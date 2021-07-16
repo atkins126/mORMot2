@@ -1122,6 +1122,19 @@ type
 // defined in mormot.core.datetime which is really cross-platform
 procedure GetLocalTime(out result: TSystemTime); stdcall;
 
+{$else}
+
+var
+  // globally defined for proper inlined calls
+{$ifdef OSLINUX}
+  pthread_self: function: pointer; cdecl;
+  pthread_mutex_lock: function(mutex: pointer): integer; cdecl;
+  pthread_mutex_unlock: function(mutex: pointer): integer; cdecl;
+  pthread_setname_np: function(thread: pointer; name: PAnsiChar): integer; cdecl;
+{$else}
+  FpcCurrentThreadManager: TThreadManager;
+{$endif OSLINUX}
+
 {$endif OSWINDOWS}
 
 /// raw cross-platform library loading function
@@ -1154,6 +1167,22 @@ procedure InitializeCriticalSection(var cs : TRTLCriticalSection);
 // - under Delphi/Windows, directly call the homonymous Win32 API
 procedure DeleteCriticalSection(var cs : TRTLCriticalSection);
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
+
+{$ifndef OSWINDOWS}
+
+/// returns the unique ID of the current running thread
+// - defined in mormot.core.os for inlined FpcCurrentThreadManager/pthread call
+function GetCurrentThreadId: TThreadID; inline;
+
+/// enter a Critical Section (Lock)
+// - defined in mormot.core.os for inlined FpcCurrentThreadManager/pthread call
+procedure EnterCriticalSection(var cs: TRTLCriticalSection); inline;
+
+/// leave a Critical Section (UnLock)
+// - defined in mormot.core.os for inlined FpcCurrentThreadManager/pthread call
+procedure LeaveCriticalSection(var cs: TRTLCriticalSection); inline;
+
+{$endif OSWINDOWS}
 
 /// returns TRUE if the supplied mutex has been initialized
 // - will check if the supplied mutex is void (i.e. all filled with 0 bytes)
@@ -1211,9 +1240,13 @@ procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
 function GetDesktopWindow: PtrInt;
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
-/// compatibility function, wrapping GetACP() Win32 API function
-// - returns the curent system code page (default WinAnsi)
+/// returns the curent system code page for AnsiString types
+// - as used to initialize CurrentAnsiConvert in mormot.core.unicode unit
+// - initialized at startup: contains GetACP() Win32 API value on Delphi,
+// or DefaultSystemCodePage on FPC - i.e. GetSystemCodePage() on POSIX (likely
+// to be UTF-8) or the value used by the LCL for its "string" types
 function Unicode_CodePage: integer;
+  {$ifdef FPC} inline; {$endif}
 
 /// compatibility function, wrapping CompareStringW() Win32 API text comparison
 // - returns 1 if PW1>PW2, 2 if PW1=PW2, 3 if PW1<PW2 - so substract 2 to have
@@ -1888,7 +1921,6 @@ procedure RedirectCode(Func, RedirectFunc: Pointer);
 {$endif CPUINTEL}
 
 /// search for a given class stored in an object vmtAutoTable Slot
-// - up to 15 properties could be registered per class
 // - quickly returns the PropertiesClass instance for this class on success
 // - returns nil if no Properties was registered for this class; caller should
 // call ClassPropertiesAdd() to initialize
@@ -1976,7 +2008,8 @@ type
     // ! finally
     // !   Safe.Unlock;
     // ! end;
-    procedure Lock; {$ifdef FPC} inline; {$endif}
+    procedure Lock;
+      {$ifdef FPC} inline; {$endif}
     /// will try to acquire the mutex
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
     // ! if Safe.TryLock then
@@ -1985,7 +2018,8 @@ type
     // !   finally
     // !     Safe.Unlock;
     // !   end;
-    function TryLock: boolean; {$ifdef FPC} inline; {$endif}
+    function TryLock: boolean;
+      {$ifdef FPC} inline; {$endif}
     /// will try to acquire the mutex for a given time
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
     // ! if Safe.TryLockMS(100) then
@@ -1998,7 +2032,8 @@ type
     /// release the instance for exclusive access
     // - each Lock/TryLock should have its exact UnLock opposite, so a
     // try..finally block is mandatory for safe code
-    procedure UnLock; {$ifdef FPC} inline; {$endif}
+    procedure UnLock;
+      {$ifdef FPC} inline; {$endif}
     /// will enter the mutex until the IUnknown reference is released
     // - could be used as such under Delphi:
     // !begin
@@ -2979,7 +3014,13 @@ end;
 
 function Unicode_CodePage: integer;
 begin
+{$ifdef FPC}
+  // = GetSystemCodePage on POSIX, Lazarus may override to UTF-8 on Windows
+  result := DefaultSystemCodePage;
+{$else}
+  // Delphi always uses the main Windows System Code Page
   result := GetACP;
+{$endif FPC}
 end;
 
 function Unicode_CompareString(PW1, PW2: PWideChar; L1, L2: PtrInt;
@@ -3999,11 +4040,11 @@ end;
 
 procedure TSynLocker.Init;
 begin
-  fSectionPadding := 0;
-  PaddingUsedCount := 0;
   InitializeCriticalSection(fSection);
+  fSectionPadding := 0;
   fLocked := false;
   fInitialized := true;
+  PaddingUsedCount := 0;
 end;
 
 procedure TSynLocker.Done;
@@ -4037,8 +4078,14 @@ end;
 
 function TSynLocker.TryLock: boolean;
 begin
-  result := not fLocked and
-            (TryEnterCriticalSection(fSection) <> 0);
+  if fLocked or
+     (TryEnterCriticalSection(fSection) = 0) then
+    result := false
+  else
+  begin
+    fLocked := true;
+    result := true;
+  end;
 end;
 
 function TSynLocker.TryLockMS(retryms: integer): boolean;

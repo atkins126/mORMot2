@@ -856,11 +856,11 @@ function SynUnicodeToString(const U: SynUnicode): string;
 // - under older version of Delphi (no unicode), it will use the
 // current RTL codepage, as with WideString conversion (but without slow
 // WideString usage)
-function Utf8ToString(const Text: RawUtf8): string; overload;
+function Utf8ToString(const Text: RawUtf8): string;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded String into a generic VCL Text
-procedure Utf8ToString(const Text: RawUtf8; var result: string); overload;
+procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded String into a generic RTL file name string
@@ -2143,20 +2143,19 @@ begin
       inc(source);
       if c = 0 then
         break;
-      if c > $7f then
-      begin
-        c := utf8.Bytes[c]; // extras
-        if c = 0 then
-          // invalid leading byte
+      if c <= $7f then
+        continue;
+      c := utf8.Bytes[c]; // extras
+      if c = 0 then
+        // invalid leading byte
+        exit;
+      // check valid UTF-8 content
+      repeat
+        if byte(source^) and $c0 <> $80 then
           exit;
-        // check valid UTF-8 content
-        repeat
-          if byte(source^) and $c0 <> $80 then
-            exit;
-          inc(source);
-          dec(c);
-        until c = 0;
-      end;
+        inc(source);
+        dec(c);
+      until c = 0;
     until false;
   result := true;
 end;
@@ -3898,7 +3897,7 @@ begin
   Utf8DecodeToUnicodeString(pointer(Text), length(Text), result);
 end;
 
-procedure Utf8ToString(const Text: RawUtf8; var result: string);
+procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
 begin
   Utf8DecodeToUnicodeString(pointer(Text), length(Text), result);
 end;
@@ -4034,7 +4033,7 @@ begin
   result := CurrentAnsiConvert.Utf8ToAnsi(Text);
 end;
 
-procedure Utf8ToString(const Text: RawUtf8; var result: string);
+procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
 begin
   result := CurrentAnsiConvert.Utf8ToAnsi(Text);
 end;

@@ -2524,6 +2524,10 @@ procedure TrimCopy(const S: RawUtf8; start, count: PtrInt;
 // - if SepStr is not found, returns Str
 function Split(const Str, SepStr: RawUtf8; StartPos: integer = 1): RawUtf8; overload;
 
+type
+  /// the function prototype of StrComp and StrIComp
+  TStrComp = function(Str1, Str2: pointer): PtrInt;
+
 /// buffer-safe version of StrComp(), to be used with PUtf8Char/PAnsiChar
 function StrComp(Str1, Str2: pointer): PtrInt;
   {$ifndef CPUX86}{$ifdef HASINLINE}inline;{$endif}{$endif}
@@ -3128,7 +3132,7 @@ const
   varSynUnicode = varUString;
   {$else}
   varSynUnicode = varOleStr;
-  {$endif}
+  {$endif HASVARUSTRING}
 
   /// this variant type will map the current string type
   // - depending on the compiler string definition (UnicodeString or AnsiString)
@@ -3136,7 +3140,7 @@ const
   varNativeString = varUString;
   {$else}
   varNativeString = varString;
-  {$endif}
+  {$endif UNICODE}
 
   {$ifndef FPC}
   CFirstUserType = $10F;
@@ -11003,7 +11007,7 @@ function _SortDynArrayVariantComp(const A, B: TVarData;
 const
   ICMP: array[TVariantRelationship] of integer = (0, -1, 1, 1);
 begin
-  // caseInsensitive not supported by the RTL
+  // caseInsensitive not supported by the RTL -> include mormot.core.variants
   result := ICMP[VarCompareValue(PVariant(@A)^, PVariant(@B)^)];
 end;
 
@@ -11520,7 +11524,7 @@ begin
   fContentRead := pointer(s);
 end;
 
-function TNestedStreamReader.Write(const Buffer; Count: Longint): Longint;
+function TNestedStreamReader.{%H-}Write(const Buffer; Count: Longint): Longint;
 begin
   raise EStreamError.Create('Unexpected TNestedStreamReader.Write');
 end;

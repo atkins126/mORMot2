@@ -382,7 +382,7 @@ type
     function NameList: PShortString;
       {$ifdef HASINLINE}inline;{$endif}
     /// get the corresponding enumeration name
-    // - return the first one if Value is invalid (>MaxValue)
+    // - return a void '' shortstring if Value is invalid (>MaxValue)
     function GetEnumNameOrd(Value: cardinal): PShortString;
       {$ifdef FPC} inline; {$endif}
     /// get the corresponding enumeration name
@@ -511,9 +511,8 @@ type
     /// ancestor interface type
     function IntfParent: PRttiInfo;
       {$ifdef HASINLINE}inline;{$endif}
-    /// interface abilities
+    /// interface abilities - not inlined to avoid random trouble on FPC trunk
     function IntfFlags: TRttiIntfFlags;
-      {$ifdef HASINLINE}inline;{$endif}
     /// interface 128-bit GUID
     function IntfGuid: PGUID;
       {$ifdef HASINLINE}inline;{$endif}
@@ -2158,6 +2157,7 @@ type
       read fValueClass;
     /// identify most common RTL inherited classes for special handling
     // - recognize TCollection TStrings TObjectList TList parents
+    // - TRttiValueClass enumerate is faster than InheritsFrom() call
     property ValueRtlClass: TRttiValueClass
       read fValueRtlClass;
     /// store the class of a T*ObjArray dynamic array
@@ -6506,10 +6506,16 @@ begin
 end;
 
 procedure TRttiCustom.SetValueClass(aClass: TClass; aInfo: PRttiInfo);
+var
+  vmt: TObject;
 begin
   fValueClass := aClass;
   // set vmtAutoTable slot for efficient Find(TClass) - to be done asap
-  ClassPropertiesAdd(aClass, self, {freexist=}false);
+  vmt := ClassPropertiesAdd(aClass, self, {freexist=}false);
+  if vmt <> self then
+    raise ERttiException.CreateUtf8(
+      '%.SetValueClass(%): vmtAutoTable already set to %', [self, aClass, vmt]);
+  // identify the most known class types
   if aClass.InheritsFrom(TCollection) then
     fValueRtlClass := vcCollection
   else if aClass.InheritsFrom(TStrings) then
@@ -6522,6 +6528,7 @@ begin
     fValueRtlClass := vcESynException
   else if aClass.InheritsFrom(Exception) then
     fValueRtlClass := vcException;
+  // register the published properties of this class
   fProps.AddFromClass(aInfo, {includeparents=}true);
   if fProps.Count = 0 then
     if fValueRtlClass = vcException then
@@ -7901,14 +7908,13 @@ begin
     PtrUInt(@_dynarray_decr_ref_free));
   RedirectCode(@fpc_dynarray_decr_ref, @fpc_dynarray_clear);
   {$ifdef FPC_HAS_CPSTRING}
-  {$ifdef OSPOSIX} // Windows is never natively UTF-8
+  // Delphi/Windows is never natively UTF-8, but FPC+Lazarus may be :)
   if DefaultSystemCodePage = CP_UTF8 then
   begin
     // dedicated UTF-8 concatenation RTL function replacements
     RedirectRtl(@_fpc_ansistr_concat, @_ansistr_concat_utf8);
     RedirectRtl(@_fpc_ansistr_concat_multi, @_ansistr_concat_multi_utf8);
   end;
-  {$endif OSPOSIX}
   {$ifdef FPC_X64MM}
   RedirectCode(@fpc_ansistr_setlength, @_ansistr_setlength);
   {$endif FPC_X64MM}

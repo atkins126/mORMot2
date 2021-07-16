@@ -1549,7 +1549,7 @@ type
       reintroduce; overload; virtual;
     /// define a custom property from its RTTI definition
     // - handle any kind of property, e.g. from enhanced RTTI or a custom record
-    // defined via TTextWriter.RegisterCustomJsonSerializer[FromText]()
+    // defined by Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer
     // - aPropertyPointer shall be filled with the offset to the private
     // field within a nil object, e.g for
     // !  class TMainObject = class(TOrm)
@@ -1571,7 +1571,7 @@ type
       reintroduce; overload;
     /// define a custom property from its RTTI definition
     // - handle any kind of property, e.g. from enhanced RTTI or a custom record
-    // defined via TTextWriter.RegisterCustomJsonSerializer[FromText]()
+    // defined by Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer
     // - aPropertyPointer shall be filled with the offset to the private
     // field within a nil object, e.g for
     // !  class TMainObject = class(TOrm)
@@ -6302,7 +6302,7 @@ type
 
   /// pre-computed SQL statements for ORM operations for a given
   // TOrmModelProperties instance
-  TOrmModelPropertiesSQL = record
+  TOrmModelPropertiesSql = record
     /// the simple field names in a SQL SELECT compatible format: 'COL1,COL2' e.g.
     // - format is
     // ! SQL.TableSimpleFields[withID: boolean; withTableName: boolean]
@@ -6381,7 +6381,7 @@ type
     fRowIDFieldName: RawUtf8;
     fExtFieldNames: TRawUtf8DynArray;
     fExtFieldNamesUnQuotedSQL: TRawUtf8DynArray;
-    fSql: TOrmModelPropertiesSQL;
+    fSql: TOrmModelPropertiesSql;
     fFieldNamesMatchInternal: TFieldBits;
     fOptions: TOrmPropertiesMappingOptions;
     fAutoComputeSql: boolean;
@@ -6505,7 +6505,7 @@ type
     /// pre-computed SQL statements for this external TOrm in this model
     // - you can use those SQL statements directly with the external engine
     // - filled if AutoComputeSql was set to true in Init() method
-    property SQL: TOrmModelPropertiesSQL read fSql;
+    property SQL: TOrmModelPropertiesSql read fSql;
     /// the ID/RowID customized external field name, if any
     // - is 'ID' by default, since 'RowID' is a reserved column name for some
     // database engines (e.g. Oracle)
@@ -6596,7 +6596,7 @@ type
     /// pre-computed SQL statements for this TOrm in this model
     // - those statements will work for internal tables, not for external
     // tables with mapped table or fields names
-    SQL: TOrmModelPropertiesSQL;
+    SQL: TOrmModelPropertiesSql;
     /// allow SQL process for one external TOrm in this model
     ExternalDB: TOrmPropertiesMapping;
     /// will by-pass automated table and field creation for this TOrm
@@ -13303,7 +13303,7 @@ begin
     GetAsVariant(Row, f, v[f], expandTimeLogAsText, expandEnumsAsText,
       expandHugeIDAsUniqueIdentifier, options);
   if length(fFieldNames) <> fFieldCount then
-    InitFieldNames;
+    InitFieldNames; // will reuse fFieldNames using COW between rows
   TDocVariantData(doc).InitObjectFromVariants(fFieldNames, v, JSON_OPTIONS_FAST);
 end;
 
@@ -13319,6 +13319,7 @@ begin
   SetLength(docs, fRowCount);
   if readonly then
   begin
+    // read-only access with no memory allocation via our TOrmTableRowVariant
     if OrmTableRowVariantType = nil then
       OrmTableRowVariantType := SynRegisterCustomVariantType(TOrmTableRowVariant);
     for r := 0 to fRowCount - 1 do
@@ -13330,6 +13331,7 @@ begin
       end;
   end
   else
+    // manual conversion to stand-alone variants
     for r := 0 to fRowCount - 1 do
       ToDocVariant(r + 1, docs[r]);
 end;
@@ -17864,7 +17866,7 @@ begin
     result := fID;
     // was called from a real TOrm instance
   {$else}
-  if PtrUInt(self) < $100000 then // rough estimation, but works in practice
+  if PtrUInt(self) < $100000 then // rough estimation, may work in practice
     result := PtrUInt(self)
   else
   try
