@@ -220,15 +220,7 @@ function GotoNextJsonPropName(P: PUtf8Char): PUtf8Char;
 // - the first character in P^ must be "
 // - it will return the latest " position, ignoring \" within
 // - caller should check that return PUtf8Char is indeed a "
-function GotoEndOfJsonString(P: PUtf8Char): PUtf8Char; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// get the next character after a quoted buffer
-// - the first character in P^ must be "
-// - it will return the latest " position, ignoring \" within
-// - overloaded version when JSON_CHARS table is already available locally
-function GotoEndOfJsonString(P: PUtf8Char; tab: PJsonCharSet): PUtf8Char; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+function GotoEndOfJsonString(P: PUtf8Char): PUtf8Char;
 
 /// reach positon just after the current JSON item in the supplied UTF-8 buffer
 // - buffer can be either any JSON item, i.e. a string, a number or even a
@@ -1896,9 +1888,9 @@ function SaveJson(const Value; TypeInfo: PRttiInfo;
 
 /// save record into its JSON serialization as saved by TTextWriter.AddRecordJson
 // - will use default Base64 encoding over RecordSave() binary - or custom true
-// JSON format (as set by TTextWriter.RegisterCustomJsonSerializer or via
-// enhanced RTTI), if available (following EnumSetsAsText optional parameter
-// for nested enumerates and sets)
+// JSON format (as set by Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer
+// or via enhanced RTTI), if available (following EnumSetsAsText optional
+// parameter for nested enumerates and sets)
 function RecordSaveJson(const Rec; TypeInfo: PRttiInfo;
   EnumSetsAsText: boolean = false): RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
@@ -1956,9 +1948,9 @@ function LoadJson(var Value; Json: PUtf8Char; TypeInfo: PRttiInfo;
 
 /// fill a record content from a JSON serialization as saved by
 // TTextWriter.AddRecordJson / RecordSaveJson
-// - will use default Base64 encoding over RecordSave() binary - or custom true
-// JSON format (as set by TTextWriter.RegisterCustomJsonSerializer or via
-// enhanced RTTI), if available
+// - will use default Base64 encoding over RecordSave() binary - or custom
+// JSON format (as set by Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer
+// or via enhanced RTTI), if available
 // - returns nil on error, or the end of buffer on success
 // - warning: the JSON buffer will be modified in-place during process - use
 // a temporary copy if you need to access it later or if the string comes from
@@ -1971,9 +1963,9 @@ function RecordLoadJson(var Rec; Json: PUtf8Char; TypeInfo: PRttiInfo;
 // TTextWriter.AddRecordJson / RecordSaveJson
 // - this overloaded function will make a private copy before parsing it,
 // so is safe with a read/only or shared string - but slightly slower
-// - will use default Base64 encoding over RecordSave() binary - or custom true
-// JSON format (as set by TTextWriter.RegisterCustomJsonSerializer or via
-// enhanced RTTI), if available
+// - will use default Base64 encoding over RecordSave() binary - or custom
+// JSON format (as set by Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer
+// or via enhanced RTTI), if available
 function RecordLoadJson(var Rec; const Json: RawUtf8; TypeInfo: PRttiInfo;
   CustomVariantOptions: PDocVariantOptions = nil;
   Tolerant: boolean = true): boolean; overload;
@@ -2018,7 +2010,7 @@ function DynArrayLoadJson(var Value; const Json: RawUtf8;
 // is missing), unless: 1. you set the TObjectListItemClass property as expected,
 // and provide a TObjectList object, or 2. woStoreClassName option has been
 // used at ObjectToJson() call and the corresponding classes have been previously
-// registered by TJsonSerializer.RegisterClassForJson() (or Classes.RegisterClass)
+// registered by Rtti.RegisterClass()
 // - will clear any previous TCollection objects, and convert any null JSON
 // basic type into nil - e.g. if From='null', will call FreeAndNil(Value)
 // - you can add some custom (un)serializers for ANY class, via mormot.core.json
@@ -2052,8 +2044,7 @@ function ObjectLoadJson(var ObjectInstance; const Json: RawUtf8;
 // - JSON input should be either 'null', either '{"ClassName":"TMyClass",...}'
 // - woStoreClassName option shall have been used at ObjectToJson() call
 // - and the corresponding class shall have been previously registered by
-// TJsonSerializer.RegisterClassForJson(), in order to retrieve the class type
-// from it name - or, at least, by a Classes.RegisterClass() function call
+// Rtti.RegisterClass() to retrieve the class type from it name
 // - the data inside From^ is modified in-place (unescaped and transformed):
 // don't call JsonToObject(pointer(JSONRawUtf8)) but makes a temporary copy of
 // the JSON text buffer before calling this function, if want to reuse it later
@@ -2811,10 +2802,10 @@ lit:        inc(P);
     PDest := P;
 end;
 
-function GotoEndOfJsonString(P: PUtf8Char; tab: PJsonCharSet): PUtf8Char;
+function GotoEndOfJsonString2(P: PUtf8Char; tab: PJsonCharSet): PUtf8Char;
+  {$ifdef HASINLINE} inline; {$endif}
 begin
-  // P^='"' at function call
-  inc(P);
+  // P[-1]='"' at function call
   repeat
     if not (jcJsonStringMarker in tab[P^]) then
     begin
@@ -2834,7 +2825,8 @@ end;
 
 function GotoEndOfJsonString(P: PUtf8Char): PUtf8Char;
 begin
-  result := GotoEndOfJsonString(P, @JSON_CHARS);
+  // P^='"' at function call
+  result := GotoEndOfJsonString2(P + 1, @JSON_CHARS);
 end;
 
 function GetJsonPropName(var P: PUtf8Char; Len: PInteger): PUtf8Char;
@@ -3024,10 +3016,11 @@ begin
       exit;
     inc(P);
   end;
+  tab := @JSON_CHARS;
   c := P^;
   if c = '"' then
   begin
-    P := GotoEndOfJsonString(P, @JSON_CHARS);
+    P := GotoEndOfJsonString2(P + 1, tab);
     if P^ <> '"' then
       exit;
 s:  repeat
@@ -3051,7 +3044,6 @@ s:  repeat
   else
   begin
     // e.g. '{age:{$gt:18}}'
-    tab := @JSON_CHARS;
     if not (jcJsonIdentifierFirstChar in tab[c]) then
       exit; // not ['_', '0'..'9', 'a'..'z', 'A'..'Z', '$']
     repeat
@@ -3428,21 +3420,16 @@ begin
 end;
 
 function GotoNextJsonObjectOrArrayInternal(P, PMax: PUtf8Char;
-  EndChar: AnsiChar): PUtf8Char;
+  EndChar: AnsiChar{$ifndef CPUX86NOTPIC} ; jsonset: PJsonCharSet{$endif}): PUtf8Char;
+{$ifdef CPUX86NOTPIC} // not enough registers
 var
-  {$ifdef CPUX86NOTPIC} // not enough registers
   jsonset: TJsonCharSet absolute JSON_CHARS;
-  {$else}
-  jsonset: PJsonCharSet;
-  {$endif CPUX86NOTPIC}
+{$endif CPUX86NOTPIC}
 label
-  Prop;
+  prop;
 begin
   // should match GetJsonPropName()
   result := nil;
-  {$ifndef CPUX86NOTPIC}
-  jsonset := @JSON_CHARS;
-  {$endif CPUX86NOTPIC}
   repeat
     // main loop for quick parsing without full validation
     case JSON_TOKENS[P^] of
@@ -3452,7 +3439,8 @@ begin
             inc(P)
           until (P^ > ' ') or
                 (P^ = #0);
-          P := GotoNextJsonObjectOrArrayInternal(P, PMax, '}');
+          P := GotoNextJsonObjectOrArrayInternal(
+                 P, PMax, '}' {$ifndef CPUX86NOTPIC}, jsonset{$endif});
           if P = nil then
             exit;
         end;
@@ -3462,7 +3450,8 @@ begin
             inc(P)
           until (P^ > ' ') or
                 (P^ = #0);
-          P := GotoNextJsonObjectOrArrayInternal(P, PMax, ']');
+          P := GotoNextJsonObjectOrArrayInternal(
+            P, PMax, ']'{$ifndef CPUX86NOTPIC}, jsonset{$endif});
           if P = nil then
             exit;
         end;
@@ -3485,7 +3474,7 @@ begin
           exit;
       jtDoubleQuote: // '"'
         begin
-          P := GotoEndOfJsonString(P, @JSON_CHARS);
+          P := GotoEndOfJsonString2(P + 1, {$ifdef CPUX86NOTPIC}@{$endif}jsonset);
           if P^ <> '"' then
             exit;
           inc(P);
@@ -3500,17 +3489,17 @@ begin
         if PInteger(P)^ = TRUE_LOW then
           inc(P, 4)
         else
-          goto Prop;
+          goto prop;
       jtFalseFirstChar: // 'f'
         if PInteger(P + 1)^ = FALSE_LOW2 then
           inc(P, 5)
         else
-          goto Prop;
+          goto prop;
       jtNullFirstChar: // 'n'
         if PInteger(P)^ = NULL_LOW then
           inc(P, 4)
         else
-          goto Prop;
+          goto prop;
       jtSingleQuote: // '''' as single-quoted identifier
         begin
           repeat
@@ -3539,7 +3528,7 @@ begin
         end;
       jtIdentifierFirstChar: // ['_', 'a'..'z', 'A'..'Z', '$']
         begin
-Prop:     repeat
+prop:     repeat
             inc(P);
           until not (jcJsonIdentifier in jsonset[P^]);
           // not ['_', '0'..'9', 'a'..'z', 'A'..'Z', '.', '[', ']']
@@ -3555,7 +3544,7 @@ Prop:     repeat
               inc(P);
             if P^ = '"' then
             begin
-              P := GotoEndOfJsonString(P, {$ifdef CPUX86NOTPIC}@{$endif}jsonset);
+              P := GotoEndOfJsonString2(P + 1, {$ifdef CPUX86NOTPIC}@{$endif}jsonset);
               if P^ <> '"' then
                 exit;
             end;
@@ -3592,7 +3581,7 @@ var
   jsonset: PJsonCharSet;
   {$endif CPUX86NOTPIC}
 label
-  pok, ok;
+  ok, ok4;
 begin
   result := nil; // to notify unexpected end
   if P = nil then
@@ -3607,11 +3596,15 @@ begin
     // complex JSON string, object or array
     jtDoubleQuote: // '"'
       begin
-        P := GotoEndOfJsonString(P {$ifndef CPUX86NOTPIC}, jsonset{$endif} );
+        P := GotoEndOfJsonString2(P + 1, {$ifdef CPUX86NOTPIC}@{$endif}jsonset);
         if P^ <> '"' then
           exit;
-        inc(P);
-        goto ok;
+        repeat
+          inc(P);
+ok:     until (P^ > ' ') or
+              (P^ = #0);
+        result := P;
+        exit;
       end;
     jtArrayStart: // '['
       begin
@@ -3619,8 +3612,11 @@ begin
           inc(P)
         until (P^ > ' ') or
               (P^ = #0);
-        P := GotoNextJsonObjectOrArrayInternal(P, nil, ']');
-        goto pok;
+        P := GotoNextJsonObjectOrArrayInternal(
+          P, nil, ']' {$ifndef CPUX86NOTPIC}, jsonset{$endif});
+        if P = nil then
+          exit;
+        goto ok;
       end;
     jtObjectStart: // '{'
       begin
@@ -3628,20 +3624,17 @@ begin
           inc(P)
         until (P^ > ' ') or
               (P^ = #0);
-        P := GotoNextJsonObjectOrArrayInternal(P, nil, '}');
-pok:    if P = nil then
+        P := GotoNextJsonObjectOrArrayInternal(
+          P, nil, '}' {$ifndef CPUX86NOTPIC}, jsonset{$endif});
+        if P = nil then
           exit;
-ok:     while (P^ <= ' ') and
-              (P^ <> #0) do
-          inc(P);
-        result := P;
-        exit;
+        goto ok;
       end;
     // strict JSON numbers and constants validation
     jtTrueFirstChar: // 't'
       if PInteger(P)^ = TRUE_LOW then
       begin
-        inc(P, 4);
+ok4:    inc(P, 4);
         goto ok;
       end;
     jtFalseFirstChar: // 'f'
@@ -3652,10 +3645,7 @@ ok:     while (P^ <= ' ') and
       end;
     jtNullFirstChar: // 'n'
       if PInteger(P)^ = NULL_LOW then
-      begin
-        inc(P, 4);
-        goto ok;
-      end;
+        goto ok4;
     jtFirstDigit: // '-', '0'..'9'
       begin
         repeat
@@ -3690,7 +3680,7 @@ begin
   case P^ of
     '"':
       begin
-        P := GotoEndOfJsonString(P {$ifndef CPUX86NOTPIC}, jsonset{$endif} );
+        P := GotoEndOfJsonString2(P + 1, {$ifdef CPUX86NOTPIC}@{$endif}jsonset);
         if (P^ <> '"') or
            ((PMax <> nil) and
             (P > PMax)) then
@@ -3704,7 +3694,8 @@ begin
           inc(P)
         until (P^ > ' ') or
               (P^ = #0);
-        P := GotoNextJsonObjectOrArrayInternal(P, PMax, ']');
+        P := GotoNextJsonObjectOrArrayInternal(
+               P, PMax, ']' {$ifndef CPUX86NOTPIC}, jsonset{$endif});
         goto pok;
       end;
     '{':
@@ -3713,7 +3704,8 @@ begin
           inc(P)
         until (P^ > ' ') or
               (P^ = #0);
-        P := GotoNextJsonObjectOrArrayInternal(P, PMax, '}');
+        P := GotoNextJsonObjectOrArrayInternal(
+               P, PMax, '}' {$ifndef CPUX86NOTPIC}, jsonset{$endif});
 pok:    if P = nil then
           exit;
 ok:     while (P^ <= ' ') and
@@ -3759,7 +3751,8 @@ begin
   while (P^ <= ' ') and
         (P^ <> #0) do
     inc(P);
-  result := GotoNextJsonObjectOrArrayInternal(P, nil, EndChar);
+  result := GotoNextJsonObjectOrArrayInternal(
+    P, nil, EndChar {$ifndef CPUX86NOTPIC}, @JSON_CHARS{$endif});
 end;
 
 function GotoNextJsonObjectOrArrayMax(P, PMax: PUtf8Char): PUtf8Char;
@@ -3783,7 +3776,8 @@ begin
     inc(P)
   until (P^ > ' ') or
         (P^ = #0);
-  result := GotoNextJsonObjectOrArrayInternal(P, PMax, EndChar);
+  result := GotoNextJsonObjectOrArrayInternal(
+    P, PMax, EndChar {$ifndef CPUX86NOTPIC}, @JSON_CHARS{$endif});
 end;
 
 function GotoNextJsonObjectOrArray(P: PUtf8Char): PUtf8Char;
@@ -4173,7 +4167,7 @@ begin // replace comments by ' ' characters which will be ignored by parser
       case P^ of
         '"':
           begin
-            P := GotoEndOfJSONString(P);
+            P := GotoEndOfJSONString(P + 1);
             if P^ <> '"' then
               exit
             else
@@ -5567,72 +5561,91 @@ var
   c: cardinal;
   esc: byte;
 begin
-  while SourceChars > 0 do
-  begin
-    c := byte(Source^);
-    if c <= $7F then
-    begin
-      if c = 0 then
-        exit;
-      if B >= BEnd then
-        FlushToStream;
-      case Escape of // twJsonEscape or twOnSameLine only occur on c <= $7f
-        twNone:
+  if SourceChars > 0 then
+  repeat
+    case Escape of // twJsonEscape or twOnSameLine only occur on c <= $7f
+      twNone:
+        repeat
+          if B >= BEnd then
+            FlushToStream;
+          c := byte(Source^);
+          inc(Source);
+          if c > $7F then
+             break;
+          if c = 0 then
+            exit;
+          inc(B);
+          B^ := AnsiChar(c);
+          dec(SourceChars);
+          if SourceChars = 0 then
+            exit;
+        until false;
+      twJsonEscape:
+        repeat
+          if B >= BEnd then
+            FlushToStream;
+          c := byte(Source^);
+          inc(Source);
+          if c > $7F then
+             break;
+          if c = 0 then
+            exit;
+          esc := JSON_ESCAPE[c]; // c<>0 -> esc<>JSON_ESCAPE_ENDINGZERO
+          if esc = JSON_ESCAPE_NONE then
           begin
+            // no escape needed
             inc(B);
             B^ := AnsiChar(c);
-          end;
-        twJsonEscape:
+          end
+          else if esc = JSON_ESCAPE_UNICODEHEX then
           begin
-            esc := JSON_ESCAPE[c]; // c<>0 -> esc<>JSON_ESCAPE_ENDINGZERO
-            if esc = JSON_ESCAPE_NONE then
-            begin
-              // no escape needed
-              inc(B);
-              B^ := AnsiChar(c);
-            end
-            else if esc = JSON_ESCAPE_UNICODEHEX then
-            begin
-              // characters below ' ', #7 e.g. -> \u0007
-              AddShorter('\u00');
-              AddByteToHex(c);
-            end
-            else
-              Add('\', AnsiChar(esc)); // escaped as \ + b,t,n,f,r,\,"
-          end;
-        twOnSameLine:
-          begin
-            inc(B);
-            if c < 32 then
-              B^ := ' '
-            else
-              B^ := AnsiChar(c);
-          end;
-      end
+            // characters below ' ', #7 e.g. -> \u0007
+            AddShorter('\u00');
+            AddByteToHex(c);
+          end
+          else
+            Add('\', AnsiChar(esc)); // escaped as \ + b,t,n,f,r,\,"
+          dec(SourceChars);
+          if SourceChars = 0 then
+            exit;
+        until false;
+    else  //twOnSameLine:
+      repeat
+        if B >= BEnd then
+          FlushToStream;
+        c := byte(Source^);
+        inc(Source);
+        if c > $7F then
+           break;
+        if c = 0 then
+          exit;
+        inc(B);
+        if c < 32 then
+          B^ := ' '
+        else
+          B^ := AnsiChar(c);
+        dec(SourceChars);
+        if SourceChars = 0 then
+          exit;
+      until false;
+    end;
+    // handle c > $7F (no surrogate is expected in TSynAnsiFixedWidth charsets)
+    c := AnsiToWide[c]; // convert FixedAnsi char into Unicode char
+    if c > $7ff then
+    begin
+      B[1] := AnsiChar($E0 or (c shr 12));
+      B[2] := AnsiChar($80 or ((c shr 6) and $3F));
+      B[3] := AnsiChar($80 or (c and $3F));
+      inc(B, 3);
     end
     else
     begin
-      // no surrogate is expected in TSynAnsiFixedWidth charsets
-      if BEnd - B <= 3 then
-        FlushToStream;
-      c := AnsiToWide[c]; // convert FixedAnsi char into Unicode char
-      if c > $7ff then
-      begin
-        B[1] := AnsiChar($E0 or (c shr 12));
-        B[2] := AnsiChar($80 or ((c shr 6) and $3F));
-        B[3] := AnsiChar($80 or (c and $3F));
-        inc(B, 3);
-      end
-      else
-      begin
-        B[1] := AnsiChar($C0 or (c shr 6));
-        B[2] := AnsiChar($80 or (c and $3F));
-        inc(B, 2);
-      end;
+      B[1] := AnsiChar($C0 or (c shr 6));
+      B[2] := AnsiChar($80 or (c and $3F));
+      inc(B, 2);
     end;
     dec(SourceChars);
-    inc(Source);
-  end;
+  until SourceChars = 0;
 end;
 
 destructor TTextWriter.Destroy;
@@ -5733,21 +5746,22 @@ procedure TTextWriter.AddAnyAnsiBuffer(P: PAnsiChar; Len: PtrInt;
 var
   B: PUtf8Char;
   engine: TSynAnsiConvert;
+label
+  utf8;
 begin
   if Len > 0 then
   begin
-    {$ifdef FPC} // CP_UTF8 is very likely on POSIX or LCL
-    if CodePage = 0 then
-      CodePage := CurrentAnsiConvert.CodePage;
-    {$endif FPC}
+    if CodePage = 0 then // CP_UTF8 is very likely on POSIX or LCL
+      CodePage := Unicode_CodePage; // = CurrentAnsiConvert.CodePage
     case CodePage of
       CP_UTF8:          // direct write of RawUtf8 content
-        if Escape = twJsonEscape then
-          Add(PUtf8Char(P), 0, Escape)    // faster with no Len
-        else
-          Add(PUtf8Char(P), Len, Escape); // expects a supplied Len
+        begin
+          if Escape = twJsonEscape then
+            Len := 0;    // faster with no Len
+utf8:     Add(PUtf8Char(P), Len, Escape);
+        end;
       CP_RAWBYTESTRING: // direct write of RawByteString content
-        Add(PUtf8Char(P), Len, Escape);
+        goto utf8;
       CP_UTF16:         // direct write of UTF-16 content
         AddW(PWord(P), 0, Escape);
       CP_RAWBLOB:       // RawBlob written with Base-64 encoding
@@ -6148,19 +6162,19 @@ begin
       // rkEnumeration,rkSet,rkDynArray,rkClass,rkInterface,rkRecord,rkObject
       // from TRttiCustomProp.GetValueDirect/GetValueGetter
       AddRttiVarData(TRttiVarData(V), WriteOptions);
-  else
-    if vt = varVariant or varByRef then
-      AddVariant(PVariant(v.VPointer)^, Escape, WriteOptions)
-    else if vt = varByRef or varString then
-      AddText(PRawByteString(v.VAny)^, Escape)
-    else if {$ifdef HASVARUSTRING} (vt = varByRef or varUString) or {$endif}
-            (vt = varByRef or varOleStr) then
+    varVariantByRef:
+      AddVariant(PVariant(v.VPointer)^, Escape, WriteOptions);
+    varStringByRef:
+      AddText(PRawByteString(v.VAny)^, Escape);
+    {$ifdef HASVARUSTRING} varUStringByRef, {$endif}
+    varOleStrByRef:
       AddTextW(PPointer(v.VAny)^, Escape)
-    else if vt >= varArray then // complex types are always < varArray
+  else
+    if vt >= varArray then // complex types are always < varArray
       AddNull
-    else if DocVariantType.FindSynVariantType(vt, cv) then
+    else if DocVariantType.FindSynVariantType(vt, cv) then // our custom types
       cv.ToJson(self, Value, Escape)
-    else if not CustomVariantToJson(self, Value, Escape) then
+    else if not CustomVariantToJson(self, Value, Escape) then // generic CastTo
       raise EJsonException.CreateUtf8('%.AddVariant VType=%', [self, vt]);
   end;
 end;
@@ -6367,7 +6381,7 @@ begin
       begin
         // string
         Value := Json;
-        Json := GotoEndOfJsonString(Json, @JSON_CHARS);
+        Json := GotoEndOfJsonString2(Json + 1, @JSON_CHARS);
         if Json^ <> '"' then
           exit;
         inc(Json);
@@ -8267,13 +8281,13 @@ begin
     begin
       VarClear(v{%H-});
       if ValueAsString or
-         not GetNumericVariantFromJson(pointer(List[i].Value),
-           TVarData(v), AllowVarDouble) then
+         not GetNumericVariantFromJson(pointer(List[i].Value), TVarData(v),
+               AllowVarDouble) then
         RawUtf8ToVariant(List[i].Value, v);
       ndx := dv.GetValueIndex(List[i].Name);
       if ndx < 0 then
         ndx := dv.InternalAdd(List[i].Name)
-      else if SortDynArrayVariantComp(TVarData(v), TVarData(dv.Values[ndx]), false) = 0 then
+      else if FastVarDataComp(@v, @dv.Values[ndx], false) = 0 then
         continue; // value not changed -> skip
       if ChangedProps <> nil then
         PDocVariantData(ChangedProps)^.AddValue(List[i].Name, v);
@@ -9284,7 +9298,11 @@ end;
 function _BC_RawByteString(A, B: PPUtf8Char; Info: PRttiInfo;
   out Compared: integer): PtrInt;
 begin
+  {$ifdef CPUINTEL}
+  compared := SortDynArrayAnsiString(A^, B^); // i386/x86_64 asm uses length
+  {$else}
   compared := SortDynArrayRawByteString(A^, B^); // will use length not #0
+  {$endif CPUINTEL}
   result := SizeOf(pointer);
 end;
 

@@ -143,13 +143,9 @@ end;
 
 { ****************** Unicode, Time, File process }
 var
-  /// contains the curent system code page (default UTF-8 on POSIX systems)
-  GetACP: integer = CP_UTF8;
-
   /// contains the current Linux kernel revision, as one 24-bit integer
   // - e.g. $030d02 for 3.13.2, or $020620 for 2.6.32
   KernelRevision: cardinal;
-
 
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
 begin
@@ -741,9 +737,6 @@ end;
 
 var
   {%H-}pthread: pointer;
-  {$ifdef OSLINUX} // see https://stackoverflow.com/a/7989973
-  pthread_setname_np: function(thread: pointer; name: PAnsiChar): integer; cdecl;
-  {$endif OSLINUX}
 
 procedure SetUnixThreadName(ThreadID: TThreadID; const Name: RawByteString);
 var
@@ -775,7 +768,7 @@ begin
   if L = 0 then
     exit;
   trunc[L] := #0;
-  {$ifdef OSLINUX}
+  {$ifdef OSLINUX} // see https://stackoverflow.com/a/7989973
   if Assigned(pthread_setname_np) then
     pthread_setname_np(pointer(ThreadID), @trunc[0]);
   {$endif OSLINUX}
@@ -1084,6 +1077,33 @@ end;
 procedure DeleteCriticalSection(var cs : TRTLCriticalSection);
 begin
   DoneCriticalSection(cs);
+end;
+
+function GetCurrentThreadId: TThreadID;
+begin
+  {$ifdef OSLINUX}
+  result := TThreadID(pthread_self);
+  {$else}
+  result := FpcCurrentThreadManager.GetCurrentThreadId;
+  {$endif OSLINUX}
+end;
+
+procedure EnterCriticalSection(var cs: TRTLCriticalSection);
+begin
+  {$ifdef OSLINUX}
+  pthread_mutex_lock(@cs);
+  {$else}
+  FpcCurrentThreadManager.EnterCriticalSection(cs);
+  {$endif OSLINUX}
+end;
+
+procedure LeaveCriticalSection(var cs: TRTLCriticalSection);
+begin
+  {$ifdef OSLINUX}
+  pthread_mutex_unlock(@cs);
+  {$else}
+  FpcCurrentThreadManager.LeaveCriticalSection(cs);
+  {$endif OSLINUX}
 end;
 
 {$ifdef OSBSDDARWIN}
@@ -2211,7 +2231,7 @@ begin
   // retrieve Kernel and Hardware information
   stdoutIsTTY := (IsATTY(StdOutputHandle) = 1) and
                  IdemPChars(RawUtf8(GetEnvironmentVariable('TERM')), [
-                   'XTERM-', 'SCREEN', 'TMUX', 'RXVT-', 'LINUX', 'CYGWIN']);
+                   'XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']);
   modname := nil;
   fpuname(uts);
   {$ifdef OSANDROID}
@@ -2237,7 +2257,10 @@ begin
   if pthread <> nil then
   begin
     {$ifdef OSLINUX}
+    @pthread_self := dlsym(pthread, 'pthread_self');
     @pthread_setname_np := dlsym(pthread, 'pthread_setname_np');
+    @pthread_mutex_lock := dlsym(pthread, 'pthread_mutex_lock');
+    @pthread_mutex_unlock := dlsym(pthread, 'pthread_mutex_unlock');
     {$endif OSLINUX}
   end;
   prod := TrimU(StringFromFile('/sys/class/dmi/id/product_name', true));
@@ -2352,10 +2375,10 @@ begin
   if CpuInfoText = '' then
     CpuInfoText := CPU_ARCH_TEXT;
   // intialize supported APIs
+  {$ifndef OSLINUX}
+  GetThreadManager(FpcCurrentThreadManager); // for inlined calls
+  {$endif OSLINUX}
   TimeZoneLocalBias := -GetLocalTimeOffset;
-  {$ifdef ISFPC27}
-  GetACP := GetSystemCodePage;
-  {$endif ISFPC27}
   {$ifdef OSDARWIN}
   mach_timebase_info(mach_timeinfo);
   mach_timecoeff := mach_timeinfo.Numer / mach_timeinfo.Denom;

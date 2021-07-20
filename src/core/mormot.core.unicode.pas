@@ -532,6 +532,9 @@ var
   // - this instance is global and instantied during the whole program life time
   Utf8AnsiConvert: TSynAnsiUtf8;
 
+  /// global TSynAnsiConvert instance with no encoding (RawByteString/RawBlob)
+  RawByteStringConvert: TSynAnsiFixedWidth;
+
 
 
 { *************** Low-Level String Conversion Functions }
@@ -856,11 +859,11 @@ function SynUnicodeToString(const U: SynUnicode): string;
 // - under older version of Delphi (no unicode), it will use the
 // current RTL codepage, as with WideString conversion (but without slow
 // WideString usage)
-function Utf8ToString(const Text: RawUtf8): string; overload;
+function Utf8ToString(const Text: RawUtf8): string;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded String into a generic VCL Text
-procedure Utf8ToString(const Text: RawUtf8; var result: string); overload;
+procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert any UTF-8 encoded String into a generic RTL file name string
@@ -1302,11 +1305,11 @@ function AnsiICompW(u1, u2: PWideChar): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// compare two "array of AnsiString" elements, with no case sensitivity
-// - just a wrapper around StrIComp()
+// - just a wrapper around inlined StrIComp()
 function SortDynArrayAnsiStringI(const A, B): integer;
 
 /// compare two "array of PUtf8Char/PAnsiChar" elements, with no case sensitivity
-// - just a wrapper around StrIComp()
+// - just a wrapper around inlined StrIComp()
 function SortDynArrayPUtf8CharI(const A, B): integer;
 
 /// compare two "array of generic string" elements, with no case sensitivity
@@ -2143,20 +2146,19 @@ begin
       inc(source);
       if c = 0 then
         break;
-      if c > $7f then
-      begin
-        c := utf8.Bytes[c]; // extras
-        if c = 0 then
-          // invalid leading byte
+      if c <= $7f then
+        continue;
+      c := utf8.Bytes[c]; // extras
+      if c = 0 then
+        // invalid leading byte
+        exit;
+      // check valid UTF-8 content
+      repeat
+        if byte(source^) and $c0 <> $80 then
           exit;
-        // check valid UTF-8 content
-        repeat
-          if byte(source^) and $c0 <> $80 then
-            exit;
-          inc(source);
-          dec(c);
-        until c = 0;
-      end;
+        inc(source);
+        dec(c);
+      until c = 0;
     until false;
   result := true;
 end;
@@ -2463,6 +2465,9 @@ end;
 var
   // internal list of TSynAnsiConvert instances
   SynAnsiConvertList: array of TSynAnsiConvert;
+  SynAnsiConvertListCount: integer;
+  SynAnsiConvertListCodePage: TWordDynArray; // for fast lookup in CPU L1 cache
+
 
 { TSynAnsiConvert }
 
@@ -2639,29 +2644,25 @@ end;
 function GetEngine(aCodePage: cardinal): TSynAnsiConvert;
   {$ifdef HASINLINE} inline; {$endif}
 var
-  n: integer;
-  p: ^TSynAnsiConvert;
+  i: PtrInt;
 begin
-  p := pointer(SynAnsiConvertList);
-  if p <> nil then
-  begin
-    n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF;
-    repeat
-      result := p^;
-      if result.CodePage = aCodePage then
-        exit;
-      inc(p);
-      dec(n);
-    until n = 0;
-  end;
-  result := nil;
+  {$ifdef FPC}
+  i := IndexWord(pointer(SynAnsiConvertListCodePage)^,
+  {$else}
+  i := WordScanIndex(pointer(SynAnsiConvertListCodePage),
+  {$endif FPC}
+    SynAnsiConvertListCount, aCodePage);
+  if i >= 0 then
+    result := SynAnsiConvertList[i]
+  else
+    result := nil;
 end;
 
-function TSynAnsiConvertInitialize(aCodePage: cardinal): TSynAnsiConvert;
+function NewEngine(aCodePage: cardinal): TSynAnsiConvert;
 begin
-  GlobalLock; // paranoid multi-threading
+  GlobalLock;
   try
-    result := GetEngine(aCodePage);
+    result := GetEngine(aCodePage); // avoid any (unlikely) race condition
     if result <> nil then
       exit;
     if aCodePage = CP_UTF8 then
@@ -2673,6 +2674,7 @@ begin
     else
       result := TSynAnsiConvert.Create(aCodePage);
     ObjArrayAdd(SynAnsiConvertList, result);
+    AddWord(SynAnsiConvertListCodePage, SynAnsiConvertListCount, aCodePage);
   finally
     GlobalUnLock;
   end;
@@ -2680,11 +2682,14 @@ end;
 
 class function TSynAnsiConvert.Engine(aCodePage: cardinal): TSynAnsiConvert;
 begin
-  if aCodePage > 0 then
+  if aCodePage <> 0 then
   begin
     result := GetEngine(aCodePage);
     if result = nil then
-      result := TSynAnsiConvertInitialize(aCodePage)
+      if aCodePage = CP_RAWBLOB then
+        result := RawByteStringConvert // CP_RAWBLOB is internal -> no engine
+      else
+        result := NewEngine(aCodePage)
   end
   else
     result := CurrentAnsiConvert;
@@ -3538,8 +3543,8 @@ begin
   if s = '' then
     result := ''
   else
+  {$ifdef HASCODEPAGE}
   begin
-    {$ifdef HASCODEPAGE}
     cp := StringCodePage(s);
     if cp = CP_UTF8 then
       result := s
@@ -3549,12 +3554,11 @@ begin
       SetCodePage(RawByteString(result), CP_UTF8, false);
     end
     else
-      result := TSynAnsiConvert.Engine(cp).
-        AnsiBufferToRawUtf8(pointer(s), length(s));
-    {$else}
-    result := CurrentAnsiConvert.AnsiBufferToRawUtf8(pointer(s), length(s));
-    {$endif HASCODEPAGE}
+      result := TSynAnsiConvert.Engine(cp).AnsiToUtf8(s);
   end;
+  {$else}
+  result := CurrentAnsiConvert.AnsiToUtf8(s);
+  {$endif HASCODEPAGE}
 end;
 
 function AnyAnsiToUtf8(const s: RawByteString): RawUtf8;
@@ -3898,7 +3902,7 @@ begin
   Utf8DecodeToUnicodeString(pointer(Text), length(Text), result);
 end;
 
-procedure Utf8ToString(const Text: RawUtf8; var result: string);
+procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
 begin
   Utf8DecodeToUnicodeString(pointer(Text), length(Text), result);
 end;
@@ -4034,7 +4038,7 @@ begin
   result := CurrentAnsiConvert.Utf8ToAnsi(Text);
 end;
 
-procedure Utf8ToString(const Text: RawUtf8; var result: string);
+procedure Utf8ToStringVar(const Text: RawUtf8; var result: string);
 begin
   result := CurrentAnsiConvert.Utf8ToAnsi(Text);
 end;
@@ -6791,9 +6795,11 @@ begin
       include(TEXT_CHARS[c], tcCtrlNot0Comma);
   end;
   // setup basic Unicode conversion engines
+  SetLength(SynAnsiConvertListCodePage, 16); // no resize -> more thread safe
   CurrentAnsiConvert := TSynAnsiConvert.Engine(Unicode_CodePage);
   WinAnsiConvert := TSynAnsiConvert.Engine(CODEPAGE_US) as TSynAnsiFixedWidth;
   Utf8AnsiConvert := TSynAnsiConvert.Engine(CP_UTF8) as TSynAnsiUtf8;
+  RawByteStringConvert := TSynAnsiConvert.Engine(CP_RAWBYTESTRING) as TSynAnsiFixedWidth;
 end;
 
 procedure FinalizeUnit;

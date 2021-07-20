@@ -769,29 +769,58 @@ end;
 
 function SortDynArrayAnsiString(const A, B): integer;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        mov     rcx, qword ptr [A]
+        // x86_64 version optimized for AnsiString/RawUtf8/RawByteString types
+        mov     rax, qword ptr [A]
         mov     rdx, qword ptr [B]
-        cmp     rcx, rdx // A=B (happens with string refcounting)
+        xor     ecx, ecx
+        cmp     rax, rdx
         je      @0
-        test    rcx, rdx // A^ or B^ may be nil i.e. ''
-        jz      @n1
-@s:     mov     al, byte ptr [rcx] // by char comparison
-        cmp     al, byte ptr [rdx]
-        jne     @ne
-        inc     rcx
-        inc     rdx
-        test    al, al
-        jnz     @s
-@0:     xor     eax, eax
+        test    rax, rdx
+        jz      @maynil
+@f:     mov     cl, byte ptr [rax]    // first char comparison
+        sub     cl, byte ptr [rdx]
+        je      @s
+@0:     movsx   eax, cl              // branchless execution on Quicksort
         ret
-@n1:    test    rcx, rcx
-        jz      @less    // A='' -> -1
-        test    rdx, rdx
-        jnz     @s       // B='' -> 1
 @1:     mov     eax, 1
         ret
-@ne:    jnc     @1
-@less:  mov     eax, -1
+        {$ifdef FPC}
+@s:     mov     r9, qword ptr [rax - _STRLEN]   // TStrLen=SizeInt on FPC
+        mov     r8, r9
+        sub     r9, qword ptr [rdx - _STRLEN]   // r9 = length(A)-length(B)
+        {$else}
+        .align 16
+@s:     mov     r9d,  dword ptr [rax - _STRLEN] // TStrLen=integer on Delphi
+        mov     r8, r9
+        mov     r10d, dword ptr [rdx - _STRLEN]
+        sub     r9, r10                         // r9 = length(A)-length(B)
+        {$endif FPC}
+        adc     rcx, -1
+        and     rcx, r9
+        sub     rcx, r8                  // rcx = -min(length(A),length(B))
+        sub     rax, rcx
+        sub     rdx, rcx
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+@by8:   mov     r10, qword ptr [rax + rcx]  // compare 8 bytes at once
+        xor     r10, qword ptr [rdx + rcx]
+        jnz     @d
+        add     rcx, 8
+        js      @by8
+@eq:    mov     eax, r9d    // all chars equal -> returns length(A)-length(B)
+        ret
+@d:     bsf     r10, r10    // char differs -> returns pbyte(A)^-pbyte(B)^
+        shr     r10, 3
+        add     rcx, r10
+        jns     @eq
+        movzx   eax, byte ptr [rax + rcx]
+        movzx   edx, byte ptr [rdx + rcx]
+        sub     eax, edx
+        ret
+@maynil:test    rdx, rdx       // A or B may be ''
+        jz      @1
+        test    rax, rax
+        jnz     @f
+        dec     eax
 end; // note: SSE4.2 read up to 16 bytes after buffer, this version won't
 
 function Hash32(Data: PCardinalArray; Len: integer): cardinal;
@@ -1283,7 +1312,7 @@ function FastFindWordSorted(P: PWordArray; R: PtrInt; Value: Word): PtrInt;
         cmovl   r9, r11
         cmp     r9, R
         jle     @s
-@ko:    or      rax, -1
+@ko:    mov     rax, -1
 @ok:    {$ifdef WIN64ABI}
         pop     rdi
         {$endif WIN64ABI}
@@ -1306,7 +1335,7 @@ function FastFindIntegerSorted(P: PIntegerArray; R: PtrInt; Value: integer): Ptr
         lea     rax, [r9 + R]
         cmp     r9, R
         jle     @s
-@ko:    or      rax, -1
+@ko:    mov     rax, -1
 @ok:
 end;
 
@@ -1327,7 +1356,7 @@ function FastFindInt64Sorted(P: PInt64Array; R: PtrInt; const Value: Int64): Ptr
         lea     rax, [r9 + R]
         cmp     r9, R
         jle     @s
-@ko:    or      rax, -1
+@ko:    mov     rax, -1
 @ok:
 end;
 
@@ -1485,7 +1514,7 @@ asm // rcx=src, edx=size, r8=dest
         mov     dword ptr [r8], 0
         add     r8, 4
         pxor    xmm0, xmm0
-        mov     eax, 32768-64
+        mov     eax, 32768 - 64
 @06:    movaps  dqword ptr [off + rax - 48], xmm0 // stack is aligned to 16 bytes
         movaps  dqword ptr [off + rax - 32], xmm0
         movaps  dqword ptr [off + rax - 16], xmm0

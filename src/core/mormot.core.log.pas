@@ -1721,7 +1721,8 @@ uses
 var
   ExeInstanceDebugFile: TDebugFile;
 
-function GetInstanceDebugFile: TDebugFile; {$ifdef FPC} inline; {$endif}
+function GetInstanceDebugFile: TDebugFile;
+  {$ifdef FPC} inline; {$endif}
 begin
   result := ExeInstanceDebugFile;
   if result = nil then
@@ -4132,6 +4133,7 @@ end;
 
 function TSynLog._AddRef: TIntCnt;
 begin
+  result := 1; // should never be 0 (would release TSynLog instance)
   if fFamily.Level * [sllEnter, sllLeave] <> [] then
   begin
     EnterCriticalSection(GlobalThreadLock);
@@ -4148,19 +4150,16 @@ begin
             end;
             inc(RefCount);
             result := RefCount;
-          end
-        else
-          result := 1; // should never be 0 (would release TSynLog instance)
+          end;
     finally
       LeaveCriticalSection(GlobalThreadLock);
     end
   end
-  else
-    result := 1;
 end;
 
 function TSynLog._Release: TIntCnt;
 begin
+  result := 1;
   if fFamily.Level * [sllEnter, sllLeave] <> [] then
   begin
     EnterCriticalSection(GlobalThreadLock);
@@ -4182,15 +4181,11 @@ begin
             end;
             result := RefCount;
           end;
-        end
-        else
-          result := 1; // should never be 0 (would release TSynLog instance)
+        end;
     finally
       LeaveCriticalSection(GlobalThreadLock);
     end;
-  end
-  else
-    result := 1;
+  end;
 end;
 
 constructor TSynLog.Create(aFamily: TSynLogFamily);
@@ -6655,7 +6650,7 @@ begin
   if replaceTabs <> '' then
     tmp := StringReplaceAll(tmp, #9, replaceTabs);
   if IsValidUtf8(pointer(tmp)) then
-    Utf8ToString(tmp, result)
+    Utf8ToStringVar(tmp, result)
   else
     {$ifdef UNICODE}
     result := CurrentAnsiConvert.AnsiToUnicodeString(pointer(tmp), length(tmp));

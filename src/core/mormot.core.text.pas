@@ -749,20 +749,18 @@ type
   // - use an internal buffer, so much faster than naive string+string
   // - see TTextWriter in mormot.core.json for proper JSON support
   // - see TJsonWriter in mormot.db.core for SQL resultset export
-  // - see TJsonSerializer in mormot.core.reflection for proper class
-  // serialization via WriteObject
+  // - see TJsonSerializer in mormot.orm.core for ORM oriented serialization
   TBaseWriter = class
   protected
     fStream: TStream;
     fInitialStreamPosition: PtrUInt;
     fTotalFileSize: PtrUInt;
-    fCustomOptions: TTextWriterOptions;
     fHumanReadableLevel: integer;
     // internal temporary buffer
     fTempBufSize: integer;
     fTempBuf: PUtf8Char;
     fOnFlushToStream: TOnTextWriterFlush;
-    fInternalJsonWriter: TBaseWriter;
+    fCustomOptions: TTextWriterOptions;
     procedure WriteToStream(data: pointer; len: PtrUInt); virtual;
     function GetTextLength: PtrUInt;
     procedure SetStream(aStream: TStream);
@@ -865,7 +863,6 @@ type
     /// append a boolean Value as text
     // - write either 'true' or 'false'
     procedure Add(Value: boolean); overload;
-      {$ifdef HASINLINE}inline;{$endif}
     /// append a Currency from its Int64 in-memory representation
     // - expects a PInt64 to avoid ambiguity with the AddCurr() method
     procedure AddCurr64(Value: PInt64);
@@ -888,13 +885,11 @@ type
     // - noexp=true will call ExtendedToShortNoExp() to avoid any scientific
     // notation in the resulting text
     procedure AddDouble(Value: double; noexp: boolean = false);
-      {$ifdef HASINLINE}inline;{$endif}
     /// append a floating-point Value as a String
     // - write "Infinity", "-Infinity", and "NaN" for corresponding IEEE values
     // - noexp=true will call ExtendedToShortNoExp() to avoid any scientific
     // notation in the resulting text
     procedure AddSingle(Value: single; noexp: boolean = false);
-      {$ifdef HASINLINE}inline;{$endif}
     /// append a floating-point Value as a String
     // - write "Infinity", "-Infinity", and "NaN" for corresponding IEEE values
     // - noexp=true will call ExtendedToShortNoExp() to avoid any scientific
@@ -2035,7 +2030,7 @@ type
       const Context: TSynLogExceptionContext): boolean; virtual;
     {$endif NOEXCEPTIONINTERCEPT}
     /// the code location when this exception was triggered
-    // - populated by SynLog unit, during interception - so may be nil
+    // - populated by mormot.core.log unit, during interception - so may be nil
     // - you can use TDebugFile.FindLocation(ESynException) class function to
     // guess the corresponding source code line
     // - will be serialized as "Address": hexadecimal and source code location,
@@ -5531,7 +5526,7 @@ begin
     exit; // paranoid check
   if BEnd - B <= PropNameLen then
     FlushToStream;
-  if twoForceJsonExtended in CustomOptions then
+  if twoForceJsonExtended in fCustomOptions then
   begin
     MoveSmall(PropName, B + 1, PropNameLen);
     inc(B, PropNameLen + 1);
@@ -6716,14 +6711,13 @@ end;
 type
   /// used internally for faster quick sort
   TQuickSortRawUtf8 = object
-    Values: PPointerArray;
     Compare: TUtf8Compare;
     CoValues: PIntegerArray;
     pivot: pointer;
-    procedure Sort(L, R: PtrInt);
+    procedure Sort(Values: PPointerArray; L, R: PtrInt);
   end;
 
-procedure TQuickSortRawUtf8.Sort(L, R: PtrInt);
+procedure TQuickSortRawUtf8.Sort(Values: PPointerArray; L, R: PtrInt);
 var
   I, J, P: PtrInt;
   tmp: Pointer;
@@ -6763,13 +6757,13 @@ begin
       begin
         // use recursion only for smaller range
         if L < J then
-          Sort(L, J);
+          Sort(Values, L, J);
         L := I;
       end
       else
       begin
         if I < R then
-          Sort(I, R);
+          Sort(Values, I, R);
         R := J;
       end;
     until L >= R;
@@ -6780,7 +6774,6 @@ procedure QuickSortRawUtf8(var Values: TRawUtf8DynArray; ValuesCount: integer;
 var
   QS: TQuickSortRawUtf8;
 begin
-  QS.Values := pointer(Values);
   if Assigned(Compare) then
     QS.Compare := Compare
   else
@@ -6789,7 +6782,7 @@ begin
     QS.CoValues := nil
   else
     QS.CoValues := pointer(CoValues^);
-  QS.Sort(0, ValuesCount - 1);
+  QS.Sort(pointer(Values), 0, ValuesCount - 1);
 end;
 
 procedure QuickSortRawUtf8(Values: PRawUtf8Array; L, R: PtrInt;
@@ -6797,13 +6790,12 @@ procedure QuickSortRawUtf8(Values: PRawUtf8Array; L, R: PtrInt;
 var
   QS: TQuickSortRawUtf8;
 begin
-  QS.Values := pointer(Values);
   if caseInsensitive then
     QS.Compare := @StrIComp
   else
     QS.Compare := @StrComp;
   QS.CoValues := nil;
-  QS.Sort(L, R);
+  QS.Sort(pointer(Values), L, R);
 end;
 
 function DeleteRawUtf8(var Values: TRawUtf8DynArray; Index: integer): boolean;
@@ -8748,10 +8740,10 @@ begin
       if SetVariantUnRefSimpleValue(V, tmp{%H-}) then
         // simple varByRef
         VariantToUtf8(Variant(tmp), result, wasString)
-      else if vt = varVariant or varByRef then
+      else if vt = varVariantByRef then
         // complex varByRef
         VariantToUtf8(PVariant(VPointer)^, result, wasString)
-      else if vt = varByRef or varString then
+      else if vt = varStringByRef then
       begin
         wasString := true;
         {$ifdef HASCODEPAGE}
@@ -8760,7 +8752,7 @@ begin
         result := PRawUtf8(VString)^;
         {$endif HASCODEPAGE}
       end
-      else if vt = varByRef or varOleStr then
+      else if vt = varOleStrByRef then
       begin
         wasString := true;
         RawUnicodeToUtf8(pointer(PWideString(VAny)^),
@@ -8768,7 +8760,7 @@ begin
       end
       else
       {$ifdef HASVARUSTRING}
-      if vt = varByRef or varUString then
+      if vt = varUStringByRef then
       begin
         wasString := true;
         RawUnicodeToUtf8(pointer(PUnicodeString(VAny)^),

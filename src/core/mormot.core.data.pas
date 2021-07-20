@@ -1129,7 +1129,8 @@ var
     (nil, nil, SortDynArrayBoolean, SortDynArrayByte, SortDynArrayCardinal,
      SortDynArrayInt64, SortDynArrayDouble, SortDynArrayExtended,
      SortDynArrayInt64, SortDynArrayInteger, SortDynArrayQWord,
-     SortDynArrayRawByteString, SortDynArrayAnsiString, SortDynArrayAnsiString,
+     {$ifdef CPUINTEL}SortDynArrayAnsiString{$else}SortDynArrayRawByteString{$endif},
+     SortDynArrayAnsiString, SortDynArrayAnsiString,
      nil, SortDynArraySingle, SortDynArrayString, SortDynArrayUnicodeString,
      SortDynArrayDouble, SortDynArrayDouble, SortDynArray128, SortDynArray128,
      SortDynArray256, SortDynArray512, SortDynArrayInt64, SortDynArrayInt64,
@@ -1139,7 +1140,8 @@ var
    (nil, nil, SortDynArrayBoolean, SortDynArrayByte, SortDynArrayCardinal,
     SortDynArrayInt64, SortDynArrayDouble, SortDynArrayExtended,
     SortDynArrayInt64, SortDynArrayInteger, SortDynArrayQWord,
-    SortDynArrayRawByteString, SortDynArrayAnsiStringI, SortDynArrayAnsiStringI,
+    {$ifdef CPUINTEL}SortDynArrayAnsiString{$else}SortDynArrayRawByteString{$endif},
+    SortDynArrayAnsiStringI, SortDynArrayAnsiStringI,
     nil, SortDynArraySingle, SortDynArrayStringI, SortDynArrayUnicodeStringI,
     SortDynArrayDouble, SortDynArrayDouble, SortDynArray128, SortDynArray128,
     SortDynArray256, SortDynArray512, SortDynArrayInt64, SortDynArrayInt64,
@@ -1561,7 +1563,7 @@ type
     // TRawUtf8DynArray, TWinAnsiDynArray, TRawByteStringDynArray,
     // TStringDynArray, TWideStringDynArray, TSynUnicodeDynArray,
     // TTimeLogDynArray and TDateTimeDynArray as JSON array - or any customized
-    // valid JSON serialization as set by TTextWriter.RegisterCustomJsonSerializer
+    // Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer format
     // - or any other kind of array as Base64 encoded binary stream precessed
     // via JSON_BASE64_MAGIC_C (UTF-8 encoded \uFFF0 special code)
     // - typical handled content could be
@@ -2381,19 +2383,23 @@ type
   {$else}
   TRawUtf8InterningSlot = object
   {$endif USERECORDWITHMETHODS}
+  private
+    fSafe: TRTLCriticalSection;
+    fCount: integer;
+    fValue: TRawUtf8DynArray;
+    fValues: TDynArrayHashed;
   public
-    /// actual RawUtf8 storage
-    Value: TRawUtf8DynArray;
-    /// hashed access to the Value[] list
-    Values: TDynArrayHashed;
-    /// associated mutex for thread-safe process
-    Safe: TSynLocker;
     /// initialize the RawUtf8 slot (and its Safe mutex)
     procedure Init;
     /// finalize the RawUtf8 slot - mainly its associated Safe mutex
     procedure Done;
     /// returns the interned RawUtf8 value
-    procedure Unique(var aResult: RawUtf8; const aText: RawUtf8; aTextHash: cardinal);
+    procedure Unique(var aResult: RawUtf8; const aText: RawUtf8;
+      aTextHash: cardinal);
+    /// returns the interned RawUtf8 value
+    // - only allocates new aResult string if needed
+    procedure UniqueFromBuffer(var aResult: RawUtf8;
+      aText: PUtf8Char; aTextLen: PtrInt; aTextHash: cardinal);
     /// ensure the supplied RawUtf8 value is interned
     procedure UniqueText(var aText: RawUtf8; aTextHash: cardinal);
     /// delete all stored RawUtf8 values
@@ -2402,7 +2408,8 @@ type
     // - any string with an usage count <= aMaxRefCount will be removed
     function Clean(aMaxRefCount: TRefCnt): integer;
     /// how many items are currently stored in Value[]
-    function Count: integer;
+    property Count: integer
+      read fCount;
   end;
 
   /// allow to store only one copy of distinct RawUtf8 values
@@ -2430,6 +2437,7 @@ type
     // - if aText does exist in the internal string pool, return the shared
     // instance (with its reference counter increased), to reduce memory usage
     function Unique(aText: PUtf8Char; aTextLen: PtrInt): RawUtf8; overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// return a RawUtf8 variable stored within this class
     // - if aText occurs for the first time, add it to the internal string pool
     // - if aText does exist in the internal string pool, return the shared
@@ -2439,8 +2447,8 @@ type
     // - if aText occurs for the first time, add it to the internal string pool
     // - if aText does exist in the internal string pool, return the shared
     // instance (with its reference counter increased), to reduce memory usage
+    // - this method won't allocate any memory if aText is already interned
     procedure Unique(var aResult: RawUtf8; aText: PUtf8Char; aTextLen: PtrInt); overload;
-      {$ifdef HASINLINE}inline;{$endif}
     /// ensure a RawUtf8 variable is stored within this class
     // - if aText occurs for the first time, add it to the internal string pool
     // - if aText does exist in the internal string pool, set the shared
@@ -3913,20 +3921,14 @@ end;
 
 procedure TRawUtf8InterningSlot.Init;
 begin
-  Safe.Init;
-  Safe.LockedInt64[0] := 0;
-  Values.InitSpecific(TypeInfo(TRawUtf8DynArray), Value, ptRawUtf8,
-    @Safe.Padding[0].VInteger, false, InterningHasher);
+  InitializeCriticalSection(fSafe);
+  fValues.InitSpecific(TypeInfo(TRawUtf8DynArray), fValue, ptRawUtf8,
+    @fCount, false, InterningHasher);
 end;
 
 procedure TRawUtf8InterningSlot.Done;
 begin
-  Safe.Done;
-end;
-
-function TRawUtf8InterningSlot.Count: integer;
-begin
-  result := Safe.LockedInt64[0];
+  DeleteCriticalSection(fSafe);
 end;
 
 procedure TRawUtf8InterningSlot.Unique(var aResult: RawUtf8;
@@ -3935,19 +3937,47 @@ var
   i: PtrInt;
   added: boolean;
 begin
-  Safe.Lock;
+  EnterCriticalSection(fSafe);
   try
-    i := Values.FindHashedForAdding(aText, added, aTextHash);
+    i := fValues.FindHashedForAdding(aText, added, aTextHash);
     if added then
     begin
-      Value[i] := aText;   // copy new value to the pool
+      fValue[i] := aText;   // copy new value to the pool
       aResult := aText;
     end
     else
-      aResult := Value[i]; // return unified string instance
+      aResult := fValue[i]; // return unified string instance
   finally
-    Safe.UnLock;
+    LeaveCriticalSection(fSafe);
   end;
+end;
+
+procedure TRawUtf8InterningSlot.UniqueFromBuffer(var aResult: RawUtf8;
+  aText: PUtf8Char; aTextLen: PtrInt; aTextHash: cardinal);
+var
+  i: PtrInt;
+  added: boolean;
+  bak: TDynArraySortCompare;
+begin
+  EnterCriticalSection(fSafe);
+  {$ifdef HASFASTTRYFINALLY} // make a huge performance difference
+  try
+  {$endif HASFASTTRYFINALLY}
+    bak := fValues.{$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}fCompare;
+    fValues.{$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}fCompare :=
+      @SortDynArrayPUtf8Char; // compare(RawUtf8,RawUtf8) -> (RawUtf8,PUtf8Char)
+    i := fValues.FindHashedForAdding(aText, added, aTextHash);
+    fValues.{$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}fCompare := bak;
+    if added then
+      FastSetString(fValue[i], aText, aTextLen); // new value to the pool
+    aResult := fValue[i]; // return unified string instance
+  {$ifdef HASFASTTRYFINALLY}
+  finally
+  {$endif HASFASTTRYFINALLY}
+    LeaveCriticalSection(fSafe);
+  {$ifdef HASFASTTRYFINALLY}
+  end;
+  {$endif HASFASTTRYFINALLY}
 end;
 
 procedure TRawUtf8InterningSlot.UniqueText(var aText: RawUtf8; aTextHash: cardinal);
@@ -3955,26 +3985,26 @@ var
   i: PtrInt;
   added: boolean;
 begin
-  Safe.Lock;
+  EnterCriticalSection(fSafe);
   try
-    i := Values.FindHashedForAdding(aText, added, aTextHash);
+    i := fValues.FindHashedForAdding(aText, added, aTextHash);
     if added then
-      Value[i] := aText
-    else  // copy new value to the pool
-      aText := Value[i];      // return unified string instance
+      fValue[i] := aText    // copy new value to the pool
+    else
+      aText := fValue[i];   // return unified string instance
   finally
-    Safe.UnLock;
+    LeaveCriticalSection(fSafe);
   end;
 end;
 
 procedure TRawUtf8InterningSlot.Clear;
 begin
-  Safe.Lock;
+  EnterCriticalSection(fSafe);
   try
-    Values.SetCount(0); // Values.Clear
-    Values.Hasher.Clear;
+    fValues.SetCount(0); // Values.Clear
+    fValues.Hasher.Clear;
   finally
-    Safe.UnLock;
+    LeaveCriticalSection(fSafe);
   end;
 end;
 
@@ -3984,13 +4014,13 @@ var
   s, d: PPtrUInt; // points to RawUtf8 values
 begin
   result := 0;
-  Safe.Lock;
+  EnterCriticalSection(fSafe);
   try
-    if Safe.Padding[0].VInteger = 0 then // len = 0 ?
+    if fCount = 0 then
       exit;
-    s := pointer(Value);
+    s := pointer(fValue);
     d := s;
-    for i := 1 to Safe.Padding[0].VInteger do
+    for i := 1 to fCount do
     begin
       if PRefCnt(PAnsiChar(s^) - _STRREFCNT)^ <= aMaxRefCount then
       begin
@@ -4014,11 +4044,11 @@ begin
     end;
     if result > 0 then
     begin
-      Values.SetCount((PtrUInt(d) - PtrUInt(Value)) div SizeOf(d^));
-      Values.ReHash;
+      fValues.SetCount((PtrUInt(d) - PtrUInt(fValue)) div SizeOf(d^));
+      fValues.ReHash;
     end;
   finally
-    Safe.UnLock;
+    LeaveCriticalSection(fSafe);
   end;
 end;
 
@@ -4115,7 +4145,7 @@ var
   hash: cardinal;
 begin
   if aText = '' then
-    result := ''
+    FastAssignNew(result)
   else if self = nil then
     result := aText
   else
@@ -4128,15 +4158,25 @@ end;
 
 function TRawUtf8Interning.Unique(aText: PUtf8Char; aTextLen: PtrInt): RawUtf8;
 begin
-  FastSetString(result, aText, aTextLen);
-  UniqueText(result);
+  Unique(result, aText, aTextLen);
 end;
 
 procedure TRawUtf8Interning.Unique(var aResult: RawUtf8;
   aText: PUtf8Char; aTextLen: PtrInt);
+var
+  hash: cardinal;
 begin
-  FastSetString(aResult, aText, aTextLen);
-  UniqueText(aResult);
+  if (aText = nil) or
+     (aTextLen <= 0) then
+    FastAssignNew(aResult)
+  else if self = nil then
+    FastSetString(aResult, aText, aTextLen)
+  else
+  begin
+    // inlined fPool[].Values.HashElement
+    hash := InterningHasher(0, pointer(aText), aTextLen);
+    fPool[hash and fPoolLast].UniqueFromBuffer(aResult, aText, aTextLen, hash);
+  end;
 end;
 
 procedure TRawUtf8Interning.UniqueVariant(var aResult: variant; const aText: RawUtf8);
@@ -4162,9 +4202,9 @@ begin
   vt := vd.VType;
   if vt = varString then
     UniqueText(RawUtf8(vd.VString))
-  else if vt = varVariant or varByRef then
+  else if vt = varVariantByRef then
     UniqueVariant(PVariant(vd.VPointer)^)
-  else if vt = varString or varByRef then
+  else if vt = varStringByRef then
     UniqueText(PRawUtf8(vd.VPointer)^);
 end;
 
@@ -7336,12 +7376,6 @@ begin
           if @QuickSort.Compare = @SortDynArrayDouble then
           begin
             QuickSortDouble(fValue^, aStart, aStop);
-            exit;
-          end;
-        ptRawUtf8:
-          if @QuickSort.Compare = @SortDynArrayAnsiString then
-          begin
-            QuickSortRawUtf8(fValue^, aStart, aStop, {caseinsens=}false);
             exit;
           end;
       end;

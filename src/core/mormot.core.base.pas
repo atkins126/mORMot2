@@ -2,6 +2,7 @@
 // - this unit is a part of the Open Source Synopse mORMot framework 2,
 // licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 unit mormot.core.base;
+
 {
   *****************************************************************************
 
@@ -2403,18 +2404,18 @@ var
 {$endif ASMX64}
 
 /// our fast version of FillChar()
-// - on Intel i386/x86_64, will use fast SSE2/AVX instructions (if available),
-// or optimized X87 assembly implementation for older CPUs
+// - on Intel i386/x86_64, will use fast SSE2/AVX instructions (if available)
 // - on non-Intel CPUs, it will fallback to the default RTL FillChar()
-// - note: Delphi x86_64 is far from efficient: even ERMS was wrongly
-// introduced in latest updates
+// - you could try to define WITH_ERMS conditional but it is usually slower
+// - note: Delphi RTL is far from efficient: on i386 the FPU is slower/unsafe,
+// and on x86_64, ERMS is wrongly used even for small blocks
 procedure FillcharFast(var dst; cnt: PtrInt; value: byte);
 
 /// our fast version of move()
-// - on Delphi Intel i386/x86_64, will use fast SSE2 instructions (if available),
-// or optimized X87 assembly implementation for older CPUs
-// - FPC i386 has fastmove.inc which is faster than our FPU/ERMS version
+// - on Delphi Intel i386/x86_64, will use fast SSE2 instructions (if available)
+// - FPC i386 has fastmove.inc which is faster than our SSE2/ERMS version
 // - FPC x86_64 RTL is slower than our SSE2/AVX asm
+// - you could try to define WITH_ERMS conditional but it is usually slower
 // - on non-Intel CPUs, it will fallback to the default RTL Move()
 {$ifdef FPC_X86}
 var MoveFast: procedure(const Source; var Dest; Count: PtrInt) = Move;
@@ -2523,6 +2524,10 @@ procedure TrimCopy(const S: RawUtf8; start, count: PtrInt;
 // - if SepStr is found, returns Str first chars until (and excluding) SepStr
 // - if SepStr is not found, returns Str
 function Split(const Str, SepStr: RawUtf8; StartPos: integer = 1): RawUtf8; overload;
+
+type
+  /// the function prototype of StrComp and StrIComp
+  TStrComp = function(Str1, Str2: pointer): PtrInt;
 
 /// buffer-safe version of StrComp(), to be used with PUtf8Char/PAnsiChar
 function StrComp(Str1, Str2: pointer): PtrInt;
@@ -3122,13 +3127,18 @@ const
   // and varQWord in FPC
   varWord64 = 21;
 
+  varVariantByRef = varVariant or varByRef;
+  varStringByRef = varString or varByRef;
+  varOleStrByRef = varOleStr or varByRef;
+
   /// this variant type will map the current SynUnicode type
   // - depending on the compiler version
   {$ifdef HASVARUSTRING}
   varSynUnicode = varUString;
+  varUStringByRef = varUString or varByRef;
   {$else}
   varSynUnicode = varOleStr;
-  {$endif}
+  {$endif HASVARUSTRING}
 
   /// this variant type will map the current string type
   // - depending on the compiler string definition (UnicodeString or AnsiString)
@@ -3136,7 +3146,7 @@ const
   varNativeString = varUString;
   {$else}
   varNativeString = varString;
-  {$endif}
+  {$endif UNICODE}
 
   {$ifndef FPC}
   CFirstUserType = $10F;
@@ -3272,12 +3282,15 @@ var
   VariantClearSeveral: procedure(V: PVarData; n: integer);
 
   /// compare two variant/TVarData values, with or without case sensitivity
-  // - this unit registers a basic case-sensitive version calling the RTL
-  // VarCompareValue(), but mormot.core.variants will assign a (much) more
-  // efficient implementation, also properly handling caseInsensitive parameter
+  // - this unit registers the basic VariantCompSimple() case-sensitive comparer
+  // - mormot.core.variants will assign the much better FastVarDataComp()
   // - called e.g. by SortDynArrayVariant/SortDynArrayVariantI functions
   SortDynArrayVariantComp: function(
     const A, B: TVarData; caseInsensitive: boolean): integer;
+
+/// basic default case-sensitive variant comparison function
+// - try as VariantToInt64/VariantToDouble, then RTL VarCompareValue()
+function VariantCompSimple(const A, B: variant): integer;
 
 
 { ************ Sorting/Comparison Functions }
@@ -3350,10 +3363,13 @@ function SortDynArrayDouble(const A, B): integer;
 function SortDynArrayExtended(const A, B): integer;
 
 /// compare two "array of AnsiString" elements, with case sensitivity
+// - on Intel/AMD will use efficient i386/x86_64 assembly using length
+// - on other CPU, will redirect to inlined StrComp() using #0 trailing char
 function SortDynArrayAnsiString(const A, B): integer;
 
 /// compare two "array of RawByteString" elements, with case sensitivity
 // - can't use StrComp() or similar functions since RawByteString may contain #0
+// - on Intel/AMD, rather use the more efficient SortDynArrayAnsiString
 function SortDynArrayRawByteString(const A, B): integer;
 
 /// compare two "array of PUtf8Char/PAnsiChar" elements, with case sensitivity
@@ -8942,11 +8958,13 @@ begin
     CpuFeatures := CpuFeatures - [cfAVX, cfAVX2, cfFMA];
   {$endif DISABLE_SSE42}
   {$ifdef ASMX86}
-  if cfERMS in CpuFeatures then // ERMSB is faster than John O'Harrow FPU code
-    ERMSB_MIN_SIZE := 511;      // but not for smallest sizes due to its warmup
+  {$ifdef WITH_ERMS}
+  if cfERMS in CpuFeatures then
+    ERMSB_MIN_SIZE := 511;      // ERMSB is less efficient than SSE2 movntdq
+  {$endif WITH_ERMS}
   {$endif ASMX86}
   {$ifdef ASMX64}
-  {$ifdef WITH_ERMS}
+  {$ifdef WITH_ERMS} // WITH_ERMS is enabled in mormot.core.base.asmx86.inc :)
   if cfERMS in CpuFeatures then // actually slower than our AVX code -> disabled
     include(CPUIDX64, cpuERMS);
   {$endif WITH_ERMS}
@@ -10653,7 +10671,7 @@ function VarDataFromVariant(const Value: variant): PVarData;
 begin
   result := @Value;
   repeat
-    if integer(result^.VType) <> varVariant or varByRef then
+    if integer(result^.VType) <> varVariantByRef then
       exit;
     if result^.VPointer <> nil then
       result := result^.VPointer
@@ -10668,15 +10686,15 @@ end;
 function VarDataIsEmptyOrNull(VarData: pointer): boolean;
 begin
   with VarDataFromVariant(PVariant(VarData)^)^ do
-    result := (VType <= varNull) or
-              (VType = varNull or varByRef);
+    result := (cardinal(VType) <= varNull) or
+              (cardinal(VType) = varNull or varByRef);
 end;
 
 function VarIsEmptyOrNull(const V: Variant): boolean;
 begin
   with VarDataFromVariant(V)^ do
-    result := (VType <= varNull) or
-              (VType = varNull or varByRef);
+    result := (cardinal(VType) <= varNull) or
+              (cardinal(VType) = varNull or varByRef);
 end;
 
 function SetVariantUnRefSimpleValue(const Source: variant;
@@ -10786,7 +10804,7 @@ end;
 function VariantToDouble(const V: Variant; var Value: double): boolean;
 var
   vd: PVarData;
-  tmp: TVarData;
+  i64: Int64;
 begin
   vd := VarDataFromVariant(V);
   result := true;
@@ -10806,8 +10824,8 @@ begin
     varCurrency or varByRef:
       CurrencyToDouble(vd^.VAny, Value);
   else
-    if VariantToInt64(PVariant(vd)^, tmp.VInt64) then
-      Value := tmp.VInt64
+    if VariantToInt64(PVariant(vd)^, i64) then
+      Value := i64
     else
       result := false;
   end;
@@ -10977,7 +10995,7 @@ end;
 procedure VariantStringToUtf8(const V: Variant; var result: RawUtf8);
 begin
   with VarDataFromVariant(V)^ do
-    if VType = varString then
+    if cardinal(VType) = varString then
       result := RawUtf8(VString)
     else
       result := '';
@@ -10998,13 +11016,33 @@ begin
     until n = 0;
 end;
 
+function VariantCompSimple(const A, B: variant): integer;
+var
+  a64, b64: Int64;
+  af64, bf64: double;
+begin
+  // directly handle ordinal and floating point values
+  if VariantToInt64(A, a64) and
+     VariantToInt64(B, b64) then
+    result := CompareInt64(a64, b64)
+  else if VariantToDouble(A, af64) and
+          VariantToDouble(B, bf64) then
+    result := CompareFloat(af64, bf64)
+  else
+    // inlined VarCompareValue() for complex/mixed types
+    if A = B then
+      result := 0
+    else if A < B then // both FPC and Delphi RTL require these two comparisons
+      result := -1
+    else
+      result := 1;
+end;
+
 function _SortDynArrayVariantComp(const A, B: TVarData;
   {%H-}caseInsensitive: boolean): integer;
-const
-  ICMP: array[TVariantRelationship] of integer = (0, -1, 1, 1);
+// caseInsensitive not supported by the RTL -> include mormot.core.variants
 begin
-  // caseInsensitive not supported by the RTL
-  result := ICMP[VarCompareValue(PVariant(@A)^, PVariant(@B)^)];
+  result := VariantCompSimple(PVariant(@A)^, PVariant(@B)^);
 end;
 
 
@@ -11086,40 +11124,47 @@ begin
   result := StrCompW(PWideChar(A), PWideChar(B));
 end;
 
+function CompareHash128(A, B: PHash128Rec): integer;
+  {$ifdef HASINLINE}inline;{$endif}
+begin
+  result := ord(A.Lo > B.Lo) - ord(A.Lo < B.Lo);
+  if result = 0 then
+    result := ord(A.Hi > B.Hi) - ord(A.Hi < B.Hi);
+end;
+
 function SortDynArray128(const A, B): integer;
 begin
-  if THash128Rec(A).Lo < THash128Rec(B).Lo then
-    result := -1
-  else if THash128Rec(A).Lo > THash128Rec(B).Lo then
-    result := 1
-  else if THash128Rec(A).Hi < THash128Rec(B).Hi then
-    result := -1
-  else if THash128Rec(A).Hi > THash128Rec(B).Hi then
-    result := 1
-  else
-    result := 0;
+  result := CompareHash128(@A, @B);
 end;
 
 function SortDynArray256(const A, B): integer;
 begin
-  result := SortDynArray128(THash256Rec(A).Lo, THash256Rec(B).Lo);
+  {$ifdef CPUX64}
+  result := MemCmpSse2(@A, @B, SizeOf(THash256));
+  {$else}
+  result := CompareHash128(@THash256Rec(A).l, @THash256Rec(B).l);
   if result = 0 then
-    result := SortDynArray128(THash256Rec(A).Hi, THash256Rec(B).Hi);
+    result := CompareHash128(@THash256Rec(A).h, @THash256Rec(B).h);
+  {$endif CPUX64}
 end;
 
 function SortDynArray512(const A, B): integer;
 begin
-  result := SortDynArray128(THash512Rec(A).c0, THash512Rec(B).c0);
+  {$ifdef CPUX64}
+  result := MemCmpSse2(@A, @B, SizeOf(THash512));
+  {$else}
+  result := CompareHash128(@THash512Rec(A).l.l, @THash512Rec(B).l.l);
   if result = 0 then
   begin
-    result := SortDynArray128(THash512Rec(A).c1, THash512Rec(B).c1);
+    result := CompareHash128(@THash512Rec(A).l.h, @THash512Rec(B).l.h);
     if result = 0 then
     begin
-      result := SortDynArray128(THash512Rec(A).c2, THash512Rec(B).c2);
+      result := CompareHash128(@THash512Rec(A).h.l, @THash512Rec(B).h.l);
       if result = 0 then
-        result := SortDynArray128(THash512Rec(A).c3, THash512Rec(B).c3);
+        result := CompareHash128(@THash512Rec(A).h.h, @THash512Rec(B).h.h);
     end;
   end;
+  {$endif CPUX64}
 end;
 
 function SortDynArrayRawByteString(const A, B): integer;
@@ -11520,7 +11565,7 @@ begin
   fContentRead := pointer(s);
 end;
 
-function TNestedStreamReader.Write(const Buffer; Count: Longint): Longint;
+function TNestedStreamReader.{%H-}Write(const Buffer; Count: Longint): Longint;
 begin
   raise EStreamError.Create('Unexpected TNestedStreamReader.Write');
 end;

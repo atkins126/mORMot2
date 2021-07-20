@@ -39,6 +39,13 @@ type
   /// exception class raised by this unit during raw Variant process
   ESynVariant = class(ESynException);
 
+const
+  {$ifdef HASVARUSTRING}
+  varFirstCustom = varUString + 1;
+  {$else}
+  varFirstCustom = varAny + 1;
+  {$endif HASVARUSTRING}
+
 /// fastcheck if a variant hold a value
 // - varEmpty, varNull or a '' string would be considered as void
 // - varBoolean=false or varDate=0 would be considered as void
@@ -58,7 +65,7 @@ function VarIs(const V: Variant; const VTypes: TVarDataTypes): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// same as Dest := Source, but copying by reference
-// - i.e. VType is defined as varVariant or varByRef
+// - i.e. VType is defined as varVariant or varByRef / varVariantByRef
 // - for instance, it will be used for late binding of TDocVariant properties,
 // to let following statements work as expected:
 // ! V := _Json('{arr:[1,2]}');
@@ -137,13 +144,17 @@ type
   // - used in mormot.core.variants.pas unit e.g. by TDocVariantData.SortByValue
   TVariantCompare = function(const V1, V2: variant): PtrInt;
 
+/// internal function as called by inlined VariantCompare/VariantCompareI and
+// the SortDynArrayVariantComp() function overriden by this unit
+function FastVarDataComp(A, B: PVarData; caseInsensitive: boolean): integer;
+
 /// TVariantCompare-compatible case-sensitive comparison function
-// - just a wrapper around SortDynArrayVariantComp(caseInsensitive=false)
+// - just a wrapper around FastVarDataComp(caseInsensitive=false)
 function VariantCompare(const V1, V2: variant): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// TVariantCompare-compatible case-insensitive comparison function
-// - just a wrapper around SortDynArrayVariantComp(caseInsensitive=true)
+// - just a wrapper around FastVarDataComp(caseInsensitive=true)
 function VariantCompareI(const V1, V2: variant): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -407,6 +418,8 @@ type
   protected
     /// name and values interning are shared among all TDocVariantData instances
     fInternNames, fInternValues: TRawUtf8Interning;
+    procedure CreateInternNames;
+    procedure CreateInternValues;
     /// fast getter implementation
     function IntGet(var Dest: TVarData; const Instance: TVarData;
       Name: PAnsiChar; NameLen: PtrInt): boolean; override;
@@ -592,8 +605,7 @@ type
     procedure CastTo(var Dest: TVarData; const Source: TVarData;
       const AVarType: TVarType); override;
     /// compare two variant values
-    // - it uses case-sensitive text comparison of the JSON representation
-    // of each variant (including TDocVariant instances)
+    // - redirect to case-sensitive FastVarDataComp() comparison
     procedure Compare(const Left, Right: TVarData;
       var Relationship: TVarCompareResult); override;
   end;
@@ -942,6 +954,15 @@ type
     // - just set protected VCount field, do not resize the arrays: caller
     // should ensure that Capacity is big enough
     procedure SetCount(aCount: integer);
+      {$ifdef HASINLINE}inline;{$endif}
+    /// efficient comparison of two TDocVariantData content
+    // - will return the same result than JSON comparison, but more efficiently
+    function Compare(const Another: TDocVariantData;
+      CaseInsensitive: boolean = false): integer;
+    /// efficient equality comparison of two TDocVariantData content
+    // - just a wrapper around Compare(Another)=0
+    function Equals(const Another: TDocVariantData;
+      CaseInsensitive: boolean = false): boolean;
       {$ifdef HASINLINE}inline;{$endif}
     /// low-level method called internally to reserve place for new values
     // - returns the index of the newly created item in Values[]/Names[] arrays
@@ -1455,11 +1476,11 @@ type
     // can specify @StrComp as comparer function for case-sensitive ordering
     // - once sorted, you can use GetVarData(..,Compare) or GetAs*(..,Compare)
     // methods for much faster O(log(n)) binary search
-    procedure SortByName(Compare: TUtf8Compare = nil);
+    procedure SortByName(SortCompare: TUtf8Compare = nil);
     /// sort the document object values by value
     // - work for both dvObject and dvArray documents
     // - will sort by UTF-8 text (VariantCompare) if no custom aCompare is supplied
-    procedure SortByValue(Compare: TVariantCompare = nil);
+    procedure SortByValue(SortCompare: TVariantCompare = nil);
     /// sort the document array values by a field of some stored objet values
     // - do nothing if the document is not a dvArray, or if the items are no dvObject
     // - will sort by UTF-8 text (VariantCompare) if no custom aValueCompare is supplied
@@ -2444,7 +2465,7 @@ begin
   vd := @V;
   repeat
     vt := vd^.VType;
-    if vt <> varVariant or varByRef then
+    if vt <> varVariantByRef then
       break;
     vd := vd^.VPointer;
     if vd = nil then
@@ -2472,12 +2493,12 @@ begin
       varDate:
         result := VInt64 = 0;
     else
-      if vt = varVariant or varByRef then
+      if vt = varVariantByRef then
         result := VarIsVoid(PVariant(VPointer)^)
-      else if (vt = varByRef or varString) or
-              (vt = varByRef or varOleStr)
+      else if (vt = varStringByRef) or
+              (vt = varOleStrByRef)
               {$ifdef HASVARUSTRING} or
-              (vt = varByRef or varUString)
+              (vt = varUStringByRef)
               {$endif HASVARUSTRING} then
         result := PPointer(VAny)^ = nil
       else if vt = DocVariantVType then
@@ -2506,7 +2527,7 @@ begin
     TVarData(Dest) := TVarData(Source)
   else if not SetVariantUnRefSimpleValue(Source, TVarData(Dest)) then
   begin
-    TRttiVarData(Dest).VType := varVariant or varByRef;
+    TRttiVarData(Dest).VType := varVariantByRef;
     TVarData(Dest).VPointer := @Source;
   end;
 end;
@@ -2521,7 +2542,7 @@ begin
   s := @Source;
   VarClear(Dest);
   vt := s^.VType;
-  if vt = varVariant or varByRef then
+  if vt = varVariantByRef then
   begin
     s := s^.VPointer;
     vt := s^.VType;
@@ -2538,14 +2559,14 @@ begin
         d.VAny := nil;
         RawByteString(d.VAny) := RawByteString(s^.VAny);
       end;
-    varByRef or varString:
+    varStringByRef:
       begin
         dt := varString;
         d.VAny := nil;
         RawByteString(d.VAny) := PRawByteString(s^.VAny)^;
       end;
-    {$ifdef HASVARUSTRING} varUString, varByRef or varUString, {$endif}
-    varOleStr, varByRef or varOleStr:
+    {$ifdef HASVARUSTRING} varUString, varUStringByRef, {$endif}
+    varOleStr, varOleStrByRef:
       begin
         dt := varString;
         d.VAny := nil;
@@ -2675,7 +2696,7 @@ begin
       varUString:
         result := UnicodeString(VAny);
       else
-        if vt = varByRef or varUString then
+        if vt = varUStringByRef then
           result := PUnicodeString(VAny)^
       {$endif UNICODE}
       else
@@ -2684,7 +2705,7 @@ begin
         if tmp = '' then
           result := ''
         else
-          Utf8ToString(tmp, result);
+          Utf8ToStringVar(tmp, result);
       end;
     end;
 end;
@@ -2692,7 +2713,7 @@ end;
 procedure VariantToVarRec(const V: variant; var result: TVarRec);
 begin
   result.VType := vtVariant;
-  if TVarData(V).VType = varByRef or varVariant then
+  if TVarData(V).VType = varVariantByRef then
     result.VVariant := TVarData(V).VPointer
   else
     result.VVariant := @V;
@@ -2744,7 +2765,7 @@ begin
         end;
       vtVariant:
         result := V.VVariant^;
-      // warning: use varByRef or varString makes GPF -> safe and fast refcount
+      // warning: use varStringByRef makes GPF -> safe and fast refcount
       vtAnsiString:
         begin
           VType := varString;
@@ -2792,109 +2813,92 @@ begin
   result := tmp.VValue;
 end;
 
-function SortDynArrayVariantCompareAsString(const A, B: variant): integer;
+
 var
-  UA, UB: RawUtf8;
+  // FastVarDataComp() efficient lookup for per-VType comparison function
+  _VARDATASAMEVTYPECMP:
+      array[boolean, 0 .. $102 {varUString}] of TDynArraySortCompare;
+
+function VariantCompAsUtf8(const A, B: variant;
+  caseInsensitive: boolean): integer;
+// need to serialize both as UTF-8 text/JSON
+var
+  au, bu: RawUtf8;
   wasString: boolean;
 begin
-  VariantToUtf8(A, UA, wasString);
-  VariantToUtf8(B, UB, wasString);
-  result := StrComp(pointer(UA), pointer(UB));
+  VariantToUtf8(A, au, wasString);
+  VariantToUtf8(B, bu, wasString);
+  if caseInsensitive then
+    result := StrIComp(pointer(au), pointer(bu))
+  else
+    result := StrComp(pointer(au), pointer(bu));
 end;
 
-function SortDynArrayVariantCompareAsStringI(const A, B: variant): integer;
-var
-  UA, UB: RawUtf8;
-  wasString: boolean;
-begin
-  VariantToUtf8(A, UA, wasString);
-  VariantToUtf8(B, UB, wasString);
-  result := StrIComp(pointer(UA), pointer(UB));
-end;
-
-function SortDynArrayZero(const A, B): integer;
-begin
-  result := 0;
-end;
-
-function _SortDynArrayVariantComp(const A, B: TVarData; caseInsensitive: boolean): integer;
-type
-  TSortDynArrayVariantComp = function(const A, B: variant): integer;
-const
-  CMP: array[boolean] of TSortDynArrayVariantComp = (
-    SortDynArrayVariantCompareAsString, SortDynArrayVariantCompareAsStringI);
-  ICMP: array[TVariantRelationship] of integer = (0, -1, 1, 1);
-  SORT1: array[varEmpty..varDate] of TDynArraySortCompare = (
-    SortDynArrayZero, SortDynArrayZero, SortDynArraySmallInt, SortDynArrayInteger,
-    SortDynArraySingle, SortDynArrayDouble, SortDynArrayInt64, SortDynArrayDouble);
-  SORT2: array[varShortInt..varWord64] of TDynArraySortCompare = (
-    SortDynArrayShortInt, SortDynArrayByte, SortDynArrayWord, SortDynArrayCardinal,
-    SortDynArrayInt64, SortDynArrayQWord);
+function FastVarDataComp(A, B: PVarData; caseInsensitive: boolean): integer;
 var
   at, bt: cardinal;
+  sametypecomp: TDynArraySortCompare;
+label
+  rtl, utf;
 begin
-  at := cardinal(A.VType);
-  bt := cardinal(B.VType);
-  if at = varVariant or varByRef then
-    result := SortDynArrayVariantComp(PVarData(A.VPointer)^, B, caseInsensitive)
-  else if bt = varVariant or varByRef then
-    result := SortDynArrayVariantComp(A, PVarData(B.VPointer)^, caseInsensitive)
-  else if at = bt then
-    case at of // optimized comparison if A and B share the same type
-      low(SORT1)..high(SORT1):
-        result := SORT1[at](A.VAny, B.VAny);
-      low(SORT2)..high(SORT2):
-        result := SORT2[at](A.VAny, B.VAny);
-      varString: // RawUtf8 most of the time (e.g. from TDocVariant)
-        if caseInsensitive then
-          result := StrIComp(A.VAny, B.VAny)
-        else
-          result := StrComp(A.VAny, B.VAny);
-      varBoolean:
-        if A.VBoolean then // normalize
-          if B.VBoolean then
-            result := 0
-          else
-            result := 1
-        else if B.VBoolean then
-          result := -1
-        else
-          result := 0;
-      varOleStr
-      {$ifdef HASVARUSTRING}, varUString{$endif HASVARUSTRING}:
-        if caseInsensitive then
-          result := AnsiICompW(A.VAny, B.VAny)
-        else
-          result := StrCompW(A.VAny, B.VAny);
-    else if at = varString or varByRef then
-      // e.g. from TRttiVarData / TRttiCustomProp.CompareValue
-      if caseInsensitive then
-        result := StrIComp(PPointer(A.VAny)^, PPointer(B.VAny)^)
+  repeat
+    at := cardinal(A^.VType);
+    if at <> varVariantByRef then
+      break;
+    A := A^.VPointer;
+  until false;
+  repeat
+    bt := cardinal(B^.VType);
+    if bt <> varVariantByRef then
+      break;
+    B := B^.VPointer;
+  until false;
+  if at = bt then
+    // optimized comparison if A and B share the same type (most common case)
+    if at <= high(_VARDATASAMEVTYPECMP[false]) then
+    begin
+      sametypecomp := _VARDATASAMEVTYPECMP[caseInsensitive, at];
+      if Assigned(sametypecomp) then
+        result := sametypecomp(A^.VAny, B^.VAny)
       else
-        result := StrComp(PPointer(A.VAny)^, PPointer(B.VAny)^)
-    else if at < varString then
-        result := ICMP[VarCompareValue(variant(A), variant(B))]
-      else
-        result := CMP[caseInsensitive](variant(A), variant(B));
+rtl:    result := VariantCompSimple(PVariant(A)^, PVariant(B)^)
     end
+    else if at = varStringByRef then
+      // e.g. from TRttiVarData / TRttiCustomProp.CompareValue
+      result := _VARDATASAMEVTYPECMP[caseInsensitive, varString](
+        PPointer(A^.VAny)^, PPointer(B^.VAny)^)
+    else if at = varSynUnicode or varByRef then
+      result := _VARDATASAMEVTYPECMP[caseInsensitive, varSynUnicode](
+         PPointer(A^.VAny)^, PPointer(B^.VAny)^)
+    else if at < varFirstCustom then
+      goto rtl
+    else if at = DocVariantVType then
+      // direct TDocVariantDat.VName/VValue comparison with no serialization
+      result := PDocVariantData(A)^.Compare(PDocVariantData(B)^, caseInsensitive)
+    else
+      // compare from custom types UTF-8 text representation/serialization
+utf:  result := VariantCompAsUtf8(PVariant(A)^, PVariant(B)^, caseInsensitive)
+  // A and B do not share the same type
   else if (at <= varNull) or
           (bt <= varNull) then
     result := ord(at > varNull) - ord(bt > varNull)
   else if (at < varString) and
-          (bt < varString) then
-    result := ICMP[VarCompareValue(variant(A), variant(B))]
+          (at <> varOleStr) and
+          (bt < varString) and
+          (bt <> varOleStr) then
+    goto rtl
   else
-    result := CMP[caseInsensitive](variant(A), variant(B));
+    goto utf;
 end;
 
 function VariantCompare(const V1, V2: variant): PtrInt;
 begin
-  result := SortDynArrayVariantComp(TVarData(V1), TVarData(V2), {caseins=}false);
+  result := FastVarDataComp(@V1, @V2, {caseins=}false);
 end;
 
 function VariantCompareI(const V1, V2: variant): PtrInt;
 begin
-  result := SortDynArrayVariantComp(TVarData(V1), TVarData(V2), {caseins=}true);
+  result := FastVarDataComp(@V1, @V2, {caseins=}true);
 end;
 
 function VariantEquals(const V: Variant; const Str: RawUtf8;
@@ -2960,7 +2964,7 @@ var
   n: integer;
   t: ^TSynInvokeableVariantType;
 begin
-  if (cardinal(aVarType) > varNativeString) and
+  if (cardinal(aVarType) >= varFirstCustom) and
      (cardinal(aVarType) < varArray) then
   begin
     t := pointer(SynVariantTypes);
@@ -3212,7 +3216,7 @@ procedure TSynInvokeableVariantType.Copy(var Dest: TVarData;
   const Source: TVarData; const Indirect: boolean);
 begin
   if Indirect then
-    SimplisticCopy(Dest, Source, true)
+    SetVariantByRef(variant(Source), variant(Dest))
   else
   begin
     VarClear(variant(Dest)); // Dest may be a complex type
@@ -3248,7 +3252,7 @@ var
     vd := @V;
     repeat
       vt := vd^.VType;
-      if vt <> varByRef or varVariant then
+      if vt <> varVariantByRef then
         break;
       vd := vd^.VPointer;
     until false;
@@ -3281,12 +3285,12 @@ begin
   v := Instance;
   repeat
     vt := v.VType;
-    if vt <> varByRef or varVariant then
+    if vt <> varVariantByRef then
       break;
     v := PVarData(v.VPointer)^;
   until false;
   repeat
-    if vt <= varNativeString then
+    if vt < varFirstCustom then
       exit; // we need a complex type to lookup
     GetNextItemShortString(FullName, itemName, '.');
     if itemName[0] in [#0, #255] then
@@ -3306,7 +3310,7 @@ begin
       exit; // property not found
     repeat
       vt := v.VType;
-      if vt <> varByRef or varVariant then
+      if vt <> varVariantByRef then
         break;
       v := PVarData(v.VPointer)^;
     until false;
@@ -3592,41 +3596,39 @@ end;
 
 procedure TDocVariant.Copy(var Dest: TVarData; const Source: TVarData;
   const Indirect: boolean);
-begin
-  //Assert(Source.VType=DocVariantVType);
-  if Indirect then
-    SimplisticCopy(Dest, Source, true)
-  else if dvoValueCopiedByReference in TDocVariantData(Source).Options then
-  begin
-    VarClear(variant(Dest)); // Dest may be a complex type
-    pointer(TDocVariantData(Dest).VName) := nil;      // avoid GPF
-    pointer(TDocVariantData(Dest).VValue) := nil;
-    TDocVariantData(Dest) := TDocVariantData(Source); // copy whole record
-  end
-  else
-    CopyByValue(Dest, Source);
-end;
-
-procedure TDocVariant.CopyByValue(var Dest: TVarData; const Source: TVarData);
 var
   S: TDocVariantData absolute Source;
   D: TDocVariantData absolute Dest;
   i: PtrInt;
 begin
   //Assert(Source.VType=DocVariantVType);
+  if Indirect then
+  begin
+    SetVariantByRef(variant(Source), variant(Dest));
+    exit;
+  end;
   VarClear(variant(Dest)); // Dest may be a complex type
-  D.VType := S.VType;
-  D.VOptions := S.VOptions; // copies also Kind
-  D.VCount := S.VCount;
+  PCardinal(@D)^ := PCardinal(@S)^; // VType + VOptions
   pointer(D.VName) := nil; // avoid GPF
   pointer(D.VValue) := nil;
+  D.VCount := S.VCount;
   if S.VCount = 0 then
     exit; // no data to copy
-  D.VName := S.VName; // names can always be safely copied
-  // slower but safe by-value copy
-  SetLength(D.VValue, S.VCount);
-  for i := 0 to S.VCount - 1 do
-    D.VValue[i] := S.VValue[i];
+  D.VName := S.VName;
+  if dvoValueCopiedByReference in S.VOptions then
+    D.VValue := S.VValue
+  else
+  begin
+    SetLength(D.VValue, S.VCount);
+    for i := 0 to S.VCount - 1 do
+      D.VValue[i] := S.VValue[i];
+  end;
+end;
+
+procedure TDocVariant.CopyByValue(var Dest: TVarData; const Source: TVarData);
+begin
+  //Assert(Source.VType=DocVariantVType);
+  Copy(Dest, Source, {indirect=}false);
 end;
 
 procedure TDocVariant.Cast(var Dest: TVarData; const Source: TVarData);
@@ -3637,16 +3639,16 @@ end;
 procedure TDocVariant.CastTo(var Dest: TVarData; const Source: TVarData;
   const AVarType: TVarType);
 var
-  Tmp: RawUtf8;
+  json: RawUtf8;
   wasString: boolean;
 begin
   if AVarType = VarType then
   begin
-    VariantToUtf8(Variant(Source), Tmp, wasString);
+    VariantToUtf8(Variant(Source), json, wasString);
     if wasString then
     begin
       VarClear(variant(Dest));
-      variant(Dest) := _JsonFast(Tmp); // convert from JSON text
+      variant(Dest) := _JsonFast(json); // convert from JSON text
       exit;
     end;
     RaiseCastError;
@@ -3655,8 +3657,8 @@ begin
   begin
     if Source.VType <> VarType then
       RaiseCastError;
-    VariantSaveJson(variant(Source), twJsonEscape, Tmp);
-    RawUtf8ToVariant(Tmp, Dest, AVarType); // convert to JSON text
+    VariantSaveJson(variant(Source), twJsonEscape, json);
+    RawUtf8ToVariant(json, Dest, AVarType); // convert to JSON text
   end;
 end;
 
@@ -3664,22 +3666,14 @@ procedure TDocVariant.Compare(const Left, Right: TVarData;
   var Relationship: TVarCompareResult);
 var
   res: integer;
-  LeftU, RightU: RawUtf8;
 begin
-  VariantSaveJson(variant(Left), twJsonEscape, LeftU);
-  VariantSaveJson(variant(Right), twJsonEscape, RightU);
-  if LeftU = RightU then
-    Relationship := crEqual
+  res := FastVarDataComp(@Left, @Right, {caseins=}false);
+  if res < 0 then
+    Relationship := crLessThan
+  else if res > 0 then
+    Relationship := crGreaterThan
   else
-  begin
-    res := StrComp(pointer(LeftU), pointer(RightU));
-    if res < 0 then
-      Relationship := crLessThan
-    else if res > 0 then
-      Relationship := crGreaterThan
-    else
-      Relationship := crEqual;
-  end;
+    Relationship := crEqual;
 end;
 
 class procedure TDocVariant.New(out aValue: variant;
@@ -3759,7 +3753,7 @@ var
   vt: cardinal;
 begin
   vt := TVarData(docVariantArray).VType;
-  if vt = varByRef or varVariant then
+  if vt = varVariantByRef then
     GetSingleOrDefault(
       PVariant(TVarData(docVariantArray).VPointer)^, default, result)
   else if (vt <> DocVariantVType) or
@@ -3779,7 +3773,7 @@ begin
   vt := result^.VType;
   if vt = docv then
     exit
-  else if vt = varByRef or varVariant then
+  else if vt = varVariantByRef then
   begin
     result := PVarData(result)^.VPointer;
     if cardinal(result^.VType) = docv then
@@ -3799,7 +3793,7 @@ begin
   vt := result^.VType;
   if vt = docv then
     exit
-  else if vt = varByRef or varVariant then
+  else if vt = varVariantByRef then
   begin
     result := PVarData(result)^.VPointer;
     if cardinal(result^.VType) = docv then
@@ -3819,7 +3813,7 @@ asm
         movzx   edx, word ptr [eax].TVarData.VType
         cmp     edx, ecx
         je      @ok
-@by:    cmp     edx, varByRef OR varVariant
+@by:    cmp     edx, varVariantByRef
         je      @ptr
         lea     eax, [DocVariantDataFake]
 @ok:
@@ -4071,7 +4065,7 @@ begin
         result := true;
         exit;
       end;
-      if vt <> varByRef or varVariant then
+      if vt <> varVariantByRef then
         break;
       vd := vd^.VPointer;
     until false;
@@ -4116,15 +4110,37 @@ end;
 function TDocVariant.InternNames: TRawUtf8Interning;
 begin
   if fInternNames = nil then
-    fInternNames := TRawUtf8Interning.Create;
+    CreateInternNames;
   result := fInternNames;
+end;
+
+procedure TDocVariant.CreateInternNames;
+begin
+  GlobalLock;
+  try
+    if fInternNames = nil then
+      fInternNames := TRawUtf8Interning.Create;
+  finally
+    GlobalUnLock;
+  end;
 end;
 
 function TDocVariant.InternValues: TRawUtf8Interning;
 begin
   if fInternValues = nil then
-    fInternValues := TRawUtf8Interning.Create;
+    CreateInternValues;
   result := fInternValues;
+end;
+
+procedure TDocVariant.CreateInternValues;
+begin
+  GlobalLock;
+  try
+    if fInternValues = nil then
+      fInternValues := TRawUtf8Interning.Create;
+  finally
+    GlobalUnLock;
+  end;
 end;
 
 procedure TDocVariantData.SetOptions(const opt: TDocVariantOptions);
@@ -4451,7 +4467,6 @@ procedure TDocVariantData.InitObjectFromVariants(const aNames: TRawUtf8DynArray;
   const aValues: TVariantDynArray; aOptions: TDocVariantOptions);
 begin
   if (aNames = nil) or
-     (aValues = nil) or
      (length(aNames) <> length(aValues)) then
     VType := varNull
   else
@@ -4476,7 +4491,7 @@ begin
     VCount := 1;
     SetLength(VName, 1);
     SetLength(VValue, 1);
-    split(aPath, '.', VName[0], right);
+    Split(aPath, '.', VName[0], right);
     if right = '' then
       VValue[0] := aValue
     else
@@ -4559,7 +4574,7 @@ begin
           exit; // invalid content
         include(VOptions, dvoIsObject);
         if dvoInternNames in VOptions then
-          intnames := DocVariantType.InternNames
+          intnames := DocVariantType.InternNames // call the function once
         else
           intnames := nil;
         if cap > 0 then
@@ -4573,9 +4588,10 @@ begin
             Name := GetJsonPropName(Json, @NameLen);
             if Name = nil then
               exit;
-            FastSetString(VName[VCount], Name, NameLen);
             if intnames <> nil then
-              intnames.UniqueText(VName[VCount]);
+              intnames.Unique(VName[VCount], Name, NameLen)
+            else
+              FastSetString(VName[VCount], Name, NameLen);
             GetJsonToAnyVariant(VValue[VCount], Json, @EndOfObject, @VOptions,
               {double=}false{is set from VOptions});
             if Json = nil then
@@ -4679,7 +4695,7 @@ var
   v: PVarData;
 begin
   with TVarData(SourceDocVariant) do
-    if cardinal(VType) = varByRef or varVariant then
+    if cardinal(VType) = varVariantByRef then
       Source := VPointer
     else
       Source := @SourceDocVariant;
@@ -4702,7 +4718,8 @@ begin
       SetLength(VName, VCount);
       for ndx := 0 to VCount - 1 do
         VName[ndx] := Source^.VName[ndx]; // manual copy is needed
-      if dvoInternNames in aOptions then
+      if (dvoInternNames in aOptions) and
+         not (dvoInternNames in Source^.Options) then
         with DocVariantType.InternNames do
           for ndx := 0 to VCount - 1 do
             UniqueText(VName[ndx]);
@@ -4722,11 +4739,11 @@ begin
       v := @SourceVValue[ndx];
       repeat
         vt := v^.VType;
-        if vt <> varByRef or varVariant then
+        if vt <> varVariantByRef then
           break;
         v := v^.VPointer;
       until false;
-      if vt <= varNativeString then
+      if vt < varFirstCustom then
         // simple string/number types copy
         VValue[ndx] := variant(v^)
       else if vt = DocVariantVType then
@@ -4790,6 +4807,58 @@ end;
 procedure TDocVariantData.SetCount(aCount: integer);
 begin
   VCount := aCount;
+end;
+
+function TDocVariantData.Compare(const Another: TDocVariantData;
+  CaseInsensitive: boolean): integer;
+var
+  j, n: PtrInt;
+  nameCmp: TStrComp;
+begin
+  // first validate the type: as { or [ in JSON
+  nameCmp := nil;
+  if dvoIsArray in VOptions then
+  begin
+    if not (dvoIsArray in Another.VOptions) then
+    begin
+      result := -1;
+      exit;
+    end;
+  end
+  else if dvoIsObject in VOptions then
+    if not (dvoIsObject in Another.VOptions) then
+    begin
+      result := 1;
+      exit;
+    end
+    else if CaseInsensitive then
+      nameCmp := @StrIComp
+    else
+      nameCmp := @StrComp;
+  // compare as many in-order content as possible
+  n := Another.VCount;
+  if VCount < n then
+    n := VCount;
+  for j := 0 to n - 1 do
+  begin
+    if Assigned(nameCmp) then
+    begin
+      result := nameCmp(pointer(VName[j]), pointer(Another.VName[j]));
+      if result <> 0 then
+        exit;
+    end;
+    result := FastVarDataComp(@VValue[j], @Another.VValue[j], CaseInsensitive);
+    if result <> 0 then
+      exit;
+  end;
+  // all content did match -> difference is now about the document count
+  result := VCount - Another.VCount;
+end;
+
+function TDocVariantData.Equals(const Another: TDocVariantData;
+  CaseInsensitive: boolean): boolean;
+begin
+  result := Compare(Another, CaseInsensitive) = 0;
 end;
 
 function TDocVariantData.InternalAdd(
@@ -5120,8 +5189,7 @@ function TDocVariantData.SearchItemByValue(const aValue: Variant;
   CaseInsensitive: boolean; StartIndex: PtrInt): PtrInt;
 begin
   for result := StartIndex to VCount - 1 do
-    if _SortDynArrayVariantComp(
-      TVarData(VValue[result]), TVarData(aValue), CaseInsensitive) = 0 then
+    if FastVarDataComp(@VValue[result], @aValue, CaseInsensitive) = 0 then
       exit;
   result := -1;
 end;
@@ -5231,15 +5299,15 @@ begin
     until L >= R;
 end;
 
-procedure TDocVariantData.SortByName(Compare: TUtf8Compare);
+procedure TDocVariantData.SortByName(SortCompare: TUtf8Compare);
 var
   qs: TQuickSortDocVariant;
 begin
   if not (dvoIsObject in VOptions) or
      (VCount <= 0) then
     exit;
-  if Assigned(Compare) then
-    qs.nameCompare := Compare
+  if Assigned(SortCompare) then
+    qs.nameCompare := SortCompare
   else
     qs.nameCompare := @StrIComp;
   qs.names := pointer(VName);
@@ -5247,14 +5315,14 @@ begin
   qs.SortByName(0, VCount - 1);
 end;
 
-procedure TDocVariantData.SortByValue(Compare: TVariantCompare);
+procedure TDocVariantData.SortByValue(SortCompare: TVariantCompare);
 var
   qs: TQuickSortDocVariant;
 begin
   if VCount <= 0 then
     exit;
-  if Assigned(Compare) then
-    qs.valueCompare := Compare
+  if Assigned(SortCompare) then
+    qs.valueCompare := SortCompare
   else
     qs.valueCompare := @VariantCompare;
   qs.names := pointer(VName);
@@ -5589,8 +5657,7 @@ begin
   end
   else
     for ndx := VCount - 1 downto 0 do
-      if _SortDynArrayVariantComp(
-           TVarData(VValue[ndx]), TVarData(aValue), CaseInsensitive) = 0 then
+      if FastVarDataComp(@VValue[ndx], @aValue, CaseInsensitive) = 0 then
       begin
         Delete(ndx);
         inc(result);
@@ -6022,7 +6089,7 @@ begin
     // if we reached here, we should try for the next scope within Dest
     repeat
       vt := found^.VType;
-      if vt <> varByRef or varVariant then
+      if vt <> varVariantByRef then
         break;
       found := found^.VPointer;
     until false;
@@ -6031,7 +6098,7 @@ begin
     exit;
   until false;
   res := found;
-  while cardinal(res^.VType) = varByRef or varVariant do
+  while cardinal(res^.VType) = varVariantByRef do
     res := res^.VPointer;
   if (cardinal(res^.VType) = VType) and
      (PDocVariantData(res)^.VCount = 0) then
@@ -6186,7 +6253,7 @@ begin
   else
   begin
     Source := @VValue[Index];
-    while PVarData(Source)^.VType = varVariant or varByRef do
+    while PVarData(Source)^.VType = varVariantByRef do
       Source := PVarData(Source)^.VPointer;
     Dest := Source^;
   end;
@@ -7676,7 +7743,7 @@ label
   direct;
 begin
   t := Source.vType;
-  if t = varByRef or varVariant then
+  if t = varVariantByRef then
     NewDispInvoke(Dest, PVarData(Source.VPointer)^, calldesc, params)
   else
   begin
@@ -7745,6 +7812,43 @@ direct:         if Dest <> nil then
   end;
 end;
 
+function SortDynArrayEmptyNull(const A, B): integer;
+begin
+  result := 0; // VType=varEmpty/varNull are always equal
+end;
+
+function SortDynArrayWordBoolean(const A, B): integer;
+begin
+  if WordBool(A) then // normalize
+    if WordBool(B) then
+      result := 0
+    else
+      result := 1
+  else if WordBool(B) then
+    result := -1
+  else
+    result := 0;
+end;
+
+const
+  // comparison of simple types - copied at startup to _VARDATASAMEVTYPECMP[]
+  _NUM1: array[varEmpty..varDate] of TDynArraySortCompare = (
+    SortDynArrayEmptyNull,
+    SortDynArrayEmptyNull,
+    SortDynArraySmallInt,
+    SortDynArrayInteger,
+    SortDynArraySingle,
+    SortDynArrayDouble,
+    SortDynArrayInt64,
+    SortDynArrayDouble);
+  _NUM2: array[varShortInt..varWord64] of TDynArraySortCompare = (
+    SortDynArrayShortInt,
+    SortDynArrayByte,
+    SortDynArrayWord,
+    SortDynArrayCardinal,
+    SortDynArrayInt64,
+    SortDynArrayQWord);
+
 procedure InitializeUnit;
 var
   vm: TVariantManager; // available since Delphi 7
@@ -7757,17 +7861,30 @@ begin
   DocVariantType := TDocVariant(SynRegisterCustomVariantType(TDocVariant));
   vt := DocVariantType.VarType;
   DocVariantVType := vt;
-  DV_FAST[dvUndefined].VType := vt;
-  PDocVariantData(@DV_FAST[dvUndefined])^.VOptions := JSON_OPTIONS_FAST;
-  DV_FAST[dvArray].VType := vt;
-  PDocVariantData(@DV_FAST[dvArray])^.VOptions := JSON_OPTIONS_FAST + [dvoIsArray];
-  DV_FAST[dvObject].VType := vt;
-  PDocVariantData(@DV_FAST[dvObject])^.VOptions := JSON_OPTIONS_FAST + [dvoIsObject];
+  PCardinal(@DV_FAST[dvUndefined])^ := vt;
+  PCardinal(@DV_FAST[dvArray])^ := vt;
+  PCardinal(@DV_FAST[dvObject])^ := vt;
   assert({%H-}SynVariantTypes[0].VarType = vt);
+  PDocVariantData(@DV_FAST[dvUndefined])^.VOptions := JSON_OPTIONS_FAST;
+  PDocVariantData(@DV_FAST[dvArray])^.VOptions := JSON_OPTIONS_FAST + [dvoIsArray];
+  PDocVariantData(@DV_FAST[dvObject])^.VOptions := JSON_OPTIONS_FAST + [dvoIsObject];
   // redirect to the feature complete variant wrapper functions
   BinaryVariantLoadAsJson := _BinaryVariantLoadAsJson;
   VariantClearSeveral := _VariantClearSeveral;
-  SortDynArrayVariantComp := _SortDynArrayVariantComp;
+  SortDynArrayVariantComp := pointer(@FastVarDataComp);
+  // setup FastVarDataComp() efficient lookup comparison functions
+  MoveFast(_NUM1, _VARDATASAMEVTYPECMP[false, varEmpty], SizeOf(_NUM1));
+  MoveFast(_NUM2, _VARDATASAMEVTYPECMP[false, varShortInt], SizeOf(_NUM2));
+  _VARDATASAMEVTYPECMP[false, varBoolean] := @SortDynArrayWordBoolean;
+  _VARDATASAMEVTYPECMP[true] := _VARDATASAMEVTYPECMP[false]; // =caseinsensitive
+  _VARDATASAMEVTYPECMP[false, varString] := @SortDynArrayAnsiString;
+  _VARDATASAMEVTYPECMP[true,  varString] := @SortDynArrayAnsiStringI;
+  _VARDATASAMEVTYPECMP[false, varOleStr] := @SortDynArrayUnicodeString;
+  _VARDATASAMEVTYPECMP[true,  varOleStr] := @SortDynArrayUnicodeStringI;
+  {$ifdef HASVARUSTRING}
+  _VARDATASAMEVTYPECMP[false, varUString] := @SortDynArrayUnicodeString;
+  _VARDATASAMEVTYPECMP[true,  varUString] := @SortDynArrayUnicodeStringI;
+  {$endif HASVARUSTRING}
   // patch DispInvoke for performance and to circumvent RTL inconsistencies
   GetVariantManager(vm);
   vm.DispInvoke := NewDispInvoke;

@@ -60,6 +60,9 @@
 // you may define this to enable REP MOVSB/STOSB for x86_64 FillcharFast/MoveFast
 // if cfERMS flag is available in Intel's CpuFeatures
 // -> disabled by default, since in practice it is slower than non-temporal mov
+{$ifdef CPUX86}
+  {.$define HASNOSSE2} // force x87 code on very very old CPU
+{$endif CPUX86}
 
 {.$define NOXPOWEREDNAME}
 // define this to avoid sending "X-Powered-By: Synopse mORMot" HTTP header
@@ -316,6 +319,9 @@
     {$define FPC_VARIANTSETVAR}
   {$endif ISFPC27}
 
+  {$if defined(FPC_USE_WIN32_SEH) or defined(FPC_USE_WIN64_SEH)}
+    {$define HASFASTTRYFINALLY}
+  {$ifend}
 
 {$else FPC}
 
@@ -372,6 +378,7 @@
 
   {$define DELPHI_OR_FPC_OLDRTTI}
   {$define HASINTERFACERTTI} // interface RTTI (not oldest FPC)
+  {$define HASFASTTRYFINALLY}
   {$warn UNSAFE_CODE OFF}    // Delphi for .Net does not exist any more!
   {$warn UNSAFE_TYPE OFF}
   {$warn UNSAFE_CAST OFF}
@@ -518,11 +525,9 @@
 
 {$ifdef CPUINTEL}
   {$ifdef OSWINDOWS}
-    {$ifdef CPUX86} // safest to reset x87 exceptions on Win32
-      {$define RESETFPUEXCEPTION}
-    {$else}
+    {$ifdef CPUX64}
       {$define WIN64ABI} // for asm on x86_64
-    {$endif CPUX86}
+    {$endif CPUX64}
   {$endif OSWINDOWS}
   {$ifdef OSPOSIX}
     {$ifdef CPUX64}
@@ -583,7 +588,7 @@
       // other Win32/Win64 Delphi platforms "should work" (tm) as expected
       {$define NOSQLITE3STATIC}
     {$ifend}
-    {$define LIBQUICKJSSTATIC}
+    {$define LIBQUICKJSSTATIC} // seems fine BUT on Delphi 10.4 Win64
   {$endif}
 {$endif FPC}
 
