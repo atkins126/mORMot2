@@ -44,10 +44,8 @@ begin
     sqlite3.ForceToUseSharedMemoryManager; // faster process
   except
     on E: Exception do
-      {$ifdef OSPOSIX} // there is always an error console ouput on POSIX
-      writeln(SQLITE_LIBRARY_DEFAULT_NAME + ' initialization failed with ',
-        ClassNameShort(E)^, ': ', E.Message);
-      {$endif OSPOSIX}
+      DisplayFatalError(SQLITE_LIBRARY_DEFAULT_NAME + ' initialization failed',
+        RawUtf8(E.ClassName +  ': ' + E.Message));
   end;
 end;
 
@@ -84,6 +82,10 @@ type
     constructor Create; override;
     /// unload the static library
     destructor Destroy; override;
+    /// calls ForceToUseSharedMemoryManager after SQlite3 is loaded
+    procedure BeforeInitialization; override;
+    /// validates EXPECTED_SQLITE3_VERSION after SQlite3 is initialized
+    procedure AfterInitialization; override;
   end;
 
 
@@ -239,6 +241,7 @@ uses
 
 // those functions will be called only under Delphi + Win32/Win64
 // - FPC will use explicit public name exports from mormot.lib.static
+// but Delphi requires the exports to be defined in this very same unit
 
 function malloc(size: cardinal): Pointer; cdecl;
 begin
@@ -826,6 +829,7 @@ function sqlite3_create_collation(DB: TSqlite3DB; CollationName: PUtf8Char;
 function sqlite3_libversion: PUtf8Char; cdecl; external;
 function sqlite3_libversion_number: integer; cdecl; external;
 function sqlite3_sourceid: PUtf8Char; cdecl; external;
+function sqlite3_threadsafe: integer; cdecl; external;
 function sqlite3_errcode(DB: TSqlite3DB): integer; cdecl; external;
 function sqlite3_extended_errcode(DB: TSqlite3DB): integer; cdecl; external;
 function sqlite3_errmsg(DB: TSqlite3DB): PUtf8Char; cdecl; external;
@@ -1014,6 +1018,7 @@ function sqlite3_snapshot_open(DB: TSqlite3DB; zSchema: PUtf8Char;
 function sqlite3_snapshot_recover(DB: TSqlite3DB; zDB: PUtf8Char): integer; cdecl; external;
 function sqlite3_snapshot_cmp(DB: TSqlite3DB; P1, P2: PSqlite3Snapshot): integer; cdecl; external;
 function sqlite3_snapshot_free(DB: TSqlite3DB; Snapshot: PSqlite3Snapshot): integer; cdecl; external;
+function sqlite3_soft_heap_limit64(N: Int64): Int64; cdecl; external;
 function sqlite3_config(operation: integer): integer; cdecl varargs; external;
 function sqlite3_db_config(DB: TSqlite3DB; operation: integer): integer; cdecl varargs; external;
 function sqlite3_trace_v2(DB: TSqlite3DB; Mask: integer; Callback: TSqlTraceCallback;
@@ -1031,8 +1036,6 @@ const
  // 'https://github.com/synopse/mORMot2/releases/tag/sqlite.' + EXPECTED_SQLITE3_VERSION;
 
 constructor TSqlite3LibraryStatic.Create;
-var
-  error: RawUtf8;
 begin
   initialize             := @sqlite3_initialize;
   shutdown               := @sqlite3_shutdown;
@@ -1044,6 +1047,7 @@ begin
   libversion             := @sqlite3_libversion;
   libversion_number      := @sqlite3_libversion_number;
   sourceid               := @sqlite3_sourceid;
+  threadsafe             := @sqlite3_threadsafe;
   errcode                := @sqlite3_errcode;
   extended_errcode       := @sqlite3_extended_errcode;
   errmsg                 := @sqlite3_errmsg;
@@ -1086,6 +1090,7 @@ begin
   expanded_sql           := @sqlite3_expanded_sql;
   normalized_sql         := @sqlite3_normalized_sql;
   step                   := @sqlite3_step;
+  table_column_metadata  := @sqlite3_table_column_metadata;
   column_count           := @sqlite3_column_count;
   column_type            := @sqlite3_column_type;
   column_decltype        := @sqlite3_column_decltype;
@@ -1201,21 +1206,43 @@ begin
   snapshot_recover       := @sqlite3_snapshot_recover;
   snapshot_cmp           := @sqlite3_snapshot_cmp;
   snapshot_free          := @sqlite3_snapshot_free;
+  soft_heap_limit64      := @sqlite3_soft_heap_limit64;
   config                 := @sqlite3_config;
   db_config              := @sqlite3_db_config;
 
-  // our static SQLite3 is compiled with SQLITE_OMIT_AUTOINIT defined
+  // ForceToUseSharedMemoryManager call before initialize otherwise SQLITE_MISUSE
+  BeforeInitialization;
+  // note: our static SQLite3 is compiled with SQLITE_OMIT_AUTOINIT defined
+  sqlite3_initialize;
+  // set fVersionNumber/fVersionText and call AfterInitialization
+  inherited Create;
+end;
+
+destructor TSqlite3LibraryStatic.Destroy;
+begin
+  if Assigned(shutdown) then
+    shutdown;
+  inherited;
+end;
+
+procedure TSqlite3LibraryStatic.BeforeInitialization;
+begin
   {$ifdef FPC}
-  ForceToUseSharedMemoryManager; // before sqlite3_initialize otherwise SQLITE_MISUSE
+  ForceToUseSharedMemoryManager;
   {$else}
   {$ifdef CPUX86}
-  fUseInternalMM := true; // Delphi .obj are using FastMM4
+  // Delphi .obj are using FastMM4 via malloc/free/realloc above functions
+  fUseInternalMM := true;
   {$else}
   ForceToUseSharedMemoryManager; // Delphi .o
   {$endif CPUX86}
   {$endif FPC}
-  sqlite3_initialize;
-  inherited Create; // set fVersionNumber/fVersionText
+end;
+
+procedure TSqlite3LibraryStatic.AfterInitialization;
+var
+  error: RawUtf8;
+begin
   if (EXPECTED_SQLITE3_VERSION <> '') and
      not IdemPChar(pointer(fVersionText), EXPECTED_SQLITE3_VERSION) then
   begin
@@ -1229,13 +1256,6 @@ begin
   end;
 end;
 
-destructor TSqlite3LibraryStatic.Destroy;
-begin
-  if Assigned(shutdown) then
-    shutdown;
-  inherited;
-end;
-
 
 initialization
   FreeAndNil(sqlite3);
@@ -1244,4 +1264,3 @@ initialization
 {$endif NOSQLITE3STATIC} // conditional defined -> auto-load local .dll/.so
 
 end.
-
