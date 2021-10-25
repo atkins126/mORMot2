@@ -871,7 +871,7 @@ type
     fReadPreference: TMongoClientReplicaSetReadPreference;
     fWriteConcern: TMongoClientWriteConcern;
     fConnectionTimeOut: cardinal;
-    fConnectionTLS: boolean;
+    fConnectionTls: boolean;
     fGracefulReconnect: record
       Enabled, ForcedDBCR: boolean;
       User, Database: RawUtf8;
@@ -893,13 +893,18 @@ type
       ForceMongoDBCR: boolean; ConnectionIndex: PtrInt);
     function ReOpen: boolean;
   public
+    /// the optional low-level Tls parameters
+    // - used when fConnectionTls was set to TRUE
+    ConnectionTlsContext: TNetTlsContext;
+    /// the optional low-level Proxy parameters
+    ConnectionTunnel: TUri;
     /// prepare a connection to a MongoDB server or Replica Set
     // - this constructor won't create the connection until the Open method
     // is called
     // - you can specify multiple hosts, as CSV values, if necessary
-    // - depending on the platform, you may request for a TLS secured connection
+    // - depending on the platform, you may request for a Tls secured connection
     constructor Create(const Host: RawUtf8; Port: integer = MONGODB_DEFAULTPORT;
-      aTLS: boolean = false; const SecondaryHostCsv: RawUtf8 = ''; const
+      aTls: boolean = false; const SecondaryHostCsv: RawUtf8 = ''; const
       SecondaryPortCsv: RawUtf8 = ''); overload;
     /// connect to a database on a remote MongoDB primary server
     // - this method won't use authentication, and will return the corresponding
@@ -982,9 +987,9 @@ type
     // - default value is 30000, i.e. 30 seconds
     property ConnectionTimeOut: cardinal
       read fConnectionTimeOut write fConnectionTimeOut;
-    /// if the socket connection is secured over TLS
-    property ConnectionTLS: boolean
-      read fConnectionTLS;
+    /// if the socket connection is secured over Tls
+    property ConnectionTls: boolean
+      read fConnectionTls;
     /// allow automatic reconnection (with authentication, if applying), if the
     // socket is closed (e.g. was dropped from the server)
     property GracefulReconnect: boolean
@@ -1191,8 +1196,9 @@ type
     /// select documents in a collection and returns a dynamic array of
     // TDocVariant instance containing the selected documents
     // - could be used to fill a VCL grid using a TDocVariantArrayDataSet
-    // as defined in SynVirtualDataSet.pas:
-    // ! ds1.DataSet := ToDataSet(self,FindDocs('{name:?,age:{$gt:?}}',['John',21],null));
+    // as defined in mormot.ui.rad.pas:
+    // ! ds1.DataSet := VariantsToDataSet(self,
+    // !   FindDocs('{name:?,age:{$gt:?}}', ['John',21], null));
     // - Projection can be null (to retrieve all fields) or a CSV string to set
     // field names to retrieve, or a TDocVariant or TBsonVariant with
     // projection operators
@@ -1876,7 +1882,7 @@ begin
   n := length(CursorIDs);
   Write4(n);
   SetLength(fCursors, n);
-  n := n * sizeof(Int64);
+  n := n * SizeOf(Int64);
   MoveFast(CursorIDs[0], fCursors[0], n);
   Write(pointer(fCursors), n);
 end;
@@ -1907,9 +1913,9 @@ begin
   Len := length(ReplyMessage);
   with PMongoReplyHeader(ReplyMessage)^ do
   begin
-    if (Len < sizeof(TMongoReplyHeader)) or
+    if (Len < SizeOf(TMongoReplyHeader)) or
        (Header.MessageLength <> Len) or
-       (sizeof(TMongoReplyHeader) + NumberReturned * 5 > Len) then
+       (SizeOf(TMongoReplyHeader) + NumberReturned * 5 > Len) then
       raise EMongoException.CreateUtf8('TMongoReplyCursor.Init(len=%)', [Len]);
     if Header.OpCode <> WIRE_OPCODES[opReply] then
       raise EMongoException.CreateUtf8('TMongoReplyCursor.Init(OpCode=%)', [Header.OpCode]);
@@ -1921,7 +1927,7 @@ begin
     fNumberReturned := NumberReturned;
   end;
   fReply := ReplyMessage;
-  fFirstDocument := PAnsiChar(pointer(fReply)) + sizeof(TMongoReplyHeader);
+  fFirstDocument := PAnsiChar(pointer(fReply)) + SizeOf(TMongoReplyHeader);
   Rewind;
   fLatestDocIndex := -1;
 end;
@@ -2072,7 +2078,7 @@ var
   item: variant;
 begin
   if Dest.VarType <> DocVariantType.VarType then
-    TDocVariant.New(Variant(Dest), JSON_OPTIONS_FAST);
+    TDocVariant.NewFast(Variant(Dest), dvArray);
   result := Dest.Count;
   if (fReply = '') or
      (DocumentCount <= 0) then
@@ -2105,7 +2111,7 @@ begin
   Rewind;
   while Next(b) do
   begin
-    inc(b, sizeof(integer)); // points to the "e_list" of "int32 e_list #0"
+    inc(b, SizeOf(integer)); // points to the "e_list" of "int32 e_list #0"
     BSONListToJson(b, betDoc, W, Mode);
     W.AddComma;
     if (MaxSize > 0) and
@@ -2155,7 +2161,7 @@ end;
 
 const
   /// message big enough to retrieve the maximum MongoDB document size
-  MONGODB_MAXMESSAGESIZE = BSON_MAXDOCUMENTSIZE + sizeof(TMongoReplyHeader);
+  MONGODB_MAXMESSAGESIZE = BSON_MAXDOCUMENTSIZE + SizeOf(TMongoReplyHeader);
 
 constructor TMongoConnection.Create(const aClient: TMongoClient;
   const aServerAddress: RawUtf8; aServerPort: integer);
@@ -2191,8 +2197,9 @@ begin
   if fSocket <> nil then
     raise EMongoConnectionException.Create('Duplicate Open', self);
   try
-    fSocket := TCrtSocket.Open(fServerAddress, UInt32ToUtf8(fServerPort), nlTcp,
-      Client.ConnectionTimeOut, Client.ConnectionTLS);
+    fSocket := TCrtSocket.Open(fServerAddress, UInt32ToUtf8(fServerPort),
+      nlTcp, Client.ConnectionTimeOut, Client.ConnectionTls,
+      @Client.ConnectionTlsContext, @Client.ConnectionTunnel);
   except
     on E: Exception do
       raise EMongoException.CreateUtf8('%.Open unable to connect to MongoDB server %: % [%]',
@@ -2210,7 +2217,7 @@ end;
 
 procedure TMongoConnection.Close;
 begin
-  FreeAndNil(fSocket);
+  FreeAndNilSafe(fSocket);
 end;
 
 procedure TMongoConnection.GetDocumentsAndFree(Query: TMongoRequestQuery; var
@@ -2233,7 +2240,7 @@ begin
     if ForceOneInstance then
       result := docs[0]
     else
-      TDocVariantData(result).InitArrayFromVariants(docs, JSON_OPTIONS_FAST);
+      TDocVariantData(result).InitArrayFromVariants(docs, JSON_FAST);
 end;
 
 function TMongoConnection.GetDocumentsAndFree(Query: TMongoRequestQuery): variant;
@@ -2475,7 +2482,7 @@ var
 begin
   if self = nil then
     raise EMongoRequestException.Create('Connection=nil', self, Request);
-  FillCharFast(Header, sizeof(Header), 0);
+  FillCharFast(Header, SizeOf(Header), 0);
   try
     Lock;
     if Send(Request) then
@@ -2492,8 +2499,8 @@ begin
           [self, Header.MessageLength], self, Request);
       SetLength(result, Header.MessageLength);
       PMongoWireHeader(result)^ := Header;
-      DataLen := Header.MessageLength - sizeof(Header);
-      if not fSocket.TrySockRecv(@PByteArray(result)[sizeof(Header)], DataLen) then
+      DataLen := Header.MessageLength - SizeOf(Header);
+      if not fSocket.TrySockRecv(@PByteArray(result)[SizeOf(Header)], DataLen) then
       try
         Close;
       finally
@@ -2505,13 +2512,13 @@ begin
         ord(opMsgOld):
           if Client.Log <> nil then
             Client.Log.Log(sllWarning, 'Msg (deprecated) from MongoDB: %',
-              [BsonToJson(@PByteArray(result)[sizeof(Header)], betDoc, DataLen,
+              [BsonToJson(@PByteArray(result)[SizeOf(Header)], betDoc, DataLen,
                modMongoShell)], Request);
         ord(opMsg):
           // TODO: parse https://docs.mongodb.com/manual/reference/mongodb-wire-protocol/#op-msg
           if Client.Log <> nil then
             Client.Log.Log(sllWarning, 'Msg from MongoDB: %',
-              [EscapeToShort(@PByteArray(result)[sizeof(Header)], DataLen)], Request);
+              [EscapeToShort(@PByteArray(result)[SizeOf(Header)], DataLen)], Request);
       end;
     end;
     // if we reached here, this is due to a socket error or an unexpeted opcode
@@ -2688,7 +2695,7 @@ end;
 { TMongoClient }
 
 constructor TMongoClient.Create(const Host: RawUtf8; Port: integer;
-  aTLS: boolean; const SecondaryHostCsv, SecondaryPortCsv: RawUtf8);
+  aTls: boolean; const SecondaryHostCsv, SecondaryPortCsv: RawUtf8);
 const
   PROT: array[boolean] of string[1] = (
     '', 's');
@@ -2698,10 +2705,10 @@ var
   nHost, i: PtrInt;
 begin
   fConnectionTimeOut := 30000;
-  fConnectionTLS := aTLS;
+  fConnectionTls := aTls;
   fLogReplyEventMaxSize := 1024;
   fGracefulReconnect.Enabled := true;
-  FormatUtf8('mongodb%://%:%', [PROT[aTLS], Host, Port], fConnectionString);
+  FormatUtf8('mongodb%://%:%', [PROT[aTls], Host, Port], fConnectionString);
   CsvToRawUtf8DynArray(pointer(SecondaryHostCsv), secHost);
   nHost := length(secHost);
   SetLength(fConnections, nHost + 1);
@@ -2720,7 +2727,7 @@ begin
         FormatUtf8('%,%:%', [fConnectionString, secHost[i], Port]);
     end;
   end;
-  fDatabases := TRawUtf8List.Create([fObjectsOwned, fNoDuplicate, fCaseSensitive]);
+  fDatabases := TRawUtf8List.CreateEx([fObjectsOwned, fNoDuplicate, fCaseSensitive]);
 end;
 
 destructor TMongoClient.Destroy;
@@ -2728,8 +2735,8 @@ var
   i: PtrInt;
 begin
   for i := 0 to high(fConnections) do
-    FreeAndNil(fConnections[i]);
-  FreeAndNil(fDatabases);
+    FreeAndNilSafe(fConnections[i]);
+  FreeAndNilSafe(fDatabases);
   inherited;
 end;
 
@@ -2925,7 +2932,7 @@ var
       exit;
     if _Safe(res)^.GetAsPVariant('payload', bin) and
        BsonVariantType.ToBlob({%H-}bin^, payload) then
-      resp.InitCsv(pointer(payload), JSON_OPTIONS_FAST, '=', ',')
+      resp.InitCsv(pointer(payload), JSON_FAST, '=', ',')
     else
       err := 'missing or invalid returned payload';
   end;
@@ -2969,7 +2976,7 @@ begin
     // https://tools.ietf.org/html/rfc5802#section-5
     user := StringReplaceAll(UserName, ['=', '=3D', ',', '=2C']);
     TAesPrng.Main.FillRandom(rnd);
-    nonce := BinToBase64(@rnd, sizeof(rnd));
+    nonce := BinToBase64(@rnd, SizeOf(rnd));
     FormatUtf8('n=%,r=%', [user, nonce], first);
     BsonVariantType.FromBinary('n,,' + first, bbtGeneric, bson);
     err := fConnections[ConnectionIndex].RunCommand(DatabaseName,
@@ -3119,7 +3126,7 @@ var
 begin
   fClient := aClient;
   fName := aDatabaseName;
-  fCollections := TRawUtf8List.Create([fObjectsOwned, fNoDuplicate, fCaseSensitive]);
+  fCollections := TRawUtf8List.CreateEx([fObjectsOwned, fNoDuplicate, fCaseSensitive]);
   if fClient.ServerBuildInfoNumber < 3000000 then
   begin
     if colls.Init(client.Connections[0].GetBsonAndFree(TMongoRequestQuery.Create(
@@ -3156,7 +3163,7 @@ end;
 
 destructor TMongoDatabase.Destroy;
 begin
-  FreeAndNil(fCollections);
+  FreeAndNilSafe(fCollections);
   inherited;
 end;
 
@@ -3170,7 +3177,7 @@ begin
     'createUser', UserName,
     'pwd', PasswordDigest(UserName, Password),
     'digestPassword', false,
-    'roles', roles], JSON_OPTIONS_FAST);
+    'roles', roles], JSON_FAST);
   // note: passwordDigestor:"client" fails
   if client.ServerBuildInfoNumber >= 4000000 then
     usr.AddValue('mechanisms', _ArrFast(['SCRAM-SHA-1']));
@@ -3430,15 +3437,14 @@ end;
 procedure TMongoCollection.EnsureIndex(const Keys: array of RawUtf8;
   Ascending, Unique: boolean);
 const
-  order: array[boolean] of integer = (
-    -1, 1);
+  order: array[boolean] of integer = ( -1, 1);
 var
   k, opt: variant;
   A: integer;
 begin
   if high(Keys) < 0 then
     exit; // no column name
-  TDocVariant.New(k);
+  TDocVariant.NewFast(k);
   for A := 0 to high(Keys) do
     TDocVariantData(k).AddValue(Keys[A], order[Ascending]);
   if Unique then
@@ -3552,7 +3558,7 @@ begin
   result := FindDoc(BsonVariant(NameValuePairs), null, 1);
   if ReturnNewObjectIfNotFound and
      VarIsEmptyOrNull(result) then
-    TDocVariantData(result).InitObject(NameValuePairs, JSON_OPTIONS_FAST);
+    TDocVariantData(result).InitObject(NameValuePairs, JSON_FAST);
 end;
 
 procedure TMongoCollection.FindDocs(var result: TVariantDynArray;
@@ -3643,9 +3649,9 @@ begin
     if DocumentObjectID <> nil then
       DocumentObjectID^ := id;
   end
-  else if DocumentObjectID <> nil then
-    if not DocumentObjectID^.FromVariant(v^) then
-      DocumentObjectID^.Init;
+  else if (DocumentObjectID <> nil) and
+          not DocumentObjectID^.FromVariant(v^) then
+    DocumentObjectID^.Init;
   if oid <> nil then
     oid^ := v;
 end;
@@ -3655,7 +3661,7 @@ procedure TMongoCollection.Insert(const Document: RawUtf8;
 var
   doc: variant;
 begin
-  _JsonFmt(Document, [], Params, JSON_OPTIONS_FAST, doc);
+  _JsonFmt(Document, [], Params, JSON_FAST, doc);
   EnsureDocumentHasID(TDocVariantData(doc), nil, DocumentObjectID);
   Insert([doc]);
 end;
@@ -3680,7 +3686,7 @@ procedure TMongoCollection.Save(const Document: RawUtf8;
 var
   doc: variant;
 begin
-  _JsonFmt(Document, [], Params, JSON_OPTIONS_FAST, doc);
+  _JsonFmt(Document, [], Params, JSON_FAST, doc);
   Save(doc, DocumentObjectID);
 end;
 
@@ -3744,7 +3750,7 @@ end;
 
 
 initialization
-  Assert(sizeof(TMongoReplyHeader) = 36);
+  Assert(SizeOf(TMongoReplyHeader) = 36);
 
 end.
 

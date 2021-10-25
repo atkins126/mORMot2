@@ -1213,7 +1213,7 @@ type
   // - will create an ephemeral ECC key pair for perfect forward security
   // - will use ECDH to compute a shared ephemeral session on both sides,
   // for AES-128 or AES-256 encryption, and HMAC with anti-replay - default
-  // algorithm will use fast and safe AES-CFB 128-bit encryption, with efficient
+  // algorithm will use fast and safe AES-CTR 128-bit encryption, with efficient
   // AES-CRC 256-bit MAC, and full hardware accelleration on Intel CPUs
   TEcdheProtocol = class(TInterfacedObjectLocked, IProtocol)
   protected
@@ -1230,7 +1230,8 @@ type
     // RX/TX sequence numbers against replay attack
     fkM: array[boolean] of THash256Rec;
     procedure SetIVAndMacNonce(aEncrypt: boolean);
-    procedure IncKM(aEncrypt: boolean); {$ifdef HASINLINE} inline; {$endif}
+    procedure IncKM(aEncrypt: boolean);
+      {$ifdef HASINLINE} inline; {$endif}
     procedure ComputeMAC(aEncrypt: boolean; aEncrypted: pointer; aLen: integer;
       out aMAC: THash256Rec);
     // raw ECDHE functions used by ProcessHandshake
@@ -1417,21 +1418,44 @@ type
 const
   /// the TEcdheProtocol class to create depending on the asymetric side
   ECDHEPROT_CLASS: array[ {server=} boolean ] of TEcdheProtocolClass = (
-    TEcdheProtocolClient, TEcdheProtocolServer);
+    TEcdheProtocolClient,
+    TEcdheProtocolServer);
 
   /// how TEcdheProtocol.SharedSecret initialize the AES engines
   ECDHEPROT_EF2BITS: array[TEcdheEF] of integer = (
-    128, 128, 128, 128, 128,
-    256, 256, 256, 256, 256,
-    128, 256, 128, 256);
+    128,  // efAesCrc128
+    128,  // efAesCfb128
+    128,  // efAesOfb128
+    128,  // efAesCtr128
+    128,  // efAesCbc128
+    256,  // efAesCrc256
+    256,  // efAesCfb256
+    256,  // efAesOfb256
+    256,  // efAesCtr256
+    256,  // efAesCbc256
+    128,  // efAesGcm128
+    256,  // efAesGcm256
+    128,  // efAesCtc128
+    256); // efAesCtc256
 
   /// default MAC used for a given Encryption Function
   // - as used by TEcdheProtocol.Create/FromKey for its default MAC
   // - favor performance - you may force macHmacSha256 for cryptographic level
   ECDHEPROT_EF2MAC: array[TEcdheEF] of TEcdheMac = (
-    macDuringEF, macHmacCrc32c, macHmacCrc32c, macHmacCrc32c, macHmacCrc32c,
-    macDuringEF, macHmacCrc32c, macHmacCrc32c, macHmacCrc32c, macHmacCrc32c,
-    macDuringEF, macDuringEF, macDuringEF, macDuringEF);
+    macDuringEF,    // efAesCrc128
+    macHmacCrc32c,  // efAesCfb128
+    macHmacCrc32c,  // efAesOfb128
+    macHmacCrc32c,  // efAesCtr128
+    macHmacCrc32c,  // efAesCbc128
+    macDuringEF,    // efAesCrc256
+    macHmacCrc32c,  // efAesCfb256
+    macHmacCrc32c,  // efAesOfb256
+    macHmacCrc32c,  // efAesCtr256
+    macHmacCrc32c,  // efAesCbc256
+    macDuringEF,    // efAesGcm128
+    macDuringEF,    // efAesGcm256
+    macDuringEF,    // efAesCtc128
+    macDuringEF);   // efAesCtc256
 
 
 
@@ -1512,12 +1536,12 @@ function EciesHeader(const head: TEciesHeader): boolean;
 begin
   result := (EciesLevel(head) >= 0) and
     (head.Algo in [ecaFIRST .. ecaLAST]) and
-    (head.crc = crc32c(PCardinal(@head.hmac)^, @head, sizeof(head) - sizeof(head.crc)));
+    (head.crc = crc32c(PCardinal(@head.hmac)^, @head, SizeOf(head) - SizeOf(head.crc)));
 end;
 
 function EciesHeader(const encrypted: RawByteString; out head: TEciesHeader): boolean;
 begin
-  result := (length(encrypted) > sizeof(head)) and
+  result := (length(encrypted) > SizeOf(head)) and
     EciesHeader(PEciesHeader(encrypted)^);
   if result then
     head := PEciesHeader(encrypted)^;
@@ -1536,12 +1560,12 @@ begin
   F := FileOpen(encryptedfile, fmOpenRead or fmShareDenyNone);
   if not ValidHandle(F) then
     exit;
-  if FileRead(F, head, sizeof(head)) = sizeof(head) then
+  if FileRead(F, head, SizeOf(head)) = SizeOf(head) then
     result := EciesHeader(head);
   if result and
      (rawencryptedfile <> '') then
   begin
-    len := FileSize(F) - sizeof(head);
+    len := FileSize(F) - SizeOf(head);
     SetLength(tmp, len);
     if FileRead(F, pointer(tmp)^, len) <> len then
       result := false
@@ -1561,7 +1585,7 @@ begin
     if sign.Check then
     begin
       s := sign.ToVariant;
-      _ObjAddProp('ECDSA', EccText(head.sign.Signature), s);
+      _ObjAddPropU('ECDSA', EccText(head.sign.Signature), s);
     end;
   finally
     sign.Free;
@@ -1571,7 +1595,7 @@ begin
       '"FileTime":"%","Algorithm":"%","RandomPublicKey":"%","HMAC":"%",' +
       '"Signature":%,"Meta":%}', [EccText(date), size, EccText(rec),
       EccText(recid), DateTimeToIso8601Text(UnixTimeToDateTime(unixts)),
-      ToText(algo)^, mormot.core.text.BinToHex(@rndpub, sizeof(rndpub)),
+      ToText(algo)^, mormot.core.text.BinToHex(@rndpub, SizeOf(rndpub)),
       Sha256DigestToString(hmac), _Safe(s)^.ToJson,
       BOOL_STR[efMetaData in EciesFeatures(head)]], result);
 end;
@@ -1630,7 +1654,7 @@ begin
   if length(match) <> 1 then
     match := FindFiles(EccKeyFileFolder, mask);
   if (length(match) <> 1) or
-     (match[0].Size < sizeof(TEccCertificateContent)) then
+     (match[0].Size < SizeOf(TEccCertificateContent)) then
     result := false
   else
     TruncatedFileName := match[0].Name;
@@ -1809,14 +1833,14 @@ end;
 
 function TEccCertificate.LoadFromStream(Stream: TStream): boolean;
 begin
-  result := (Stream.Read(fContent, sizeof(fContent)) = sizeof(fContent)) and
+  result := (Stream.Read(fContent, SizeOf(fContent)) = SizeOf(fContent)) and
     InternalLoad(ReadStringFromStream(Stream, 524288));
 end;
 
 function TEccCertificate.SaveToStream(Stream: TStream): boolean;
 begin
   result := CheckCRC and
-    (Stream.Write(fContent, sizeof(fContent)) = sizeof(fContent)) and
+    (Stream.Write(fContent, SizeOf(fContent)) = SizeOf(fContent)) and
     WriteStringToStream(Stream, InternalSave);
 end;
 
@@ -1870,7 +1894,7 @@ begin
       head.sign := Signature.fContent;
       if Signature.InheritsFrom(TEccSignatureCertifiedFile) then
         with _Safe(TEccSignatureCertifiedFile(Signature).MetaData)^ do
-          if (Kind = dvObject) and
+          if IsObject and
              (Count > 0) then
           begin
             head.magic := THash128(ECIES_MAGIC[1]); // indicates efMetaData
@@ -1878,10 +1902,10 @@ begin
           end; // new format storing {metadata}+#0+plain
     end
     else
-      FillcharFast(head.sign, sizeof(head.sign), 255); // Version=255=not signed
+      FillcharFast(head.sign, SizeOf(head.sign), 255); // Version=255=not signed
     if not Ecc256r1MakeKey(head.rndpub, rndpriv) then
       raise EECCException.CreateUtf8('%.Encrypt: MakeKey?', [self]);
-    SetLength(secret, sizeof(TEccSecretKey));
+    SetLength(secret, SizeOf(TEccSecretKey));
     if not Ecc256r1SharedSecret(fContent.Signed.PublicKey, rndpriv, PEccSecretKey(secret)^) then
       raise EECCException.CreateUtf8('%.Encrypt: SharedSecret?', [self]);
     Pbkdf2HmacSha256(secret, KDFSalt, KDFRounds, aeskey.b, 'salt');
@@ -1923,14 +1947,14 @@ begin
       Pbkdf2HmacSha256(secret, MACSalt, MACRounds, mackey.b, 'hmac');
       HmacSha256(mackey.b, enc, head.hmac);
     end;
-    head.crc := crc32c(PCardinal(@head.hmac)^, @head, sizeof(head) - sizeof(head.crc));
-    SetLength(result, sizeof(head) + length(enc));
+    head.crc := crc32c(PCardinal(@head.hmac)^, @head, SizeOf(head) - SizeOf(head.crc));
+    SetLength(result, SizeOf(head) + length(enc));
     PEciesHeader(result)^ := head;
-    MoveFast(pointer(enc)^, PByteArray(result)[sizeof(head)], length(enc));
+    MoveFast(pointer(enc)^, PByteArray(result)[SizeOf(head)], length(enc));
   finally
     FillZero(aeskey.b);
     FillZero(mackey.b);
-    FillCharFast(rndpriv, sizeof(rndpriv), 0);
+    FillCharFast(rndpriv, SizeOf(rndpriv), 0);
     if dec <> Plain then
       FillZero(dec);
     if content <> Plain then
@@ -2061,7 +2085,7 @@ begin
             else
               continue;
       end;
-      sha.Full(@fContent.Signed, sizeof(TEccCertificateSigned), hash);
+      sha.Full(@fContent.Signed, SizeOf(TEccCertificateSigned), hash);
       if not Ecc256r1Sign(priv^, hash, fContent.Signature) then
         raise EECCException.CreateUtf8('%.CreateNew: ecdsa_sign?', [self]);
       if not ParanoidVerify or
@@ -2071,7 +2095,7 @@ begin
         raise EECCException.CreateUtf8('%.CreateNew: ParanoidVerify2?', [self]);
     end;
   end;
-  fContent.CRC := fnv32(0, @fContent, sizeof(fContent) - 4);
+  fContent.CRC := fnv32(0, @fContent, SizeOf(fContent) - 4);
 end;
 
 constructor TEccCertificateSecret.CreateFromSecureBinary(const Binary:
@@ -2116,7 +2140,7 @@ end;
 function TEccCertificateSecret.InternalLoad(const data: RawByteString): boolean;
 begin
   result := fStoreOnlyPublicKey or
-            TAesPrng.AFUnsplit(data, fPrivateKey, sizeof(fPrivateKey));
+            TAesPrng.AFUnsplit(data, fPrivateKey, SizeOf(fPrivateKey));
 end;
 
 function TEccCertificateSecret.InternalSave: RawByteString;
@@ -2125,7 +2149,7 @@ begin
     result := ''
   else
     result := TAesPrng.Main.AFSplit(
-                fPrivateKey, sizeof(fPrivateKey), fAFSplitStripes);
+                fPrivateKey, SizeOf(fPrivateKey), fAFSplitStripes);
 end;
 
 function TEccCertificateSecret.HasSecret: boolean;
@@ -2174,7 +2198,7 @@ begin
           if NoHeader then
             head := 0
           else
-            head := sizeof(PRIVKEY_MAGIC);
+            head := SizeOf(PRIVKEY_MAGIC);
           SetLength(result, head + PRIVKEY_SALTSIZE + length(enc));
           MoveFast(PRIVKEY_MAGIC, e[0], head);
           XorBlock16(pointer(salt), @e[head], @PRIVKEY_MAGIC);
@@ -2253,7 +2277,7 @@ begin
   if NoHeader then
     head := 0
   else
-    head := sizeof(PRIVKEY_MAGIC);
+    head := SizeOf(PRIVKEY_MAGIC);
   pos := 0;
   for index := 1 to DestFileCount do
   begin
@@ -2293,7 +2317,7 @@ begin
   result := false;
   dec(Len, PRIVKEY_SALTSIZE);
   if (self = nil) or
-     (Len <= sizeof(PRIVKEY_MAGIC) + sizeof(TAesBlock)) then
+     (Len <= SizeOf(PRIVKEY_MAGIC) + SizeOf(TAesBlock)) then
     exit;
   if IsEqual(THash128(PRIVKEY_MAGIC), PHash128(Data)^) then
   begin
@@ -2378,7 +2402,7 @@ begin
     [name, Pbkdf2Round, suffix]);
   if IncludeRaw then
     suffix := FormatUtf8('  %_RAW = ''%'';'#13#10'%', [name,
-      mormot.core.text.BinToHex(@fPrivateKey, sizeof(fPrivateKey)), suffix]);
+      mormot.core.text.BinToHex(@fPrivateKey, SizeOf(fPrivateKey)), suffix]);
   result := BinToSource(name, Comment, pointer(data), length(data), 16, suffix)
 end;
 
@@ -2424,7 +2448,7 @@ begin
   meta.InitObject([
     'name', ExtractFileName(FileToSign),
     'date', DateTimeToIso8601Text(FileAgeToDateTime(FileToSign))],
-    JSON_OPTIONS_FAST);
+    JSON_FAST);
   meta.AddNameValuesToObject(MetaNameValuePairs);
   doc.InitObject([
     'meta', variant(meta),
@@ -2432,7 +2456,7 @@ begin
     'md5', Md5(content),
     'sha256', Sha256DigestToString(sha),
     'sign', sign],
-    JSON_OPTIONS_FAST);
+    JSON_FAST);
   result := FileToSign + ECCCERTIFICATESIGN_FILEEXT;
   FileFromString(doc.ToJson('', '', jsonHumanReadable), result);
 end;
@@ -2452,11 +2476,11 @@ var
   c: TAesAbstractClass;
 begin
   result := ecdCorrupted;
-  datalen := length(Encrypted) - sizeof(TEciesHeader);
+  datalen := length(Encrypted) - SizeOf(TEciesHeader);
   if (datalen <= 0) or
      not EciesHeader(Encrypted, head) then
     exit;
-  data := @PByteArray(Encrypted)[sizeof(TEciesHeader)];
+  data := @PByteArray(Encrypted)[SizeOf(TEciesHeader)];
   if CheckCRC and HasSecret then
   try
     if not IsEqual(head.recid, fContent.Signed.Serial) then
@@ -2464,7 +2488,7 @@ begin
       result := ecdInvalidSerial;
       exit;
     end;
-    SetLength(secret, sizeof(TEccSecretKey));
+    SetLength(secret, SizeOf(TEccSecretKey));
     if not Ecc256r1SharedSecret(
         head.rndpub, fPrivateKey, PEccSecretKey(secret)^) then
       exit;
@@ -2488,7 +2512,7 @@ begin
     begin
       // validate the HMAC signature of the encrypted content
       Pbkdf2HmacSha256(secret, MACSalt, MACRounds, mackey.b, 'hmac');
-      HmacSha256(@mackey, data, sizeof(mackey), datalen, hmac);
+      HmacSha256(@mackey, data, SizeOf(mackey), datalen, hmac);
       if not IsEqual(hmac, head.hmac) then
         exit;
       // decrypt the content
@@ -2686,7 +2710,7 @@ end;
 function TEccSignatureCertified.FromBase64(const base64: RawUtf8): boolean;
 begin
   result := (self <> nil) and
-    Base64ToBin(pointer(base64), @fContent, length(base64), sizeof(fContent)) and
+    Base64ToBin(pointer(base64), @fContent, length(base64), SizeOf(fContent)) and
     EccCheck(fContent);
 end;
 
@@ -2706,7 +2730,7 @@ end;
 
 function TEccSignatureCertified.ToBase64: RawUtf8;
 begin
-  result := BinToBase64(@fContent, sizeof(fContent));
+  result := BinToBase64(@fContent, SizeOf(fContent));
 end;
 
 function TEccSignatureCertified.ToVariant: variant;
@@ -2775,7 +2799,7 @@ end;
 function TEccSignatureCertifiedFile.FromFileJson(const aFileContent: RawUtf8): boolean;
 begin
   fLowLevelInfo.Clear;
-  if not fLowLevelInfo.InitJson(aFileContent, JSON_OPTIONS_FAST) then
+  if not fLowLevelInfo.InitJson(aFileContent, JSON_FAST) then
   begin
     result := false;
     exit;
@@ -2884,7 +2908,7 @@ begin
     result := ecvValidSigned;
   if fIsValidCached then
   begin
-    crc := crc64c(@content, sizeof(content));
+    crc := crc64c(@content, SizeOf(content));
     fSafe.Lock;
     try
       if Int64ScanExists(pointer(fIsValidCache), fIsValidCacheCount, crc) then
@@ -2907,7 +2931,7 @@ begin
     result := ecvDeprecatedAuthority;
     exit;
   end;
-  sha.Full(@content.Signed, sizeof(content.Signed), hash);
+  sha.Full(@content.Signed, SizeOf(content.Signed), hash);
   if Ecc256r1Verify(auth.Signed.PublicKey, hash, content.Signature) then
   begin
     fSafe.Lock;
@@ -3335,7 +3359,7 @@ var
   values: TRawUtf8DynArray;
 begin
   result := false;
-  if doc.InitJson(cajsoncontent, JSON_OPTIONS_FAST) then
+  if doc.InitJson(cajsoncontent, JSON_FAST) then
   begin
     doc.GetAsDocVariantSafe('PublicBase64')^.ToRawUtf8DynArray(values);
     result := LoadFromArray(values);
@@ -3431,7 +3455,7 @@ begin
      (_FromKeySetCA <> nil) then
   begin
     fPKI := _FromKeySetCA;
-    inc(_FromKeySetCARefCount);
+    InterlockedIncrement(_FromKeySetCARefCount);
   end
   else
     fPKI := aPKI;
@@ -3462,7 +3486,7 @@ begin
       fPKI.Free
     else if (fPKI = _FromKeySetCA) and
             (_FromKeySetCARefCount > 0) then
-      dec(_FromKeySetCARefCount);
+      InterlockedDecrement(_FromKeySetCARefCount);
   if ownPrivate in fOwned then
     fPrivate.Free;
   inherited Destroy;
@@ -3525,7 +3549,7 @@ begin
      (_FromKeySetCA <> nil) then
   begin
     ca := _FromKeySetCA;
-    inc(_FromKeySetCARefCount);
+    InterlockedIncrement(_FromKeySetCARefCount);
   end;
   // compute priv: TEccCertificateSecret
   priv := nil;
@@ -3575,7 +3599,7 @@ class function TEcdheProtocol.FromPasswordSecureFile(
   const aPasswordSecureFile: RawUtf8; aServer: boolean;
   aAuth: TEcdheAuth; aEF: TEcdheEF; aRounds: integer): TEcdheProtocol;
 var
-  i: integer;
+  i: PtrInt;
   fn: TFileName;
   priv: TEccCertificateSecret;
 begin
@@ -3583,7 +3607,7 @@ begin
   // did we supply a fully qualified 'password#xxxx.private' key file name?
   if not EndWith(aPasswordSecureFile, '.PRIVATE') then
     exit;
-  for i := length(aPasswordSecureFile) downto 1 do
+  for i := length(aPasswordSecureFile) - 8 downto 1 do
     // PosExChar() fails if '#' appears within the password -> manual loop
     if aPasswordSecureFile[i] = '#' then
     begin
@@ -3657,12 +3681,12 @@ begin
         raise EECCException.CreateUtf8('%.%: macDuringEF not available in %/%',
           [self, ED[aEncrypt], ToText(fAlgo.ef)^, fAes[aEncrypt]]);
     macHmacCrc256c:
-      HmacCrc256c(@fkM[aEncrypt], aEncrypted, sizeof(THash256), aLen, aMAC.b);
+      HmacCrc256c(@fkM[aEncrypt], aEncrypted, SizeOf(THash256), aLen, aMAC.b);
     macHmacSha256:
-      HmacSha256(@fkM[aEncrypt], aEncrypted, sizeof(THash256), aLen, aMAC.b);
+      HmacSha256(@fkM[aEncrypt], aEncrypted, SizeOf(THash256), aLen, aMAC.b);
     macHmacCrc32c:
       begin
-        c := HmacCrc32c(@fkM[aEncrypt], aEncrypted, sizeof(THash256), aLen);
+        c := HmacCrc32c(@fkM[aEncrypt], aEncrypted, SizeOf(THash256), aLen);
         for i := 0 to 7 do
           aMAC.c[i] := c; // naive 256-bit diffusion
       end;
@@ -3673,7 +3697,7 @@ begin
           aMAC.c[i] := c; // naive 256-bit diffusion
       end;
     macNone:
-      crc256c(@fkM[aEncrypt], sizeof(THash256), aMAC.b); // replay attack only
+      crc256c(@fkM[aEncrypt], SizeOf(THash256), aMAC.b); // replay attack only
   else
     raise EECCException.CreateUtf8(
       '%.%: ComputeMAC %?', [self, ED[aEncrypt], ToText(fAlgo.mac)^]);
@@ -3691,7 +3715,7 @@ begin
   try
     SetIVAndMacNonce({encrypt=}true);
     len := fAes[true].EncryptPkcs7Length(length(aPlain), false);
-    SetString(aEncrypted, nil, len + sizeof(THash256)); // append a trailing MAC
+    SetString(aEncrypted, nil, len + SizeOf(THash256)); // append a trailing MAC
     // encrypt the input
     fAes[true].EncryptPkcs7Buffer(
       Pointer(aPlain), pointer(aEncrypted), length(aPlain), len, false);
@@ -3711,7 +3735,7 @@ var
   mac: THash256Rec;
 begin
   result := sprInvalidMAC;
-  len := length(aEncrypted) - sizeof(THash256); // there is a trailing MAC
+  len := length(aEncrypted) - SizeOf(THash256); // there is a trailing MAC
   if len <= 0 then
     exit;
   fSafe.Lock;
@@ -3820,7 +3844,7 @@ begin
   end
   else if not EccCheck(QC) then
     exit;
-  dec(len, sizeof(TEccSignature)); // Sign at the latest position
+  dec(len, SizeOf(TEccSignature)); // Sign at the latest position
   sha.Full(frame, len, hash);
   res := sprInvalidSignature;
   if not Ecc256r1Verify(QC.Signed.PublicKey, hash, PEccSignature(@frame[len])^) then
@@ -3836,7 +3860,7 @@ var
   sha: TSha256;
 begin
   QC := fPrivate.fContent;
-  dec(len, sizeof(TEccSignature)); // Sign at the latest position
+  dec(len, SizeOf(TEccSignature)); // Sign at the latest position
   sha.Full(frame, len, hash);
   if not Ecc256r1Sign(fPrivate.fPrivateKey, hash, PEccSignature(@frame[len])^) then
     raise EECCException.CreateUtf8('%.Sign: ecdsa_sign?', [self]);
@@ -3868,7 +3892,7 @@ begin
   if fAes[false] <> nil then
     raise EECCException.CreateUtf8(
       '%.ComputeHandshake already called', [self]);
-  FillCharFast(aClient, sizeof(aClient), 0);
+  FillCharFast(aClient, SizeOf(aClient), 0);
   aClient.algo := fAlgo;
   // client-side randomness for ephemeral keys and signatures
   TAesPrng.Main.FillRandom(fRndA);
@@ -3879,7 +3903,7 @@ begin
       raise EECCException.CreateUtf8('%.ComputeHandshake: MakeKey?', [self]);
   // compute the client ephemeral signature
   if fAlgo.auth <> authServer then
-    Sign(@aClient, sizeof(aClient), aClient.QCA);
+    Sign(@aClient, SizeOf(aClient), aClient.QCA);
 end;
 
 function TEcdheProtocolClient.ValidateHandshake(const aServer: TEcdheFrameServer):
@@ -3901,7 +3925,7 @@ begin
   fRndB := aServer.RndB;
   // server ephemeral authenticatation from its public key
   if fAlgo.auth <> authClient then
-    if not Verify(@aServer, sizeof(aServer), aServer.QCB, result) then
+    if not Verify(@aServer, SizeOf(aServer), aServer.QCB, result) then
       exit;
   // compute the ephemeral shared secret keys for AES and MAC+IV
   try
@@ -3934,7 +3958,7 @@ begin
     MsgOut := BinToBase64(@out1, SizeOf(out1));
     result := sprSuccess;
   end
-  else if Base64ToBin(Pointer(MsgIn), @in2, length(MsgIn), sizeof(in2)) then
+  else if Base64ToBin(Pointer(MsgIn), @in2, length(MsgIn), SizeOf(in2)) then
     result := ValidateHandshake(in2)
   else
     result := sprBadRequest;
@@ -3987,10 +4011,10 @@ begin
     exit;
   fRndA := aClient.RndA;
   if fAlgo.auth <> authServer then
-    if not Verify(@aClient, sizeof(aClient), aClient.QCA, result) then
+    if not Verify(@aClient, SizeOf(aClient), aClient.QCA, result) then
       exit;
   // compute the ephemeral shared secret keys for AES and MAC+IV
-  FillCharFast(aServer, sizeof(aServer), 0);
+  FillCharFast(aServer, SizeOf(aServer), 0);
   aServer.algo := fAlgo;
   aServer.RndA := fRndA;
   TAesPrng.Main.FillRandom(fRndB);
@@ -4015,7 +4039,7 @@ begin
   end;
   // compute the server ephemeral signature from its private key
   if fAlgo.auth <> authClient then
-    Sign(@aServer, sizeof(aServer), aServer.QCB);
+    Sign(@aServer, SizeOf(aServer), aServer.QCB);
   result := sprSuccess;
 end;
 
@@ -4025,7 +4049,7 @@ var
   in1: TEcdheFrameClient;
   out1: TEcdheFrameServer;
 begin
-  if Base64ToBin(Pointer(MsgIn), @in1, length(MsgIn), sizeof(in1)) then
+  if Base64ToBin(Pointer(MsgIn), @in1, length(MsgIn), SizeOf(in1)) then
   begin
     result := ComputeHandshake(in1, out1);
     MsgOut := BinToBase64(@out1, SizeOf(out1));
@@ -4040,9 +4064,9 @@ initialization
   Rtti.RegisterObjArray(TypeInfo(TEccCertificateObjArray), TEccCertificate);
   {$endif HASDYNARRAYTYPE}
   // binary headers should be consistent on all platforms/compilers
-  assert(sizeof(TEciesHeader) = 228);
-  assert(sizeof(TEcdheFrameClient) = 290);
-  assert(sizeof(TEcdheFrameServer) = 306);
+  assert(SizeOf(TEciesHeader) = 228);
+  assert(SizeOf(TEcdheFrameClient) = 290);
+  assert(SizeOf(TEcdheFrameServer) = 306);
 
 end.
 

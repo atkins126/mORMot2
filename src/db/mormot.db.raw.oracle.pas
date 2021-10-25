@@ -775,7 +775,7 @@ type
   POracleDate = ^TOracleDate;
 
   /// wrapper to an array of TOracleDate items
-  TOracleDateArray = array[0..(maxInt div sizeof(TOracleDate)) - 1] of TOracleDate;
+  TOracleDateArray = array[0..(maxInt div SizeOf(TOracleDate)) - 1] of TOracleDate;
   POracleDateArray = ^TOracleDateArray;
 
 
@@ -1476,10 +1476,11 @@ var
   L, ErrNum: integer;
 begin
   case Status of
-    OCI_ERROR, OCI_SUCCESS_WITH_INFO:
+    OCI_ERROR,
+    OCI_SUCCESS_WITH_INFO:
       begin
         tmp[0] := #0;
-        ErrorGet(ErrorHandle, 1, nil, ErrNum, tmp, sizeof(tmp), OCI_HTYPE_ERROR);
+        ErrorGet(ErrorHandle, 1, nil, ErrNum, tmp, SizeOf(tmp), OCI_HTYPE_ERROR);
         L := mormot.core.base.StrLen(@tmp);
         while (L > 0) and
               (tmp[L - 1] < ' ') do
@@ -1542,7 +1543,7 @@ begin
   else
   begin
     tmp[0] := #0;
-    ErrorGet(ErrorHandle, 1, nil, ErrNum, tmp, sizeof(tmp), OCI_HTYPE_ERROR);
+    ErrorGet(ErrorHandle, 1, nil, ErrNum, tmp, SizeOf(tmp), OCI_HTYPE_ERROR);
     L := mormot.core.base.StrLen(@tmp);
     while (L > 0) and
           (tmp[L - 1] < ' ') do
@@ -1676,7 +1677,7 @@ var
   Size, i: PtrInt;
   Mant: array[0..19] of byte;
 begin
-  FillcharFast(Mant, sizeof(Mant), 0);
+  FillcharFast(Mant, SizeOf(Mant), 0);
   Exp := 0;
   Size := 1;
   minus := Value >= 0;

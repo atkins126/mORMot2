@@ -239,7 +239,7 @@ type
   end;
 
   /// Exception raised during gssapi library process
-  EGssApi = class(Exception)
+  EGssApi = class(ExceptionWithProps)
   private
     fMajorStatus: cardinal;
     fMinorStatus: cardinal;
@@ -247,6 +247,7 @@ type
     /// initialize an gssapi library exception with the proper error message
     constructor Create(aMajorStatus, aMinorStatus: cardinal;
       const aPrefix: string);
+  published
     /// associated GSS_C_GSS_CODE state value
     property MajorStatus: cardinal
       read fMajorStatus;
@@ -292,7 +293,7 @@ function gss_compare_oid(oid1, oid2: gss_OID): boolean;
 
 type
   /// GSSAPI Auth context
-  // - first field should be an Int64 ID
+  // - first field should be an Int64 ID - typically a THttpServerConnectionID
   TSecContext = record
     ID: Int64;
     CredHandle: pointer;
@@ -834,8 +835,7 @@ function ServerDomainFind(const aOld: RawUtf8): PtrInt;
 begin
   for result := 0 to length(ServerDomainMap) - 1 do
     with ServerDomainMap[result] do
-      if (length(Old) = length(aOld)) and
-         IdemPChar(pointer(aOld), pointer(Old)) then
+      if IdemPropNameU(Old, aOld) then
         exit;
   result := -1;
 end;
@@ -886,8 +886,7 @@ begin
     DomainLen := StrLen(DomainStart);
     for i := 0 to high(ServerDomainMap) do
       with ServerDomainMap[i] do
-        if (length(Old) = DomainLen) and
-           IdemPChar(DomainStart, pointer(Old)) then
+        if IdemPropNameU(Old, DomainStart, DomainLen) then
         begin
           Domain := New;
           break;

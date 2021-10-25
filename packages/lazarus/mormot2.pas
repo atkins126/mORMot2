@@ -21,20 +21,22 @@ uses
   mormot.db.rad.firedac, mormot.db.rad.nexusdb, mormot.db.rad.unidac, 
   mormot.db.raw.odbc, mormot.db.raw.oledb, mormot.db.raw.oracle, 
   mormot.db.raw.postgres, mormot.db.raw.sqlite3, mormot.db.raw.sqlite3.static, 
-  mormot.db.sql, mormot.db.sql.odbc, mormot.db.sql.oledb, 
+  mormot.db.sql, mormot.db.sql.ibx, mormot.db.sql.odbc, mormot.db.sql.oledb, 
   mormot.db.sql.oracle, mormot.db.sql.postgres, mormot.db.sql.sqlite3, 
   mormot.db.sql.zeos, mormot.lib.curl, mormot.lib.gssapi, mormot.lib.lizard, 
   mormot.lib.openssl11, mormot.lib.quickjs, mormot.lib.sspi, 
   mormot.lib.static, mormot.lib.winhttp, mormot.lib.z, mormot.net.async, 
   mormot.net.client, mormot.net.http, mormot.net.relay, mormot.net.rtsphttp, 
   mormot.net.server, mormot.net.sock, mormot.net.tunnel, mormot.net.ws.client, 
-  mormot.net.ws.core, mormot.net.ws.server, mormot.orm.client, 
-  mormot.orm.core, mormot.orm.mongodb, mormot.orm.rest, mormot.orm.server, 
-  mormot.orm.sql, mormot.orm.sqlite3, mormot.orm.storage, mormot.rest.client, 
-  mormot.rest.core, mormot.rest.http.client, mormot.rest.http.server, 
-  mormot.rest.memserver, mormot.rest.mvc, mormot.rest.server, 
-  mormot.rest.sqlite3, mormot.script.core, mormot.script.quickjs, 
-  mormot.soa.client, mormot.soa.codegen, mormot.soa.core, mormot.soa.server;
+  mormot.net.ws.core, mormot.net.ws.server, mormot.orm.base, 
+  mormot.orm.client, mormot.orm.core, mormot.orm.mongodb, mormot.orm.rest, 
+  mormot.orm.server, mormot.orm.sql, mormot.orm.sqlite3, mormot.orm.storage, 
+  mormot.rest.client, mormot.rest.core, mormot.rest.http.client, 
+  mormot.rest.http.server, mormot.rest.memserver, mormot.rest.mvc, 
+  mormot.rest.server, mormot.rest.sqlite3, mormot.script.core, 
+  mormot.script.quickjs, mormot.soa.client, mormot.soa.codegen, 
+  mormot.soa.core, mormot.soa.server, mormot.ui.rad, mormot.ui.rad.json, 
+  mormot.ui.rad.sql;
 
 implementation
 

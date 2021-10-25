@@ -29,13 +29,14 @@ Basic types and reusable stand-alone functions shared by all framework units
 - Sorting/Comparison Functions
 - Some Convenient `TStream` descendants and File access functions
 - Faster Alternative to RTL Standard Functions
-- Raw Shared Constants / Types Definitions
+- Raw Shared Types Definitions
 
 Aim of those types and functions is to be cross-platform and cross-compiler, without any dependency but the main FPC/Delphi RTL. It also detects the kind of Intel/AMD it runs on, to adapt to the fastest asm version available. It is the main unit where x86_64 or i386 asm stubs are included.
 
 ### mormot.core.os
 
 Cross-platform functions shared by all framework units
+- Some Cross-System Type and Constant Definitions
 - Gather Operating System Information
 - Operating System Specific Types (e.g. `TWinRegistry`)
 - Unicode, Time, File, Console, Library process
@@ -87,6 +88,7 @@ Cross-Compiler RTTI Definitions shared by all framework units
 - Managed Types Finalization or Copy
 - RTTI Value Types used for JSON Parsing
 - RTTI-based Registration for Custom JSON Parsing
+- High Level `TObjectWithID` and `TObjectWithCustomCreate` Class Types
 - Redirect Most Used FPC RTL Functions to Optimized x86_64 Assembly
 
 Purpose of this unit is to avoid any direct use of `TypInfo.pas` RTL unit, which is not exactly compatible between compilers, and lacks of direct RTTI access with no memory allocation. We define pointers to RTTI record/object to access `TypeInfo()` via a set of explicit methods. Here fake record/objects are just wrappers around pointers defined in Delphi/FPC RTL's `TypInfo.pas` with the magic of inlining. We redefined all RTTI definitions as `TRtti*` types to avoid confusion with type names as published by the `TypInfo` unit.
@@ -115,6 +117,7 @@ Low-Level Data Processing Functions shared by all framework units
 - INI Files and In-memory Access
 - Efficient RTTI Values Binary Serialization and Comparison
 - `TDynArray`, `TDynArrayHashed` and `TSynQueue` Wrappers
+- `Integer` Arrays Extended Process
 - `RawUtf8` String Values Interning and `TRawUtf8List`
 
 ### mormot.core.json

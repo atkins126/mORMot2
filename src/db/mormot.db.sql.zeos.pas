@@ -361,9 +361,10 @@ implementation
 constructor TSqlDBZeosConnectionProperties.Create(const aServerName,
   aDatabaseName, aUserID, aPassWord: RawUtf8);
 const
-  PCHARS: array[0..8] of PAnsiChar = ('ORACLE', 'FREETDS_MSSQL', 'MSSQL',
-    'INTERBASE', 'FIREBIRD', 'MYSQL', 'SQLITE', 'POSTGRESQL', 'JET');
-  TYPES: array[-1..high(PCHARS)] of TSqlDBDefinition = (
+  PCHARS: array[0 .. 9] of PAnsiChar = (
+    'ORACLE', 'FREETDS_MSSQL', 'MSSQL', 'INTERBASE', 'FIREBIRD', 'MYSQL',
+    'SQLITE', 'POSTGRESQL', 'JET', nil);
+  TYPES: array[-1 .. high(PCHARS) - 1] of TSqlDBDefinition = (
     dDefault, dOracle, dMSSQL, dMSSQL, dFirebird, dFirebird, dMySQL,
     dSQLite, dPostgreSQL, dJet {e.g. ADO[JET]} );
     // expecting Sybase + ASA support in TSqlDBDefinition
@@ -397,7 +398,7 @@ begin
     fUrl.Password := Utf8ToString(aPassWord);
   if fDbmsName = '' then
     StringToUtf8(fUrl.Protocol, fDbmsName);
-  CreateWithZURL(fUrl, TYPES[IdemPCharArray(pointer(fDbmsName), PCHARS)], true);
+  CreateWithZURL(fUrl, TYPES[IdemPPChar(pointer(fDbmsName), @PCHARS)], true);
 end;
 
 procedure TSqlDBZeosConnectionProperties.GetForeignKeys;
@@ -696,7 +697,7 @@ begin
       meta.AddEscapeCharToWildcards(sTableName), '');
     FA.InitSpecific(TypeInfo(TSqlDBColumnDefineDynArray), Fields,
       ptRawUtf8, @n, {caseinsens=}true);
-    FillCharFast(F, sizeof(F), 0);
+    FillCharFast(F, SizeOf(F), 0);
     while res.Next do
     begin
       {$ifdef ZEOS72UP}
@@ -953,7 +954,7 @@ begin
     SetLength(fDateDynArray, fDynArraySize[ftDate]);
     SetLength(fUtf8DynArray, fDynArraySize[ftUtf8]);
     SetLength(fBlobDynArray, fDynArraySize[ftBlob]);
-    FillcharFast(ndx, sizeof(ndx), 0);
+    FillcharFast(ndx, SizeOf(ndx), 0);
     for p := 0 to fParamCount - 1 do
     begin
       if fParams[p].VInt64 <> fParamsArrayCount then

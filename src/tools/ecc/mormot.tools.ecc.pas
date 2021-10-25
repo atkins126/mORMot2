@@ -202,7 +202,8 @@ begin
       if SavePasswordRounds = DEFAULT_ECCROUNDS then
         json := SavePassword
       else
-        json := JsonEncode(['pass', SavePassword, 'rounds', SavePasswordRounds]);
+        json := JsonEncode(['pass', SavePassword,
+                            'rounds', SavePasswordRounds]);
       bin := TAesPrng.Main.AFSplit(pointer(json)^, length(json), CHEAT_SPLIT);
       fn := Utf8ToString(secret.Serial) + CHEAT_FILEEXT;
       FileFromString(master.Encrypt(bin), fn);
@@ -512,7 +513,7 @@ begin
       raise EECCException.CreateUtf8('Incorrect file %', [fn]);
     if not doc.InitJson(json) then
       doc.InitObject(['pass', json,
-                      'rounds', DEFAULT_ECCROUNDS], JSON_OPTIONS_FAST);
+                      'rounds', DEFAULT_ECCROUNDS], JSON_FAST);
     authpass := doc.U['pass'];
     authround := doc.I['rounds'];
     result := doc.ToJson('', '', jsonHumanReadable);

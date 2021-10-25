@@ -66,8 +66,10 @@ uses
 
 type
   /// exception class raised by this unit
-  EOpenSsl = class(Exception)
+  EOpenSsl = class(ExceptionWithProps)
   protected
+    fLastError: integer;
+    function GetOpenSsl: string;
     class procedure CheckFailed(caller: TObject; const method: string;
       res: integer; errormsg: PRawUtf8);
   public
@@ -80,6 +82,13 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     /// raise the exception if OpenSslIsAvailable if false
     class procedure CheckAvailable(caller: TClass; const method: string);
+  published
+    /// the last error code from OpenSSL, after Check() failure
+    property LastError: integer
+      read fLastError;
+    /// returns the OpenSslVersionHexa value
+    property OpenSsl: string
+      read GetOpenSsl;
   end;
 
 
@@ -149,6 +158,9 @@ var
   /// numeric OpenSSL library version loaded e.g. after OpenSslIsAvailable call
   // - equals e.g. $1010106f
   OpenSslVersion: cardinal;
+  /// hexadecimal OpenSSL library version loaded e.g. after OpenSslIsAvailable call
+  // - equals e.g. '1010106F'
+  OpenSslVersionHexa: string;
 
 {$ifndef OPENSSLSTATIC}
   /// internal flag used by OpenSslIsAvailable function for dynamic loading
@@ -2223,7 +2235,9 @@ var
   P: PPointerArray;
   api: PtrInt;
 begin
-  result := true;
+  {$ifndef UNICODE}
+  result := false; // make old Delphi compilers happy
+  {$endif UNICODE}
   GlobalLock;
   try
     if openssl_initialized = osslAvailable then
@@ -2270,10 +2284,10 @@ begin
         raise EOpenSsl.Create('CRYPTO_set_mem_functions() failure');
       {$endif OPENSSLUSERTLMM}
       OpenSslVersion := libcrypto.OpenSSL_version_num;
+      OpenSslVersionHexa := IntToHex(OpenSslVersion, 8);
       if OpenSslVersion and $ffffff00 < $10101000 then // paranoid check 1.1.1
-        raise EOpenSsl.CreateFmt(
-          'Incorrect OpenSSL version %x - expected at least 101010xx',
-          [OpenSslVersion]);
+        raise EOpenSsl.CreateFmt('Incorrect OpenSSL version %x in %s - expects' +
+          ' >= 101010xx (1.1.1.x)', [OpenSslVersion, libcrypto.LibraryPath]);
     except
       FreeAndNil(libssl);
       FreeAndNil(libcrypto);
@@ -2895,7 +2909,6 @@ begin
   end;
 end;
 
-{$I-}
 procedure WritelnSSL_error;
 var
   err: integer;
@@ -2905,10 +2918,8 @@ begin
   if err = 0 then
     exit;
   ERR_error_string_n(err, @tmp, SizeOf(tmp));
-  writeln({$ifdef FPC}stderr,{$endif} tmp);
-  ioresult;
+  DisplayError('%s', [tmp]);
 end;
-{$I+}
 
 function SSL_CTX_set_session_cache_mode(ctx: PSSL_CTX; mode: integer): integer;
 begin
@@ -3029,21 +3040,20 @@ end;
 class procedure EOpenSsl.CheckFailed(caller: TObject; const method: string;
   res: integer; errormsg: PRawUtf8);
 var
-  tmp: array[0..1023] of AnsiChar;
+  msg: RawUtf8;
+  exc: EOpenSsl;
 begin
   res := ERR_get_error;
-  if res = 0 then
-    tmp[0] := #0
-  else
-    ERR_error_string_n(res, @tmp, SizeOf(tmp));
-  if (errormsg <> nil) and
-     (tmp[0] <> #0) then
-    FastSetString(errormsg^, @tmp, StrLen(@tmp));
+  SSL_error(res, msg);
+  if errormsg <> nil then
+    errormsg^ := msg;
   if caller = nil then
-    raise CreateFmt('OpenSSL error %d [%s]', [res, PAnsiChar(@tmp)])
+    exc := CreateFmt('OpenSSL error %d [%s]', [res, msg])
   else
-    raise CreateFmt('%s.%s: OpenSSL error %d [%s]',
-      [ClassNameShort(caller)^, method, res, PAnsiChar(@tmp)]);
+    exc := CreateFmt('%s.%s: OpenSSL error %d [%s]',
+      [ClassNameShort(caller)^, method, res, msg]);
+  exc.fLastError := res;
+  raise exc;
 end;
 
 class procedure EOpenSsl.CheckAvailable(caller: TClass; const method: string);
@@ -3055,6 +3065,11 @@ begin
     else
       raise CreateFmt('%s.%s: OpenSSL 1.1.1 is not available',
         [ClassNameShort(caller)^, method]);
+end;
+
+function EOpenSsl.GetOpenSsl: string;
+begin
+  result := OpenSslVersionHexa;
 end;
 
 
@@ -3110,7 +3125,7 @@ begin
   result := length(pwd);
   if result <> 0 then
     if size > result  then
-      MoveSmall(buf, pointer(pwd), result + 1) // +1 to include trailing #0
+      MoveSmall(pointer(pwd), buf, result + 1) // +1 to include trailing #0
     else
       result := 0; // buf[0..size-1] is too small for this password -> abort
 end;
@@ -3136,7 +3151,6 @@ begin
   end;
 end;
 
-//  OnEachPeerVerify:
 const
   // list taken on 2021-02-19 from https://ssl-config.mozilla.org/
   // - prefer CHACHA20-POLY1305 if no AES acceleration is available
@@ -3155,7 +3169,7 @@ const
 procedure TOpenSslClient.AfterConnection(Socket: TNetSocket;
   var Context: TNetTlsContext; const ServerAddress: RawUtf8);
 var
-  res: integer;
+  v, res: integer;
   len: PtrInt;
   ciph: PSSL_CIPHER;
   P: PUtf8Char;
@@ -3205,7 +3219,10 @@ begin
   EOpenSslClient.Check(self, 'AfterConnection setcipherlist',
     SSL_CTX_set_cipher_list(fCtx, pointer(Context.CipherList)),
     @Context.LastError);
-  SSL_CTX_set_min_proto_version(fCtx, TLS1_2_VERSION); // no SSL3 TLS1 TLS1.1
+  v := TLS1_2_VERSION; // no SSL3 TLS1.0 TLS1.1
+  if Context.AllowDeprecatedTls then
+    v := TLS1_VERSION; // allow TLS1.0 TLS1.1
+  SSL_CTX_set_min_proto_version(fCtx, v);
   fSsl := SSL_new(fCtx);
   SSL_set_tlsext_host_name(fSsl, ServerAddress); // SNI field
   if not Context.IgnoreCertificateErrors then
@@ -3262,7 +3279,7 @@ begin
       end;
       if res <> X509_V_OK then
       begin
-        str(res, Context.LastError);
+        str(res, AnsiString(Context.LastError));
         if not Context.IgnoreCertificateErrors then
           EOpenSslClient.Check(self, 'AfterConnection getverifyresult',
             0, @Context.LastError);
@@ -3302,7 +3319,7 @@ begin
         result := nrRetry;
       SSL_ERROR_ZERO_RETURN:
         // peer issued an SSL_shutdown -> keep fDoSslShutdown=true
-        result := nrFatalError;
+        result := nrClosed;
       else
         begin
           result := nrFatalError;

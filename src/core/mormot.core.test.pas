@@ -220,7 +220,8 @@ type
     /// used by the published methods to run a test assertion, with a error
     // message computed via FormatUtf8()
     // - condition must equals TRUE to pass the test
-    procedure CheckUtf8(condition: boolean; const msg: RawUtf8; const args: array of const); overload;
+    procedure CheckUtf8(condition: boolean; const msg: RawUtf8;
+      const args: array of const); overload;
     /// used by published methods to start some timing on associated log
     // - call this once, before one or several consecutive CheckLogTime()
     // - warning: this method is not thread-safe
@@ -232,8 +233,8 @@ type
     // - condition must equals TRUE to pass the test
     // - the supplied message would be appended, with its timing
     // - warning: this method is not thread-safe
-    procedure CheckLogTime(condition: boolean; const msg: RawUtf8; const args: array of const;
-      level: TSynLogInfo = sllTrace);
+    procedure CheckLogTime(condition: boolean; const msg: RawUtf8;
+      const args: array of const; level: TSynLogInfo = sllTrace);
     /// used by the published methods to run test assertion against a Hash32() constant
     procedure CheckHash(const data: RawByteString; expectedhash32: cardinal;
       const msg: RawUtf8 = '');
@@ -269,7 +270,8 @@ type
       SizeInBytes: cardinal = 0; Timer: PPrecisionTimer = nil;
       OnlyLog: boolean = false): TSynMonitorOneMicroSec; overload;
     /// will add to the console a formatted message with a speed estimation
-    function NotifyTestSpeed(const ItemNameFmt: RawUtf8; const ItemNameArgs: array of const;
+    function NotifyTestSpeed(
+      const ItemNameFmt: RawUtf8; const ItemNameArgs: array of const;
       ItemCount: integer; SizeInBytes: cardinal = 0; Timer: PPrecisionTimer = nil;
       OnlyLog: boolean = false): TSynMonitorOneMicroSec; overload;
     /// append some text to the current console
@@ -874,10 +876,10 @@ begin
   last := paragraph;
   while WordCount > 0 do
   begin
-    rnd := Random32; // get 32-bit of randomness
+    rnd := Random32; // get 32 bits of randomness for up to 4 words per loop
     for n := 0 to rnd and 3 do
     begin
-      // consume up to 20-bit from rnd
+      // consume up to 4*5 = 20 bits from rnd
       rnd := rnd shr 2;
       s := bla[rnd and 7];
       rnd := rnd shr 3;
@@ -891,13 +893,13 @@ begin
       dec(WordCount);
     end;
     WR.CancelLastChar(' ');
-    case rnd and 127 of // consume 7-bit
+    case rnd and 127 of // consume 7 bits
       0..4:
         begin
           if RandomInclude <> '' then
           begin
             WR.Add(' ');
-            WR.AddString(RandomInclude);
+            WR.AddString(RandomInclude); // 5/128 = 4% chance of text inclusion
           end;
           last := space;
         end;
@@ -1130,7 +1132,7 @@ begin
   if TTextRec(fSaveToFile).Handle = 0 then
     CreateSaveToFile;
   Color(ccLightCyan);
-  TextLn([#13#10'   ', Ident, #13#10'  ', StringOfChar('-', length(Ident) + 2)]);
+  TextLn([#13#10'   ', Ident, #13#10'  ', RawUtf8OfChar('-', length(Ident) + 2)]);
   RunTimer.Start;
   Randomize;
   fFailed := nil;
@@ -1309,7 +1311,7 @@ begin
   system.assign(fSaveToFile, FN);
   rewrite(fSaveToFile);
   if IOResult <> 0 then
-    FillCharFast(fSaveToFile, sizeof(fSaveToFile), 0);
+    FillCharFast(fSaveToFile, SizeOf(fSaveToFile), 0);
 end;
 
 procedure TSynTests.SaveToText(var aDest: System.Text);
@@ -1334,7 +1336,11 @@ begin
     Level := withLogs;
     PerThreadLog := ptIdentifiedInOnFile;
     HighResolutionTimestamp := true;
-    //RotateFileCount := 5; RotateFileSizeKB := 20*1024; // rotate by 20 MB logs
+    if Level = LOG_VERBOSE then
+    begin
+      RotateFileCount := 10;
+      RotateFileSizeKB := 100*1024; // rotate verbose logs by 100MB files
+    end;
     //DestinationPath := Executable.ProgramFilePath + 'logs'; // should exist
   end;
   // testing is performed by some dedicated classes defined in the caller units

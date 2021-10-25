@@ -31,6 +31,7 @@ uses
   mormot.db.raw.sqlite3,
   mormot.db.raw.sqlite3.static,
   mormot.db.proxy,
+  mormot.orm.base,
   mormot.orm.core,
   mormot.orm.storage,
   mormot.orm.sql,
@@ -186,7 +187,7 @@ begin
     exit; // should be called once
   fExternalModel := TOrmModel.Create([TOrmPeopleExt, TOrmOnlyBlob, TOrmTestJoin,
     TOrmASource, TOrmADest, TOrmADests, TOrmPeople, TOrmMyHistory]);
-  ReplaceParamsByNames(ToUtf8(StringOfChar('?', 200)), sql);
+  ReplaceParamsByNames(RawUtf8OfChar('?', 200), sql);
   CheckHash(sql, $AD27D1E0, 'excludes :IF :OF');
 end;
 
@@ -459,7 +460,7 @@ begin
             R.FillPrepare(fPeopleData);
             if not CheckFailed(R.FillContext <> nil) then
             begin
-              Client.BatchStart(TOrmPeople, 5000);
+              Client.BatchStart(TOrmPeople);
               n := 0;
               while R.FillOne do
               begin
@@ -489,7 +490,7 @@ begin
             end;
             for i := 0 to high(ids) do
             begin
-              Client.BatchStart(TOrmPeople);
+              Client.BatchStart(TOrmPeople, {autotrans=}0);
               Client.BatchDelete(ids[i]);
               Check(Client.BatchSend(res) = HTTP_SUCCESS);
               Check(length(res) = 1);
@@ -816,12 +817,12 @@ begin
           Client2.Server.Server.CreateMissingTables;
 
           Check(Client2.Client.TransactionBegin(TOrmPeople));
-          Check(Client2.Client.BatchStart(TOrmPeople));
+          Check(Client2.Client.BatchStart(TOrmPeople, {autotrans=}0));
           Check(Client2.Client.BatchSend(Res) = 200, 'Void batch');
           Check(Res = nil);
           Client2.Client.Commit;
           Check(Client2.Client.TransactionBegin(TOrmPeople));
-          Check(Client2.Client.BatchStart(TOrmPeople));
+          Check(Client2.Client.BatchStart(TOrmPeople, {autotrans=}0));
           while R.FillOne do
           begin
             Check(R.ID <> 0);
@@ -1051,7 +1052,7 @@ begin
           if RInt.IDValue > 100 then
           begin
             if aExternalClient.Client.BatchCount = 0 then
-              aExternalClient.Client.BatchStart(TOrmPeopleExt, 5000);
+              aExternalClient.Client.BatchStart(TOrmPeopleExt);
             aExternalClient.Client.BatchAdd(RExt, true);
           end
           else
@@ -1118,7 +1119,7 @@ begin
             if i > 4000 then
             begin
               if aExternalClient.Client.BatchCount = 0 then
-                aExternalClient.Client.BatchStart(TOrmPeopleExt, 10000);
+                aExternalClient.Client.BatchStart(TOrmPeopleExt);
               Check(aExternalClient.Client.BatchUpdate(RExt) >= 0,
                 'BatchUpdate 1/100 rows');
             end
@@ -1179,14 +1180,16 @@ begin
             Check(RExt.CreatedAt <= Updated);
             if i mod 100 = 0 then
             begin
-              Check(RExt.YearOfBirth = RExt.YearOfDeath, 'Update');
-              Check(RExt.LastChange >= Updated);
+              Check(RExt.YearOfBirth = RExt.YearOfDeath, 'Update1');
+              CheckUtf8(RExt.LastChange >= Updated, 'LastChange1 %>=%',
+                [RExt.LastChange, Updated]);
             end
             else
             begin
-              Check(RExt.YearOfBirth <> RExt.YearOfDeath, 'Update');
+              Check(RExt.YearOfBirth <> RExt.YearOfDeath, 'Update2');
               Check(RExt.LastChange >= Start);
-              Check(RExt.LastChange <= Updated);
+              CheckUtf8(RExt.LastChange <= Updated, 'LastChange2 %<=%',
+                [RExt.LastChange, Updated]);
             end;
           end;
         end;
@@ -1211,7 +1214,7 @@ begin
         end;
         for i := 0 to high(ids) do
         begin
-          aExternalClient.Client.BatchStart(TOrmPeopleExt);
+          aExternalClient.Client.BatchStart(TOrmPeopleExt, {autotrans=}0);
           aExternalClient.Client.BatchDelete(ids[i]);
           Check(aExternalClient.Client.BatchSend(BatchID) = HTTP_SUCCESS);
           Check(length(BatchID) = 1);

@@ -259,8 +259,8 @@ type
   end;
 
 
-{$ifndef PUREMORMOT2}
 // backward compatibility types redirections
+{$ifndef PUREMORMOT2}
 
 type
   TODBCConnectionProperties = TSqlDBOdbcConnectionProperties;
@@ -282,17 +282,17 @@ uses
 
 procedure TSqlDBOdbcConnection.Connect;
 const
-  DBMS_NAMES: array[0..8] of PAnsiChar = (
+  DBMS_NAMES: array[0..9] of PAnsiChar = (
     'ORACLE', 'MICROSOFT SQL', 'ACCESS', 'MYSQL', 'SQLITE',
-    'FIREBIRD', 'INTERBASE', 'POSTGRE', 'INFORMIX');
-  DBMS_TYPES: array[-1..high(DBMS_NAMES)] of TSqlDBDefinition = (
+    'FIREBIRD', 'INTERBASE', 'POSTGRE', 'INFORMIX', nil);
+  DBMS_TYPES: array[-1..high(DBMS_NAMES) - 1] of TSqlDBDefinition = (
     dDefault, dOracle, dMSSQL, dJet, dMySQL, dSQLite,
     dFirebird, dFirebird, dPostgreSql, dInformix);
-  DRIVER_NAMES: array[0..21] of PAnsiChar = (
+  DRIVER_NAMES: array[0..22] of PAnsiChar = (
     'SQLSRV', 'LIBTDSODBC', 'IVSS', 'IVMSSS', 'PBSS', 'DB2CLI', 'LIBDB2',
     'IVDB2', 'PBDB2', 'MSDB2', 'CWBODBC', 'MYODBC', 'SQORA', 'MSORCL', 'PBOR',
-    'IVOR', 'ODBCFB', 'IB', 'SQLITE', 'PSQLODBC', 'NXODBCDRIVER', 'ICLIT09B');
-  DRIVER_TYPES: array[-1..high(DRIVER_NAMES)] of TSqlDBDefinition = (
+    'IVOR', 'ODBCFB', 'IB', 'SQLITE', 'PSQLODBC', 'NXODBCDRIVER', 'ICLIT09B', nil);
+  DRIVER_TYPES: array[-1..high(DRIVER_NAMES) - 1] of TSqlDBDefinition = (
     dDefault, dMSSQL, dMSSQL, dMSSQL, dMSSQL, dMSSQL, dDB2, dDB2, dDB2, dDB2,
     dDB2, dDB2, dMySQL, dOracle, dOracle, dOracle, dOracle, dFirebird,
     dFirebird, dSQLite, dPostgreSQL, dNexusDB, dInformix);
@@ -343,9 +343,9 @@ begin
     GetInfoString(fDbc, SQL_DBMS_NAME, fDbmsName);
     GetInfoString(fDbc, SQL_DBMS_VER, fDbmsVersion);
     // guess DBMS type from driver name or DBMS name
-    fDbms := DRIVER_TYPES[IdemPCharArray(pointer(fDriverName), DRIVER_NAMES)];
+    fDbms := DRIVER_TYPES[IdemPPChar(pointer(fDriverName), @DRIVER_NAMES)];
     if fDbms = dDefault then
-      fDbms := DBMS_TYPES[IdemPCharArray(pointer(fDbmsName), DBMS_NAMES)];
+      fDbms := DBMS_TYPES[IdemPPChar(pointer(fDbmsName), @DBMS_NAMES)];
     if fDbms = dDefault then
       raise EOdbcException.CreateUtf8(
         '%.Connect: unrecognized provider DbmsName=% DriverName=% DbmsVersion=%',
@@ -497,7 +497,9 @@ function ODBCColumnToFieldType(DataType, ColumnPrecision, ColumnScale: integer):
 begin
   // ftUnknown, ftNull, ftInt64, ftDouble, ftCurrency, ftDate, ftUtf8, ftBlob
   case DataType of
-    SQL_DECIMAL, SQL_NUMERIC, SQL_FLOAT:
+    SQL_DECIMAL,
+    SQL_NUMERIC,
+    SQL_FLOAT:
       begin
         result := ftDouble;
         if ColumnPrecision = 10 then
@@ -528,9 +530,14 @@ const
   // - text columns to SQL_C_WCHAR (for proper UTF-8 data retrieval)
   // - BLOB columns to SQL_C_BINARY
   ODBC_TYPE_TOC: array[TSqlDBFieldType] of ShortInt = (
-    SQL_C_CHAR, SQL_C_CHAR, SQL_C_CHAR, SQL_C_CHAR, SQL_C_CHAR,
-    SQL_C_TYPE_TIMESTAMP, SQL_C_WCHAR, SQL_C_BINARY);
-   // ftUnknown, ftNull, ftInt64, ftDouble, ftCurrency, ftDate, ftUtf8, ftBlob
+    SQL_C_CHAR,            // ftUnknown
+    SQL_C_CHAR,            // ftNull
+    SQL_C_CHAR,            // ftInt64
+    SQL_C_CHAR,            // ftDouble
+    SQL_C_CHAR,            // ftCurrency
+    SQL_C_TYPE_TIMESTAMP,  // ftDate
+    SQL_C_WCHAR,           // ftUtf8
+    SQL_C_BINARY);         // ftBlob
 
 procedure TSqlDBOdbcStatement.BindColumns;
 var
@@ -615,7 +622,7 @@ begin
   Col.ColumnDataSize := Indicator;
   if Status <> SQL_SUCCESS then
     if Status = SQL_SUCCESS_WITH_INFO then
-      if Col.ColumnType in FIXEDLENGTH_SqlDBFIELDTYPE then
+      if Col.ColumnType in FIXEDLENGTH_SQLDBFIELDTYPE then
         Status := SQL_SUCCESS
       else // allow rounding problem
       if IsTruncated then
@@ -640,7 +647,8 @@ begin
       CheckStatus;
   if Indicator >= 0 then
     case Status of
-      SQL_SUCCESS, SQL_NO_DATA:
+      SQL_SUCCESS,
+      SQL_NO_DATA:
         Col.ColumnDataState := colDataFilled;
     else
       RaiseError;
@@ -650,7 +658,7 @@ begin
       SQL_NULL_DATA:
         Col.ColumnDataState := colNull;
       SQL_NO_TOTAL:
-        if Col.ColumnType in FIXEDLENGTH_SqlDBFIELDTYPE then
+        if Col.ColumnType in FIXEDLENGTH_SQLDBFIELDTYPE then
           Col.ColumnDataState := colDataFilled
         else
           raise EOdbcException.CreateUtf8('%.GetCol: [%] column has no size', [self,
@@ -691,7 +699,8 @@ begin
   case R of
     SQL_NO_DATA:
       result := false; // no more results
-    SQL_SUCCESS, SQL_SUCCESS_WITH_INFO:
+    SQL_SUCCESS,
+    SQL_SUCCESS_WITH_INFO:
       result := true; // got next
   else
     begin
@@ -810,7 +819,8 @@ begin
         case ColumnType of
           ftInt64:
             WR.AddNoJsonEscape(Pointer(fColData[col]));  // already as SQL_C_CHAR
-          ftDouble, ftCurrency:
+          ftDouble,
+          ftCurrency:
             WR.AddFloatStr(Pointer(fColData[col]));      // already as SQL_C_CHAR
           ftDate:
             WR.AddNoJsonEscape(@tmp,
@@ -856,13 +866,15 @@ end;
 
 const
   NULWCHAR: WideChar = #0;
+  ODBC_IOTYPE_TO_PARAM: array[TSqlDBParamInOutType] of ShortInt = (
+    SQL_PARAM_INPUT,          // paramIn
+    SQL_PARAM_OUTPUT,         // paramOut
+    SQL_PARAM_INPUT_OUTPUT);  // paramInOut
+
+  IDList_type:  PWideChar = 'IDList';
+  StrList_type: PWideChar = 'StrList';
 
 procedure TSqlDBOdbcStatement.ExecutePrepared;
-const
-  ODBC_IOTYPE_TO_PARAM: array[TSqlDBParamInOutType] of ShortInt = (
-    SQL_PARAM_INPUT, SQL_PARAM_OUTPUT, SQL_PARAM_INPUT_OUTPUT);
-  IDList_type: WideString = 'IDList';
-  StrList_type: WideString = 'StrList';
 
   function CType2SQL(CDataType: integer): integer;
   begin
@@ -965,7 +977,7 @@ begin
                 '%.ExecutePrepared: Unsupported array parameter type #%',
                 [self, p + 1]);
             end;
-            BufferSize := Length(WideString(ParameterValue)) * SizeOf(WideChar);
+            BufferSize := StrLenW(ParameterValue) * SizeOf(WideChar);
             StrLen_or_Ind[p] := Length(VArray);
           end
           else
@@ -985,7 +997,8 @@ begin
               ftDouble:
                 begin
                   CValueType := SQL_C_DOUBLE;
-                  if (fDbms = dMSSQL) and (VInOut=paramIn) and
+                  if (fDbms = dMSSQL) and
+                     (VInOut = paramIn) and
                      (unaligned(PDouble(@VInt64)^) > -1) and
                      (unaligned(PDouble(@VInt64)^) < 1) then
                   begin
@@ -1056,8 +1069,8 @@ retry:            VData := CurrentAnsiConvert.Utf8ToAnsi(VData);
                 ParameterValue := pointer(VData);
               BufferSize := length(VData);
               if CValueType = SQL_C_CHAR then
-                inc(BufferSize)
-              else // include last #0
+                inc(BufferSize) // include last #0
+              else
               if CValueType = SQL_C_WCHAR then
                 BufferSize := BufferSize shr 1;
             end
@@ -1252,7 +1265,8 @@ begin
     case status of
       SQL_NO_DATA:
         exit;
-      SQL_SUCCESS, SQL_SUCCESS_WITH_INFO:
+      SQL_SUCCESS,
+      SQL_SUCCESS_WITH_INFO:
         begin
           // ignore WITH_INFO messages
           fCurrentRow := sav + 1;
@@ -1340,8 +1354,10 @@ begin
           F.ColumnLength := stmt.ColumnInt(6);
           F.ColumnScale := stmt.ColumnInt(8);
           F.ColumnPrecision := stmt.ColumnInt(9);
-          F.ColumnType := ODBCColumnToFieldType(datatype, F.ColumnPrecision, F.ColumnScale);
-          F.ColumnIndexed := (fDbms in [dFirebird, dDB2]) and IsRowID(pointer(F.ColumnName));
+          F.ColumnType := ODBCColumnToFieldType(
+            datatype, F.ColumnPrecision, F.ColumnScale);
+          F.ColumnIndexed := (fDbms in [dFirebird, dDB2]) and
+                             IsRowID(pointer(F.ColumnName));
           // ID UNIQUE field create an implicit index
           FA.Add(F);
         until not stmt.Step;
@@ -1355,8 +1371,8 @@ begin
       stmt := TSqlDBOdbcStatement.Create(MainConnection);
       try
         stmt.AllocStatement;
-        status := ODBC.StatisticsA(stmt.fStatement, nil, 0, pointer(schema), SQL_NTS,
-          pointer(table), SQL_NTS, SQL_INDEX_ALL, SQL_QUICK);
+        status := ODBC.StatisticsA(stmt.fStatement, nil, 0, pointer(schema),
+          SQL_NTS, pointer(table), SQL_NTS, SQL_INDEX_ALL, SQL_QUICK);
         if status <> SQL_SUCCESS then // e.g. driver does not support schema
           status := ODBC.StatisticsA(stmt.fStatement, nil, 0, nil, 0,
             pointer(table), SQL_NTS, SQL_INDEX_ALL, SQL_QUICK);
@@ -1529,9 +1545,9 @@ begin
   if Parameters <> nil then
     exit; // already retrieved directly from engine
   SqlSplitProcedureName(aProcName, schem, pack, proc);
-  proc := UpperCase(proc);
-  pack := UpperCase(pack);
-  schem := UpperCase(schem);
+  UpperCaseSelf(proc);
+  UpperCaseSelf(pack);
+  UpperCaseSelf(schem);
   if pack <> '' then
     proc := pack + '.' + proc;
   try

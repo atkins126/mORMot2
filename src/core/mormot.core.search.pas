@@ -1,4 +1,4 @@
-/// Framework Core Text Search Engines
+/// Framework Core Text, Binary and Time Search Engines
 // - this unit is a part of the Open Source Synopse mORMot framework 2,
 // licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 unit mormot.core.search;
@@ -357,7 +357,6 @@ const
   // - for a more detailled soundex, use 4 bits resolution, which will
   // compute up to 7 soundex chars in a cardinal (that's our choice)
   SOUNDEX_BITS = 4;
-
 
 
 { ****************** Versatile Expression Search Engine }
@@ -1300,22 +1299,23 @@ type
   // - is able to retrieve accurate information from the Windows registry,
   // or from a binary compressed file on other platforms (which should have been
   // saved from a Windows system first)
+  // - for Linux/POSIX our mORMot 2 repository supplies a ready-to-use
+  // ! {$R mormot.tz.res}
   // - each time zone will be idendified by its TzId string, as defined by
   // Microsoft for its Windows Operating system
+  // - note that each instance is thread-safe
   TSynTimeZone = class
   protected
+    fLock: TRTLCriticalSection;
     fZone: TTimeZoneDataDynArray;
+    fZoneCount: integer;
     fZones: TDynArrayHashed;
     fLastZone: TTimeZoneID;
     fLastIndex: integer;
     fIds: TStringList;
     fDisplays: TStringList;
+    function FindZoneIndex(const TzId: TTimeZoneID): PtrInt;
   public
-    /// will retrieve the default shared TSynTimeZone instance
-    // - locally created via the CreateDefault constructor
-    // - this is the usual entry point for time zone process, calling e.g.
-    // $ aLocalTime := TSynTimeZone.Default.NowToLocal(aTimeZoneID);
-    class function Default: TSynTimeZone;
     /// initialize the internal storage
     // - but no data is available, until Load* methods are called
     constructor Create;
@@ -1327,6 +1327,10 @@ type
     constructor CreateDefault(dummycpp: integer = 0);
     /// finalize the instance
     destructor Destroy; override;
+    /// will retrieve the default shared TSynTimeZone instance
+    // - locally created via the CreateDefault constructor
+    // - see also the NowToLocal/LocalToUtc/UtcToLocal global functions
+    class function Default: TSynTimeZone;
     {$ifdef OSWINDOWS}
     /// read time zone information from the Windows registry
     procedure LoadFromRegistry;
@@ -1345,6 +1349,8 @@ type
     // then compile the resource as expected, with a brcc32 .rc entry:
     // ! TSynTimeZone 10 "TSynTimeZone.data"
     // - you can specify a library (dll) resource instance handle, if needed
+    // - for Linux/POSIX our mORMot 2 repository supplies a ready-to-use
+    // ! {$R mormot.tz.res}
     procedure LoadFromResource(Instance: THandle = 0);
     /// write then time zone information into a compressed file
     // - if no file name is supplied, a ExecutableName.tz file would be created
@@ -1353,7 +1359,7 @@ type
     function SaveToBuffer: RawByteString;
     /// retrieve the time bias (in minutes) for a given date/time on a TzId
     function GetBiasForDateTime(const Value: TDateTime; const TzId: TTimeZoneID;
-      out Bias: integer; out HaveDaylight: boolean): boolean;
+      out Bias: integer; out HaveDaylight: boolean; ValueIsUtc: boolean = false): boolean;
     /// retrieve the display text corresponding to a TzId
     // - returns '' if the supplied TzId is not recognized
     function GetDisplay(const TzId: TTimeZoneID): RawUtf8;
@@ -1382,6 +1388,33 @@ type
     function Displays: TStrings;
   end;
 
+/// retrieve the time bias (in minutes) for a given date/time on a TzId
+// - will use a global shared thread-safe TSynTimeZone instance for the request
+function GetBiasForDateTime(const Value: TDateTime; const TzId: TTimeZoneID;
+  out Bias: integer; out HaveDaylight: boolean; ValueIsUtc: boolean = false): boolean;
+
+/// retrieve the display text corresponding to a TzId
+// - returns '' if the supplied TzId is not recognized
+// - will use a global shared thread-safe TSynTimeZone instance for the request
+function GetDisplay(const TzId: TTimeZoneID): RawUtf8;
+
+/// compute the UTC date/time corrected for a given TzId
+// - will use a global shared thread-safe TSynTimeZone instance for the request
+function UtcToLocal(const UtcDateTime: TDateTime; const TzId: TTimeZoneID): TDateTime;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// compute the current date/time corrected for a given TzId
+// - will use a global shared thread-safe TSynTimeZone instance for the request
+function NowToLocal(const TzId: TTimeZoneID): TDateTime;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// compute the UTC date/time for a given local TzId value
+// - by definition, a local time may correspond to two UTC times, during the
+// time biais period, so the returned value is informative only, and any
+// stored value should be following UTC
+// - will use a global shared thread-safe TSynTimeZone instance for the request
+function LocalToUtc(const LocalDateTime: TDateTime; const TzID: TTimeZoneID): TDateTime;
+  {$ifdef HASINLINE} inline; {$endif}
 
 
 implementation
@@ -3171,7 +3204,6 @@ begin
   if next <> nil then
     next^ := FindNextUtf8WordBegin(U);
 end;
-
 
 
 { ****************** Versatile Expression Search Engine }
@@ -5113,9 +5145,12 @@ var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(value);
-  JsonDecode(tmp.buf, ['MaxLength', 'Utf8Length'], @V);
+  JsonDecode(tmp.buf, [
+    'MaxLength', // 0
+    'Utf8Length' // 1
+    ], @V);
   fMaxLength := GetCardinalDef(V[0].value, 0);
-  fUtf8Length := V[1].Idem('1') or V[1].Idem('true');
+  fUtf8Length := V[1].ToBoolean;
   tmp.Done;
 end;
 
@@ -5191,11 +5226,16 @@ var
 begin
   inherited;
   tmp.Init(value);
-  JsonDecode(tmp.buf, ['AllowedTLD', 'ForbiddenTLD', 'ForbiddenDomains', 'AnyTLD'], @V);
+  JsonDecode(tmp.buf, [
+    'AllowedTLD',        // 0
+    'ForbiddenTLD',      // 1
+    'ForbiddenDomains',  // 2
+    'AnyTLD'             // 3
+    ], @V);
   LowerCaseCopy(V[0].value, V[0].ValueLen, fAllowedTLD);
   LowerCaseCopy(V[1].value, V[1].ValueLen, fForbiddenTLD);
   LowerCaseCopy(V[2].value, V[2].ValueLen, fForbiddenDomains);
-  AnyTLD := V[3].Idem('1') or V[3].Idem('true');
+  AnyTLD := V[3].ToBoolean;
   tmp.Done;
 end;
 
@@ -5351,13 +5391,27 @@ end;
 
 procedure TSynValidateText.SetParameters(const value: RawUtf8);
 var
-  V: array[0..high(TSynValidateTextProps) + 1] of TValuePUtf8Char;
+  V: array[0..high(TSynValidateTextProps) + {Utf8Length} 1] of TValuePUtf8Char;
   i: integer;
   tmp: TSynTempBuffer;
 const
   DEFAULT: TSynValidateTextProps = (
-    1, maxInt, 0, 0, 0, 0, 0, 0, maxInt, maxInt, maxInt, maxInt, maxInt,
-    maxInt, maxInt, maxInt);
+    1,       //  MinLength
+    maxInt,  //  MaxLength
+    0,       //  MinAlphaCount
+    0,       //  MinDigitCount
+    0,       //  MinPunctCount
+    0,       //  MinLowerCount
+    0,       //  MinUpperCount
+    0,       //  MinSpaceCount
+    maxInt,  //  MaxLeftTrimCount
+    maxInt,  //  MaxRightTrimCount
+    maxInt,  //  MaxAlphaCount
+    maxInt,  //  MaxDigitCount
+    maxInt,  //  MaxPunctCount
+    maxInt,  //  MaxLowerCount
+    maxInt,  //  MaxUpperCount
+    maxInt); //  MaxSpaceCount
 begin
   if (MinLength = 0) and
      (MaxLength = 0) then  // if not previously set
@@ -5367,15 +5421,28 @@ begin
     exit;
   tmp.Init(value);
   try
-    JsonDecode(tmp.buf, ['MinLength', 'MaxLength', 'MinAlphaCount',
-      'MinDigitCount', 'MinPunctCount', 'MinLowerCount', 'MinUpperCount',
-      'MinSpaceCount', 'MaxLeftTrimCount', 'MaxRightTrimCount', 'MaxAlphaCount',
-      'MaxDigitCount', 'MaxPunctCount', 'MaxLowerCount', 'MaxUpperCount',
-      'MaxSpaceCount', 'Utf8Length'], @V);
+    JsonDecode(tmp.buf, [
+      'MinLength',
+      'MaxLength',
+      'MinAlphaCount',
+      'MinDigitCount',
+      'MinPunctCount',
+      'MinLowerCount',
+      'MinUpperCount',
+      'MinSpaceCount',
+      'MaxLeftTrimCount',
+      'MaxRightTrimCount',
+      'MaxAlphaCount',
+      'MaxDigitCount',
+      'MaxPunctCount',
+      'MaxLowerCount',
+      'MaxUpperCount',
+      'MaxSpaceCount',
+      'Utf8Length'], @V);
     for i := 0 to high(fProps) do
       fProps[i] := GetCardinalDef(V[i].value, fProps[i]);
     with V[high(V)] do
-      fUtf8Length := Idem('1') or Idem('true');
+      fUtf8Length := ToBoolean;
   finally
     tmp.Done;
   end;
@@ -5387,11 +5454,26 @@ end;
 procedure TSynValidatePassWord.SetParameters(const value: RawUtf8);
 const
   DEFAULT: TSynValidateTextProps = (
-    5, 20, 1, 1, 1, 1, 1, 0, maxInt, maxInt, maxInt, maxInt,
-    maxInt, maxInt, maxInt, 0);
+    5,        //  MinLength
+    20,       //  MaxLength
+    1,        //  MinAlphaCount
+    1,        //  MinDigitCount
+    1,        //  MinPunctCount
+    1,        //  MinLowerCount
+    1,        //  MinUpperCount
+    0,        //  MinSpaceCount
+    maxInt,   //  MaxLeftTrimCount
+    maxInt,   //  MaxRightTrimCount
+    maxInt,   //  MaxAlphaCount
+    maxInt,   //  MaxDigitCount
+    maxInt,   //  MaxPunctCount
+    maxInt,   //  MaxLowerCount
+    maxInt,   //  MaxUpperCount
+    0);       //  MaxSpaceCount
 begin
   // set default values for validating a strong password
   fProps := DEFAULT;
+  fUtf8Length := false;
   // read custom parameters
   inherited;
 end;
@@ -5433,17 +5515,19 @@ end;
 
 constructor TSynTimeZone.Create;
 begin
-  fZones.InitSpecific(TypeInfo(TTimeZoneDataDynArray), fZone, ptRawUtf8);
+  fZones.InitSpecific(TypeInfo(TTimeZoneDataDynArray),
+    fZone, ptRawUtf8, @fZoneCount);
+  InitializeCriticalSection(fLock);
 end;
 
-constructor TSynTimeZone.CreateDefault;
+constructor TSynTimeZone.CreateDefault(dummycpp: integer);
 begin
   Create;
   {$ifdef OSWINDOWS}
   LoadFromRegistry;
   {$else}
   LoadFromFile;
-  if fZones.Count = 0 then
+  if fZoneCount = 0 then
     LoadFromResource; // if no .tz file is available, try if bound to executable
   {$endif OSWINDOWS}
 end;
@@ -5453,6 +5537,7 @@ begin
   inherited Destroy;
   fIds.Free;
   fDisplays.Free;
+  DeleteCriticalSection(fLock);
 end;
 
 var
@@ -5475,7 +5560,12 @@ end;
 
 function TSynTimeZone.SaveToBuffer: RawByteString;
 begin
-  result := AlgoSynLZ.Compress(fZones.SaveTo);
+  EnterCriticalSection(fLock);
+  try
+    result := AlgoSynLZ.Compress(fZones.SaveTo);
+  finally
+    LeaveCriticalSection(fLock);
+  end;
 end;
 
 procedure TSynTimeZone.SaveToFile(const FileName: TFileName);
@@ -5491,10 +5581,17 @@ end;
 
 procedure TSynTimeZone.LoadFromBuffer(const Buffer: RawByteString);
 begin
-  fZones.LoadFromBinary(AlgoSynLZ.Decompress(Buffer));
-  fZones.ReHash;
-  FreeAndNil(fIds);
-  FreeAndNil(fDisplays);
+  if Buffer = '' then
+   exit;
+  EnterCriticalSection(fLock);
+  try
+    fZones.LoadFromBinary(AlgoSynLZ.Decompress(Buffer));
+    fZones.ReHash;
+    FreeAndNil(fIds);
+    FreeAndNil(fDisplays);
+  finally
+    LeaveCriticalSection(fLock);
+  end;
 end;
 
 procedure TSynTimeZone.LoadFromFile(const FileName: TFileName);
@@ -5575,14 +5672,40 @@ end;
 
 {$endif OSWINDOWS}
 
+function TSynTimeZone.FindZoneIndex(const TzId: TTimeZoneID): PtrInt;
+begin
+  if (self = nil) or
+     (TzId = '') then
+    result := -1
+  else
+  begin
+    EnterCriticalSection(fLock);
+    {$ifdef HASFASTTRYFINALLY} // make a huge performance difference
+    try
+    {$endif HASFASTTRYFINALLY}
+      if TzId = fLastZone then
+        result := fLastIndex
+      else
+      begin
+        result := fZones.FindHashed(TzId);
+        fLastZone := TzId;
+        flastIndex := result;
+      end;
+    {$ifdef HASFASTTRYFINALLY}
+    finally
+    {$endif HASFASTTRYFINALLY}
+      LeaveCriticalSection(fLock);
+    {$ifdef HASFASTTRYFINALLY}
+    end;
+    {$endif HASFASTTRYFINALLY}
+  end;
+end;
+
 function TSynTimeZone.GetDisplay(const TzId: TTimeZoneID): RawUtf8;
 var
-  ndx: integer;
+  ndx: PtrInt;
 begin
-  if self = nil then
-    ndx := -1
-  else
-    ndx := fZones.FindHashed(TzId);
+  ndx := FindZoneIndex(TzId);
   if ndx < 0 then
     if TzId = 'UTC' then // e.g. on XP
       result := TzId
@@ -5593,24 +5716,15 @@ begin
 end;
 
 function TSynTimeZone.GetBiasForDateTime(const Value: TDateTime;
-  const TzId: TTimeZoneID; out Bias: integer; out HaveDaylight: boolean): boolean;
+  const TzId: TTimeZoneID; out Bias: integer; out HaveDaylight: boolean;
+  ValueIsUtc: boolean): boolean;
 var
-  ndx: integer;
+  ndx: PtrInt;
   d: TSynSystemTime;
   tzi: PTimeZoneInfo;
   std, dlt: TDateTime;
 begin
-  if (self = nil) or
-     (TzId = '') then
-    ndx := -1
-  else if TzId = fLastZone then
-    ndx := fLastIndex
-  else
-  begin
-    ndx := fZones.FindHashed(TzId);
-    fLastZone := TzId;
-    flastIndex := ndx;
-  end;
+  ndx := FindZoneIndex(TzId);
   if ndx < 0 then
   begin
     Bias := 0;
@@ -5630,6 +5744,13 @@ begin
     HaveDaylight := true;
     std := tzi.change_time_std.EncodeForTimeChange(d.Year);
     dlt := tzi.change_time_dlt.EncodeForTimeChange(d.Year);
+    if ValueIsUtc then
+    begin
+      // Std shifts by the DST bias to convert to UTC
+      std := ((std * MinsPerDay) + tzi.Bias + tzi.bias_dlt) / MinsPerDay;
+      // Dst shifts by the STD bias
+      dlt := ((dlt * MinsPerDay) + tzi.Bias + tzi.bias_std) / MinsPerDay;
+    end;
     if std < dlt then
       if (std <= Value) and
          (Value < dlt) then
@@ -5656,7 +5777,7 @@ begin
     result := UtcDateTime
   else
   begin
-    GetBiasForDateTime(UtcDateTime, TzId, Bias, HaveDaylight);
+    GetBiasForDateTime(UtcDateTime, TzId, Bias, HaveDaylight, {fromutc=}true);
     result := ((UtcDateTime * MinsPerDay) - Bias) / MinsPerDay;
   end;
 end;
@@ -5708,5 +5829,38 @@ begin
   result := fDisplays;
 end;
 
+
+function GetBiasForDateTime(const Value: TDateTime; const TzId: TTimeZoneID;
+  out Bias: integer; out HaveDaylight: boolean; ValueIsUtc: boolean): boolean;
+begin
+  result := TSynTimeZone.Default.
+    GetBiasForDateTime(Value, TzId, Bias, HaveDaylight, ValueIsUtc);
+end;
+
+function GetDisplay(const TzId: TTimeZoneID): RawUtf8;
+begin
+  result := TSynTimeZone.Default.GetDisplay(TzId);
+end;
+
+function UtcToLocal(const UtcDateTime: TDateTime; const TzId: TTimeZoneID): TDateTime;
+begin
+  result := TSynTimeZone.Default.UtcToLocal(UtcDateTime, TzId);
+end;
+
+function NowToLocal(const TzId: TTimeZoneID): TDateTime;
+begin
+  result := TSynTimeZone.Default.NowToLocal(TzId);
+end;
+
+function LocalToUtc(const LocalDateTime: TDateTime; const TzID: TTimeZoneID): TDateTime;
+begin
+  result := TSynTimeZone.Default.LocalToUtc(LocalDateTime, TzId);
+end;
+
+
+initialization
+
+finalization
+  FreeAndNilSafe(SharedSynTimeZone);
 
 end.

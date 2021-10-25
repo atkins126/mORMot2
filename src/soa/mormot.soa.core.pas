@@ -37,6 +37,7 @@ uses
   mormot.core.json,
   mormot.core.threads,
   mormot.core.interfaces,
+  mormot.orm.base,
   mormot.orm.core;
 
 
@@ -69,14 +70,14 @@ type
     property Method: RawUtf8
       read fMethod write fMethod;
     /// the input parameters, as a JSON document
-    // - will be stored in JSON_OPTIONS_FAST_EXTENDED format, i.e. with
+    // - will be stored in JSON_FAST_EXTENDED format, i.e. with
     // shortened field names, for smaller TEXT storage
     // - content may be searched using JsonGet/JsonHas SQL functions on a
     // SQlite3 storage, or with direct document query under MongoDB/PostgreSQL
     property Input: variant
       read fInput write fInput;
     /// the output parameters, as a JSON document, including result: for a function
-    // - will be stored in JSON_OPTIONS_FAST_EXTENDED format, i.e. with
+    // - will be stored in JSON_FAST_EXTENDED format, i.e. with
     // shortened field names, for smaller TEXT storage
     // - content may be searched using JsonGet/JsonHas SQL functions on a
     // SQlite3 storage, or with direct document query under MongoDB/PostgreSQL
@@ -631,7 +632,7 @@ type
       IncludePseudoMethods: boolean; out bits: TServiceContainerInterfaceMethodBits);
     function GetMethodName(ListInterfaceMethodIndex: integer): RawUtf8;
     procedure CheckInterface(const aInterfaces: array of PRttiInfo);
-    function AddServiceInternal(aService: TServiceFactory): integer;
+    function AddServiceInternal(aService: TServiceFactory): PtrInt;
     function TryResolve(aInterface: PRttiInfo; out Obj): boolean; override;
     /// retrieve a service provider from its URI
     function GetService(const aUri: RawUtf8): TServiceFactory;
@@ -972,11 +973,11 @@ begin
     if IDAsHexa then
       InitObject([
         'ID', Int64ToHex(fID),
-        MethodName, Method], JSON_OPTIONS_FAST)
+        MethodName, Method], JSON_FAST)
     else
       InitObject([
         'ID', fID,
-        MethodName, Method], JSON_OPTIONS_FAST);
+        MethodName, Method], JSON_FAST);
   m := Service.FindMethodIndex(Method);
   if m >= 0 then
     Service.Methods[m].ArgsAsDocVariantObject(
@@ -1310,7 +1311,7 @@ begin
     result := length(fInterface);
 end;
 
-function TServiceContainer.AddServiceInternal(aService: TServiceFactory): integer;
+function TServiceContainer.AddServiceInternal(aService: TServiceFactory): PtrInt;
 var
   MethodIndex: integer;
 
@@ -1343,7 +1344,7 @@ begin
   // add associated methods - first SERVICE_PSEUDO_METHOD[], then from interface
   aUri := aUri + '.';
   MethodIndex := 0;
-  for internal := Low(TServiceInternalMethod) to High(TServiceInternalMethod) do
+  for internal := Low(internal) to High(internal) do
     AddOne(aUri + SERVICE_PSEUDO_METHOD[internal]);
   for m := 0 to aService.fInterface.MethodsCount - 1 do
     AddOne(aUri + aService.fInterface.Methods[m].Uri);
@@ -1392,7 +1393,7 @@ end;
 procedure TServiceContainer.SetInterfaceMethodBits(MethodNamesCsv: PUtf8Char;
   IncludePseudoMethods: boolean; out bits: TServiceContainerInterfaceMethodBits);
 var
-  i, n: PtrInt;
+  i, n, m: PtrInt;
   method: RawUtf8;
 begin
   FillCharFast(bits, SizeOf(bits), 0);
@@ -1401,7 +1402,7 @@ begin
     raise EServiceException.CreateUtf8('%.SetInterfaceMethodBits: n=%', [self, n]);
   if IncludePseudoMethods then
     for i := 0 to n - 1 do
-      if fInterfaceMethod[i].InterfaceMethodIndex < SERVICE_PSEUDO_METHOD_COUNT then
+      if fInterfaceMethod[i].InterfaceMethodIndex < Length(SERVICE_PSEUDO_METHOD) then
         include(bits, i);
   while MethodNamesCsv <> nil do
   begin
@@ -1410,10 +1411,12 @@ begin
     begin
       for i := 0 to n - 1 do
         with fInterfaceMethod[i] do // O(n) search is fast enough here
-          if (InterfaceMethodIndex >= SERVICE_PSEUDO_METHOD_COUNT) and
-             IdemPropNameU(method, InterfaceService.fInterface.Methods[
-              InterfaceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT].Uri) then
+        begin
+          m := InterfaceMethodIndex - Length(SERVICE_PSEUDO_METHOD);
+          if (m >= 0) and
+             IdemPropNameU(method, InterfaceService.fInterface.Methods[m].Uri) then
             include(bits, i);
+        end;
     end
     else
     begin

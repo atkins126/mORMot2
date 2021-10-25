@@ -48,6 +48,7 @@ uses
   mormot.crypt.secure,
   mormot.core.log,
   mormot.core.interfaces,
+  mormot.orm.base,
   mormot.orm.core, // for TOrm and IRestOrm
   mormot.soa.core,
   mormot.db.core;
@@ -261,8 +262,8 @@ type
   end;
 
 
-{$ifndef PUREMORMOT2}
 // backward compatibility types redirections
+{$ifndef PUREMORMOT2}
 
   TSqlRestServerUriContextCommand = TRestServerUriContextCommand;
   TSqlRestServerAcquireMode = TRestServerAcquireMode;
@@ -857,8 +858,8 @@ type
   {$endif PUREMORMOT2}
   end;
 
-{$ifndef PUREMORMOT2}
 // backward compatibility types redirections
+{$ifndef PUREMORMOT2}
 
 type
   TSqlRest = TRest;
@@ -965,7 +966,7 @@ type
       const FieldName: RawUtf8; Options: TOrmInitializeTableOptions); override;
     /// corresponding TOrmAccessRights for this authentication group
     // - content is converted into/from text format via AccessRight DB property
-    // (so it will be not fixed e.g. by the binary TOrmFieldTables layout, i.e.
+    // (so it will be not fixed e.g. by the binary TOrmTableBits layout, i.e.
     // the MAX_TABLES constant value)
     property SqlAccessRights: TOrmAccessRights
       read GetOrmAccessRights write SetOrmAccessRights;
@@ -1082,7 +1083,7 @@ type
   // - llfSecured is set if the transmission is encrypted or in-process,
   // using e.g. HTTPS/TLS or our proprietary AES/ECDHE WebSockets algorithms
   // - llfWebsockets communication was made using WebSockets
-  // - match THttpServerRequestFlag from mormot.net.http.pas
+  // - should exactly match THttpServerRequestFlag from mormot.net.http.pas
   TRestUriParamsLowLevelFlag = (
     llfHttps,
     llfSecured,
@@ -1141,6 +1142,12 @@ type
     LowLevelConnectionID: Int64;
     /// low-level properties of the current connection
     LowLevelConnectionFlags: TRestUriParamsLowLevelFlags;
+    /// pre-parsed Remote IP of the current connection
+    LowLevelRemoteIP: RawUtf8;
+    /// pre-parsed "Bearer" HTTP header value
+    LowLevelBearerToken: RawUtf8;
+    /// pre-parsed "User-Agent" HTTP header value
+    LowLevelUserAgent: RawUtf8;
     /// initialize the non RawUtf8 values
     procedure Init; overload;
     /// initialize the input values
@@ -1183,8 +1190,8 @@ type
     out HeadRespFree: TLibraryRequestFree; var Head: PUtf8Char; var HeadLen: cardinal;
     out Resp: PUtf8Char; out RespLen, State: cardinal): cardinal; cdecl;
 
-{$ifndef PUREMORMOT2}
 // backward compatibility types redirections
+{$ifndef PUREMORMOT2}
 
 type
   TSqlAuthUser = TAuthUser;
@@ -1465,8 +1472,8 @@ type
   TOrmTableDeletedClass = class of TOrmTableDeleted;
 
 
-{$ifndef PUREMORMOT2}
 // backward compatibility types redirections
+{$ifndef PUREMORMOT2}
 
 type
   TSqlRestThread = TRestThread;
@@ -1477,7 +1484,7 @@ type
 implementation
 
 uses
-  mormot.orm.rest; // avoid circular references
+  mormot.orm.rest; // to avoid circular references
 
 
 { ************ Customize REST Execution }
@@ -1525,7 +1532,7 @@ type
     fList: TInterfacedObjectMultiList;
     fCallBackUnRegisterNeeded: boolean;
     function FakeInvoke(const aMethod: TInterfaceMethod; const aParams: RawUtf8;
-      aResult, aErrorMsg: PRawUtf8; aClientDrivenID: PCardinal;
+      aResult, aErrorMsg: PRawUtf8; aFakeID: PInterfacedObjectFakeID;
       aServiceCustomAnswer: PServiceCustomAnswer): boolean; override;
   public
     constructor Create(aRest: TRest; aFactory: TInterfaceFactory;
@@ -1675,14 +1682,14 @@ end;
 
 function TInterfacedObjectMulti.FakeInvoke(const aMethod: TInterfaceMethod;
   const aParams: RawUtf8; aResult, aErrorMsg: PRawUtf8;
-  aClientDrivenID: PCardinal; aServiceCustomAnswer: PServiceCustomAnswer): boolean;
+  aFakeID: PInterfacedObjectFakeID; aServiceCustomAnswer: PServiceCustomAnswer): boolean;
 var
   i: Ptrint;
   exec: TInterfaceMethodExecute;
   instances: TPointerDynArray;
 begin
-  result := inherited FakeInvoke(aMethod, aParams, aResult, aErrorMsg,
-    aClientDrivenID, aServiceCustomAnswer);
+  result := inherited FakeInvoke(
+    aMethod, aParams, aResult, aErrorMsg, aFakeID, aServiceCustomAnswer);
   if not result or
      (fList.fDestCount = 0) then
     exit;
@@ -1843,9 +1850,9 @@ begin
     // abort any (unlikely) pending TRestBatch
     fOrm.AsyncBatchStop(nil);
   for cmd := Low(cmd) to high(cmd) do
-    FreeAndNil(fAcquireExecution[cmd]); // calls fOrmInstance.OnEndThread
-  FreeAndNil(fServices);
-  FreeAndNil(fRun); // after fAcquireExecution+fServices
+    FreeAndNilSafe(fAcquireExecution[cmd]); // calls fOrmInstance.OnEndThread
+  FreeAndNilSafe(fServices);
+  FreeAndNilSafe(fRun); // after fAcquireExecution+fServices
   if fOrmInstance <> nil then
     if (fOrm = nil) or
        (fOrmInstance.RefCount <> 1) then
@@ -1858,12 +1865,12 @@ begin
   if (fModel <> nil) and
      (fModel.Owner = self) then
     // make sure we are the Owner (TRestStorage has fModel<>nil e.g.)
-    FreeAndNil(fModel);
+    FreeAndNilSafe(fModel);
   // fPrivateGarbageCollector should be released in last position
   if fPrivateGarbageCollector <> nil then
   begin
     fPrivateGarbageCollector.ClearFromLast;
-    FreeAndNil(fPrivateGarbageCollector);
+    FreeAndNilSafe(fPrivateGarbageCollector);
   end;
   // call TObject.Destroy
   inherited Destroy;
@@ -2694,7 +2701,7 @@ type
     fDest: IInvokable;
     fOnResult: TOnAsyncRedirectResult;
     function FakeInvoke(const aMethod: TInterfaceMethod; const aParams: RawUtf8;
-      aResult, aErrorMsg: PRawUtf8; aClientDrivenID: PCardinal;
+      aResult, aErrorMsg: PRawUtf8; aFakeID: PInterfacedObjectFakeID;
       aServiceCustomAnswer: PServiceCustomAnswer): boolean; override;
   public
     constructor Create(aTimer: TRestBackgroundTimer; aFactory:
@@ -2726,13 +2733,14 @@ end;
 
 function TInterfacedObjectAsync.FakeInvoke(const aMethod: TInterfaceMethod;
   const aParams: RawUtf8; aResult, aErrorMsg: PRawUtf8;
-  aClientDrivenID: PCardinal; aServiceCustomAnswer: PServiceCustomAnswer): boolean;
+  aFakeID: PInterfacedObjectFakeID;
+  aServiceCustomAnswer: PServiceCustomAnswer): boolean;
 var
   msg: RawUtf8;
   call: TInterfacedObjectAsyncCall;
 begin
-  result := inherited FakeInvoke(aMethod, aParams, aResult, aErrorMsg,
-    aClientDrivenID, aServiceCustomAnswer);
+  result := inherited FakeInvoke(
+    aMethod, aParams, aResult, aErrorMsg, aFakeID, aServiceCustomAnswer);
   if not result then
     exit;
   call.Method := @aMethod;
@@ -2921,7 +2929,7 @@ end;
 function TRestBackgroundTimer.AsyncBatchStop(Table: TOrmClass): boolean;
 var
   b: PtrInt;
-  timeout: Int64;
+  start, tix, timeout: Int64;
   {%H-}log: ISynLog;
 begin
   result := false;
@@ -2929,7 +2937,8 @@ begin
      (fBackgroundBatch = nil) then
     exit;
   log := fRest.fLogClass.Enter('AsyncBatchStop(%)', [Table], self);
-  timeout := mormot.core.os.GetTickCount64 + 5000;
+  start := mormot.core.os.GetTickCount64;
+  timeout := start + 5000;
   if Table = nil then
   begin
     // as called from TRest.Destroy
@@ -2949,17 +2958,16 @@ begin
        not EnQueue(AsyncBatchExecute, 'free@' + Table.SqlTableName, true) then
       exit;
     repeat
-      SleepHiRes(1); // wait for all pending rows to be sent
+      tix := SleepStep(start); // wait for all pending rows to be sent
     until (fBackgroundBatch[b] = nil) or
-          (mormot.core.os.GetTickCount64 > timeout);
-    if ObjArrayCount(fBackgroundBatch) > 0 then
-      result := true
-    else
-    begin
-      result := Disable(AsyncBatchExecute);
-      if result then
-        ObjArrayClear(fBackgroundBatch, true);
-    end;
+          (tix > timeout);
+    result := true;
+    for b := 0 to length(fBackgroundBatch) - 1 do
+      if fBackgroundBatch[b] <> nil then
+        exit; // there are still some pending batchs
+    result := Disable(AsyncBatchExecute);
+    if result then
+      ObjArrayClear(fBackgroundBatch, true); // all batches are done
   end;
 end;
 
@@ -3233,9 +3241,9 @@ begin
         UserID := Server.Add(G, true);
         G.Ident := 'Guest';
         A.AllowRemoteExecute := [];
-        FillcharFast(A.POST, SizeOf(TOrmFieldTables), 0); // R/O access
-        FillcharFast(A.PUT, SizeOf(TOrmFieldTables), 0);
-        FillcharFast(A.DELETE, SizeOf(TOrmFieldTables), 0);
+        FillcharFast(A.POST, SizeOf(TOrmTableBits), 0); // R/O access
+        FillcharFast(A.PUT, SizeOf(TOrmTableBits), 0);
+        FillcharFast(A.DELETE, SizeOf(TOrmTableBits), 0);
         G.SqlAccessRights := A;
         G.SessionTimeout := AuthGuestGroupDefaultTimeout;
         Server.Add(G, true);
@@ -3408,17 +3416,8 @@ begin
 end;
 
 procedure TRestThread.WaitForNotExecuting(maxMS: integer);
-var
-  endtix: Int64;
 begin
-  if fExecuting then
-  begin
-    endtix := mormot.core.os.GetTickCount64 + maxMS;
-    repeat
-      SleepHiRes(1); // wait for InternalExecute to finish
-    until not fExecuting or
-              (mormot.core.os.GetTickCount64 >= endtix);
-  end;
+  SleepHiRes(maxMS, fExecuting, {termvalue=}false);
 end;
 
 destructor TRestThread.Destroy;
@@ -3437,7 +3436,7 @@ begin
       fRest.fLogFamily := nil; // no log after fRest.EndCurrentThread(self)
       fRest.fLogClass := nil;
     end;
-    FreeAndNil(fRest);
+    FreeAndNilSafe(fRest);
   end;
   fSafe.Done;
   fEvent.Free;
@@ -3517,7 +3516,7 @@ end;
 destructor TRestRunThreads.Destroy;
 begin
   inherited Destroy;
-  FreeAndNil(fBackgroundTimer);
+  FreeAndNilSafe(fBackgroundTimer);
 end;
 
 function TRestRunThreads.EnsureBackgroundTimerExists: TRestBackgroundTimer;
@@ -3866,7 +3865,7 @@ begin
   begin
     result := fHistoryTable.Create;
     if not HistoryGet(Index, Event, Timestamp, result) then
-      FreeAndNil(result);
+      FreeAndNilSafe(result);
   end;
 end;
 
@@ -4008,7 +4007,7 @@ begin
   finally
     fHistoryUncompressed := '';
     fHistoryUncompressedOffset := nil;
-    FreeAndNil(fHistoryAdd);
+    FreeAndNilSafe(fHistoryAdd);
     fHistoryAddOffset := nil;
     fHistoryAddCount := 0;
   end;

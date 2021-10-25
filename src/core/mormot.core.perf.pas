@@ -1062,6 +1062,20 @@ type
 function ToText(const aIntelCPUFeatures: TIntelCpuFeatures;
   const Sep: RawUtf8 = ','): RawUtf8; overload;
 
+/// convert ARM 32-bit CPU features as plain CSV text
+function ToText(const aArm32CPUFeatures: TArm32HwCaps;
+  const Sep: RawUtf8 = ','): RawUtf8; overload;
+
+/// convert ARM 64-bit CPU features as plain CSV text
+function ToText(const aArm64CPUFeatures: TArm64HwCaps;
+  const Sep: RawUtf8 = ','): RawUtf8; overload;
+
+/// contains the current CPU Features as space-separated text
+// - computed from CpuFeatures set for Intel/AMD or ARM 32-bit/64-bit
+// - contains the Flags: or Features: value of Linux /proc/cpuinfo otherwise
+// (less accurate than our CpuFeatures set on older kernel)
+var
+  CpuFeaturesText: RawUtf8;
 
 /// retrieve low-level information about all mounted disk partitions as text
 // - returns e.g. under Linux
@@ -1071,11 +1085,6 @@ function ToText(const aIntelCPUFeatures: TIntelCpuFeatures;
 // - includes the free space if withfreespace is true - e.g. '(80 GB / 115 GB)'
 function GetDiskPartitionsText(nocache: boolean = false;
   withfreespace: boolean = false; nospace: boolean = false): RawUtf8;
-
-{$ifdef CPUINTEL}
-/// returns the global Intel/AMD CpuFeatures flags as ready-to-be-displayed text
-function CpuFeaturesText: RawUtf8;
-{$endif CPUINTEL}
 
 /// returns a JSON object containing basic information about the computer
 // - including Host, User, CPU, OS, freemem, freedisk...
@@ -1221,7 +1230,10 @@ begin
   begin
     if fStart <> 0 then
       Pause;
-    MicroSecToString(fTime div Count, result);
+    if Int64(fTime) <= 0 then
+      result := '0'
+    else
+      NanoSecToString((fTime * 1000) div Count, result);
   end;
 end;
 
@@ -1229,7 +1241,8 @@ function TPrecisionTimer.PerSec(const Count: QWord): QWord;
 begin
   if fStart <> 0 then
     Pause;
-  if fTime <= 0 then
+  if (Count = 0) or
+     (Int64(fTime) <= 0) then
     // avoid negative or div per 0 in case of incorrect Start/Stop sequence
     result := 0
   else
@@ -1646,7 +1659,7 @@ end;
 
 function TSynMonitor.ComputeDetails: variant;
 begin
-  _Json(ComputeDetailsJson, result{%H-}, JSON_OPTIONS_FAST);
+  _Json(ComputeDetailsJson, result{%H-}, JSON_FAST);
 end;
 
 
@@ -2118,10 +2131,12 @@ var
   t, n, p: PtrInt;
   track: PSynMonitorUsageTrack;
   data, val: TDocVariantData;
+  g: PDocVariantData;
 begin
   if Gran < low(fValues) then
     raise ESynException.CreateUtf8('%.Save(%) unexpected', [self, ToText(Gran)^]);
   TDocVariant.IsOfTypeOrNewFast(fValues[Gran]);
+  g := _Safe(fValues[Gran]);
   for t := 0 to length(fTracked) - 1 do
   begin
     track := @fTracked[t];
@@ -2132,7 +2147,7 @@ begin
         if not IsZero(Values[Gran]) then
         begin
           // save non void values
-          val.InitArrayFrom(Values[Gran], JSON_OPTIONS_FAST);
+          val.InitArrayFrom(Values[Gran], JSON_FAST);
           data.AddValue(Name, Variant(val));
           val.Clear;
           // handle local cache
@@ -2149,10 +2164,10 @@ begin
                 Values[Gran][ID.GetTime(pred(Gran), true)];
           end;
         end;
-    _Safe(fValues[Gran]).AddOrUpdateValue(track^.Name, variant(data));
+    g^.AddOrUpdateValue(track^.Name, variant(data));
     data.Clear;
   end;
-  _Safe(fValues[Gran]).SortByName;
+  g^.SortByName;
   ID.Truncate(Gran);
   if not SaveDB(ID.Value, fValues[Gran], Gran) then
     fLog.SynLog.Log(sllWarning, 'Save(ID=%=%,%) failed',
@@ -2175,7 +2190,7 @@ begin
           with Track.Props[p] do
             if val^.GetAsDocVariant(Name, int) and
                (int^.Count > 0) and
-               (dvoIsArray in int^.Options) then
+               int^.IsArray then
             begin
               for v := 0 to length(Values[g]) - 1 do
                 if v < int^.Count then
@@ -2337,40 +2352,48 @@ end;
 
 { ************ Operating System Monitoring }
 
-function ToText(const aIntelCPUFeatures: TIntelCpuFeatures;
-  const Sep: RawUtf8): RawUtf8;
+function FeaturesToText(Info: PRttiInfo; const Features;
+  const Sep: RawUtf8; UnderscorePos: integer): RawUtf8;
 var
-  f: TIntelCpuFeature;
+  f, max: integer;
   List: PShortString;
 begin
   result := '';
-  GetEnumType(TypeInfo(TIntelCpuFeature), List);
-  for f := low(f) to high(f) do
+  max := GetEnumType(Info, List);
+  for f := 0 to max do
   begin
-    if (f in aIntelCPUFeatures) and
-       (List^[3] <> '_') then
+    if GetBitPtr(@Features, f) and
+       (List^[UnderscorePos] <> '_') then
     begin
       if result <> '' then
         result := result + Sep;
-      result := result + TrimLeftLowerCaseShort(List);
+      result := result + RawUtf8(copy(List^, UnderscorePos, 20));
     end;
     inc(PByte(List), PByte(List)^ + 1); // next
   end;
 end;
 
-{$ifdef CPUINTEL}
-
-var
-  _CpuFeatures: RawUtf8;
-
-function CpuFeaturesText: RawUtf8;
+function ToText(const aIntelCPUFeatures: TIntelCpuFeatures;
+  const Sep: RawUtf8): RawUtf8;
 begin
-  if _CpuFeatures = '' then
-    _CpuFeatures := LowerCase(ToText(CpuFeatures, ' '));
-  result := _CpuFeatures;
+  result := FeaturesToText(
+    TypeInfo(TIntelCpuFeature), aIntelCPUFeatures, Sep, 3);
 end;
 
-{$endif CPUINTEL}
+function ToText(const aArm32CPUFeatures: TArm32HwCaps;
+  const Sep: RawUtf8): RawUtf8;
+begin
+  result := FeaturesToText(
+    TypeInfo(TArm32HwCaps), aArm32CPUFeatures, Sep, 6);
+end;
+
+function ToText(const aArm64CPUFeatures: TArm64HwCaps;
+  const Sep: RawUtf8): RawUtf8;
+begin
+  result := FeaturesToText(
+    TypeInfo(TArm64HwCaps), aArm64CPUFeatures, Sep, 6);
+end;
+
 
 function SystemInfoJson: RawUtf8;
 var
@@ -2389,11 +2412,11 @@ begin
       'cpu', CpuInfoText,
       'bios', BiosInfoText,
       {$ifdef OSWINDOWS}{$ifdef CPU32}'wow64', IsWow64, {$endif}{$endif OSWINDOWS}
-      {$ifdef CPUINTEL}'cpufeatures', CpuFeaturesText, {$endif}
+      'cpufeatures', CpuFeaturesText,
       'processcpu', cpu,
       'processmem', mem,
       'freemem', free,
-      'disk', GetDiskPartitionsText(false, true)]);
+      'disk', GetDiskPartitionsText({nocache=}false, {withfree=}true)]);
 end;
 
 function GetLastExceptions(Depth: integer): variant;
@@ -3035,8 +3058,20 @@ begin
 end;
 
 
+procedure InitializeUnit;
+begin
+  {$ifdef CPUINTELARM}
+  // CpuFeatures: TIntelCpuFeatures/TArm32HwCaps/TArm64HwCaps
+  CpuFeaturesText := LowerCase(ToText(CpuFeatures, ' '));
+  if CpuFeaturesText = '' then
+  {$endif CPUINTELARM}
+  {$ifdef OSLINUXANDROID}
+  CpuFeaturesText := LowerCase(CpuInfoFeatures); // fallback to /proc/cpuinfo
+  {$endif OSLINUXANDROID}
+end;
 
 initialization
+  InitializeUnit;
 
 finalization
   {$ifdef CPUINTEL}

@@ -696,7 +696,7 @@ var
   payload: TDocVariantData;
 begin
   result := '';
-  payload.InitObject(DataNameValue, JSON_OPTIONS_FAST);
+  payload.InitObject(DataNameValue, JSON_FAST);
   if jrcIssuer in fClaims then
     if Issuer = '' then
       RaiseMissing(jrcIssuer)
@@ -737,8 +737,8 @@ begin
         exit; // not generated, but should be supplied
     end
     else
-      payload.AddValueFromText(JWT_CLAIMS_TEXT[jrcJwtID],
-        fIDGen.ToObfuscated(fIDGen.ComputeNew));
+      payload.AddValue(JWT_CLAIMS_TEXT[jrcJwtID],
+        RawUtf8ToVariant(fIDGen.ToObfuscated(fIDGen.ComputeNew)));
   result := payload.ToJson;
 end;
 
@@ -864,7 +864,9 @@ begin
        (headerlen > 512) then
       exit;
     if not Base64UriToBin(tok, headerlen - 1, temp) or
-       (JsonDecode(temp.buf, ['alg', 'typ'], @head) = nil) or
+       (JsonDecode(temp.buf, ['alg', // 0
+                              'typ'  // 1
+                             ], @head) = nil) or
        not {%H-}head[0].Idem(fAlgorithm) or
        ((head[1].Value <> nil) and
         not head[1].Idem('JWT')) then
@@ -902,9 +904,14 @@ begin
     if P^ <> '{' then
       exit;
     P := GotoNextNotSpace(P + 1);
-    cap := JsonObjectPropCount(P);
-    if cap < 0 then
-      exit;
+    if P^ = '}' then
+      cap := 0
+    else
+    begin
+      cap := JsonObjectPropCount(P); // fast pre-parsing
+      if cap = 0 then
+        exit; // invalid input
+    end;
     requiredclaims := fClaims - excluded;
     if cap > 0 then
       repeat
@@ -944,7 +951,7 @@ begin
                   jrcAudience:
                     if JWT.reg[jrcAudience][1] = '[' then
                     begin
-                      aud.InitJson(JWT.reg[jrcAudience], JSON_OPTIONS_FAST);
+                      aud.InitJson(JWT.reg[jrcAudience], JSON_FAST);
                       if aud.Count = 0 then
                         exit;
                       for j := 0 to aud.Count - 1 do
@@ -984,7 +991,7 @@ begin
         if jrcData in excluded then
           continue; // caller didn't want to fill JWT.data
         include(JWT.claims, jrcData);
-        GetVariantFromJson(V, wasString, value, @JSON_OPTIONS[true],
+        GetVariantFromJsonField(V, wasString, value, @JSON_[mFast],
           joDoubleInData in fOptions, VLen);
         if JWT.data.Count = 0 then
           JWT.data.Capacity := cap;
@@ -1054,11 +1061,16 @@ begin
   begin
     VarClear(PayLoad^);
     temp2.Init(temp.buf, temp.len); // its own copy for in-place parsing
-    PDocVariantData(PayLoad)^.InitJsonInPlace(temp2.buf, JSON_OPTIONS_FAST);
+    PDocVariantData(PayLoad)^.InitJsonInPlace(temp2.buf, JSON_FAST);
     temp2.Done;
   end;
   repeat // avoid try..finally for temp.Done
-    if JsonDecode(temp.buf, ['iss', 'aud', 'exp', 'nbf', 'sub'], @V, true) = nil then
+    if JsonDecode(temp.buf, ['iss', // 0
+                             'aud', // 1
+                             'exp', // 2
+                             'nbf', // 3
+                             'sub'  // 4
+                            ], @V, true) = nil then
       break;
     result := jwtUnexpectedClaim;
     if ((ExpectedSubject <> '') and
@@ -1289,7 +1301,7 @@ var
   hash: TSha256Digest;
 begin
   JWT.result := jwtInvalidSignature;
-  if length(signature) <> sizeof(TEccSignature) then
+  if length(signature) <> SizeOf(TEccSignature) then
     exit;
   sha.Full(pointer(headpayload), length(headpayload), hash);
   if Ecc256r1Verify(fCertificate.Content.Signed.PublicKey, hash, PEccSignature(signature)^) then
@@ -1309,7 +1321,7 @@ begin
   sha.Full(pointer(headpayload), length(headpayload), hash);
   if not Ecc256r1Sign(TEccCertificateSecret(fCertificate).PrivateKey, hash, sign) then
     raise EECCException.CreateUtf8('%.ComputeSignature: ecdsa_sign?', [self]);
-  result := BinToBase64Uri(@sign, sizeof(sign));
+  result := BinToBase64Uri(@sign, SizeOf(sign));
 end;
 
 

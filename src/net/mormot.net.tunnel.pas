@@ -490,8 +490,9 @@ var
 begin
   frame.opcode := focBinary;
   frame.content := [fopAlreadyCompressed]; // it is probably encrypted
+  frame.tix := 0;
   frame.payload := msg;
-  process.Outgoing.Push(frame);
+  process.Outgoing.Push(frame, 0);
 end;
 
 procedure TTunnelRelayServerProtocol.ProcessIncomingFrame(
@@ -554,7 +555,7 @@ begin
         AsynchSend(fReverse, request.payload);
     focConnectionClose:
        if fReverse <> nil then
-         fReverse.Shutdown;
+         fReverse.Shutdown({waitforpong=}true);
   end;
 end;
 

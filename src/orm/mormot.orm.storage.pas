@@ -45,6 +45,7 @@ uses
   mormot.crypt.secure,
   mormot.core.log,
   mormot.core.interfaces,
+  mormot.orm.base,
   mormot.orm.core,
   mormot.orm.rest,
   mormot.orm.client,
@@ -145,9 +146,11 @@ type
 
   /// the WHERE and ORDER BY statements as set by TOrmVirtualTable.Prepare
   // - Where[] and OrderBy[] are fixed sized arrays, for fast and easy code
-  //{$ifdef USERECORDWITHMETHODS}TOrmVirtualTablePrepared = record{$else}
-    TOrmVirtualTablePrepared = object
-  //{$endif USERECORDWITHMETHODS}
+  {$ifdef USERECORDWITHMETHODS}
+  TOrmVirtualTablePrepared = record
+  {$else}
+  TOrmVirtualTablePrepared = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// number of WHERE statement parameters in Where[] array
     WhereCount: integer;
@@ -448,7 +451,7 @@ type
     // - should move cursor to first row of matching data
     // - should return false on low-level database error (but true in case of a
     // valid call, even if HasData will return false, i.e. no data match)
-    function Search(const Prepared: TOrmVirtualTablePrepared): boolean; virtual; abstract;
+    function Search(var Prepared: TOrmVirtualTablePrepared): boolean; virtual; abstract;
     /// called after Search() to check if there is data to be retrieved
     // - should return false if reached the end of matching data
     function HasData: boolean; virtual; abstract;
@@ -479,7 +482,7 @@ type
     function Next: boolean; override;
     /// called to begin a search in the virtual table
     // - this no-op version will mark EOF, i.e. fCurrent=0 and fMax=-1
-    function Search(const Prepared: TOrmVirtualTablePrepared): boolean; override;
+    function Search(var Prepared: TOrmVirtualTablePrepared): boolean; override;
   end;
 
 
@@ -629,6 +632,11 @@ type
       const SentData: RawUtf8): TID; override;
     function EngineUpdate(TableModelIndex: integer; ID: TID;
       const SentData: RawUtf8): boolean; override;
+    /// internal method called by TRestServer.Batch() to process SIMPLE input
+    // - overriden for optimized multi-insert of the supplied JSON array values
+    function InternalBatchDirect(Encoding: TRestBatchEncoding;
+      RunTableIndex: integer; const Fields: TFieldBits;
+      Sent: PUtf8Char): TID; override;
     /// manual Add of a TOrm
     // - returns the ID created on success
     // - returns -1 on failure (not UNIQUE field value e.g.)
@@ -648,11 +656,11 @@ type
     function GetOne(aID: TID): TOrm; virtual; abstract;
     /// manual Update of a TOrm field values
     // - Rec.ID specifies which record is to be updated
-    // - will update all properties, including BLOB fields and such
+    // - will update bit-wise Fields specified properties
     // - returns TRUE on success, FALSE on any error (e.g. invalid Rec.ID)
     // - method available since a TRestStorage instance may be created
     // stand-alone, i.e. without any associated Model/TRestOrmServer
-    function UpdateOne(Rec: TOrm;
+    function UpdateOne(Rec: TOrm; const Fields: TFieldBits;
       const SentData: RawUtf8): boolean; overload; virtual; abstract;
     /// manual Update of a TOrm field values from an array of TSqlVar
     // - will update all properties, including BLOB fields and such
@@ -674,8 +682,6 @@ type
     fPropInfo: TOrmPropInfo;
     fCaseInsensitive: boolean;
     fLastFindHashCode: cardinal;
-    function EventCompare(const A,B): integer; // match TOnDynArraySortCompare
-    function EventHash(const Elem): cardinal;  // match TOnDynArrayHashOne
   public
     /// initialize a hash for a record array field
     // - aField maps the "stored AS_UNIQUE" published property
@@ -685,6 +691,7 @@ type
     function Find(Rec: TOrm): integer;
     /// called by TRestStorageInMemory.AddOne after a precious Find()
     function AddedAfterFind(Rec: TOrm): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     /// the corresponding field RTTI
     property PropInfo: TOrmPropInfo
       read fPropInfo;
@@ -728,10 +735,12 @@ type
     fUnSortedID: boolean;
     fSearchRec: TOrm; // temporary record to store the searched value
     fBasicUpperSqlSelect: array[boolean] of RawUtf8;
-    fUnique: array of TRestStorageInMemoryUnique;
+    fUnique, fUniquePerField: array of TRestStorageInMemoryUnique;
     fMaxID: TID;
     fValues: TDynArrayHashed; // hashed by ID
-    function UniqueFieldsUpdateOK(aRec: TOrm; aUpdateIndex: integer): boolean;
+    fTempBuffer: PTextWriterStackBuffer;
+    function UniqueFieldsUpdateOK(aRec: TOrm; aUpdateIndex: integer;
+      aFields: PFieldBits): boolean;
     function GetItem(Index: integer): TOrm;
       {$ifdef HASINLINE}inline;{$endif}
     function GetID(Index: integer): TID;
@@ -857,11 +866,11 @@ type
     function GetOne(aID: TID): TOrm; override;
     /// manual Update of a TOrm field values
     // - Rec.ID specifies which record is to be updated
-    // - will update all properties, including BLOB fields and such
+    // - will update bit-wise Fields specified properties
     // - returns TRUE on success, FALSE on any error (e.g. invalid Rec.ID)
     // - method available since a TRestStorage instance may be created
     // stand-alone, i.e. without any associated Model/TRestOrmServer
-    function UpdateOne(Rec: TOrm;
+    function UpdateOne(Rec: TOrm; const Fields: TFieldBits;
       const SentData: RawUtf8): boolean; override;
     /// manual Update of a TOrm field values from a TSqlVar array
     // - will update all properties, including BLOB fields and such
@@ -962,18 +971,16 @@ type
     // function over each stored item to implement < <= <> > >= search
     // - warning: this method should be protected via StorageLock/StorageUnlock
     function FindWhere(WhereField: integer; const WhereValue: RawUtf8;
-      WhereOp: TSelectStatementOperator;
-      const OnFind: TOnFindWhereEqual; Dest: pointer;
-      FoundLimit, FoundOffset: integer;
+      WhereOp: TSelectStatementOperator; const OnFind: TOnFindWhereEqual;
+      Dest: pointer; FoundLimit, FoundOffset: integer;
       CaseInsensitive: boolean = true): PtrInt; overload;
     /// comparison lookup of the WhereValue in a field, specified by name
     // - this method won't use any index but brute force using the comparison
     // function over each stored item to implement < <= <> > >= search
     // - warning: this method should be protected via StorageLock/StorageUnlock
     function FindWhere(const WhereFieldName, WhereValue: RawUtf8;
-      WhereOp: TSelectStatementOperator;
-      const OnFind: TOnFindWhereEqual; Dest: pointer;
-      FoundLimit, FoundOffset: integer;
+      WhereOp: TSelectStatementOperator; const OnFind: TOnFindWhereEqual;
+      Dest: pointer; FoundLimit, FoundOffset: integer;
       CaseInsensitive: boolean = true): PtrInt; overload;
     /// search the maximum value of a given column
     // - will only handle integer/Int64 kind of column
@@ -983,20 +990,15 @@ type
     procedure ForEach(WillModifyContent: boolean;
       const OnEachProcess: TOnFindWhereEqual; Dest: pointer);
     /// low-level TOnFindWhereEqual callback doing nothing
-    class procedure DoNothingEvent(aDest: pointer;
-      aRec: TOrm; aIndex: integer);
+    class procedure DoNothingEvent(aDest: pointer; aRec: TOrm; aIndex: integer);
     /// low-level TOnFindWhereEqual callback making PPointer(aDest)^ := aRec
-    class procedure DoInstanceEvent(aDest: pointer;
-      aRec: TOrm; aIndex: integer);
+    class procedure DoInstanceEvent(aDest: pointer; aRec: TOrm; aIndex: integer);
     /// low-level TOnFindWhereEqual callback making PInteger(aDest)^ := aIndex
-    class procedure DoIndexEvent(aDest: pointer;
-      aRec: TOrm; aIndex: integer);
+    class procedure DoIndexEvent(aDest: pointer; aRec: TOrm; aIndex: integer);
     /// low-level TOnFindWhereEqual callback making PPointer(aDest)^ := aRec.CreateCopy
-    class procedure DoCopyEvent(aDest: pointer;
-      aRec: TOrm; aIndex: integer);
+    class procedure DoCopyEvent(aDest: pointer; aRec: TOrm; aIndex: integer);
     /// low-level TOnFindWhereEqual callback calling TSynList(aDest).Add(aRec)
-    class procedure DoAddToListEvent(aDest: pointer;
-      aRec: TOrm; aIndex: integer);
+    class procedure DoAddToListEvent(aDest: pointer; aRec: TOrm; aIndex: integer);
     /// read-only access to the TOrm values, storing the data
     // - this returns directly the item class instance stored in memory: if you
     // change the content, it will affect the internal data - so for instance
@@ -1095,7 +1097,7 @@ type
     // valid call, even if HasData will return false, i.e. no data match)
     // - only handled WHERE clause is for "ID = value" - other request will
     // return all records in ID order, and let the database engine handle it
-    function Search(const Prepared: TOrmVirtualTablePrepared): boolean; override;
+    function Search(var Prepared: TOrmVirtualTablePrepared): boolean; override;
     /// called to retrieve a column value of the current data row into a TSqlVar
     // - if aColumn=-1, will return the row ID as varInt64 into aResult
     // - will return false in case of an error, true on success
@@ -1205,7 +1207,7 @@ type
   TOrmVirtualTableCursorLog = class(TOrmVirtualTableCursorIndex)
   public
     /// called to begin a search in the virtual table
-    function Search(const Prepared: TOrmVirtualTablePrepared): boolean; override;
+    function Search(var Prepared: TOrmVirtualTablePrepared): boolean; override;
     /// called to retrieve a column value of the current data row as TSqlVar
     function Column(aColumn: integer; var aResult: TSqlVar): boolean; override;
   end;
@@ -1326,7 +1328,7 @@ type
       const SetFieldName, SetValue, WhereFieldName, WhereValue: RawUtf8): boolean; override;
     function EngineUpdateFieldIncrement(TableModelIndex: integer; ID: TID;
       const FieldName: RawUtf8; Increment: Int64): boolean; override;
-    function InternalBatchStart(Method: TUriMethod;
+    function InternalBatchStart(Encoding: TRestBatchEncoding;
       BatchOptions: TRestBatchOptions): boolean; override;
     procedure InternalBatchStop; override;
   public
@@ -1389,6 +1391,10 @@ type
 
 
 function ToText(t: TOrmVirtualTableTransaction): PShortString; overload;
+
+/// extract the ID from first value of the encPostHexID input JSON
+// - and move Sent^ to a fake '[' with the first real simple parameter
+function BatchExtractSimpleID(var Sent: PUtf8Char): TID;
 
 
 implementation
@@ -1563,8 +1569,12 @@ begin
   begin
     ClassToText(self, result);
     system.delete(result, 1, LEN[IdemPCharArray(pointer(result),
-      ['TSQLVIRTUALTABLE', 'TSQLVIRTUAL', 'TSQL',
-       'TORMVIRTUALTABLE', 'TORMVIRTUAL', 'TORM'])]);
+      ['TSQLVIRTUALTABLE',  // 0
+       'TSQLVIRTUAL',       // 1
+       'TSQL',              // 2
+       'TORMVIRTUALTABLE',  // 3
+       'TORMVIRTUAL',       // 4
+       'TORM'])]);          // 5
   end;
 end;
 
@@ -1681,7 +1691,7 @@ begin
 end;
 
 function TOrmVirtualTableCursorIndex.Search(
-  const Prepared: TOrmVirtualTablePrepared): boolean;
+  var Prepared: TOrmVirtualTablePrepared): boolean;
 begin
   fCurrent := 0; // mark EOF by default
   fMax := -1;
@@ -1886,13 +1896,77 @@ begin
   end;
 end;
 
+function BatchExtractSimpleID(var Sent: PUtf8Char): TID;
+begin
+  if Sent^ = '[' then
+    inc(Sent);
+  result := GetInt64(GetJsonField(Sent, Sent));
+  if Sent = nil then
+  begin
+    result := 0; // clearly invalid input
+    exit;
+  end;
+  dec(Sent);
+  Sent^ := '['; // ignore the first field (stored in fBatch.ID)
+end;
+
+function TRestStorageTOrm.InternalBatchDirect(Encoding: TRestBatchEncoding;
+  RunTableIndex: integer; const Fields: TFieldBits; Sent: PUtf8Char): TID;
+var
+  rec: TOrm;
+  id: TID;
+begin
+  result := 0; // unsupported
+  if not (Encoding in BATCH_DIRECT) then
+    exit;
+  if Sent = nil then
+  begin
+    // called first with Sent=nil
+    result := 1; // supported
+    exit;
+  end;
+  // called a second time with the proper JSON array
+  if Encoding in [encPutHexID, encPostHexID] then
+  begin
+    id := BatchExtractSimpleID(Sent);
+    if (Sent = nil) or
+       (id <= 0) then
+      exit; // invalid input
+  end
+  else
+    id := 0;
+  // same logic than EngineAdd/EngineUpdate but with no memory alloc
+  rec := fStoredClass.Create;
+  try
+    if rec.FillFromArray(Fields, Sent) then
+    begin
+      rec.IDValue := id;
+      StorageLock(true, 'InternalBatchDirect');
+      try
+        if Encoding = encPutHexID then
+          if UpdateOne(rec, Fields, '') then // no SentData
+            result := HTTP_SUCCESS
+          else
+            result := HTTP_NOTFOUND
+        else
+          result := AddOne(rec, id > 0, ''); // no SentData
+      finally
+        StorageUnLock;
+      end;
+    end;
+  finally
+    if (Encoding = encPutHexID) or
+       (result <= 0) then
+      rec.Free; // on AddOne success, rec is owned by fValue: TObjectList
+  end;
+end;
+
 function TRestStorageTOrm.EngineUpdate(TableModelIndex: integer;
   ID: TID; const SentData: RawUtf8): boolean;
 var
   rec: TOrm;
+  fields: TFieldBits; // to handle partial fields update
 begin
-  // this implementation won't handle partial fields update (e.g. BatchUpdate
-  // after FillPrepare) - but TRestStorageInMemory.EngineUpdate will
   if (ID <= 0) or
      (TableModelIndex <> fStoredClassProps.TableIndex) then
   begin
@@ -1903,9 +1977,9 @@ begin
   try
     rec := fStoredClass.Create;
     try
-      rec.FillFrom(SentData);
+      rec.FillFrom(SentData, @fields);
       rec.IDValue := ID;
-      result := UpdateOne(rec, SentData);
+      result := UpdateOne(rec, fields, SentData);
     finally
       rec.Free;
     end;
@@ -1924,18 +1998,19 @@ begin
     result := false; // mark error
     exit;
   end;
-  StorageLock(true, 'UpdateOne');
+  rec := fStoredClass.Create;
   try
-    rec := fStoredClass.Create;
+    rec.SetFieldSqlVars(Values);
+    rec.IDValue := ID;
+    StorageLock(true, 'UpdateOne');
     try
-      rec.SetFieldSqlVars(Values);
-      rec.IDValue := ID;
-      result := UpdateOne(rec, rec.GetJsonValues(true, False, ooUpdate));
+      result := UpdateOne(rec, rec.Orm.CopiableFieldsBits,
+        rec.GetJsonValues(true, False, ooUpdate));
     finally
-      rec.Free;
+      StorageUnLock;
     end;
   finally
-    StorageUnLock;
+    rec.Free;
   end;
 end;
 
@@ -1944,22 +2019,24 @@ end;
 
 constructor TRestStorageInMemoryUnique.Create(aOwner: TRestStorageInMemory;
   aField: TOrmPropInfo);
+var
+  hash: TOnDynArrayHashOne;
+  cmp: TOnDynArraySortCompare;
 begin
   fOwner := aOwner;
   fPropInfo := aField;
   fCaseInsensitive := not (aBinaryCollation in aField.Attributes);
-  fHasher.Init(@fOwner.fValues, nil, EventHash, nil, nil, EventCompare, false);
-end;
-
-function TRestStorageInMemoryUnique.EventCompare(const A, B): integer;
-begin
-  result := fPropInfo.CompareValue(
-    TOrm(A), TOrm(B), fCaseInsensitive);
-end;
-
-function TRestStorageInMemoryUnique.EventHash(const Elem): cardinal;
-begin
-  result := fPropInfo.GetHash(TOrm(Elem), fCaseInsensitive);
+  if fCaseInsensitive then
+  begin
+    hash := fPropInfo.EventHashI;
+    cmp := fPropInfo.EventCompareI;
+  end
+  else
+  begin
+    hash := fPropInfo.EventHash;
+    cmp := fPropInfo.EventCompare;
+  end;
+  fHasher.Init(@fOwner.fValues, nil, hash, nil, nil, cmp, false);
 end;
 
 function TRestStorageInMemoryUnique.Find(Rec: TOrm): integer;
@@ -1984,7 +2061,8 @@ end;
 constructor TRestStorageInMemory.Create(aClass: TOrmClass;
   aServer: TRestOrmServer; const aFileName: TFileName; aBinaryFile: boolean);
 var
-  f: PtrInt;
+  f, n: PtrInt;
+  fields: TOrmPropInfoList;
 begin
   inherited Create(aClass, aServer);
   if (fStoredClassProps <> nil) and
@@ -2007,14 +2085,21 @@ begin
       fBasicUpperSqlSelect[true] :=
         StringReplaceAll(fBasicUpperSqlSelect[false], ' ROWID,', ' ID,');
     end;
-  if not IsZero(fIsUnique) then
-    with fStoredClassRecordProps.Fields do
-    begin
-      SetLength(fUnique, Count);
-      for f := 0 to Count - 1 do
-        if byte(f) in fIsUnique then
-          fUnique[f] := TRestStorageInMemoryUnique.Create(self, List[f]);
-    end;
+  fields := fStoredClassRecordProps.Fields;
+  n := GetBitsCount(fIsUnique, fields.Count);
+  if n > 0 then
+  begin
+    SetLength(fUnique, n);
+    SetLength(fUniquePerField, fields.Count);
+    n := 0;
+    for f := 0 to fields.Count - 1 do
+      if byte(f) in fIsUnique then
+      begin
+        fUnique[n] := TRestStorageInMemoryUnique.Create(self, fields.List[f]);
+        fUniquePerField[f] := fUnique[n];
+        inc(n);
+      end;
+  end;
   ReloadFromFile;
 end;
 
@@ -2024,6 +2109,8 @@ begin
   ObjArrayClear(fUnique);
   fValues.Clear; // to free all stored TOrm instances
   fSearchRec.Free;
+  if fTempBuffer <> nil then
+    FreeMem(fTempBuffer);
   inherited Destroy;
 end;
 
@@ -2049,17 +2136,16 @@ begin
      (Rec = nil) then
     exit;
   // ensure no duplicated ID or unique field
-  for f := 0 to high(fUnique) do
-    if byte(f) in fIsUnique then
+  for f := 0 to length(fUnique) - 1 do
+  begin
+    ndx := fUnique[f].Find(Rec);
+    if ndx >= 0 then
     begin
-      ndx := fUnique[f].Find(Rec);
-      if ndx >= 0 then
-      begin
-        InternalLog('AddOne: non unique %.% on % %',
-          [fStoredClass, fUnique[f].PropInfo.Name, fValue[ndx], Rec], sllDB);
-        exit;
-      end;
+      InternalLog('AddOne: non unique %.% on % %',
+        [fStoredClass, fUnique[f].PropInfo.Name, fValue[ndx], Rec], sllDB);
+      exit;
     end;
+  end;
   if ForceID then
   begin
     if Rec.IDValue <= 0 then
@@ -2082,11 +2168,10 @@ begin
     Rec.IDValue := fMaxID;
   end;
   // update internal hash tables and add to internal list
-  for f := 0 to high(fUnique) do
-    if byte(f) in fIsUnique then
-      if not fUnique[f].AddedAfterFind(Rec) then // paranoid
-        raise ERestStorage.CreateUtf8('%.AddOne on %.%',
-          [self, Rec, fUnique[f].PropInfo.Name]);
+  for f := 0 to length(fUnique) - 1 do
+    if not fUnique[f].AddedAfterFind(Rec) then // paranoid
+      raise ERestStorage.CreateUtf8('%.AddOne on %.%',
+        [self, Rec, fUnique[f].PropInfo.Name]);
   ndx := fValues.FindHashedForAdding(Rec, added);
   if added then
     fValue[ndx] := Rec
@@ -2094,29 +2179,31 @@ begin
     raise ERestStorage.CreateUtf8('%.AddOne % failed', [self, Rec]); // paranoid
   result := Rec.IDValue; // success
   fModified := true;
-  if Owner <> nil then
-    Owner.InternalUpdateEvent(oeAdd, fStoredClassProps.TableIndex,
-      result, SentData, nil);
+  if (Owner <> nil) then
+    Owner.InternalUpdateEvent(
+      oeAdd, fStoredClassProps.TableIndex, result, SentData, nil, Rec);
 end;
 
 function TRestStorageInMemory.UniqueFieldsUpdateOK(aRec: TOrm;
-  aUpdateIndex: integer): boolean;
+  aUpdateIndex: integer; aFields: PFieldBits): boolean;
 var
   f, ndx: PtrInt;
 begin
   result := false;
-  for f := 0 to high(fUnique) do
-    if byte(f) in fIsUnique then
-    begin
-      ndx := fUnique[f].Find(aRec);
-      if (ndx >= 0) and
-         (ndx <> aUpdateIndex) then
+  for f := 0 to length(fUnique) - 1 do
+    with fUnique[f] do
+      if (aFields = nil) or
+          (byte(PropInfo.PropertyIndex) in aFields^) then
       begin
-        InternalLog('UniqueFieldsUpdateOK failed on % for %',
-          [fUnique[f].PropInfo.Name, aRec], sllDB);
-        exit;
+        ndx := Find(aRec);
+        if (ndx >= 0) and
+           (ndx <> aUpdateIndex) then
+        begin
+          InternalLog('UniqueFieldsUpdateOK failed on % for %',
+            [PropInfo.Name, aRec], sllDB);
+          exit;
+        end;
       end;
-    end;
   result := true;
 end;
 
@@ -2203,12 +2290,11 @@ begin
     if Owner <> nil then
       // notify BEFORE deletion
       Owner.InternalUpdateEvent(oeDelete, fStoredClassProps.TableIndex,
-        rec.IDValue, '', nil);
-    for f := 0 to high(fUnique) do
-      if byte(f) in fIsUnique then
-        if fUnique[f].Hasher.FindBeforeDelete(@rec) < aIndex then
-          raise ERestStorage.CreateUtf8('%.DeleteOne(%) failed on %',
-            [self, aIndex, fUnique[f].PropInfo.Name]);
+        rec.IDValue, '', nil, nil);
+    for f := 0 to length(fUnique) - 1 do
+      if fUnique[f].Hasher.FindBeforeDelete(@rec) < aIndex then
+        raise ERestStorage.CreateUtf8('%.DeleteOne(%) failed on %',
+          [self, aIndex, fUnique[f].PropInfo.Name]);
     if fValues.FindHashedAndDelete(rec) <> aIndex then
       raise ERestStorage.CreateUtf8('%.DeleteOne(%) failed', [self, aIndex]);
     if fMaxID = 0 then
@@ -2447,7 +2533,7 @@ begin
     begin
       // omit first FoundOffset rows
       P.SetValueVar(fSearchRec, WhereValue, false); // private copy for comparison
-      i := fUnique[WhereField].Find(fSearchRec);
+      i := fUniquePerField[WhereField].Find(fSearchRec);
       if i >= 0 then
       begin
         if Assigned(OnFind) then
@@ -2460,12 +2546,14 @@ begin
   // full scan optimized search for a specified value
   found := 0;
   if P.InheritsFrom(TOrmPropInfoRttiInt32) and
-     (TOrmPropInfoRttiInt32(P).PropRtti.Kind in [rkInteger, rkEnumeration, rkSet]) then
+     (TOrmPropInfoRttiInt32(P).PropRtti.Kind in
+        [rkInteger, rkEnumeration, rkSet]) then
   begin
     // search 8/16/32-bit properties
     v := GetInt64(pointer(WhereValue), err); // 64-bit for cardinal
     if err <> 0 then
       exit;
+    vp := pointer(fValue);
     nfo := TOrmPropInfoRtti(P).PropInfo;
     offs := TOrmPropInfoRtti(P).GetterIsFieldPropOffset;
     if offs <> 0 then
@@ -2475,9 +2563,8 @@ begin
       if ot in [roSLong, roULong] then
       begin
         // handle very common 32-bit integer field
-        vp := pointer(fValue);
         for i := 0 to fCount - 1 do
-          if (PCardinal(vp^ + offs)^ = PCardinal(@v)^) and
+          if (PCardinal(vp^ + offs)^ = cardinal(v)) and
              FoundOneAndReachedLimit then
             break
           else
@@ -2486,16 +2573,20 @@ begin
       else
         // inlined GetOrdProp() for 8-bit or 16-bit values
         for i := 0 to fCount - 1 do
-          if (FromRttiOrd(ot, pointer(PtrUInt(fValue[i]) + offs)) = v) and
+          if (FromRttiOrd(ot, pointer(vp^ + offs)) = v) and
              FoundOneAndReachedLimit then
-            break;
+            break
+          else
+            inc(vp);
     end
     else
       // has getter -> use GetOrdProp()
       for i := 0 to fCount - 1 do
-        if (nfo^.GetOrdProp(fValue[i]) = v) and
+        if (nfo^.GetOrdProp(pointer(vp^)) = v) and
            FoundOneAndReachedLimit then
-          break;
+          break
+        else
+          inc(vp);
   end
   else if P.InheritsFrom(TOrmPropInfoRttiInt64) then
   begin
@@ -2537,8 +2628,8 @@ end;
 
 function TRestStorageInMemory.FindWhere(WhereField: integer;
   const WhereValue: RawUtf8; WhereOp: TSelectStatementOperator;
-  const OnFind: TOnFindWhereEqual; Dest: pointer; FoundLimit,
-  FoundOffset: integer; CaseInsensitive: boolean): PtrInt;
+  const OnFind: TOnFindWhereEqual; Dest: pointer;
+  FoundLimit, FoundOffset: integer; CaseInsensitive: boolean): PtrInt;
 var
   P: TOrmPropInfo;
   cmp: integer;
@@ -2589,7 +2680,7 @@ begin
     if P = nil then
       cmp := CompareInt64(v^.IDValue, id{%H-})
     else
-      cmp := P.CompareValue(v^, fSearchRec, CaseInsensitive);
+      cmp := P.CompareValue(v^, fSearchRec, CaseInsensitive); // fast override
     if cmp < 0 then
       found := WhereOp in [opNotEqualTo, opLessThan, opLessThanOrEqualTo]
     else if cmp > 0 then
@@ -2639,7 +2730,6 @@ function TRestStorageInMemory.FindMax(WhereField: integer;
   out max: Int64): boolean;
 var
   P: TOrmPropInfo;
-  nfo: PRttiProp;
   i: PtrInt;
   v: Int64;
 begin
@@ -2661,10 +2751,9 @@ begin
   P := fStoredClassRecordProps.Fields.List[WhereField];
   if P.InheritsFrom(TOrmPropInfoRttiInt32) then
   begin
-    nfo := TOrmPropInfoRtti(P).PropInfo;
     for i := 0 to fCount - 1 do
     begin
-      v := nfo.GetOrdProp(fValue[i]);
+      v := TOrmPropInfoRttiInt32(P).GetValueInt32(fValue[i]);
       if v > max then
         max := v;
     end;
@@ -2672,10 +2761,9 @@ begin
   end
   else if P.InheritsFrom(TOrmPropInfoRttiInt64) then
   begin
-    nfo := TOrmPropInfoRtti(P).PropInfo;
     for i := 0 to fCount - 1 do
     begin
-      v := nfo.GetInt64Prop(fValue[i]);
+      v := TOrmPropInfoRttiInt64(P).GetValueInt64(fValue[i]);
       if v > max then
         max := v;
     end;
@@ -2712,26 +2800,34 @@ var
   Prop: TOrmPropInfo;
   bits: TFieldBits;
   withID: boolean;
+  tmp: PTextWriterStackBuffer;
 label
   err;
 begin
   // exact same format as TOrmTable.GetJsonValues()
   result := 0;
   if length(Stmt.Where) > 1 then
-    raise ERestStorage.CreateUtf8('%.GetJsonValues on % with Stmt.Where[]=%',
+    raise ERestStorage.CreateUtf8('%.GetJsonValues on % with Stmt.Where[]=%:' +
+      ' our in-memory engine only supports a single WHERE clause operation',
       [self, fStoredClass, length(Stmt.Where)]);
+  if fTempBuffer = nil then
+    GetMem(fTempBuffer, SizeOf(fTempBuffer^)); // 8KB pre-allocated buffer
+  tmp := fTempBuffer; // aBufSize=65500 is ignored if tmp<>nil
   if Stmt.Where = nil then
-    // no WHERE statement -> get all rows -> set rows count
+    // no WHERE statement -> get all rows -> guess rows count
     if (Stmt.Limit > 0) and
        (fCount > Stmt.Limit) then
       KnownRowsCount := Stmt.Limit
     else
-      KnownRowsCount := fCount
+    begin
+      KnownRowsCount := fCount;
+      tmp := nil; // 64KB heap buffer when getting all rows - 8KB otherwise
+    end
   else
     KnownRowsCount := 0;
   Stmt.SelectFieldBits(bits, withID);
-  W := fStoredClassRecordProps.CreateJsonWriter(Stream, Expand, withID,
-    bits, KnownRowsCount, {bufsize=}256 shl 10);
+  W := fStoredClassRecordProps.CreateJsonWriter(
+    Stream, Expand, withID, bits, KnownRowsCount, 65500, tmp);
   if W <> nil then
   try
     if Expand then
@@ -2767,7 +2863,7 @@ begin
              (Stmt.Offset > 0) then
             goto err
           else
-            with _Safe(Stmt.Where[0].ValueVariant)^ do
+            with _Safe(Stmt.Where[0].ValueVariant, dvArray)^ do
               for ndx := 0 to Count - 1 do
                 if VariantToInt64(Values[ndx], id) then
                 begin
@@ -2784,7 +2880,8 @@ begin
                 end
                 else
                   goto err;
-        opIsNull, opIsNotNull:
+        opIsNull,
+        opIsNotNull:
           if Stmt.Where[0].Field > 0 then
           begin
             Prop := fStoredClassRecordProps.Fields.List[Stmt.Where[0].Field - 1];
@@ -2962,9 +3059,8 @@ begin
     if fCount > 0 then
     begin
       timer.Start;
-      for f := 0 to high(fUnique) do
-        if byte(f) in fIsUnique then
-          fUnique[f].Hasher.Clear;
+      for f := 0 to length(fUnique) - 1 do
+        fUnique[f].Hasher.Clear;
       fValues.Hasher.Clear;
       fValues.Clear;
       if andUpdateFile then
@@ -2997,33 +3093,33 @@ const
   _CALLER: array[boolean] of string[7] = (
     'Json', 'Binary');
 var
-  f, c: PtrInt;
-  cf: RawUtf8;
+  f, dup: PtrInt;
+  dupfield: RawUtf8;
   timer: TPrecisionTimer;
 begin
   // now fValue[] contains the just loaded data
   loaded.Pause;
   timer.Start;
   fCount := length(fValue);
-  c := fValues.ReHash;
-  if c > 0 then
-    cf := 'ID'
+  dup := fValues.ReHash;
+  if dup > 0 then
+    dupfield := ID_TXT
   else
-    for f := 0 to high(fUnique) do
-      if byte(f) in fIsUnique then
+    for f := 0 to length(fUnique) - 1 do
+    begin
+      dup := fUnique[f].Hasher.ReHash({forced=}true);
+      if dup > 0 then
       begin
-        c := fUnique[f].Hasher.ReHash({forced=}true);
-        if c > 0 then
-        begin
-          cf := fUnique[f].PropInfo.Name;
-          break;
-        end;
+        dupfield := fUnique[f].PropInfo.Name;
+        break;
       end;
-  if c > 0 then
+    end;
+  if dup > 0 then
   begin
     DropValues({andupdatefile=}false);
     raise ERestStorage.CreateUtf8('%.LoadFrom%: found % % in %.% field',
-      [self, _CALLER[binary], Plural('duplicate', c), fStoredClass, {%H-}cf]);
+      [self, _CALLER[binary], Plural('duplicate', dup), fStoredClass,
+       {%H-}dupfield]);
   end;
   if binary then
   begin
@@ -3503,7 +3599,7 @@ begin
         if {%H-}SetValueJson = '' then
           JsonEncodeNameSQLValue(P.Name, SetValue, SetValueJson);
         Owner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
-          rec.IDValue, SetValueJson, nil);
+          rec.IDValue, SetValueJson, nil, nil);
       end;
     end;
     fModified := true;
@@ -3519,6 +3615,7 @@ function TRestStorageInMemory.EngineUpdate(TableModelIndex: integer; ID: TID;
 var
   i: PtrInt;
   rec: TOrm;
+  modified: TFieldBits;
 begin
   result := false;
   if (ID < 0) or
@@ -3538,9 +3635,9 @@ begin
     if fUnique <> nil then
     begin
       // use temp rec to ensure no collision when updated Unique field
-      rec := fValue[i].CreateCopy; // copy since can be a partial update
-      rec.FillFrom(SentData);      // overwrite updated properties
-      if not UniqueFieldsUpdateOK(rec, i) then
+      rec := fValue[i].CreateCopy;       // copy since can be a partial update
+      rec.FillFrom(SentData, @modified); // overwrite updated properties
+      if not UniqueFieldsUpdateOK(rec, i, @modified) then
       begin
         rec.Free;
         exit;
@@ -3555,16 +3652,18 @@ begin
     result := true;
     if Owner <> nil then
       Owner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
-        ID, SentData, nil);
+        ID, SentData, nil, nil);
   finally
     StorageUnLock;
   end;
 end;
 
-function TRestStorageInMemory.UpdateOne(Rec: TOrm;
+function TRestStorageInMemory.UpdateOne(Rec: TOrm; const Fields: TFieldBits;
   const SentData: RawUtf8): boolean;
 var
-  i: PtrInt;
+  i, f: PtrInt;
+  dest: TOrm;
+  nfo: TOrmPropInfoList;
 begin
   result := false;
   if (Rec = nil) or
@@ -3578,14 +3677,18 @@ begin
        not RecordCanBeUpdated(fStoredClass, Rec.IDValue, oeUpdate) then
       exit;
     if (fUnique <> nil) and
-       not UniqueFieldsUpdateOK(Rec, i) then
+       not UniqueFieldsUpdateOK(Rec, i, @Fields) then
       exit;
-    CopyObject(Rec, fValue[i]);
+    dest := fValue[i];
+    nfo := fStoredClassRecordProps.Fields;
+    for f := 0 to nfo.Count - 1 do
+      if GetBitPtr(@Fields, f) then
+        nfo.List[f].CopyValue(Rec, dest);
     fModified := true;
     result := true;
     if Owner <> nil then
       Owner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
-        Rec.IDValue, SentData, nil);
+        Rec.IDValue, SentData, nil, nil);
   finally
     StorageUnLock;
   end;
@@ -3611,7 +3714,7 @@ begin
       // use temp rec to ensure no collision when updated Unique field
       rec := fValue[i].CreateCopy; // copy since can be a partial update
       if not rec.SetFieldSqlVars(Values) or
-         not UniqueFieldsUpdateOK(rec, i) then
+         not UniqueFieldsUpdateOK(rec, i, nil) then
       begin
         rec.Free;
         exit;
@@ -3627,7 +3730,7 @@ begin
     result := true;
     if Owner <> nil then
       Owner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
-        ID, fValue[i].GetJsonValues(True, False, ooUpdate), nil);
+        ID, fValue[i].GetJsonValues(True, False, ooUpdate), nil, nil);
   finally
     StorageUnLock;
   end;
@@ -3703,7 +3806,7 @@ begin
     begin
       fStoredClassRecordProps.FieldBitsFromBlobField(BlobField, AffectedField);
       Owner.InternalUpdateEvent(oeUpdateBlob, fStoredClassProps.TableIndex,
-        aID, '', @AffectedField);
+        aID, '', @AffectedField, nil);
     end;
     fModified := true;
     result := true;
@@ -3733,7 +3836,7 @@ begin
           BlobFields[f].CopyValue(Value, fValue[i]);
         if Owner <> nil then
           Owner.InternalUpdateEvent(oeUpdateBlob, fStoredClassProps.TableIndex,
-            Value.IDValue, '', @fStoredClassRecordProps.FieldBits[oftBlob]);
+            Value.IDValue, '', @fStoredClassRecordProps.FieldBits[oftBlob], nil);
         fModified := true;
         result := true;
       finally
@@ -3790,7 +3893,7 @@ begin
         if BinaryFile then
           SaveToBinary(F)
         else
-          SaveToJson(F, true);
+          SaveToJson(F, {expandedjson=} true);
       finally
         F.Free;
       end;
@@ -4029,7 +4132,7 @@ begin
 end;
 
 function TOrmVirtualTableCursorJson.Search(
-  const Prepared: TOrmVirtualTablePrepared): boolean;
+  var Prepared: TOrmVirtualTablePrepared): boolean;
 var
   store: TRestStorageInMemory;
 begin
@@ -4059,7 +4162,7 @@ begin
           begin
             store.fStoredClassRecordProps.Fields.List[Column].SetFieldSqlVar(
               store.fSearchRec, Value);
-            fMax := store.fUnique[Column].Find(store.fSearchRec);
+            fMax := store.fUniquePerField[Column].Find(store.fSearchRec);
             if fMax >= 0 then
               fCurrent := fMax; // value found with O(1) search
           end;
@@ -4272,7 +4375,7 @@ begin
 end;
 
 function TOrmVirtualTableCursorLog.Search(
-  const Prepared: TOrmVirtualTablePrepared): boolean;
+  var Prepared: TOrmVirtualTablePrepared): boolean;
 begin
   result := inherited Search(Prepared); // mark EOF by default
   if result then
@@ -4822,7 +4925,7 @@ begin
   end;
 end;
 
-function TRestStorageShard.InternalBatchStart(Method: TUriMethod;
+function TRestStorageShard.InternalBatchStart(Encoding: TRestBatchEncoding;
   BatchOptions: TRestBatchOptions): boolean;
 begin
   result := false;

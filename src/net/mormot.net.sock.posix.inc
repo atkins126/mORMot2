@@ -141,6 +141,9 @@ type
 
 { ******** Sockets API calls via the libc }
 
+// we use the libc rather than fp*() low-level functions because the libc
+// may be implemented via vDSO and avoid a syscall
+
 function gethostbyname(name: PAnsiChar): PHostEnt; cdecl;
   external clib name 'gethostbyname';
 function socket(af, struct, protocol: integer): TSocket; cdecl;
@@ -148,6 +151,9 @@ function socket(af, struct, protocol: integer): TSocket; cdecl;
 function setsockopt(s: TSocket; level, optname: integer;
    optval: pointer; optlen: integer): integer; cdecl;
   external clib name 'setsockopt';
+function getsockopt(s: TSocket; level, optname: integer;
+   optval: pointer; optlen: PInteger): integer; cdecl;
+  external clib name 'getsockopt';
 function ioctlsocket(s: TSocket; cmd: cardinal; arg: PCardinal): integer; cdecl;
   external clib name 'ioctl';
 function shutdown(s: TSocket; how: integer): integer; cdecl;
@@ -600,6 +606,7 @@ begin
      (byte(events) = 0) or
      (fCount = fMaxSockets) then
     exit;
+  // "EPOLLET" edge triggered detection is not consistent with select or poll
   e.data.ptr := pointer(tag); // don't use data.u64
   if pseRead in events then
     if pseWrite in events then
@@ -611,14 +618,14 @@ begin
   else
     e.events := 0;
   // EPOLLERR and EPOLLHUP are always implicitly tracked
-  result := epoll_ctl(fEPFD, EPOLL_CTL_ADD, TSocket(socket), @e) = NO_ERROR;
+  result := epoll_ctl(fEPFD, EPOLL_CTL_ADD, TSocket(socket), @e) >= NO_ERROR;
   if result then
     inc(fCount);
 end;
 
 function TPollSocketEpoll.Unsubscribe(socket: TNetSocket): boolean;
 var
-  e: EPoll_Event; // should be there even if not used
+  e: EPoll_Event; // should be there even if not used (old kernel < 2.6.9)
 begin
   if (self = nil) or
      (socket = nil) or
@@ -626,7 +633,7 @@ begin
     result := false
   else
   begin
-    result := epoll_ctl(fEPFD, EPOLL_CTL_DEL, TSocket(socket), @e) = NO_ERROR;
+    result := epoll_ctl(fEPFD, EPOLL_CTL_DEL, TSocket(socket), @e) >= NO_ERROR;
     if result then
       dec(fCount);
   end;
@@ -636,20 +643,21 @@ function TPollSocketEpoll.WaitForModified(var results: TPollSocketResults;
   timeoutMS: integer): boolean;
 var
   e: TPollSocketEvents;
-  i: PtrInt;
+  i, n: PtrInt;
   ev: integer;
   t: TPollSocketTag;
 begin
-  result := false; // error
+  result := false; // error or nothing new
   if (self = nil) or
      (fCount = 0) then
     exit;
-  results.Count := epoll_wait(fEPFD, pointer(fResults), fMaxSockets, timeoutMS);
-  if results.Count <= 0 then
+  n := epoll_wait(fEPFD, pointer(fResults), fMaxSockets, timeoutMS);
+  results.Count := n;
+  if n <= 0 then
     exit;
-  if length(results.Events) < results.Count then
-    SetLength(results.Events, fCount);
-  for i := 0 to results.Count - 1 do
+  if n > length(results.Events) then
+    SetLength(results.Events, fMaxSockets); // n<=fMaxSockets for sure
+  for i := 0 to n - 1 do
   begin
     with fResults[i] do
     begin

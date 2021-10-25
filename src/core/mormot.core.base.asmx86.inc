@@ -15,27 +15,30 @@
 
 {$ifdef ASMX86}
 
-{$define WITH_ERMS} // we found out that ERMS is worth it on i386
+{$define WITH_ERMS} // we enable it as fallback on old CPU without SSE2
 
 {$ifdef WITH_ERMS}
 var
-  // "rep stosb/movsb" enabled for len >= 512 on ERMSB CPUs
+  // "rep stosb/movsb" enabled for len >= 4096 on ERMSB CPUs
+  // it has been reported that "on 32-bit strings have to be at least 4KB"
+  // see https://stackoverflow.com/a/43837564/458259 for explanations and timing
   ERMSB_MIN_SIZE: integer = maxInt; // maxInt = disabled by default
-  {$define WITH_ERMSASM}
+  {$define WITH_ERMSASM} // include "rep movsb" asm blocks 
 {$endif WITH_ERMS}
+
 {$ifdef HASNOSSE2}
-  {$define WITH_ERMSASM} // rep movsb as fallback on oldest CPU
+  {$define WITH_ERMSASM} // "rep movsd" is used on oldest CPU
 {$endif HASNOSSE2}
 
 const
   // non-temporal writes should bypass the cache when the size is bigger than
   // half the size of the largest level cache - we assume low 1MB cache here
-  CPUCACHESSE2 = 512 * 1024;
+  NONTEMPORALSIZE = 512 * 1024;
 
 // fast SSE2 version - force define HASNOSSE2 when run any very old CPU
 // - using FPU fld/fst may trigger unexpected exceptions, as reported by Agner
 // Fog on "Optimizing Assembly" page 118 -> default is SSE2 code
-// - note: Delphi Win32 x87 RTL code by John O'Harrow seems deprecated 
+// - note: Delphi Win32 x87 RTL code by John O'Harrow seems deprecated
 procedure FillcharFast(var dst; cnt: PtrInt; value: byte);
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
@@ -60,22 +63,22 @@ asm
         movd    xmm0, ecx
         mov     ecx, eax
         pshufd  xmm0, xmm0, 0
-        and     ecx, 15                 // 16-byte align writes
-        movdqu  dqword ptr [eax], xmm0       // fill first 16 bytes
-        movdqu  dqword ptr [eax + edx], xmm0 // fill last 16 bytes
+        and     ecx, 15                      // 16-byte align writes
+        movups  dqword ptr [eax], xmm0       // fill first 16 bytes
+        movups  dqword ptr [eax + edx], xmm0 // fill last 16 bytes
         sub     ecx, 16
         sub     eax, ecx
         add     edx, ecx
         add     eax, edx
         neg     edx
-        cmp     edx, - CPUCACHESSE2 * 1024 // assume 512KB of L1 cache
+        cmp     edx, -NONTEMPORALSIZE        // assume > 512KB bypass the cache
         jl      @nv
 // {$ifdef FPC} align 16 {$endif} natural alignment is actually OK
-@loop:  movdqa  dqword ptr [eax + edx], xmm0 // fill 16 bytes per loop
+@loop:  movaps  dqword ptr [eax + edx], xmm0 // fill 16 bytes per loop
         add     edx, 16
         jl      @loop
         ret
-{$ifdef FPC} align 16 {$endif}
+{$ifdef FPC} align 16 {$else} nop; nop; nop {$endif}
 @nv:    movntdq dqword ptr [eax + edx], xmm0 // non-temporal fill 16 bytes
         add     edx, 16
         jl      @nv
@@ -83,13 +86,25 @@ asm
 {$endif HASNOSSE2}
 {$ifdef WITH_ERMSASM}
 @ermsb: push    edi
+        cld
+{$ifndef HASNOSSE2}
         mov     edi, eax
         mov     eax, ecx
         mov     ecx, edx
-        cld
+        rep     stosb   // ERMSB favors stosb and will properly align writes
+{$else} 
+@ermsa: test    al, 3   // aligned stosd is better on old CPUs
+        jz      @erms3
+        mov     byte ptr [eax], cl
+        inc     eax
+        dec     edx
+        jmp     @ermsa
+@erms3: mov     edi, eax
+        mov     eax, ecx
+        mov     ecx, edx
         shr     ecx, 2
         jz      @erms2
-        rep     stosd    // ERMSB / no SSE2 version
+        rep     stosd    // no SSE2 version
 @erms2: test    dl, 2
         jz      @erms1
         mov     word ptr [edi], ax
@@ -97,12 +112,14 @@ asm
 @erms1: test    dl, 1
         jz      @erms0
         mov     byte ptr [edi], al
+{$endif HASNOSSE2}
 @erms0: pop     edi
         ret
 {$endif WITH_ERMSASM}
-{$ifdef FPC} align 4 {$endif}
+{$ifdef FPC} align 4 {$else} nop {$ifdef HASNOSSE2} nop; nop {$endif} {$endif}
 @jmptab:dd      @00, @02, @04, @06, @08, @10, @12, @14, @16
         dd      @18, @20, @22, @24, @26, @28, @30, @32
+        // Delphi RTL uses 16-bit "mov [eax + ...], cx" which are slower
 @32:    mov     [eax + 28], ecx
 @28:    mov     [eax + 24], ecx
 @24:    mov     [eax + 20], ecx
@@ -204,29 +221,29 @@ asm
         ja      @ermsf
         {$endif WITH_ERMS}
         push    edx
-        movdqu  xmm2, dqword ptr [eax]       // first 16
+        movups  xmm2, dqword ptr [eax]       // first 16
         lea     eax, [eax + ecx - 16]
         lea     ecx, [ecx + edx - 16]
-        movdqu  xmm1, dqword ptr [eax]       // last 16
+        movups  xmm1, dqword ptr [eax]       // last 16
         push    ecx
         neg     ecx
-        and     edx,  - 16             // 16-byte align writes
+        and     edx,  -16                    // 16-byte align writes
         lea     ecx, [ecx + edx + 16]
         pop     edx
-        cmp     ecx, - CPUCACHESSE2 * 1024 // assume 512KB of L1 cache
+        cmp     ecx, -NONTEMPORALSIZE        // assume > 512KB bypass the cache
         jl      @fwnv
         {$ifdef FPC} align 16 {$endif}
-@fwd:   movdqu  xmm0, dqword ptr [eax + ecx] // move by 16 bytes
-        movdqa  dqword ptr [edx + ecx], xmm0
+@fwd:   movups  xmm0, dqword ptr [eax + ecx] // move by 16 bytes
+        movaps  dqword ptr [edx + ecx], xmm0
         add     ecx, 16
         jl      @fwd
-@fwde:  movdqu  dqword ptr [edx], xmm1       // last 16
+@fwde:  movups  dqword ptr [edx], xmm1       // last 16
         pop     edx
-        movdqu  dqword ptr [edx], xmm2       // first 16
+        movups  dqword ptr [edx], xmm2       // first 16
         ret
         {$ifdef FPC} align 16 {$endif}
 @fwnv:  movdqu  xmm0, dqword ptr [eax + ecx]
-        movntdq dqword ptr [edx + ecx], xmm0  // non-temporal move by 16 bytes
+        movntdq dqword ptr [edx + ecx], xmm0 // non-temporal move by 16 bytes
         add     ecx, 16
         jl      @fwd
         sfence
@@ -245,28 +262,28 @@ asm
         {$endif WITH_ERMS}
         sub     ecx, 16
         push    ecx
-        movdqu  xmm2, dqword ptr [eax + ecx] // last 16
-        movdqu  xmm1, dqword ptr [eax]       // first 16
+        movups  xmm2, dqword ptr [eax + ecx] // last 16
+        movups  xmm1, dqword ptr [eax]       // first 16
         add     ecx, edx
         and     ecx, -16              // 16-byte align writes
         sub     ecx, edx
         {$ifdef FPC} align 16 {$endif}
-@bwd:   movdqu  xmm0, dqword ptr [eax + ecx]
-        movdqa  dqword ptr [edx + ecx], xmm0
+@bwd:   movups  xmm0, dqword ptr [eax + ecx]
+        movaps  dqword ptr [edx + ecx], xmm0
         sub     ecx, 16
         jg      @bwd
         pop     ecx
-        movdqu  dqword ptr [edx], xmm1       // first 16
-        movdqu  dqword ptr [edx + ecx], xmm2 // last 16
+        movups  dqword ptr [edx], xmm1       // first 16
+        movups  dqword ptr [edx + ecx], xmm2 // last 16
         ret
 {$endif HASNOSSE2}
-@m01:   movzx   ecx, byte ptr [eax]
-        mov     [edx], cl
+@m01:   mov     al, [eax]
+        mov     [edx], al
         ret
-@m02:   movzx   ecx, word ptr [eax]
-        mov     [edx], cx
+@m02:   movzx   eax, word ptr [eax]
+        mov     [edx], ax
         ret
-@m03:   mov     cx, [eax]
+@m03:   movzx   ecx, word ptr [eax]
         mov     al, [eax + 2]
         mov     [edx], cx
         mov     [edx + 2], al
@@ -280,7 +297,7 @@ asm
         mov     [edx + 4], al
         ret
 @m06:   mov     ecx, [eax]
-        mov     ax, [eax + 4]
+        movzx   eax, word ptr [eax + 4]
         mov     [edx], ecx
         mov     [edx + 4], ax
         ret
@@ -572,20 +589,6 @@ asm
         pop     ebx
         pop     esi
         pop     edi
-end;
-
-function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): PtrInt;
-{$ifdef FPC}nostackframe; assembler;{$endif}
-asm
-        push    eax
-        call    IntegerScan
-        pop     edx
-        test    eax, eax
-        jnz     @e
-        dec     eax // returns -1
-        ret
-@e:     sub     eax, edx
-        shr     eax, 2
 end;
 
 function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
@@ -1165,24 +1168,40 @@ end;
 function StrLenSafe(S: pointer): PtrInt;
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
-        // slower than StrLenSSE2(), but won't read any byte beyond the string
-        mov     edx, eax
-        test    eax, eax
-        jz      @0
-@s:     cmp     byte ptr [eax], 0
-        je      @0
-        cmp     byte ptr [eax + 1], 0
-        je      @1
-        cmp     byte ptr [eax + 2], 0
-        je      @2
-        cmp     byte ptr [eax + 3], 0
-        je      @3
-        add     eax, 4
-        jmp     @s
-@3:     inc     eax
-@2:     inc     eax
-@1:     inc     eax
-@0:     sub     eax, edx
+        // slower than StrLenSSE2(), but won't read any byte beyond the page
+        test  eax, eax
+        jz    @z
+        cmp   byte ptr [eax], 0
+        je @0
+        cmp   byte ptr [eax + 1], 0
+        je @1
+        cmp   byte ptr [eax + 2], 0
+        je @2
+        cmp   byte ptr [eax + 3], 0
+        je @3
+        push  eax
+        and   eax, -4                // dword align reads
+        nop                          // @s loop code alignment
+@s:     add   eax, 4
+        mov   edx, dword ptr [eax]   // 4 chars per loop
+        lea   ecx, [edx - $01010101]
+        not   edx
+        and   edx, ecx
+        and   edx, $80808080         // set byte to $80 at each #0 position
+        jz    @s                     // loop until any #0 found
+@set:   pop   ecx
+        bsf   edx, edx               // find first #0 position
+        shr   edx, 3                 // byte offset of first #0
+        add   eax, edx               // address of first #0
+        sub   eax, ecx               // length
+@z:     ret
+@0:     xor   eax, eax
+        ret
+@1:     mov   eax, 1
+        ret
+@2:     mov   eax, 2
+        ret
+@3:     mov   eax, 3
 end;
 
 function PosEx(const SubStr, S: RawUtf8; Offset: PtrUInt): integer;
@@ -1380,7 +1399,7 @@ asm
 @f:     movzx   ecx, byte ptr [eax] // first char comparison (quicksort speedup)
         sub     cl, byte ptr [edx]
         je      @s
-        movsx   eax, cl              // branchless execution on Quicksort
+        movsx   eax, cl              // branchless execution on Quicksort/ReHash
         ret
 @0:     xor     eax, eax
         ret
@@ -1451,6 +1470,100 @@ asm
 @0:     xor     eax, eax
         ret
 @p:     mov     eax, 1
+end;
+
+procedure DynArrayHashTableAdjust(P: PIntegerArray; deleted: integer; count: PtrInt);
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        // eax=P edx=deleted ecx=count
+        push    ebx
+        mov     ebx, eax
+        xor     eax, eax
+@by8:   sub     ecx, 8
+        cmp     edx, dword ptr [ebx]
+        setl    al
+        sub     dword ptr [ebx], eax
+        cmp     edx, dword ptr [ebx + 4H]
+        setl    al
+        sub     dword ptr [ebx + 4H], eax
+        cmp     edx, dword ptr [ebx + 8H]
+        setl    al
+        sub     dword ptr [ebx + 8H], eax
+        cmp     edx, dword ptr [ebx + 0CH]
+        setl    al
+        sub     dword ptr [ebx + 0CH], eax
+        cmp     edx, dword ptr [ebx + 10H]
+        setl    al
+        sub     dword ptr [ebx + 10H], eax
+        cmp     edx, dword ptr [ebx + 14H]
+        setl    al
+        sub     dword ptr [ebx + 14H], eax
+        cmp     edx, dword ptr [ebx + 18H]
+        setl    al
+        sub     dword ptr [ebx + 18H], eax
+        cmp     edx, dword ptr [ebx + 1CH]
+        setl    al
+        sub     dword ptr [ebx + 1CH], eax
+        add     ebx, 32
+        cmp     ecx, 8
+        jge     @by8
+        test    ecx, ecx
+        jz      @ok
+        // trailing indexes (never appearing within DYNARRAYHASH_PO2 range)
+@by1:   cmp     edx, dword ptr [ebx]
+        setl    al
+        sub     dword ptr [ebx], eax
+        add     ebx, 4
+        dec     ecx
+        jnz     @by1
+@ok:    pop     ebx
+end;
+
+procedure DynArrayHashTableAdjust16(P: PWordArray; deleted: cardinal; count: PtrInt);
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        // eax=P dx=deleted ecx=count
+        push    ebx
+        mov     ebx, eax
+        xor     eax, eax
+@by8:   sub     ecx, 8
+        cmp     dx, word ptr [ebx]
+        setl    al
+        sub     word ptr [ebx], ax
+        cmp     dx, word ptr [ebx + 2]
+        setl    al
+        sub     word ptr [ebx + 2], ax
+        cmp     dx, word ptr [ebx + 4]
+        setl    al
+        sub     word ptr [ebx + 4], ax
+        cmp     dx, word ptr [ebx + 6]
+        setl    al
+        sub     word ptr [ebx + 6], ax
+        cmp     dx, word ptr [ebx + 8]
+        setl    al
+        sub     word ptr [ebx + 8], ax
+        cmp     dx, word ptr [ebx + 10]
+        setl    al
+        sub     word ptr [ebx + 10], ax
+        cmp     dx, word ptr [ebx + 12]
+        setl    al
+        sub     word ptr [ebx + 12], ax
+        cmp     dx, word ptr [ebx + 14]
+        setl    al
+        sub     word ptr [ebx + 14], ax
+        add     ebx, 16
+        cmp     ecx, 8
+        jge     @by8
+        test    ecx, ecx
+        jz      @ok
+        // trailing indexes (never appearing within DYNARRAYHASH_PO2 range)
+@by1:   cmp     dx, word ptr [ebx]
+        setl    al
+        sub     word ptr [ebx], ax
+        add     ebx, 2
+        dec     ecx
+        jnz     @by1
+@ok:    pop     ebx
 end;
 
 function GetBitsCountSse42(value: PtrInt): PtrInt;
@@ -1758,22 +1871,22 @@ asm
         movq    qword ptr [esi + edx], xmm0
         jmp     @movend
 @large: push    esi
-        movdqu  xmm2, dqword ptr [eax]
+        movups  xmm2, dqword ptr [eax]
         lea     eax, [eax + edx - 16]
         lea     edx, [esi + edx - 16]
-        movdqu  xmm1, dqword ptr [eax]
+        movups  xmm1, dqword ptr [eax]
         push    edx
         neg     edx
         and     esi,  -16
         lea     edx, [edx + esi + 16]
         pop     esi
-@lrgnxt:movdqu  xmm0, dqword ptr [eax + edx]
-        movdqa  dqword ptr [esi + edx], xmm0
+@lrgnxt:movups  xmm0, dqword ptr [eax + edx]
+        movaps  dqword ptr [esi + edx], xmm0
         add     edx, 16
         jl      @lrgnxt
-        movdqu  dqword ptr [esi], xmm1
+        movups  dqword ptr [esi], xmm1
         pop     esi
-        movdqu  dqword ptr [esi], xmm2
+        movups  dqword ptr [esi], xmm2
 {$endif HASNOSSE2}
 @movend:cmp     esi, ebp
         jbe     @@0916
@@ -1874,10 +1987,10 @@ asm
         {$else}
         pxor    xmm0, xmm0
         mov     ecx, 256
-@@089I: movdqu  dqword ptr [ebx], xmm0
-        movdqu  dqword ptr [ebx + 16], xmm0
-        movdqu  dqword ptr [ebx + 32], xmm0
-        movdqu  dqword ptr [ebx + 48], xmm0
+@@089I: movups  dqword ptr [ebx], xmm0
+        movups  dqword ptr [ebx + 16], xmm0
+        movups  dqword ptr [ebx + 32], xmm0
+        movups  dqword ptr [ebx + 48], xmm0
         add     ebx, 64
         {$endif HASNOSSE2}
         dec     ecx

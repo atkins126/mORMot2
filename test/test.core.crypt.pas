@@ -85,7 +85,7 @@ function SingleTest(const s: RawByteString; TDig: TSha1Digest): boolean; overloa
 var
   SHA: TSha1;
   Digest: TSha1Digest;
-  i: integer;
+  i: PtrInt;
 begin
   // 1. Hash complete RawByteString
   SHA.Full(pointer(s), length(s), Digest);
@@ -141,7 +141,7 @@ procedure TTestCoreCrypto._SHA256;
   var
     SHA: TSha256;
     Digest: TSha256Digest;
-    i: integer;
+    i: PtrInt;
   begin
     // 1. Hash complete RawByteString
     SHA.Full(pointer(s), length(s), Digest);
@@ -178,7 +178,7 @@ procedure TTestCoreCrypto._SHA256;
     Digests: THash256DynArray;
     sign: TSynSigner;
     c: AnsiChar;
-    i: integer;
+    i: PtrInt;
     sha: TSha256;
   begin
     SingleTest('abc', D1);
@@ -249,23 +249,23 @@ var
 begin
   rc4.Init(Test1, 8);
   rc4.Encrypt(Test1, dat, 8);
-  Check(CompareMem(@dat, @Res1, sizeof(Res1)));
+  Check(CompareMem(@dat, @Res1, SizeOf(Res1)));
   rc4.Init(Key2, 4);
   rc4.Encrypt(Test2, dat, 10);
-  Check(CompareMem(@dat, @Res2, sizeof(Res2)));
-  rc4.Init(Key1, sizeof(Key1));
-  rc4.Encrypt(InDat, dat, sizeof(InDat));
-  Check(CompareMem(@dat, @OutDat, sizeof(OutDat)));
-  rc4.Init(Key1, sizeof(Key1));
+  Check(CompareMem(@dat, @Res2, SizeOf(Res2)));
+  rc4.Init(Key1, SizeOf(Key1));
+  rc4.Encrypt(InDat, dat, SizeOf(InDat));
+  Check(CompareMem(@dat, @OutDat, SizeOf(OutDat)));
+  rc4.Init(Key1, SizeOf(Key1));
   bak := rc4;
-  rc4.Encrypt(InDat, dat, sizeof(InDat));
-  Check(CompareMem(@dat, @OutDat, sizeof(OutDat)));
+  rc4.Encrypt(InDat, dat, SizeOf(InDat));
+  Check(CompareMem(@dat, @OutDat, SizeOf(OutDat)));
   rc4 := bak;
-  rc4.Encrypt(InDat, dat, sizeof(InDat));
-  Check(CompareMem(@dat, @OutDat, sizeof(OutDat)));
+  rc4.Encrypt(InDat, dat, SizeOf(InDat));
+  Check(CompareMem(@dat, @OutDat, SizeOf(OutDat)));
   rc4 := bak;
-  rc4.Encrypt(OutDat, dat, sizeof(InDat));
-  Check(CompareMem(@dat, @InDat, sizeof(OutDat)));
+  rc4.Encrypt(OutDat, dat, SizeOf(InDat));
+  Check(CompareMem(@dat, @InDat, SizeOf(OutDat)));
   key := RandomString(100);
   for ks := 1 to 10 do
   begin
@@ -319,7 +319,7 @@ const
   FOX: RawByteString = 'The quick brown fox jumps over the lazy dog';
 var
   dig: THash512Rec;
-  i: integer;
+  i: PtrInt;
   sha: TSha512;
   c: AnsiChar;
   temp: RawByteString;
@@ -427,7 +427,7 @@ var
   secret, data, encrypted: RawByteString;
   dig: THash256;
   h512: THash512Rec;
-  s, i: integer;
+  s, i: PtrInt;
   sign: TSynSigner;
 begin
   // validate against official NIST vectors
@@ -513,6 +513,10 @@ begin
 end;
 
 procedure TTestCoreCrypto._TAesPNRG;
+var
+  timer: TPrecisionTimer;
+  i: integer;
+  big: RawByteString;
 begin
   check(TAesPrng.IsAvailable);
   check(TSystemPrng.IsAvailable);
@@ -520,6 +524,18 @@ begin
   {$ifdef USE_OPENSSL}
   Prng(TAesPrngOsl, 'OpenSSL');
   {$endif USE_OPENSSL}
+  // same benchmarks as in Prng()
+  timer.Start;
+  Check(Random32(0) = 0);
+  for i := 1 to 50000 do
+    Check(Random32(i) < cardinal(i));
+  for i := 0 to 50000 do
+    Check(Random32(maxInt - i) < cardinal(maxInt - i));
+  NotifyTestSpeed('Lecuyer Random32', [], 50000 * 2, 50000 * 8, @timer);
+  SetLength(big, 100000);
+  timer.Start;
+  RandomBytes(pointer(big), length(big));
+  NotifyTestSpeed('Lecuyer RandomBytes', [], 1, length(big), @timer);
 end;
 
 procedure TTestCoreCrypto.Prng(meta: TAesPrngClass; const name: RawUTF8);
@@ -541,7 +557,7 @@ begin
   p.FillRandom(b1);
   p.FillRandom(b2);
   Check(not IsEqual(b1, b2));
-  Check(not CompareMem(@b1, @b2, sizeof(b1)));
+  Check(not CompareMem(@b1, @b2, SizeOf(b1)));
   clo := 0;
   chi := 0;
   dlo := 0;
@@ -554,7 +570,7 @@ begin
     a1.FillRandom(b1);
     a2.FillRandom(b2);
     Check(not IsEqual(b1, b2));
-    Check(not CompareMem(@b1, @b2, sizeof(b1)));
+    Check(not CompareMem(@b1, @b2, SizeOf(b1)));
     Check(a1.FillRandom(0) = '');
     Check(a1.FillRandomHex(0) = '');
     for i := 1 to 2000 do
@@ -724,16 +740,17 @@ procedure TTestCoreCrypto._JWT;
     check(jwt.data.B['http://example.com/is_root']);
     check((jwt.reg[jrcIssuedAt] <> '') = (jrcIssuedAt in one.Claims));
     check((jwt.reg[jrcJWTID] <> '') = (jrcJWTID in one.Claims));
-    for i := 1 to 1000 do
-    begin
-      Finalize(jwt);
-      FillCharFast(jwt, sizeof(jwt), 0);
-      check(jwt.reg[jrcIssuer] = '');
-      one.Verify(t, jwt);
-      check(jwt.result = jwtValid, 'from cache');
-      check(jwt.reg[jrcIssuer] = 'joe');
-      check((jwt.reg[jrcJWTID] <> '') = (jrcJWTID in one.Claims));
-    end;
+    if jwt.result = jwtValid then
+      for i := 1 to 1000 do
+      begin
+        Finalize(jwt);
+        FillCharFast(jwt, SizeOf(jwt), 0);
+        check(jwt.reg[jrcIssuer] = '');
+        one.Verify(t, jwt);
+        check(jwt.result = jwtValid, 'from cache');
+        check(jwt.reg[jrcIssuer] = 'joe');
+        check((jwt.reg[jrcJWTID] <> '') = (jrcJWTID in one.Claims));
+      end;
     if (one.Algorithm <> 'none') and
        (t[length(t)] in ['1'..'9', 'B'..'Z', 'b'..'z']) then
     begin
@@ -941,7 +958,7 @@ begin
   SHAKE128.InitCypher('secret', SHAKE_128);
   SHAKE256.InitCypher('secret', SHAKE_256);
   RC4.InitSha3(dig, SizeOf(dig));
-  FillCharFast(time, sizeof(time), 0);
+  FillCharFast(time, SizeOf(time), 0);
   size := 0;
   n := 0;
   for s := 0 to high(SIZ) do
@@ -1473,7 +1490,7 @@ begin
         iv.L := $1234567890abcdef;
         iv.H := $0fedcba987654321;
         FillZero(THash256(mac));
-        st := RawUtf8(StringOfChar('x', 50));
+        st := RawUtf8OfChar('x', 50);
         // create a TAesAbstract instance and validate it
         one := MODES[m].Create(pointer(st)^, ks);
         try
@@ -1486,15 +1503,15 @@ begin
           s2 := one.EncryptPkcs7(st, false);
           if aead then
           begin
-            FillRandom(@mac1, 4);
-            Check(one.MacEncryptGetTag(mac1));
             Check(m in [low(TEST_AES_MAC) .. high(TEST_AES_MAC)]);
+            RandomBytes(@mac1, SizeOf(mac1));
+            Check(one.MacEncryptGetTag(mac1));
             //writeln(m,' ',k,' ',Sha256DigestToString(mac1)); writeln(TEST_AES_MAC[m, k]);
             //CheckEqual(Sha256DigestToString(mac1), TEST_AES_MAC[m, k], 'TEST_AES_MAC');
           end
           else if gcm then
           begin
-            FillRandom(@tag1, 4);
+            RandomBytes(@tag1, SizeOf(tag1));
             Check(TAesGcmAbstract(one).AesGcmFinal(tag1));
             // writeln(one.classname, ks, ' ', AesBlockToShortString(tag1));
             CheckEqual(AesBlockToString(tag1), TEST_AES_TAG[k],
@@ -1506,7 +1523,7 @@ begin
           s2 := one.EncryptPkcs7(st, false); // twice to check AES ctxt reuse
           if aead then
           begin
-            FillRandom(@mac2, 4);
+            RandomBytes(@mac2, SizeOf(mac2));
             Check(one.MacEncryptGetTag(mac2));
             Check(IsEqual(mac2, mac1));
           end
@@ -1598,8 +1615,8 @@ begin
           A.Decrypt(b, p);
         A.Done;
         Timer[noaesni].Pause;
-        Check(CompareMem(@p, @s, sizeof(p)));
-        Check(IsEqual(p, s));
+        CheckUtf8(IsEqual(p, s), 'encrypt/decrypt ks=% %<>%', [ks, p[0], s[0]]);
+        Check(CompareMem(@p, @s, SizeOf(p)));
       end;
       iv.c3 := $e0ffffff; // to trigger an explicit CTR overflow
       for m := low(MODES) to high(MODES) do
@@ -1889,26 +1906,26 @@ begin
   end;
   Check(CompareMem(@buf32, @buf, SizeOf(buf32)));
   Check(CompareMem(@tag32, @tag, SizeOf(tag32)));
-  test(@T01, 16, K01, 8 * sizeof(K01), @I01, sizeof(I01), nil, 0,
-       @C01, sizeof(C01), @P01, 01);
-  test(@T02, 16, K02, 8 * sizeof(K02), @I02, sizeof(I02), @H02, sizeof(H02),
+  test(@T01, 16, K01, 8 * SizeOf(K01), @I01, SizeOf(I01), nil, 0,
+       @C01, SizeOf(C01), @P01, 01);
+  test(@T02, 16, K02, 8 * SizeOf(K02), @I02, SizeOf(I02), @H02, SizeOf(H02),
        nil, 0, nil, 02);
-  test(@T03, 16, K03, 8 * sizeof(K03), @I03, sizeof(I03), @H03, sizeof(H03),
-       @C03, sizeof(C03), @P03, 03);
-  test(@T04, 16, K04, 8 * sizeof(K04), @I04, sizeof(I04), nil, 0,
-       @C04, sizeof(C04), @P04, 04);
-  test(@T05, 16, K05, 8 * sizeof(K05), @I05, sizeof(I05), @H05, sizeof(H05),
-       @C05, sizeof(C05), @P05, 05);
-  test(@T07, 16, K07, 8 * sizeof(K07), @I07, sizeof(I07), @H07, sizeof(H07),
-       @C07, sizeof(C07), @P07, 07);
-  test(@T08, 16, K08, 8 * sizeof(K08), @I08, sizeof(I08), @H08, sizeof(H08),
-       @C08, sizeof(C08), @P08, 08);
-  test(@T09, 16, K09, 8 * sizeof(K09), @I09, sizeof(I09), @H09, sizeof(H09),
-       @C09, sizeof(C09), @P09, 09);
-  test(@T10, 16, K10, 8 * sizeof(K10), @I10, sizeof(I10), nil, 0, @C10,
-       sizeof(C10), @P10, 10);
-  test(@T11, 16, K11, 8 * sizeof(K11), @I11, sizeof(I11), @H11, sizeof(H11),
-       @C11, sizeof(C11), @P11, 11);
+  test(@T03, 16, K03, 8 * SizeOf(K03), @I03, SizeOf(I03), @H03, SizeOf(H03),
+       @C03, SizeOf(C03), @P03, 03);
+  test(@T04, 16, K04, 8 * SizeOf(K04), @I04, SizeOf(I04), nil, 0,
+       @C04, SizeOf(C04), @P04, 04);
+  test(@T05, 16, K05, 8 * SizeOf(K05), @I05, SizeOf(I05), @H05, SizeOf(H05),
+       @C05, SizeOf(C05), @P05, 05);
+  test(@T07, 16, K07, 8 * SizeOf(K07), @I07, SizeOf(I07), @H07, SizeOf(H07),
+       @C07, SizeOf(C07), @P07, 07);
+  test(@T08, 16, K08, 8 * SizeOf(K08), @I08, SizeOf(I08), @H08, SizeOf(H08),
+       @C08, SizeOf(C08), @P08, 08);
+  test(@T09, 16, K09, 8 * SizeOf(K09), @I09, SizeOf(I09), @H09, SizeOf(H09),
+       @C09, SizeOf(C09), @P09, 09);
+  test(@T10, 16, K10, 8 * SizeOf(K10), @I10, SizeOf(I10), nil, 0, @C10,
+       SizeOf(C10), @P10, 10);
+  test(@T11, 16, K11, 8 * SizeOf(K11), @I11, SizeOf(I11), @H11, SizeOf(H11),
+       @C11, SizeOf(C11), @P11, 11);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -1954,7 +1971,7 @@ begin
     md.Final(dig);
     md.Full(pointer(tmp), n, dig2);
     check(IsEqual(dig, dig2));
-    check(CompareMem(@dig, @dig2, sizeof(dig)));
+    check(CompareMem(@dig, @dig2, SizeOf(dig)));
   end;
 end;
 
@@ -1991,7 +2008,7 @@ end;
 procedure TTestCoreCrypto._TBinaryCookieGenerator;
 var
   gen: TBinaryCookieGenerator;
-  i: integer;
+  i: PtrInt;
   bak: RawUtf8;
   timer: TPrecisionTimer;
   cook: array of RawUtf8;

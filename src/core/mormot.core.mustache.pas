@@ -544,7 +544,7 @@ begin
      (ValueName = 'true') or
      (ValueName = 'false') or
      (ValueName = 'null') then
-    VariantLoadJson(result, ValueName, @JSON_OPTIONS[true])
+    VariantLoadJson(result, ValueName, @JSON_[mFast])
   else
   begin
     GetValueFromContext(ValueName, tmp);
@@ -581,7 +581,7 @@ var
       begin
         // {{helper 123}} or {{helper "constant"}} or {{helper [1,2,3]}}
         val.VType := varEmpty;
-        VariantLoadJson(variant(val), pointer(valnam), nil, @JSON_OPTIONS[true]);
+        JsonToVariantInPlace(variant(val), pointer(valnam), JSON_FAST_FLOAT);
         valFree := true;
       end
       else
@@ -602,7 +602,9 @@ var
                 valFree := true;
                 break;
               end;
-            '<', '>', '=':
+            '<',
+            '>',
+            '=':
               begin
                 // {{#if .=123}} -> {{#if .,"=",123}}
                 k := j + 1;
@@ -612,7 +614,7 @@ var
                    GetValueCopyFromContext(Copy(valnam, 1, j - 1)),
                    Copy(valnam, j, k - j),
                    GetValueCopyFromContext(Copy(valnam, k, maxInt))],
-                  JSON_OPTIONS[true]);
+                  JSON_FAST_FLOAT);
                 valFree := true;
                 break;
               end;
@@ -725,8 +727,8 @@ begin
     end;
 end;
 
-function TSynMustacheContextVariant.AppendSection(const ValueName: RawUtf8):
-  TSynMustacheSectionType;
+function TSynMustacheContextVariant.AppendSection(
+  const ValueName: RawUtf8): TSynMustacheSectionType;
 var
   Value: TVarData;
 begin
@@ -795,7 +797,7 @@ end;
 
 constructor TSynMustachePartials.Create;
 begin
-  fList := TRawUtf8List.Create([fNoDuplicate, fCaseSensitive]);
+  fList := TRawUtf8List.CreateEx([fNoDuplicate, fCaseSensitive]);
 end;
 
 constructor TSynMustachePartials.CreateOwned(
@@ -834,14 +836,14 @@ begin
     result := -1;
 end;
 
-class function TSynMustachePartials.CreateOwned(const Partials: variant):
-  TSynMustachePartials;
+class function TSynMustachePartials.CreateOwned(
+  const Partials: variant): TSynMustachePartials;
 var
   p: PtrInt;
 begin
   result := nil;
   with _Safe(Partials)^ do
-    if (Kind = dvObject) and
+    if IsObject and
        (Count > 0) then
     begin
       result := TSynMustachePartials.Create;
@@ -923,8 +925,12 @@ begin
     aStart := fScanStart;
     aEnd := fScanEnd;
     case aKind of
-      mtComment, mtSection, mtSectionEnd, mtInvertedSection,
-      mtSetDelimiter, mtPartial:
+      mtComment,
+      mtSection,
+      mtSectionEnd,
+      mtInvertedSection,
+      mtSetDelimiter,
+      mtPartial:
         begin
           // (indented) standalone lines should be removed from the template
           if aKind <> mtPartial then
@@ -953,7 +959,9 @@ begin
                       dec(TextLen);
             end;
         end;
-      mtVariable, mtVariableUnescape, mtVariableUnescapeAmp:
+      mtVariable,
+      mtVariableUnescape,
+      mtVariableUnescapeAmp:
         begin
           // handle JSON object/array with nested }
           // e.g. as {{helper [{a:{a:1,b:2}}]}}
@@ -964,7 +972,7 @@ begin
             P := GotoNextNotSpaceSameLine(P + 1);
             if P^ in ['{', '['] then
             begin
-              P := GotoNextJsonObjectOrArray(P);
+              P := GotoEndJsonItem(P);
               if P <> nil then
               begin
                 aEnd := P;
@@ -991,7 +999,9 @@ begin
     Kind := aKind;
     SectionOppositeIndex := -1;
     case aKind of
-      mtText, mtComment, mtTranslate:
+      mtText,
+      mtComment,
+      mtTranslate:
         begin
           TextStart := aStart;
           TextLen := aEnd - aStart;
@@ -1148,7 +1158,9 @@ begin
   for i := 0 to fTagCount - 1 do
     with fTemplate.fTags[i] do
       case Kind of
-        mtSection, mtInvertedSection, mtSetPartial:
+        mtSection,
+        mtInvertedSection,
+        mtSetPartial:
           begin
             inc(secCount);
             if secCount > fTemplate.fSectionMaxCount then
@@ -1156,7 +1168,9 @@ begin
             secLevel := 1;
             for j := i + 1 to fTagCount - 1 do
               case fTemplate.fTags[j].Kind of
-                mtSection, mtInvertedSection, mtSetPartial:
+                mtSection,
+                mtInvertedSection,
+                mtSetPartial:
                   inc(secLevel);
                 mtSectionEnd:
                   begin
@@ -1226,7 +1240,7 @@ begin
     GlobalLock;
     try
       if SynMustacheCache = nil then
-        SynMustacheCache := TSynMustacheCache.Create(
+        SynMustacheCache := TSynMustacheCache.CreateEx(
           [fObjectsOwned, fNoDuplicate, fCaseSensitive]);
     finally
       GlobalUnLock;
@@ -1291,7 +1305,8 @@ begin
               Context.fWriter.AddNoJsonEscape(TextStart, TextLen);
           mtVariable:
             Context.AppendValue(Value, false);
-          mtVariableUnescape, mtVariableUnescapeAmp:
+          mtVariableUnescape,
+          mtVariableUnescapeAmp:
             Context.AppendValue(Value, true);
           mtSection:
             case Context.AppendSection(Value) of
@@ -1393,7 +1408,7 @@ function TSynMustache.RenderJson(const Json: RawUtf8;
 var
   context: variant;
 begin
-  _Json(Json, context{%H-}, JSON_OPTIONS[true]);
+  _Json(Json, context{%H-}, JSON_FAST_FLOAT);
   result := Render(context, Partials, Helpers, OnTranslate, EscapeInvert);
 end;
 
@@ -1404,7 +1419,7 @@ function TSynMustache.RenderJson(const Json: RawUtf8;
 var
   context: variant;
 begin
-  _Json(FormatUtf8(Json, Args, Params, true), context{%H-}, JSON_OPTIONS[true]);
+  _Json(FormatUtf8(Json, Args, Params, true), context{%H-}, JSON_FAST_FLOAT);
   result := Render(context, Partials, Helpers, OnTranslate, EscapeInvert);
 end;
 
@@ -1499,15 +1514,47 @@ var
 class function TSynMustache.HelpersGetStandardList: TSynMustacheHelpers;
 begin
   if HelpersStandardList = nil then
-    HelperAdd(HelpersStandardList, [
-      'DateTimeToText', 'DateToText', 'DateFmt', 'TimeLogToText', 'JsonQuote',
-      'JsonQuoteUri', 'ToJson', 'MarkdownToHtml', 'SimpleToHtml', 'WikiToHtml',
-      'BlobToBase64', 'EnumTrim', 'EnumTrimRight', 'PowerOfTwo', 'Equals',
-      'If', 'NewGuid', 'ExtractFileName', 'Lower', 'Upper'], [
-      DateTimeToText, DateToText, DateFmt, TimeLogToText, JsonQuote,
-      JsonQuoteUri, ToJson, MarkdownToHtml, SimpleToHtml, WikiToHtml,
-      BlobToBase64, EnumTrim, EnumTrimRight, PowerOfTwo, Equals_,
-      If_, NewGuid, ExtractFileName, Lower, Upper]);
+    HelperAdd(HelpersStandardList,
+     ['DateTimeToText',
+      'DateToText',
+      'DateFmt',
+      'TimeLogToText',
+      'JsonQuote',
+      'JsonQuoteUri',
+      'ToJson',
+      'MarkdownToHtml',
+      'SimpleToHtml',
+      'WikiToHtml',
+      'BlobToBase64',
+      'EnumTrim',
+      'EnumTrimRight',
+      'PowerOfTwo',
+      'Equals',
+      'If',
+      'NewGuid',
+      'ExtractFileName',
+      'Lower',
+      'Upper'],
+     [DateTimeToText,
+      DateToText,
+      DateFmt,
+      TimeLogToText,
+      JsonQuote,
+      JsonQuoteUri,
+      ToJson,
+      MarkdownToHtml,
+      SimpleToHtml,
+      WikiToHtml,
+      BlobToBase64,
+      EnumTrim,
+      EnumTrimRight,
+      PowerOfTwo,
+      Equals_,
+      If_,
+      NewGuid,
+      ExtractFileName,
+      Lower,
+      Upper]);
   result := HelpersStandardList;
 end;
 
@@ -1557,7 +1604,7 @@ var
 begin
   // {{DateFmt DateValue,"dd/mm/yyy"}}
   with _Safe(Value)^ do
-    if (Kind = dvArray) and
+    if IsArray and
        (Count = 2) and
        VariantToDateTime(Values[0], dt) then
       Result := FormatDateTime(Values[1], dt)
@@ -1613,7 +1660,7 @@ var
 begin
   // {{{SimpleToHtml content,browserhasnoemoji,nohtmlescape}}}
   d := _Safe(Value);
-  if (dvoIsArray in d^.Options) and
+  if d^.IsArray and
      (d^.Count >= 2) then
   begin
     if VarIsEmptyOrNull(d^.Values[0]) then
@@ -1725,7 +1772,7 @@ class procedure TSynMustache.Equals_(const Value: variant;
 begin
   // {{#Equals .,12}}
   with _Safe(Value)^ do
-    if (Kind = dvArray) and
+    if IsArray and
        (Count = 2) and
        (FastVarDataComp(@Values[0], @Values[1], false) = 0) then
       Result := true
@@ -1740,9 +1787,9 @@ var
   wasString: boolean;
 begin
   // {{#if .<>""}} or {{#if .,"=",123}}
-  SetVariantNull(Result{%H-});
+  SetVariantNull(result{%H-});
   with _Safe(Value)^ do
-    if (Kind = dvArray) and
+    if IsArray and
        (Count = 3) then
     begin
       VariantToUtf8(Values[1], oper, wasString);
@@ -1753,22 +1800,22 @@ begin
         case PWord(oper)^ of
           ord('='):
             if cmp = 0 then
-              Result := True;
+              result := True;
           ord('>'):
             if cmp > 0 then
-              Result := True;
+              result := True;
           ord('<'):
             if cmp < 0 then
-              Result := True;
+              result := True;
           ord('>') + ord('=') shl 8:
             if cmp >= 0 then
-              Result := True;
+              result := True;
           ord('<') + ord('=') shl 8:
             if cmp <= 0 then
-              Result := True;
+              result := True;
           ord('<') + ord('>') shl 8:
             if cmp <> 0 then
-              Result := True;
+              result := True;
         end;
       end;
     end;
@@ -1779,7 +1826,7 @@ class procedure TSynMustache.NewGuid(const Value: variant;
 var
   g: TGUID;
 begin
-  CreateGUID(g);
+  RandomGuid(g);
   RawUtf8ToVariant(GuidToRawUtf8(g), Result);
 end;
 

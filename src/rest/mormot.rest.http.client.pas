@@ -80,12 +80,15 @@ type
   // is inconsistent between browsers: http://stackoverflow.com/a/9186091
   // - TRestHttpClientGeneric.Compression default property is [hcSynLZ]
   // - deprecated hcSynShaAes used SHA-256/AES-256-CFB to encrypt the content
-  // (after SynLZ compression), but has been audited as weak so HTTPS is to
-  // be used instead
+  // (after SynLZ compression), but has been audited as weak so standard HTTPS
+  // is to be used instead
   TRestHttpCompression = (
     hcSynLZ,
     hcDeflate
-    {$ifndef PUREMORMOT2} , hcSynShaAes {$endif PUREMORMOT2} );
+    {$ifndef PUREMORMOT2}
+    , hcSynShaAes
+    {$endif PUREMORMOT2}
+    );
 
   /// set of available compressions schemes
   TRestHttpCompressions = set of TRestHttpCompression;
@@ -192,9 +195,7 @@ type
     // - you may include hcDeflate, which will have a better compression ratio,
     // be recognized by all browsers and libraries, but would consume much
     // more CPU resources than hcSynLZ
-    // - if you include hcSynShaAes, it will use SHA-256/AES-256-CFB to encrypt
-    // the content (after SynLZ compression), if it is enabled on the server side:
-    // ! MyServer := TRestHttpServer.Create('888',[DataBase],'+',useHttpApi,32,secSynShaAes);
+    // - hcSynShaAes is weak and deprecated, so should not be used on production
     // - for fast and safe communication between stable mORMot nodes, consider
     // using TRestHttpClientWebSockets, leaving hcDeflate for AJAX or non mORMot
     // clients, and hcSynLZ if you expect to have mORMot client(s)
@@ -353,10 +354,10 @@ type
     /// used to handle an interface parameter as SOA callback
     function FakeCallbackRegister(Sender: TServiceFactory;
       const Method: TInterfaceMethod; const ParamInfo: TInterfaceMethodArgument;
-      ParamValue: Pointer): integer; override;
+      ParamValue: Pointer): TRestClientCallbackID; override;
     /// used to finalize an interface parameter as SOA callback
     function FakeCallbackUnregister(Factory: TInterfaceFactory;
-      FakeCallbackID: integer; Instance: pointer): boolean; override;
+      FakeCallbackID: TRestClientCallbackID; Instance: pointer): boolean; override;
     /// this event will be executed just after the HTTP client has been
     // upgraded to the expected WebSockets protocol
     // - supplied Sender parameter will be this TRestHttpClientWebsockets instance
@@ -472,8 +473,8 @@ var
   HttpClientFullWebSocketsLog: boolean;
 
 
-{$ifndef PUREMORMOT2}
 // backward compatibility types redirections
+{$ifndef PUREMORMOT2}
 
 type
   TSqlRestHttpClientWinSock = TRestHttpClientSocket;
@@ -723,12 +724,8 @@ end;
 procedure TRestHttpClientSocket.InternalClose;
 begin
   if fSocket <> nil then
-  try
-    InternalLog('InternalClose: fSocket.Free', sllTrace);
-    FreeAndNil(fSocket);
-  except
-    ; // ignore any error here
-  end;
+  InternalLog('InternalClose: fSocket.Free', sllTrace);
+  FreeAndNilSafe(fSocket);
 end;
 
 function TRestHttpClientSocket.InternalRequest(const url, method: RawUtf8;
@@ -736,12 +733,12 @@ function TRestHttpClientSocket.InternalRequest(const url, method: RawUtf8;
 begin
   fLogFamily.SynLog.Log(sllTrace, 'InternalRequest % calling %(%).Request',
     [method, fSocket.ClassType, pointer(fSocket)], self);
-  result.Lo := fSocket.Request(url, method, KeepAliveMS, Header,
-    RawByteString(Data), DataType, false);
-  result.Hi := fSocket.ServerInternalState;
-  Header := fSocket.HeaderGetText;
-  Data := fSocket.Content;
-  fSocket.Content := ''; // ensure RefCnt=1 to avoid body alloc+copy
+  result.Lo := fSocket.Request(
+    url, method, KeepAliveMS, Header, RawByteString(Data), DataType, false);
+  result.Hi := fSocket.Http.ServerInternalState;
+  Header := fSocket.Http.Headers;
+  Data := fSocket.Http.Content;
+  fSocket.Http.Content := ''; // ensure RefCnt=1 to avoid body alloc+copy
 end;
 
 
@@ -778,10 +775,7 @@ end;
 
 procedure TRestHttpClientRequest.InternalClose;
 begin
-  try
-    FreeAndNil(fRequest);
-  except
-  end;
+  FreeAndNilSafe(fRequest);
 end;
 
 function TRestHttpClientRequest.InternalRequest(const url, method: RawUtf8;
@@ -849,7 +843,7 @@ end;
 
 function TRestHttpClientWebsockets.FakeCallbackRegister(Sender: TServiceFactory;
   const Method: TInterfaceMethod; const ParamInfo: TInterfaceMethodArgument;
-  ParamValue: Pointer): integer;
+  ParamValue: Pointer): TRestClientCallbackID;
 begin
   if WebSockets = nil then
     raise EServiceException.CreateUtf8('Missing %.WebSocketsUpgrade() call ' +
@@ -864,7 +858,7 @@ begin
 end;
 
 function TRestHttpClientWebsockets.FakeCallbackUnregister(
-  Factory: TInterfaceFactory; FakeCallbackID: integer;
+  Factory: TInterfaceFactory; FakeCallbackID: TRestClientCallbackID;
   Instance: pointer): boolean;
 var
   body, head, resp: RawUtf8;

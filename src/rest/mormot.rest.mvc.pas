@@ -41,6 +41,7 @@ uses
   mormot.core.log,
   mormot.core.interfaces,
   mormot.core.mustache,
+  mormot.orm.base,
   mormot.orm.core,
   mormot.orm.rest,
   mormot.orm.server,
@@ -55,8 +56,8 @@ uses
 
 const
   /// TDocVariantOptions for efficient MVC data context rendering
-  // - maps JSON_OPTIONS_FAST_EXTENDED with field names interning
-  JSON_OPTIONS_MVC =
+  // - maps JSON_FAST_EXTENDED with field names interning
+  JSON_MVC =
     [dvoReturnNullForUnknownProperty,
      dvoValueCopiedByReference,
      dvoSerializeAsExtendedJson,
@@ -295,7 +296,7 @@ type
     // - can optionally retrieve the associated record Data parameter
     function CheckAndRetrieve(PRecordData: pointer = nil;
       PRecordTypeInfo: PRttiInfo = nil;
-      PExpires: PCardinal = nil): integer; virtual; abstract;
+      PExpires: PUnixTime = nil): integer; virtual; abstract;
     /// retrieve the session information as a JSON object
     // - returned as a TDocVariant, including any associated record Data and
     // optionally its session ID
@@ -352,7 +353,7 @@ type
     // - will return the 32-bit internal session ID, or 0 if the cookie is invalid
     function CheckAndRetrieve(PRecordData: pointer = nil;
       PRecordTypeInfo: PRttiInfo = nil;
-      PExpires: PCardinal = nil): integer; override;
+      PExpires: PUnixTime = nil): integer; override;
     /// clear the session
     // - by deleting the cookie on the client side
     procedure Finalize(PRecordTypeInfo: PRttiInfo = nil); override;
@@ -939,8 +940,7 @@ const
    (labelValue, labelValue),
    (labelFalse, labelTrue));
 begin
-  Rec := _Safe(Value);
-  if Rec^.Kind = dvObject then
+  if _SafeObject(Value, Rec) then
   begin
     W := TTextWriter.CreateOwnedStream(tmp);
     try
@@ -952,9 +952,21 @@ begin
         if i < 0 then
           continue;
         if not (Field.OrmFieldType in
-            [oftAnsiText, oftUtf8Text, oftInteger, oftFloat, oftCurrency,
-             oftTimeLog, oftModTime, oftCreateTime, oftDateTime, oftDateTimeMS,
-             oftUnixTime, oftUnixMSTime, oftBoolean, oftEnumerate, oftSet]) then
+            [oftAnsiText,
+             oftUtf8Text,
+             oftInteger,
+             oftFloat,
+             oftCurrency,
+             oftTimeLog,
+             oftModTime,
+             oftCreateTime,
+             oftDateTime,
+             oftDateTimeMS,
+             oftUnixTime,
+             oftUnixMSTime,
+             oftBoolean,
+             oftEnumerate,
+             oftSet]) then
           // we support only most obvious types in 'case OrmFieldType of" below
           continue;
         HtmlTableStyle.BeforeFieldName(W);
@@ -963,17 +975,25 @@ begin
         HtmlTableStyle.BeforeValue(W);
         VariantToUtf8(Rec^.Values[i], u);
         case Field.OrmFieldType of
-          oftAnsiText, oftUtf8Text, oftInteger, oftFloat, oftCurrency:
+          oftAnsiText,
+          oftUtf8Text,
+          oftInteger,
+          oftFloat,
+          oftCurrency:
             W.AddHtmlEscape(pointer(u));
-          oftTimeLog, oftModTime, oftCreateTime:
+          oftTimeLog,
+          oftModTime,
+          oftCreateTime:
             if VariantToInt64(Rec^.Values[i], timelog.Value) then
               W.AddHtmlEscapeString(timelog.i18nText);
-          oftDateTime, oftDateTimeMS:
+          oftDateTime,
+          oftDateTimeMS:
             begin
               timelog.From(u);
               W.AddHtmlEscapeString(timelog.i18nText);
             end;
-          oftUnixTime, oftUnixMSTime:
+          oftUnixTime,
+          oftUnixMSTime:
             if VariantToInt64(Rec^.Values[i], timelog.Value) then
             begin
               if Field.OrmFieldType = oftUnixTime then
@@ -982,7 +1002,8 @@ begin
                 timelog.FromUnixMSTime(timelog.Value);
               W.AddHtmlEscapeString(timelog.i18nText);
             end;
-          oftBoolean, oftEnumerate:
+          oftBoolean,
+          oftEnumerate:
             if Field.InheritsFrom(TOrmPropInfoRttiEnum) then
             begin
               caption := TOrmPropInfoRttiEnum(Field).GetCaption(u, int);
@@ -999,7 +1020,7 @@ begin
                 for j := 0 to sets.Count - 1 do
                 begin
                   HtmlTableStyle.AddLabel(W, sets[j], ONOFF[GetBit(int, j)]);
-                  W.AddShort('<br/>');
+                  W.AddShorter('<br/>');
                 end;
               finally
                 sets.Free;
@@ -1046,9 +1067,9 @@ const
   SETLABEL: array[THtmlTableStyleLabel] of string[3] = (
     '', '', '- ', '+ ', '');
 begin
-  WR.AddShort(SETLABEL[kind]);
+  WR.AddShorter(SETLABEL[kind]);
   WR.AddHtmlEscapeString(text);
-  WR.AddShort('&nbsp;');
+  WR.AddShorter('&nbsp;');
 end;
 
 class procedure TExpressionHtmlTableStyle.AfterValue(WR: TTextWriter);
@@ -1058,7 +1079,7 @@ end;
 
 class procedure TExpressionHtmlTableStyle.BeforeFieldName(WR: TTextWriter);
 begin
-  WR.AddShort('<tr><td>');
+  WR.AddShorter('<tr><td>');
 end;
 
 class procedure TExpressionHtmlTableStyle.BeforeValue(WR: TTextWriter);
@@ -1068,12 +1089,12 @@ end;
 
 class procedure TExpressionHtmlTableStyle.EndTable(WR: TTextWriter);
 begin
-  WR.AddShort('</table>');
+  WR.AddShorter('</table>');
 end;
 
 class procedure TExpressionHtmlTableStyle.StartTable(WR: TTextWriter);
 begin
-  WR.AddShort('<table>');
+  WR.AddShorter('<table>');
 end;
 
 
@@ -1086,10 +1107,10 @@ const
     'danger', 'success', 'danger', 'success', 'primary');
 begin
   WR.AddShort('<span class="label label-');
-  WR.AddShort(SETLABEL[kind]);
+  WR.AddShorter(SETLABEL[kind]);
   WR.Add('"', '>');
   WR.AddHtmlEscapeString(text);
-  WR.AddShort('</span>');
+  WR.AddShorter('</span>');
 end;
 
 class procedure TExpressionHtmlTableStyleBootstrap.StartTable(WR: TTextWriter);
@@ -1199,7 +1220,7 @@ constructor TMvcViewsMustache.Create(aInterface: PRttiInfo;
 var
   params: TMvcViewsMustacheParameters;
 begin
-  FillcharFast(params, sizeof(params), 0);
+  FillcharFast(params, SizeOf(params), 0);
   params.FileTimestampMonitorAfterSeconds := 5;
   params.ExtensionForNotExistingTemplate := aExtensionForNotExistingTemplate;
   params.Helpers := TSynMustache.HelpersGetStandardList;
@@ -1393,7 +1414,7 @@ var
 begin
   // create a TDocVariant from the binary record content
   SaveJson(rec^, recrtti, TEXTWRITEROPTIONS_MUSTACHE, json);
-  TDocVariantData(result).InitJsonInPlace(pointer(json), JSON_OPTIONS_MVC);
+  TDocVariantData(result).InitJsonInPlace(pointer(json), JSON_MVC);
 end;
 
 function TMvcSessionAbstract.CheckAndRetrieveInfo(
@@ -1448,7 +1469,7 @@ begin
 end;
 
 function TMvcSessionWithCookies.CheckAndRetrieve(PRecordData: pointer;
-  PRecordTypeInfo: PRttiInfo; PExpires: PCardinal): integer;
+  PRecordTypeInfo: PRttiInfo; PExpires: PUnixTime): integer;
 var
   cookie: RawUtf8;
 begin
@@ -1628,7 +1649,7 @@ begin
             // rendering, e.g. with fast Mustache {{template}}
             VarClear(renderContext);
             TDocVariantData(renderContext).InitJsonInPlace(
-              pointer(methodOutput), JSON_OPTIONS_MVC);
+              pointer(methodOutput), JSON_MVC);
             fApplication.GetViewInfo(fMethodIndex, info);
             _Safe(renderContext)^.AddValue('main', info);
             if fMethodIndex = fApplication.fFactoryErrorIndex then
@@ -1811,10 +1832,14 @@ begin
     if cardinal(aMethodIndex) < cardinal(Length(fCache)) then
       with fCache[aMethodIndex] do
         case Policy of
-          cacheRootIgnoringSession, cacheRootIfSession, cacheRootIfNoSession:
+          cacheRootIgnoringSession,
+          cacheRootIfSession,
+          cacheRootIfNoSession:
             RootValue := '';
-          cacheRootWithSession, cacheWithParametersIgnoringSession,
-          cacheWithParametersIfSession, cacheWithParametersIfNoSession:
+          cacheRootWithSession,
+          cacheWithParametersIgnoringSession,
+          cacheWithParametersIfSession,
+          cacheWithParametersIfNoSession:
             InputValues.Init(false);
         end;
 end;
@@ -1868,6 +1893,8 @@ begin
     TMvcViewsMustache(aViews).RegisterExpressionHelpersForTables(fRestServer);
   fStaticCache.Init({casesensitive=}true);
   fApplication.SetSession(TMvcSessionWithRestServer.Create(aApplication));
+  // no remote ORM access via REST
+  fRestServer.Options := fRestServer.Options + [rsoNoTableURI, rsoNoInternalState];
 end;
 
 function TMvcRunOnRestServer.AddStaticCache(const aFileName: TFileName;
@@ -1922,7 +1949,7 @@ begin
       else
         cached := #0;
       if cached = #0 then
-        if PosEx('..', rawFormat) > 0 then // avoid injection
+        if not SafeFileNameU(rawFormat) then // avoid injection
           // cached='' means HTTP_NOTFOUND
           cached := ''
         else
@@ -1971,7 +1998,7 @@ begin
         if methodIndex >= 0 then
         begin
           method := @fApplication.fFactory.Methods[methodIndex];
-          inputContext := Ctxt.GetInputAsTDocVariant(JSON_OPTIONS_MVC, method);
+          inputContext := Ctxt.GetInputAsTDocVariant(JSON_MVC, method);
           if Assigned(fApplication.OnBeforeRender) then
             if not fApplication.OnBeforeRender(Ctxt, method, inputContext, renderer) then
               // aborted by this event handler
@@ -1979,7 +2006,7 @@ begin
           if not VarIsEmpty(inputContext) then
             with _Safe(inputContext)^ do
             begin
-              if (kind = dvObject) and
+              if IsObject and
                  (Count > 0) then
                 // try {"p.a1":5,"p.a2":"dfasdfa"} -> {"p":{"a1":5,"a2":"dfasdfa"}}
                 if method^.ArgsInputValuesCount = 1 then
@@ -2279,7 +2306,7 @@ end;
 
 procedure TMvcApplication.SetSession(Value: TMvcSessionAbstract);
 begin
-  FreeAndNil(fSession);
+  FreeAndNilSafe(fSession);
   fSession := Value;
 end;
 
@@ -2307,7 +2334,8 @@ end;
 
 
 initialization
-  assert(sizeof(TMvcAction) = sizeof(TServiceCustomAnswer));
+  assert(SizeOf(TMvcAction) = SizeOf(TServiceCustomAnswer));
+  TSynLog.Family.ExceptionIgnore.Add(EMvcApplication);
 
 end.
 

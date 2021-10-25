@@ -31,7 +31,7 @@ uses
   mormot.rest.mvc,
   mormot.rest.sqlite3,
   mormot.orm.core,
-  mormot.orm.rest,
+  mormot.orm.base,
   MVCModel;
 
 type
@@ -133,6 +133,7 @@ type
     function ArticleCommit(
       ID: TID;
       const Title, Content: RawUtf8): TMvcAction;
+    property HasFts: boolean read fHasFts write fHasFts;
   end;
 
 implementation
@@ -150,7 +151,7 @@ procedure TBlogApplication.Start(aServer: TRest);
 begin
   fDefaultData := TLockedDocVariant.Create;
   inherited Start(aServer, TypeInfo(IBlogApplication));
-  fHasFTS := True;
+  fHasFTS := true;
   // TRestOrmServer(TRestServer(aServer).Server).StaticVirtualTable[TOrmArticle]=nil;
   fTagsLookup.Init(RestModel.Orm);
   // publish IBlogApplication using Mustache Views (TMvcRunOnRestServer default)
@@ -166,6 +167,7 @@ begin
   (TMvcRunOnRestServer(fMainRunner).Views as TMvcViewsMustache).
     RegisterExpressionHelpers(['MonthToText'], [MonthToText]).
     RegisterExpressionHelpers(['TagToText'],   [TagToText]);
+  // data setup
   ComputeMinimalData;
   aServer.Orm.Cache.SetCache(TOrmAuthor);
   aServer.Orm.Cache.SetCache(TOrmArticle);
@@ -391,7 +393,7 @@ begin
       TOrmArticle, '', whereClause, [match, rank],
       'id,title,tags,author,authorname,createdat,abstract,contenthtml,rank');
     with _Safe(articles)^ do
-      if (Kind = dvArray) and
+      if IsArray and
          (Count > 0) then
         rank := Values{%H-}[Count - 1].rank
       else

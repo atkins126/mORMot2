@@ -43,6 +43,7 @@ uses
   mormot.net.ws.server,
   mormot.db.core,
   mormot.db.nosql.bson,
+  mormot.orm.base,
   mormot.orm.core,
   mormot.orm.rest,
   mormot.orm.storage,
@@ -102,8 +103,10 @@ type
     // arrays published properties handling
     // - test dynamic tables
     procedure _TRestClientDB;
+    {$ifndef NOSQLITE3STATIC}
     /// check SQlite3 internal regex.c function
     procedure RegexpFunction;
+    {$endif NOSQLITE3STATIC}
     /// test Master/Slave replication using TRecordVersion field
     procedure _TRecordVersion;
   end;
@@ -510,6 +513,12 @@ begin
   check(Names[i1] = '');
   for i := 0 to i1 - 1 do
     check(PosEx('eona', Names[i]) > 0);
+  s := Demo.ExecuteNoExceptionUtf8('SELECT current_timestamp;');
+  check(s <> '', 'current_timestamp');
+  s := Demo.ExecuteNoExceptionUtf8('SELECT datetime(current_timestamp);');
+  check(s <> '', 'datetime');
+  s := Demo.ExecuteNoExceptionUtf8('SELECT datetime(current_timestamp,''localtime'');');
+  check(s <> '', 'localtime');
 end;
 
 procedure TTestSQLite3Engine.VirtualTableDirectAccess;
@@ -557,6 +566,7 @@ begin
   CheckEqual(n, 0);
 end;
 
+{$ifndef NOSQLITE3STATIC}
 procedure TTestSQLite3Engine.RegexpFunction;
 const
   EXPRESSIONS: array[0..2] of RawUtf8 = (
@@ -595,6 +605,7 @@ begin
     Model.Free;
   end;
 end;
+{$endif NOSQLITE3STATIC}
 
 type
   TOrmPeopleVersioned = class(TOrmPeople)
@@ -668,7 +679,7 @@ var
     begin
       serv := TTestBidirectionalRemoteConnection(Test).HttpServer;
       Test.check(serv.AddServer(Master));
-      serv.WebSocketsEnable(Master, 'key2').Settings.SetFullLog;
+      serv.WebSocketsEnable(Master, 'key2')^.SetFullLog;
       ws := TRestHttpClientWebsockets.Create(
         '127.0.0.1', HTTP_DEFAULTPORT, TOrmModel.Create(Model));
       ws.Model.Owner := ws;
@@ -711,7 +722,7 @@ begin
       Master.Free; // test TRestServer.InternalRecordVersionMaxFromExisting
       MasterAccess.Free;
       CreateMaster(false);
-      MasterAccess.Client.BatchStart(TOrmPeopleVersioned, 10000);
+      MasterAccess.Client.BatchStart(TOrmPeopleVersioned);
       while Rec.FillOne do
         // fast add via Batch
         Test.check(MasterAccess.Client.BatchAdd(Rec, true, true) >= 0);
@@ -731,8 +742,8 @@ begin
       begin
         // asynchronous synchronization via websockets
         Test.check(Master.RecordVersionSynchronizeMasterStart(true));
-        Test.check(Slave2.RecordVersionSynchronizeSlaveStart(TOrmPeopleVersioned,
-          MasterAccess, nil));
+        Test.check(Slave2.RecordVersionSynchronizeSlaveStart(
+          TOrmPeopleVersioned, MasterAccess, nil));
       end
       else
       begin
@@ -1448,7 +1459,7 @@ var
       end;
       for i := 0 to high(ids) do
       begin
-        ClientDist.Client.BatchStart(TOrmPeople);
+        ClientDist.Client.BatchStart(TOrmPeople, {autotrans=}0);
         ClientDist.Client.BatchDelete(ids[i]);
         check(ClientDist.Client.BatchSend(res) = HTTP_SUCCESS);
         check(length(res) = 1);
@@ -1788,7 +1799,7 @@ begin
               // test BATCH sequence usage
               if ClientDist.Orm.TransactionBegin(TOrmPeople) then
               try
-                check(ClientDist.Client.BatchStart(TOrmPeople, 5000));
+                check(ClientDist.Client.BatchStart(TOrmPeople));
                 n := 0;
                 for i := 0 to aStatic.Count - 1 do
                   if i and 7 = 0 then
@@ -2191,13 +2202,15 @@ procedure TTestSqliteMemory._TOrmTableWritable;
   var
     s1, s2: TOrmTableJson;
     w: TOrmTableWritable;
-    f, r: integer;
+    json: RawJson;
+    ts: TTimeLogBits;
+    f, r, n: integer;
   begin
     s1 := TOrmTableJson.CreateFromTables([TOrmPeople], '', JS);
     s2 := TOrmTableJson.CreateFromTables([TOrmPeople], '', JS);
     w := TOrmTableWritable.CreateFromTables([TOrmPeople], '', JS);
     try // merge the same data twice, and validate duplicated columns
-      w.NewValuesInterning := intern;
+      w.UpdatedValuesInterning := intern;
       CheckEqual(w.RowCount, s1.RowCount);
       CheckEqual(w.FieldCount, s1.FieldCount);
       w.Join(s2, 'rowid', 'ID'); // s2 will be sorted -> keep s1 untouched
@@ -2229,6 +2242,41 @@ procedure TTestSqliteMemory._TOrmTableWritable;
     finally
       s1.Free;
       s2.Free;
+      w.Free;
+    end;
+    w := TOrmTableWritable.CreateFromTables([TOrmPeopleTimed], '', JS);
+    try
+      w.UpdatedValuesInterning := intern;
+      f := w.FieldIndex('YearOfBirth');
+      Check(f >= 0);
+      n := 0;
+      for r := w.RowCount downto 1 do // downto = validate in-order rows update
+        if r and 3 = 0 then
+        begin
+          w.Update(r, f, UInt32ToUtf8(1700 + r shr 3));
+          inc(n);
+        end;
+      CheckEqual(w.UpdatedRowsCount, n, 'UpdatedRows');
+      ts.From('20211030T18:00:00');
+      Check(ts.Value <> 0);
+      json := w.UpdatesToJson([boOnlyObjects], ts.Value);
+      Check(IsValidJson(json, {strict=}true));
+      CheckHash(json, $91DBF8CA, 'boOnlyObjects');
+      json := w.UpdatesToJson([], ts.Value);
+      Check(IsValidJson(json, {strict=}true));
+      CheckHash(json, $6B9E0BE3, '');
+      json := w.UpdatesToJson([boExtendedJson], ts.Value);
+      Check(IsValidJson(json, {strict=}true));
+      Check(IsValidJson(json, {strict=}false));
+      CheckHash(json, $6B9E0BE3, 'boExtendedJson');
+      json := w.UpdatesToJson([boNoModelEncoding], ts.Value);
+      Check(IsValidJson(json, {strict=}true));
+      CheckHash(json, $49679790, '');
+      json := w.UpdatesToJson([boExtendedJson, boNoModelEncoding], ts.Value);
+      Check(not IsValidJson(json, {strict=}true));
+      Check(IsValidJson(json, {strict=}false));
+      CheckHash(json, $82B63D9D, 'boExtendedJson2');
+    finally
       w.Free;
       intern.Free;
     end;

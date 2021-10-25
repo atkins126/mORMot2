@@ -6,7 +6,8 @@ unit mormot.db.sql.oledb;
 {
   *****************************************************************************
 
-   Efficient SQL Database Connection via OleDB 
+   Efficient SQL Database Connection via OleDB
+    - Some Low-Level OleDB / ORM Constants
     - TSqlDBOleDBConnection* and TSqlDBOleDBStatement Classes
     - Database Engine Specific OleDB Connection Classes
 
@@ -39,6 +40,35 @@ uses
   mormot.db.core,
   mormot.db.sql,
   mormot.db.raw.oledb;
+
+
+{ ************ Some Low-Level OleDB / ORM Constants }
+
+const
+  PARAMTYPE2OLEDB: array[TSqlDBParamInOutType] of DBPARAMIO = (
+    DBPARAMIO_INPUT,                       // paramIn
+    DBPARAMIO_OUTPUT,                      // paramOut
+    DBPARAMIO_INPUT or DBPARAMIO_OUTPUT);  // paramInOut
+
+  FIELDTYPE2OLEDB: array[TSqlDBFieldType] of DBTYPE = (
+    DBTYPE_EMPTY,                  // ftUnknown
+    DBTYPE_I4,                     // ftNull
+    DBTYPE_I8,                     // ftInt64
+    DBTYPE_R8,                     // ftDouble
+    DBTYPE_CY,                     // ftCurrency
+    DBTYPE_DATE,                   // ftDate
+    DBTYPE_WSTR or DBTYPE_BYREF,   // ftUtf8
+    DBTYPE_BYTES or DBTYPE_BYREF); // ftBlob
+
+  FIELDTYPE2OLEDBTYPE_NAME: array[TSqlDBFieldType] of WideString = (
+     '',                 // ftUnknown
+     'DBTYPE_I4',        // ftNull
+     'DBTYPE_I8',        // ftInt64
+     'DBTYPE_R8',        // ftDouble
+     'DBTYPE_CY',        // ftCurrency
+     'DBTYPE_DATE',      // ftDate
+     'DBTYPE_WVARCHAR',  // ftUtf8
+     'DBTYPE_BINARY');   // ftBlob
 
 
 { ************ TSqlDBOleDBConnection* and TSqlDBOleDBStatement Classes }
@@ -206,7 +236,7 @@ type
     /// define if parameter can be retrieved after a stored procedure execution
     VInOut: TSqlDBParamInOutType;
     // so that VInt64 will be 8 bytes aligned
-    VFill: array[sizeof(TSqlDBFieldType)+sizeof(TSqlDBParamInOutType)+sizeof(integer)..
+    VFill: array[SizeOf(TSqlDBFieldType)+SizeOf(TSqlDBParamInOutType)+SizeOf(integer)..
       SizeOf(Int64)-1] of byte;
   end;
   {$ifdef CPU64}
@@ -239,7 +269,7 @@ type
     fRowSetData: array of byte;
     fParamBindings: TDBBindingDynArray;
     fColumnBindings: TDBBindingDynArray;
-    fHasColumnValueInlined: boolean;
+    fHasColumnValueByRef: boolean;
     fOleDBConnection: TSqlDBOleDBConnection;
     fDBParams: TDBParams;
     fRowBufferSize: integer;
@@ -277,7 +307,7 @@ type
     constructor Create(aConnection: TSqlDBConnection); override;
     /// release all associated memory and COM objects
     destructor Destroy; override;
-    /// retrieve column information from a supplied IRowSet
+    /// internal method to retrieve column information from a supplied IRowSet
     // - is used e.g. by TSqlDBOleDBStatement.Execute or to retrieve metadata columns
     // - raise an exception on error
     procedure FromRowSet(RowSet: IRowSet);
@@ -443,7 +473,9 @@ type
     // for pre-Unicode version of Delphi, and a generic UnicodeString (=string)
     // since Delphi 2009: you may not loose any data during charset conversion
     // - a ftBlob content will be mapped into a TBlobData AnsiString variant
-    function ColumnToVariant(Col: integer; var Value: Variant): TSqlDBFieldType; override;
+    function ColumnToVariant(
+      Col: integer; var Value: Variant): TSqlDBFieldType; override;
+
     /// just map the original Collection into a TSqlDBOleDBConnection class
     property OleDBConnection: TSqlDBOleDBConnection
       read fOleDBConnection;
@@ -457,6 +489,10 @@ type
     // - default value is 16384 bytes, minimal allowed size is 8192
     property RowBufferSize: integer
       read fRowBufferSize write SetRowBufferSize;
+    /// direct access to the columns description
+    // - gives more details than the default ColumnType() function
+    property Columns: TSqlDBColumnPropertyDynArray
+      read fColumns;
   end;
 
 
@@ -624,8 +660,8 @@ type
   end;
 
 
-{$ifndef PUREMORMOT2}
 // backward compatibility types redirections
+{$ifndef PUREMORMOT2}
 
 type
   TOleDBConnectionProperties = TSqlDBOleDBConnectionProperties;
@@ -811,33 +847,20 @@ type
       1:
         (Double: double);
       2:
-        (        case integer of
-          0:
-            (VData: array[0..0] of byte);
-          1:
-            (VWideChar: PWideChar);
-          2:
-            (VAnsiChar: PAnsiChar)
-        );
+        (ValueInlined: byte); // for TSqlDBColumnProperty.ColumnValueInlined
+      3:
+        (ByRef: pointer); // DBTYPE_BYREF PWideChar/PAnsiChar
   end;
 
   PColumnValue = ^TColumnValue;
 
 procedure TSqlDBOleDBStatement.LogStatusError(Status: integer;
   Column: PSqlDBColumnProperty);
-var
-  msg: RawUtf8;
 begin
-  {$ifndef PUREPASCAL}
-  if cardinal(Status) <= cardinal(ord(high(TSqlDBOleDBStatus))) then
-    msg := UnCamelCase(TrimLeftLowerCaseShort(
-     GetEnumName(TypeInfo(TSqlDBOleDBStatus), Status)))
-  else
-  {$else}
-    Int32ToUtf8(Status, msg);
-  {$endif}
-  SynDBLog.Add.Log(sllError, 'Invalid [%] status for column [%] at row % for %',
-    [{%H-}msg, Column^.ColumnName, fCurrentRow, fSql], self);
+  SynDBLog.Add.Log(sllError,
+    'Invalid [%] % status for column [%] at row % for [%]',
+    [GetEnumName(TypeInfo(TSqlDBOleDBStatus), Status)^, Status,
+     Column^.ColumnName, fCurrentRow, fSql], self);
 end;
 
 function TSqlDBOleDBStatement.GetCol(Col: integer;
@@ -857,7 +880,7 @@ begin
     stIsNull:
       result := nil;
     stTruncated:
-      LogTruncatedColumn(Column^);
+      LogTruncatedColumn(self, Column^);
   else
     LogStatusError(PColumnValue(result)^.Status, Column);
   end;
@@ -881,12 +904,20 @@ begin
     ColumnToTypedValue(Col, DestType, Dest);
 end;
 
+function ColPtr(C: PSqlDBColumnProperty; V: PColumnValue): pointer;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  if C^.ColumnValueInlined then
+    result := @V^.ValueInlined
+  else
+    result := V^.ByRef; // either PWideChar or PAnsiChar
+end;
+
 function TSqlDBOleDBStatement.ColumnBlob(Col: integer): RawByteString;
 // ColumnBlob will return the binary content of the field
 var
   C: PSqlDBColumnProperty;
   V: PColumnValue;
-  P: PAnsiChar;
 begin
   V := GetCol(Col, C);
   if V = nil then // column is NULL
@@ -894,27 +925,15 @@ begin
   else
     case C^.ColumnType of
       ftBlob:
-        begin
-          if C^.ColumnValueInlined then
-            P := @V^.VData
-          else
-            P := V^.VAnsiChar;
-          SetString(result, P, V^.Length);
-        end;
+        SetString(result, PAnsiChar(ColPtr(C, V)), V^.Length);
       ftUtf8:
         if V^.Length = 0 then
           result := ''
         else
-        begin
-          if C^.ColumnValueInlined then
-            P := @V^.VData
-          else
-            P := V^.VAnsiChar;
           // +1 below for trailing WideChar(#0) in the resulting RawUnicode
-          SetString(result, P, V^.Length + 1);
-        end;
+          SetString(result, PAnsiChar(ColPtr(C, V)), V^.Length + 1);
     else
-      SetString(result, PAnsiChar(@V^.Int64), sizeof(Int64));
+      SetString(result, PAnsiChar(@V^.Int64), SizeOf(Int64)); // as binary
     end;
 end;
 
@@ -975,7 +994,6 @@ function TSqlDBOleDBStatement.ColumnUtf8(Col: integer): RawUtf8;
 var
   C: PSqlDBColumnProperty;
   V: PColumnValue;
-  P: pointer;
 begin
   V := GetCol(Col, C);
   if V = nil then // column is NULL
@@ -987,21 +1005,9 @@ begin
       ftDate:
         result := DateTimeToIso8601Text(V^.Double);
       ftUtf8:
-        begin
-          if C^.ColumnValueInlined then
-            P := @V^.VData
-          else
-            P := V^.VWideChar;
-          RawUnicodeToUtf8(P, V^.Length shr 1, result);
-        end;
+        RawUnicodeToUtf8(ColPtr(C, V), V^.Length shr 1, result);
       ftBlob:
-        begin
-          if C^.ColumnValueInlined then
-            P := @V^.VData
-          else
-            P := V^.VAnsiChar;
-          result := BinToBase64WithMagic(P, V^.Length);
-        end;
+        result := BinToBase64WithMagic(ColPtr(C, V), V^.Length);
       ftCurrency:
         Curr64ToStr(V^.Int64, result);
       ftDouble:
@@ -1016,7 +1022,6 @@ function TSqlDBOleDBStatement.ColumnString(Col: integer): string;
 var
   C: PSqlDBColumnProperty;
   V: PColumnValue;
-  P: pointer;
 begin
   V := GetCol(Col, C);
   if V = nil then // column is NULL
@@ -1035,30 +1040,17 @@ begin
       ftDate:
         result := Ansi7ToString(DateTimeToIso8601Text(V^.Double));
       ftUtf8:
-        begin
-          if C^.ColumnValueInlined then
-            P := @V^.VData
-          else
-            P := V^.VWideChar;
-          result := RawUnicodeToString(P, V^.Length shr 1);
-        end;
+        result := RawUnicodeToString(ColPtr(C, V), V^.Length shr 1);
       ftBlob:
-        begin
-          if C^.ColumnValueInlined then
-            P := @V^.VData
-          else
-            P := V^.VAnsiChar;
-          result := Ansi7ToString(BinToBase64WithMagic(P, V^.Length));
-        end;
+        result := Ansi7ToString(BinToBase64WithMagic(ColPtr(C, V), V^.Length));
     end;
 end;
 
-function TSqlDBOleDBStatement.ColumnToVariant(Col: integer; var Value: Variant):
-  TSqlDBFieldType;
+function TSqlDBOleDBStatement.ColumnToVariant(
+  Col: integer; var Value: Variant): TSqlDBFieldType;
 var
   C: PSqlDBColumnProperty;
   V: PColumnValue;
-  P: pointer;
 begin
   // dedicated version to avoid as much memory allocation than possible
   V := GetCol(Col, C);
@@ -1071,24 +1063,23 @@ begin
   begin
     VType := MAP_FIELDTYPE2VARTYPE[result];
     case result of
-      ftInt64, ftDouble, ftCurrency, ftDate:
+      ftInt64,
+      ftDouble,
+      ftCurrency,
+      ftDate:
         VInt64 := V^.Int64; // copy 64 bit content
       ftUtf8:
         begin
           VAny := nil;
-          if C^.ColumnValueInlined then
-            P := @V^.VData
-          else
-            P := V^.VAnsiChar;
           {$ifndef UNICODE}
           if not Connection.Properties.VariantStringAsWideString then
           begin
             VType := varString;
-            RawUnicodeToString(P, V^.Length shr 1, AnsiString(VAny));
+            RawUnicodeToString(ColPtr(C, V), V^.Length shr 1, AnsiString(VAny));
           end
           else
           {$endif UNICODE}
-            SetString(SynUnicode(VAny), PWideChar(P), V^.Length shr 1);
+            SetString(SynUnicode(VAny), PWideChar(ColPtr(C, V)), V^.Length shr 1);
         end;
       ftBlob:
         if fForceBlobAsNull then
@@ -1096,11 +1087,7 @@ begin
         else
         begin
           VAny := nil;
-          if C^.ColumnValueInlined then
-            P := @V^.VData
-          else
-            P := V^.VAnsiChar;
-          SetString(RawByteString(VAny), PAnsiChar(P), V^.Length);
+          SetString(RawByteString(VAny), PAnsiChar(ColPtr(C, V)), V^.Length);
         end;
     end;
   end;
@@ -1109,8 +1096,8 @@ end;
 procedure TSqlDBOleDBStatement.ColumnsToJson(WR: TJsonWriter);
 var
   col: integer;
+  C: PSqlDBColumnProperty;
   V: PColumnValue;
-  P: Pointer;
 label
   Write;
 begin
@@ -1119,66 +1106,57 @@ begin
     raise EOleDBException.CreateUtf8('%.ColumnsToJson() with no prior Step', [self]);
   if WR.Expand then
     WR.Add('{');
-  for col := 0 to fColumnCount - 1 do // fast direct conversion from OleDB buffer
-    with fColumns[col] do
-    begin
-      if WR.Expand then
-        WR.AddFieldName(ColumnName); // add '"ColumnName":'
-      V := @fRowSetData[ColumnAttr];
-      case TSqlDBOleDBStatus(V^.Status) of
-        stOK:
-Write:    case ColumnType of
-            ftInt64:
-              WR.Add(V^.Int64);
-            ftDouble:
-              WR.AddDouble(V^.Double);
-            ftCurrency:
-              WR.AddCurr64(@V^.Int64);
-            ftDate:
-              begin
-                WR.Add('"');
-                WR.AddDateTime(@V^.Double, 'T', #0, fForceDateWithMS);
-                WR.Add('"');
-              end;
-            ftUtf8:
-              begin
-                WR.Add('"');
-                if ColumnValueInlined then
-                  P := @V^.VData
-                else
-                  P := V^.VWideChar;
-                WR.AddJsonEscapeW(P, V^.Length shr 1);
-                WR.Add('"');
-              end;
-            ftBlob:
-              if fForceBlobAsNull then
-                WR.AddNull
-              else
-              begin
-                if ColumnValueInlined then
-                  P := @V^.VData
-                else
-                  P := V^.VAnsiChar;
-                WR.WrBase64(P, V^.Length, true); // withMagic=true
-              end;
-          else
-            WR.AddNull;
-          end;
-        stIsNull:
+  c := pointer(fColumns);
+  for col := 1 to fColumnCount do // fast direct conversion from OleDB buffers
+  begin
+    if WR.Expand then
+      WR.AddFieldName(c^.ColumnName); // add '"ColumnName":'
+    V := @fRowSetData[c^.ColumnAttr];
+    case TSqlDBOleDBStatus(V^.Status) of
+      stOK:
+Write:  case c^.ColumnType of
+          ftInt64:
+            WR.Add(V^.Int64);
+          ftDouble:
+            WR.AddDouble(V^.Double);
+          ftCurrency:
+            WR.AddCurr64(@V^.Int64);
+          ftDate:
+            begin
+              WR.Add('"');
+              WR.AddDateTime(@V^.Double, 'T', #0, fForceDateWithMS);
+              WR.Add('"');
+            end;
+          ftUtf8:
+            begin
+              WR.Add('"');
+              WR.AddJsonEscapeW(ColPtr(C, V), V^.Length shr 1);
+              WR.Add('"');
+            end;
+          ftBlob:
+            if fForceBlobAsNull then
+              WR.AddNull
+            else
+              WR.WrBase64(ColPtr(C, V), V^.Length, true); // withMagic=true
+        else
           WR.AddNull;
-        stTruncated:
-          begin
-            LogTruncatedColumn(fColumns[col]);
-            goto Write;
-          end;
-      else
-        begin
-          WR.AddNull;
-          LogStatusError(V^.Status, @fColumns[col]);
         end;
+      stIsNull:
+        WR.AddNull;
+      stTruncated:
+        begin
+          LogTruncatedColumn(self, C^);
+          goto Write;
+        end;
+    else
+      begin
+        WR.AddNull;
+        LogStatusError(V^.Status, C);
       end;
-      WR.AddComma;
     end;
+    WR.AddComma;
+    inc(c);
+  end;
   WR.CancelLastComma; // cancel last ','
   if WR.Expand then
     WR.Add('}');
@@ -1219,19 +1197,7 @@ begin
 end;
 
 const
-  PARAMTYPE2OLEDB: array[TSqlDBParamInOutType] of DBPARAMIO = (
-    DBPARAMIO_INPUT, DBPARAMIO_OUTPUT, DBPARAMIO_INPUT or DBPARAMIO_OUTPUT);
-
-  FIELDTYPE2OLEDB: array[TSqlDBFieldType] of DBTYPE = (
-    DBTYPE_EMPTY, DBTYPE_I4, DBTYPE_I8, DBTYPE_R8, DBTYPE_CY, DBTYPE_DATE,
-    DBTYPE_WSTR or DBTYPE_BYREF, DBTYPE_BYTES or DBTYPE_BYREF);
-
-  FIELDTYPE2OLEDBTYPE_NAME: array[TSqlDBFieldType] of WideString = (
-     '', 'DBTYPE_I4', 'DBTYPE_I8', 'DBTYPE_R8', 'DBTYPE_CY', 'DBTYPE_DATE',
-    'DBTYPE_WVARCHAR', 'DBTYPE_BINARY');
-// ftUnknown, ftNull, ftInt64, ftDouble, ftCurrency, ftDate, ftUtf8, ftBlob
-
-  TABLE_PARAM_DATASOURCE: WideString = 'table';
+  TABLE_PARAM_DATASOURCE: PWideChar = 'table';
 
 procedure TSqlDBOleDBStatement.Prepare(const aSql: RawUtf8; ExpectResults: boolean);
 var
@@ -1308,7 +1274,8 @@ begin
       for i := 0 to fParamCount - 1 do
         case fParams[i].VType of
           ftUnknown:
-            raise EOleDBException.CreateUtf8('%.Execute: missing #% bound parameter for [%]',
+            raise EOleDBException.CreateUtf8(
+              '%.Execute: missing #% bound parameter for [%]',
               [self, i + 1, fSql]);
         end;
       P := pointer(fParams);
@@ -1352,7 +1319,7 @@ begin
         begin
           BI^.pwszDataSourceType := Pointer(TABLE_PARAM_DATASOURCE);
           B^.wType := DBTYPE_TABLE;
-          B^.cbMaxLen := sizeof(IUnknown);
+          B^.cbMaxLen := SizeOf(IUnknown);
           B^.pObject := @dbObjTVP;
           B^.obValue := PAnsiChar(@P^.VIUnknown) - pointer(fParams);
           case P^.VType of
@@ -1380,8 +1347,12 @@ begin
                 BI.pwszDataSourceType := 'DBTYPE_WVARCHAR';
                 BI.dwFlags := BI^.dwFlags or DBPARAMFLAGS_ISNULLABLE;
               end;
-            ftInt64, ftDouble, ftCurrency, ftDate:            // those types match the VInt64 binary representation :)
-              B^.cbMaxLen := sizeof(Int64);
+            ftInt64,
+            ftDouble,
+            ftCurrency,
+            ftDate:
+              // those types match the VInt64 binary representation :)
+              B^.cbMaxLen := SizeOf(Int64);
             ftBlob:
               begin
                 // sent as DBTYPE_BYREF mapping directly RawByteString VBlob content
@@ -1397,13 +1368,13 @@ begin
                 if P^.VText = '' then
                 begin
                   B^.wType := DBTYPE_WSTR; // '' -> bind one #0 wide char
-                  B^.cbMaxLen := sizeof(WideChar);
+                  B^.cbMaxLen := SizeOf(WideChar);
                 end
                 else
                 begin
                   // mapping directly the WideString VText content
                   B^.wType := DBTYPE_BSTR; // DBTYPE_WSTR just doesn't work :(
-                  B^.cbMaxLen := sizeof(Pointer);
+                  B^.cbMaxLen := SizeOf(Pointer);
                   BI^.ulParamSize := length(P^.VText);
                 end;
               end;
@@ -1484,9 +1455,14 @@ begin
     exit; // no row returned
   fRowSet := RowSet;
   fRowSize := BindColumns(fRowSet as IColumnsInfo, fColumn, fColumnBindings);
-  SetLength(fRowSetData, fRowSize);
+  if length(fRowSetData) < fRowSize then
+  begin
+    fRowSetData := nil; // don't move any data, just get a big enough buffer
+    SetLength(fRowSetData, fRowSize);
+  end;
   if fRowSize > RowBufferSize then
     RowBufferSize := fRowSize; // enforce at least one row in OleDB buffer
+  fRowStepHandles := nil;
   SetLength(fRowStepHandles, RowBufferSize div fRowSize);
 end;
 
@@ -1494,13 +1470,13 @@ procedure TSqlDBOleDBStatement.FlushRowSetData;
 var
   c: PtrInt;
 begin
-  if fHasColumnValueInlined then
+  if fHasColumnValueByRef then
     for c := 0 to fColumnCount - 1 do
       with fColumns[c] do
         if not ColumnValueInlined then // release DBTYPE_BYREF memory
           with PColumnValue(@fRowSetData[ColumnAttr])^ do
-            if VWideChar <> nil then
-              OleDBConnection.fMalloc.Free(VWideChar);
+            if ByRef <> nil then
+              OleDBConnection.fMalloc.Free(ByRef);
   FillcharFast(fRowSetData[0], fRowSize, 0);
 end;
 
@@ -1523,7 +1499,8 @@ begin
     SetLength(Status, fColumnCount);
     OleDBConnection.OleDBCheck(self,
       (fRowSet as IAccessor).CreateAccessor(DBACCESSOR_ROWDATA or DBACCESSOR_OPTIMIZED,
-       fColumnCount, pointer(fColumnBindings), fRowSize, fRowSetAccessor, pointer(Status)), Status);
+       fColumnCount, pointer(fColumnBindings), fRowSize, fRowSetAccessor, pointer(Status)),
+       Status);
     fRowStepHandleRetrieved := 0;
     fRowStepHandleCurrent := 0;
     fRowStepResult := 0;
@@ -1542,8 +1519,8 @@ begin
     ReleaseRowSetDataAndRows;
     if fRowStepResult = DB_S_ENDOFROWSET then
       exit; // no more row available -> return false
-    fRowStepResult := fRowSet.GetNextRows(DB_NULL_HCHAPTER, 0, length(fRowStepHandles),
-      fRowStepHandleRetrieved, pointer(fRowStepHandles));
+    fRowStepResult := fRowSet.GetNextRows(DB_NULL_HCHAPTER, 0,
+      length(fRowStepHandles), fRowStepHandleRetrieved, pointer(fRowStepHandles));
     OleDBConnection.OleDBCheck(self, fRowStepResult);
     fRowStepHandleCurrent := 0;
     if fRowStepHandleRetrieved = 0 then
@@ -1551,7 +1528,8 @@ begin
   end;
   // here we have always fRowStepHandleCurrent<fRowStepHandleRetrieved
   OleDBConnection.OleDBCheck(self,
-    fRowSet.GetData(fRowStepHandles[fRowStepHandleCurrent], fRowSetAccessor, pointer(fRowSetData)));
+    fRowSet.GetData(fRowStepHandles[fRowStepHandleCurrent],
+      fRowSetAccessor, pointer(fRowSetData)));
   inc(fRowStepHandleCurrent);
   fCurrentRow := sav + 1;
   inc(fTotalRowsRetrieved);
@@ -1580,7 +1558,8 @@ begin
   FlushRowSetData;
   if fRowStepHandleRetrieved <> 0 then
   begin
-    fRowSet.ReleaseRows(fRowStepHandleRetrieved, Pointer(fRowStepHandles), nil, nil, nil);
+    fRowSet.ReleaseRows(
+      fRowStepHandleRetrieved, Pointer(fRowStepHandles), nil, nil, nil);
     fRowStepHandleRetrieved := 0;
   end;
   fCurrentRow := 0;
@@ -1668,25 +1647,30 @@ begin
       Col^.ColumnNonNullable := nfo^.dwFlags and DBCOLUMNFLAGS_MAYBENULL = 0;
       Col^.ColumnAttr := result; // offset of status[-length]-value in fRowSetData[]
       Col^.ColumnValueInlined := true;
+      Col^.ColumnValueDBType := nfo^.wType;
       B^.iOrdinal := nfo^.iOrdinal;
       B^.eParamIO := DBPARAMIO_NOTPARAM;
       B^.obStatus := result;
-      inc(result, sizeof(PtrInt)); // TColumnValue.Status
+      inc(result, SizeOf(PtrInt)); // TColumnValue.Status
       B^.wType := FIELDTYPE2OLEDB[Col^.ColumnType];
       case Col^.ColumnType of
-        ftInt64, ftDouble, ftCurrency, ftDate:
+        ftInt64,
+        ftDouble,
+        ftCurrency,
+        ftDate:
           begin
-            inc(result, sizeof(PtrUInt)); // ignore TColumnValue.Length
+            inc(result, SizeOf(PtrUInt)); // ignore TColumnValue.Length
             B^.dwPart := DBPART_STATUS or DBPART_VALUE;
             B^.obValue := result;
-            B^.cbMaxLen := sizeof(Int64);
-            inc(result, sizeof(Int64));
+            B^.cbMaxLen := SizeOf(Int64);
+            inc(result, SizeOf(Int64));
           end;
-        ftUtf8, ftBlob:
+        ftUtf8,
+        ftBlob:
           begin
             B^.dwPart := DBPART_STATUS or DBPART_VALUE or DBPART_LENGTH;
             B^.obLength := result; // need length field in fRowSetData[]
-            inc(result, sizeof(PtrUInt)); // TColumnValue.Length
+            inc(result, SizeOf(PtrUInt)); // TColumnValue.Length
             B^.obValue := result;
             if nfo^.ulColumnSize < MAXCOLUMNSIZE then
             begin
@@ -1697,7 +1681,9 @@ begin
               if Col^.ColumnType = ftUtf8 then
               begin
                 case nfo^.wType of
-                  DBTYPE_STR, DBTYPE_BSTR, DBTYPE_WSTR:
+                  DBTYPE_STR,
+                  DBTYPE_BSTR,
+                  DBTYPE_WSTR:
                     len := len * 2; // ulColumnSize = WideChar count
                   DBTYPE_GUID:
                     len := 78;
@@ -1706,7 +1692,7 @@ begin
                 end;
                 inc(len, 2); // reserve memory for trailing WideChar(#0)
               end;
-              if AlignDataInternalBuffer then // 8 bytes alignment
+              if fAlignBuffer then // 8 bytes alignment
                 len := ((len - 1) shr 3 + 1) shl 3;
               inc(result, len);
               B^.cbMaxLen := len;
@@ -1714,26 +1700,26 @@ begin
             else
             begin
               // get huge content by pointer (includes DBTYPE_BYREF)
-              fHasColumnValueInlined := true;
+              fHasColumnValueByRef := true;
               Col^.ColumnValueInlined := false;
-              B^.cbMaxLen := sizeof(Pointer); // value=pointer in fRowSetData[]
-              if AlignDataInternalBuffer then
+              B^.cbMaxLen := SizeOf(Pointer); // value=pointer in fRowSetData[]
+              if fAlignBuffer then
                 inc(result, 8)
               else
-                inc(result, sizeof(Pointer));
+                inc(result, SizeOf(Pointer));
             end;
           end;
       else
         raise EOleDBException.CreateUtf8(
-          '%.Execute: wrong column [%] (%) for [%]', [self, aName,
-           GetEnumName(TypeInfo(TSqlDBFieldType), ord(Col^.ColumnType))^, fSql]);
+          '%.Execute: wrong column [%] (%) for [%]',
+          [self, aName, ToText(Col^.ColumnType)^, fSql]);
       end;
       inc(nfo);
       inc(B);
-      if AlignDataInternalBuffer then
+      if fAlignBuffer then
         Assert((result and 7) = 0);
     end;
-    assert(not AlignDataInternalBuffer or (result and 7 = 0));
+    assert(not fAlignBuffer or (result and 7 = 0));
     assert(fColumnCount = integer(nCols));
   finally
     OleDBConnection.fMalloc.Free(Cols);
@@ -1760,7 +1746,8 @@ begin
     // retrieve initialization parameters from connection string
     OleCheck(CoCreateInstance(CLSID_MSDAINITIALIZE, nil, CLSCTX_INPROC_SERVER,
       IID_IDataInitialize, DataInitialize));
-    OleCheck(DataInitialize.GetDataSource(nil, CLSCTX_INPROC_SERVER, pointer(OleDBProperties.ConnectionString),
+    OleCheck(DataInitialize.GetDataSource(nil, CLSCTX_INPROC_SERVER,
+      pointer(OleDBProperties.ConnectionString),
       IID_IDBInitialize, IUnknown(fDBInitialize)));
     DataInitialize := nil;
     // open the connection to the DB
@@ -1789,7 +1776,7 @@ constructor TSqlDBOleDBConnection.Create(aProperties: TSqlDBConnectionProperties
 var
   {%H-}log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self, 'Create');
+  log := SynDBLog.Enter(self, 'Create');
   if not aProperties.InheritsFrom(TSqlDBOleDBConnectionProperties) then
     raise EOleDBException.CreateUtf8('Invalid %.Create(%)', [self, aProperties]);
   fOleDBProperties := TSqlDBOleDBConnectionProperties(aProperties);
@@ -1802,15 +1789,15 @@ destructor TSqlDBOleDBConnection.Destroy;
 var
   log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self, 'Destroy');
+  log := SynDBLog.Enter(self, 'Destroy');
   try
     inherited Destroy; // call Disconnect;
     fMalloc := nil;
     CoUninit;
   except
     on E: Exception do
-      if Log <> nil then
-        Log.Log(sllError, E);
+      if log <> nil then
+        log.Log(sllError, E);
   end;
 end;
 
@@ -1818,7 +1805,7 @@ procedure TSqlDBOleDBConnection.Disconnect;
 var
   {%H-}log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self, 'Disconnect');
+  log := SynDBLog.Enter(self, 'Disconnect');
   try
     inherited Disconnect; // flush any cached statement
   finally
@@ -1842,14 +1829,14 @@ begin
   result := TSqlDBOleDBStatement.Create(self);
 end;
 
-procedure TSqlDBOleDBConnection.OleDBCheck(aStmt: TSqlDBStatement; aResult:
-  HRESULT; const aStatus: TCardinalDynArray);
+procedure TSqlDBOleDBConnection.OleDBCheck(aStmt: TSqlDBStatement;
+  aResult: HRESULT; const aStatus: TCardinalDynArray);
 
   procedure EnhancedTest;
   var
     ErrorInfo, ErrorInfoDetails: IErrorInfo;
     ErrorRecords: IErrorRecords;
-    i: integer;
+    i: PtrInt;
     Desc: WideString;
     ErrorCount: cardinal;
     E: Exception;
@@ -1870,7 +1857,8 @@ procedure TSqlDBOleDBConnection.OleDBCheck(aStmt: TSqlDBStatement; aResult:
           OleCheck(ErrorInfoDetails.GetDescription(Desc));
           if fOleDBErrorMessage <> '' then
             fOleDBErrorMessage := fOleDBErrorMessage + '  ';
-          fOleDBErrorMessage := fOleDBErrorMessage + UnicodeBufferToString(pointer(Desc));
+          fOleDBErrorMessage := fOleDBErrorMessage +
+            UnicodeBufferToString(pointer(Desc));
           ErrorInfoDetails := nil;
         end;
     end;
@@ -1943,7 +1931,7 @@ procedure TSqlDBOleDBConnection.Rollback;
 var
   {%H-}log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self, 'Rollback');
+  log := SynDBLog.Enter(self, 'Rollback');
   if assigned(fTransaction) then
   begin
     inherited Rollback;
@@ -1955,7 +1943,7 @@ procedure TSqlDBOleDBConnection.StartTransaction;
 var
   {%H-}log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self, 'StartTransaction');
+  log := SynDBLog.Enter(self, 'StartTransaction');
   if assigned(fTransaction) then
   begin
     inherited StartTransaction;
@@ -1977,7 +1965,7 @@ var
   tmp: PWideChar;
   log: ISynLog;
 begin
-  Log := SynDBLog.Enter(self, 'ConnectionStringDialog');
+  log := SynDBLog.Enter(self, 'ConnectionStringDialog');
   result := false;
   if self <> nil then
   try
@@ -2001,13 +1989,13 @@ begin
             fConnectionString := tmp;
             if tmp <> nil then
               CoTaskMemFree(tmp);
-            if Log <> nil then
-              Log.Log(sllDB, 'New connection settings set', self);
+            if log <> nil then
+              log.log(sllDB, 'New connection settings set', self);
             result := true;
           end;
         DB_E_CANCELED:
-          if Log <> nil then
-            Log.Log(sllDB, 'Canceled', self);
+          if log <> nil then
+            log.log(sllDB, 'Canceled', self);
       else
         OleCheck(res);
       end;
@@ -2037,7 +2025,8 @@ begin
       result := false;
     end;
     SynDBLog.Add.Log(sllDB, 'CreateDatabase for [%] returned %',
-      [ConnectionString, ord(result)], self);
+      [SanitizeFromPassword(SynUnicodeToUtf8(fConnectionString)),
+       ord(result)], self);
   finally
     DB := null;
     Catalog := nil;
@@ -2084,6 +2073,17 @@ begin
   end;
 end;
 
+const
+  DBTYPE_DISPLAY: array[TSqlDBFieldType] of RawUtf8 = (
+    '???',      // ftUnknown
+    'null',     // ftNull
+    'int',      // ftInt64
+    'double',   // ftDouble
+    'currency', // ftCurrency
+    'date',     // ftDate
+    'nvarchar', // ftUtf8
+    'blob');    // ftBlob
+
 procedure TSqlDBOleDBConnectionProperties.GetFields(const aTableName: RawUtf8;
   out Fields: TSqlDBColumnDefineDynArray);
 var
@@ -2092,9 +2092,6 @@ var
   n, i: integer;
   F: TSqlDBColumnDefine;
   FA: TDynArray;
-const
-  DBTYPE_DISPLAY: array[TSqlDBFieldType] of RawUtf8 = ('???', 'null', 'int',
-    'double', 'currency', 'date', 'nvarchar', 'blob');
 begin
   inherited; // first try from SQL, if any (faster)
   if Fields <> nil then
@@ -2166,11 +2163,11 @@ begin
         FromRowSet(Rows);
         while Step do
           fForeignKeys.Add(TrimU(ColumnUtf8('FK_TABLE_SCHEMA')) + '.' +
-            TrimU(ColumnUtf8('FK_TABLE_NAME')) + '.' +
-              TrimU(ColumnUtf8('FK_COLUMN_NAME')),
-            TrimU(ColumnUtf8('PK_TABLE_SCHEMA')) + '.' +
-              TrimU(ColumnUtf8('PK_TABLE_NAME')) + '.' +
-              TrimU(ColumnUtf8('PK_COLUMN_NAME')));
+                           TrimU(ColumnUtf8('FK_TABLE_NAME')) + '.' +
+                           TrimU(ColumnUtf8('FK_COLUMN_NAME')),
+                           TrimU(ColumnUtf8('PK_TABLE_SCHEMA')) + '.' +
+                           TrimU(ColumnUtf8('PK_TABLE_NAME')) + '.' +
+                           TrimU(ColumnUtf8('PK_COLUMN_NAME')));
       finally
         Free;
       end;
@@ -2419,7 +2416,8 @@ begin
   fProviderName := 'MSDASQL'; // we could have left it void - never mind
   inherited SetInternalProperties;
   if fDriver <> '' then
-    fConnectionString := Utf8ToSynUnicode('Driver=' + fDriver + ';') + fConnectionString;
+    fConnectionString := Utf8ToSynUnicode('Driver=' + fDriver + ';') +
+      fConnectionString;
 end;
 
 

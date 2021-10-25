@@ -103,6 +103,8 @@ type
     coFTPSSLAuth           = 129,
     coIgnoreContentLength  = 136,
     coFTPSkipPasvIp        = 137,
+    coTimeoutMs            = 155, // since libcurl 7.16.2 - April 11 2007
+    coConnectTimeoutMs     = 156,
     coFile                 = 10001,
     coURL                  = 10002,
     coProxy                = 10004,
@@ -728,10 +730,10 @@ implementation
   // compiled static library from https://github.com/gcesarmza/curl-android-ios
   {$ifdef OSANDROID}
     {$ifdef CPUAARCH64}
-      {$L ..\..\static\aarch64-android\libcurl.a}
+      {$linklib ..\..\static\aarch64-android\libcurl.a}
     {$endif CPUAARCH64}
     {$ifdef CPUARM}
-      {$L ..\..\static\arm-android\libcurl.a}
+      {$linklib ..\..\static\arm-android\libcurl.a}
     {$endif CPUARM}
     {$linklib libz.so}
   {$endif OSANDROID}

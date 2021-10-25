@@ -6,7 +6,7 @@ unit mormot.db.raw.sqlite3.static;
 {
   *****************************************************************************
 
-    Statically linked SQLite3 3.35.5 engine with optional AES encryption
+    Statically linked SQLite3 3.36.0 engine with optional AES encryption
     - TSqlite3LibraryStatic Implementation
     - Encryption-Related Functions
 
@@ -420,46 +420,20 @@ begin
   libc_qsort(baseP, NElem, Width, comparF);
 end;
 
+{$ifdef OSWINDOWS}
+
 var
   { as standard C library documentation states:
   Statically allocated buffer, shared by the functions gmtime() and localtime().
   Each call of these functions overwrites the content of this structure.
-  -> since timing is not thread-dependent, it's OK to share this buffer :) }
-  atm: packed record
-    tm_sec: integer;            { Seconds.      [0-60] (1 leap second) }
-    tm_min: integer;            { Minutes.      [0-59]  }
-    tm_hour: integer;           { Hours.        [0-23]  }
-    tm_mday: integer;           { Day.          [1-31]  }
-    tm_mon: integer;            { Month.        [0-11]  }
-    tm_year: integer;           { Year          - 1900. }
-    tm_wday: integer;           { Day of week.  [0-6]   }
-    tm_yday: integer;           { Days in year. [0-365] }
-    tm_isdst: integer;          { DST.          [-1/0/1]}
-    __tm_gmtoff: integer;       { Seconds east of UTC  }
-    __tm_zone: PChar;           { Timezone abbreviation}
-  end;
+  -> this buffer is shared, but SQlite3 will protect it with a mutex :) }
+  atm: time_t;
 
-function localtime64(const t: Int64): pointer; cdecl; 
-// a fast full pascal version of the standard C library function
-var S: TSystemTime;
+function localtime(t: PCardinal): pointer; cdecl;
 begin
-  GetLocalTime(S);
-  atm.tm_sec := S.wSecond;
-  atm.tm_min := S.wMinute;
-  atm.tm_hour := S.wHour;
-  atm.tm_mday := S.wDay;
-  atm.tm_mon := S.wMonth-1;
-  atm.tm_year := S.wYear-1900;
-  atm.tm_wday := S.wDay;
+  localtime32_s(t^, atm);
   result := @atm;
 end;
-
-function localtime(t: PCardinal): pointer; cdecl; 
-begin
-  result := localtime64(t^);
-end;
-
-{$ifdef OSWINDOWS}
 
 function _beginthreadex(security: pointer; stksize: dword;
   start, arg: pointer; flags: dword; var threadid: dword): THandle; cdecl;
@@ -791,7 +765,7 @@ begin
   FileSeek64(F, 1024, soFromBeginning);
   while Posi < Size do
   begin
-    R := FileRead(F, Buf, sizeof(Buf)); // read buffer
+    R := FileRead(F, Buf, SizeOf(Buf)); // read buffer
     if R < 0 then
       break; // stop on any read error
     if OldPassWord <> '' then
@@ -896,7 +870,7 @@ function sqlite3_column_text(S: TSqlite3Statement; Col: integer): PUtf8Char; cde
 function sqlite3_column_text16(S: TSqlite3Statement; Col: integer): PWideChar; cdecl; external;
 function sqlite3_column_blob(S: TSqlite3Statement; Col: integer): PUtf8Char; cdecl; external;
 function sqlite3_value_type(Value: TSqlite3Value): integer; cdecl; external;
-function sqlite3_value_subtype(Value: TSqlite3Value): integer; cdecl; external;
+function sqlite3_value_subtype(Value: TSqlite3Value): cardinal; cdecl; external;
 function sqlite3_value_numeric_type(Value: TSqlite3Value): integer; cdecl; external;
 function sqlite3_value_nochange(Value: TSqlite3Value): integer; cdecl; external;
 function sqlite3_value_frombind(Value: TSqlite3Value): integer; cdecl; external;
@@ -908,8 +882,8 @@ function sqlite3_value_double(Value: TSqlite3Value): double; cdecl; external;
 function sqlite3_value_int64(Value: TSqlite3Value): Int64; cdecl; external;
 function sqlite3_value_text(Value: TSqlite3Value): PUtf8Char; cdecl; external;
 function sqlite3_value_blob(Value: TSqlite3Value): pointer; cdecl; external;
-procedure sqlite3_result_pointer(Context: TSqlite3FunctionContext; Param: integer; Value: pointer;
-  Typ: PUtf8Char;DestroyPtr: TSqlDestroyPtr); cdecl; external;
+procedure sqlite3_result_pointer(Context: TSqlite3FunctionContext; Value: pointer;
+  Typ: PUtf8Char; DestroyPtr: TSqlDestroyPtr); cdecl; external;
 procedure sqlite3_result_null(Context: TSqlite3FunctionContext); cdecl; external;
 procedure sqlite3_result_int64(Context: TSqlite3FunctionContext; Value: Int64); cdecl; external;
 procedure sqlite3_result_double(Context: TSqlite3FunctionContext; Value: double); cdecl; external;
@@ -919,7 +893,7 @@ procedure sqlite3_result_zeroblob(Context: TSqlite3FunctionContext; Value_bytes:
 procedure sqlite3_result_text(Context: TSqlite3FunctionContext; Value: PUtf8Char;
   Value_bytes: integer=-1; DestroyPtr: TSqlDestroyPtr=SQLITE_TRANSIENT); cdecl; external;
 procedure sqlite3_result_value(Context: TSqlite3FunctionContext; Value: TSqlite3Value); cdecl; external;
-procedure sqlite3_result_subtype(Context: TSqlite3FunctionContext; Value: integer); cdecl; external;
+procedure sqlite3_result_subtype(Context: TSqlite3FunctionContext; Value: cardinal); cdecl; external;
 procedure sqlite3_result_error(Context: TSqlite3FunctionContext; Msg: PUtf8Char;
   MsgLen: integer=-1); cdecl; external;
 function sqlite3_user_data(Context: TSqlite3FunctionContext): pointer; cdecl; external;
@@ -1004,9 +978,9 @@ function sqlite3_backup_finish(Backup: TSqlite3Backup): integer; cdecl; external
 function sqlite3_backup_remaining(Backup: TSqlite3Backup): integer; cdecl; external;
 function sqlite3_backup_pagecount(Backup: TSqlite3Backup): integer; cdecl; external;
 function sqlite3_serialize(DB: TSqlite3DB; Schema: PUtf8Char; Size: PInt64;
-  Flags: integer): pointer; cdecl; external;
+  Flags: cardinal): pointer; cdecl; external;
 function sqlite3_deserialize(DB: TSqlite3DB; Schema: PUtf8Char; Data: pointer;
-  DBSize, BufSize: Int64; Flags: integer): pointer; cdecl; external;
+  DBSize, BufSize: Int64; Flags: cardinal): pointer; cdecl; external;
 function sqlite3_wal_hook(DB: TSqlite3DB; Callback: TSqlWalHookCallback; UserData: pointer): pointer; cdecl; external;
 function sqlite3_wal_autocheckpoint(DB: TSqlite3DB; N: integer): integer; cdecl; external;
 function sqlite3_wal_checkpoint_v2(DB: TSqlite3DB; zDb: PUtf8Char; eMode: integer;
@@ -1029,7 +1003,7 @@ function sqlite3_trace_v2(DB: TSqlite3DB; Mask: integer; Callback: TSqlTraceCall
 
 const
   // error message if statically linked sqlite3.o(bj) does not match this value
-  EXPECTED_SQLITE3_VERSION = '3.35.5';
+  EXPECTED_SQLITE3_VERSION = '3.36.0';
 
   // where to download the latest available static binaries, including SQLite3
   EXPECTED_STATIC_DOWNLOAD = 'https://synopse.info/files/mormot2static.7z';

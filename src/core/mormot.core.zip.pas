@@ -375,12 +375,27 @@ type
   PZipReadEntry = ^TZipReadEntry;
   TZipReadEntryDynArray = array of TZipReadEntry;
 
+  TZipAbstract = class
+  protected
+    fZipNamePathDelim, fZipNamePathDelimReversed: AnsiChar;
+    fZipNamePathDelimString, fZipNamePathDelimReversedString: string;
+    procedure SetZipNamePathDelim(Value: AnsiChar);
+  public
+    /// initialize this class
+    constructor Create;
+    /// how sub folders names are handled in the ZIP
+    // - by default, is '/' to follow 4.4.17 of reference PKware appnote
+    // - you can force '\' if you want backward compatibility
+    property ZipNamePathDelim: AnsiChar
+      read fZipNamePathDelim write SetZipNamePathDelim;
+  end;
+
   /// read-only access to a .zip archive file
   // - can open directly a specified .zip file - only trailing WorkingMem bytes
   // are read in the memory, and should contain at least the Central Directory
   // - can open a .zip archive file content from a resource (embedded in the executable)
   // - can open a .zip archive file content from memory
-  TZipRead = class
+  TZipRead = class(TZipAbstract)
   private
     fSource: TStream; // if .zip is a file bigger than 1MB
     fSourceOffset: QWord; // where the .zip start in fSource (if appended)
@@ -481,7 +496,7 @@ type
 
   /// write-only access for creating a .zip archive
   // - update can be done manualy by using CreateFrom()
-  TZipWrite = class
+  TZipWrite = class(TZipAbstract)
   protected
     fDest: TStream;
     fAppendOffset: QWord;
@@ -799,6 +814,8 @@ begin
 end;
 
 function TSynZipCompressor.Write(const Buffer; Count: Longint): Longint;
+var
+  code: integer;
 begin
   if (self = nil) or
      not fInitialized or
@@ -814,9 +831,9 @@ begin
   while Z.Stream.avail_in > 0 do
   begin
     // compress pending data
-    Z.Check(Z.Compress(Z_NO_FLUSH), [Z_OK], 'TSynZipCompressor.Write');
+    code := Z.Check(Z.Compress(Z_NO_FLUSH), [Z_OK], 'TSynZipCompressor.Write');
     if Z.Stream.avail_out = 0 then
-      Z.DoFlush;
+      Z.DoFlush(code);
   end;
   Z.Stream.next_in := nil;
   Z.Stream.avail_in := 0;
@@ -831,8 +848,8 @@ begin
   while (Z.Check(Z.Compress(Z_FINISH),
           [Z_OK, Z_STREAM_END], 'TSynZipCompressor.Flush') <> Z_STREAM_END) and
         (Z.Stream.avail_out = 0) do
-    Z.DoFlush;
-  Z.DoFlush;
+    Z.DoFlush(Z_OK);
+  Z.DoFlush(Z_STREAM_END);
   fSizeOut := Z.Written;
 end;
 
@@ -875,10 +892,9 @@ begin
   while Z.Stream.avail_in > 0 do
   begin
     // uncompress pending data
-    Z.Check(Z.Uncompress(Z_NO_FLUSH), [Z_OK, Z_STREAM_END],
-      'TSynZipDecompressor.Write');
+    Z.Check(Z.Uncompress(Z_NO_FLUSH), [Z_OK, Z_STREAM_END], 'TSynZipDecompressor.Write');
     if Z.Stream.avail_out = 0 then
-      Z.DoFlush;
+      Z.DoFlush(Z_OK);
   end;
   Z.Stream.next_in := nil;
   Z.Stream.avail_in := 0;
@@ -893,8 +909,8 @@ begin
   while (Z.Check(Z.Uncompress(Z_FINISH),
           [Z_OK, Z_STREAM_END], 'TSynZipDecompressor.Flush') <> Z_STREAM_END) and
         (Z.Stream.avail_out = 0) do
-    Z.DoFlush;
-  Z.DoFlush;
+    Z.DoFlush(Z_OK);
+  Z.DoFlush(Z_STREAM_END);
   fSizeOut := Z.Written;
 end;
 
@@ -1198,7 +1214,8 @@ end;
 
 function TFileHeader.IsFolder: boolean;
 begin
-  result := extFileAttr and $00000010 <> 0;
+  result := (@self <> nil) and
+            (extFileAttr and $00000010 <> 0);
 end;
 
 procedure TFileHeader.SetVersion(NeedZip64: boolean);
@@ -1269,11 +1286,34 @@ begin
     while true do
       if ord(P^) = 0 then
         break
-      else if ord(P^) <= 126 then
+      else if ord(P^) <= 127 then
         inc(P)
       else
         exit;
   result := true;
+end;
+
+
+{ TZipAbstract }
+
+constructor TZipAbstract.Create;
+begin
+  SetZipNamePathDelim('/'); // APPNOTE.TXT 4.4.17: MUST be forward slashes
+end;
+
+procedure TZipAbstract.SetZipNamePathDelim(Value: AnsiChar);
+begin
+  if Value = fZipNamePathDelim then
+    exit;
+  if Value = '/' then
+    fZipNamePathDelimReversed := '\'
+  else if Value = '\' then
+    fZipNamePathDelimReversed := '/'
+  else
+    exit; // do nothing if not one of two common folder delimiters
+  fZipNamePathDelim := Value;
+  fZipNamePathDelimString := string(Value);
+  fZipNamePathDelimReversedString := string(fZipNamePathDelimReversed);
 end;
 
 
@@ -1554,7 +1594,7 @@ begin
   // may call libdeflate_crc32 / libdeflate_deflate_compress
   e := NewEntry(Z_DEFLATED, mormot.lib.z.crc32(0, Buf, Size), FileAge);
   e^.h64.zfullSize := Size;
-  tmp.Init((Size * 11) div 10 + 256); // max potential size
+  tmp.Init(zlibCompressMax(Size));
   try
     e^.h64.zzipSize := CompressMem(Buf, tmp.buf, Size, tmp.len, CompressLevel);
     WriteHeader(aZipName);
@@ -1602,11 +1642,8 @@ begin
     if RemovePath then
       ZipName := ExtractFileName(aFileName)
     else
-      {$ifdef OSWINDOWS}
-      ZipName := aFileName;
-      {$else}
-      ZipName := StringReplace(aFileName, '/', '\', [rfReplaceAll]);
-      {$endif OSWINDOWS}
+      ZipName := StringReplace(aFileName, fZipNamePathDelimReversedString,
+        fZipNamePathDelimString, [rfReplaceAll]);
   // open the input file
   f := FileOpen(aFileName, fmOpenRead or fmShareDenyNone);
   if ValidHandle(f) then
@@ -1641,7 +1678,7 @@ begin
         if met = Z_STORED then
           h64.zzipSize := todo
         else
-          h64.zzipSize := (todo * 11) div 10 + 256; // max potential size
+          h64.zzipSize := zlibCompressMax(todo);
         headerpos := fDest.Position;
         WriteHeader(ZipName);
         // append the stored/deflated data
@@ -1710,7 +1747,8 @@ procedure TZipWrite.AddFolder(const FolderName: TFileName;
       begin
         repeat
           if SearchRecValidFolder(f) then
-            RecursiveAdd(fileDir + f.Name + PathDelim, zipDir + f.Name + '\');
+            RecursiveAdd(fileDir + f.Name + PathDelim,
+              zipDir + f.Name + fZipNamePathDelimString);
         until FindNext(f) <> 0;
         FindClose(f);
       end;
@@ -1957,13 +1995,13 @@ begin
     isascii7 := true;
     P := pointer(tmp);
     repeat
-      if P^ = '/' then // normalize path delimiter
-        P^ := '\'
+      if P^ = fZipNamePathDelimReversed then // normalize path delimiter
+        P^ := fZipNamePathDelim
       else if P^ > #127 then
         isascii7 := false;
       inc(P);
     until P^ = #0;
-    if P[-1] = '\' then
+    if P[-1] = fZipNamePathDelim then
     begin
       h := hnext;
       continue; // ignore void folder entry
@@ -2134,7 +2172,7 @@ end;
 destructor TZipRead.Destroy;
 begin
   fResource.Close;
-  FreeAndNil(fSource);
+  FreeAndNilSafe(fSource);
   inherited Destroy;
 end;
 
@@ -2441,29 +2479,40 @@ function TZipRead.UnZip(aIndex: integer; const DestDir: TFileName;
   DestDirIsFileName: boolean): boolean;
 var
   FS: TFileStream;
-  Path: TFileName;
+  LocalZipName, Dest: TFileName;
   info: TFileInfoFull;
 begin
   result := false;
   if not RetrieveFileInfo(aIndex, info) then
     exit;
-  with Entry[aIndex] do
-    if DestDirIsFileName then
-      Path := DestDir
-    else
-    begin
-      Path := EnsureDirectoryExists(DestDir + ExtractFilePath(zipName));
-      if Path = '' then
-        exit;
-      Path := Path + ExtractFileName(zipName);
-    end;
-  FS := TFileStream.Create(Path, fmCreate);
-  try
-    result := UnZipStream(aIndex, info, FS);
-  finally
-    FS.Free;
+  if DestDirIsFileName then
+    Dest := DestDir
+  else
+  begin
+    LocalZipName := Entry[aIndex].zipName;
+    if fZipNamePathDelim <> PathDelim then
+      LocalZipName := StringReplace(
+        LocalZipName, fZipNamePathDelimString, PathDelim, [rfReplaceAll]);
+    if not SafeFileName(LocalZipName) then
+      raise ESynZip.CreateUtf8('%.UnZip(%): unsafe file name ''%''',
+        [self, fFileName, LocalZipName]);
+    Dest := EnsureDirectoryExists(DestDir + ExtractFilePath(LocalZipName));
+    if Dest = '' then
+      exit;
+    Dest := Dest + ExtractFileName(LocalZipName);
   end;
-  FileSetDateFromWindowsTime(Path, info.f32.zlastMod);
+  if Entry[aIndex].dir^.IsFolder then
+    result := EnsureDirectoryExists(Dest) <> ''
+  else
+  begin
+    FS := TFileStream.Create(Dest, fmCreate);
+    try
+      result := UnZipStream(aIndex, info, FS);
+    finally
+      FS.Free;
+    end;
+  end;
+  FileSetDateFromWindowsTime(Dest, info.f32.zlastMod);
 end;
 
 function TZipRead.UnZipAll(DestDir: TFileName): integer;
@@ -2524,7 +2573,7 @@ var
 begin
   result := false;
   if aOldLogFileName = '' then
-    FreeAndNil(EventArchiveZipWrite)
+    FreeAndNilSafe(EventArchiveZipWrite)
   else
   begin
     if not FileExists(aOldLogFileName) then
@@ -2737,59 +2786,67 @@ const
 
 function CompressGZip(var Data: RawByteString; Compress: boolean): RawUtf8;
 var
-  L: integer;
+  max, L, C: integer;
   P: PAnsiChar;
+  tmp: RawByteString;
 begin
   L := length(Data);
   if Compress then
   begin
-    SetString(result, nil, L + 128 + L shr 3); // maximum possible memory required
-    P := pointer(result);
+    max := zlibCompressMax(L);
+    SetString(tmp, nil, max + (GZHEAD_SIZE + 8));
+    P := pointer(tmp);
     MoveFast(GZHEAD, P^, GZHEAD_SIZE);
     inc(P, GZHEAD_SIZE);
-    inc(P, CompressMem(pointer(Data), P, L, // maybe libdeflate_deflate_compress
-      length(result) - (GZHEAD_SIZE + 8), HTTP_LEVEL));
-    PCardinal(P)^ := crc32(0, pointer(Data), L); // maybe libdeflate_crc32
-    inc(P,4);
-    PCardinal(P)^ := L;
-    inc(P,4);
-    SetString(Data, PAnsiChar(pointer(result)), P - pointer(result));
+    C := CompressMem(pointer(Data), P, L, max, HTTP_LEVEL);
+    if C <= 0 then // error (maybe from libdeflate_deflate_compress)
+      Data := ''
+    else
+    begin
+      inc(P, C);
+      PCardinal(P)^ := crc32(0, pointer(Data), L); // maybe libdeflate_crc32
+      inc(P, 4);
+      PCardinal(P)^ := L;
+      inc(P, 4);
+      PStrLen(PAnsiChar(pointer(tmp)) - _STRLEN)^ := P - pointer(tmp); // no realloc
+      Data := tmp;
+    end;
   end
   else
-    Data := gzread(pointer(Data), length(Data));
+    Data := gzread(pointer(Data), L);
   result := 'gzip';
 end;
 
-procedure CompressInternal(var Data: RawByteString; Compress, ZLib: boolean);
+procedure CompressRaw(var Data: RawByteString; Compress, ZLib: boolean);
 var
-  tmp: RawByteString;
-  DataLen: integer;
+  src: RawByteString;
+  max, L: integer;
 begin
-  tmp := Data;
-  DataLen := length(Data);
+  src := Data;
+  L := length(src);
   if Compress then
   begin
-    SetString(Data, nil, DataLen + 256 + DataLen shr 3); // max mem required
-    DataLen := CompressMem(
-      pointer(tmp), pointer(Data), DataLen, length(Data), HTTP_LEVEL, ZLib);
-    if DataLen <= 0 then
+    max := zlibCompressMax(L);
+    SetString(Data, nil, max);
+    L := CompressMem(pointer(src), pointer(Data), L, max, HTTP_LEVEL, ZLib);
+    if L <= 0 then
       Data := ''
     else
-      SetLength(Data, DataLen);
+      PStrLen(PAnsiChar(pointer(Data)) - _STRLEN)^ := L; // fake len: no realloc
   end
   else
-    Data := UnCompressZipString(pointer(tmp), DataLen, nil, ZLib, 0);
+    Data := UnCompressZipString(pointer(src), L, nil, ZLib, 0);
 end;
 
 function CompressDeflate(var Data: RawByteString; Compress: boolean): RawUtf8;
 begin
-  CompressInternal(Data, Compress, {zlib=}false);
+  CompressRaw(Data, Compress, {zlib=}false);
   result := 'deflate';
 end;
 
 function CompressZLib(var Data: RawByteString; Compress: boolean): RawUtf8;
 begin
-  CompressInternal(Data, Compress, {zlib=}true);
+  CompressRaw(Data, Compress, {zlib=}true);
   result := 'zlib';
 end;
 
@@ -2801,7 +2858,7 @@ var
   len : integer;
 begin
   result := '';
-  SetLength(result, 12 + (Int64(length(data)) * 11) div 10 + 12);
+  SetLength(result, 12 + zlibCompressMax(length(data)));
   PInt64(result)^ := length(data);
   PCardinalArray(result)^[2] := adler32(0, pointer(data), length(data));
   // use faster libdeflate instead of plain zlib if available
@@ -2869,20 +2926,17 @@ type
     function RawProcess(src, dst: pointer; srcLen, dstLen, dstMax: integer;
       process: TAlgoCompressWithNoDestLenProcess): integer; override;
   public
+    /// set AlgoID = 2 as genuine byte identifier for Deflate
     constructor Create; override;
-    function AlgoID: byte; override;
     function AlgoCompressDestLen(PlainLen: integer): integer; override;
   end;
 
 constructor TAlgoDeflate.Create;
 begin
+  if fAlgoID = 0 then
+    fAlgoID := 2;
   inherited Create;
   fDeflateLevel := 6;
-end;
-
-function TAlgoDeflate.AlgoID: byte;
-begin
-  result := 2;
 end;
 
 function TAlgoDeflate.RawProcess(src, dst: pointer; srcLen, dstLen,
@@ -2902,7 +2956,7 @@ end;
 
 function TAlgoDeflate.AlgoCompressDestLen(PlainLen: integer): integer;
 begin
-  result := PlainLen + 256 + PlainLen shr 3;
+  result := zlibCompressMax(PlainLen);
 end;
 
 
@@ -2912,17 +2966,13 @@ type
   // implements the AlgoDeflateFast global variable
   TAlgoDeflateFast = class(TAlgoDeflate)
   public
+    /// set AlgoID = 2 as genuine byte identifier for Deflate Fast
     constructor Create; override;
-    function AlgoID: byte; override;
   end;
-
-function TAlgoDeflateFast.AlgoID: byte;
-begin
-  result := 3;
-end;
 
 constructor TAlgoDeflateFast.Create;
 begin
+  fAlgoID := 3;
   inherited Create;
   fDeflateLevel := 1;
 end;

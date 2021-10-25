@@ -140,10 +140,10 @@ type
     fType_strList: pointer;
     // match DB charset for CHAR/NVARCHAR2, nil for OCI_UTF8/OCI_AL32UTF8
     fAnsiConvert: TSynAnsiConvert;
-    procedure STRToUtf8(P: PAnsiChar; var result: RawUtf8;
+    procedure OCISTRToUtf8(P: PAnsiChar; var result: RawUtf8;
       ColumnDBCharSet,ColumnDBForm: cardinal);
     {$ifndef UNICODE}
-    procedure STRToAnsiString(P: PAnsiChar; var result: AnsiString;
+    procedure OCISTRToAnsiString(P: PAnsiChar; var result: AnsiString;
       ColumnDBCharSet,ColumnDBForm: cardinal);
     {$endif UNICODE}
   public
@@ -193,7 +193,7 @@ type
   // - those statements can be prepared on the client side, but by default we
   // enabled the OCI-side statement cache, not to reinvent the wheel this time
   // - note that bound OUT ftUtf8 parameters will need to be pre-allocated
-  // before calling - e.g. via BindTextU(StringOfChar(3000),paramOut)
+  // before calling - e.g. via BindTextU(RawUtf8OfChar(3000),paramOut)
   // - you can also bind an TInt64DynArray or TRawUtf8DynArray as parameter to
   // be assigned later as an OCI_OBJECT so that you may write such statements:
   // ! var arr: TInt64DynArray = [1, 2, 3];
@@ -721,7 +721,7 @@ begin
   end;
 end;
 
-procedure TSqlDBOracleConnection.STRToUtf8(P: PAnsiChar; var result: RawUtf8;
+procedure TSqlDBOracleConnection.OCISTRToUtf8(P: PAnsiChar; var result: RawUtf8;
   ColumnDBCharSet, ColumnDBForm: cardinal);
 var
   L: integer;
@@ -737,7 +737,7 @@ begin
 end;
 
 {$ifndef UNICODE}
-procedure TSqlDBOracleConnection.STRToAnsiString(P: PAnsiChar;
+procedure TSqlDBOracleConnection.OCISTRToAnsiString(P: PAnsiChar;
   var result: AnsiString; ColumnDBCharSet, ColumnDBForm: cardinal);
 var
   L: integer;
@@ -822,8 +822,8 @@ begin
     // V=nil means column is NULL
     if C^.ColumnType = ftBlob then
       if C^.ColumnValueInlined then
-        raise ESqlDBOracle.CreateUtf8('%.ColumnBlobFromStream(ColumnValueInlined) '
-          + 'not supported', [self])
+        raise ESqlDBOracle.CreateUtf8(
+          '%.ColumnBlobFromStream(ColumnValueInlined) not supported', [self])
       else        // conversion from POCILobLocator
         with TSqlDBOracleConnection(Connection) do
           OCI.BlobToDescriptorFromStream(self, fContext, fError, V^, Stream);
@@ -871,7 +871,7 @@ function TSqlDBOracleStatement.ColumnDouble(Col: integer): double;
 var
   C: PSqlDBColumnProperty;
   V: pointer;
-  Curr: currency;
+  curr: currency;
 begin
   V := GetCol(Col, C);
   if V = nil then // column is NULL
@@ -884,8 +884,8 @@ begin
         result := PInt64(V)^;
       ftCurrency:
         begin
-          PInt64(@Curr)^ := StrToCurr64(V); // handle '.5' - not GetExtended()
-          result := Curr;
+          PInt64(@curr)^ := StrToCurr64(V); // handle '.5' - not GetExtended()
+          result := curr;
         end;
     else
       // need conversion to destination type
@@ -948,7 +948,7 @@ begin
       else
       begin
         if indicator <> 0 then
-          LogTruncatedColumn(fColumns[col]);
+          LogTruncatedColumn(self, fColumns[col]);
         V := @fRowBuffer[ColumnAttr + fRowFetchedCurrent * ColumnValueDBSize];
         case ColumnType of
           ftInt64:
@@ -974,10 +974,10 @@ begin
               WR.Add('"');
               with TSqlDBOracleConnection(Connection) do
                 if ColumnValueInlined then
-                  STRToUtf8(V, U, ColumnValueDBCharSet, ColumnValueDBForm)
+                  OCISTRToUtf8(V, U, ColumnValueDBCharSet, ColumnValueDBForm)
                 else
-                  OCI.ClobFromDescriptor(self, fContext, fError, PPOCIDescriptor
-                    (V)^, ColumnValueDBForm, U, false);
+                  OCI.ClobFromDescriptor(self, fContext, fError,
+                    PPOCIDescriptor(V)^, ColumnValueDBForm, U, false);
               WR.AddJsonEscape(pointer(U));
               WR.Add('"');
             end;
@@ -989,8 +989,8 @@ begin
             else
             begin
               with TSqlDBOracleConnection(Connection) do
-                OCI.BlobFromDescriptor(self, fContext, fError, PPOCIDescriptor(V)
-                  ^, RawByteString(U));
+                OCI.BlobFromDescriptor(self, fContext, fError,
+                  PPOCIDescriptor(V)^, RawByteString(U));
               WR.WrBase64(Pointer(U), length(U), true);
             end;
         else
@@ -1043,7 +1043,7 @@ begin
       begin
         with TSqlDBOracleConnection(Connection) do
           if C^.ColumnValueInlined then
-            STRToUtf8(V, RawUtf8(Temp), C^.ColumnValueDBCharSet, C^.ColumnValueDBForm)
+            OCISTRToUtf8(V, RawUtf8(Temp), C^.ColumnValueDBCharSet, C^.ColumnValueDBForm)
           else
             OCI.ClobFromDescriptor(self, fContext, fError, PPOCIDescriptor(V)^,
               C^.ColumnValueDBForm, RawUtf8(Temp), false);
@@ -1062,18 +1062,19 @@ begin
           SetString(Temp, PAnsiChar(V), C^.ColumnValueDBSize)
         else
           with TSqlDBOracleConnection(Connection) do
-            OCI.BlobFromDescriptor(self, fContext, fError, PPOCIDescriptor(V)^, Temp);
+            OCI.BlobFromDescriptor(self, fContext, fError,
+              PPOCIDescriptor(V)^, Temp);
         Value.VBlob := pointer(Temp);
         Value.VBlobLen := length(Temp);
       end;
   else
-    raise ESqlDBOracle.CreateUtf8('%.ColumnToSqlVar: unexpected VType=%', [self,
-      ord(Value.VType)]);
+    raise ESqlDBOracle.CreateUtf8('%.ColumnToSqlVar: unexpected VType=%',
+      [self, ord(Value.VType)]);
   end;
 end;
 
-function TSqlDBOracleStatement.ColumnToVariant(Col: integer; var Value: Variant):
-  TSqlDBFieldType;
+function TSqlDBOracleStatement.ColumnToVariant(Col: integer;
+  var Value: Variant): TSqlDBFieldType;
 var
   C: PSqlDBColumnProperty;
   V: pointer;
@@ -1120,24 +1121,25 @@ begin
           VAny := nil;
           with TSqlDBOracleConnection(Connection) do
             if C^.ColumnValueInlined then
-          {$ifndef UNICODE}
+              {$ifndef UNICODE}
               if not Connection.Properties.VariantStringAsWideString then
               begin
                 VType := varString;
-                STRToAnsiString(V, AnsiString(VAny), C^.ColumnValueDBCharSet, C^.ColumnValueDBForm);
+                OCISTRToAnsiString(V, AnsiString(VAny),
+                  C^.ColumnValueDBCharSet, C^.ColumnValueDBForm);
                 exit;
               end
               else
-          {$endif UNICODE}
-                STRToUtf8(V, tmp, C^.ColumnValueDBCharSet, C^.ColumnValueDBForm)
+              {$endif UNICODE}
+                OCISTRToUtf8(V, tmp, C^.ColumnValueDBCharSet, C^.ColumnValueDBForm)
             else
-              OCI.ClobFromDescriptor(self, fContext, fError, PPOCIDescriptor(V)^,
-                C^.ColumnValueDBForm, tmp);
+              OCI.ClobFromDescriptor(self, fContext, fError,
+                PPOCIDescriptor(V)^, C^.ColumnValueDBForm, tmp);
         {$ifndef UNICODE}
           if not Connection.Properties.VariantStringAsWideString then
           begin
             VType := varString;
-            AnsiString(VAny) := Utf8DecodeToString(pointer(tmp), length(tmp));
+            AnsiString(VAny) := CurrentAnsiConvert.Utf8ToAnsi(tmp);
           end
           else
         {$endif UNICODE}
@@ -1150,12 +1152,12 @@ begin
             SetString(RawByteString(VAny), PAnsiChar(V), C^.ColumnValueDBSize)
           else
             with TSqlDBOracleConnection(Connection) do
-              OCI.BlobFromDescriptor(self, fContext, fError, PPOCIDescriptor(V)^,
-                RawByteString(VAny));
+              OCI.BlobFromDescriptor(self, fContext, fError,
+                PPOCIDescriptor(V)^, RawByteString(VAny));
         end;
     else
-      raise ESqlDBOracle.CreateUtf8('%.ColumnToVariant: unexpected % type', [self,
-        ord(result)]);
+      raise ESqlDBOracle.CreateUtf8('%.ColumnToVariant: unexpected % type',
+        [self, ord(result)]);
     end;
   end;
 end;
@@ -1172,10 +1174,10 @@ begin
     with TSqlDBOracleConnection(Connection) do
       if C^.ColumnValueInlined then
         // conversion from SQLT_STR (null-terminated string)
-        STRToUtf8(V, result, C^.ColumnValueDBCharSet, C^.ColumnValueDBForm)
+        OCISTRToUtf8(V, result, C^.ColumnValueDBCharSet, C^.ColumnValueDBForm)
       else        // conversion from POCILobLocator
-        OCI.ClobFromDescriptor(self, fContext, fError, PPOCIDescriptor(V)^, C^.ColumnValueDBForm,
-          result)
+        OCI.ClobFromDescriptor(self, fContext, fError, PPOCIDescriptor(V)^,
+          C^.ColumnValueDBForm, result)
   else
     // need conversion to destination type
     ColumnToTypedValue(Col, ftUtf8, result);
@@ -1219,9 +1221,11 @@ end;
 constructor TSqlDBOracleStatement.Create(aConnection: TSqlDBConnection);
 begin
   if not aConnection.InheritsFrom(TSqlDBOracleConnection) then
-    raise ESqlDBOracle.CreateUtf8('Invalid %.Create(%) call', [self, aConnection]);
+    raise ESqlDBOracle.CreateUtf8('Invalid %.Create(%) call',
+      [self, aConnection]);
   inherited Create(aConnection);
-  fInternalBufferSize := TSqlDBOracleConnectionProperties(aConnection.Properties).InternalBufferSize;
+  fInternalBufferSize :=
+    TSqlDBOracleConnectionProperties(aConnection.Properties).InternalBufferSize;
   if fInternalBufferSize < 16384 then // default is 128 KB
     fInternalBufferSize := 16384; // minimal value
 end;
@@ -1273,7 +1277,8 @@ var
   status: integer;
 begin
   fRowFetched := 0;
-  status := OCI.StmtFetch(fStatement, fError, fRowCount, OCI_FETCH_NEXT, OCI_DEFAULT);
+  status := OCI.StmtFetch(
+    fStatement, fError, fRowCount, OCI_FETCH_NEXT, OCI_DEFAULT);
   case status of
     OCI_SUCCESS:
       fRowFetched := fRowCount; // all rows successfully retrieved
@@ -1348,7 +1353,8 @@ label
   txt;
 begin
   if fStatement = nil then
-    raise ESqlDBOracle.CreateUtf8('%.ExecutePrepared without previous Prepare', [self]);
+    raise ESqlDBOracle.CreateUtf8(
+      '%.ExecutePrepared without previous Prepare', [self]);
   inherited ExecutePrepared; // set fConnection.fLastAccessTicks
   SqlLogBegin(sllSQL);
   try
@@ -1360,7 +1366,8 @@ begin
       fRowFetchedEnded := false;
       // 1. bind parameters
       if fPreparedParamsCount <> fParamCount then
-        raise ESqlDBOracle.CreateUtf8('%.ExecutePrepared expected % bound parameters, got %',
+        raise ESqlDBOracle.CreateUtf8(
+          '%.ExecutePrepared expected % bound parameters, got %',
           [self, fPreparedParamsCount, fParamCount]);
       if not fExpectResults then
         fRowCount := 1; // to avoid ORA-24333 error
@@ -1374,10 +1381,12 @@ begin
             with fParams[i] do
             begin
               if VArray = nil then
-                raise ESqlDBOracle.CreateUtf8('%.ExecutePrepared: Parameter #% should be an array',
+                raise ESqlDBOracle.CreateUtf8(
+                  '%.ExecutePrepared: Parameter #% should be an array',
                   [self, i]);
               if VInt64 <> fParamsArrayCount then
-                raise ESqlDBOracle.CreateUtf8('%.ExecutePrepared: Parameter #% expected array count %, got %',
+                raise ESqlDBOracle.CreateUtf8(
+                  '%.ExecutePrepared: Parameter #% expected array count %, got %',
                   [self, i, fParamsArrayCount, VInt64]);
               SetLength(aIndicator[i], fParamsArrayCount);
               VDBType := SQLT_STR;
@@ -1386,18 +1395,18 @@ begin
                 ftDate:
                   begin
                     VDBType := SQLT_DAT;
-                    SetString(VData, nil, fParamsArrayCount * sizeof(TOracleDate));
+                    SetString(VData, nil, fParamsArrayCount * SizeOf(TOracleDate));
                     oData := pointer(VData);
-                    oLength := sizeof(TOracleDate);
+                    oLength := SizeOf(TOracleDate);
                   end;
                 ftInt64:
                   if OCI.SupportsInt64Params then
                   begin
                     // starting with 11.2, OCI supports NUMBER conversion to/from Int64
                     VDBType := SQLT_INT;
-                    SetString(VData, nil, fParamsArrayCount * sizeof(Int64));
+                    SetString(VData, nil, fParamsArrayCount * SizeOf(Int64));
                     oData := pointer(VData);
-                    oLength := sizeof(Int64);
+                    oLength := SizeOf(Int64);
                   end;
                   // prior to 11.2, we will stay with the default SQLT_STR type
                 ftUtf8:
@@ -1417,7 +1426,8 @@ begin
                     SetInt64(pointer(Varray[j]), oDataINT^[j])
                   else
                     case VType of
-                      ftUtf8, ftDate:
+                      ftUtf8,
+                      ftDate:
                         begin
                           L := length(VArray[j]) - 2; // -2 since quotes will be removed
                           if VType = ftDate then
@@ -1435,7 +1445,7 @@ begin
                         end;
                       ftBlob:
                         begin
-                          L := length(VArray[j]) + sizeof(integer);
+                          L := length(VArray[j]) + SizeOf(integer);
                           if L * fParamsArrayCount > MAX_INLINED_PARAM_SIZE then
                             raise ESqlDBOracle.CreateUtf8(
                               '%.ExecutePrepared: Array parameter #% BLOB too big',
@@ -1488,7 +1498,7 @@ begin
         else
         begin
           // 1.2. One row DML optimized binding
-          FillcharFast(Int32, sizeof(Int32), 0);
+          FillcharFast(Int32, SizeOf(Int32), 0);
           SetLength(oIndicator, fParamCount);
           SetLength(ociArrays, fParamCount);
           for i := 0 to fParamCount - 1 do
@@ -1515,7 +1525,7 @@ begin
                   ociArrays[ociArraysCount]),
                 fError);
               inc(ociArraysCount);
-              SetString(param.VData, nil, Length(param.VArray) * sizeof(Int64));
+              SetString(param.VData, nil, Length(param.VArray) * SizeOf(Int64));
               oData := pointer(param.VData);
               for j := 0 to Length(param.VArray) - 1 do
                 case param.VType of
@@ -1524,7 +1534,7 @@ begin
                       SetInt64(pointer(param.Varray[j]), oDataINT^[j]);
                       OCI.Check(nil, self,
                         OCI.NumberFromInt(fError, @oDataINT[j],
-                          sizeof(Int64), OCI_NUMBER_SIGNED, num_val),
+                          SizeOf(Int64), OCI_NUMBER_SIGNED, num_val),
                         fError);
                       OCI.Check(nil, self,
                         OCI.CollAppend(Env, fError, @num_val,
@@ -1565,7 +1575,7 @@ begin
                 end
                 else
                 begin
-                  oLength := sizeof(Int64);
+                  oLength := SizeOf(Int64);
                   oData := @VInt64;
                   case VType of
                     ftUnknown:
@@ -1580,7 +1590,7 @@ begin
                             HandleAlloc(Env, PPointer(oData)^,
                               OCI_HTYPE_STMT, 0, nil),
                             fError);
-                        oLength := sizeof(pointer);
+                        oLength := SizeOf(pointer);
                       end;
                     ftInt64:
                       if OCI.SupportsInt64Params then
@@ -1625,9 +1635,9 @@ begin
                       begin
                         VDBType := SQLT_TIMESTAMP; // SQLT_DAT is wrong within WHERE clause
                         oOCIDateTime := DateTimeToDescriptor(PDateTime(@VInt64)^);
-                        SetString(VData, PAnsiChar(@oOCIDateTime), sizeof(oOCIDateTime));
+                        SetString(VData, PAnsiChar(@oOCIDateTime), SizeOf(oOCIDateTime));
                         oData := pointer(VData);
-                        oLength := sizeof(oOCIDateTime);
+                        oLength := SizeOf(oOCIDateTime);
                       end
                       else
                       begin
@@ -1669,17 +1679,18 @@ txt:                    VDBType := SQLT_STR; // use STR external data type (SQLT
                               'blob length exceeds max size for parameter #%',
                               [self, KB(oLength), i + 1]);
                           UniqueString(VData); // for thread-safety
-                          PInteger(PtrInt(VData) - sizeof(integer))^ := oLength;
+                          PInteger(PtrInt(VData) - SizeOf(integer))^ := oLength;
                           if {%H-}wasStringHacked = nil then
                             SetLength(wasStringHacked, fParamCount shr 3 + 1);
                           SetBitPtr(pointer(wasStringHacked), i); // for unpatching below
                           {$endif FPC_64}
-                          oData := Pointer(PtrInt(VData) - sizeof(integer));
-                          Inc(oLength, sizeof(integer));
+                          oData := Pointer(PtrInt(VData) - SizeOf(integer));
+                          Inc(oLength, SizeOf(integer));
                         end;
                       end;
                   else
-                    raise ESqlDBOracle.CreateUtf8('%.ExecutePrepared: Invalid parameter #% type=%',
+                    raise ESqlDBOracle.CreateUtf8(
+                      '%.ExecutePrepared: Invalid parameter #% type=%',
                       [self, i + 1, ord(VType)]);
                   end;
                 end;
@@ -1716,7 +1727,7 @@ txt:                    VDBType := SQLT_STR; // use STR external data type (SQLT
       if wasStringHacked <> nil then // restore patched strings length ASAP
         for i := 0 to fParamCount - 1 do
           if GetBitPtr(pointer(wasStringHacked), i) then
-            PInteger(PtrInt(fParams[i].VData) - sizeof(integer))^ := 0;
+            PInteger(PtrInt(fParams[i].VData) - SizeOf(integer))^ := 0;
       {$endif FPC_64}
       for i := 0 to ociArraysCount - 1 do
         OCI.Check(nil, self,
@@ -1739,7 +1750,8 @@ txt:                    VDBType := SQLT_STR; // use STR external data type (SQLT
                   end
                   else
                   // on error, release bound statement resource
-                  if OCI.HandleFree(PPointer(@VInt64)^, OCI_HTYPE_STMT) <> OCI_SUCCESS then
+                  if OCI.HandleFree(
+                       PPointer(@VInt64)^, OCI_HTYPE_STMT) <> OCI_SUCCESS then
                     SynDBLog.Add.Log(sllError,
                       'ExecutePrepared: HandleFree(SQLT_RSET)', self);
               ftInt64:
@@ -1756,8 +1768,8 @@ txt:                    VDBType := SQLT_STR; // use STR external data type (SQLT
                     begin
                       // release OCIDateTime resource
                       oOCIDateTime := PPointer(VData)^;
-                      if OCI.DescriptorFree(oOCIDateTime, OCI_DTYPE_TIMESTAMP)
-                        <> OCI_SUCCESS then
+                      if OCI.DescriptorFree(
+                           oOCIDateTime, OCI_DTYPE_TIMESTAMP) <> OCI_SUCCESS then
                         SynDBLog.Add.Log(sllError,
                           'ExecutePrepared: DescriptorFree(OCI_DTYPE_TIMESTAMP)', self);
                       VData := '';
@@ -1778,7 +1790,8 @@ procedure TSqlDBOracleStatement.FetchTest(Status: integer);
 begin
   fRowFetched := 0;
   case Status of
-    OCI_SUCCESS, OCI_SUCCESS_WITH_INFO:
+    OCI_SUCCESS,
+    OCI_SUCCESS_WITH_INFO:
       begin
         if fColumnCount <> 0 then
           fRowFetched := fRowCount;
@@ -1826,8 +1839,7 @@ begin
   else
     DecodeTime(aDateTime, HH, MM, SS, MS);
   OCI.Check(nil, nil,
-    OCI.DateTimeConstruct(env, fError, result,
-      Y, M, D, HH, MM, SS, 0, nil, 0),
+    OCI.DateTimeConstruct(env, fError, result, Y, M, D, HH, MM, SS, 0, nil, 0),
     fError);
 end;
 
@@ -1858,7 +1870,8 @@ begin
             if P^ <> nil then
             begin
               case ColumnValueDBType of
-                SQLT_CLOB, SQLT_BLOB:
+                SQLT_CLOB,
+                SQLT_BLOB:
                   if OCI.DescriptorFree(P^, OCI_DTYPE_LOB) <> OCI_SUCCESS then
                     SynDBLog.Add.Log(sllError,
                       'FreeHandles: Invalid OCI_DTYPE_LOB', self);
@@ -1923,7 +1936,7 @@ begin
     0:
       exit; // OK
   else
-    LogTruncatedColumn(Column^);
+    LogTruncatedColumn(self, Column^);
   end;
 end;
 
@@ -1931,7 +1944,8 @@ function TSqlDBOracleStatement.UpdateCount: integer;
 begin
   result := 0;
   if fStatement <> nil then
-    OCI.AttrGet(fStatement, OCI_HTYPE_STMT, @result, nil, OCI_ATTR_ROW_COUNT, fError);
+    OCI.AttrGet(fStatement, OCI_HTYPE_STMT, @result, nil,
+      OCI_ATTR_ROW_COUNT, fError);
 end;
 
 procedure TSqlDBOracleStatement.SetColumnsForPreparedStatement;
@@ -1974,7 +1988,7 @@ begin
       fError);
     ColCount := 0;
     AttrGet(fStatement, OCI_HTYPE_STMT, @ColCount, nil, OCI_ATTR_PARAM_COUNT, fError);
-    RowSize := ColCount * sizeof(sb2); // space for indicators
+    RowSize := ColCount * SizeOf(sb2); // space for indicators
     ColumnLongTypes := [];
     fColumn.Capacity := ColCount;
     for i := 1 to ColCount do
@@ -1993,7 +2007,13 @@ begin
         ColumnValueDBSize := oSize;
         ColumnValueInlined := true;
         case oType of
-          SQLT_CHR, SQLT_VCS, SQLT_AFC, SQLT_AVC, SQLT_STR, SQLT_VST, SQLT_NTY:
+          SQLT_CHR,
+          SQLT_VCS,
+          SQLT_AFC,
+          SQLT_AVC,
+          SQLT_STR,
+          SQLT_VST,
+          SQLT_NTY:
             begin
               ColumnType := ftUtf8;
               ColumnValueDBType := SQLT_STR; // null-terminated string
@@ -2006,31 +2026,38 @@ begin
               ColumnValueDBType := SQLT_STR; // null-terminated string
               include(ColumnLongTypes, hasLONG);
             end;
-          SQLT_LVC, SQLT_CLOB:
+          SQLT_LVC,
+          SQLT_CLOB:
             begin
               ColumnType := ftUtf8;
               ColumnValueInlined := false;
               ColumnValueDBType := SQLT_CLOB;
-              ColumnValueDBSize := sizeof(POCILobLocator);
+              ColumnValueDBSize := SizeOf(POCILobLocator);
               include(ColumnLongTypes, hasLOB);
             end;
-          SQLT_RID, SQLT_RDD:
+          SQLT_RID,
+          SQLT_RDD:
             begin
               ColumnType := ftUtf8;
               ColumnValueDBType := SQLT_STR; // null-terminated string
               ColumnValueDBSize := 24; // 24 will fit 8 bytes alignment
             end;
-          SQLT_VNU, SQLT_FLT, SQLT_BFLOAT, SQLT_BDOUBLE, SQLT_IBFLOAT, SQLT_IBDOUBLE:
+          SQLT_VNU,
+          SQLT_FLT,
+          SQLT_BFLOAT,
+          SQLT_BDOUBLE,
+          SQLT_IBFLOAT,
+          SQLT_IBDOUBLE:
             begin
               ColumnType := ftDouble;
               ColumnValueDBType := SQLT_BDOUBLE;
-              ColumnValueDBSize := sizeof(Double);
+              ColumnValueDBSize := SizeOf(Double);
             end;
           SQLT_NUM:
             begin
               oScale := 5; // OCI_ATTR_PRECISION is always 38 (on Oracle 11g) :(
               AttrGet(oHandle, OCI_DTYPE_PARAM, @oScale, nil, OCI_ATTR_SCALE, fError);
-              ColumnValueDBSize := sizeof(Double);
+              ColumnValueDBSize := SizeOf(Double);
               case oScale of
                {0: if (major_version>11) or
                       ((major_version=11) and
@@ -2063,20 +2090,28 @@ begin
                 end;
               end;
             end;
-          SQLT_INT, _SQLT_PLI, SQLT_UIN:
+          SQLT_INT,
+          _SQLT_PLI,
+          SQLT_UIN:
             begin
               ColumnType := ftInt64;
               ColumnValueDBType := SQLT_INT;
-              ColumnValueDBSize := sizeof(Int64);
+              ColumnValueDBSize := SizeOf(Int64);
             end;
-          SQLT_DAT, SQLT_DATE, SQLT_TIME, SQLT_TIME_TZ, SQLT_TIMESTAMP,
-          SQLT_TIMESTAMP_TZ, SQLT_TIMESTAMP_LTZ:
+          SQLT_DAT,
+          SQLT_DATE,
+          SQLT_TIME,
+          SQLT_TIME_TZ,
+          SQLT_TIMESTAMP,
+          SQLT_TIMESTAMP_TZ,
+          SQLT_TIMESTAMP_LTZ:
             begin
               ColumnType := ftDate;
               ColumnValueDBType := SQLT_DAT;
-              ColumnValueDBSize := sizeof(TOracleDate);
+              ColumnValueDBSize := SizeOf(TOracleDate);
             end;
-          SQLT_INTERVAL_YM, SQLT_INTERVAL_DS:
+          SQLT_INTERVAL_YM,
+          SQLT_INTERVAL_DS:
             begin
               ColumnType := ftDate;
               ColumnValueDBType := SQLT_STR; // null-terminated string
@@ -2090,28 +2125,31 @@ begin
                 ColumnType := ftBlob;
               ColumnValueDBType := SQLT_BIN;
             end;
-          SQLT_LBI, SQLT_BLOB, SQLT_LVB:
+          SQLT_LBI,
+          SQLT_BLOB,
+          SQLT_LVB:
             begin
               ColumnType := ftBlob;
               ColumnValueInlined := false;
               ColumnValueDBType := SQLT_BLOB;
-              ColumnValueDBSize := sizeof(POCILobLocator);
+              ColumnValueDBSize := SizeOf(POCILobLocator);
               if fForceBlobAsNull then
                 ColumnType := ftNull
               else
                 include(ColumnLongTypes, hasLOB);
             end;
-          SQLT_RSET, SQLT_CUR:
+          SQLT_RSET,
+          SQLT_CUR:
             begin
               ColumnType := ftNull;
               ColumnValueInlined := false;
               ColumnValueDBType := SQLT_RSET;
-              ColumnValueDBSize := sizeof(POCIStmt);
+              ColumnValueDBSize := SizeOf(POCIStmt);
               include(ColumnLongTypes, hasCURS);
             end;
         else
-          raise ESqlDBOracle.CreateUtf8('% - Column [%]: unknown type %', [self,
-            ColumnName, oType]);
+          raise ESqlDBOracle.CreateUtf8('% - Column [%]: unknown type %',
+            [self, ColumnName, oType]);
         end;
         inc(RowSize, ColumnValueDBSize);
         if ColumnType = ftUtf8 then
@@ -2187,7 +2225,7 @@ begin
     fRowBufferCount := fRowCount; // fRowCount may be set to 0: avoid leaking
     // fRowBuffer[] contains Indicators[] + Col0[] + Col1[] + Col2[]...
     Indicators := pointer(fRowBuffer);
-    RowSize := fRowBufferCount * ColCount * sizeof(sb2);
+    RowSize := fRowBufferCount * ColCount * SizeOf(sb2);
     for i := 0 to ColCount - 1 do
       with fColumns[i] do
       begin
@@ -2199,7 +2237,8 @@ begin
           for j := 1 to fRowBufferCount do
           begin
             case ColumnValueDBType of
-              SQLT_CLOB, SQLT_BLOB:
+              SQLT_CLOB,
+              SQLT_BLOB:
                 Check(nil, self,
                   DescriptorAlloc(Env, PP^, OCI_DTYPE_LOB, 0, nil),
                   fError);
@@ -2208,8 +2247,8 @@ begin
                   HandleAlloc(Env, PP^, OCI_HTYPE_STMT, 0, nil),
                   fError);
             else
-              raise ESqlDBOracle.CreateUtf8('%: Wrong % type for %', [self,
-                ColumnValueDBType, ColumnName]);
+              raise ESqlDBOracle.CreateUtf8('%: Wrong % type for %',
+                [self, ColumnValueDBType, ColumnName]);
             end;
             inc(PP);
           end;
@@ -2242,10 +2281,10 @@ begin
             end;
         end;
         inc(RowSize, fRowBufferCount * ColumnValueDBSize);
-        inc(Indicators, fRowBufferCount * sizeof(sb2));
+        inc(Indicators, fRowBufferCount * SizeOf(sb2));
       end;
     assert(PtrUInt(Indicators - pointer(fRowBuffer)) = fRowBufferCount *
-      ColCount * sizeof(sb2));
+      ColCount * SizeOf(sb2));
     assert(RowSize <= fInternalBufferSize);
   end;
 end;
@@ -2324,7 +2363,8 @@ var
   sav, status: integer;
 begin
   if not Assigned(fStatement) then
-    raise ESqlDBOracle.CreateUtf8('%.Execute should be called before Step', [self]);
+    raise ESqlDBOracle.CreateUtf8(
+      '%.Execute should be called before Step', [self]);
   result := false;
   if (fCurrentRow < 0) or
      (fRowCount = 0) then
@@ -2343,8 +2383,8 @@ begin
        { if OCI.major_version < 9 then
           raise ESqlDBOracle.CreateUtf8('OCI % does not support OCI_FETCH_FIRST',
             [OCI.ClientRevision]); }
-        status := OCI.StmtFetch(fStatement, fError, fRowCount, OCI_FETCH_FIRST,
-          OCI_DEFAULT);
+        status := OCI.StmtFetch(fStatement, fError, fRowCount,
+          OCI_FETCH_FIRST, OCI_DEFAULT);
         FetchTest(status); // error + set fRowCount+fRowFetchedCurrent
         if fCurrentRow < 0 then // should not happen
           raise ESqlDBOracle.Create('OCI_FETCH_FIRST did not reset cursor');

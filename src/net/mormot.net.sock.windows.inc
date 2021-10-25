@@ -100,9 +100,9 @@ const
   INADDR_LOOPBACK  = $7F000001;
   INADDR_BROADCAST = $FFFFFFFF;
   INADDR_NONE      = $FFFFFFFF;
-  ADDR_ANY		 = INADDR_ANY;
-  INVALID_SOCKET		= TSocket(NOT(0));
-  SOCKET_ERROR			= -1;
+  ADDR_ANY	   = INADDR_ANY;
+  INVALID_SOCKET   = TSocket(NOT(0));
+  SOCKET_ERROR	   = -1;
 
 const
   IP_OPTIONS          = 1;
@@ -132,7 +132,7 @@ const
   SO_USELOOPBACK  = $0040;          { bypass hardware when possible }
   SO_LINGER       = $0080;          { linger on close if data present }
   SO_OOBINLINE    = $0100;          { leave received OOB data in line }
-  SO_DONTLINGER  =   $ff7f;
+  SO_DONTLINGER   = $ff7f;
   { Additional options }
   SO_SNDBUF       = $1001;          { send buffer size }
   SO_RCVBUF       = $1002;          { receive buffer size }
@@ -151,14 +151,14 @@ const
   SO_PROTOCOL_INFO  = SO_PROTOCOL_INFOA;
   PVD_CONFIG        = $3001;        { configuration info for service provider }
   { Option for opening sockets for synchronous access }
-  SO_OPENTYPE     = $7008;
   SO_SYNCHRONOUS_ALERT    = $10;
   SO_SYNCHRONOUS_NONALERT = $20;
   { Other NT-specific options }
-  SO_MAXDG        = $7009;
-  SO_MAXPATHDG    = $700A;
-  SO_UPDATE_ACCEPT_CONTEXT     = $700B;
-  SO_CONNECT_TIME = $700C;
+  SO_OPENTYPE              = $7008;
+  SO_MAXDG                 = $7009;
+  SO_MAXPATHDG             = $700A;
+  SO_UPDATE_ACCEPT_CONTEXT = $700B;
+  SO_CONNECT_TIME          = $700C;
 
   SOMAXCONN       = $7fffffff;
 
@@ -175,10 +175,10 @@ const
   NI_MAXHOST	   = 1025;
   NI_MAXSERV	   = 32;
   NI_NOFQDN 	   = $1;
-  NI_NUMERICHOST = $2;
+  NI_NUMERICHOST   = $2;
   NI_NAMEREQD	   = $4;
-  NI_NUMERICSERV = $8;
-  NI_DGRAM       = $10;
+  NI_NUMERICSERV   = $8;
+  NI_DGRAM         = $10;
 
 const
   SOCK_STREAM     = 1;               { stream socket }
@@ -385,6 +385,9 @@ function socket(af, struct, protocol: integer): TSocket; stdcall;
 function setsockopt(s: TSocket; level, optname: integer;
    optval: pointer; optlen: integer): integer; stdcall;
   external ws2 name 'setsockopt';
+function getsockopt(s: TSocket; level, optname: integer;
+   optval: pointer; optlen: PInteger): integer; stdcall;
+  external ws2 name 'getsockopt';
 function ioctlsocket(s: TSocket; cmd: cardinal; arg: PCardinal): integer; stdcall;
   external ws2 name 'ioctlsocket';
 function shutdown(s: TSocket; how: integer): integer; stdcall;
@@ -536,18 +539,18 @@ begin
   rdp := nil;
   wrp := nil;
   sock := TSocket(@self);
-  if neRead in scope then
-  begin
-    rd.fd_array[0] := sock;
-    rd.fd_count := 1;
-    rdp := @rd;
-  end;
-  if (neWrite in scope) or
-     not (neRead in scope) then // a least one is needed
+  if neWrite in scope then
   begin
     wr.fd_array[0] := sock;
     wr.fd_count := 1;
     wrp := @wr;
+  end;
+  if (neRead in scope) or
+     not (neWrite in scope) then // a least one is needed
+  begin
+    rd.fd_array[0] := sock;
+    rd.fd_count := 1;
+    rdp := @rd;
   end;
   SetTimeVal(ms, tv);
   res := select(sock + 1, rdp, wrp, nil, @tv);
@@ -561,13 +564,12 @@ begin
      ({%H-}rd.fd_count = 1) and
      (rd.fd_array[0] = sock) then
   begin
-    // Windows expects to check FIONREAD for graceful disconnection
     if ioctlsocket(sock, FIONREAD, @pending) <> NO_ERROR then
       include(result, neError)
-    else if pending > 0 then
-      include(result, neRead)
-    else
-      include(result, neClosed);
+    else 
+      include(result, neRead);
+    // FIONREAD is not enough on Windows for graceful disconnection
+    // -> return neRead and not neClosed if pending=0
   end;
   if (wrp <> nil) and
      ({%H-}wr.fd_count = 1) and
@@ -593,7 +595,7 @@ begin
     exit;
   dec(FDSet.fd_count);
   if i < FDSet.fd_count then
-    MoveFast(FDSet.fd_array[i + 1], FDSet.fd_array[i], (FDSet.fd_count - i) * sizeof(TSocket));
+    MoveFast(FDSet.fd_array[i + 1], FDSet.fd_array[i], (FDSet.fd_count - i) * SizeOf(TSocket));
 end;
 
 procedure FD_SET(Socket: TNetSocket; var FDSet: TFDSet);
@@ -610,6 +612,7 @@ type
   // grow FD_SETSIZE up to 512 for the purpose of this class
   // - under POSIX, select() is very limited, so poll/epoll APIs are to be used
   // - in practice, TPollSocketSelect is FASTER than TPollSocketPoll + WSAPoll()
+  // because the new WSAPoll API is just an emulator usinig select() internally
   TPollSocketSelect = class(TPollSocketAbstract)
   protected
     fHighestSocket: TNetSocket;
@@ -673,8 +676,8 @@ begin
     n := fCount - i;
     if n > 0 then
     begin
-      MoveFast(fTagSocket[i + 1], fTagSocket[i], n * sizeof(fTagSocket[i]));
-      MoveFast(fTagTag[i + 1], fTagTag[i], n * sizeof(fTagTag[i]));
+      MoveFast(fTagSocket[i + 1], fTagSocket[i], n * SizeOf(fTagSocket[i]));
+      MoveFast(fTagTag[i + 1], fTagTag[i], n * SizeOf(fTagTag[i]));
     end;
     if fCount = 0 then
       fHighestSocket := nil;
@@ -689,7 +692,6 @@ var
   rdp, wrp: PFDSet;
   ev: TPollSocketEvents;
   i: PtrInt;
-  pending: cardinal;
   sock: TNetSocket;
   rd, wr: TFDSet; // modified by select() -> local copy on stack
 begin
@@ -723,14 +725,19 @@ begin
     sock := fTagSocket[i];
     if (rdp <> nil) and
        FD_ISSET(sock, rd{%H-}) then
-    begin
-      if (IoctlSocket(TSocket(sock), FIONREAD, @pending) = NO_ERROR) and
-         ({%H-}pending = 0) then
-        // socket closed gracefully - see TCrtSocket.SockReceivePending
-        include(ev, pseClosed)
-      else
-        include(ev, pseRead);
-    end;
+    // on heavily multi-threaded process, select() may be triggerred but
+    // currently reading in another thread, so here IoctlSocket() would return
+    // pending=0 whereas the socket is actually NOT closed (seen on Windows 7)
+    // -> return pseRead now and let a single thread check for pending bytes and
+    // detect gracefully closed sockets e.g. in TPollAsyncSockets.ProcessRead
+    (*
+    if (IoctlSocket(TSocket(sock), FIONREAD, @pending) = NO_ERROR) and
+       ({%H-}pending = 0) then
+      // socket closed gracefully - see TCrtSocket.SockReceivePending
+      include(ev, pseClosed)
+    else
+    *)
+      include(ev, pseRead);
     if (wrp <> nil) and
        FD_ISSET(sock, wr{%H-}) then
       include(ev, pseWrite);
@@ -1238,7 +1245,8 @@ var
   end;
 
 begin
-  if fSessionClosed and (fDataCount = 0) then
+  if fSessionClosed and
+     (fDataCount = 0) then
   begin
     result := nrClosed;
     exit;
@@ -1254,9 +1262,14 @@ begin
         fInputSize - fInputCount, MSG_NOSIGNAL);
       if read <= 0 then
       begin
-        result := NetLastError; // may be nrRetry for WSATRY_AGAIN
-        if result = nrOK then
-          result := nrUnknownError;
+        if read = 0 then
+          result := nrClosed
+        else
+        begin
+          result := NetLastError; // may be nrRetry for WSATRY_AGAIN
+          if result = nrOK then
+            result := nrUnknownError;
+        end;
         exit;
       end;
       inc(fInputCount, read);

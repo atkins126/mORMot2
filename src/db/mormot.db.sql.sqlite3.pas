@@ -141,9 +141,9 @@ type
   TSqlDBSQLite3Statement = class(TSqlDBStatement)
   protected
     fStatement: TSqlRequest;
-    fShouldLogSQL: boolean; // sllSQL in SynDBLog.Level -> set fLogSQLValues[]
     fLogSQLValues: TVariantDynArray;
     fUpdateCount: integer;
+    fShouldLogSQL: boolean; // sllSQL in SynDBLog.Level -> set fLogSQLValues[]
     // retrieve the inlined value of a given parameter, e.g. 1 or 'name'
     procedure AddParamValueAsText(Param: integer; Dest: TTextWriter;
       MaxCharCount: integer); override;
@@ -240,7 +240,8 @@ type
     /// the Column type of the current Row
     // - ftCurrency type should be handled specificaly, for faster process and
     // avoid any rounding issue, since currency is a standard OleDB type
-    function ColumnType(Col: integer; FieldSize: PInteger = nil): TSqlDBFieldType; override;
+    function ColumnType(Col: integer;
+      FieldSize: PInteger = nil): TSqlDBFieldType; override;
     /// Reset the previous prepared statement
     procedure Reset; override;
     /// returns TRUE if the column contains NULL
@@ -273,6 +274,7 @@ type
 
 /// direct export of a DB statement rows into a SQLite3 database
 // - the corresponding table will be created within the specified DB file
+// - is a wrapper around TSqlDBConnection.NewTableFromRows()
 function RowsToSqlite3(const Dest: TFileName; const TableName: RawUtf8;
   Rows: TSqlDBStatement; UseMormotCollations: boolean): integer;
 
@@ -312,9 +314,22 @@ end;
 procedure TSqlDBSQLite3ConnectionProperties.SetUseMormotCollations(const Value: boolean);
 const
   SQLITE3_FIELDS: array[boolean] of TSqlDBFieldTypeDefinition = (
-   (' INTEGER', ' TEXT', ' INTEGER', ' FLOAT', ' FLOAT', ' TEXT', ' TEXT', ' BLOB'),
-   (' INTEGER', ' TEXT COLLATE SYSTEMNOCASE', ' INTEGER', ' FLOAT', ' FLOAT',
-    ' TEXT COLLATE ISO8601', ' TEXT COLLATE SYSTEMNOCASE', ' BLOB'));
+   (' INTEGER',                       // ftUnknown = int32
+    ' TEXT',                          // ftNull    = UTF-8
+    ' INTEGER',                       // ftInt64
+    ' FLOAT',                         // ftDouble
+    ' FLOAT',                         // ftCurrency
+    ' TEXT',                          // ftDate
+    ' TEXT',                          // ftUtf8
+    ' BLOB'),                         // ftBlob
+   (' INTEGER',                       // ftUnknown = int32
+    ' TEXT COLLATE SYSTEMNOCASE',     // ftNull    = UTF-8
+    ' INTEGER',                       // ftInt64
+    ' FLOAT',                         // ftDouble
+    ' FLOAT',                         // ftCurrency
+    ' TEXT COLLATE ISO8601',          // ftDate
+    ' TEXT COLLATE SYSTEMNOCASE',     // ftUtf8
+    ' BLOB'));                        // ftBlob
 begin
   fUseMormotCollations := Value;
   fSqlCreateField := SQLITE3_FIELDS[Value];
@@ -345,15 +360,12 @@ begin
   UseMormotCollations := true;
 end;
 
-type
-  TSqlDatabaseHook = class(TSQLDatabase); // to access fPassword
-
 constructor TSqlDBSQLite3ConnectionProperties.Create(aDB: TSqlDatabase);
 begin
   if aDB = nil then
     raise ESqlDBException.CreateUtf8('%.Create(DB=nil)', [self]);
   fExistingDB := aDB;
-  Create('', StringToUtf8(aDB.FileName), '', TSqlDatabaseHook(aDB).fPassword);
+  Create('', StringToUtf8(aDB.FileName), '', aDB.Password);
 end;
 
 procedure TSqlDBSQLite3ConnectionProperties.GetForeignKeys;
@@ -662,9 +674,9 @@ begin
     exit; // execution done in Step()
   if fShouldLogSQL then
     SqlLogBegin(sllSQL);
-  try  // INSERT/UPDATE/DELETE (i.e. not SELECT) -> try to execute directly now
+  try
+    // INSERT/UPDATE/DELETE (i.e. not SELECT) -> try to execute directly now
     repeat // Execute all steps of the first statement
-
     until fStatement.Step <> SQLITE_ROW;
     fUpdateCount := DB.LastChangeCount;
   finally
@@ -712,17 +724,19 @@ end;
 
 procedure TSqlDBSQLite3Statement.Reset;
 begin
-  fStatement.Reset;
+  fStatement.Reset; // should be done now
   fUpdateCount := 0;
   // fStatement.BindReset; // slow down the process, and is not mandatory
   ReleaseRows;
-  SetLength(fLogSQLValues, fParamCount);
+  if fShouldLogSQL then
+    SetLength(fLogSQLValues, fParamCount);
   inherited Reset;
 end;
 
 procedure TSqlDBSQLite3Statement.ReleaseRows;
 begin
-  VariantDynArrayClear(fLogSQLValues);
+  if fShouldLogSQL then
+    VariantDynArrayClear(fLogSQLValues);
   inherited ReleaseRows;
 end;
 
@@ -755,6 +769,7 @@ begin
   else
     fCurrentRow := 0;
 end;
+
 
 initialization
   TSqlDBSQLite3ConnectionProperties.RegisterClassNameForDefinition;

@@ -7,13 +7,64 @@ interface
 
 {$I ..\src\mormot.defines.inc}
 
+// if defined, TTestCoreProcess.JSONBenchmark will include some other libraries
+
+// on my Laptop, parsing the 1MB People.json expanded array on Win32:
+  // TOrmTableJson    = 507 MB/s    (the parser dedicated to ORM resultset)
+  // TDocVariantData  = 169 MB/s    (custom variant time with late binding)
+  // DynArrayLoadJson = 332 MB/s    (dynamic array of records via cached RTTI)
+
+{$define JSONBENCHMARK_FPJSON}         // fpjson = 24 MB/s
+{.$define JSONBENCHMARK_JSONTOOLS}     // jsontools = 38 MB /s
+
+{.$define JSONBENCHMARK_DELPHIJSON}    // Delphi system.json = 5.8 MB/s on XE8
+{.$define JSONBENCHMARK_JDO}           // JsonDataObjects = 103 MB/s
+{.$define JSONBENCHMARK_SO} // SuperObject = 35 MB/s on Delphi, 10.5 MB/s on FPC
+{.$define JSONBENCHMARK_XSO}           // X-SuperObject = 1.5 MB/s
+{.$define JSONBENCHMARK_GRIJJY}        // Grijjy = 54 MB/s
+{.$define JSONBENCHMARK_DWS}           // dwsJSON = 97 MB/s
+{.$define JSONBENCHMARK_WSFT}          // WinSoft JSON = 27 MB/s
+
+
 uses
   sysutils,
   classes,
   variants,
-  {$ifndef FPC}
+  {$ifdef FPC}
+  {$undef JSONBENCHMARK_DELPHIJSON} // system.json is not available on FPC
+  {$ifdef JSONBENCHMARK_FPJSON}
+  fpjson,
+  jsonparser,
+  {$endif JSONBENCHMARK_FPJSON}
+  {$ifdef JSONBENCHMARK_JSONTOOLS}
+  jsontools,
+  {$endif JSONBENCHMARK_JSONTOOLS}
+  {$else}
   typinfo, // for proper Delphi inlining
+  {$undef JSONBENCHMARK_FPJSON} // fpjson is not available on Delphi
+  {$ifdef JSONBENCHMARK_DELPHIJSON}
+  system.json,
+  {$endif JSONBENCHMARK_DELPHIJSON}
+  {$ifdef JSONBENCHMARK_JDO}
+  JsonDataObjects,
+  {$endif JSONBENCHMARK_JDO}
   {$endif FPC}
+  {$ifdef JSONBENCHMARK_SO}
+  SuperObject,
+  SuperTypes,
+  {$endif JSONBENCHMARK_SO}
+  {$ifdef JSONBENCHMARK_XSO}
+  XSuperObject,
+  {$endif JSONBENCHMARK_XSO}
+  {$ifdef JSONBENCHMARK_GRIJJY}
+  Grijjy.Bson,
+  {$endif JSONBENCHMARK_GRIJJY}
+  {$ifdef JSONBENCHMARK_DWS}
+  dwsJson,
+  {$endif JSONBENCHMARK_DWS}
+  {$ifdef JSONBENCHMARK_WSFT}
+  WinJson,
+  {$endif JSONBENCHMARK_WSFT}
   mormot.core.base,
   mormot.core.os,
   mormot.core.text,
@@ -38,6 +89,7 @@ uses
   mormot.net.sock,
   mormot.db.core,
   mormot.db.nosql.bson,
+  mormot.orm.base,
   mormot.orm.core,
   mormot.rest.client,
   mormot.rest.server,
@@ -59,6 +111,8 @@ type
     procedure UrlEncoding;
     /// some low-level JSON encoding/decoding
     procedure EncodeDecodeJSON;
+    /// some performance numbers about JSON parsing and generating
+    procedure JSONBenchmark;
     /// HTML generation from Wiki Or Markdown syntax
     procedure WikiMarkdownToHtml;
     /// some low-level variant process
@@ -275,6 +329,7 @@ procedure TTestCoreProcess.Variants;
 var
   v: Variant;
   vd: TVarData absolute v;
+  json: PUtf8Char;
   t: pointer;
   dt: TDateTime;
   ni: TNullableInteger;
@@ -291,85 +346,119 @@ begin
   Check(boolean(v));
   ValueVarToVariant('true', 4, oftBoolean, vd, false, t);
   Check(boolean(v));
-  GetVariantFromJson('0', False, v, nil);
+  GetVariantFromJsonField('0', False, v, nil);
   Check(vd.VType = varInteger);
   Check(v = 0);
-  GetVariantFromJson('123', False, v, nil);
+  GetVariantFromJsonField('123', False, v, nil);
   Check(vd.VType = varInteger);
   Check(v = 123);
-  GetVariantFromJson('0123', False, v, nil);
+  GetVariantFromJsonField('0123', False, v, nil);
   Check(vd.VType = varString);
-  GetVariantFromJson('-123', False, v, nil);
+  GetVariantFromJsonField('-', False, v, nil);
+  Check(vd.VType = varString);
+  Check(v = '-');
+  GetVariantFromJsonField('-e', False, v, nil);
+  Check(vd.VType = varString);
+  Check(v = '-e');
+  GetVariantFromJsonField('-0', False, v, nil);
+  Check(vd.VType = varInteger);
+  Check(v = 0);
+  GetVariantFromJsonField('-123', False, v, nil);
   Check(vd.VType = varInteger);
   Check(v = -123);
-  GetVariantFromJson('123456789', False, v, nil);
+  GetVariantFromJsonField('-0123', False, v, nil);
+  Check(vd.VType = varString);
+  GetVariantFromJsonField('123456789', False, v, nil);
   Check(vd.VType = varInteger);
   Check(v = 123456789);
-  GetVariantFromJson('9876543210', False, v, nil);
+  GetVariantFromJsonField('9876543210', False, v, nil);
   Check(vd.VType = varInt64);
   Check(v = 9876543210);
-  GetVariantFromJson('12345678901', False, v, nil);
+  GetVariantFromJsonField('12345678901', False, v, nil);
   Check(vd.VType = varInt64);
   Check(v = 12345678901);
-  GetVariantFromJson('12345678901234567', False, v, nil);
+  GetVariantFromJsonField('12345678901234567', False, v, nil);
   Check(vd.VType = varInt64);
-  GetVariantFromJson('123456789012345678', False, v, nil);
+  GetVariantFromJsonField('123456789012345678', False, v, nil);
   Check(vd.VType = varInt64);
   Check(v = 123456789012345678);
-  GetVariantFromJson('1234567890123456789', False, v, nil);
+  GetVariantFromJsonField('1234567890123456789', False, v, nil);
   Check(vd.VType = varInt64);
   Check(v = 1234567890123456789);
-  GetVariantFromJson('12345678901234567890', False, v, nil, true);
+  GetVariantFromJsonField('12345678901234567890', False, v, nil, true);
   Check(vd.VType = varDouble);
   CheckSame(vd.VDouble, 12345678901234567890.0, 0);
-  GetVariantFromJson('12345678901234567890', False, v, nil, false);
+  GetVariantFromJsonField('12345678901234567890', False, v, nil, false);
   Check(vd.VType = varString);
-  GetVariantFromJson('-123.1', False, v, nil);
+  GetVariantFromJsonField('0.123', False, v, nil);
+  Check(vd.VType = varCurrency);
+  Check(v = 0.123);
+  GetVariantFromJsonField('-0.123', False, v, nil);
+  Check(vd.VType = varCurrency);
+  Check(v = -0.123);
+  GetVariantFromJsonField('-123.1', False, v, nil);
   Check(vd.VType = varCurrency);
   Check(v = -123.1);
-  GetVariantFromJson('-123.12', False, v, nil);
+  GetVariantFromJsonField('-123.12', False, v, nil);
   Check(vd.VType = varCurrency);
   Check(v = -123.12);
-  GetVariantFromJson('-123.123', False, v, nil);
+  GetVariantFromJsonField('-123.123', False, v, nil);
   Check(vd.VType = varCurrency);
   Check(v = -123.123);
-  GetVariantFromJson('123.1234', False, v, nil, false);
+  GetVariantFromJsonField('123.1234', False, v, nil);
   Check(vd.VType = varCurrency);
   Check(v = 123.1234);
-  GetVariantFromJson('123.1234', False, v, nil, true);
+  GetVariantFromJsonField('-123.1234', False, v, nil);
   Check(vd.VType = varCurrency);
-  Check(v = 123.1234);
-  GetVariantFromJson('-123.12345', False, v, nil, true);
+  Check(v = -123.1234);
+  GetVariantFromJsonField('0123.1234', False, v, nil);
+  Check(vd.VType = varString);
+  GetVariantFromJsonField('-0123.1234', False, v, nil);
+  Check(vd.VType = varString);
+  GetVariantFromJsonField('-123.1234', False, v, nil);
+  Check(vd.VType = varCurrency);
+  GetVariantFromJsonField('123.12345', False, v, nil);
+  Check(vd.VType = varString);
+  GetVariantFromJsonField('123.12345', False, v, nil, {double=}true);
+  Check(vd.VType = varDouble);
+  CheckSame(v, 123.12345);
+  GetVariantFromJsonField('-123.12345', False, v, nil, true);
   Check(vd.VType = varDouble);
   CheckSame(v, -123.12345);
-  GetVariantFromJson('-1.123e12', False, v, nil, true);
+  GetVariantFromJsonField('-1.123e12', False, v, nil, true);
   Check(vd.VType = varDouble);
   CheckSame(v, -1.123e12);
-  GetVariantFromJson('-123.123e-2', False, v, nil, true);
+  GetVariantFromJsonField('-123.123e-2', False, v, nil, true);
   Check(vd.VType = varDouble);
   CheckSame(v, -123.123e-2);
-  GetVariantFromJson('-123.123ee2', False, v, nil, true);
+  GetVariantFromJsonField('-123.123ee2', False, v, nil, true);
   Check(vd.VType = varString);
   Check(v = '-123.123ee2');
-  GetVariantFromJson('1-123.12', False, v, nil);
+  GetVariantFromJsonField('1e', False, v, nil);
+  Check(vd.VType = varString);
+  Check(v = '1e');
+  GetVariantFromJsonField('1e0', False, v, nil);
+  Check(vd.VType = varInteger);
+  Check(v = 1);
+  GetVariantFromJsonField('1-123.12', False, v, nil);
   Check(vd.VType = varString);
   Check(v = '1-123.12');
-  GetVariantFromJson('123.', False, v, nil);
+  GetVariantFromJsonField('123.', False, v, nil);
   Check(vd.VType = varString);
   Check(v = '123.');
-  GetVariantFromJson('123.abc', False, v, nil);
+  GetVariantFromJsonField('123.abc', False, v, nil);
   Check(vd.VType = varString);
   Check(v = '123.abc');
-  GetVariantFromJson('123.1abc', False, v, nil);
+  GetVariantFromJsonField('123.1abc', False, v, nil);
   Check(vd.VType = varString);
   Check(v = '123.1abc');
-  GetVariantFromJson('123.12a', False, v, nil);
+  GetVariantFromJsonField('123.12a', False, v, nil);
   Check(vd.VType = varString);
   Check(v = '123.12a');
-  GetVariantFromJson('123.123a', False, v, nil);
+  GetVariantFromJsonField('123.123a', False, v, nil);
   Check(vd.VType = varString);
   Check(v = '123.123a');
-  GetVariantFromJson('123.1234a', False, v, nil);
+  GetVariantFromJsonField('123.1234a', False, v, nil);
   Check(vd.VType = varString);
   Check(v = '123.1234a');
   Check(VariantToDateTime('2016', dt));
@@ -393,55 +482,59 @@ begin
   Check(ni = 10);
   Check(nt = 'toto');
   {$endif FPC}
-  JsonToVariantInPlace(v, nil);
+  json := nil;
+  GetJsonToAnyVariant(v, json, nil, nil, false);
   Check(vd.VType = varEmpty);
-  v := JsonToVariant('');
+  v := VariantLoadJson('');
   Check(vd.VType = varEmpty);
-  v := JsonToVariant('null');
+  v := VariantLoadJson('null');
   Check(vd.VType = varNull);
-  v := JsonToVariant('false');
+  v := VariantLoadJson('false');
   Check(not boolean(v));
-  v := JsonToVariant('true');
+  v := VariantLoadJson('true');
   Check(boolean(v));
-  v := JsonToVariant('invalid');
-  Check(vd.VType = varNull);
-  v := JsonToVariant('0');
+  v := VariantLoadJson('invalid');
+  Check(vd.VType = varEmpty);
+  Check(VariantLoadJson(v, 'true'));
+  Check(boolean(v));
+  Check(not VariantLoadJson(v, 'invalid'));
+  Check(vd.VType = varEmpty);
+  v := VariantLoadJson('0');
   Check(vd.VType = varInteger);
-  v := JsonToVariant('123456789012345678');
+  v := VariantLoadJson('123456789012345678');
   Check(vd.VType = varInt64);
   Check(v = 123456789012345678);
-  v := JsonToVariant('123.1234');
+  v := VariantLoadJson('123.1234');
   Check(vd.VType = varCurrency);
   CheckSame(v, 123.1234);
-  v := JsonToVariant('-1E-300', [], true);
+  v := VariantLoadJson('-1E-300', nil, true);
   Check(vd.VType = varDouble);
   CheckSame(v, -1e-300);
-  v := JsonToVariant('[]');
+  v := VariantLoadJson('[]', @JSON_[mFast]);
   Check(v._kind = ord(dvArray));
   Check(v._count = 0);
-  v := JsonToVariant('[ ]');
+  v := VariantLoadJson('[ ]', @JSON_[mFast]);
   Check(v._kind = ord(dvArray));
   Check(v._count = 0);
-  v := JsonToVariant('{  }');
+  v := VariantLoadJson('{  }', @JSON_[mFast]);
   Check(v._kind = ord(dvObject));
   Check(v._count = 0);
-  v := JsonToVariant('[1,2,3]');
+  v := VariantLoadJson('[1,2,3]', @JSON_[mFast]);
   Check(v._kind = ord(dvArray));
   Check(v._count = 3);
-  v := JsonToVariant(' {"a":10,b:20}');
+  v := VariantLoadJson(' {"a":10,b:20}', @JSON_[mFast]);
   Check(v._kind = ord(dvObject));
   Check(v._count = 2);
-  v := JsonToVariant('{"invalid":');
+  v := VariantLoadJson('{"invalid":', @JSON_[mFast]);
   Check(vd.VType = varEmpty);
-  v := JsonToVariant(' "toto\r\ntoto"');
+  v := VariantLoadJson(' "toto\r\ntoto"');
   Check(vd.VType = varString);
   Check(v = 'toto'#$D#$A'toto');
 end;
 
 type
   TMustacheTest = packed record
-    desc: string;
-    template, expected: RawUtf8;
+    desc, template, expected: RawUtf8;
     data, partials: variant;
   end;
 
@@ -450,7 +543,7 @@ type
   end;
 
 const
-  __TMustacheTest = 'desc string template,expected RawUtf8 data,partials variant';
+  __TMustacheTest = 'desc,template,expected RawUtf8 data,partials variant';
   __TMustacheTests = 'tests array of TMustacheTest';
   MUSTACHE_SPECS: array[0..4] of TFileName = (
     'interpolation', 'comments', 'sections', 'inverted', 'partials');
@@ -471,7 +564,7 @@ begin
   mustache := TSynMustache.Parse(
     'Hello {{name}}'#13#10'You have just won {{value}} dollars!');
   Check(mustache.SectionMaxCount = 0);
-  TDocVariant.New(doc);
+  TDocVariant.NewFast(doc);
   doc.name := 'Chris';
   doc.value := 10000;
   html := mustache.Render(doc);
@@ -684,7 +777,7 @@ begin
           continue; // we don't indent each line of the expanded partials (yet)
         mustache := TSynMustache.Parse(template);
         html := mustache.Render(data, TSynMustachePartials.CreateOwned(partials));
-        Check(html = expected, desc);
+        CheckEqual(html, expected, desc);
       end;
   end;
   Rtti.RegisterFromText(TypeInfo(TMustacheTest), '');
@@ -1046,6 +1139,14 @@ type
       read FSomeField write FSomeField;
   end;
 
+  TObjectWithVariant = class(TSynPersistent)
+  protected
+    fValue: variant;
+  published
+    property Value: variant
+      read fValue write fValue;
+  end;
+
   {$ifdef ISDELPHI2010}
   TStaticArrayOfInt = packed array[1..5] of Integer;
 
@@ -1105,7 +1206,7 @@ const
 
 procedure TTestCoreProcess.EncodeDecodeJSON;
 var
-  J, U, U2: RawUtf8;
+  J, J2, U, U2: RawUtf8;
   P: PUtf8Char;
   binary, zendframeworkJson, discogsJson: RawByteString;
   V: array[0..4] of TValuePUtf8Char;
@@ -1116,13 +1217,14 @@ var
   JA, JA2: TTestCustomJsonArray;
   JAS: TTestCustomJsonArraySimple;
   JAV: TTestCustomJsonArrayVariant;
-  GDtoObject: TDtoObject;
+  GDtoObject, G2: TDtoObject;
+  owv: TObjectWithVariant;
   Trans: TTestCustomJson2;
   Disco: TTestCustomDiscogs;
   Cache: TRestCacheEntryValue;
   peop: TOrmPeople;
   K: RawUtf8;
-  Valid: boolean;
+  strict, Valid: boolean;
   RB: RawBlob;
   Enemy: TEnemy;
   Instance: TRttiCustom;
@@ -1325,8 +1427,8 @@ var
       exit; // avoid GPF e.g. on Windows XP where https is broken
     TRttiJson.RegisterFromText(TypeInfo(TTestCustomJsonGitHub),
       __TTestCustomJsonGitHub, ro, wo);
-    FillCharFast(git, sizeof(git), 0);
-    FillCharFast(git2, sizeof(git2), 0);
+    FillCharFast(git, SizeOf(git), 0);
+    FillCharFast(git2, SizeOf(git2), 0);
     U := zendframeworkJson; // need unique string for procedure re-entrance
     check(IsValidJson(U));
     Check(DynArrayLoadJson(
@@ -1433,10 +1535,10 @@ var
     Finalize(JR2);
     Finalize(JA);
     Finalize(JA2);
-    FillCharFast(JR, sizeof(JR), 0);
-    FillCharFast(JR2, sizeof(JR2), 0);
-    FillCharFast(JA, sizeof(JA), 0);
-    FillCharFast(JA2, sizeof(JA2), 0);
+    FillCharFast(JR, SizeOf(JR), 0);
+    FillCharFast(JR2, SizeOf(JR2), 0);
+    FillCharFast(JA, SizeOf(JA), 0);
+    FillCharFast(JA2, SizeOf(JA2), 0);
     U := RecordSaveJson(JR, TypeInfo(TTestCustomJsonRecord));
     CheckEqual(U, '{"A":0,"B":0,"C":0,"D":"","E":{"E1":0,"E2":0},"F":""}');
     check(IsValidJson(U));
@@ -1572,7 +1674,7 @@ var
     check(IsValidJson(J));
 
     Finalize(JAS);
-    FillCharFast(JAS, sizeof(JAS), 0);
+    FillCharFast(JAS, SizeOf(JAS), 0);
     U := RecordSaveJson(JAS, TypeInfo(TTestCustomJsonArraySimple));
     CheckEqual(U, '{"A":0,"B":0,"C":[],"D":"","E":[],"H":""}');
     check(IsValidJson(U));
@@ -1597,7 +1699,7 @@ var
     check(IsValidJson(U));
 
     Finalize(JAV);
-    FillCharFast(JAV, sizeof(JAV), 0);
+    FillCharFast(JAV, SizeOf(JAV), 0);
     U := RecordSaveJson(JAV, TypeInfo(TTestCustomJsonArrayVariant));
     CheckEqual(U, '{"A":0,"B":0,"C":[],"D":""}');
     check(IsValidJson(U));
@@ -1619,6 +1721,8 @@ var
       with DocVariantData(JAV.C[3])^ do
       begin
         Check(Kind = dvObject);
+        Check(IsObject);
+        Check(not IsArray);
         Check(Count = 1);
         Check(Names[0] = 'four');
         Check(Values[0]._Kind = ord(dvArray));
@@ -1626,6 +1730,7 @@ var
         with DocVariantData(Values[0])^ do
         begin
           Check(Kind = dvArray);
+          Check(IsArray);
           Check(Count = 4);
           for v := 0 to Count - 1 do
             Check(Values[v] = v + 1);
@@ -1634,8 +1739,20 @@ var
     end;
     Check(JAV.D = '4');
     GDtoObject := TDtoObject.Create;
+    G2 := TDtoObject.Create;
+    Check(IsObjectDefaultOrVoid(GDtoObject));
+    Check(IsObjectDefaultOrVoid(G2));
+    Check(ObjectEquals(G2, GDtoObject));
     U := '{"SomeField":"Test"}';
     Check(ObjectLoadJson(GDtoObject, U, nil, []), 'nestedvariant1');
+    Check(not ObjectEquals(G2, GDtoObject));
+    Check(not IsObjectDefaultOrVoid(GDtoObject));
+    Check(IsObjectDefaultOrVoid(G2));
+    RawUtf8ToVariant('Test', va);
+    Check(SetValueObject(G2, 'SomeField', va));
+    Check(not SetValueObject(G2, 'SomeNonExistingField', va));
+    Check(ObjectEquals(G2, GDtoObject));
+    Check(not IsObjectDefaultOrVoid(G2));
     J := ObjectToJson(GDtoObject, []);
     CheckEqual(J, '{"NestedObject":{"FieldString":"","FieldInteger":0,' +
       '"FieldVariant":null},"SomeField":"Test"}');
@@ -1646,10 +1763,41 @@ var
       'nestedvariant2');
     J := ObjectToJson(GDtoObject, [woDontStoreVoid]);
     CheckEqual(J, U);
+    Check(G2.NestedObject.FieldInteger = 0);
+    Check(SetValueObject(G2, 'nestedobject.fieldinteger', 10));
+    Check(G2.NestedObject.FieldInteger = 10);
+    ClearObject(G2);
+    ClearObject(GDtoObject);
+    Check(IsObjectDefaultOrVoid(GDtoObject));
+    Check(IsObjectDefaultOrVoid(G2));
+    Check(ObjectEquals(G2, GDtoObject));
+    G2.Free;
     GDtoObject.Free;
+    owv := TObjectWithVariant.Create;
+    J := ObjectToJson(owv);
+    CheckEqual(J, '{"Value":null}');
+    owv.Value := 10;
+    J := ObjectToJson(owv);
+    CheckEqual(J, '{"Value":10}');
+    owv.Value := '{"a":10}';
+    J := ObjectToJson(owv);
+    CheckEqual(J, '{"Value":"{\"a\":10}"}');
+    owv.Value := _JsonFast('{"a":10}');
+    J := ObjectToJson(owv);
+    CheckEqual(J, '{"Value":{"a":10}}');
+    ClearObject(owv);
+    J := ObjectToJson(owv);
+    CheckEqual(J, '{"Value":null}');
+    J := '{ "RowID": 1, "Value": {"SegmentID": "1976-113", "From":"LEXINGTON ' +
+      'AV/72 ST","To":"LEXINGTON AV/57 ST"} }';
+    Check(ObjectLoadJson(owv, J, nil, JSONPARSER_TOLERANTOPTIONS));
+    CheckEqual(_safe(owv.value)^.Count, 3);
+    CheckEqual(_safe(owv.value)^.ToJson, '{"SegmentID":"1976-113","From":' +
+      '"LEXINGTON AV/72 ST","To":"LEXINGTON AV/57 ST"}');
+    owv.Free;
 
     Finalize(Cache);
-    FillCharFast(Cache, sizeof(Cache), 0);
+    FillCharFast(Cache, SizeOf(Cache), 0);
     U := RecordSaveJson(Cache, TypeInfo(TRestCacheEntryValue));
     CheckEqual(U, '{"ID":0,"Timestamp512":0,"Tag":0,"Json":""}');
     check(IsValidJson(U));
@@ -1676,9 +1824,9 @@ var
     Check(Cache.Tag = 12);
 
     {$ifdef ISDELPHI2010}
-    FillCharFast(nav, sizeof(nav), 0);
-    FillCharFast(nav2, sizeof(nav2), 1);
-    Check(not CompareMem(@nav, @nav2, sizeof(nav)));
+    FillCharFast(nav, SizeOf(nav), 0);
+    FillCharFast(nav2, SizeOf(nav2), 1);
+    Check(not CompareMem(@nav, @nav2, SizeOf(nav)));
     Check(nav2.MaxRows <> 0);
     check(nav2.EOF);
     U := RecordSaveJson(nav, TypeInfo(TConsultaNav));
@@ -1689,15 +1837,15 @@ var
     check(not nav2.EOF);
     J := RecordSaveJson(nav2, TypeInfo(TConsultaNav));
     CheckEqual(J, RecordSaveJson(nav, TypeInfo(TConsultaNav)));
-    Check(CompareMem(@nav, @nav2, sizeof(nav)));
+    Check(CompareMem(@nav, @nav2, SizeOf(nav)));
     Finalize(nrtti);
-    FillCharFast(nrtti, sizeof(nrtti), 0);
+    FillCharFast(nrtti, SizeOf(nrtti), 0);
     U := RecordSaveJson(nrtti, TypeInfo(TNewRtti));
     CheckEqual(U,
       '{"Number":0,"StaticArray":[{"Name":"","Single":0,"Double":0},' +
       '{"Name":"","Single":0,"Double":0}],"Int":[0,0,0,0,0]}');
     Finalize(nrtti2);
-    FillCharFast(nrtti2, sizeof(nrtti2), 0);
+    FillCharFast(nrtti2, SizeOf(nrtti2), 0);
     Check(RecordLoadJson(nrtti2, pointer(U), TypeInfo(TNewRtti)) <> nil);
     J := RecordSaveJson(nrtti2, TypeInfo(TNewRtti));
     CheckEqual(J, RecordSaveJson(nrtti, TypeInfo(TNewRtti)));
@@ -1718,7 +1866,7 @@ var
       '{"Number":1,"StaticArray":[{"Name":"one","Single":1.5,"Double":1.7},' +
       '{"Name":"two","Single":2.5,"Double":2.7}],"Int":[1,2,3,4,5]}');
     Finalize(nrtti2);
-    FillCharFast(nrtti2, sizeof(nrtti2), 0);
+    FillCharFast(nrtti2, SizeOf(nrtti2), 0);
     Check(RecordLoadJson(nrtti2, pointer(U), TypeInfo(TNewRtti)) <> nil);
     J := RecordSaveJson(nrtti2, TypeInfo(TNewRtti));
     CheckEqual(J, RecordSaveJson(nrtti, TypeInfo(TNewRtti)));
@@ -1802,6 +1950,8 @@ begin
   Check(IsStringJson('TRUE'));
   Check(not IsStringJson('123'));
   Check(IsStringJson('0123'));
+  Check(not IsStringJson('-123'));
+  Check(IsStringJson('-0123'));
   Check(not IsStringJson('0.123'));
   Check(not IsStringJson('1E19'));
   Check(not IsStringJson('1.23E1'));
@@ -1950,34 +2100,33 @@ begin
     peop.Data := #1#2#3#4;
     J := ObjectToJson(peop, [woRawBlobAsBase64]);
     check(IsValidJson(J));
-    check(J[53] = #$EF);
-    check(J[54] = #$BF);
-    check(J[55] = #$B0);
-    J[53] := '1';
-    J[54] := '2';
-    J[55] := '3';
+    check(J[56] = #$EF);
+    check(J[57] = #$BF);
+    check(J[58] = #$B0);
+    J2 := ObjectToJson(peop); // TOrm.RttiJsonWrite always include RawBlob
+    check(IsValidJson(J2));
+    CheckEqual(J, J2);
+    J[56] := '1';
+    J[57] := '2';
+    J[58] := '3';
     check(IsValidJson(J));
-    CheckEqual(J, '{"ID":1234,"FirstName":"FN","LastName":"LN",' +
+    CheckEqual(J, '{"RowID":1234,"FirstName":"FN","LastName":"LN",' +
       '"Data":"123AQIDBA==","YearOfBirth":1000,"YearOfDeath":0}');
-    J := ObjectToJson(peop);
-    check(IsValidJson(J));
-    CheckEqual(J, '{"ID":1234,"FirstName":"FN","LastName":"LN",' +
-      '"Data":null,"YearOfBirth":1000,"YearOfDeath":0}');
     ClearObject(peop);
     J := ObjectToJson(peop);
     check(IsValidJson(J));
-    CheckEqual(J, '{"ID":0,"FirstName":"","LastName":"",' +
+    CheckEqual(J, '{"RowID":0,"FirstName":"","LastName":"",' +
       '"Data":null,"YearOfBirth":0,"YearOfDeath":0}');
     peop.IDValue := -1234;
     J := ObjectToJson(peop);
     check(IsValidJson(J));
-    CheckEqual(J, '{"ID":-1234,"FirstName":"","LastName":"",' +
+    CheckEqual(J, '{"RowID":-1234,"FirstName":"","LastName":"",' +
       '"Data":null,"YearOfBirth":0,"YearOfDeath":0}');
     peop.YearOfDeath := 10;
     peop.LastName := 'john';
     J := ObjectToJson(peop);
     check(IsValidJson(J));
-    CheckEqual(J, '{"ID":-1234,"FirstName":"","LastName":"john","Data":null,' +
+    CheckEqual(J, '{"RowID":-1234,"FirstName":"","LastName":"john","Data":null,' +
       '"YearOfBirth":0,"YearOfDeath":10}');
   finally
     peop.Free;
@@ -1989,6 +2138,8 @@ begin
     U := RandomUtf8(i);
     J := JsonEncode(['a', a, 'r', r, 'u', U]);
     check(IsValidJson(J));
+    check(JsonObjectPropCount(@J[2]) = 3);
+    check(JsonObjectPropCount(@J[2], PUtf8Char(pointer(J)) + length(J)) = 3);
     JsonDecode(J, ['U', 'R', 'A', 'FOO'], @V);
     V[0].ToUtf8(U2);
     Check(U2 = U);
@@ -2028,66 +2179,84 @@ begin
       J := Text;
       CheckEqual(J, U + ',' + DoubleToStr(r) + ',' + DoubleToStr(c) + ',"' + U + '"');
       P := UniqueRawUtf8(J);
-      P := VariantLoadJson(Va, P);
+      GetJsonToAnyVariant(Va, P, nil, nil, false);
       Check(P <> nil);
       Check(Va = a);
-      P := VariantLoadJson(Va, P, nil, nil, true);
+      GetJsonToAnyVariant(Va, P, nil, nil, true);
       Check(P <> nil);
       CheckSame(VariantToDoubleDef(Va), r);
-      P := VariantLoadJson(Va, P);
+      GetJsonToAnyVariant(Va, P, nil, nil, false);
       Check(P <> nil);
       Check(Va = c);
-      P := VariantLoadJson(Va, P);
+      GetJsonToAnyVariant(Va, P, nil, nil, false);
       Check((P <> nil) and
             (P^ = #0));
       Check(Va = U);
       binary := VariantSave(Va);
-      Vb := VariantLoad(binary, @JSON_OPTIONS[true]);
+      Vb := VariantLoad(binary, @JSON_[mFast]);
       Check(Vb = U);
     finally
       Free;
     end;
   end;
   J := GetJsonObjectAsSql('{"ID":  1 ,"Name":"Alice","Role":"User","Last Login":null,'+
-    '"First Login" :   null  ,  "Department"  :  "{\"relPath\":\"317\\\\\",\"revision\":1}" } ]',
-    false, true);
+    '"First Login" :   null  ,  "Department"  :  ' +
+    '"{\"relPath\":\"317\\\\\",\"revision\":1}" } ]', false, true);
   U := ' (ID,Name,Role,Last Login,First Login,Department) VALUES ' +
-    '(:(1):,:(''Alice''):,:(''User''):,:(null):,:(null):,:(''{"relPath":"317\\","revision":1}''):)';
+    '(:(1):,:(''Alice''):,:(''User''):,:(null):,:(null):,' +
+    ':(''{"relPath":"317\\","revision":1}''):)';
   CheckEqual(J, U);
   J := GetJsonObjectAsSql('{ "Name":"Alice","Role":"User","Last Login":null,' +
-    '"First Login" :   null  ,  "Department"  :  "{\"relPath\":\"317\\\\\",\"revision\":1}" } ]',
-    false, true, 1, true);
+    '"First Login" :   null  ,  "Department"  :  ' +
+    '"{\"relPath\":\"317\\\\\",\"revision\":1}" } ]', false, true, 1, true);
   CheckEqual(J, U);
   J := GetJsonObjectAsSql('{ "Name":"Alice","Role":"User","Last Login":null,' +
-    '"First Login" :   null  ,  "Department"  :  "{\"relPath\":\"317\\\\\",\"revision\":1}" } ]',
-    false, true, 1, false);
+    '"First Login" :   null  ,  "Department"  :  ' +
+    '"{\"relPath\":\"317\\\\\",\"revision\":1}" } ]', false, true, 1, false);
   Insert('Row', U, 3);
   CheckEqual(J, U);
   Delete(U, 3, 3);
   J :=
     '{"ID":  1 ,"Name":"Alice","Role":"User","Last Login":null, // comment'#13#10 +
-    '"First Login" : /* to be ignored */  null  ,  "Department"  :  "{\"relPath\":\"317\\\\\",\"revision\":1}" } ]';
-  check(not IsValidJson(J));
+    '"First Login" : /* to be ignored */  null  ,  "Department"  : ' +
+    ' "{\"relPath\":\"317\\\\\",\"revision\":1}" } ]';
+  check(not IsValidJson(J, {strict=}false));
+  check(not IsValidJson(J, {strict=}true));
+  J2 := '[' + J;
+  check(IsValidJson(J2, {strict=}false));
+  check(not IsValidJson(J2, {strict=}true));
   RemoveCommentsFromJson(UniqueRawUtf8(J));
-  check(not IsValidJson(J));
-  check(IsValidJson('[' + J));
+  check(not IsValidJson(J, {strict=}false));
+  check(not IsValidJson(J, {strict=}true));
+  J2 := '[' + J;
+  check(IsValidJson(J2, {strict=}false));
+  check(IsValidJson(J2, {strict=}true));
   J := GetJsonObjectAsSql(J, false, true);
   CheckEqual(J, U);
   J := '{'#10'"httpServer": {'#10'"host": "*",'#10'"port": "8881",'#10 +
     '"serverType": "Socket",'#10'/*"reverseProxy": {'#10'"kind": "nginx",'#10 +
     '"sendFileLocationRoot": "snake-ukrpatent-local"'#10'}*/'#10'} //eol'#10'}';
-  check(not IsValidJSON(J));
+  check(IsValidJson(J, {strict=}false));
+  check(not IsValidJson(J, {strict=}true));
   RemoveCommentsFromJson(UniqueRawUTF8(J));
-  CheckUtf8(IsValidJSON(J), J);
+  check(IsValidJson(J, {strict=}false));
+  check(IsValidJson(J, {strict=}true));
   J := JSONReformat(J,jsonCompact);
   CheckEqual(J,'{"httpServer":{"host":"*","port":"8881","serverType":"Socket"}}');
-  J :=
-    '{"RowID":  210 ,"Name":"Alice","Role":"User","Last Login":null, // comment'#13#10 +
-    '"First Login" : /* to be ignored */  null  ,  "Department"  :  "{\"relPath\":\"317\\\\\",\"revision\":1}" } ]';
-  check(not IsValidJson(J));
+  J := '{"RowID":  210 ,"Name":"Alice","Role":"User","Last Login":null, ' +
+    '// comment'#13#10'"First Login" : /* to be ignored */  null  ,  "Department"' +
+    ' :    "{\"relPath\":\"317\\\\\",\"revision\":1}" } ]';
+  check(not IsValidJson(J, {strict=}false));
+  check(not IsValidJson(J, {strict=}true));
+  J2 := '[' + J;
+  check(IsValidJson(J2, {strict=}false));
+  check(not IsValidJson(J2, {strict=}true));
   RemoveCommentsFromJson(UniqueRawUtf8(J));
-  check(not IsValidJson(J));
-  check(IsValidJson('[' + J));
+  check(not IsValidJson(J, {strict=}false));
+  check(not IsValidJson(J, {strict=}true));
+  J2 := '[' + J;
+  check(IsValidJson(J2, {strict=}false));
+  check(IsValidJson(J2, {strict=}true));
   J := GetJsonObjectAsSql(J, false, true, 1, True);
   CheckEqual(J, U);
   O := TPersistentToJson.Create;
@@ -2151,9 +2320,11 @@ begin
     O2.fName := '';
     O2.fEnum := low(E);
     O2.fSets := [];
-    check(not IsValidJson(J));
+    check(IsValidJson(J, {strict=}false));
+    check(not IsValidJson(J, {strict=}true));
     RemoveCommentsFromJson(UniqueRawUtf8(J));
-    check(IsValidJson(J));
+    check(IsValidJson(J, {strict=}false));
+    check(IsValidJson(J, {strict=}true));
     JsonToObject(O2, pointer(J), Valid);
     Check(Valid);
     Check(O.Name = O2.Name);
@@ -2180,17 +2351,51 @@ begin
   P := GotoNextJsonItem(P, 1, @EndOfObject);
   Check(P <> nil);
   Check(EndOfObject = '}');
-  check(IsValidJson('null'));
-  check(IsValidJson('true'));
-  check(IsValidJson('false'));
-  check(IsValidJson(' null'));
-  check(IsValidJson(' true'));
-  check(IsValidJson(' false'));
-  check(IsValidJson('null  '));
-  check(IsValidJson('true  '));
-  check(IsValidJson('false  '));
-  check(not IsValidJson('nulle'));
-  check(not IsValidJson('trye'));
+  for strict := false to true do
+  begin
+    check(IsValidJson('null', strict));
+    check(IsValidJson('true', strict));
+    check(not IsValidJson('true,', strict)); // expects a single value
+    check(IsValidJson('false', strict));
+    check(IsValidJson(' null', strict));
+    check(IsValidJson(' true', strict));
+    check(IsValidJson(' false', strict));
+    check(IsValidJson('null  ', strict));
+    check(IsValidJson('true  ', strict));
+    check(IsValidJson('false  ', strict));
+    check(IsValidJson('[]', strict));
+    check(IsValidJson(' [] ', strict));
+    check(IsValidJson(' []', strict));
+    check(IsValidJson('[1]', strict));
+    check(IsValidJson(' [2] ', strict));
+    check(IsValidJson(' [3]', strict));
+    check(IsValidJson(' [ [ ] ] ', strict));
+    check(IsValidJson('[[]]', strict));
+    check(IsValidJson('{}', strict));
+    check(IsValidJson(' {} ', strict));
+    check(IsValidJson(' {}', strict));
+    check(IsValidJson('{"123":123.4e1}', strict));
+    check(IsValidJson('{"a":1,b:2}', strict) = not strict);
+    check(IsValidJson('{a:[{ }]}', strict) = not strict);
+    check(IsValidJson('{123:123}', strict) = not strict);
+    check(IsValidJson('{true:123}', strict) = not strict);
+    check(not IsValidJson(' { ', strict));
+    check(not IsValidJson(' [ ', strict));
+    check(not IsValidJson(' } ', strict));
+    check(not IsValidJson(' ] ', strict));
+    check(not IsValidJson(' {a:1},{b,2} ', strict));
+    check(not IsValidJson('{ { [}}', strict));
+    check(not IsValidJson('{ { []}', strict));
+    check(not IsValidJson('{ [{ ]}}', strict));
+    check(not IsValidJson('{ { []}}', strict));
+    check(not IsValidJson('{ { }}', strict));
+    check(not IsValidJson('nulle', strict));
+    check(not IsValidJson('trye', strict));
+    check(not IsValidJson(RawUtf8OfChar('[', 2000), strict));
+    // some false positive content (fast but not perfect)
+    check(IsValidJson('{"123":123.4e1.0}', strict)); 
+    check(IsValidJson('[ -01001, ,- , , ,42.e]', strict));
+  end;
   C2 := TCollTst.Create;
   Coll := TCollTst.Create;
   try
@@ -2538,19 +2743,22 @@ begin
   TestJSONSerialization;
   {$endif ISDELPHI2010}
   // tests parsing options
-  Parser := Rtti.RegisterFromText(TypeInfo(TTestCustomJsonRecord),
-    copy(__TTestCustomJsonRecord, 1, PosEx('}', __TTestCustomJsonRecord)));
+  Parser := Rtti.RegisterFromText(
+    TypeInfo(TTestCustomJsonRecord), __TTestCustomJsonRecord);
   U := RecordSaveJson(JR2, TypeInfo(TTestCustomJsonRecord));
   Check(IsValidJson(U));
-  CheckEqual(U, '{"A":0,"B":0,"C":0,"D":"","E":{"E1":0,"E2":0}}');
+  CheckEqual(U, '{"A":0,"B":0,"C":0,"D":"","E":{"E1":0,"E2":0},"F":""}');
   U := RecordSaveJson(JR, TypeInfo(TTestCustomJsonRecord));
   Check(IsValidJson(U));
-  CheckEqual(U, '{"A":10,"B":0,"C":0,"D":"**","E":{"E1":0,"E2":0}}');
+  CheckEqual(U, '{"A":10,"B":0,"C":0,"D":"**","E":{"E1":0,"E2":0},"F":"1899-12-31"}');
   U := '{"B":0,"C":0,"A":10,"D":"**","E":{"E1":0,"E2":20}}';
+  JR2.A := 100;
+  JR2.F := 10;
   RecordLoadJson(JR2, UniqueRawUtf8(U), TypeInfo(TTestCustomJsonRecord));
   Check(JR2.A = 10);
   Check(JR2.D = '**');
   Check(JR2.E.E2 = 20);
+  Check(JR2.F = 10);
   TRttiJson(Parser).IncludeReadOptions := JSONPARSER_TOLERANTOPTIONS;
   U := '{ "A" : 1 , "B" : 2 , "C" : 3 , "D" : "A" , "tobeignored":null,"E": '#13#10 +
        '{ "E1" : 4, "E2" : 5 } , "tbi" : { "b" : 0 } }';
@@ -2559,6 +2767,7 @@ begin
   Check(JR2.D = 'A');
   Check(JR2.E.E1 = 4);
   Check(JR2.E.E2 = 5);
+  Check(JR2.F = 10);
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonRecord), '');
 
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayWithoutF),
@@ -2568,7 +2777,7 @@ begin
   CheckEqual(U,
     '{"A":100,"B":0,"C":0,"D":null,"E":[{"E1":1,"E2":"2"},{"E1":3,"E2":"4"}]}');
   Finalize(JA);
-  FillCharFast(JA, sizeof(JA), 0);
+  FillCharFast(JA, SizeOf(JA), 0);
   RecordLoadJson(JA, pointer(U), TypeInfo(TTestCustomJsonArrayWithoutF));
   Check(JA.A = 100);
   Check(JA.D = '');
@@ -2582,7 +2791,7 @@ begin
   Check(IsValidJson(U));
   Check(length(JA.E) = 2);
   Finalize(JA);
-  FillCharFast(JA, sizeof(JA), 0);
+  FillCharFast(JA, SizeOf(JA), 0);
   RecordLoadJson(JA, pointer(U), TypeInfo(TTestCustomJsonArrayWithoutF));
   Check(length(JA.E) = 2);
   Check(JA.D = '1234');
@@ -2613,7 +2822,7 @@ begin
     __TTestCustomJson2Title, [], [woHumanReadable]);
   TRttiJson.RegisterFromText(TypeInfo(TTestCustomJson2), __TTestCustomJson2, [],
     [woHumanReadable]);
-  FillCharFast(Trans, sizeof(Trans), 0);
+  FillCharFast(Trans, SizeOf(Trans), 0);
   U := RecordSaveJson(Trans, TypeInfo(TTestCustomJson2));
   Check(IsValidJson(U));
   CheckEqual(U,  #13#10'{'#13#10#9'"Transactions": '#13#10#9'['#13#10#9']'#13#10'}');
@@ -2640,10 +2849,10 @@ begin
 
   Parser := TRttiJson.RegisterFromText(TypeInfo(TTestCustomDiscogs),
     __TTestCustomDiscogs, [jpoIgnoreUnknownProperty], []);
-  FillCharFast(Disco, sizeof(Disco), 0);
-  Check(PtrUInt(@Disco.releases) - PtrUInt(@Disco) = 3 * sizeof(integer));
-  Check(sizeof(Disco.releases[0]) = 5 * sizeof(Pointer) + 2 * sizeof(integer));
-  Check(sizeof(Disco) = sizeof(Pointer) + 3 * sizeof(integer));
+  FillCharFast(Disco, SizeOf(Disco), 0);
+  Check(PtrUInt(@Disco.releases) - PtrUInt(@Disco) = 3 * SizeOf(integer));
+  Check(SizeOf(Disco.releases[0]) = 5 * SizeOf(Pointer) + 2 * SizeOf(integer));
+  Check(SizeOf(Disco) = SizeOf(Pointer) + 3 * SizeOf(integer));
   U := RecordSaveJson(Disco, TypeInfo(TTestCustomDiscogs));
   CheckEqual(U, '{"pagination":{"per_page":0,"items":0,"page":0},"releases":[]}');
   U := JsonReformat(discogsJson, jsonCompact);
@@ -2660,7 +2869,7 @@ begin
   Check(IsValidJson(U));
   FileFromString(U, WorkDir + 'discoExtract.json');
   Finalize(Disco);
-  FillCharFast(Disco, sizeof(Disco), 0);
+  FillCharFast(Disco, SizeOf(Disco), 0);
   U := '{"pagination":{"per_page":1},"releases":[{"title":"TEST","id":10}]}';
   Check(IsValidJson(U));
   RecordLoadJson(Disco, UniqueRawUtf8(U), TypeInfo(TTestCustomDiscogs));
@@ -2672,7 +2881,7 @@ begin
     Check(Disco.releases[0].id = 10);
   end;
   Finalize(Disco);
-  FillCharFast(Disco, sizeof(Disco), 0);
+  FillCharFast(Disco, SizeOf(Disco), 0);
   U := '{"pagination":{},"releases":[{"Id":10},{"TITle":"blabla"}]}';
   Check(IsValidJson(U));
   RecordLoadJson(Disco, UniqueRawUtf8(U), TypeInfo(TTestCustomDiscogs));
@@ -2716,7 +2925,7 @@ begin
     CheckEqual(U,
       '{"Enabled":false,"Name":"","Offense":{"damage":{"min":10,"max":0},' +
       '"attackspeed":{"min":0,"max":100}}}');
-    FillcharFast(Enemy.Off, sizeof(Enemy.Off), 0);
+    FillcharFast(Enemy.Off, SizeOf(Enemy.Off), 0);
     check(Enemy.Off.Damage.Min = 0);
     check(Enemy.Off.AttackSpeed.Max = 0);
     JsonToObject(Enemy, pointer(U), Valid);
@@ -2726,6 +2935,434 @@ begin
   finally
     Enemy.Free;
   end;
+end;
+
+{
+  Some numbers on Delphi XE8 + Windows 7 32-bit - taken with mORMot 2 at 7/27/21
+
+   - JSON benchmark: 100,369 assertions passed  3.04s
+      StrLen() in 883us, 21.6 GB/s
+      IsValidUtf8(RawUtf8) in 8.88ms, 2.1 GB/s
+      IsValidUtf8(PUtf8Char) in 9.85ms, 1.9 GB/s
+      IsValidJson(RawUtf8) in 28.91ms, 678 MB/s
+      IsValidJson(PUtf8Char) in 27.04ms, 725 MB/s
+      JsonArrayCount(P) in 26.61ms, 736.6 MB/s
+      JsonArrayCount(P,PMax) in 21.94ms, 893.6 MB/s
+      JsonObjectPropCount() in 10.54ms, 1 GB/s
+      TDocVariant in 117.44ms, 166.9 MB/s
+      TDocVariant dvoInternNames in 175.67ms, 111.6 MB/s
+      TOrmTableJson GetJsonValues in 23.78ms, 362.6 MB/s (write)
+      TOrmTableJson expanded in 39.49ms, 496.4 MB/s
+      TOrmTableJson not expanded in 24.52ms, 351.6 MB/s
+      DynArrayLoadJson in 59ms, 332.3 MB/s
+      Delphi JSON in 338.73ms, 5.7 MB/s
+      JsonDataObjects in 190.11ms, 103.1 MB/s
+      SuperObject in 55.49ms, 35.3 MB/s
+      X-SuperObject in 627.30ms, 1.5 MB/s
+      Grijjy in 35.85ms, 54.6 MB/s
+      dwsJSON in 20.21ms, 97 MB/s
+      WinSoft WinJson in 70.88ms, 27.6 MB/s
+
+  Some numbers on FPC 3.2 + Linux x86_64:
+
+  - JSON benchmark: 100,299 assertions passed  810.30ms
+     StrLen() in 820us, 23.3 GB/s
+     IsValidUtf8(RawUtf8) in 1.46ms, 13 GB/s
+     IsValidUtf8(PUtf8Char) in 2.23ms, 8.5 GB/s
+     IsValidJson(RawUtf8) in 27.23ms, 719.8 MB/s
+     IsValidJson(PUtf8Char) in 25.87ms, 757.6 MB/s
+     JsonArrayCount(P) in 25.26ms, 775.9 MB/s
+     JsonArrayCount(P,PMax) in 25.04ms, 783 MB/s
+     JsonObjectPropCount() in 8.40ms, 1.3 GB/s
+     TDocVariant in 118.81ms, 165 MB/s
+     TDocVariant dvoInternNames in 145.08ms, 135.1 MB/s
+     TOrmTableJson GetJsonValues in 22.88ms, 376.8 MB/s (write)
+     TOrmTableJson expanded in 36.56ms, 536.1 MB/s
+     TOrmTableJson not expanded in 19.57ms, 440.4 MB/s
+     DynArrayLoadJson in 59.14ms, 331.4 MB/s
+     fpjson in 79.36ms, 24.7 MB/s
+     jsontools in 51.41ms, 38.1 MB/s
+     SuperObject in 187.79ms, 10.4 MB/s
+
+  - Test is to parse our 1 MB People.json array of 8227 TOrmPeople objects.
+  - IsValidUtf8() has very efficient AVX2 asm on FPC + x86_64.
+  - TDocVariant dvoInternNames will recognize and intern the nested object
+    field names, so memory consumption is likely to be reduced and unfragmented.
+  - DynArrayLoadJson() parses the JSON directly into a dynamic array of records
+    using our cached RTTI, so memory consumption will be as low as possible,
+    and performance is 100 times faster than the Delphi RTL library.
+  - Most libraries claim they are "fast" but actually they are just faster than
+    Delphi JSON which is (dead) slow. So only JsonDataObject and dwsJSON could
+    claim to be optimized. fpjson is not so bad. And mORMot 2 flies for sure.
+}
+
+procedure TTestCoreProcess.JSONBenchmark;
+const
+  ITER = 20;
+  ONLYLOG = false;
+var
+  people, sample, notexpanded, j0, j1, j2, j3: RawUtf8;
+  peoples: string;
+  P: PUtf8Char;
+  count, len, lennexp, i, interned: integer;
+  dv: TDocVariantData;
+  table: TOrmTableJson;
+  timer: TPrecisionTimer;
+  rec: TRecordPeopleDynArray;
+  objarr: TOrmPeopleObjArray;
+  {$ifdef JSONBENCHMARK_FPJSON}
+  fpjson: TJSONData;
+  {$endif JSONBENCHMARK_FPJSON}
+  {$ifdef JSONBENCHMARK_JSONTOOLS}
+  jt: TJsonNode;
+  {$endif JSONBENCHMARK_JSONTOOLS}
+  {$ifdef JSONBENCHMARK_DELPHIJSON}
+  djson: system.json.TJSONValue;
+  {$endif JSONBENCHMARK_DELPHIJSON}
+  {$ifdef JSONBENCHMARK_JDO}
+  jdo: JsonDataObjects.TJsonBaseObject;
+  {$endif JSONBENCHMARK_JDO}
+  {$ifdef JSONBENCHMARK_SO}
+  so: superobject.ISuperObject;
+  s: supertypes.SOString;
+  {$endif JSONBENCHMARK_SO}
+  {$ifdef JSONBENCHMARK_XSO}
+  xso: xsuperobject.ISuperArray;
+  {$endif JSONBENCHMARK_XSO}
+  {$ifdef JSONBENCHMARK_GRIJJY}
+  g: TgoBsonArray;
+  {$endif JSONBENCHMARK_GRIJJY}
+  {$ifdef JSONBENCHMARK_DWS}
+  dws: TdwsJSONValue;
+  {$endif JSONBENCHMARK_DWS}
+  {$ifdef JSONBENCHMARK_WSFT}
+  ws: WinJson.TJson;
+  {$endif JSONBENCHMARK_WSFT}
+begin
+  people := StringFromFile(WorkDir + 'People.json');
+  if people = '' then
+    exit; // need to run at least once the ORM tests
+  len := length(people);
+  check(len > 800000, 'unexpected people.json');
+  Utf8ToStringVar(people, peoples); // convert to UTF-8 once
+  timer.Start;
+  for i := 1 to ITER do
+    Check(StrLen(pointer(people)) = len);
+  len := len * ITER;
+  NotifyTestSpeed('StrLen()', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+    Check(IsValidUtf8(people));
+  NotifyTestSpeed('IsValidUtf8(RawUtf8)', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+    Check(IsValidUtf8(PUtf8Char(pointer(people))));
+  NotifyTestSpeed('IsValidUtf8(PUtf8Char)', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+    Check(IsValidJson(people));
+  NotifyTestSpeed('IsValidJson(RawUtf8)', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+    Check(IsValidJsonBuffer(pointer(people)));
+  NotifyTestSpeed('IsValidJson(PUtf8Char)', 0, len, @timer, ONLYLOG);
+  P := @people[2]; // point just after initial '[' for JsonArrayCount
+  count := JsonArrayCount(P);
+  check(count > 8200); // = 8227 in current People.json ORM tests file
+  i := JsonArrayCount(P, P + 10000);
+  check(i < 0);
+  check(abs(i) < count);
+  timer.Start;
+  for i := 1 to ITER do
+    Check(JsonArrayCount(P) = count);
+  NotifyTestSpeed('JsonArrayCount(P)', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+    Check(JsonArrayCount(P, P + length(people)) = count);
+  NotifyTestSpeed('JsonArrayCount(P,PMax)', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER * 5000 do
+    Check(JsonObjectPropCount(P + 3) = 6, 'first TOrmPeople object');
+  NotifyTestSpeed('JsonObjectPropCount()', 0, ITER * 5000 * 119, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+    j0 := JsonReformat(people, jsonUnquotedPropNameCompact);
+  NotifyTestSpeed('jsonUnquotedPropNameCompact', 0,
+    length(j0) * ITER, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+    j0 := JsonReformat(people, jsonHumanReadable);
+  NotifyTestSpeed('jsonHumanReadable', 0, length(j0) * ITER, @timer, ONLYLOG);
+  interned := DocVariantType.InternNames.Count;
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    dv.InitJson(people, JSON_FAST);
+    Check(dv.count = count);
+    dv.Clear; // to reuse dv
+  end;
+  NotifyTestSpeed('TDocVariant', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    dv.InitJson(people, JSON_FAST + [dvoJsonParseDoNotGuessCount]);
+    Check(dv.count = count);
+    dv.Clear; // to reuse dv
+  end;
+  NotifyTestSpeed('TDocVariant no guess', 0, len, @timer, ONLYLOG);
+  Check(DocVariantType.InternNames.Count = interned, 'no intern');
+  DocVariantType.InternNames.Clean;
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    dv.InitJson(people, JSON_FAST + [dvoInternNames]);
+    Check(dv.count = count);
+    dv.Clear; // to reuse dv
+  end;
+  NotifyTestSpeed('TDocVariant dvoInternNames', 0, len, @timer, ONLYLOG);
+  Check(DocVariantType.InternNames.Count - interned = 6, 'intern');
+  Check(DocVariantType.InternNames.Clean = 6, 'clean');
+  Check(DocVariantType.InternNames.Count = interned, 'cleaned');
+  table := TOrmTableJson.Create('', people);
+  try
+    Check(table.RowCount = count);
+    timer.Start;
+    for i := 1 to ITER do
+    begin
+      notexpanded := table.GetJsonValues({expand=}false, 0, 65536);
+      lennexp := length(notexpanded);
+      Check(lennexp < length(people), 'notexpanded');
+    end;
+    NotifyTestSpeed('TOrmTableJson GetJsonValues', 0, lennexp * ITER, @timer, ONLYLOG);
+  finally
+    table.Free;
+  end;
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    table := TOrmTableJson.Create('', people);
+    try
+      Check(table.RowCount = count);
+    finally
+      table.Free;
+    end;
+  end;
+  NotifyTestSpeed('TOrmTableJson expanded', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    table := TOrmTableJson.Create('', notexpanded);
+    try
+      Check(table.RowCount = count);
+    finally
+      table.Free;
+    end;
+  end;
+  NotifyTestSpeed('TOrmTableJson not expanded', 0, lennexp * ITER, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    // default serialization (with ID=0) TOrmPeopleObjArray in 79.14ms, 247.6 MB/s
+    Check(DynArrayLoadJson(rec, people, TypeInfo(TRecordPeopleDynArray)));
+    Check(length(rec) = count);
+  end;
+  NotifyTestSpeed('DynArrayLoadJson', 0, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    Check(DynArrayLoadJson(objarr, people, TypeInfo(TOrmPeopleObjArray)));
+    Check(length(objarr) = count);
+    //FileFromString(DynArraySaveJson(objarr, TypeInfo(TOrmPeopleObjArray)), WorkDir + 'objarray.json');
+    ObjArrayClear(objarr);
+  end;
+  NotifyTestSpeed('TOrmPeopleObjArray', 0, len, @timer, ONLYLOG);
+  {$ifdef JSONBENCHMARK_FPJSON}
+  timer.Start;
+  for i := 1 to ITER div 10 do // div 10 since fpjson is slower
+  begin
+    fpjson := GetJSON(people, {utf8=}true);
+    if not CheckFailed(fpjson <> nil) then
+      try
+        if not CheckFailed(fpjson.JSONType = jtArray) then
+          Check((fpjson as TJSONArray).Count = count);
+      finally
+        fpjson.Free;
+      end;
+  end;
+  NotifyTestSpeed('fpjson', 0, len div 10, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_FPJSON}
+  {$ifdef JSONBENCHMARK_JSONTOOLS}
+  timer.Start;
+  for i := 1 to ITER div 10 do // div 10 since jsontools is slower
+  begin
+    jt := TJsonNode.Create;
+    try // note: on i386, jsontools raises a parsing EJsonException :(
+      //if not CheckFailed(jt.TryParse('["XS\"\"\"."]')) then
+      begin
+        Check(jt.TryParse(peoples), 'jtparse');
+        Check(jt.Kind = nkArray, 'jtarray');
+        Check(jt.Count = count, 'jtcount');
+      end;
+    finally
+      jt.Free;
+    end;
+  end;
+  NotifyTestSpeed('jsontools', 0, len div 10, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_JSONTOOLS}
+  {$ifdef JSONBENCHMARK_DELPHIJSON}
+  timer.Start;
+  for i := 1 to ITER div 10 do // div 10 since Delphi json is dead slow
+  begin
+    djson := system.json.TJSONObject.ParseJSONValue(people);
+    if not CheckFailed(djson <> nil) then
+      try
+        if not CheckFailed(djson is system.json.TJSONArray) then
+          Check((djson as system.json.TJSONArray).Count = count);
+      finally
+        djson.Free;
+      end;
+  end;
+  NotifyTestSpeed('Delphi JSON', 0, len div 10, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_DELPHIJSON}
+  {$ifdef JSONBENCHMARK_JDO}
+  timer.Start;
+  for i := 1 to ITER do // JsonDataObjects speed is 40 MB/s ;)
+  begin
+    jdo := TJsonBaseObject.ParseUtf8(people);
+    if not CheckFailed(jdo <> nil) then
+      try
+        if not CheckFailed(jdo is JsonDataObjects.TJsonArray) then
+          Check((jdo as JsonDataObjects.TJsonArray).Count = count);
+      finally
+        jdo.Free;
+      end;
+  end;
+  NotifyTestSpeed('JsonDataObjects', 0, len, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_JDO}
+  {$ifdef JSONBENCHMARK_SO}
+  s := supertypes.SOString(people); // convert to UTF-8 once
+  timer.Start;
+  for i := 1 to ITER div 10 do
+  begin
+    so := superobject.SO(s);
+    if not CheckFailed(so <> nil) then
+      if not CheckFailed(so.IsType(stArray)) then
+        Check(so.AsArray.Length = count);
+  end;
+  NotifyTestSpeed('SuperObject', 0, len div 10, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_SO}
+  {$ifdef JSONBENCHMARK_XSO}
+  timer.Start;
+  for i := 1 to 1 do // X-SuperObject is 1.5 MB/s 8(
+  begin
+    xso := xsuperobject.SA(peoples);
+    if not CheckFailed(xso <> nil) then
+      Check(xso.Length = count);
+  end;
+  NotifyTestSpeed('X-SuperObject', 0, len div ITER, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_SO}
+  {$ifdef JSONBENCHMARK_GRIJJY}
+  timer.Start;
+  for i := 1 to ITER div 10 do
+  begin
+    g := TgoBsonArray.Parse(peoples);
+    Check(g.Count = count);
+  end;
+  NotifyTestSpeed('Grijjy', 0, len div 10, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_GRIJJY}
+  {$ifdef JSONBENCHMARK_DWS}
+  timer.Start;
+  for i := 1 to ITER div 10 do
+  begin
+    dws := TdwsJSONValue.ParseString(peoples);
+    try
+      Check((dws as TdwsJSONArray).ElementCount = count);
+    finally
+      dws.Free;
+    end;
+  end;
+  NotifyTestSpeed('dwsJSON', 0, len div 10, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_DWS}
+  {$ifdef JSONBENCHMARK_WSFT}
+  WinJson.TJsonParser.Create.Free; // run it once for the trial popup to show
+  timer.Start;
+  for i := 1 to ITER div 10 do
+  begin
+    with WinJson.TJsonParser.Create do
+      try
+        ws := Parse(peoples);
+        try
+          if not CheckFailed(ws.IsArray) then
+            Check((ws as WinJson.TJsonArray).ElementCount = Count);
+        finally
+          ws.Free;
+        end;
+      finally
+        Free;
+      end;
+  end;
+  NotifyTestSpeed('WinSoft WinJson', 0, len div 10, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_WSFT}
+  sample := StringFromFile(WorkDir + 'sample.json');
+  if sample <> '' then
+    begin
+      timer.Start;
+      for i := 1 to ITER do
+        j0 := JsonReformat(sample, jsonCompact);
+      NotifyTestSpeed('JsonReformat sample.json', 0,
+        length(sample) * ITER, @timer, ONLYLOG);
+      j1 := JsonReformat(sample, jsonEscapeUnicode);
+      j2 := JsonReformat(j1, jsonNoEscapeUnicode);
+      j3 := JsonReformat(sample, jsonNoEscapeUnicode);
+      //FileFromString(j0, WorkDir + 'sample0.json');
+      //FileFromString(j1, WorkDir + 'sample1.json');
+      //FileFromString(j2, WorkDir + 'sample2.json');
+      //FileFromString(j3, WorkDir + 'sample3.json');
+      Check(IsValidUtf8(sample), 'sample.json utf8');
+      Check(IsValidUtf8(j0), 'sample0.json utf8');
+      Check(IsValidUtf8(j1), 'sample1.json utf8');
+      Check(IsValidUtf8(j2), 'sample2.json utf8');
+      Check(IsValidUtf8(j3), 'sample3.json utf8');
+      Check(j2 = j3, 'reformat sample.json');
+      timer.Start;
+      for i := 1 to ITER do
+      begin
+        dv.InitJson(sample, JSON_FAST_FLOAT);
+        Check(dv.count = 3);
+        dv.Clear; // to reuse dv
+      end;
+      NotifyTestSpeed('TDocVariant sample.json', 0,
+        length(sample) * ITER, @timer, ONLYLOG);
+      timer.Start;
+      for i := 1 to ITER do
+      begin
+        dv.InitJson(sample, JSON_FAST +
+          [dvoAllowDoubleValue, dvoJsonParseDoNotGuessCount]);
+        Check(dv.count = 3);
+        dv.Clear; // to reuse dv
+      end;
+      NotifyTestSpeed('TDocVariant sample.json no guess', 0,
+        length(sample) * ITER, @timer, ONLYLOG);
+    end;
+  {$ifdef JSONBENCHMARK_FPJSON}
+  if sample <> '' then
+  begin
+    timer.Start;
+    for i := 1 to ITER div 10 do // div 10 since fpjson is slower
+    begin
+      fpjson := GetJSON(sample, {utf8=}true);
+      if not CheckFailed(fpjson <> nil) then
+        try
+          if not CheckFailed(fpjson.JSONType = jtObject) then
+            Check((fpjson as TJSONObject).Count = 3);
+        finally
+          fpjson.Free;
+        end;
+    end;
+    NotifyTestSpeed('fpjson sample.json', 0,
+      length(sample) * (ITER div 10), @timer, ONLYLOG);
+  end;
+  {$endif JSONBENCHMARK_FPJSON}
 end;
 
 procedure TTestCoreProcess.WikiMarkdownToHtml;
@@ -3245,8 +3882,7 @@ begin
   Check(VariantSaveJson(1.5) = '1.5');
   Check(VariantSaveJson(_Json('{BSON:["awesome",5.05,1986]}')) = BSONAWESOME);
   Check(VariantSaveJson(_JsonFast('{ BSON : ["awesome", 5.05, 1986] }')) = BSONAWESOME);
-  Check(VariantSaveJson(_JsonFast('{ ''BSON'' : ["awesome", 5.05, 1986] } ')) =
-    BSONAWESOME);
+  Check(VariantSaveJson(_JsonFast('{ ''BSON'' : ["awesome", 5.05, 1986] } ')) = BSONAWESOME);
   Check(Bson('{BSON:["awesome",5.05,1986]}', [], []) = BSONAWESOMEBIN);
   Check(Bson('{ BSON : ["awesome", 5.05, 1986] }', [], []) = BSONAWESOMEBIN);
   Check(Bson('{ ''BSON'' : ["awesome", 5.05, 1986] } ', [], []) = BSONAWESOMEBIN);
@@ -3310,9 +3946,9 @@ begin
   u := VariantSaveMongoJson(o2, modNoMongo);
   CheckEqual(u, u2);
   bin := VariantSave(o2);
-  u := VariantSaveMongoJson(VariantLoad(bin, @JSON_OPTIONS[true]), modNoMongo);
+  u := VariantSaveMongoJson(VariantLoad(bin, @JSON_[mFast]), modNoMongo);
   CheckEqual(u, u2);
-  check(VariantSaveMongoJson(VariantLoad(bin, @JSON_OPTIONS[true]), modNoMongo)
+  check(VariantSaveMongoJson(VariantLoad(bin, @JSON_[mFast]), modNoMongo)
     = u2, 'twice to ensure bin is untouched');
   u := VariantSaveMongoJson(_Json('{id:ObjectId(),name:"John"}'), modNoMongo);
   Check(IdemPChar(Pointer(u), '{"ID":"'), 'ObjectId() constructor ');
@@ -3449,6 +4085,8 @@ procedure TTestCoreProcess._TDocVariant;
     if CheckFailed(Doc.VarType = DocVariantVType) then
       exit;
     Check(Doc.Kind = dvObject);
+    Check(Doc.IsObject);
+    Check(not Doc.IsArray);
     Check(Doc.Count = 2);
     Check(Doc.Names[0] = 'name');
     Check(Doc.Values[0] = 'John');
@@ -3495,6 +4133,8 @@ var
     Doc2.InitObject(['id', 10, 'doc', _Obj(['name', 'John', 'birthyear', 1972],
       aOptions)]);
     Check(Doc2.Kind = dvObject);
+    Check(Doc2.IsObject);
+    Check(not Doc2.IsArray);
     Check(variant(Doc2)._kind = ord(dvObject));
     Check(Doc2.Count = 2);
     Check(Doc2.Value['id'] = 10);
@@ -3572,6 +4212,7 @@ var
     v: PVariant;
     d: PDocVariantData;
     f: TDocVariantFields;
+    j, j2: RawUtf8;
   begin
     vd.InitArray([1, 2, 3, 4]);
     for f in vd do
@@ -3599,7 +4240,9 @@ var
     v2.InitFast;
     for v in vd.Items do
       v2.AddItem(v^);
-    CheckEqual(vd.ToJson, v2.ToJson);
+    j := vd.ToJson;
+    j2 := v2.ToJson;
+    CheckEqual(j, j2);
     Check(vd.Equals(v2));
     v2.Clear;
     v2.InitFast;
@@ -3608,7 +4251,8 @@ var
       Check(DocVariantType.IsOfType(variant(d^)));
       v2.AddItem(variant(d^));
     end;
-    CheckEqual(v2.ToJson, '[{"a":1,"b":1},{"a":2,"b":2}]');
+    j2 := v2.ToJson;
+    CheckEqual(j2, '[{"a":1,"b":1},{"a":2,"b":2}]');
     vd.Clear;
     vd.InitJson('{a:1,b:2,c:3}');
     v2.Clear;
@@ -3642,6 +4286,7 @@ const
     '"TIMESTAMP_CALL":"2017-10-26T04:48:14"}]';
 var
   Doc, Doc2: TDocVariantData;
+  model, m2: TDocVariantModel;
   vr: TTVarRecDynArray;
   i, ndx: PtrInt;
   V, V1, V2: variant;
@@ -3653,7 +4298,11 @@ var
 begin
   Doc.Init;
   Check(Doc.Kind = dvUndefined);
+  Check(not Doc.IsObject);
+  Check(not Doc.IsArray);
   Check(variant(Doc)._kind = ord(dvUndefined));
+  Check(Doc.GetModel(model));
+  Check(model = mVoid);
   Doc.AddValue('name', 'Jonas');
   Doc.AddValue('birthyear', 1972);
   Check(Doc.Value['name'] = 'Jonas');
@@ -3666,7 +4315,11 @@ begin
   Doc.Clear;
   Doc.InitFast;
   Check(Doc.Kind = dvUndefined);
+  Check(not Doc.IsObject);
+  Check(not Doc.IsArray);
   Check(variant(Doc)._kind = ord(dvUndefined));
+  Check(Doc.GetModel(model));
+  Check(model = mFast);
   Doc.AddValue('name', 'Jonas');
   Doc.AddValue('birthyear', 1972);
   Check(Doc.Value['name'] = 'Jonas');
@@ -3680,10 +4333,22 @@ begin
   Doc2.InitJson(Doc.ToJson);
   Check(Doc2.Equals(Doc));
   CheckDoc(Doc2);
+  Check(Doc2.GetModel(model));
+  Check(model = mVoid);
+  for m2 := low(m2) to high(m2) do
+  begin
+    Doc2.Clear;
+    Doc2.InitJson(Doc.ToJson, m2);
+    Check(Doc2.Equals(Doc));
+    Check(Doc2.GetModel(model));
+    Check(model = m2);
+  end;
   Doc.Clear;
   Doc.InitArray(['one', 2, 3.0]);
   Check(variant(Doc)._kind = ord(dvArray));
   Check(variant(Doc)._count = 3);
+  Check(Doc.GetModel(model));
+  Check(model = mVoid);
   if not CheckFailed(Doc.Count = 3) then
   begin
     Check(Doc.Values[0] = 'one');
@@ -3947,6 +4612,23 @@ begin
   {$ifdef HASITERATORS}
   DoEnumerators;
   {$endif HASITERATORS}
+  Doc.Clear;
+  s := '[{a:1,b:2,c:0},{a:2,b:1,c:2},{b:3,c:1,a:1}]';
+  Doc.InitJson(s);
+  Check(Doc.Count = 3);
+  CheckEqual(Doc.ToJson('', '', jsonUnquotedPropNameCompact), s, 'd');
+  Doc.SortByValue;
+  CheckEqual(Doc.ToJson('', '', jsonUnquotedPropNameCompact),
+    '[{a:1,b:2,c:0},{a:2,b:1,c:2},{b:3,c:1,a:1}]', 'SortByValue');
+  Doc.SortArrayByField('c');
+  CheckEqual(Doc.ToJson('', '', jsonUnquotedPropNameCompact),
+    '[{a:1,b:2,c:0},{b:3,c:1,a:1},{a:2,b:1,c:2}]', 'SortArrayByField c');
+  Doc.SortArrayByField('b');
+  CheckEqual(Doc.ToJson('', '', jsonUnquotedPropNameCompact),
+    '[{a:2,b:1,c:2},{a:1,b:2,c:0},{b:3,c:1,a:1}]', 'SortArrayByField b');
+  Doc.SortArrayByFields(['a', 'b']);
+  CheckEqual(Doc.ToJson('', '', jsonUnquotedPropNameCompact),
+    '[{a:1,b:2,c:0},{b:3,c:1,a:1},{a:2,b:1,c:2}]', 'SortArrayByField ab');
   // some tests to avoid regression about bugs reported by users on forum
   lTable := TOrmTableJson.Create('');
   try
@@ -3965,6 +4647,66 @@ begin
     check(V = '1234');
   finally
     lTable.Free;
+  end;
+  Doc.Clear;
+  Doc.InitJson(
+   '{' + #13#10 +
+   '	"CostCenter": {' + #13#10 +
+   '		"ContactData": [{' + #13#10 +
+   '			"ContactID": 1637001,' + #13#10 +
+   '			"ContactTypeID": 0,' + #13#10 +
+   '			"ContactType": "Adresse",' + #13#10 +
+   '			"PropertyValueID": 572326,' + #13#10 +
+   '			"PropertyID": 175,' + #13#10 +
+   '			"DoubleValue": 6.92616701126099,' + #13#10 +
+   '			"ShortStringValue": "6.92617",' + #13#10 +
+   '			"PropertyType": 7,' + #13#10 +
+   '			"PropertyName": "Longitude",' + #13#10 +
+   '			"PropertyNotation": "Longitude",' + #13#10 +
+   '			"IsRequired": false' + #13#10 +
+   '		}, {' + #13#10 +
+   '			"PropertyValueID": 572327,' + #13#10 +
+   '			"PropertyID": 174,' + #13#10 +
+   '			"DoubleValue": 51.5208320617676,' + #13#10 +
+   '			"ShortStringValue": "51.5208",' + #13#10 +
+   '			"PropertyType": 7,' + #13#10 +
+   '			"PropertyName": "Latitude",' + #13#10 +
+   '			"PropertyNotation": "Latitude",' + #13#10 +
+   '			"IsRequired": false' + #13#10 +
+   '		}]' + #13#10 +
+   '	}' + #13#10 +
+   '}', JSON_FAST_FLOAT);
+  Check(Doc.Count = 1);
+  Check(Doc.Kind = dvObject);
+  Check(Doc.IsObject);
+  Check(not Doc.IsArray);
+  J := Doc.ToJson('', '', jsonUnquotedPropNameCompact);
+  CheckEqual(J, '{CostCenter:{ContactData:[{ContactID:1637001,ContactTypeID:0,' +
+    'ContactType:"Adresse",PropertyValueID:572326,PropertyID:175,DoubleValue:' +
+    '6.92616701126099,ShortStringValue:"6.92617",PropertyType:7,PropertyName:' +
+    '"Longitude",PropertyNotation:"Longitude",IsRequired:false},{PropertyValueID:' +
+    '572327,PropertyID:174,DoubleValue:51.5208320617676,ShortStringValue:"51.5208",' +
+    'PropertyType:7,PropertyName:"Latitude",PropertyNotation:"Latitude",' +
+    'IsRequired:false}]}}');
+  J := StringFromFile(WorkDir + 'm1.json');
+  if J <> '' then
+  begin
+    check(IsValidUtf8(J));
+    check(IsValidJson(J));
+    _Json(J, v, [dvoReturnNullForUnknownProperty,
+      dvoAllowDoubleValue, dvoValueCopiedByReference]);
+    CheckEqual(_Safe(v)^.Count, 1);
+    _Safe(v)^.SaveToJsonFile(WorkDir + 'm1-saved0.json');
+    VarClear(v); // release memory ASAP
+    Doc.Clear;
+    Doc.InitJson(J, JSON_FAST_FLOAT + [dvoSerializeAsExtendedJson]);
+    CheckEqual(Doc.Count, 1);
+    Doc.SaveToJsonFile(WorkDir + 'm1-saved1.json');
+    Doc.Clear;
+    Doc.InitJsonInPlace(pointer(J), JSON_FAST_FLOAT);
+    CheckEqual(Doc.Count, 1);
+    Doc.SaveToJsonFile(WorkDir + 'm1-saved2.json');
+    Doc.Clear;
   end;
 end;
 
@@ -4631,7 +5373,7 @@ var
             SizeOf(TFileInfo) - SizeOf(Entry[i].dir^.fileInfo.extraLen)));
       i := NameToIndex('REP1\ONE.exe');
       Check(i = 0, '0');
-      FillcharFast(info, sizeof(info), 0);
+      FillcharFast(info, SizeOf(info), 0);
       Check(RetrieveFileInfo(i, info), 'info');
       Check(integer(info.f64.zfullSize) = length(Data), 'siz');
       Check(info.f32.zcrc32 = crc0, 'crc0');
@@ -4806,9 +5548,9 @@ var
 begin
   for i := 1 to 200 do
   begin
-    s := AlgoSynLZ.Compress(StringOfChar(AnsiChar(i), i));
+    s := AlgoSynLZ.Compress(RawUtf8OfChar(AnsiChar(i), i));
     t := AlgoSynLZ.Decompress(s);
-    Check(t = StringOfChar(AnsiChar(i), i));
+    Check(t = RawUtf8OfChar(AnsiChar(i), i));
   end;
   rle := 'hello' + Spaces(10000) + 'hello' + Spaces(1000) + 'world';
   s := AlgoSynLZ.Compress(rle);
@@ -4820,7 +5562,7 @@ begin
   Check(t = rle);
   for i := 0 to 1000 do
   begin
-    s := StringOfChar(AnsiChar(' '), 20);
+    s := RawUtf8OfChar(' ', 20);
     t := RandomTextParagraph(i, '.', s);
     SetString(s, PAnsiChar(pointer(t)), length(t)); // =UniqueString
     Check(CompressSynLZ(s, true) = 'synlz');
@@ -4874,8 +5616,8 @@ procedure TTestCoreCompression._TAlgoCompress;
       exit;
     for i := 1 to 50 do
     begin
-      t := StringOfChar(AnsiChar(i), i){%H-}+{%H-}t;
-      s := StringOfChar(AnsiChar(i), i){%H-}+{%H-}s;
+      t := RawUtf8OfChar(AnsiChar(i), i){%H-}+{%H-}t;
+      s := RawUtf8OfChar(AnsiChar(i), i){%H-}+{%H-}s;
       Check(algo.Decompress(algo.Compress(s)) = t);
     end;
     plain := 0;
@@ -4885,6 +5627,8 @@ procedure TTestCoreCompression._TAlgoCompress;
     log := StringFromFile(WorkDir + 'bigTest.log');
     for i := 0 to 100 do
     begin
+      t := '';
+      s2 := '';
       if log = '' then
         s := copy(Data, 1, i * 800) // first 80KB from executable
       else

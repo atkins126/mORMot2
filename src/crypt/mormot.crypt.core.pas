@@ -80,12 +80,18 @@ type
     {$define USEAESNIHASH} // aesni+sse4.1 32-64-128 aeshash
   {$endif HASAESNI}
   {$ifdef OSWINDOWS}
-  {$define SHA512_X86} // external sha512-x86.o for win32/lin32
+    {$define SHA512_X86} // external sha512-x86.o for win32/lin32
   {$endif OSWINDOWS}
   {$ifdef OSLINUX}
-  {$define SHA512_X86} // external sha512-x86.o for win32/lin32
+    {$define SHA512_X86} // external sha512-x86.o for win32/lin32
   {$endif OSLINUX}
 {$endif ASMX86}
+
+{$ifdef CPUAARCH64}
+  {$ifdef OSLINUXANDROID}
+    {$define USEARMCRYPTO}
+  {$endif OSLINUXANDROID}
+{$endif CPUAARCH64}
 
 
 { ****************** Low-Level Memory Buffers Helper Functions }
@@ -169,6 +175,29 @@ procedure RawSha256Compress(var Hash; Data: pointer);
 
 /// entry point of the raw SHA-512 transform function - may be used for low-level use
 procedure RawSha512Compress(var Hash; Data: pointer);
+
+
+{$ifdef CPUINTEL}
+
+/// optimized 256-bit addition written in i386/x86_64 asm - used by ecc256r1
+function _add256(out Output; const Left, Right): PtrUInt;
+
+/// optimized 256-bit substraction written in i386/x86_64 asm - used by ecc256r1
+function _sub256(out Output; const Left, Right): PtrUInt;
+
+/// optimized 128-bit addition written in i386/x86_64 asm - used by ecc256r1
+procedure _inc128(var Value; var Added);
+
+/// optimized 64-bit addition written in i386/x86_64 asm - used by ecc256r1
+procedure _inc64(var Value; var Added);
+
+{$ifdef CPUX64}
+/// 128-to-256-bit multiplication written in x86_64 asm - used by ecc256r1
+procedure _mult128(const l, r; out product);
+{$endif CPUX64}
+
+{$endif CPUINTEL}
+
 
 var
   /// 32-bit truncation of Go runtime aeshash, using aesni opcode
@@ -1388,6 +1417,13 @@ type
   /// meta-class for our CSPRNG implementations
   TAesPrngClass = class of TAesPrngAbstract;
 
+  /// which sources uses TAesPrng.GetEntropy() to gather its entropy
+  TAesPrngGetEntropySource = (
+    gesSystemAndUser,
+    gesSystemOnly,
+    gesSystemOnlyMayBlock,
+    gesUserOnly);
+
   /// cryptographic pseudorandom number generator (CSPRNG) based on AES-256
   // - use as a shared instance via TAesPrng.Fill() overloaded class methods
   // - this class is able to generate some random output by encrypting successive
@@ -1415,6 +1451,7 @@ type
     fSeedAfterBytes: PtrUInt;
     fAesKeySize: integer;
     fSeedPbkdf2Round: cardinal;
+    fSeedEntropySource: TAesPrngGetEntropySource;
     fSeeding: boolean;
   public
     /// initialize the internal secret key, using Operating System entropy
@@ -1446,17 +1483,19 @@ type
     // - this method is thread-safe
     procedure Seed; override;
     /// retrieve some entropy bytes from the Operating System
-    // - entropy comes from CryptGenRandom API on Windows, and /dev/urandom or
-    // /dev/random on Linux/POSIX
-    // - this system-supplied entropy is then XORed with the output of a SHA-3
-    // cryptographic SHAKE-256 generator in XOF mode, from several sources
-    // (timestamp, thread and system information, mormot.core.base XorEntropy)
-    // - if SystemOnly=true, returned values come from system only, so may not
-    // always be true randomness on closed systems like Windows
+    // - system entropy comes from CryptGenRandom API on Windows (which may be
+    // very slow), and /dev/urandom or /dev/random on Linux/POSIX (which may
+    // block waiting from OS entropy if gesSystemOnlyMayBlock is set)
+    // - user entropy comes from the output of a SHA-3 cryptographic SHAKE-256
+    // generator in XOF mode, from several sources (timestamp, thread, hardware
+    // and system information, mormot.core.base XorEntropy)
+    // - Source will mix one or both of those entropy sources - note that
+    // gesSystemAndUser is the default, but gesUserOnly is the fastest, and
+    // also derivated from OS entropy at least once at startup
     // - to gather randomness, use TAesPrng.Main.FillRandom() or TAesPrng.Fill()
     // methods, NOT this class function (which will be much slower, BTW)
     class function GetEntropy(Len: integer;
-      SystemOnly: boolean = false): RawByteString; virtual;
+      Source: TAesPrngGetEntropySource = gesSystemAndUser): RawByteString; virtual;
     /// returns a shared instance of a TAesPrng instance
     // - if you need to generate some random content, just call the
     // TAesPrng.Main.FillRandom() overloaded methods, or directly TAesPrng.Fill()
@@ -1472,6 +1511,9 @@ type
     // since GetEntropy output comes from a SHAKE-256 generator in XOF mode
     property SeedPbkdf2Round: cardinal
       read fSeedPbkdf2Round;
+    /// the source of entropy used during seeding - faster gesUserOnly by default
+    property SeedEntropySource: TAesPrngGetEntropySource
+      read fSeedEntropySource;
     /// how many bits (128 or 256 - which is the default) are used for the AES
     property AesKeySize: integer
       read fAesKeySize;
@@ -1511,16 +1553,6 @@ var
   // - you may override this to a customized instance, e.g. for a specific
   // random generator to be used, like TSystemPrng or TAesPrngOsl
   MainAesPrng: TAesPrngAbstract;
-
-/// low-level function returning some random binary from then available
-// Operating System pseudorandom source
-// - will call /dev/urandom or /dev/random under POSIX, and CryptGenRandom API
-// on Windows, and fallback to mormot.core.base.FillRandom if the system API
-// failed - also for padding if more than Len>32 from /dev/urandom
-// - you should not have to call this procedure, but faster and safer TAesPrng;
-// also consider the TSystemPrng class
-procedure FillSystemRandom(Buffer: PByteArray; Len: integer;
-  AllowBlocking: boolean);
 
 /// low-level anti-forensic diffusion of a memory buffer using SHA-256
 // - as used by TAesPrng.AFSplit and TAesPrng.AFUnSplit
@@ -2617,10 +2649,14 @@ type
   // - is defined privately in the implementation section
   // - do NOT change this structure: it is fixed in the asm code
   TAesContext = packed record
-    RK: TKeyArray;   // Key (encr. or decr.)
-    iv: THash128Rec; // IV or CTR used e.g. by TAesGcmEngine or TAesPrng
-    buf: TAesBlock;  // Work buffer used e.g. by TAesGcmEngine or AesNiTrailer()
-    DoBlock: TAesContextDoBlock; // main AES function
+    // Key (encr. or decr.) - should remain the first field
+    RK: TKeyArray;
+    // IV or CTR used e.g. by TAesGcmEngine or TAesPrng
+    iv: THash128Rec;
+    // Work buffer used e.g. by TAesGcmEngine or AesNiTrailer()
+    buf: TAesBlock;
+    // main AES function to process one 16-bytes block
+    DoBlock: TAesContextDoBlock;
     {$ifdef USEAESNI32}
     AesNi32: pointer; // xmm7 AES-NI encoding
     {$endif USEAESNI32}
@@ -2753,7 +2789,7 @@ begin
       XorMemory(P, @tab[Index], Len);
       inc(P, Len);
       inc(Index, Len);
-      Dec(Count, Len);
+      dec(Count, Len);
     until Count = 0;
 end;
 
@@ -2851,13 +2887,10 @@ end;
 
 function Adler32SelfTest: boolean;
 begin
-  result :=
-  {$ifndef PUREPASCAL}
-    (Adler32Asm(1, @Te0, SizeOf(Te0)) = $BCBEFE10) and
-    (Adler32Asm(7, @Te1, SizeOf(Te1) - 3) = $DA91FDBE) and
-  {$endif}
-    (Adler32Pas(1, @Te0, SizeOf(Te0)) = $BCBEFE10) and
-    (Adler32Pas(7, @Te1, SizeOf(Te1) - 3) = $DA91FDBE);
+  result := (Adler32Asm(1, @Te0, SizeOf(Te0)) = $BCBEFE10) and
+            (Adler32Asm(7, @Te1, SizeOf(Te1) - 3) = $DA91FDBE) and
+            (Adler32Pas(1, @Te0, SizeOf(Te0)) = $BCBEFE10) and
+            (Adler32Pas(7, @Te1, SizeOf(Te1) - 3) = $DA91FDBE);
 end;
 
 {$ifndef CPUINTEL}
@@ -3050,28 +3083,48 @@ begin
   dec(pk);
   for i := 1 to ctxt.Rounds - 1 do
   begin
-    t0 := t[s0 and $ff] xor t[$100 + s3 shr 8 and $ff] xor
-          t[$200 + s2 shr 16 and $ff] xor t[$300 + s1 shr 24];
-    t1 := t[s1 and $ff] xor t[$100 + s0 shr 8 and $ff] xor
-          t[$200 + s3 shr 16 and $ff] xor t[$300 + s2 shr 24];
-    t2 := t[s2 and $ff] xor t[$100 + s1 shr 8 and $ff] xor
-          t[$200 + s0 shr 16 and $ff] xor t[$300 + s3 shr 24];
-    s3 := t[s3 and $ff] xor t[$100 + s2 shr 8 and $ff] xor
-          t[$200 + s1 shr 16 and $ff] xor t[$300 + s0 shr 24] xor pk[3];
+    t0 := t[s0 and $ff] xor
+          t[$100 + s3 shr 8 and $ff] xor
+          t[$200 + s2 shr 16 and $ff] xor
+          t[$300 + s1 shr 24];
+    t1 := t[s1 and $ff] xor
+          t[$100 + s0 shr 8 and $ff] xor
+          t[$200 + s3 shr 16 and $ff] xor
+          t[$300 + s2 shr 24];
+    t2 := t[s2 and $ff] xor
+          t[$100 + s1 shr 8 and $ff] xor
+          t[$200 + s0 shr 16 and $ff] xor
+          t[$300 + s3 shr 24];
+    s3 := t[s3 and $ff] xor
+          t[$100 + s2 shr 8 and $ff] xor
+          t[$200 + s1 shr 16 and $ff] xor
+          t[$300 + s0 shr 24] xor pk[3];
     s0 := t0 xor pk[0];
     s1 := t1 xor pk[1];
     s2 := t2 xor pk[2];
     dec(pk);
   end;
   ib := @InvSBox;
-  bo[0] := ((ib[s0 and $ff]) xor (ib[s3 shr 8 and $ff]) shl 8 xor
-    (ib[s2 shr 16 and $ff]) shl 16 xor (ib[s1 shr 24]) shl 24) xor pk[0];
-  bo[1] := ((ib[s1 and $ff]) xor (ib[s0 shr 8 and $ff]) shl 8 xor
-    (ib[s3 shr 16 and $ff]) shl 16 xor (ib[s2 shr 24]) shl 24) xor pk[1];
-  bo[2] := ((ib[s2 and $ff]) xor (ib[s1 shr 8 and $ff]) shl 8 xor
-    (ib[s0 shr 16 and $ff]) shl 16 xor (ib[s3 shr 24]) shl 24) xor pk[2];
-  bo[3] := ((ib[s3 and $ff]) xor (ib[s2 shr 8 and $ff]) shl 8 xor
-    (ib[s1 shr 16 and $ff]) shl 16 xor (ib[s0 shr 24]) shl 24) xor pk[3];
+  bo[0] := ((ib[s0 and $ff]) xor
+            (ib[s3 shr 8 and $ff]) shl 8 xor
+            (ib[s2 shr 16 and $ff]) shl 16 xor
+            (ib[s1 shr 24]) shl 24) xor
+            pk[0];
+  bo[1] := ((ib[s1 and $ff]) xor
+            (ib[s0 shr 8 and $ff]) shl 8 xor
+            (ib[s3 shr 16 and $ff]) shl 16 xor
+            (ib[s2 shr 24]) shl 24) xor
+            pk[1];
+  bo[2] := ((ib[s2 and $ff]) xor
+            (ib[s1 shr 8 and $ff]) shl 8 xor
+            (ib[s0 shr 16 and $ff]) shl 16 xor
+            (ib[s3 shr 24]) shl 24) xor
+            pk[2];
+  bo[3] := ((ib[s3 and $ff]) xor
+            (ib[s2 shr 8 and $ff]) shl 8 xor
+            (ib[s1 shr 16 and $ff]) shl 16 xor
+            (ib[s0 shr 24]) shl 24) xor
+            pk[3];
 end;
 
 {$endif ASMX86}
@@ -3092,10 +3145,15 @@ begin
         pk^[4] := ((sb[(temp shr 8) and $ff])) xor
                   ((sb[(temp shr 16) and $ff]) shl 8) xor
                   ((sb[(temp shr 24)]) shl 16) xor
-                  ((sb[(temp) and $ff]) shl 24) xor pk^[0] xor RCon[i];
-        pk^[5] := pk^[1] xor pk^[4];
-        pk^[6] := pk^[2] xor pk^[5];
-        pk^[7] := pk^[3] xor pk^[6];
+                  ((sb[(temp) and $ff]) shl 24) xor
+                  pk^[0] xor
+                  RCon[i];
+        pk^[5] := pk^[1] xor
+                  pk^[4];
+        pk^[6] := pk^[2] xor
+                  pk^[5];
+        pk^[7] := pk^[3] xor
+                  pk^[6];
         inc(PByte(pk), 4 * 4);
       end;
     192:
@@ -3106,14 +3164,21 @@ begin
         pk^[6] := ((sb[(temp shr 8) and $ff])) xor
                   ((sb[(temp shr 16) and $ff]) shl 8) xor
                   ((sb[(temp shr 24)]) shl 16) xor
-                  ((sb[(temp) and $ff]) shl 24) xor pk^[0] xor RCon[i];
-        pk^[7] := pk^[1] xor pk^[6];
-        pk^[8] := pk^[2] xor pk^[7];
-        pk^[9] := pk^[3] xor pk^[8];
+                  ((sb[(temp) and $ff]) shl 24) xor
+                  pk^[0] xor
+                  RCon[i];
+        pk^[7] := pk^[1] xor
+                  pk^[6];
+        pk^[8] := pk^[2] xor
+                  pk^[7];
+        pk^[9] := pk^[3] xor
+                  pk^[8];
         if i = 7 then
           exit;
-        pk^[10] := pk^[4] xor pk^[9];
-        pk^[11] := pk^[5] xor pk^[10];
+        pk^[10] := pk^[4] xor
+                   pk^[9];
+        pk^[11] := pk^[5] xor
+                   pk^[10];
         inc(PByte(pk), 6 * 4);
       end;
   else // 256
@@ -3124,10 +3189,15 @@ begin
       pk^[8] := ((sb[(temp shr 8) and $ff])) xor
                 ((sb[(temp shr 16) and $ff]) shl 8) xor
                 ((sb[(temp shr 24)]) shl 16) xor
-                ((sb[(temp) and $ff]) shl 24) xor pk^[0] xor RCon[i];
-      pk^[9] := pk^[1] xor pk^[8];
-      pk^[10] := pk^[2] xor pk^[9];
-      pk^[11] := pk^[3] xor pk^[10];
+                ((sb[(temp) and $ff]) shl 24) xor
+                pk^[0] xor
+                RCon[i];
+      pk^[9] := pk^[1] xor
+                pk^[8];
+      pk^[10] := pk^[2] xor
+                 pk^[9];
+      pk^[11] := pk^[3] xor
+                 pk^[10];
       if i = 6 then
         exit;
       temp := pk^[11];
@@ -3135,17 +3205,21 @@ begin
       pk^[12] := ((sb[(temp) and $ff])) xor
                  ((sb[(temp shr 8) and $ff]) shl 8) xor
                  ((sb[(temp shr 16) and $ff]) shl 16) xor
-                 ((sb[(temp shr 24)]) shl 24) xor pk^[4];
-      pk^[13] := pk^[5] xor pk^[12];
-      pk^[14] := pk^[6] xor pk^[13];
-      pk^[15] := pk^[7] xor pk^[14];
+                 ((sb[(temp shr 24)]) shl 24) xor
+                 pk^[4];
+      pk^[13] := pk^[5] xor
+                 pk^[12];
+      pk^[14] := pk^[6] xor
+                 pk^[13];
+      pk^[15] := pk^[7] xor
+                 pk^[14];
       inc(PByte(pk), 8 * 4);
     end;
   end;
 end;
 
-procedure MakeDecrKeyPas(rounds: integer; k: PAWk);
 // compute AES decryption key from encryption key
+procedure MakeDecrKeyPas(rounds: integer; k: PAWk);
 var
   x: cardinal;
   t: PCardinalArray; // faster on a PIC system
@@ -3157,22 +3231,56 @@ begin
     inc(PByte(k), 16);
     dec(rounds);
     x := k[0];
-    k[0] := t[$300 + sb[x shr 24]] xor t[$200 + sb[x shr 16 and $ff]] xor
-            t[$100 + sb[x shr 8 and $ff]] xor t[sb[x and $ff]];
+    k[0] := t[$300 + sb[x shr 24]] xor
+            t[$200 + sb[x shr 16 and $ff]] xor
+            t[$100 + sb[x shr 8 and $ff]] xor
+            t[sb[x and $ff]];
     x := k[1];
-    k[1] := t[$300 + sb[x shr 24]] xor t[$200 + sb[x shr 16 and $ff]] xor
-            t[$100 + sb[x shr 8 and $ff]] xor t[sb[x and $ff]];
+    k[1] := t[$300 + sb[x shr 24]] xor
+            t[$200 + sb[x shr 16 and $ff]] xor
+            t[$100 + sb[x shr 8 and $ff]] xor
+            t[sb[x and $ff]];
     x := k[2];
-    k[2] := t[$300 + sb[x shr 24]] xor t[$200 + sb[x shr 16 and $ff]] xor
-            t[$100 + sb[x shr 8 and $ff]] xor t[sb[x and $ff]];
+    k[2] := t[$300 + sb[x shr 24]] xor
+            t[$200 + sb[x shr 16 and $ff]] xor
+            t[$100 + sb[x shr 8 and $ff]] xor
+            t[sb[x and $ff]];
     x := k[3];
-    k[3] := t[$300 + sb[x shr 24]] xor t[$200 + sb[x shr 16 and $ff]] xor
-            t[$100 + sb[x shr 8 and $ff]] xor t[sb[x and $ff]];
+    k[3] := t[$300 + sb[x shr 24]] xor
+            t[$200 + sb[x shr 16 and $ff]] xor
+            t[$100 + sb[x shr 8 and $ff]] xor
+            t[sb[x and $ff]];
   until rounds = 1;
 end;
 
 
 { TAes }
+
+{$ifdef USEARMCRYPTO}
+
+var
+  AesArmAvailable,
+  ShaArmAvailable,
+  PmullArmAvailable: boolean;
+
+{$ifdef CPUAARCH64}
+
+{$L ..\..\static\aarch64-linux\armv8.o} // we can reuse Linux code on any POSIX
+{$L ..\..\static\aarch64-linux\sha256armv8.o}
+
+procedure aesencryptarm128(rk, bi, bo: pointer); external;
+procedure aesencryptarm192(rk, bi, bo: pointer); external;
+procedure aesencryptarm256(rk, bi, bo: pointer); external;
+//procedure MakeDecrKeyArm(rounds: integer; rk: pointer); external; buggy
+procedure aesdecryptarm128(rk, bi, bo: pointer); external;
+procedure aesdecryptarm192(rk, bi, bo: pointer); external;
+procedure aesdecryptarm256(rk, bi, bo: pointer); external;
+procedure gf_mul_h_arm(a, b: pointer); external;
+procedure sha256_block_data_order(ctx, bi: pointer; count: PtrInt); external;
+
+{$endif CPUAARCH64}
+
+{$endif USEARMCRYPTO}
 
 procedure TAes.Encrypt(var B: TAesBlock);
 begin
@@ -3205,6 +3313,17 @@ begin
   ctx.DoBlock := @AesEncryptAsm;
   {$else}
   ctx.DoBlock := @aesencryptpas;
+  {$ifdef USEARMCRYPTO}
+  if AesArmAvailable then
+    case KeySize of
+      128:
+        ctx.DoBlock := @aesencryptarm128;
+      192:
+        ctx.DoBlock := @aesencryptarm192;
+      256:
+        ctx.DoBlock := @aesencryptarm256;
+    end;
+  {$endif USEARMCRYPTO}
   {$endif ASMINTEL}
   {$ifdef USEAESNI}
   if cfAESNI in CpuFeatures then
@@ -3264,6 +3383,17 @@ begin
   ctx.DoBlock := @aesdecrypt386;
   {$else}
   ctx.DoBlock := @aesdecryptpas;
+  {$ifdef USEARMCRYPTO}
+  if AesArmAvailable then
+    case KeySize of
+      128:
+        ctx.DoBlock := @aesdecryptarm128;
+      192:
+        ctx.DoBlock := @aesdecryptarm192;
+      256:
+        ctx.DoBlock := @aesdecryptarm256;
+    end;
+  {$endif USEARMCRYPTO}
   {$endif ASMX86}
   {$ifdef USEAESNI}
   if aesNi in ctx.Flags then
@@ -3524,10 +3654,13 @@ begin
     begin
       // inlined mul_x8()
       t := gft_le[x.c3 shr 24];
-      x.c3 := ((x.c3 shl 8) or  (x.c2 shr 24));
-      x.c2 := ((x.c2 shl 8) or  (x.c1 shr 24));
-      x.c1 := ((x.c1 shl 8) or  (x.c0 shr 24));
-      x.c0 := ((x.c0 shl 8) xor t);
+      x.c3 := (x.c3 shl 8) or
+              (x.c2 shr 24);
+      x.c2 := (x.c2 shl 8) or
+              (x.c1 shr 24);
+      x.c1 := (x.c1 shl 8) or
+              (x.c0 shr 24);
+      x.c0 := (x.c0 shl 8) xor t;
     end;
     for j := 0 to 7 do
     begin
@@ -3551,6 +3684,11 @@ begin
     gf_mul_pclmulqdq(@a, @b)
   else
   {$endif USECLMUL}
+  {$ifdef USEARMCRYPTO}
+  if PmullArmAvailable then
+    gf_mul_h_arm(@a, @b)
+  else
+  {$endif USEARMCRYPTO}
     gf_mul_pas(a, b);
 end;
 
@@ -3562,6 +3700,11 @@ begin
     gf_mul_pclmulqdq(@a, @engine.ghash_h)
   else
   {$endif USECLMUL}
+  {$ifdef USEARMCRYPTO}
+  if PmullArmAvailable then
+    gf_mul_h_arm(@a, @engine.ghash_h)
+  else
+  {$endif USEARMCRYPTO}
     // use pure pascal efficient code with 4KB pre-computed table
     engine.gf_mul_h_pas(a);
 end;
@@ -4791,7 +4934,7 @@ begin
      (Count and AesBlockMod <> 0) then
     exit;
   crc := fMac.encrypted;
-  crcblocks(@crc, Encrypted, Count shr 4 - 2);
+  crcblocks(@crc, Encrypted, (Count shr 4) - 2);
   result := IsEqual(crc, PHash128(@PByteArray(Encrypted)[Count - SizeOf(crc)])^);
 end;
 
@@ -5697,62 +5840,6 @@ end;
 
 { ************* AES-256 Cryptographic Pseudorandom Number Generator (CSPRNG) }
 
-procedure FillSystemRandom(Buffer: PByteArray; Len: integer;
-  AllowBlocking: boolean);
-var
-  fromos: boolean;
-  i: integer;
-  {$ifdef OSPOSIX}
-  dev: integer;
-  {$endif OSPOSIX}
-  {$ifdef OSWINDOWS}
-  prov: HCRYPTPROV;
-  {$endif OSWINDOWS}
-  tmp: array[byte] of byte;
-begin
-  fromos := false;
-  {$ifdef OSPOSIX}
-  dev := FileOpen('/dev/urandom', fmOpenRead);
-  if (dev <= 0) and
-     AllowBlocking then
-    dev := FileOpen('/dev/random', fmOpenRead);
-  if dev > 0 then
-  try
-    i := Len;
-    if i > 32 then
-      i := 32; // up to 256 bits - see "man urandom" Usage paragraph
-    fromos := (FileRead(dev, Buffer[0], i) = i) and
-              (Len <= 32);
-  finally
-    FileClose(dev);
-  end;
-  {$endif OSPOSIX}
-  {$ifdef OSWINDOWS}
-  // warning: on some Windows versions, this could take up to 30 ms!
-  if CryptoApi.Available then
-    if CryptoApi.AcquireContextA(prov, nil, nil,
-      PROV_RSA_FULL, CRYPT_VERIFYCONTEXT) then
-    begin
-      fromos := CryptoApi.GenRandom(prov, Len, Buffer);
-      CryptoApi.ReleaseContext(prov, 0);
-    end;
-  {$endif OSWINDOWS}
-  if fromos then
-    exit;
-  // Operating System API failed -> fallback to our FillRandom()
-  i := Len;
-  repeat
-    mormot.core.base.FillRandom(@tmp, SizeOf(tmp) shr 2); // RdRand32 + Lecuyer
-    if i <= SizeOf(tmp) then
-    begin
-      XorMemory(@Buffer^[Len - i], @tmp, i);
-      break;
-    end;
-    XorMemoryPtrInt(@Buffer^[Len - i], @tmp, SizeOf(tmp) shr POINTERSHR);
-    dec(i, SizeOf(tmp));
-  until false;
-end;
-
 procedure AFDiffusion(buf, rnd: pointer; size: cardinal);
 var
   sha: TSha256;
@@ -5769,7 +5856,7 @@ begin
     sha.Update(@iv, SizeOf(iv));
     sha.Update(buf, SizeOf(dig));
     sha.Final(PSha256Digest(buf)^);
-    inc(PByte(buf), SizeOf(dig));
+    inc(PSha256Digest(buf));
   end;
   dec(size, last * SizeOf(dig));
   if size = 0 then
@@ -6035,6 +6122,7 @@ end;
 
 constructor TAesPrng.Create;
 begin
+  fSeedEntropySource := gesUserOnly; // fastest and safe enough (seeded from OS)
   Create({pbkdf2rounds=}16);
 end;
 
@@ -6053,61 +6141,54 @@ begin
   result := MainAesPrng;
 end;
 
-class function TAesPrng.GetEntropy(Len: integer; SystemOnly: boolean): RawByteString;
 var
-  data: THash512Rec;
+  // some system-derivated forward-secure seed for TAesPrng.GetEntropy
+  _OSEntropySeed: THash128;
+
+class function TAesPrng.GetEntropy(
+  Len: integer; Source: TAesPrngGetEntropySource): RawByteString;
+var
   fromos: RawByteString;
-  mem: TMemoryInfo;
+  data: THash512Rec;
   sha3: TSha3;
-  aes: TAes; // used for entropy obfuscation
-
-  procedure sha3update; // keep incoming data.i0i1i2i3/d0d1/h0 content
-  begin
-    QueryPerformanceMicroSeconds(data.d2); // set data.h1 low 64-bit
-    aes.Encrypt(data.h0);
-    XorEntropy(@data.h2); // DefaultHasher128(RdRand32+Rdtsc+Now+Random+CreateGUID)
-    XorEntropy(@data.h3);
-    QueryPerformanceMicroSeconds(data.d3); // set data.h1 high 64-bit
-    aes.Encrypt(data.h1);
-    sha3.Update(@data, SizeOf(data));
-  end;
-
 begin
   try
     // retrieve some initial entropy from OS
     SetLength(fromos, Len);
-    FillSystemRandom(pointer(fromos), Len, {allowblocking=}SystemOnly);
-    if SystemOnly then
+    if Source <> gesUserOnly then
+      FillSystemRandom(pointer(fromos), Len, Source = gesSystemOnlyMayBlock);
+    if Source in [gesSystemOnly, gesSystemOnlyMayBlock] then
     begin
       result := fromos;
-      fromos := '';
       exit;
     end;
-    // xor some explicit entropy - it won't hurt
+    // XOR with some userland entropy - it won't hurt
     sha3.Init(SHAKE_256); // used in XOF mode for variable-length output
-    mormot.core.base.FillRandom(@data, SizeOf(data) shr 2); // gsl_rng_taus2
-    aes.EncryptInit(data.h3, 128);
-    sha3update;
+    // randomness and entropy from mormot.core.base
+    RandomBytes(@data, SizeOf(data)); // XOR stack data from gsl_rng_taus2
+    sha3.Update(@data, SizeOf(data));
+    XorEntropy(data); // 512-bit from RdRand32 + Rdtsc + Now + CreateGUID
+    sha3.Update(@data, SizeOf(data));
+    // include some official system-derivated entropy source
+    if IsZero(_OSEntropySeed) then
+      // retrieve kernel randomness once - even in gesUserOnly mode
+      FillSystemRandom(@_OSEntropySeed, SizeOf(_OSEntropySeed), {block=}false)
+    else
+      // forward security - may be using AesNiHash128
+      DefaultHasher128(@_OSEntropySeed, @data, SizeOf(data));
+    sha3.Update(@_OSEntropySeed, SizeOf(_OSEntropySeed));
+    // system/process information used as salt/padding from mormot.core.os
     sha3.Update(Executable.Host);
     sha3.Update(Executable.User);
     sha3.Update(Executable.ProgramFullSpec);
-    data.h0 := Executable.Hash.b;
-    sha3update;
-    if RetrieveSystemTimes(data.d0, data.d1, data.d2) then
-      sha3.Update(@data, SizeOf(data)) // from GetSystemTimes() WinAPI
-    else
-      sha3.Update(StringFromFile('/proc/stat', {nosize=}true)); // Linux kernel
-    sha3.Update(RetrieveLoadAvg); // may return '' e.g. on Windows
-    GetMemoryInfo(mem, {withalloc=}true);
-    sha3.Update(@mem, SizeOf(mem));
+    sha3.Update(@Executable.Hash.b, SizeOf(Executable.Hash.b));
     sha3.Update(OSVersionText);
     sha3.Update(@SystemInfo, SizeOf(SystemInfo));
-    data.i0 := integer(HInstance);
-    data.i1 := PtrInt(GetCurrentThreadId);
-    data.i2 := PtrInt(MainThreadID);
-    data.i3 := integer(UnixMSTimeUtcFast);
-    sha3update;
-    result := sha3.Cypher(fromos); // = xor OS entropy using SHA-3 in XOF mode
+    // append low-level Operating System entropy from mormot.core.os
+    XorOSEntropy(data); // detailed system cpu and memory info + system random
+    sha3.Update(@data, SizeOf(data));
+    // XOR previously retrieved OS entropy using SHA-3 in 256-bit XOF mode
+    result := sha3.Cypher(fromos);
   finally
     sha3.Done;
     FillZero(fromos);
@@ -6128,7 +6209,8 @@ begin
   LeaveCriticalSection(fSafe);
   if not alreadyseeding then
     try
-      entropy := GetEntropy(128); // 128 bytes is the HmacSha512 key block size
+      // 128 bytes is the HmacSha512 key block size
+      entropy := GetEntropy(128, fSeedEntropySource);
       Pbkdf2HmacSha512(entropy, Executable.User, fSeedPbkdf2Round, key.b);
       EnterCriticalSection(fSafe);
       try
@@ -6401,7 +6483,7 @@ begin
       end;
       FillZero(key);
       {$ifdef OSWINDOWS}
-      // somewhat enhance privacy by using Windows API
+      // may probably enhance privacy by using Windows API
       key := CryptDataForCurrentUserDPAPI(key2, appsec, false);
       {$else}
       // chmod 400 + AES-CFB + AFUnSplit is enough for privacy on POSIX 
@@ -6565,10 +6647,14 @@ procedure RawSha256Compress(var Hash; Data: pointer);
 begin
   {$ifdef ASMX64}
   if K256Aligned <> nil then
-    // use optimized Intel's Sha256Sse4.asm
-    Sha256Sse4(Data^, Hash, 1)
+    Sha256Sse4(Data^, Hash, 1) // from optimized Intel's Sha256Sse4.asm
   else
   {$endif ASMX64}
+  {$ifdef USEARMCRYPTO}
+  if ShaArmAvailable then
+    sha256_block_data_order(@Hash, Data, 1) // from sha256armv8.o
+  else
+  {$endif USEARMCRYPTO}
     Sha256CompressPas(TSHAHash(Hash), Data);
 end;
 
@@ -8393,15 +8479,15 @@ var
 begin
   count := bytes[0] and $3f;  // number of pending bytes in
   p := @in_;
-  Inc(p, count);
+  inc(p, count);
   // Set the first char of padding to 0x80.  There is always room
   p^ := $80;
-  Inc(p);
+  inc(p);
   // Bytes of padding needed to make 56 bytes (-8..55)
   count := 55 - count;
   if count < 0 then
   begin
-    //  Padding forces an extra block
+    // Padding forces an extra block
     FillcharFast(p^, count + 8, 0);
     MD5Transform(buf, in_);
     p := @in_;
@@ -8459,16 +8545,18 @@ end;
 
 procedure TMd5.Update(const buffer; len: cardinal);
 var
-  p: ^TMd5In;
+  p: PMd5In;
   t, i: cardinal;
 begin
+  if len = 0 then
+    exit;
   p := @buffer;
   // Update byte count
   t := bytes[0];
-  Inc(bytes[0], len);
+  inc(bytes[0], len);
   if bytes[0] < t then
     // 64 bit carry from low to high
-    Inc(bytes[1]);
+    inc(bytes[1]);
   t := 64 - (t and 63);  // space available in in_ (at least 1)
   if t > len then
   begin
@@ -8538,165 +8626,165 @@ begin
   E := Hash.E;
   // unrolled loop -> all is computed in cpu registers
   // note: FPC detects "(A shl 5) or (A shr 27)" pattern into "RolDWord(A,5)" :)
-  Inc(E, ((A shl 5) or (A shr 27)) + (D xor (B and (C xor D))) + $5A827999 + W[0]);
+  inc(E, ((A shl 5) or (A shr 27)) + (D xor (B and (C xor D))) + $5A827999 + W[0]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (C xor (A and (B xor C))) + $5A827999 + W[1]);
+  inc(D, ((E shl 5) or (E shr 27)) + (C xor (A and (B xor C))) + $5A827999 + W[1]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (B xor (E and (A xor B))) + $5A827999 + W[2]);
+  inc(C, ((D shl 5) or (D shr 27)) + (B xor (E and (A xor B))) + $5A827999 + W[2]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (A xor (D and (E xor A))) + $5A827999 + W[3]);
+  inc(B, ((C shl 5) or (C shr 27)) + (A xor (D and (E xor A))) + $5A827999 + W[3]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (E xor (C and (D xor E))) + $5A827999 + W[4]);
+  inc(A, ((B shl 5) or (B shr 27)) + (E xor (C and (D xor E))) + $5A827999 + W[4]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (D xor (B and (C xor D))) + $5A827999 + W[5]);
+  inc(E, ((A shl 5) or (A shr 27)) + (D xor (B and (C xor D))) + $5A827999 + W[5]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (C xor (A and (B xor C))) + $5A827999 + W[6]);
+  inc(D, ((E shl 5) or (E shr 27)) + (C xor (A and (B xor C))) + $5A827999 + W[6]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (B xor (E and (A xor B))) + $5A827999 + W[7]);
+  inc(C, ((D shl 5) or (D shr 27)) + (B xor (E and (A xor B))) + $5A827999 + W[7]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (A xor (D and (E xor A))) + $5A827999 + W[8]);
+  inc(B, ((C shl 5) or (C shr 27)) + (A xor (D and (E xor A))) + $5A827999 + W[8]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (E xor (C and (D xor E))) + $5A827999 + W[9]);
+  inc(A, ((B shl 5) or (B shr 27)) + (E xor (C and (D xor E))) + $5A827999 + W[9]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (D xor (B and (C xor D))) + $5A827999 + W[10]);
+  inc(E, ((A shl 5) or (A shr 27)) + (D xor (B and (C xor D))) + $5A827999 + W[10]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (C xor (A and (B xor C))) + $5A827999 + W[11]);
+  inc(D, ((E shl 5) or (E shr 27)) + (C xor (A and (B xor C))) + $5A827999 + W[11]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (B xor (E and (A xor B))) + $5A827999 + W[12]);
+  inc(C, ((D shl 5) or (D shr 27)) + (B xor (E and (A xor B))) + $5A827999 + W[12]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (A xor (D and (E xor A))) + $5A827999 + W[13]);
+  inc(B, ((C shl 5) or (C shr 27)) + (A xor (D and (E xor A))) + $5A827999 + W[13]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (E xor (C and (D xor E))) + $5A827999 + W[14]);
+  inc(A, ((B shl 5) or (B shr 27)) + (E xor (C and (D xor E))) + $5A827999 + W[14]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (D xor (B and (C xor D))) + $5A827999 + W[15]);
+  inc(E, ((A shl 5) or (A shr 27)) + (D xor (B and (C xor D))) + $5A827999 + W[15]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (C xor (A and (B xor C))) + $5A827999 + W[16]);
+  inc(D, ((E shl 5) or (E shr 27)) + (C xor (A and (B xor C))) + $5A827999 + W[16]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (B xor (E and (A xor B))) + $5A827999 + W[17]);
+  inc(C, ((D shl 5) or (D shr 27)) + (B xor (E and (A xor B))) + $5A827999 + W[17]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (A xor (D and (E xor A))) + $5A827999 + W[18]);
+  inc(B, ((C shl 5) or (C shr 27)) + (A xor (D and (E xor A))) + $5A827999 + W[18]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (E xor (C and (D xor E))) + $5A827999 + W[19]);
+  inc(A, ((B shl 5) or (B shr 27)) + (E xor (C and (D xor E))) + $5A827999 + W[19]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $6ED9EBA1 + W[20]);
+  inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $6ED9EBA1 + W[20]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $6ED9EBA1 + W[21]);
+  inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $6ED9EBA1 + W[21]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $6ED9EBA1 + W[22]);
+  inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $6ED9EBA1 + W[22]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $6ED9EBA1 + W[23]);
+  inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $6ED9EBA1 + W[23]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $6ED9EBA1 + W[24]);
+  inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $6ED9EBA1 + W[24]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $6ED9EBA1 + W[25]);
+  inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $6ED9EBA1 + W[25]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $6ED9EBA1 + W[26]);
+  inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $6ED9EBA1 + W[26]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $6ED9EBA1 + W[27]);
+  inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $6ED9EBA1 + W[27]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $6ED9EBA1 + W[28]);
+  inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $6ED9EBA1 + W[28]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $6ED9EBA1 + W[29]);
+  inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $6ED9EBA1 + W[29]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $6ED9EBA1 + W[30]);
+  inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $6ED9EBA1 + W[30]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $6ED9EBA1 + W[31]);
+  inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $6ED9EBA1 + W[31]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $6ED9EBA1 + W[32]);
+  inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $6ED9EBA1 + W[32]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $6ED9EBA1 + W[33]);
+  inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $6ED9EBA1 + W[33]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $6ED9EBA1 + W[34]);
+  inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $6ED9EBA1 + W[34]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $6ED9EBA1 + W[35]);
+  inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $6ED9EBA1 + W[35]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $6ED9EBA1 + W[36]);
+  inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $6ED9EBA1 + W[36]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $6ED9EBA1 + W[37]);
+  inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $6ED9EBA1 + W[37]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $6ED9EBA1 + W[38]);
+  inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $6ED9EBA1 + W[38]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $6ED9EBA1 + W[39]);
+  inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $6ED9EBA1 + W[39]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + ((B and C) or (D and (B or C))) + $8F1BBCDC + W[40]);
+  inc(E, ((A shl 5) or (A shr 27)) + ((B and C) or (D and (B or C))) + $8F1BBCDC + W[40]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + ((A and B) or (C and (A or B))) + $8F1BBCDC + W[41]);
+  inc(D, ((E shl 5) or (E shr 27)) + ((A and B) or (C and (A or B))) + $8F1BBCDC + W[41]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + ((E and A) or (B and (E or A))) + $8F1BBCDC + W[42]);
+  inc(C, ((D shl 5) or (D shr 27)) + ((E and A) or (B and (E or A))) + $8F1BBCDC + W[42]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + ((D and E) or (A and (D or E))) + $8F1BBCDC + W[43]);
+  inc(B, ((C shl 5) or (C shr 27)) + ((D and E) or (A and (D or E))) + $8F1BBCDC + W[43]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + ((C and D) or (E and (C or D))) + $8F1BBCDC + W[44]);
+  inc(A, ((B shl 5) or (B shr 27)) + ((C and D) or (E and (C or D))) + $8F1BBCDC + W[44]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + ((B and C) or (D and (B or C))) + $8F1BBCDC + W[45]);
+  inc(E, ((A shl 5) or (A shr 27)) + ((B and C) or (D and (B or C))) + $8F1BBCDC + W[45]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + ((A and B) or (C and (A or B))) + $8F1BBCDC + W[46]);
+  inc(D, ((E shl 5) or (E shr 27)) + ((A and B) or (C and (A or B))) + $8F1BBCDC + W[46]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + ((E and A) or (B and (E or A))) + $8F1BBCDC + W[47]);
+  inc(C, ((D shl 5) or (D shr 27)) + ((E and A) or (B and (E or A))) + $8F1BBCDC + W[47]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + ((D and E) or (A and (D or E))) + $8F1BBCDC + W[48]);
+  inc(B, ((C shl 5) or (C shr 27)) + ((D and E) or (A and (D or E))) + $8F1BBCDC + W[48]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + ((C and D) or (E and (C or D))) + $8F1BBCDC + W[49]);
+  inc(A, ((B shl 5) or (B shr 27)) + ((C and D) or (E and (C or D))) + $8F1BBCDC + W[49]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + ((B and C) or (D and (B or C))) + $8F1BBCDC + W[50]);
+  inc(E, ((A shl 5) or (A shr 27)) + ((B and C) or (D and (B or C))) + $8F1BBCDC + W[50]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + ((A and B) or (C and (A or B))) + $8F1BBCDC + W[51]);
+  inc(D, ((E shl 5) or (E shr 27)) + ((A and B) or (C and (A or B))) + $8F1BBCDC + W[51]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + ((E and A) or (B and (E or A))) + $8F1BBCDC + W[52]);
+  inc(C, ((D shl 5) or (D shr 27)) + ((E and A) or (B and (E or A))) + $8F1BBCDC + W[52]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + ((D and E) or (A and (D or E))) + $8F1BBCDC + W[53]);
+  inc(B, ((C shl 5) or (C shr 27)) + ((D and E) or (A and (D or E))) + $8F1BBCDC + W[53]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + ((C and D) or (E and (C or D))) + $8F1BBCDC + W[54]);
+  inc(A, ((B shl 5) or (B shr 27)) + ((C and D) or (E and (C or D))) + $8F1BBCDC + W[54]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + ((B and C) or (D and (B or C))) + $8F1BBCDC + W[55]);
+  inc(E, ((A shl 5) or (A shr 27)) + ((B and C) or (D and (B or C))) + $8F1BBCDC + W[55]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + ((A and B) or (C and (A or B))) + $8F1BBCDC + W[56]);
+  inc(D, ((E shl 5) or (E shr 27)) + ((A and B) or (C and (A or B))) + $8F1BBCDC + W[56]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + ((E and A) or (B and (E or A))) + $8F1BBCDC + W[57]);
+  inc(C, ((D shl 5) or (D shr 27)) + ((E and A) or (B and (E or A))) + $8F1BBCDC + W[57]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + ((D and E) or (A and (D or E))) + $8F1BBCDC + W[58]);
+  inc(B, ((C shl 5) or (C shr 27)) + ((D and E) or (A and (D or E))) + $8F1BBCDC + W[58]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + ((C and D) or (E and (C or D))) + $8F1BBCDC + W[59]);
+  inc(A, ((B shl 5) or (B shr 27)) + ((C and D) or (E and (C or D))) + $8F1BBCDC + W[59]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $CA62C1D6 + W[60]);
+  inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $CA62C1D6 + W[60]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $CA62C1D6 + W[61]);
+  inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $CA62C1D6 + W[61]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $CA62C1D6 + W[62]);
+  inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $CA62C1D6 + W[62]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $CA62C1D6 + W[63]);
+  inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $CA62C1D6 + W[63]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $CA62C1D6 + W[64]);
+  inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $CA62C1D6 + W[64]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $CA62C1D6 + W[65]);
+  inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $CA62C1D6 + W[65]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $CA62C1D6 + W[66]);
+  inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $CA62C1D6 + W[66]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $CA62C1D6 + W[67]);
+  inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $CA62C1D6 + W[67]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $CA62C1D6 + W[68]);
+  inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $CA62C1D6 + W[68]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $CA62C1D6 + W[69]);
+  inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $CA62C1D6 + W[69]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $CA62C1D6 + W[70]);
+  inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $CA62C1D6 + W[70]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $CA62C1D6 + W[71]);
+  inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $CA62C1D6 + W[71]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $CA62C1D6 + W[72]);
+  inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $CA62C1D6 + W[72]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $CA62C1D6 + W[73]);
+  inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $CA62C1D6 + W[73]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $CA62C1D6 + W[74]);
+  inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $CA62C1D6 + W[74]);
   C := (C shl 30) or (C shr 2);
-  Inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $CA62C1D6 + W[75]);
+  inc(E, ((A shl 5) or (A shr 27)) + (B xor C xor D) + $CA62C1D6 + W[75]);
   B := (B shl 30) or (B shr 2);
-  Inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $CA62C1D6 + W[76]);
+  inc(D, ((E shl 5) or (E shr 27)) + (A xor B xor C) + $CA62C1D6 + W[76]);
   A := (A shl 30) or (A shr 2);
-  Inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $CA62C1D6 + W[77]);
+  inc(C, ((D shl 5) or (D shr 27)) + (E xor A xor B) + $CA62C1D6 + W[77]);
   E := (E shl 30) or (E shr 2);
-  Inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $CA62C1D6 + W[78]);
+  inc(B, ((C shl 5) or (C shr 27)) + (D xor E xor A) + $CA62C1D6 + W[78]);
   D := (D shl 30) or (D shr 2);
-  Inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $CA62C1D6 + W[79]);
+  inc(A, ((B shl 5) or (B shr 27)) + (C xor D xor E) + $CA62C1D6 + W[79]);
   C := (C shl 30) or (C shr 2);
   // Calculate new working hash
   inc(Hash.A, A);
@@ -9239,8 +9327,9 @@ end;
 function TAesFullHeader.Calc(const Key; KeySize: cardinal): cardinal;
 begin
   result := Adler32Asm(KeySize, @Key, KeySize shr 3) xor
-    Te0[OriginalLen and $FF] xor Te1[SourceLen and $FF] xor
-    Td0[SomeSalt and $7FF];
+              Te0[OriginalLen and $FF] xor
+              Te1[SourceLen and $FF] xor
+              Td0[SomeSalt and $7FF];
 end;
 
 function TAesFull.EncodeDecode(const Key; KeySize, inLen: cardinal;
@@ -9523,7 +9612,7 @@ begin
         AES.Encrypt(buf);
         Dest.WriteBuffer(buf, SizeOf(TAesBlock));
         inc(DestSize, SizeOf(TAesBlock));
-        Dec(Count, Len);
+        dec(Count, Len);
         AES.DoBlocks(@B[Len], @B[Len], cardinal(Count) shr AesBlockShift, true);
       end
       else
@@ -9634,6 +9723,12 @@ end;
 
 
 procedure InitializeUnit;
+{$ifdef USEARMCRYPTO}
+var
+  rk: TKeyArray;
+  bi, bo: TAesBlock;
+  shablock: array[0..63] of byte;
+{$endif USEARMCRYPTO}
 begin
   ComputeAesStaticTables;
   {$ifdef ASMX64}
@@ -9670,7 +9765,7 @@ begin
   begin
     // 128-bit aeshash as implemented in Go runtime, using aesenc opcode
     GetMemAligned(AESNIHASHKEYSCHED_, nil, 16 * 16, AESNIHASHKEYSCHED);
-    FillRandom(AESNIHASHKEYSCHED, 16 * 4); // genuine to avoid hash flooding
+    RandomBytes(AESNIHASHKEYSCHED, 16 * 16); // genuine to avoid hash flooding
     AesNiHash32 := @_AesNiHash32;
     AesNiHash64 := @_AesNiHash64;
     AesNiHash128 := @_AesNiHash128;
@@ -9678,9 +9773,34 @@ begin
     InterningHasher := @_AesNiHash32;
     DefaultHasher64 := @_AesNiHash64;
     DefaultHasher128 := @_AesNiHash128;
-    Random32Seed; // re-seed main FillRandom() with AesNiHash128 as hasher
   end;
   {$endif USEAESNIHASH}
+  {$ifdef USEARMCRYPTO}
+  if ahcAes in CpuFeatures then
+    try
+      aesencryptarm128(@rk, @bi, @bo); // apply to stack random
+      AesArmAvailable := true;
+    except
+      // ARMv8 AES HW opcodes seem not available
+      exclude(CpuFeatures, ahcAes);
+    end;
+  if ahcPmull in CpuFeatures then
+    try
+      gf_mul_h_arm(@bi, @bo); // apply to stack random
+      PmullArmAvailable := true;
+    except
+      // ARMv8 PMULL HW opcodes seem not available
+      exclude(CpuFeatures, ahcPmull);
+    end;
+  if ahcSha2 in CpuFeatures then
+    try
+      sha256_block_data_order(@rk, @shablock, 1);
+      ShaArmAvailable := true;
+    except
+      // ARMv8 SHA HW opcodes seem not available
+      exclude(CpuFeatures, ahcSha2);
+    end;
+  {$endif USEARMCRYPTO}
   assert(SizeOf(TMd5Buf) = SizeOf(TMd5Digest));
   assert(SizeOf(TAes) = AES_CONTEXT_SIZE);
   assert(SizeOf(TAesContext) = AES_CONTEXT_SIZE);

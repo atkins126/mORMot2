@@ -164,7 +164,7 @@ type
     /// finalize the Inflate Uncompression
     function UncompressEnd: integer;
     /// low-level flush of the compressed data pending in the internal buffer
-    procedure DoFlush;
+    procedure DoFlush(Code: integer);
     /// low-level check of the code returned by the ZLib library
     // - raise EZLib Exception on error
     function Check(const Code: integer; const ValidCodes: array of integer;
@@ -184,6 +184,10 @@ function adler32(adler: TZCRC; buf: pointer; len: cardinal): TZCRC;
   {$ifdef LIBDEFLATESTATIC} inline; {$else}
   {$ifdef ZLIBEXT} cdecl; {$else} {$ifdef ZLIBSTATIC} cdecl; {$else}
     {$ifdef FPC} inline; {$endif} {$endif} {$endif} {$endif}
+
+/// compute the maximum potential compressed size of an uncompressed buffer
+function zlibCompressMax(input: PtrUInt): PtrUInt;
+  {$ifdef CPU64} inline; {$endif}
 
 
 const
@@ -543,6 +547,29 @@ implementation
 
 { ****************** Low-Level ZLib Streaming Access }
 
+const
+  z_errmsg: array[0..9] of PAnsiChar = (
+    'need dictionary',       // Z_NEED_DICT       2
+    'stream end',            // Z_STREAM_END      1
+    '',                      // Z_OK              0
+    'file error',            // Z_ERRNO         (-1)
+    'stream error',          // Z_STREAM_ERROR  (-2)
+    'data error',            // Z_DATA_ERROR    (-3)
+    'insufficient memory',   // Z_MEM_ERROR     (-4)
+    'buffer error',          // Z_BUF_ERROR     (-5)
+    'incompatible version',  // Z_VERSION_ERROR (-6)
+    '');
+
+function ZLibErrorText(code: integer): PAnsiChar;
+begin
+  Code := 2 - Code;
+  if (Code >= 0) and
+     (Code <= 8) then
+    result := z_errmsg[Code]
+  else
+    result := nil;
+end;
+
 {$ifdef ZLIBSTATIC}
 
 {$ifdef FPC} // we supply our own static zlib files in coff format for Windows
@@ -592,19 +619,6 @@ begin
   // direct use of the (FastMM4) delphi heap for all zip memory allocation
   FreeMem(Block);
 end;
-
-const
-  z_errmsg: array[0..9] of PAnsiChar = (
-    'need dictionary',       // Z_NEED_DICT       2
-    'stream end',            // Z_STREAM_END      1
-    '',                      // Z_OK              0
-    'file error',            // Z_ERRNO         (-1)
-    'stream error',          // Z_STREAM_ERROR  (-2)
-    'data error',            // Z_DATA_ERROR    (-3)
-    'insufficient memory',   // Z_MEM_ERROR     (-4)
-    'buffer error',          // Z_BUF_ERROR     (-5)
-    'incompatible version',  // Z_VERSION_ERROR (-6)
-    '');
 
 procedure memset(P: Pointer; B: integer; count: integer); cdecl;
 begin
@@ -775,7 +789,7 @@ begin
   if CompressionLevel > 9 then
     CompressionLevel := 9; // libdeflate allows additional 10,11,12 level
   result := deflateInit2_(Stream, CompressionLevel, Z_DEFLATED, bits,
-    DEF_MEM_LEVEL, Z_DEFAULT_STRATEGY, ZLIB_VERSION, sizeof(Stream)) >= 0;
+    DEF_MEM_LEVEL, Z_DEFAULT_STRATEGY, ZLIB_VERSION, SizeOf(Stream)) >= 0;
   if FlushBufferOwned and
      not result then
   begin
@@ -831,7 +845,7 @@ begin
   end;
 end;
 
-procedure TZLib.DoFlush;
+procedure TZLib.DoFlush(Code: integer);
 var
   n: integer;
 begin
@@ -842,7 +856,9 @@ begin
       FlushCheckCRC^ := crc32(FlushCheckCRC^, FlushBuffer, n);
     FlushStream.WriteBuffer(FlushBuffer^, n);
     inc(Written, n);
-  end;
+  end
+  else if Code = Z_BUF_ERROR then
+    Check(Code, [], 'DoFlush with no output'); // may occur on corrupted input 
   Stream.next_out := FlushBuffer;
   Stream.avail_out := FlushSize;
 end;
@@ -858,8 +874,14 @@ begin
   for i := Low(ValidCodes) to High(ValidCodes) do
     if ValidCodes[i] = Code then
       exit;
-  raise EZLib.CreateFmt('Error %d during %s process (avail in=%d out=%d)',
-    [Code, Context, Stream.avail_in, Stream.avail_out]);
+  raise EZLib.CreateFmt('Error %d [%s] during %s process (avail in=%d out=%d)',
+    [Code, ZLibErrorText(Code), Context, Stream.avail_in, Stream.avail_out]);
+end;
+
+function zlibCompressMax(input: PtrUInt): PtrUInt;
+begin
+  // zlib compresBound = len + (len >> 12) + (len >> 14) +  (len >> 25) + 13
+  result := input + input shr 12 + input shr 14 + input shr 25 + 256;
 end;
 
 
@@ -904,7 +926,7 @@ function libdeflate_crc32; external;
     {$L ..\..\static\aarch64-linux\libdeflate_dd.o} // deflate_decompress.o
     {$L ..\..\static\aarch64-linux\libdeflate_zc.o} // zlib_compress.o
     {$L ..\..\static\aarch64-linux\libdeflate_zd.o} // zlib_decompress.o
-    {$L ..\..\static\aarch64-linux\libgcc.a}
+    {$linklib ..\..\static\aarch64-linux\libgcc.a}
   {$endif CPUAARCH64}
   {$ifdef CPUARM}
     // current supplied .o don't link yet
@@ -916,7 +938,7 @@ function libdeflate_crc32; external;
     {$L ..\..\static\arm-linux\libdeflate_dd.o} // deflate_decompress.o
     {$L ..\..\static\arm-linux\libdeflate_zc.o} // zlib_compress.o
     {$L ..\..\static\arm-linux\libdeflate_zd.o} // zlib_decompress.o
-    {$L ..\..\static\arm-linux\libgcc.a}
+    {$linklib ..\..\static\arm-linux\libgcc.a}
   {$endif CPUARM}
   const
     _PU = '';
@@ -1055,7 +1077,7 @@ begin
       repeat
         code := z.Check(z.Compress(Z_FINISH),
           [Z_OK, Z_STREAM_END, Z_BUF_ERROR], 'CompressStream');
-        z.DoFlush;
+        z.DoFlush(code);
       until code = Z_STREAM_END;
     finally
       z.CompressEnd;
@@ -1076,9 +1098,9 @@ begin
       repeat
         code := z.Check(z.Uncompress(Z_FINISH),
           [Z_OK, Z_STREAM_END, Z_BUF_ERROR], 'UncompressStream');
-        z.DoFlush;
+        z.DoFlush(code);
       until code = Z_STREAM_END;
-      z.DoFlush;
+      z.DoFlush(code);
     finally
       z.UncompressEnd;
     end;

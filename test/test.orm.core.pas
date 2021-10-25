@@ -31,7 +31,9 @@ uses
   mormot.core.test,
   mormot.db.core,
   mormot.db.nosql.bson,
+  mormot.orm.base,
   mormot.orm.core,
+  mormot.orm.rest,
   mormot.soa.core,
   mormot.rest.client,
   mormot.rest.server,
@@ -114,8 +116,8 @@ type
     procedure _TOrmSigned;
     /// test the TOrmModel class
     procedure _TOrmModel;
-    /// test a full in-memory server over Windows Messages
-    // - Under Linux, URIDll will be used instead due to lack of message loop
+    /// test a full in-memory server
+    // - use ExportServerGlobalLibraryRequest/TRestClientLibraryRequest for communication
     // - without any SQLite3 engine linked
     procedure _TRestServerFullMemory;
   end;
@@ -129,6 +131,7 @@ procedure TTestOrmCore._TOrmModel;
 var
   M: TOrmModel;
   U: TRestServerUri;
+  met: TUriMethod;
 begin
   M := TOrmModel.Create([TOrmTest]);
   try
@@ -155,6 +158,12 @@ begin
   Check(U.Address = 'addr');
   Check(U.Port = '');
   Check(U.Root = '');
+  Check(ToMethod('') = mNone);
+  Check(ToMethod('toto') = mNone);
+  Check(ToMethod('get') = mGET);
+  Check(ToMethod('CONNECT') = mCONNECT);
+  for met := low(met) to high(met) do
+    Check(ToMethod(RawUtf8(MethodText(met))) = met);
 end;
 
 procedure TTestOrmCore._TRestServerFullMemory;
@@ -313,7 +322,8 @@ begin
               CheckVariantWith(Values[j], j + 1);
           T.Free;
         end;
-        dummy := TSynMustache.Parse('{{#items}}'#13#10'{{Int}}={{Test}}'#13#10'{{/items}}').
+        dummy := TSynMustache.Parse(
+          '{{#items}}'#13#10'{{Int}}={{Test}}'#13#10'{{/items}}').
           Render(Client.Orm.RetrieveDocVariantArray(TOrmTest, 'items', 'Int,Test'));
         check(IdemPChar(pointer(dummy), '1=1'#$D#$A'2=2'#$D#$A'3=3'#$D#$A'4=4'));
         CheckHash(dummy, $BC89CA72);
@@ -337,8 +347,9 @@ begin
         s := Client.Orm.OneFieldValues(TOrmTest, 'Test',
           FormatUtf8('ValWord=?', [], [110]));
         Check(s = '110');
-        Check(Client.Orm.UpdateField(TOrmTest, 'Unicode', ['110'], 'ValWord', [120]),
-          'update one field of a given record');
+        Check(Client.Orm.UpdateField(TOrmTest,
+          'Unicode', ['110'],
+          'ValWord', [120]), 'update one field of a given record');
         R := TOrmTest.Create(Client.Orm, 110);
         try
           R.CheckWith(self, 110, 10);
@@ -370,7 +381,7 @@ begin
             if (i = 200) or (i = 300) then
             begin
               R.FillWith(R.ID + 10);
-              Check(Client.Orm.Update(R, 'ValWord,ValDate'), 'update only 2 fields');
+              Check(Client.Orm.Update(R, 'ValWord,ValDate'), '2 fields update');
             end;
           end;
           Check(i = 10099);
@@ -378,7 +389,8 @@ begin
           R.Free;
         end;
         // note: SELECT .. IN ... is implemented via a TDocVariant
-        R := TOrmTest.CreateAndFillPrepare(Client.Orm, [200, 300], 'ValWord,ValDate,ID');
+        R := TOrmTest.CreateAndFillPrepare(
+          Client.Orm, [200, 300], 'ValWord,ValDate,ID');
         try
           i := 0;
           while R.FillOne do
@@ -386,14 +398,14 @@ begin
             inc(i);
             Check(R.ID >= 200);
             R.FillWith(R.ID + 10);
-            Check(Client.Orm.Update(R, 'ValWord,ValDate'), 'update only 2 fields');
+            Check(Client.Orm.Update(R, 'ValWord,ValDate'), '2 fields update');
           end;
           Check(i = 2);
         finally
           R.Free;
         end;
         n := 20000;
-        R := TOrmTest.create;
+        R := TOrmTest.Create;
         try
           for i := 10100 to n do
           begin
@@ -530,7 +542,7 @@ begin
       'VALUES (0,'''','''','''',0,0,'''',0,null)');
     s := ObjectToJson(T);
     CheckEqual(s,
-      '{"ID":0,"Int":0,"Test":"","Unicode":"","Ansi":"","ValFloat":0,' +
+      '{"RowID":0,"Int":0,"Test":"","Unicode":"","Ansi":"","ValFloat":0,' +
       '"ValWord":0,"ValDate":"","Next":0,"Data":null,"ValVariant":null}');
     T.ValDate := 39882.888612; // a fixed date and time
     wa := 'abcde6ef90';
@@ -579,8 +591,8 @@ begin
     s3 := VariantSaveJson(obj);
     Check(s3 = s);
     s := ObjectToJson(T);
-    CheckEqual(s, '{"ID":10,"Int":0,"Test":"' + T.Test + '","Unicode":"' + T.Test
-      + '","Ansi":"' + T.Test + '","ValFloat":3.141592653,"ValWord":1203,' +
+    CheckEqual(s, '{"RowID":10,"Int":0,"Test":"' + T.Test + '","Unicode":"' +
+      T.Test + '","Ansi":"' + T.Test + '","ValFloat":3.141592653,"ValWord":1203,' +
       '"ValDate":"2009-03-10T21:19:36","Next":0,"Data":null,"ValVariant":3.1416}');
     T2.ClearProperties;
     Check(not T.SameValues(T2));
@@ -610,10 +622,10 @@ begin
     s2 := 'Int=1234567890123456, Test=''' + T.Test + ''', Unicode=''' + T.Test +
       ''', Ansi=''' + T.Test + ''', ValFloat=3.141592653, ValWord=1203, ' +
       'ValDate=''2009-03-10T21:19:36'', Next=0';
-    Check(s = s2 + ', ValVariant=''' + T.Test + '''');
+    CheckEqual(s, s2 + ', ValVariant=''' + T.Test + '''');
     T.ValVariant := _Json('{name:"John",int:1234}');
     s := T.GetSqlSet;
-    Check(s = s2 + ', ValVariant=''{"name":"John","int":1234}''',
+    CheckEqual(s, s2 + ', ValVariant=''{"name":"John","int":1234}''',
       'JSON object as text');
     s := T.GetJsonValues(true, true, ooSelect);
     Check(s = s1 + ',"ValVariant":{"name":"John","int":1234}}');
@@ -629,7 +641,6 @@ begin
     CheckEqual(s, StringReplaceAll(s2, ', ', ',') +
       ',ValVariant=''{"name":"John","int":1234}''');
     s := ObjectToJson(T);
-    delete(s1, 3, 3); // "RowID":10 -> "ID":10
     s := StringReplaceAll(s, 'null', '0');
     CheckEqual(s, s1 + ',"Data":0,"ValVariant":{"name":"John","int":1234}}');
     bin := T.GetBinary;
@@ -638,7 +649,7 @@ begin
     Check(T.SameValues(T2));
     bin := VariantSave(T.ValVariant);
     Check(bin <> '');
-    Check(VariantLoad(v, pointer(bin), @JSON_OPTIONS[true]) <> nil);
+    Check(VariantLoad(v, pointer(bin), @JSON_[mFast]) <> nil);
     CheckEqual(VariantSaveMongoJson(v, modMongoStrict), '{"name":"John","int":1234}');
   finally
     M.Free;

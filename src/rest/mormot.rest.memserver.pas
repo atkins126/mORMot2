@@ -39,6 +39,7 @@ uses
   mormot.crypt.secure,
   mormot.core.log,
   mormot.core.interfaces,
+  mormot.orm.base,
   mormot.orm.core,
   mormot.orm.rest,
   mormot.orm.server,
@@ -236,8 +237,8 @@ function CreateInMemoryServerForAllVirtualTables(aModel: TOrmModel;
   aHandleUserAuthentication: boolean): TRestServer;
 
 
-{$ifndef PUREMORMOT2}
 // backward compatibility types redirections
+{$ifndef PUREMORMOT2}
 
 type
   // should be a proper type for RegisterClassNameForDefinition
@@ -360,8 +361,11 @@ begin
       t := Model.GetTableIndexPtr(TableName);
       if t < 0 then
         exit;
+      if (P^ <> '[') and
+         (P^ <> '{') then
+        break;
       Data := P;
-      P := GotoNextJsonObjectOrArray(P);
+      P := GotoEndJsonItem(P);
       if P = nil then
         break;
       TRestStorageInMemory(fStaticData[t]).LoadFromJson(Data, P - Data);
