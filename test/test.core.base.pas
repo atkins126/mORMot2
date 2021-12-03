@@ -26,6 +26,7 @@ uses
   mormot.core.search,
   mormot.core.log,
   mormot.core.test,
+  mormot.core.threads,
   mormot.net.sock,
   mormot.net.http,
   mormot.net.client,
@@ -33,8 +34,6 @@ uses
   mormot.orm.base,
   mormot.orm.core,
   mormot.rest.client;
-
-
 
 const
   {$ifdef OSWINDOWS}
@@ -833,6 +832,8 @@ begin
       Check(GetInteger(Pointer(L[i])) = TComponent(L.Objects[i]).Tag);
     Check(L.IndexOf('5') = 2);
     Check(L.IndexOf('6') < 0);
+    Check(L.Exists('5'));
+    Check(not L.Exists('6'));
   finally
     L.Free;
   end;
@@ -845,7 +846,7 @@ begin
       Check(L.AddObject(Rec.Parameters, Rec) = i - 1);
       Check(L.IndexOf(Rec.Parameters) = i - 1);
     end;
-    Check(L.IndexOf('') < 0);
+    Check(not L.Exists(''));
     Check(L.IndexOf('abcd') < 0);
     Check(L.Count = MAX);
     n := 0;
@@ -934,7 +935,7 @@ begin
     A.amount := UInt32ToUtf8(i);
     Check(AmountDA.Add(A) = i - 1);
   end;
-  AmountDA.ReHash;
+  AmountDA.ForceReHash;
   for i := 1 to length(AmountCollection) do
     Check(AmountDA.FindHashed(i) = i - 1);
   // default Init() will hash and compare the WHOLE binary content, i.e. 8 bytes
@@ -948,7 +949,7 @@ begin
     AI.amount := i * 2;
     Check(AmountIDA1.Add(AI) = i - 1);
   end;
-  AmountIDA1.ReHash;
+  AmountIDA1.ForceReHash;
   for i := 1 to length(AmountICollection) do
   begin
     AI.firmID := i;
@@ -968,7 +969,7 @@ begin
     AI.amount := i * 2;
     Check(AmountIDA2.Add(AI) = i - 1);
   end;
-  AmountIDA2.ReHash;
+  AmountIDA2.ForceReHash;
   for i := 1 to length(AmountICollection) do
     Check(AmountIDA2.FindHashed(i) >= 0);
   // valide generic-like features
@@ -990,7 +991,7 @@ begin
   City.Longitude := 0;
   ACities.Add(City);
   Check(ACities.Count = 3);
-  ACities.ReHash; // will use default hash, and search by Name = 1st field
+  ACities.ForceReHash; // will use default hash, and search by Name = 1st field
   City.Name := 'Iasi';
   Check(ACities.FindHashedAndFill(City) = 0);
   Check(City.Name = 'Iasi');
@@ -1151,10 +1152,10 @@ var
   Test, Test2: RawByteString;
   ST: TCustomMemoryStream;
   Index: TIntegerDynArray;
-  W: TTextWriter;
-  {$ifndef ISDELPHI2010}
+  W: TJsonWriter;
+  {$ifndef HASEXTRECORDRTTI}
   JSON_BASE64_MAGIC_UTF8: RawUtf8;
-  {$endif ISDELPHI2010}
+  {$endif HASEXTRECORDRTTI}
   tmp: TSynTempBuffer;
 const
   MAGIC: array[0..1] of word = (34, $fff0);
@@ -1246,7 +1247,7 @@ begin
   Check(not IsRawUtf8DynArray(TypeInfo(TIntegerDynArray)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TPointerDynArray)), 'IsRawUtf8DynArray3');
   Check(not IsRawUtf8DynArray(TypeInfo(TAmountCollection)), 'IsRawUtf8DynArray4');
-  W := TTextWriter.CreateOwnedStream;
+  W := TJsonWriter.CreateOwnedStream;
   // validate TBooleanDynArray
   dyn1.Init(TypeInfo(TBooleanDynArray), AB);
   SetLength(AB, 4);
@@ -1603,13 +1604,13 @@ begin
   W.CancelAll;
   W.AddDynArrayJson(ARP);
   U := W.Text;
-  {$ifndef ISDELPHI2010} // enhanced RTTI won't let binary serialization
+  {$ifndef HASEXTRECORDRTTI} // enhanced RTTI won't let binary serialization
   P := pointer(U);
   JSON_BASE64_MAGIC_UTF8 := RawUnicodeToUtf8(@MAGIC, 2);
   U2 := RawUtf8('[') + JSON_BASE64_MAGIC_UTF8 +
         RawUtf8(BinToBase64(ARP.SaveTo)) + RawUtf8('"]');
   Check(U = U2);
-  {$endif ISDELPHI2010}
+  {$endif HASEXTRECORDRTTI}
   ARP.Clear;
   Check(ARP.LoadFromJson(pointer(U)) <> nil);
   if not CheckFailed(ARP.Count = 1001) then
@@ -1701,14 +1702,14 @@ begin
   // note: error? ensure TTestCoreBase run after TTestLowLevelTypes
   // -> otherwise custom serialization is still active with no Build* fields
   U := W.Text;
-  {$ifdef ISDELPHI2010} // thanks to enhanced RTTI
+  {$ifdef HASEXTRECORDRTTI} // thanks to enhanced RTTI
   Check(IdemPChar(pointer(U), '[{"MAJOR":0,"MINOR":1,"RELEASE":2,"BUILD":3,' +
     '"MAIN":"1000","DETAILED":"2000","BUILDDATETIME":"1999-02-24T02:52:48",' +
     '"BUILDYEAR":2011},{"MAJOR":1,"MINOR":2,"RELEASE":3,"BUILD":4,'));
   CheckHash(U, $74523E0F, 'hash32i');
   {$else}
   Check(U = '[' + JSON_BASE64_MAGIC_UTF8 + BinToBase64(Test) + '"]');
-  {$endif ISDELPHI2010}
+  {$endif HASEXTRECORDRTTI}
   AFP.Clear;
   Check(AFP.LoadFrom(pointer(Test)) - pointer(Test) = length(Test));
   for i := 0 to 1000 do
@@ -3504,7 +3505,7 @@ function TestAddFloatStr(const str: RawUtf8): RawUtf8;
 var
   tmp: TTextWriterStackBuffer;
 begin
-  with TTextWriter.CreateOwnedStream(tmp) do
+  with TJsonWriter.CreateOwnedStream(tmp) do
   try
     AddFloatStr(pointer(str));
     SetText(result);
@@ -3521,9 +3522,9 @@ procedure TTestCoreBase.NumericalConversions;
     d: double;
     err: integer;
   begin
-    ExtendedToShort(a, v, DOUBLE_PRECISION);
+    ExtendedToShort(@a, v, DOUBLE_PRECISION);
     CheckEqual(a, expected, 'ExtendedToShort');
-    DoubleToShort(a, v);
+    DoubleToShort(@a, v);
     CheckEqual(a, expected, 'DoubleToShort');
     a[ord(a[0]) + 1] := #0;
     d := GetExtended(@a[1], err);
@@ -3560,7 +3561,7 @@ var
   c: currency;
   ident: TRawUtf8DynArray;
   vj, vs: variant;
-  a, a2: shortstring;
+  a, a2: ShortString;
   u: string;
   varint: array[0..255] of byte;
   st: TFastReader;
@@ -3602,7 +3603,7 @@ begin
   d := 3.141592653 / 1.0573623912;
   for i := 1 to n do
   begin
-    DoubleToShort(a, d);
+    DoubleToShort(@a, d);
     inc(crc, ord(a[0]));
     d := d * 1.0038265263;
   end;
@@ -4051,11 +4052,11 @@ begin
     if (i < 9000) or
        (i > 9999) then
     begin
-      a[0] := AnsiChar(ExtendedToShort(a, d, DOUBLE_PRECISION));
-      a2[0] := AnsiChar(DoubleToShort(a2, d));
+      a[0] := AnsiChar(ExtendedToShort(@a, d, DOUBLE_PRECISION));
+      a2[0] := AnsiChar(DoubleToShort(@a2, d));
       Check(a = a2);
-      a[0] := AnsiChar(ExtendedToShortNoExp(a, d, DOUBLE_PRECISION));
-      a2[0] := AnsiChar(DoubleToShortNoExp(a2, d));
+      a[0] := AnsiChar(ExtendedToShortNoExp(@a, d, DOUBLE_PRECISION));
+      a2[0] := AnsiChar(DoubleToShortNoExp(@a2, d));
       Check(a = a2);
       CheckEqual(TestAddFloatStr(s), s);
       Check(not SameValue(e + 1, d));
@@ -4434,6 +4435,19 @@ begin
   Check(GetUnQuoteCsvItem('''''''one,''''''', 0) = '''one,''');
   Check(GetUnQuoteCsvItem('"""one,', 0, ',', '"') = '');
   Check(FormatUtf8('abcd', [U], [{%H-}WS]) = 'abcd');
+  Check(MakePath([]) = '');
+  Check(MakePath([], true) = '');
+  Check(MakePath([1], false, '/') = '1');
+  Check(MakePath([1], true, '/') = '1/');
+  Check(MakePath([1, 2, '3'], false, '/') = '1/2/3');
+  Check(MakePath([1, 2, 3], true, '/') = '1/2/3/');
+  Check(MakeCsv([]) = '');
+  Check(MakeCsv([], true) = '');
+  Check(MakeCsv([1]) = '1');
+  Check(MakeCsv([1], true, '+') = '1+');
+  Check(MakeCsv([1, 2, 3]) = '1,2,3');
+  Check(MakeCsv([1, '2', 3], true) = '1,2,3,');
+  Check(MakeCsv([1, '2 ,', 3]) = '1,2 ,3');
   U := QuotedStr('', '"');
   CheckEqual(U, '""');
   U := QuotedStr('abc', '"');
@@ -5085,7 +5099,7 @@ begin
       d.tzi.Bias := i;
       check(tz.Zones.Add(d) = i, 'add some zones');
     end;
-    tz.Zones.ReHash;
+    tz.Zones.ForceReHash;
     dt := nowutc;
     for reload := false to true do
     begin
@@ -5301,6 +5315,7 @@ var
 begin
   C := TSynCache.Create;
   try
+    Check(not C.Reset);
     for i := 0 to 100 do
     begin
       v := Int32ToUtf8(i);
@@ -5308,14 +5323,17 @@ begin
       s := C.Find(v, @Tag);
       Check(s = '');
       Check(Tag = 0);
-      C.Add(v + v, i);
+      C.AddOrUpdate(v, v + v, i);
     end;
+    CheckEqual(c.Count, 101);
     for i := 0 to 100 do
     begin
       v := Int32ToUtf8(i);
       Check(C.Find(v, @Tag) = v + v);
       Check(Tag = i);
     end;
+    Check(C.Reset);
+    CheckEqual(c.Count, 0);
   finally
     C.Free;
   end;
@@ -5538,6 +5556,7 @@ end;
 procedure TTestCoreBase.UrlDecoding;
 var
   i, V: integer;
+  c: cardinal;
   s, t, d: RawUtf8;
   U: PUtf8Char;
 begin
@@ -5554,6 +5573,8 @@ begin
     Check(IdemPChar(U, 'WHERE='), 'Where');
     Check(UrlDecodeInteger(U, 'WHERE=', V));
     Check(V = i);
+    Check(UrlDecodeCardinal(U, 'WHERE=', c));
+    Check(c = cardinal(i));
     Check(not UrlDecodeValue(pointer(d), 'NOTFOUND=', t, @U));
     Check(UrlDecodeInteger(U, 'WHERE=', V, @U));
     Check(U = nil);
@@ -6158,7 +6179,7 @@ var
     end;
     dic := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray),
       TypeInfo(TIntegerDynArray), false, 0, nil, Hasher);
-    dic.Options := [doSingleThreaded];
+    dic.ThreadUse := uNoLock; // faster without locking
     if SetCapacity then
       dic.Capacity := Length(a);
     timer.Start;

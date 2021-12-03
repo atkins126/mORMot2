@@ -28,9 +28,6 @@ uses
   classes,
   variants,
   contnrs,
-  {$ifdef ISDELPHI2010} // Delphi 2009/2010 generics are buggy
-  Generics.Collections,
-  {$endif ISDELPHI2010}
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -85,7 +82,7 @@ type
   public
     /// how read or write operations will be executed
     Mode: TRestServerAcquireMode;
-    /// delay before failing to acquire the lock
+    /// ms delay before failing to acquire the lock
     LockedTimeOut: cardinal;
     /// background thread instance (if any)
     Thread: TSynBackgroundThreadMethod;
@@ -96,6 +93,11 @@ type
   /// define how a TRest class may execute its ORM and SOA operations
   TRestAcquireExecutions =
     array[TRestServerUriContextCommand] of TRestAcquireExecution;
+
+  /// a genuine identifier for a given client connection on server side
+  // - see also THttpServerConnectionID as defined in mormot.net.http: may map
+  // the http.sys ID, or a genuine 31-bit value from increasing sequence
+  TRestConnectionID = Int64;
 
 
 const
@@ -227,11 +229,11 @@ type
     function AsyncBatchRawAdd(Table: TOrmClass; const SentData: RawUtf8): integer;
     /// append some JSON content in a BATCH to be writen in a background thread
     // - could be used to emulate AsyncBatchAdd() with an already pre-computed
-    // JSON object, as stored in a TTextWriter instance
+    // JSON object, as stored in a TJsonWriter instance
     // - is a wrapper around TRestBatch.RawAppend.AddNoJsonEscape(SentData)
     // in the Timer thread
     // - this method is thread-safe
-    procedure AsyncBatchRawAppend(Table: TOrmClass; SentData: TTextWriter);
+    procedure AsyncBatchRawAppend(Table: TOrmClass; SentData: TJsonWriter);
     /// update an ORM member in a BATCH to be written in a background thread
     // - should have been preceded by a call to AsyncBatchStart(), or returns -1
     // - is a wrapper around the TRestBatch.Update() sent in the Timer thread
@@ -280,9 +282,12 @@ type
   protected
     fOwner: TRest;
     fBackgroundTimer: TRestBackgroundTimer;
+    fShutdown: boolean;
   public
     /// initialize the threading process
     constructor Create(aOwner: TRest); reintroduce;
+    /// notify that no new registration is allowed
+    procedure Shutdown;
     /// finalize the threading process
     destructor Destroy; override;
     /// allows to safely execute a processing method in a background thread
@@ -428,7 +433,7 @@ type
   TRest = class(TInterfaceResolver)
   protected
     fOrm: IRestOrm;
-    fOrmInstance: TInterfacedObject; // is a TRestOrm from mormot.orm.rest.pas
+    fOrmInstance: TRestOrmParent; // is a TRestOrm from mormot.orm.rest.pas
     fModel: TOrmModel;
     fServices: TServiceContainer;
     fRun: TRestRunThreads;
@@ -457,6 +462,7 @@ type
     /// any overriden TRest class should call it in the initialization section
     class procedure RegisterClassNameForDefinition;
     /// ensure the thread will be taken into account during process
+    // - will redirect to fOrmInstance: TRestOrmParent corresponding methods
     procedure OnBeginCurrentThread(Sender: TThread); virtual;
     procedure OnEndCurrentThread(Sender: TThread); virtual;
   public
@@ -471,7 +477,7 @@ type
     // - e.g. release associated TOrmModel and TServiceContainer
     destructor Destroy; override;
     /// called by TRestOrm.Create overriden constructor to set fOrm from IRestOrm
-    procedure SetOrmInstance(aORM: TInterfacedObject); virtual;
+    procedure SetOrmInstance(aORM: TRestOrmParent); virtual;
     /// save the TRest properties into a persistent storage object
     // - you can then use TRest.CreateFrom() to re-instantiate it
     // - current Definition.Key value will be used for the password encryption
@@ -706,14 +712,6 @@ type
     function RetrieveList(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
       const aCustomFieldsCsv: RawUtf8 = ''): TObjectList; overload;
-    {$ifdef ISDELPHI2010} // Delphi 2009/2010 generics support is buggy :(
-    function RetrieveList<T: TOrm>(
-      const aCustomFieldsCsv: RawUtf8 = ''): TObjectList<T>; overload;
-       {$ifdef HASINLINE}inline;{$endif}
-    function RetrieveList<T: TOrm>(const FormatSqlWhere: RawUtf8;
-      const BoundsSqlWhere: array of const;
-      const aCustomFieldsCsv: RawUtf8 = ''): TObjectList<T>; overload;
-    {$endif ISDELPHI2010}
     function RetrieveListJson(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
       const aCustomFieldsCsv: RawUtf8 = ''; aForceAjax: boolean = false): RawJson; overload;
@@ -738,7 +736,7 @@ type
       const aCustomFieldsCsv: RawUtf8 = ''): boolean;
     procedure AppendListAsJsonArray(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const OutputFieldName: RawUtf8; W: TJsonSerializer;
+      const OutputFieldName: RawUtf8; W: TOrmWriter;
       const CustomFieldsCsv: RawUtf8 = '');
     function RTreeMatch(DataTable: TOrmClass;
       const DataTableBlobFieldName: RawUtf8; RTreeTable: TOrmRTreeClass;
@@ -820,7 +818,7 @@ type
       ForceID: boolean = false; const CustomFields: TFieldBits = [];
       DoNotAutoComputeFields: boolean = false): integer;
     function AsyncBatchRawAdd(Table: TOrmClass; const SentData: RawUtf8): integer;
-    procedure AsyncBatchRawAppend(Table: TOrmClass; SentData: TTextWriter);
+    procedure AsyncBatchRawAppend(Table: TOrmClass; SentData: TJsonWriter);
     function AsyncBatchUpdate(Value: TOrm; const CustomFields: TFieldBits = [];
       DoNotAutoComputeFields: boolean = false): integer;
     function AsyncBatchDelete(Table: TOrmClass; ID: TID): integer;
@@ -1139,7 +1137,7 @@ type
     // - stores mormot.net.http's THttpServerConnectionID, e.g. a http.sys
     // 64-bit ID, or an incremental rolling sequence of 31-bit integers for
     // THttpServer/TWebSocketServer, or maybe a raw PtrInt(self/THandle)
-    LowLevelConnectionID: Int64;
+    LowLevelConnectionID: TRestConnectionID;
     /// low-level properties of the current connection
     LowLevelConnectionFlags: TRestUriParamsLowLevelFlags;
     /// pre-parsed Remote IP of the current connection
@@ -1482,9 +1480,6 @@ type
 
 
 implementation
-
-uses
-  mormot.orm.rest; // to avoid circular references
 
 
 { ************ Customize REST Execution }
@@ -1830,7 +1825,7 @@ begin
   fRun := TRestRunThreads.Create(self);
 end;
 
-procedure TRest.SetOrmInstance(aORM: TInterfacedObject);
+procedure TRest.SetOrmInstance(aORM: TRestOrmParent);
 begin
   if fOrmInstance <> nil then
     raise ERestException.CreateUtf8('%.SetOrmInstance twice', [self]);
@@ -1849,6 +1844,7 @@ begin
   if fOrm <> nil then
     // abort any (unlikely) pending TRestBatch
     fOrm.AsyncBatchStop(nil);
+  fRun.Shutdown; // notify ASAP
   for cmd := Low(cmd) to high(cmd) do
     FreeAndNilSafe(fAcquireExecution[cmd]); // calls fOrmInstance.OnEndThread
   FreeAndNilSafe(fServices);
@@ -1886,12 +1882,12 @@ end;
 
 procedure TRest.OnBeginCurrentThread(Sender: TThread);
 begin
-  TRestOrm(fOrmInstance).BeginCurrentThread(Sender);
+  fOrmInstance.BeginCurrentThread(Sender);
 end;
 
 procedure TRest.OnEndCurrentThread(Sender: TThread);
 begin
-  TRestOrm(fOrmInstance).EndCurrentThread(Sender);
+  fOrmInstance.EndCurrentThread(Sender);
   // most will be done e.g. in TRestRunThreadsServer.EndCurrentThread
   if fLogFamily <> nil then
     fLogFamily.OnThreadEnded(Sender);
@@ -2182,21 +2178,6 @@ begin
   result := fOrm.RetrieveList(Table, FormatSqlWhere, BoundsSqlWhere, aCustomFieldsCsv);
 end;
 
-{$ifdef ISDELPHI2010} // Delphi 2009/2010 generics support is buggy :(
-
-function TRest.RetrieveList<T>(const aCustomFieldsCsv: RawUtf8): TObjectList<T>;
-begin
-  result := fOrm.Generics.RetrieveList<T>(aCustomFieldsCsv);
-end;
-
-function TRest.RetrieveList<T>(const FormatSqlWhere: RawUtf8;
-  const BoundsSqlWhere: array of const; const aCustomFieldsCsv: RawUtf8): TObjectList<T>;
-begin
-  result := fOrm.Generics.RetrieveList<T>(FormatSqlWhere, BoundsSqlWhere, aCustomFieldsCsv);
-end;
-
-{$endif ISDELPHI2010}
-
 function TRest.RetrieveListJson(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
   const aCustomFieldsCsv: RawUtf8; aForceAjax: boolean): RawJson;
@@ -2254,7 +2235,7 @@ end;
 
 procedure TRest.AppendListAsJsonArray(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const OutputFieldName: RawUtf8; W: TJsonSerializer; const CustomFieldsCsv: RawUtf8);
+  const OutputFieldName: RawUtf8; W: TOrmWriter; const CustomFieldsCsv: RawUtf8);
 begin
   fOrm.AppendListAsJsonArray(Table, FormatSqlWhere, BoundsSqlWhere,
     OutputFieldName, W, CustomFieldsCsv);
@@ -2529,7 +2510,7 @@ begin
   result := fOrm.AsyncBatchRawAdd(Table, SentData);
 end;
 
-procedure TRest.AsyncBatchRawAppend(Table: TOrmClass; SentData: TTextWriter);
+procedure TRest.AsyncBatchRawAppend(Table: TOrmClass; SentData: TJsonWriter);
 begin
   fOrm.AsyncBatchRawAppend(Table, SentData);
 end;
@@ -2843,7 +2824,7 @@ var
 begin
   try
     // send any pending json
-    for b := 0 to high(fBackgroundBatch) do
+    for b := 0 to length(fBackgroundBatch) - 1 do
     begin
       batch := fBackgroundBatch[b];
       if batch.Count = 0 then
@@ -2869,16 +2850,17 @@ begin
       end;
       // inlined TRest.BatchSend for lower contention
       if json <> '' then
-      try
-        // json layout is '{"Table":["cmd":values,...]}'
-        status := fRest.ORM.BatchSend(table, json, res, count); // may take a while
-        fRest.InternalLog('AsyncBatchExecute % EngineBatchSend=%',
-          [table, status]);
-      except
-        on E: Exception do
-          fRest.InternalLog('% during AsyncBatchExecute %',
-            [E.ClassType, table], sllWarning);
-      end;
+        try
+          // json layout is '{"Table":["cmd":values,...]}'
+          status := fRest.Orm.BatchSend(table, json, res, count);
+          // BatchSend() may take a while
+          fRest.InternalLog(
+            'AsyncBatchExecute % EngineBatchSend=%', [table, status]);
+        except
+          on E: Exception do
+            fRest.InternalLog('% during AsyncBatchExecute %',
+              [E.ClassType, table], sllWarning);
+        end;
     end;
   finally
     if IdemPChar(pointer(Msg), 'FREE@') then
@@ -2921,7 +2903,7 @@ begin
   if fBackgroundBatch = nil then
     SetLength(fBackgroundBatch, fRest.Model.TablesMax + 1);
   fBackgroundBatch[b] := TRestBatchLocked.Create(
-    fRest.ORM, Table, AutomaticTransactionPerRow, Options);
+    fRest.Orm, Table, AutomaticTransactionPerRow, Options);
   fBackgroundBatch[b].Threshold := PendingRowThreshold;
   result := true;
 end;
@@ -3011,7 +2993,7 @@ begin
 end;
 
 procedure TRestBackgroundTimer.AsyncBatchRawAppend(Table: TOrmClass;
-  SentData: TTextWriter);
+  SentData: TJsonWriter);
 var
   b: TRestBatchLocked;
 begin
@@ -3513,15 +3495,23 @@ begin
   fOwner := aOwner;
 end;
 
+procedure TRestRunThreads.Shutdown;
+begin
+  if self <> nil then
+    fShutdown := true;
+end;
+
 destructor TRestRunThreads.Destroy;
 begin
   inherited Destroy;
+  fShutdown := true;
   FreeAndNilSafe(fBackgroundTimer);
 end;
 
 function TRestRunThreads.EnsureBackgroundTimerExists: TRestBackgroundTimer;
 begin
-  if self = nil then
+  if (self = nil) or
+     fShutdown then
   begin
     result := nil; // paranoid check to avoid any GPF
     exit;
@@ -3539,21 +3529,23 @@ end;
 function TRestRunThreads.NewBackgroundThreadMethod(const Format: RawUtf8;
    const Args: array of const): TSynBackgroundThreadMethod;
 begin
-  if self = nil then
+  if (self = nil) or
+     fShutdown then
     result := nil
   else
-    result := TSynBackgroundThreadMethod.Create(nil, FormatUtf8(Format, Args),
-      BeginCurrentThread, EndCurrentThread);
+    result := TSynBackgroundThreadMethod.Create(
+      nil, FormatUtf8(Format, Args), BeginCurrentThread, EndCurrentThread);
 end;
 
-function TRestRunThreads.NewParallelProcess(ThreadCount: integer; const Format: RawUtf8;
-  const Args: array of const): TSynParallelProcess;
+function TRestRunThreads.NewParallelProcess(ThreadCount: integer;
+  const Format: RawUtf8; const Args: array of const): TSynParallelProcess;
 begin
-  if self = nil then
+  if (self = nil) or
+     fShutdown then
     result := nil
   else
-    result := TSynParallelProcess.Create(ThreadCount, FormatUtf8(Format, Args),
-      BeginCurrentThread, EndCurrentThread);
+    result := TSynParallelProcess.Create(
+      ThreadCount, FormatUtf8(Format, Args), BeginCurrentThread, EndCurrentThread);
 end;
 
 function TRestRunThreads.NewBackgroundThreadProcess(
@@ -3564,12 +3556,13 @@ var
   name: RawUtf8;
 begin
   FormatUtf8(Format, Args, name);
-  if self = nil then
-    result := TSynBackgroundThreadProcess.Create(name, aOnProcess, aOnProcessMS,
-      nil, nil, aStats)
+  if (self = nil) or
+     fShutdown then
+    result := TSynBackgroundThreadProcess.Create(
+      name, aOnProcess, aOnProcessMS, nil, nil, aStats)
   else
-    result := TSynBackgroundThreadProcess.Create(name, aOnProcess, aOnProcessMS,
-      BeginCurrentThread, EndCurrentThread, aStats);
+    result := TSynBackgroundThreadProcess.Create(
+      name, aOnProcess, aOnProcessMS, BeginCurrentThread, EndCurrentThread, aStats);
 end;
 
 function TRestRunThreads.TimerEnable(
@@ -3577,7 +3570,8 @@ function TRestRunThreads.TimerEnable(
   aOnProcessSecs: cardinal): TRestBackgroundTimer;
 begin
   result := nil;
-  if self = nil then
+  if (self = nil) or
+     fShutdown then
     exit;
   if aOnProcessSecs = 0 then
   begin
@@ -3592,6 +3586,7 @@ function TRestRunThreads.TimerDisable(
   const aOnProcess: TOnSynBackgroundTimerProcess): boolean;
 begin
   if (self = nil) or
+     fShutdown or
      (fBackgroundTimer = nil) then
     result := false
   else
@@ -3606,7 +3601,8 @@ end;
 function TRestRunThreads.SystemUseTrack(periodSec: integer): TSystemUse;
 begin
   result := nil;
-  if self = nil then
+  if (self = nil) or
+     fShutdown then
     exit;
   result := TSystemUse.Current;
   if (result.Timer = nil) or
@@ -3636,7 +3632,8 @@ procedure TRestRunThreads.AsyncRedirect(const aGuid: TGUID;
   const aDestinationInterface: IInvokable; out aCallbackInterface;
   const aOnResult: TOnAsyncRedirectResult);
 begin
-  if self <> nil then
+  if (self <> nil) and
+     not fShutdown then
     EnsureBackgroundTimerExists.AsyncRedirect(
       aGuid, aDestinationInterface, aCallbackInterface, aOnResult);
 end;
@@ -3645,7 +3642,8 @@ procedure TRestRunThreads.AsyncRedirect(const aGuid: TGUID;
   const aDestinationInstance: TInterfacedObject; out aCallbackInterface;
   const aOnResult: TOnAsyncRedirectResult);
 begin
-  if self <> nil then
+  if (self <> nil) and
+     not fShutdown then
     EnsureBackgroundTimerExists.AsyncRedirect(
       aGuid, aDestinationInstance, aCallbackInterface, aOnResult);
 end;
@@ -3653,16 +3651,19 @@ end;
 procedure TRestRunThreads.AsyncInterning(Interning: TRawUtf8Interning;
   InterningMaxRefCount, PeriodMinutes: integer);
 begin
-  if self <> nil then
+  if (self <> nil) and
+     not fShutdown then
     EnsureBackgroundTimerExists.AsyncInterning(
       Interning, InterningMaxRefCount, PeriodMinutes);
 end;
 
 function TRestRunThreads.MultiRedirect(const aGuid: TGUID; out aCallbackInterface;
   aCallBackUnRegisterNeeded: boolean): IMultiCallbackRedirect;
-var factory: TInterfaceFactory;
+var
+  factory: TInterfaceFactory;
 begin
-  if self = nil then
+  if (self = nil) or
+     fShutdown then
     result := nil
   else
   begin
@@ -4014,6 +4015,9 @@ begin
 end;
 
 
+
+initialization
+  DefaultTAuthGroupClass := TAuthGroup;
 
 end.
 

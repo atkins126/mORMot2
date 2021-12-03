@@ -626,10 +626,9 @@ procedure fpc_dynarray_incr_ref;     external name 'FPC_DYNARRAY_INCR_REF';
 procedure fpc_dynarray_decr_ref;     external name 'FPC_DYNARRAY_DECR_REF';
 procedure fpc_dynarray_clear;        external name 'FPC_DYNARRAY_CLEAR';
 {$ifdef FPC_X64MM}
-procedure fpc_getmem;                external name 'FPC_GETMEM';
+function  fpc_getmem(size: PtrUInt): pointer; external name 'FPC_GETMEM';
 procedure fpc_freemem;               external name 'FPC_FREEMEM';
 {$else}
-procedure _Getmem;                   external name 'FPC_GETMEM';
 procedure _Freemem(p: pointer);      external name 'FPC_FREEMEM';
 {$endif FPC_X64MM}
 
@@ -660,7 +659,7 @@ asm
         mov     p, rax
         cmp     qword ptr [rax - _STRREFCNT], rdx
         jl      @z
-lock    dec     qword ptr [rax - _STRREFCNT]
+  lock  dec     qword ptr [rax - _STRREFCNT]
         jbe     @free
 @z:     ret
 @free:  sub     p, _STRRECSIZE
@@ -673,7 +672,7 @@ asm
         jz      @z
         cmp     qword ptr [p - _STRREFCNT], 0
         jl      @z
-lock    inc     qword ptr [p - _STRREFCNT]
+   lock inc     qword ptr [p - _STRREFCNT]
 @z:
 end;
 
@@ -686,7 +685,7 @@ asm
         jz      @ns
         cmp     qword ptr [s - _STRREFCNT], 0
         jl      @ns
-lock    inc     qword ptr [s - _STRREFCNT]
+   lock inc     qword ptr [s - _STRREFCNT]
 @ns:    mov     qword ptr [d], s
         test    rax, rax
         jnz     @z
@@ -694,14 +693,14 @@ lock    inc     qword ptr [s - _STRREFCNT]
 @z:     mov     d, rax
         cmp     qword ptr [rax - _STRREFCNT], 0
         jl      @n
- lock   dec     qword ptr [rax - _STRREFCNT]
+   lock dec     qword ptr [rax - _STRREFCNT]
         ja      @n
 @free:  sub     d, _STRRECSIZE
         jmp     _Freemem
 @n:
 end;
 
-{ note: fpc_ansistr_compare/_equal do check the codepage and make a UTF-8
+{ note: fpc_ansistr_compare/_equal RTL do check the codepage and make a UTF-8
   conversion if necessary, whereas Delphi _LStrCmp/_LStrEqual don't;
   involving codepage is safer, but paranoid, and 1. is (much) slower, and
   2. is not Delphi compatible -> we rather follow the Delphi's way }
@@ -790,7 +789,7 @@ asm
         jz      @z
         cmp     qword ptr [p - _DAREFCNT], 0
         jle     @z
-lock    inc     qword ptr [p - _DAREFCNT]
+   lock inc     qword ptr [p - _DAREFCNT]
 @z:
 end;
 
@@ -816,7 +815,7 @@ asm
         sub     p, SizeOf(TDynArrayRec)
         cmp     qword ptr [rax - _DAREFCNT], 0
         jle     @z
-lock    dec     qword ptr [p]
+   lock dec     qword ptr [p]
         jbe     @free
 @z:     ret
 @free:  jmp     _dynarray_decr_ref_free
@@ -847,7 +846,7 @@ begin
 end;
 
 procedure _ansistr_setlength(var s: RawByteString; len: PtrInt; cp: cardinal);
-  nostackframe; assembler;
+  {$ifndef OSWINDOWS} nostackframe; {$endif} assembler;
 asm
         mov     rax, qword ptr [s]
         test    len, len
@@ -973,13 +972,13 @@ end;
 procedure _ansistr_concat_multi_convert(var dest: RawByteString;
   const s: array of RawByteString; cp: cardinal);
 var
-  t: TBaseWriter;
+  t: TTextWriter;
   i: PtrInt;
   p: pointer;
   u: RawUtf8;
   tmp: TTextWriterStackBuffer;
 begin
-  t := TBaseWriter.CreateOwnedStream(tmp);
+  t := TTextWriter.CreateOwnedStream(tmp);
   try
     for i := 0 to high(s) do
     begin

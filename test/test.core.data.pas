@@ -258,14 +258,14 @@ type
     fTimeLog: TTimeLogDynArray;
     fFileVersions: TFVs;
     class procedure FVReader(var Context: TJsonParserContext; Data: pointer);
-    class procedure FVWriter(W: TTextWriter; Data: pointer;
+    class procedure FVWriter(W: TJsonWriter; Data: pointer;
       Options: TTextWriterWriteObjectOptions);
     class procedure FVReader2(var Context: TJsonParserContext; Data: pointer);
-    class procedure FVWriter2(W: TTextWriter; Data: pointer;
+    class procedure FVWriter2(W: TJsonWriter; Data: pointer;
       Options: TTextWriterWriteObjectOptions);
     class procedure FVClassReader(var Context: TJsonParserContext;
        Value: TObject);
-    class procedure FVClassWriter(W: TTextWriter; Value: TObject;
+    class procedure FVClassWriter(W: TJsonWriter; Value: TObject;
       Options: TTextWriterWriteObjectOptions);
   published
     property Ints: TIntegerDynArray
@@ -827,7 +827,7 @@ begin
     end;
 end;
 
-class procedure TCollTstDynArray.FVWriter(W: TTextWriter; Data: pointer;
+class procedure TCollTstDynArray.FVWriter(W: TJsonWriter; Data: pointer;
   Options: TTextWriterWriteObjectOptions);
 begin
   with PFV(Data)^ do
@@ -854,7 +854,7 @@ begin
     end;
 end;
 
-class procedure TCollTstDynArray.FVWriter2(W: TTextWriter; Data: pointer;
+class procedure TCollTstDynArray.FVWriter2(W: TJsonWriter; Data: pointer;
   Options: TTextWriterWriteObjectOptions);
 begin
   with PFV(Data)^ do
@@ -885,7 +885,7 @@ begin
     end;
 end;
 
-class procedure TCollTstDynArray.FVClassWriter(W: TTextWriter; Value: TObject;
+class procedure TCollTstDynArray.FVClassWriter(W: TJsonWriter; Value: TObject;
   Options: TTextWriterWriteObjectOptions);
 begin
   with TFileVersion(Value) do
@@ -1008,8 +1008,8 @@ var
   V: array[0..1] of TValuePUtf8Char;
 begin
   JsonDecode(Value, ['damage', 'attackspeed'], @V, true);
-  RangeFromJson(Off.Damage, V[0].Value);
-  RangeFromJson(Off.AttackSpeed, V[1].Value);
+  RangeFromJson(Off.Damage, V[0].Text);
+  RangeFromJson(Off.AttackSpeed, V[1].Text);
 end;
 
 type
@@ -1147,7 +1147,7 @@ type
       read fValue write fValue;
   end;
 
-  {$ifdef ISDELPHI2010}
+  {$ifdef HASEXTRECORDRTTI}
   TStaticArrayOfInt = packed array[1..5] of Integer;
 
   TNewRtti = record
@@ -1167,7 +1167,7 @@ type
       last_name: string;
     end;
   end;
-  {$endif ISDELPHI2010}
+  {$endif HASEXTRECORDRTTI}
 
 const
   // convention may be to use __ or _ before the type name
@@ -1525,11 +1525,11 @@ var
     X: RawUtf8;
     AA, AB: TRawUtf8DynArrayDynArray;
     i, a, v: PtrInt;
-    {$ifdef ISDELPHI2010}
+    {$ifdef HASEXTRECORDRTTI}
     nav, nav2: TConsultaNav;
     nrtti, nrtti2: TNewRtti;
     book: TBookRecord;
-    {$endif ISDELPHI2010}
+    {$endif HASEXTRECORDRTTI}
   begin
     Finalize(JR);
     Finalize(JR2);
@@ -1823,7 +1823,7 @@ var
     Check(Cache.Json = 'test3');
     Check(Cache.Tag = 12);
 
-    {$ifdef ISDELPHI2010}
+    {$ifdef HASEXTRECORDRTTI}
     FillCharFast(nav, SizeOf(nav), 0);
     FillCharFast(nav2, SizeOf(nav2), 1);
     Check(not CompareMem(@nav, @nav2, SizeOf(nav)));
@@ -1876,7 +1876,7 @@ var
     check(book.name = 'Book the First');
     check(book.author.first_name = 'Bob');
     Check(book.author.last_name = 'White');
-    {$endif ISDELPHI2010}
+    {$endif HASEXTRECORDRTTI}
   end;
 
   procedure TestGetJsonField(const s, v: RawUtf8; str, error: boolean;
@@ -2035,18 +2035,18 @@ begin
   CheckEqual(J, '{"name":"john","year":1982,"pi":3.14159}');
   check(IsValidJson(J));
   JsonDecode(J, ['year', 'pi', 'john', 'name'], @V);
-  Check(V[0].Value = '1982');
-  Check(V[1].Value = '3.14159');
-  Check(V[2].Value = nil);
-  Check(V[3].Value = 'john');
+  Check(V[0].Text = '1982');
+  Check(V[1].Text = '3.14159');
+  Check(V[2].Text = nil);
+  Check(V[3].Text = 'john');
   J := '{surrogate:"\uD801\uDC00"}'; // see https://en.wikipedia.org/wiki/CESU-8
   check(IsValidJson(J));
   JsonDecode(J, ['surrogate'], @V);
-  Check(V[0].ValueLen = 4);
-  Check(V[0].Value[0] = #$F0);
-  Check(V[0].Value[1] = #$90);
-  Check(V[0].Value[2] = #$90);
-  Check(V[0].Value[3] = #$80);
+  Check(V[0].Len = 4);
+  Check(V[0].Text[0] = #$F0);
+  Check(V[0].Text[1] = #$90);
+  Check(V[0].Text[2] = #$90);
+  Check(V[0].Text[3] = #$80);
   J := JsonEncode(['name', 'john', 'ab', '[', 'a', 'b', ']']);
   check(IsValidJson(J));
   CheckEqual(J, '{"name":"john","ab":["a","b"]}');
@@ -2143,11 +2143,11 @@ begin
     JsonDecode(J, ['U', 'R', 'A', 'FOO'], @V);
     V[0].ToUtf8(U2);
     Check(U2 = U);
-    Check(SameValue(GetExtended(V[1].Value, err), r));
-    Check(not IsString(V[2].Value));
-    Check(not IsStringJson(V[2].Value));
+    Check(SameValue(GetExtended(V[1].Text, err), r));
+    Check(not IsString(V[2].Text));
+    Check(not IsStringJson(V[2].Text));
     Check(V[2].ToInteger = a);
-    Check(V[3].Value = nil);
+    Check(V[3].Text = nil);
     J := BinToBase64WithMagic(U);
     check(PInteger(J)^ and $00ffffff = JSON_BASE64_MAGIC_C);
     RB := BlobToRawBlob(pointer(J));
@@ -2165,7 +2165,7 @@ begin
     check(CompareMem(pointer(RB), pointer(U), length(U)));
 {    J := TRestServer.JsonEncodeResult([r]);
     Check(SameValue(GetExtended(pointer(JsonDecode(J)),err),r)); }
-    with TTextWriter.CreateOwnedStream do
+    with TJsonWriter.CreateOwnedStream do
     try
       AddVariant(a);
       AddComma;
@@ -2712,10 +2712,10 @@ begin
   end;
   Parser.Free;
 
-  {$ifdef ISDELPHI2010}
+  {$ifdef HASEXTRECORDRTTI}
   // test JSON serialization defined by Enhanced RTTI available since Delphi 2010
   TestJSONSerialization;
-  {$endif ISDELPHI2010}
+  {$endif HASEXTRECORDRTTI}
   // test TJsonRecordTextDefinition JSON serialization
   Rtti.RegisterFromText(TypeInfo(TSubAB), __TSubAB);
   Rtti.RegisterFromText(TypeInfo(TSubCD), __TSubCD);
@@ -2738,10 +2738,10 @@ begin
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayVariant), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArraySimple), '');
 
-  {$ifdef ISDELPHI2010}
+  {$ifdef HASEXTRECORDRTTI}
   // test JSON serialization defined by Enhanced RTTI
   TestJSONSerialization;
-  {$endif ISDELPHI2010}
+  {$endif HASEXTRECORDRTTI}
   // tests parsing options
   Parser := Rtti.RegisterFromText(
     TypeInfo(TTestCustomJsonRecord), __TTestCustomJsonRecord);
@@ -4288,6 +4288,8 @@ var
   Doc, Doc2: TDocVariantData;
   model, m2: TDocVariantModel;
   vr: TTVarRecDynArray;
+  dv: PDocVariantData;
+  pv: PVariant;
   i, ndx: PtrInt;
   V, V1, V2: variant;
   s, j: RawUtf8;
@@ -4550,8 +4552,11 @@ begin
   vd := 1.7;
   _Safe(V1)^.AddItem(vd);
   CheckEqual(VariantSaveJson(V1), '[1.5,1.7]');
-  V2 := _obj(['id', 1]);
+  V2 := _obj(['id', 0]);
+  Check(VariantSaveJson(V2) = '{"id":0}');
+  Check(_Safe(V2)^.SetValueByPath('id', 1));
   Check(VariantSaveJson(V2) = '{"id":1}');
+  Check(not _Safe(V2)^.SetValueByPath('id.name', 'toto'));
   V1.Add(V2);
   Check(VariantSaveJson(V1) = '[1.5,1.7,{"id":1}]');
   s := 'abc';
@@ -4564,11 +4569,29 @@ begin
   Doc.InitObjectFromPath('name', 'toto');
   check(Doc.ToJson = '{"name":"toto"}');
   Doc.Clear;
-  Doc.InitObjectFromPath('people.age', 31);
+  Doc.InitObjectFromPath('people.age', 30);
+  check(Doc.ToJson = '{"people":{"age":30}}');
+  Check(Doc.SetValueByPath('people.age', 31));
+  Check(not Doc.SetValueByPath('people2.name', 'toto'));
   check(Doc.ToJson = '{"people":{"age":31}}');
+  Check(Doc.SetValueByPath('people2.name', 'toto', {create=}true));
+  check(Doc.ToJson = '{"people":{"age":31},"people2":{"name":"toto"}}');
+  check(not Doc.GetDocVariantByPath('Peopl2', dv));
+  check(Doc.GetDocVariantByPath('People2', dv));
+  checkEqual(dv^.ToJson, '{"name":"toto"}');
+  pv := Doc.GetPVariantByPath('people2.NAME');
+  check(pv <> nil);
+  check(pv^ = 'toto');
+  Check(Doc.DeleteByPath('people2.Name'));
+  checkEqual(Doc.ToJson, '{"people":{"age":31},"people2":{}}');
+  Check(not Doc.DeleteByPath('people22'));
+  Check(Doc.DeleteByPath('people2'));
+  checkEqual(Doc.ToJson, '{"people":{"age":31}}');
   check(Doc.O['people'].ToJson = '{"age":31}');
   check(Doc.O['people2'].ToJson = 'null');
-  Doc.O_['people2'].AddValue('name', 'toto');
+  Doc.O_['people2'].AddValue('name', 'titi');
+  check(Doc.ToJson = '{"people":{"age":31},"people2":{"name":"titi"}}');
+  Check(Doc.SetValueByPath('people2.name', 'toto'));
   check(Doc.ToJson = '{"people":{"age":31},"people2":{"name":"toto"}}');
   check(Doc.A['arr'].ToJson = 'null');
   Doc.A_['arr'].AddItems([1, 2.2, '3']);
@@ -4873,7 +4896,8 @@ begin
     t := UrlEncode(s);
     Check(UrlDecode(t) = s);
     d := 'seleCT=' + t + '&where=' + Int32ToUtf8(i);
-    Check(UrlEncode(['seleCT', s, 'where', i]) = '?' + d);
+    CheckEqual(UrlEncode(['seleCT', s, 'where', i]), '?' + d);
+    CheckEqual(UrlEncode(['seleCT', s, 'where', i], {trimlead=}true), d);
   end;
 end;
 

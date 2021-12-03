@@ -331,7 +331,7 @@ end;
 
 function TIcuLibrary.ucnv(codepage: cardinal): pointer;
 var
-  s: shortstring;
+  s: ShortString;
   err: SizeInt;
   {$ifdef CPUINTEL}
   mask: cardinal;
@@ -617,7 +617,7 @@ begin
   result := result div MILLION; // ns to ms
 end;
 
-function UnixTimeUtc: Int64;
+function UnixTimeUtc: TUnixTime;
 var
   tz: timeval;
 begin
@@ -625,7 +625,7 @@ begin
   result := tz.tv_sec;
 end;
 
-function UnixMSTimeUtc: Int64;
+function UnixMSTimeUtc: TUnixMSTime;
 var
   tz: timeval;
 begin
@@ -692,7 +692,7 @@ var
   CLOCK_MONOTONIC_PRECISE: integer = CLOCK_MONOTONIC;
 
 
-function UnixMSTimeUtc: Int64;
+function UnixMSTimeUtc: TUnixMSTime;
 var
   r: timespec;
 begin
@@ -701,7 +701,7 @@ begin
   result := PtrUInt(r.tv_nsec) div MILLION + (r.tv_sec * THOUSAND);
 end;
 
-function UnixTimeUtc: Int64;
+function UnixTimeUtc: TUnixTime;
 var
   r: timespec;
 begin
@@ -739,7 +739,7 @@ end;
 
 {$endif OSDARWIN}
 
-function UnixMSTimeUtcFast: Int64;
+function UnixMSTimeUtcFast: TUnixMSTime;
 begin
   result := UnixMSTimeUtc;
 end;
@@ -1074,6 +1074,17 @@ begin
   end;
   fpnanosleep(@timeout, nil)
   // no retry loop on ESysEINTR (as with regular RTL's Sleep)
+end;
+
+procedure SwitchToThread;
+var
+  timeout: Ttimespec;
+begin
+  // nanosleep() seems better than FPC RTL ThreadSwitch = sched_yield
+  timeout.tv_sec := 0;
+  timeout.tv_nsec := 10; // empirically identified on a recent Linux Kernel
+  // note: nanosleep() adds a few dozen of microsecs for context switching
+  fpnanosleep(@timeout, nil);
 end;
 
 procedure InitializeCriticalSection(var cs : TRTLCriticalSection);
@@ -1452,13 +1463,13 @@ begin
   fpsysctl(pointer(@mib), 2, @result, @len, nil, 0);
 end;
 
-function fpsysctlhwstr(hwid: cint; var temp: shortstring): pointer;
+function fpsysctlhwstr(hwid: cint; var temp: ShortString): pointer;
 var mib: array[0..1] of cint;
     len: cint;
 begin
   mib[0] := CTL_HW;
   mib[1] := hwid;
-  FillCharFast(temp, SizeOf(temp), 0); // shortstring as 0-terminated buffer
+  FillCharFast(temp, SizeOf(temp), 0); // ShortString as 0-terminated buffer
   len := SizeOf(temp);
   fpsysctl(pointer(@mib), 2, @temp, @len, nil, 0);
   if temp[0] <> #0 then
@@ -1929,7 +1940,7 @@ procedure DoShutDown(Sig: integer; Info: PSigInfo; Context: PSigContext); cdecl;
 var
   level: TSynLogInfo;
   si_code: integer;
-  text: shortstring; // code below has no memory allocation
+  text: ShortString; // code below has no memory allocation
 begin
   if Assigned(SynDaemonInterceptLog) then
   begin
@@ -2271,6 +2282,54 @@ end;
 
 {$endif OSLINUX}
 
+function Hex2Dec(c: AnsiChar): integer; inline;
+begin
+  result := ord(c);
+  case c of
+    '0'..'9':
+      dec(result, ord('0'));
+    'A'..'Z':
+      dec(result, ord('A') - 10);
+    'a'..'z':
+      dec(result, ord('a') - 10);
+  else
+    result := -1;
+  end;
+end;
+
+function PosixParseHex32(p: PAnsiChar): integer;
+var
+  v0, v1: integer;
+begin
+  result := 0;
+  p := StrScan(p, 'x');
+  if p = nil then
+    exit;
+  repeat
+    inc(p); // points to trailing 'x' at start
+    v0 := Hex2Dec(p^);
+    if v0 < 0 then
+      break; // not in '0'..'9','a'..'f'
+    inc(p);
+    v1 := Hex2Dec(p^);
+    if v1 < 0 then
+    begin
+      result := (result shl 4) or v0; // only one char left
+      break;
+    end;
+    result := (result shl 8) or (v0 shl 4) or v1;
+  until false;
+end;
+
+procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);
+var
+  v: integer;
+begin
+  v := PosixParseHex32(p);
+  if v <> 0 then
+    AddInteger(result, v, {nodup=}true);
+end;
+
 {$ifdef CPUARM3264} // POSIX libc is faster than the RTL or our pascal code
 
 function libc_strlen(s: PAnsiChar): SizeInt;
@@ -2302,46 +2361,6 @@ begin
   if (@dest <> nil) and
      (count > 0) then
     libc_memset(@dest, value, count);
-end;
-
-function Hex2Dec(c: AnsiChar): integer; inline;
-begin
-  result := ord(c);
-  case c of
-    '0'..'9':
-      dec(result, ord('0'));
-    'A'..'Z':
-      dec(result, ord('A') - 10);
-    'a'..'z':
-      dec(result, ord('a') - 10);
-  else
-    result := -1;
-  end;
-end;
-
-procedure ParseHex32(p: PAnsiChar; var result: TIntegerDynArray);
-var
-  v, v0, v1: integer;
-begin
-  p := StrScan(p, 'x');
-  if p = nil then
-    exit;
-  v := 0;
-  repeat
-    inc(p); // points to trailing 'x' at start
-    v0 := Hex2Dec(p^);
-    if v0 < 0 then
-      break; // not in '0'..'9','a'..'f'
-    inc(p);
-    v1 := Hex2Dec(p^);
-    if v1 < 0 then
-    begin
-      v := (v shl 4) or v0; // only one char left
-      break;
-    end;
-    v := (v shl 8) or (v0 shl 4) or v1;
-  until false;
-  AddInteger(result, v, {nodup=}true);
 end;
 
 {$ifdef OSLINUXANDROID}
@@ -2413,7 +2432,7 @@ var
   tp: timespec;
   {$endif OSDARWIN}
   {$ifdef OSBSDDARWIN}
-  temp: shortstring;
+  temp: ShortString;
   {$else}
   hw, cpuinfo: PUtf8Char;
   proccpuinfo, release, prod: RawUtf8;
@@ -2530,9 +2549,9 @@ begin
       hw := ParseLine(beg)
     {$ifdef CPUARM3264}
     else if IdemPChar(beg, 'CPU IMPLEMENTER') then
-      ParseHex32(beg, aci)
+      ParseHex32Add(beg, aci)
     else if IdemPChar(beg, 'CPU PART') then
-      ParseHex32(beg, act);
+      ParseHex32Add(beg, act);
     {$endif CPUARM3264}
   end;
   {$ifdef CPUARM3264}

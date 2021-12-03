@@ -11,9 +11,6 @@ uses
   sysutils,
   {$ifndef FPC}
   typinfo, // to avoid Delphi inlining problems
-  {$ifdef ISDELPHI2010} // Delphi 2009/2010 generics are buggy
-  Generics.Collections,
-  {$endif ISDELPHI2010}
   {$endif FPC}
   mormot.core.base,
   mormot.core.os,
@@ -29,6 +26,9 @@ uses
   mormot.core.log,
   mormot.core.mustache,
   mormot.core.test,
+  {$ifdef ORMGENERICS} // not supported on oldest compilers (e.g. < Delphi XE8)
+  mormot.core.collections,
+  {$endif ORMGENERICS}
   mormot.db.core,
   mormot.db.nosql.bson,
   mormot.orm.base,
@@ -202,10 +202,9 @@ var
   readonly: boolean;
   docs: variant;
   T: TOrmTable;
-{$ifdef ISDELPHI2010}
-var
-  List: TObjectList<TOrmTest>;
-{$endif ISDELPHI2010}
+  {$ifdef ORMGENERICS}
+  List: IList<TOrmTest>;
+  {$endif ORMGENERICS}
 begin
   Model := TOrmModel.Create([TOrmTest]);
   try
@@ -294,10 +293,10 @@ begin
         finally
           R.Free;
         end;
-        {$ifdef ISDELPHI2010}
-        List := Client.Orm.Generics.RetrieveList<TOrmTest>('*');
+        {$ifdef ORMGENERICS}
+        Check(Client.Orm.RetrieveIList(TOrmTest, List, '*'));
         if not CheckFailed(List <> nil) then
-        try
+        begin
           Check(List.Count = 9999);
           for R in List do
             R.CheckWith(self, R.IDValue);
@@ -306,10 +305,9 @@ begin
             R := List[i];
             R.CheckWith(self, i + 1);
           end;
-        finally
-          List.Free;
+          // List := nil; // not mandatory
         end;
-        {$endif ISDELPHI2010}
+        {$endif ORMGENERICS}
         for readonly := false to true do
         begin
           T := Client.Orm.MultiFieldValues(TOrmTest, '*');

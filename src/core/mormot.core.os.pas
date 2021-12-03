@@ -117,7 +117,7 @@ const
 // - e.g. StatusCodeToReason(200)='OK'
 // - as defined in http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
 // - see also StatusCodeToErrorMsg() from mormot.core.text if you need
-// the HTTP error as both integer and text, returned as shortstring
+// the HTTP error as both integer and text, returned as ShortString
 function StatusCodeToReason(Code: cardinal): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -229,12 +229,12 @@ const
   NORESPONSE_CONTENT_TYPE = '!NORESPONSE';
 
   /// JSON compatible representation of a boolean value, i.e. 'false' and 'true'
-  // - can be used e.g. in logs, or anything accepting a shortstring
+  // - can be used e.g. in logs, or anything accepting a ShortString
   BOOL_STR: array[boolean] of string[7] = (
     'false', 'true');
 
   /// the JavaScript-like values of non-number IEEE constants
-  // - as recognized by FloatToShortNan, and used by TBaseWriter.Add()
+  // - as recognized by FloatToShortNan, and used by TTextWriter.Add()
   // when serializing such single/double/extended floating-point values
   JSON_NAN: array[TFloatNan] of string[11] = (
     '0', '"NaN"', '"Infinity"', '"-Infinity"');
@@ -309,7 +309,7 @@ type
     osAndroid);
 
   /// the recognized Windows versions
-  // - defined even outside MSWINDOWS to access e.g. from monitoring tools
+  // - defined even outside OSWINDOWS to access e.g. from monitoring tools
   TWindowsVersion = (
     wUnknown,
     w2000,
@@ -356,7 +356,7 @@ type
 
 const
   /// the recognized Windows versions, as plain text
-  // - defined even outside MSWINDOWS to allow process e.g. from monitoring tools
+  // - defined even outside OSWINDOWS to allow process e.g. from monitoring tools
   WINDOWS_NAME: array[TWindowsVersion] of RawUtf8 = (
     '',
     '2000',
@@ -984,7 +984,7 @@ procedure SetExecutableVersion(const aVersionText: RawUtf8); overload;
 // return filename, symbol name and line number (if any) as plain text, e.g.
 // '4cb765 ../src/core/mormot.core.base.pas statuscodeissuccess (11183)' on FPC
 var
-  GetExecutableLocation: function(aAddress: pointer): shortstring;
+  GetExecutableLocation: function(aAddress: pointer): ShortString;
 
 
 type
@@ -1187,6 +1187,57 @@ type
   HCRYPTKEY = pointer;
   HCRYPTHASH = pointer;
 
+  PCCERT_CONTEXT = pointer;
+  PPCCERT_CONTEXT = ^PCCERT_CONTEXT;
+  PCCRL_CONTEXT = pointer;
+  PPCCRL_CONTEXT = ^PCCRL_CONTEXT;
+  PCRYPT_ATTRIBUTE = pointer;
+  PCERT_INFO = pointer;
+  HCERTSTORE = pointer;
+
+  CRYPTOAPI_BLOB = record
+    cbData: DWORD;
+    pbData: PByte;
+  end;
+  CRYPT_OBJID_BLOB = CRYPTOAPI_BLOB;
+
+  PCRYPT_ALGORITHM_IDENTIFIER = ^CRYPT_ALGORITHM_IDENTIFIER;
+  CRYPT_ALGORITHM_IDENTIFIER = record
+    pszObjId: PAnsiChar;
+    Parameters: CRYPT_OBJID_BLOB;
+  end;
+
+  CRYPT_SIGN_MESSAGE_PARA = record
+    cbSize: DWORD;
+    dwMsgEncodingType: DWORD;
+    pSigningCert: PCCERT_CONTEXT;
+    HashAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
+    pvHashAuxInfo: Pointer;
+    cMsgCert: DWORD;
+    rgpMsgCert: PPCCERT_CONTEXT;
+    cMsgCrl: DWORD;
+    rgpMsgCrl: PPCCRL_CONTEXT;
+    cAuthAttr: DWORD;
+    rgAuthAttr: PCRYPT_ATTRIBUTE;
+    cUnauthAttr: DWORD;
+    rgUnauthAttr: PCRYPT_ATTRIBUTE;
+    dwFlags: DWORD;
+    dwInnerContentType: DWORD;
+    HashEncryptionAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
+    pvHashEncryptionAuxInfo: Pointer;
+  end;
+
+  PFN_CRYPT_GET_SIGNER_CERTIFICATE = function(pvGetArg: Pointer;
+    dwCertEncodingType: DWORD; pSignerId: PCERT_INFO;
+    hMsgCertStore: HCERTSTORE): PCCERT_CONTEXT; stdcall;
+  CRYPT_VERIFY_MESSAGE_PARA = record
+    cbSize: DWORD;
+    dwMsgAndCertEncodingType: DWORD;
+    hCryptProv: HCRYPTPROV;
+    pfnGetSignerCertificate: PFN_CRYPT_GET_SIGNER_CERTIFICATE;
+    pvGetArg: Pointer;
+  end;
+
   /// direct access to the Windows CryptoApi
   TWinCryptoApi = object
   private
@@ -1224,6 +1275,14 @@ type
     // - since Windows Vista with Service Pack 1 (SP1), an AES counter-mode
     // based PRNG specified in NIST Special Publication 800-90 is used
     GenRandom: function(hProv: HCRYPTPROV; dwLen: DWORD; pbBuffer: Pointer): BOOL; stdcall;
+    /// sign a message (not resolved yet - in crypt32.dll)
+    SignMessage: function(var pSignPara: CRYPT_SIGN_MESSAGE_PARA;
+      fDetachedSignature: BOOL; cToBeSigned: DWORD; rgpbToBeSigned: pointer;
+      var rgcbToBeSigned: DWORD; pbSignedBlob: pointer; var pcbSignedBlob: DWORD): BOOL; stdcall;
+    /// verify a signed message (not resolved yet - in crypt32.dll)
+    VerifyMessageSignature: function(var pVerifyPara: CRYPT_VERIFY_MESSAGE_PARA;
+      dwSignerIndex: DWORD; pbSignedBlob: PByte; cbSignedBlob: DWORD;
+      pbDecoded: PByte; pcbDecoded: LPDWORD; ppSignerCert: PPCCERT_CONTEXT): BOOL; stdcall;
     /// try to load the CryptoApi on this system
     function Available: boolean;
       {$ifdef HASINLINE}inline;{$endif}
@@ -1289,11 +1348,11 @@ procedure CoInit;
 procedure CoUninit;
 
 /// retrieves the current executable module handle, i.e.  its memory load address
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetModuleHandle(lpModuleName: PChar): HMODULE;
 
 /// post a message to the Windows message queue
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 function PostMessage(hWnd: HWND; Msg:UINT; wParam: WPARAM; lParam: LPARAM): BOOL;
 
 /// retrieves the current stack trace
@@ -1306,20 +1365,20 @@ function RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture: cardinal;
 function IsDebuggerPresent: BOOL; stdcall;
 
 /// retrieves the current thread ID
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentThreadId: DWORD; stdcall;
 
 /// retrieves the current process ID
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentProcessId: DWORD; stdcall;
 
-/// redefined in mormot.core.os to avoid dependency to Windows
+/// redefined in mormot.core.os to avoid dependency to the Windows unit
 function WaitForSingleObject(hHandle: THandle; dwMilliseconds: DWORD): DWORD; stdcall;
 
-/// redefined in mormot.core.os to avoid dependency to Windows
+/// redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetEnvironmentStringsW: PWideChar; stdcall;
 
-/// redefined in mormot.core.os to avoid dependency to Windows
+/// redefined in mormot.core.os to avoid dependency to the Windows unit
 function FreeEnvironmentStringsW(EnvBlock: PWideChar): BOOL; stdcall;
 
 /// expand any embedded environment variables, i.e %windir%
@@ -1327,39 +1386,39 @@ function ExpandEnvVars(const aStr: string): string;
 
 /// try to enter a Critical Section (Lock)
 // - returns 1 if the lock was acquired, or 0 if the mutex is already locked
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 // - under Delphi/Windows, directly call the homonymous Win32 API
 function TryEnterCriticalSection(var cs: TRTLCriticalSection): integer; stdcall;
 
 /// enter a Critical Section (Lock)
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 // - under Delphi/Windows, directly call the homonymous Win32 API
 procedure EnterCriticalSection(var cs: TRTLCriticalSection); stdcall;
 
 /// leave a Critical Section (UnLock)
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 // - under Delphi/Windows, directly call the homonymous Win32 API
 procedure LeaveCriticalSection(var cs: TRTLCriticalSection); stdcall;
 
 /// initialize IOCP instance
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 function CreateIoCompletionPort(FileHandle, ExistingCompletionPort: THandle;
   CompletionKey: pointer; NumberOfConcurrentThreads: DWORD): THandle; stdcall;
 
 /// retrieve IOCP instance status
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetQueuedCompletionStatus(CompletionPort: THandle;
   var lpNumberOfBytesTransferred: DWORD; var lpCompletionKey: PtrUInt;
   var lpOverlapped: pointer; dwMilliseconds: DWORD): BOOL; stdcall;
 
 /// trigger a IOCP instance
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 function PostQueuedCompletionStatus(CompletionPort: THandle;
   NumberOfBytesTransferred: DWORD; dwCompletionKey: pointer;
   lpOverlapped: POverlapped): BOOL; stdcall;
 
 /// finalize a Windows resource (e.g. IOCP instance)
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 function CloseHandle(hObject: THandle): BOOL; stdcall;
 
 /// redefined here to avoid warning to include "Windows" in uses clause
@@ -1559,7 +1618,7 @@ type
 
 /// returns the current UTC time as TSystemTime
 // - under Delphi/Windows, directly call the homonymous Win32 API
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 // - you should call directly FPC's version otherwise
 // - warning: do not call this function directly, but use TSynSystemTime as
 // defined in mormot.core.datetime which is really cross-platform
@@ -1567,7 +1626,18 @@ procedure GetLocalTime(out result: TSystemTime); stdcall;
 
 /// a wrapper around FileTimeToLocalFileTime/FileTimeToSystemTime Windows APIs
 // - only used by mormot.lib.static for proper SQlite3 linking on Windows
-procedure UnixTimeToLocalTime(I64: Int64; out Local: TSystemTime);
+procedure UnixTimeToLocalTime(I64: TUnixTime; out Local: TSystemTime);
+
+/// convert an Unix seconds time to a Win32 64-bit FILETIME value
+procedure UnixTimeToFileTime(I64: TUnixTime; out FT: TFileTime);
+
+/// convert a Win32 64-bit FILETIME value into an Unix seconds time
+function FileTimeToUnixTime(const FT: TFileTime): TUnixTime;
+  {$ifdef FPC} inline; {$endif}
+
+/// convert a Win32 64-bit FILETIME value into an Unix milliseconds time
+function FileTimeToUnixMSTime(const FT: TFileTime): TUnixMSTime;
+  {$ifdef FPC} inline; {$endif}
 
 {$else}
 
@@ -1593,17 +1663,17 @@ function LibraryResolve(Lib: TLibHandle; ProcName: PAnsiChar): pointer;
 
 
 const
-  /// redefined here to avoid dependency to Windows or SyncObjs
+  /// redefined here to avoid dependency to the Windows or SyncObjs units
   INFINITE = cardinal(-1);
 
 /// initialize a Critical Section (for Lock/UnLock)
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 // - under Delphi/Windows, directly call the homonymous Win32 API
 procedure InitializeCriticalSection(var cs : TRTLCriticalSection);
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
 /// finalize a Critical Section (for Lock/UnLock)
-// - redefined in mormot.core.os to avoid dependency to Windows
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
 // - under Delphi/Windows, directly call the homonymous Win32 API
 procedure DeleteCriticalSection(var cs : TRTLCriticalSection);
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
@@ -1622,7 +1692,7 @@ var EnterCriticalSection: procedure(var cs: TRTLCriticalSection);
 // - defined in mormot.core.os for inlined FpcCurrentThreadManager call
 var LeaveCriticalSection: procedure(var cs: TRTLCriticalSection);
 
-/// leave a Critical Section (UnLock)
+/// try to acquire and lock a Critical Section (Lock)
 // - returns 1 if the lock was acquired, or 0 if the mutex is already locked
 // - defined in mormot.core.os for inlined FpcCurrentThreadManager call
 var TryEnterCriticalSection: function(var cs: TRTLCriticalSection): integer;
@@ -1638,7 +1708,7 @@ function IsInitializedCriticalSection(var cs: TRTLCriticalSection): boolean;
 // - if the supplied mutex has been initialized, do nothing
 // - if the supplied mutex is void (i.e. all filled with 0), initialize it
 procedure InitializeCriticalSectionIfNeededAndEnter(var cs: TRTLCriticalSection);
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef HASINLINEWINAPI}inline;{$endif}
 
 /// on need finalization of a mutex
 // - if the supplied mutex has been initialized, delete it
@@ -1729,10 +1799,10 @@ function Unicode_AnsiToWide(
 function Unicode_WideToAnsi(
   W: PWideChar; A: PAnsiChar; LW, LA, CodePage: PtrInt): integer;
 
-/// conversion of some UTF-16 buffer into a temporary Ansi shortstring
+/// conversion of some UTF-16 buffer into a temporary Ansi ShortString
 // - used when mormot.core.unicode is an overkill, e.g. TCrtSocket.SockSend()
 procedure Unicode_WideToShort(
-  W: PWideChar; LW, CodePage: PtrInt; var res: shortstring);
+  W: PWideChar; LW, CodePage: PtrInt; var res: ShortString);
 
 /// compatibility function, wrapping Win32 API CharUpperBuffW()
 // - on POSIX, use the ICU library, or fallback to 'a'..'z' conversion only
@@ -1775,7 +1845,7 @@ function NowUtc: TDateTime;
 // (will use e.g. fast clock_gettime(CLOCK_REALTIME_COARSE) under Linux,
 // or GetSystemTimeAsFileTime under Windows)
 // - returns a 64-bit unsigned value, so is "Year2038bug" free
-function UnixTimeUtc: Int64;
+function UnixTimeUtc: TUnixTime;
 
 /// returns the current UTC date/time as a millisecond-based c-encoded time
 // - i.e. current number of milliseconds elapsed since Unix epoch 1/1/1970
@@ -1784,14 +1854,14 @@ function UnixTimeUtc: Int64;
 // or GetSystemTimeAsFileTime/GetSystemTimePreciseAsFileTime under Windows - the
 // later being more accurate, but slightly slower than the former, so you may
 // consider using UnixMSTimeUtcFast on Windows if its 10-16ms accuracy is enough
-function UnixMSTimeUtc: Int64;
+function UnixMSTimeUtc: TUnixMSTime;
 
 /// returns the current UTC date/time as a millisecond-based c-encoded time
 // - under Linux/POSIX, is the very same than UnixMSTimeUtc (inlined call)
 // - under Windows 8+, will call GetSystemTimeAsFileTime instead of
 // GetSystemTimePreciseAsFileTime, which has higher precision, but is slower
 // - prefer it under Windows, if a dozen of ms resolution is enough for your task
-function UnixMSTimeUtcFast: Int64;
+function UnixMSTimeUtcFast: TUnixMSTime;
   {$ifdef OSPOSIX} inline; {$endif}
 
 /// the number of minutes bias in respect to UTC/GMT date/time
@@ -1819,10 +1889,10 @@ type
     EStack: PPtrUInt;
     /// = FPC's RaiseProc() FrameCount if EStack is Frame: PCodePointer
     EStackCount: integer;
-    /// timestamp of this exception, as number of seconds since UNIX Epoch (TUnixTime)
+    /// timestamp of this exception, as number of seconds since UNIX Epoch
     // - UnixTimeUtc is faster than NowUtc or GetSystemTime
     // - use UnixTimeToDateTime() to convert it into a regular TDateTime
-    ETimestamp: Int64;
+    ETimestamp: TUnixTime;
     /// the logging level corresponding to this exception
     // - may be either sllException or sllExceptionOS
     ELevel: TSynLogInfo;
@@ -1877,7 +1947,14 @@ function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): bo
 
 /// convert a Windows File 32-bit TimeStamp into a regular TDateTime
 // - returns 0 if the conversion failed
+// - used e.g. by FileSetDateFromWindowsTime() on POSIX
 function WindowsFileTimeToDateTime(WinTime: integer): TDateTime;
+
+/// convert a Windows File 64-bit TimeStamp into a regular TDateTime
+// - i.e. a FILETIME value as returned by GetFileTime() Win32 API
+// - returns 0 if the conversion failed
+// - some binary formats (e.g. ISO 9660) has such FILETIME fields
+function WindowsFileTime64ToDateTime(WinTime: QWord): TDateTime;
 
 /// low-level conversion of a TDateTime into a Windows File 32-bit TimeStamp
 // - returns 0 if the conversion failed
@@ -2365,6 +2442,15 @@ function ConsoleReadBody: RawByteString;
 /// low-level access to the keyboard state of a given key
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
+// local RTL wrapper function to avoid linking mormot.core.unicode.pas
+// when using Windows API
+procedure Win32PWideCharToUtf8(P: PWideChar; Len: integer; out res: RawUtf8);
+
+{$else}
+
+// internal function to avoid linking mormot.core.buffers.pas
+function PosixParseHex32(p: PAnsiChar): integer;
+
 {$endif OSWINDOWS}
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded string
@@ -2432,9 +2518,161 @@ procedure RedirectCode(Func, RedirectFunc: Pointer);
 
 { **************** TSynLocker/TSynLocked and Low-Level Threading Features }
 
-  { TODO : introduce light cross-platform read/write lockers ? }
+type
+  /// a lightweight exclusive non-rentrant lock, stored in a PtrUInt value
+  // - calls SwitchToThread after some spinning, but don't use any R/W OS API
+  // - warning: methods are non rentrant, i.e. calling Lock twice in a raw would
+  // deadlock: use TRWLock or TSynLocker/TRTLCriticalSection for reentrant methods
+  // - light locks are expected to be kept a very small amount of time: use
+  // TSynLocker or TRTLCriticalSection if the lock may block too long
+  // - only consume 4 bytes on CPU32, 8 bytes on CPU64
+  {$ifdef USERECORDWITHMETHODS}
+  TLightLock = record
+  {$else}
+  TLightLock = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    Flags: PtrUInt;
+    // low-level function called by the Lock method when inlined
+    procedure LockSpin;
+  public
+    /// to be called if the instance has not been filled with 0
+    // - e.g. not needed if TLightLock is defined as a class field
+    procedure Init;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// enter an exclusive non-rentrant lock
+    procedure Lock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// try to enter an exclusive non-rentrant lock
+    // - if returned true, caller should eventually call LightUnLock()
+    // - several lightlocks, each protecting a few variables (e.g. a list), may be
+    // more efficient than a more global TRTLCriticalSection/TRWLock
+    function TryLock: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// leave an exclusive non-rentrant lock
+    procedure UnLock;
+      {$ifdef HASINLINE} inline; {$endif}
+  end;
 
 type
+  /// how TRWLock.Lock and TRWLock.UnLock high-level wrapper methods are called
+  TRWLockContext = (
+    cReadOnly,
+    cReadWrite,
+    cWrite);
+
+  /// a lightweight multiple Reads / exclusive Write lock
+  // - calls SwitchToThread after some spinning, but don't use any R/W OS API
+  // - locks are expected to be kept a very small amount of time: use TSynLocker
+  // or TRTLCriticalSection if the lock may block too long
+  // - warning: all methods are reentrant, but WriteLock/ReadWriteLock would
+  // deadlock if called after a ReadOnlyLock
+  {$ifdef USERECORDWITHMETHODS}
+  TRWLock = record
+  {$else}
+  TRWLock = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    Flags: PtrUInt; // bit 0 = WriteLock, 1 = ReadWriteLock, >1 = ReadOnlyLock
+    LastReadWriteLockThread, LastWriteLockThread: TThreadID; // to be reentrant
+    LastReadWriteLockCount,  LastWriteLockCount: cardinal;
+    {$ifndef ASMINTEL}
+    procedure ReadOnlyLockSpin;
+    {$endif ASMINTEL}
+  public
+    /// initialize the R/W lock
+    // - not needed if TRWLock is part of a class - i.e. if was filled with 0
+    procedure Init;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// could be called at shutdown to ensure that the R/W lock is in neutral state
+    procedure AssertDone;
+    /// wait for the lock to be available for reading, but not upgradable to write
+    // - several readers could acquire the lock simultaneously
+    // - ReadOnlyLock is reentrant since there is an internal counter
+    // - warning: calling ReadWriteLock/WriteLock after ReadOnlyLock would deadlock
+    // - typical usage is the following:
+    // ! rwlock.ReadOnlyLock; // won't block concurrent ReadOnlyLock
+    // ! try
+    // !   result := Exists(value);
+    // ! finally
+    // !   rwlock.ReadOnlyUnLock;
+    // ! end;
+    procedure ReadOnlyLock;
+      {$ifndef ASMINTEL} inline; {$endif}
+    /// release a previous ReadOnlyLock call
+    procedure ReadOnlyUnLock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// wait for the lock to be accessible for reading - later upgradable to write
+    // - will mark the lock with the current thread so that a nested WriteLock
+    // would be possible, but won't block concurrent ReadOnlyLock
+    // - several readers could acquire ReadOnlyLock simultaneously, but only a
+    // single thread could acquire a ReadWriteLock
+    // - reentrant method, and nested WriteLock is allowed
+    // - typical usage is the following:
+    // ! rwlock.ReadWriteLock;      // won't block concurrent ReadOnlyLock
+    // ! try                        // but block other ReadWriteLock/WriteLock
+    // !   result := Exists(value);
+    // !   if not result then
+    // !   begin
+    // !     rwlock.WriteLock; // block any ReadOnlyLock/ReadWriteLock/WriteLock
+    // !     try
+    // !       Add(value);
+    // !     finally
+    // !       rwlock.WriteUnLock;
+    // !     end;
+    // !   end;
+    // ! finally
+    // !   rwlock.ReadWriteUnLock;
+    // ! end;
+    procedure ReadWriteLock;
+    /// release a previous ReadWriteLock call
+    procedure ReadWriteUnLock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// wait for the lock to be accessible for writing
+    // - the write lock is exclusive
+    // - calling WriteLock within a ReadWriteLock is allowed and won't block
+    // - but calling WriteLock within a ReadOnlyLock would deaadlock
+    // - this method is rentrant from a single thread
+    // - typical usage is the following:
+    // ! rwlock.WriteLock; // block any ReadOnlyLock/ReadWriteLock/WriteLock
+    // ! try
+    // !   Add(value);
+    // ! finally
+    // !   rwlock.WriteUnLock;
+    // ! end;
+    procedure WriteLock;
+    /// release a previous WriteLock call
+    procedure WriteUnlock;
+      {$ifdef FPC_OR_DELPHIXE4} inline; {$endif} // circumvent weird Delphi bug
+    /// a high-level wrapper over ReadOnlyLock/ReadWriteLock/WriteLock methods
+    procedure Lock(context: TRWLockContext (*{$ifndef PUREMORMOT2} = cWrite {$endif}*));
+      {$ifdef HASINLINE} inline; {$endif}
+    /// a high-level wrapper over ReadOnlyUnLock/ReadWriteUnLock/WriteUnLock methods
+    procedure UnLock(context: TRWLockContext (*{$ifndef PUREMORMOT2} = cWrite {$endif}*));
+      {$ifdef HASINLINE} inline; {$endif}
+  end;
+  PRWLock = ^TRWLock;
+
+const
+  RW_FORCE: array[{write}boolean] of TRWLockContext = (
+    cReadOnly,
+    cWrite);
+  RW_UPGRADE: array[{write}boolean] of TRWLockContext = (
+    cReadOnly,
+    cReadWrite);
+
+type
+  /// how TSynLocker handles its thread processing
+  // - by default, uSharedLock will use the main TRTLCriticalSection
+  // - you may set uRWLock and call overloaded RWLock/RWUnLock() to use our
+  // lighter TRWLock - but be aware that cReadOnly followed by cReadWrite/cWrite
+  // would deadlock - regular Lock/UnLock will use cWrite exclusive lock
+  // - uNoLock will disable the whole locking mechanism
+  TSynLockerUse = (
+    uSharedLock,
+    uRWLock,
+    uNoLock);
+
   /// allow to add cross-platform locking methods to any class instance
   // - typical use is to define a Safe: TSynLocker property, call Safe.Init
   // and Safe.Done in constructor/destructor methods, and use Safe.Lock/UnLock
@@ -2447,11 +2685,16 @@ type
   // - for object-level locking, see TSynPersistentLock which owns one such
   // instance, or call low-level fSafe := NewSynLocker in your constructor,
   // then fSafe^.DoneAndFreemem in your destructor
+  // - RWUse property could replace the TRTLCriticalSection by a lighter TRWLock
+  // - see also TRWLock and TSynPersistentRWLock if the multiple read / exclusive
+  // write lock is better (only if the locked process does not take too much time)
   TSynLocker = object
   protected
     fSection: TRTLCriticalSection;
-    fSectionPadding: PtrInt; // paranoid to avoid FUTEX_WAKE_PRIVATE=EAGAIN
-    fLocked, fInitialized: boolean;
+    fRW: TRWLock;
+    fLockCount: integer;
+    fInitialized: boolean;
+    fRWUse: TSynLockerUse;
     function GetVariant(Index: integer): Variant;
     procedure SetVariant(Index: integer; const Value: Variant);
     function GetInt64(Index: integer): Int64;
@@ -2464,6 +2707,7 @@ type
     procedure SetPointer(Index: integer; const Value: Pointer);
     function GetUtf8(Index: integer): RawUtf8;
     procedure SetUtf8(Index: integer; const Value: RawUtf8);
+    function GetIsLocked: boolean;
   public
     /// number of values stored in the internal Padding[] array
     // - equals 0 if no value is actually stored, or a 1..7 number otherwise
@@ -2491,10 +2735,18 @@ type
     /// finalize the mutex, and call FreeMem() on the pointer of this instance
     // - should have been initiazed with a NewSynLocker call
     procedure DoneAndFreeMem;
+    /// low-level acquisition of the lock, depending on RWUse property
+    // - warning: if RWUse=uRWLock, this method will use the internal TRWLock
+    procedure RWLock(context: TRWLockContext);
+      {$ifdef HASINLINEWINAPI} inline; {$endif}
+    /// low-level release of the lock, depending on RWUse property
+    procedure RWUnLock(context: TRWLockContext);
+      {$ifdef HASINLINEWINAPI} inline; {$endif}
     /// lock the instance for exclusive access
-    // - this method is re-entrant from the same thread (you can nest Lock/UnLock
-    // calls in the same thread), but would block any other Lock attempt in
-    // another thread
+    // - redirects to RWLock(cWrite)
+    // - with default RWUse=uSharedLock, this method is re-entrant from the same
+    // thread i.e. you can nest Lock/UnLock calls in the same thread
+    // - warning: with RWUse=uRWLock, this method would deadlock on nested calls
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
     // ! Safe.Lock;
     // ! try
@@ -2505,6 +2757,7 @@ type
     procedure Lock;
       {$ifdef HASINLINEWINAPI} inline; {$endif}
     /// will try to acquire the mutex
+    // - do nothing and return false if RWUse is not the default uSharedLock
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
     // ! if Safe.TryLock then
     // !   try
@@ -2515,6 +2768,7 @@ type
     function TryLock: boolean;
       {$ifdef HASINLINEWINAPI} inline; {$endif}
     /// will try to acquire the mutex for a given time
+    // - just wait and return false if RWUse is not the default uSharedLock
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
     // ! if Safe.TryLockMS(100) then
     // !   try
@@ -2522,11 +2776,12 @@ type
     // !   finally
     // !     Safe.Unlock;
     // !   end;
-    function TryLockMS(retryms: integer): boolean;
+    function TryLockMS(retryms: integer; terminated: PBoolean = nil): boolean;
     /// release the instance for exclusive access
+    // - redirects to RWUnLock(cWrite)
     // - each Lock/TryLock should have its exact UnLock opposite, so a
     // try..finally block is mandatory for safe code
-    procedure UnLock;
+    procedure UnLock; overload;
       {$ifdef HASINLINEWINAPI} inline; {$endif}
     /// will enter the mutex until the IUnknown reference is released
     // - could be used as such under Delphi:
@@ -2553,8 +2808,9 @@ type
     // !end;
     function ProtectMethod: IUnknown;
     /// returns true if the mutex is currently locked by another thread
+    // - with RWUse=uRWLock, any lock (even ReadOnlyLock) would return true
     property IsLocked: boolean
-      read fLocked;
+      read GetIsLocked;
     /// returns true if the Init method has been called for this mutex
     // - is only relevant if the whole object has been previously filled with 0,
     // i.e. as part of a class or as global variable, but won't be accurate
@@ -2565,6 +2821,7 @@ type
     // - you may store up to 7 variables, using an 0..6 index, shared with
     // LockedBool, LockedInt64, LockedPointer and LockedUtf8 array properties
     // - returns null if the Index is out of range
+    // - allow concurrent thread reading if RWUse was set to uRWLock
     property Locked[Index: integer]: Variant
       read GetVariant write SetVariant;
     /// safe locked access to a Int64 value
@@ -2572,6 +2829,7 @@ type
     // Locked and LockedUtf8 array properties
     // - Int64s will be stored internally as a varInt64 variant
     // - returns nil if the Index is out of range, or does not store a Int64
+    // - allow concurrent thread reading if RWUse was set to uRWLock
     property LockedInt64[Index: integer]: Int64
       read GetInt64 write SetInt64;
     /// safe locked access to a boolean value
@@ -2579,6 +2837,7 @@ type
     // Locked, LockedInt64, LockedPointer and LockedUtf8 array properties
     // - value will be stored internally as a varboolean variant
     // - returns nil if the Index is out of range, or does not store a boolean
+    // - allow concurrent thread reading if RWUse was set to uRWLock
     property LockedBool[Index: integer]: boolean
       read GetBool write SetBool;
     /// safe locked access to a pointer/TObject value
@@ -2586,6 +2845,7 @@ type
     // Locked, LockedBool, LockedInt64 and LockedUtf8 array properties
     // - pointers will be stored internally as a varUnknown variant
     // - returns nil if the Index is out of range, or does not store a pointer
+    // - allow concurrent thread reading if RWUse was set to uRWLock
     property LockedPointer[Index: integer]: Pointer
       read GetPointer write SetPointer;
     /// safe locked access to an UTF-8 string value
@@ -2593,6 +2853,7 @@ type
     // Locked and LockedPointer array properties
     // - UTF-8 string will be stored internally as a varString variant
     // - returns '' if the Index is out of range, or does not store a string
+    // - allow concurrent thread reading if RWUse was set to uRWLock
     property LockedUtf8[Index: integer]: RawUtf8
       read GetUtf8 write SetUtf8;
     /// safe locked in-place increment to an Int64 value
@@ -2623,6 +2884,9 @@ type
     // with a Lock; try ... finally UnLock block
     property UnlockedInt64[Index: integer]: Int64
       read GetUnlockedInt64 write SetUnlockedInt64;
+    /// how RWLock/RWUnLock would be processed
+    property RWUse: TSynLockerUse
+      read fRWUse write fRWUse;
   end;
 
   /// a pointer to a TSynLocker mutex instance
@@ -2648,8 +2912,9 @@ function NewSynLocker: PSynLocker;
 type
   {$M+}
 
-  /// a lighter alternative to TSynPersistentLock
+  /// a persistent-agnostic alternative to TSynPersistentLock
   // - can be used as base class when custom JSON persistence is not needed
+  // - consider a TRWLock field as a lighter multi read / exclusive write option
   TSynLocked = class
   protected
     fSafe: PSynLocker; // TSynLocker would increase inherited fields offset
@@ -2670,18 +2935,35 @@ type
   /// meta-class definition of the TSynLocked hierarchy
   TSynLockedClass = class of TSynLocked;
 
+  /// a thread-safe Pierre L'Ecuyer software random generator
+  // - just wrap TLecuyer with a LighLock()
+  // - should not be used, unless may be slightly faster than a threadvar
+  TLecuyerThreadSafe = object
+    Safe: TLightLock;
+    Generator: TLecuyer;
+    /// compute the next 32-bit generated value
+    function Next: cardinal; overload;
+    /// compute a 64-bit floating point value
+    function NextDouble: double;
+    /// XOR some memory buffer with random bytes
+    procedure Fill(dest: pointer; count: integer);
+    /// fill some string[31] with 7-bit ASCII random text
+    procedure FillShort31(var dest: TShort31);
+  end;
+
   TThreadIDDynArray = array of TThreadID;
 
-{$ifdef OSPOSIX}
-
 var
+  /// a global thread-safe Pierre L'Ecuyer software random generator
+  SharedRandom: TLecuyerThreadSafe;
+
+{$ifdef OSPOSIX}
   /// could be set to TRUE to force SleepHiRes(0) to call the sched_yield API
   // - in practice, it has been reported as buggy under POSIX systems
   // - even Linus Torvald himself raged against its usage - see e.g.
   // https://www.realworldtech.com/forum/?threadid=189711&curpostid=189752
   // - you may tempt the devil and try it by yourself
   SleepHiRes0Yield: boolean = false;
-
 {$endif OSPOSIX}
 
 /// similar to Windows sleep() API call, to be truly cross-platform
@@ -2716,6 +2998,14 @@ function SleepDelay(elapsed: PtrInt): PtrInt;
 /// compute optimal sleep time as SleepStep, in 0/1/5/50/120-250 ms steps
 // - is agressively designed burning some CPU in favor of responsiveness
 function SleepStepTime(var start, tix: Int64; endtix: PInt64 = nil): PtrInt;
+
+/// similar to Windows SwitchToThread API call, to be truly cross-platform
+// - call fpnanosleep(10) on POSIX systems
+procedure SwitchToThread;
+  {$ifdef OSWINDOWS} stdcall; {$endif}
+
+/// try LockedExc() in a loop, calling SwitchToThread after some spinning
+procedure SpinExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt);
 
 /// low-level naming of a thread
 // - under Linux/FPC, calls pthread_setname_np API which truncates to 16 chars
@@ -2757,10 +3047,10 @@ threadvar
 function GetCurrentThreadName: RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// returns the thread id and the thread name as a shortstring
+/// returns the thread id and the thread name as a ShortString
 // - returns e.g. 'Thread 0001abcd [shortthreadname]'
 // - for convenient use when logging or raising an exception
-function GetCurrentThreadInfo: shortstring;
+function GetCurrentThreadInfo: ShortString;
 
 /// enter a process-wide giant lock for thread-safe shared process
 // - shall be protected as such:
@@ -2771,15 +3061,18 @@ function GetCurrentThreadInfo: shortstring;
 // !  GlobalUnLock;
 // ! end;
 // - you should better not use such a giant-lock, but an instance-dedicated
-// critical section or TSynLocker - these functions are just here to be
+// critical section/TSynLocker or TRWLock - these functions are just here to be
 // convenient, for non time-critical process (e.g. singleton initialization)
 procedure GlobalLock;
 
 /// release the giant lock for thread-safe shared process
-// - you should better not use such a giant-lock, but an instance-dedicated
-// critical section or TSynLocker - these functions are just here to be
-// convenient, for non time-critical process (e.g. singleton initialization)
 procedure GlobalUnLock;
+
+/// framework will register here some instances to be released eventually
+// - better in this root unit than in each finalization section
+// - its use is protected by the GlobalLock
+function RegisterGlobalShutdownRelease(Instance: TObject;
+  SearchExisting: boolean = false): pointer;
 
 
 { ****************** Unix Daemon and Windows Service Support }
@@ -3688,9 +3981,6 @@ end;
 
 { *************** Per Class Properties O(1) Lookup via vmtAutoTable Slot }
 
-var
-  AutoSlotsLock: TRTLCriticalSection;
-
 procedure PatchCodePtrUInt(Code: PPtrUInt; Value: PtrUInt; LeaveUnprotected: boolean);
 begin
   PatchCode(Code, @Value, SizeOf(Code^), nil, LeaveUnprotected);
@@ -3796,7 +4086,7 @@ begin
 end;
 
 procedure Unicode_WideToShort(W: PWideChar; LW, CodePage: PtrInt;
-  var res: shortstring);
+  var res: ShortString);
 var
   i: PtrInt;
 begin
@@ -3851,6 +4141,14 @@ begin
     result := date + time
   else
     result := 0;
+end;
+
+const
+  DateFileTimeDelta =  94353120000000000; // from year 1601 to 1899
+
+function WindowsFileTime64ToDateTime(WinTime: QWord): TDateTime;
+begin
+  result := (Int64(WinTime) - DateFileTimeDelta) / 10000;
 end;
 
 function ValidHandle(Handle: THandle): boolean;
@@ -4022,8 +4320,8 @@ begin
   retry := 10;
   repeat
     // thread-safe unique file name generation
-    result := Format('%s%s_%x.tmp', [folder, Executable.ProgramName,
-      InterlockedIncrement(_TmpCounter)]);
+    result := Format('%s%s_%x.tmp',
+      [folder, Executable.ProgramName, InterlockedIncrement(_TmpCounter)]);
     if not FileExists(result) then
       exit;
     dec(retry); // no endless loop
@@ -4856,7 +5154,7 @@ const
   // hexstr() is not available on Delphi -> use our own simple version
   HexCharsLower: array[0..15] of AnsiChar = '0123456789abcdef';
 
-function _GetExecutableLocation(aAddress: pointer): shortstring;
+function _GetExecutableLocation(aAddress: pointer): ShortString;
 var
   i: PtrInt;
   b: PByte;
@@ -4885,6 +5183,31 @@ end;
 procedure GlobalUnLock;
 begin
   mormot.core.os.LeaveCriticalSection(GlobalCriticalSection);
+end;
+
+var
+  InternalGarbageCollection: record
+    Instances:  TObjectDynArray;
+    Count: integer;
+    Shutdown: boolean; // paranoid check to avoid messing with Instances[]
+  end;
+
+function RegisterGlobalShutdownRelease(Instance: TObject;
+  SearchExisting: boolean): pointer;
+begin
+  if not InternalGarbageCollection.Shutdown then
+  begin
+    GlobalLock;
+    try
+      with InternalGarbageCollection do
+        if not SearchExisting or
+           (ObjArrayFind(Instances, Count, Instance) < 0) then
+          ObjArrayAddCount(Instances, Instance, Count);
+    finally
+      GlobalUnLock;
+    end;
+  end;
+  result := Instance;
 end;
 
 function SleepDelay(elapsed: PtrInt): PtrInt;
@@ -4961,6 +5284,45 @@ begin
   result := terminated = terminatedvalue;
 end;
 
+{$ifdef CPUINTEL}
+procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
+asm
+      pause
+end;
+{$endif CPUINTEL}
+
+const
+  {$ifdef CPUINTEL}
+  SPIN_COUNT = 1000;
+  {$else}
+  SPIN_COUNT = 100; // since DoPause does nothing, switch to thread sooner
+  {$endif CPUINTEL}
+
+function DoSpin(spin: PtrUInt): PtrUInt;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  {$ifdef CPUINTEL}
+  DoPause;
+  {$endif CPUINTEL}
+  dec(spin);
+  if spin = 0 then
+  begin
+    SwitchToThread;
+    spin := SPIN_COUNT;
+  end;
+  result := spin;
+end;
+
+procedure SpinExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt);
+var
+  spin: PtrUInt;
+begin
+  spin := SPIN_COUNT;
+  while not LockedExc(Target, NewValue, Comperand) do
+    spin := DoSpin(spin);
+end;
+
+
 procedure _SetThreadName(ThreadID: TThreadID; const Format: RawUtf8;
   const Args: array of const);
 begin
@@ -4982,17 +5344,239 @@ begin
   ShortStringToAnsi7String(CurrentThreadName, result);
 end;
 
-function GetCurrentThreadInfo: shortstring;
+function GetCurrentThreadInfo: ShortString;
 begin
   result := ShortString(format('Thread %x [%s]',
     [PtrUInt(GetCurrentThreadId), CurrentThreadName]));
 end;
 
-function NewSynLocker: PSynLocker;
+
+{ TLightLock }
+
+procedure TLightLock.Init;
 begin
-  result := AllocMem(SizeOf(TSynLocker));
-  InitializeCriticalSection(result^.fSection);
-  result^.fInitialized := true;
+  Flags := 0;
+end;
+
+procedure TLightLock.LockSpin;
+var
+  spin: PtrUInt;
+begin
+  spin := SPIN_COUNT;
+  repeat
+    spin := DoSpin(spin);
+  until LockedExc(Flags, 1, 0);
+end;
+
+procedure TLightLock.Lock;
+begin
+  // we tried a dedicated asm but it was slower: inlining is preferred
+  if not LockedExc(Flags, 1, 0) then
+    LockSpin;
+end;
+
+function TLightLock.TryLock: boolean;
+begin
+  result := LockedExc(Flags, 1, 0);
+end;
+
+procedure TLightLock.UnLock;
+begin
+  Flags := 0;
+end;
+
+
+
+{ TRWLock }
+
+procedure TRWLock.Init;
+begin
+  // bit 0 = WriteLock, 1 = ReadWriteLock, 2.. = ReadOnlyLock counter
+  Flags := 0;
+  // no need to set the other fields because they will be reset if Flags=0
+end;
+
+procedure TRWLock.AssertDone;
+begin
+  if Flags <> 0 then
+    raise EOSException.CreateFmt('TRWLock Flags=%x', [Flags]);
+end;
+
+// dedicated asm for this most simple (and used) method
+{$ifdef ASMX64}
+
+procedure TRWLock.ReadOnlyLock;
+asm     // since we may call SwitchToThread we need to have a stackframe
+        {$ifndef WIN64ABI}
+        mov     rcx, rdi      // rcx = self
+        {$endif WIN64ABI}
+@retry: mov     r8d, SPIN_COUNT
+@spin:  mov     rax, qword ptr [rcx + TRWLock.Flags]
+        and     rax, not 1
+        lea     rdx, [rax + 4]
+   lock cmpxchg qword ptr [rcx + TRWLock.Flags], rdx
+        jz      @done
+        pause
+        dec     r8d
+        jnz     @spin
+        push    rcx
+        call    SwitchToThread
+        pop     rcx
+        jmp     @retry
+@done:  // restore the stack frame
+end;
+
+{$else}
+
+{$ifdef ASMX86}
+
+procedure TRWLock.ReadOnlyLock;
+  {$ifdef FPCWINDOWS} nostackframe; assembler; {$endif}
+asm     // since we may call SwitchToThread we need to have a stackframe
+        push    ebx
+        mov     ebx, eax
+@retry: mov     ecx, SPIN_COUNT
+@spin:  mov     eax, dword ptr [ebx + TRWLock.Flags]
+        and     eax, not 1
+        lea     edx, [eax + 4]
+   lock cmpxchg dword ptr [ebx + TRWLock.Flags], edx
+        jz      @done
+        pause
+        dec     ecx
+        jnz     @spin
+        call    SwitchToThread
+        jmp     @retry
+@done:  pop     ebx
+end;    // restore the stack frame on systems which expects it
+
+{$else}
+
+procedure TRWLock.ReadOnlyLock;
+var
+  f: PtrUInt;
+begin
+  // if not writing, atomically increase the RD counter in the upper flag bits
+  f := Flags and not 1; // bit 0=WriteLock, 1=ReadWriteLock, >1=ReadOnlyLock
+  if not LockedExc(Flags, f + 4, f) then
+    ReadOnlyLockSpin;
+end;
+
+procedure TRWLock.ReadOnlyLockSpin;
+var
+  spin, f: PtrUInt;
+begin
+  spin := SPIN_COUNT;
+  repeat
+    spin := DoSpin(spin);
+    f := Flags and not 1; // retry ReadOnlyLock
+  until LockedExc(Flags, f + 4, f);
+end;
+
+{$endif ASMX86}
+{$endif ASMX64}
+
+procedure TRWLock.ReadOnlyUnLock;
+begin
+  LockedDec(Flags, 4);
+end;
+
+procedure TRWLock.ReadWriteLock;
+var
+  spin, f: PtrUInt;
+  tid: TThreadID;
+begin
+  tid := GetCurrentThreadId;
+  if (Flags and 2 = 2) and
+     (LastReadWriteLockThread = tid) then
+  begin
+    inc(LastReadWriteLockCount); // allow ReadWriteLock to be reentrant
+    exit;
+  end;
+  // if not writing, atomically acquire the upgradable RD flag bit
+  spin := SPIN_COUNT;
+  repeat
+    f := Flags and not 3; // bit 0=WriteLock, 1=ReadWriteLock, >1=ReadOnlyLock
+    if LockedExc(Flags, f + 2, f) then
+      break;
+    spin := DoSpin(spin);
+  until false;
+  LastReadWriteLockThread := tid;
+  LastReadWriteLockCount := 0;
+end;
+
+procedure TRWLock.ReadWriteUnLock;
+begin
+  if LastReadWriteLockCount <> 0 then
+  begin
+    dec(LastReadWriteLockCount);
+    exit;
+  end;
+  LastReadWriteLockThread := TThreadID(0);
+  LockedDec(Flags, 2);
+end;
+
+procedure TRWLock.WriteLock;
+var
+  spin, f: PtrUInt;
+  tid: TThreadID;
+begin
+  tid := GetCurrentThreadId;
+  if (Flags and 1 = 1) and
+     (LastWriteLockThread = tid) then
+  begin
+    inc(LastWriteLockCount); // allow WriteLock to be reentrant
+    exit;
+  end;
+  spin := SPIN_COUNT;
+  // acquire the WR flag bit
+  repeat
+    f := Flags and not 1; // bit 0=WriteLock, 1=ReadWriteLock, >1=ReadOnlyLock
+    if LockedExc(Flags, f + 1, f) then
+      if (Flags and 2 = 2) and
+         (LastReadWriteLockThread <> tid) then
+        // there is a pending ReadWriteLock but not on this thread
+        LockedDec(Flags, 1) // try again
+      else
+        // we exclusively acquired the WR lock
+        break;
+    spin := DoSpin(spin);
+  until false;
+  LastWriteLockThread := tid;
+  LastWriteLockCount := 0;
+  // wait for all readers to have finished their job
+  while Flags > 3 do
+    spin := DoSpin(spin);
+end;
+
+procedure TRWLock.WriteUnlock;
+begin
+  if LastWriteLockCount <> 0 then
+  begin
+    dec(LastWriteLockCount);
+    exit;
+  end;
+  LastWriteLockThread := TThreadID(0);
+  LockedDec(Flags, 1);
+end;
+
+procedure TRWLock.Lock(context: TRWLockContext);
+begin
+  if context = cReadOnly then
+    ReadOnlyLock
+  else if context = cReadWrite then
+    ReadWriteLock
+  else
+    WriteLock;
+end;
+
+procedure TRWLock.UnLock(context: TRWLockContext);
+begin
+  if context = cReadOnly then
+    ReadOnlyUnLock
+  else if context = cReadWrite then
+    ReadWriteUnLock
+  else
+    WriteUnLock;
 end;
 
 
@@ -5012,12 +5596,19 @@ end;
 
 { TSynLocker }
 
+function NewSynLocker: PSynLocker;
+begin
+  result := AllocMem(SizeOf(TSynLocker));
+  InitializeCriticalSection(result^.fSection);
+  result^.fInitialized := true;
+end;
+
 procedure TSynLocker.Init;
 begin
   InitializeCriticalSection(fSection);
-  fSectionPadding := 0;
-  fLocked := false;
+  fLockCount := 0;
   fInitialized := true;
+  fRW.Init;
   PaddingUsedCount := 0;
 end;
 
@@ -5038,40 +5629,99 @@ begin
   FreeMem(@self);
 end;
 
+function TSynLocker.GetIsLocked: boolean;
+begin
+  case fRWUse of
+    uSharedLock:
+      result := fLockCount <> 0; // only updated by uSharedLock
+    uRWLock:
+      result := fRW.Flags = 0;   // no lock at all
+  else
+    result := false;             // uNoLock will never lock
+  end;
+end;
+
+procedure TSynLocker.RWLock(context: TRWLockContext);
+begin
+  case fRWUse of
+    uSharedLock:
+      begin
+        mormot.core.os.EnterCriticalSection(fSection);
+        inc(fLockCount);
+      end;
+    uRWLock:
+      fRW.Lock(context);
+  end; // uNoLock will just do nothing
+end;
+
+procedure TSynLocker.RWUnLock(context: TRWLockContext);
+begin
+  case fRWUse of
+    uSharedLock:
+      begin
+        dec(fLockCount);
+        mormot.core.os.LeaveCriticalSection(fSection);
+      end;
+    uRWLock:
+      fRW.UnLock(context);
+  end; // uNoLock will just do nothing
+end;
+
 procedure TSynLocker.Lock;
 begin
-  mormot.core.os.EnterCriticalSection(fSection);
-  fLocked := true;
+  case fRWUse of
+    uSharedLock:
+      begin
+        mormot.core.os.EnterCriticalSection(fSection);
+        inc(fLockCount);
+      end;
+    uRWLock:
+      fRW.WriteLock;
+  end; // uNoLock will just do nothing
 end;
 
 procedure TSynLocker.UnLock;
 begin
-  fLocked := false;
-  mormot.core.os.LeaveCriticalSection(fSection);
+  case fRWUse of
+    uSharedLock:
+      begin
+        dec(fLockCount);
+        mormot.core.os.LeaveCriticalSection(fSection);
+      end;
+    uRWLock:
+      fRW.WriteUnLock;
+  end; // uNoLock will just do nothing
 end;
 
 function TSynLocker.TryLock: boolean;
 begin
-  if fLocked or
-     (mormot.core.os.TryEnterCriticalSection(fSection) = 0) then
-    result := false
-  else
-  begin
-    fLocked := true;
-    result := true;
-  end;
+  result := (fRWUse = uSharedLock) and
+            (mormot.core.os.TryEnterCriticalSection(fSection) <> 0);
+  if result then
+    inc(fLockCount);
 end;
 
-function TSynLocker.TryLockMS(retryms: integer): boolean;
+function TSynLocker.TryLockMS(retryms: integer; terminated: PBoolean): boolean;
+var
+  ms: integer;
+  endtix: Int64;
 begin
+  result := TryLock;
+  if result or
+     (fRWUse <> uSharedLock) or
+     (retryms <= 0) then
+    exit;
+  ms := 0;
+  endtix := GetTickCount64 + retryms;
   repeat
+    SleepHiRes(ms);
     result := TryLock;
     if result or
-       (retryms <= 0) then
-      break;
-    SleepHiRes(1);
-    dec(retryms);
-  until false;
+       ((terminated <> nil) and
+        terminated^) then
+      exit;
+    ms := ms xor 1; // 0,1,0,1... seems to be good for scaling
+  until GetTickCount64 > endtix;
 end;
 
 function TSynLocker.ProtectMethod: IUnknown;
@@ -5082,13 +5732,17 @@ end;
 function TSynLocker.GetVariant(Index: integer): Variant;
 begin
   if cardinal(Index) < cardinal(PaddingUsedCount) then
+  {$ifdef HASFASTTRYFINALLY}
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    RWLock(cReadOnly);
     result := variant(Padding[Index]);
+  {$ifdef HASFASTTRYFINALLY}
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+  {$endif HASFASTTRYFINALLY}
+    RWUnLock(cReadOnly);
   end
   else
     VarClear(result);
@@ -5098,28 +5752,30 @@ procedure TSynLocker.SetVariant(Index: integer; const Value: Variant);
 begin
   if cardinal(Index) <= high(Padding) then
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+    RWLock(cWrite);
     if Index >= PaddingUsedCount then
       PaddingUsedCount := Index + 1;
     variant(Padding[Index]) := Value;
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+    RWUnLock(cWrite);
   end;
 end;
 
 function TSynLocker.GetInt64(Index: integer): Int64;
 begin
   if cardinal(Index) < cardinal(PaddingUsedCount) then
+  {$ifdef HASFASTTRYFINALLY}
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    RWLock(cReadOnly);
     if not VariantToInt64(variant(Padding[Index]), result) then
       result := 0;
+  {$ifdef HASFASTTRYFINALLY}
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+  {$endif HASFASTTRYFINALLY}
+    RWUnLock(cReadOnly);
   end
   else
     result := 0;
@@ -5133,14 +5789,18 @@ end;
 function TSynLocker.GetBool(Index: integer): boolean;
 begin
   if cardinal(Index) < cardinal(PaddingUsedCount) then
+  {$ifdef HASFASTTRYFINALLY}
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    RWLock(cReadOnly);
     if not VariantToBoolean(variant(Padding[Index]), result) then
       result := false;
+  {$ifdef HASFASTTRYFINALLY}
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+  {$endif HASFASTTRYFINALLY}
+    RWUnLock(cReadOnly);
   end
   else
     result := false;
@@ -5151,7 +5811,7 @@ begin
   SetVariant(Index, Value);
 end;
 
-function TSynLocker.GetUnLockedInt64(Index: integer): Int64;
+function TSynLocker.GetUnlockedInt64(Index: integer): Int64;
 begin
   if (cardinal(Index) >= cardinal(PaddingUsedCount)) or
      not VariantToInt64(variant(Padding[Index]), result) then
@@ -5171,17 +5831,21 @@ end;
 function TSynLocker.GetPointer(Index: integer): Pointer;
 begin
   if cardinal(Index) < cardinal(PaddingUsedCount) then
+  {$ifdef HASFASTTRYFINALLY}
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    RWLock(cReadOnly);
     with Padding[Index] do
       if VType = varUnknown then
         result := VUnknown
       else
         result := nil;
+  {$ifdef HASFASTTRYFINALLY}
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+  {$endif HASFASTTRYFINALLY}
+    RWUnLock(cReadOnly);
   end
   else
     result := nil;
@@ -5191,8 +5855,7 @@ procedure TSynLocker.SetPointer(Index: integer; const Value: Pointer);
 begin
   if cardinal(Index) <= high(Padding) then
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+    RWLock(cWrite);
     if Index >= PaddingUsedCount then
       PaddingUsedCount := Index + 1;
     with Padding[Index] do
@@ -5201,21 +5864,24 @@ begin
       VUnknown := Value;
     end;
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+    RWUnLock(cWrite);
   end;
 end;
 
 function TSynLocker.GetUtf8(Index: integer): RawUtf8;
 begin
   if cardinal(Index) < cardinal(PaddingUsedCount) then
+  {$ifdef HASFASTTRYFINALLY}
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    RWLock(cReadOnly);
     VariantStringToUtf8(variant(Padding[Index]), result);
+  {$ifdef HASFASTTRYFINALLY}
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+  {$endif HASFASTTRYFINALLY}
+    RWUnLock(cReadOnly);
   end
   else
     result := '';
@@ -5225,14 +5891,12 @@ procedure TSynLocker.SetUtf8(Index: integer; const Value: RawUtf8);
 begin
   if cardinal(Index) <= high(Padding) then
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+    RWLock(cWrite);
     if Index >= PaddingUsedCount then
       PaddingUsedCount := Index + 1;
     RawUtf8ToVariant(Value, variant(Padding[Index]));
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+    RWUnLock(cWrite);
   end;
 end;
 
@@ -5240,8 +5904,7 @@ function TSynLocker.LockedInt64Increment(Index: integer; const Increment: Int64)
 begin
   if cardinal(Index) <= high(Padding) then
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+    RWLock(cWrite);
     result := 0;
     if Index < PaddingUsedCount then
       VariantToInt64(variant(Padding[Index]), result)
@@ -5249,44 +5912,36 @@ begin
       PaddingUsedCount := Index + 1;
     variant(Padding[Index]) := Int64(result + Increment);
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+    RWUnLock(cWrite);
   end
   else
     result := 0;
 end;
 
-function TSynLocker.LockedExchange(Index: integer; const Value: Variant): Variant;
+function TSynLocker.LockedExchange(Index: integer; const Value: variant): variant;
 begin
+  VarClear(result);
   if cardinal(Index) <= high(Padding) then
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+    RWLock(cWrite);
     with Padding[Index] do
     begin
       if Index < PaddingUsedCount then
         result := PVariant(@VType)^
       else
-      begin
         PaddingUsedCount := Index + 1;
-        VarClear(result);
-      end;
       PVariant(@VType)^ := Value;
     end;
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
-  end
-  else
-    VarClear(result);
+    RWUnLock(cWrite);
+  end;
 end;
 
 function TSynLocker.LockedPointerExchange(Index: integer; Value: pointer): pointer;
 begin
   if cardinal(Index) <= high(Padding) then
   try
-    mormot.core.os.EnterCriticalSection(fSection);
-    fLocked := true;
+    RWLock(cWrite);
     with Padding[Index] do
     begin
       if Index < PaddingUsedCount then
@@ -5306,12 +5961,12 @@ begin
       VUnknown := Value;
     end;
   finally
-    fLocked := false;
-    mormot.core.os.LeaveCriticalSection(fSection);
+    RWUnLock(cWrite);
   end
   else
     result := nil;
 end;
+
 
 
 { TSynLocked }
@@ -5325,6 +5980,36 @@ destructor TSynLocked.Destroy;
 begin
   inherited Destroy;
   fSafe^.DoneAndFreeMem;
+end;
+
+{ TLecuyerThreadSafe }
+
+function TLecuyerThreadSafe.Next: cardinal;
+begin
+  Safe.Lock;
+  result := Generator.Next;
+  Safe.UnLock;
+end;
+
+function TLecuyerThreadSafe.NextDouble: double;
+begin
+  Safe.Lock;
+  result := Generator.NextDouble;
+  Safe.UnLock;
+end;
+
+procedure TLecuyerThreadSafe.Fill(dest: pointer; count: integer);
+begin
+  Safe.Lock;
+  Generator.Fill(dest, count);
+  Safe.UnLock;
+end;
+
+procedure TLecuyerThreadSafe.FillShort31(var dest: TShort31);
+begin
+  Safe.Lock;
+  Generator.FillShort31(dest);
+  Safe.UnLock;
 end;
 
 
@@ -5533,10 +6218,17 @@ end;
 
 
 procedure FinalizeUnit;
+var
+  i: PtrInt;
 begin
+  with InternalGarbageCollection do
+  begin
+    Shutdown := true;
+    for i := Count - 1 downto 0 do
+      FreeAndNilSafe(Instances[i]); // before GlobalCriticalSection deletion
+  end;
   ObjArrayClear(CurrentFakeStubBuffers);
   Executable.Version.Free;
-  DeleteCriticalSection(AutoSlotsLock);
   DeleteCriticalSection(GlobalCriticalSection);
   FinalizeSpecificUnit; // in mormot.core.os.posix/windows.inc files
 end;
@@ -5547,7 +6239,6 @@ initialization
   SetMultiByteRTLFileSystemCodePage(CP_UTF8);
   {$endif ISFPC27}
   InitializeCriticalSection(GlobalCriticalSection);
-  InitializeCriticalSection(AutoSlotsLock);
   InitializeUnit; // in mormot.core.os.posix/windows.inc files
   OSVersionShort := ToTextOS(OSVersionInt32);
   SetExecutableVersion(0, 0, 0, 0);

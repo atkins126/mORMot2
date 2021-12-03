@@ -44,7 +44,7 @@ uses
   mormot.orm.core,
   mormot.orm.rest,
   mormot.soa.core,
-  mormot.soa.Server,
+  mormot.soa.server,
   mormot.db.core,
   mormot.rest.core,
   mormot.rest.server,
@@ -65,6 +65,7 @@ type
   ERestHttpServer = class(ERestException);
 
   /// available running options for TRestHttpServer.Create() constructor
+  // - see HTTP_DEFAULT_MODE / WEBSOCKETS_DEFAULT_MODE for the best mode
   // - useHttpApi to run kernel-mode HTTP.SYS server (THttpApiServer) with an
   // already registered URI (default way, similar to IIS/WCF security policy
   // as specified by Microsoft) - you would need to register the URI by hand,
@@ -80,22 +81,27 @@ type
   // - useHttpApiOnly and useHttpApiRegisteringURIOnly won't fallback to the
   // socket-based HTTP server if http.sys initialization failed
   // - useHttpSocket will run the standard Sockets library (i.e. socket-based
-  // THttpServer with one thread per kept alive connection) - it will trigger
-  // the Windows firewall popup UAC window at first execution
+  // THttpServer with one thread per kept alive connection), using a thread pool
+  // for HTTP/1.0 requests (e.g. behind a reverse proxy) or one thread per
+  // HTTP/1.1 keep alive connection, so won't scale without any reverse proxy
   // - useBidirSocket will use the standard Sockets library but via the
   // TWebSocketServerRest class, allowing HTTP connection upgrade to the
   // WebSockets protocol, to enable immediate event callbacks in addition to
-  // the standard request/answer RESTful mode with one thread per client
+  // the standard request/answer RESTful mode: will use one thread per client
+  // so won't scale
   // - useHttpAsync will use the Sockets library in event-driven mode,
-  // with a thread poll for both single shot and kept alive connections
+  // with a thread poll for both HTTP/1.0 single shot and HTTP/1.1 kept alive
+  // connections, so would scale much better than older useHttpSocket
   // - useBidirAsync will use TWebSocketAsyncServerRest in event-driven mode,
-  // using its thread poll for all its HTTP or WebSockets process
+  // using its thread poll for all its HTTP or WebSockets process, , so would
+  // scale much better than older useBidirSocket
   // - in practice, useHttpSocket is good behind a reverse proxy defined in
   // HTTP/1.0 mode, but useHttpAsync  may scale much better in case of
   // a lot of concurrent connections, especially kept-alive connections
   // - useBidirSocket may be used for legacy reasons, if one thread per client
   // is a good idea - but useBidirAsync may be preferred for proper scaling
-  // - the first item should be the preferred one (see HTTP_DEFAULT_MODE)
+  // - on Windows, all sockets-based server will trigger the firewall popup UAC
+  // window at first execution, unless your setup program did register the app
   TRestHttpServerUse = (
     {$ifdef USEHTTPSYS}
     useHttpApi,
@@ -137,13 +143,17 @@ const
     [useHttpApiRegisteringURI, useHttpApiRegisteringURIOnly];
 
   {$else}
-  // - older useHttpSocket is less efficient than our new async server
+  // - older useHttpSocket focuses on HTTP/1.0 or a small number of short-living
+  // connections - creating one thread per HTTP/1.1 connection - so is a good
+  // idea behind a nginx reverse proxy using HTTP/1.0, whereas our new
+  // useHttpAsync server scales much better with high number of connections
   HTTP_DEFAULT_MODE = useHttpAsync;
   {$endif USEHTTPSYS}
 
   /// the kind of HTTP server to be used by default for WebSockets support
   // - will define the best available server class, depending on the platform
-  // - useBidirSocket is less efficient and uses one thread per connection
+  // - useBidirSocket uses one thread per connection, whereas useBidirAsync
+  // use a thread-pool and has an event-driven approach so scales much better
   WEBSOCKETS_DEFAULT_MODE = useBidirAsync;
 
   /// the TRestHttpServerUse which have bi-directional callback notifications
@@ -173,7 +183,7 @@ type
   // - just create it and it will serve SQL statements as UTF-8 JSON
   // - for a true AJAX server, expanded data is prefered - your code may contain:
   // ! DBServer.NoAjaxJson := false;
-  TRestHttpServer = class(TSynPersistentLock)
+  TRestHttpServer = class(TSynPersistent)
   protected
     fShutdownInProgress: boolean;
     fHttpServer: THttpServerGeneric;
@@ -183,6 +193,7 @@ type
     fDBServers: array of TRestHttpOneServer;
     fDBServerNames: RawUtf8;
     fDBSingleServer: ^TRestHttpOneServer;
+    fSafe: TRWLock;
     fHosts: TSynNameValue;
     fAccessControlAllowOrigin: RawUtf8;
     fAccessControlAllowOriginsMatch: TMatchs;
@@ -516,7 +527,7 @@ begin
      (aServer.Model = nil) then
     exit;
   log := fLog.Enter(self, 'AddServer');
-  fSafe.Lock; // protect fDBServers[]
+  fSafe.WriteLock; // protect fDBServers[]
   try
     n := length(fDBServers);
     for i := 0 to n - 1 do
@@ -535,7 +546,7 @@ begin
     fHttpServer.ProcessName := fDBServerNames;
     result := true;
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
     if log <> nil then
       log.Log(sllHttp, 'AddServer(%,Root=%,Port=%,Public=%:%)=% servers=%',
         [aServer, aServer.Model.Root, fPort, fPublicAddress, fPublicPort,
@@ -545,14 +556,14 @@ end;
 
 function TRestHttpServer.DBServerFind(aServer: TRestServer): integer;
 begin
-  fSafe.Lock; // protect fDBServers[]
+  fSafe.ReadOnlyLock; // protect fDBServers[]
   try
     for result := 0 to Length(fDBServers) - 1 do
       if fDBServers[result].Server = aServer then
         exit;
     result := -1;
   finally
-    fSafe.UnLock;
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
@@ -567,7 +578,7 @@ begin
      (aServer.Model = nil) then
     exit;
   log := fLog.Enter(self, 'RemoveServer');
-  fSafe.Lock; // protect fDBServers[]
+  fSafe.WriteLock; // protect fDBServers[]
   try
     n := high(fDBServers);
     for i := n downto 0 do // may appear several times, with another Security
@@ -594,7 +605,7 @@ begin
         result := true; // don't break here: may appear with another Security
       end;
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
     if log <> nil then
       log.Log(sllHttp, '%.RemoveServer(Root=%)=%',
         [self, aServer.Model.Root, BOOL_STR[result]], self);
@@ -725,7 +736,7 @@ begin
     else
       raise ERestHttpServer.CreateUtf8('%.Create(% ): unsupported %',
         [self, fDBServerNames, ToText(aUse)^]);
-    THttpServerSocketGeneric(fHttpServer).WaitStarted;
+    THttpServerSocketGeneric(fHttpServer).WaitStarted(10);
   end;
   // setup the newly created server instance
   fHttpServer.OnRequest := Request;
@@ -787,7 +798,7 @@ begin
     log := fLog.Enter('Shutdown(%)', [BOOL_STR[noRestServerShutdown]], self);
     fShutdownInProgress := true;
     fHttpServer.Shutdown;
-    fSafe.Lock; // protect fDBServers[]
+    fSafe.WriteLock; // protect fDBServers[]
     try
       for i := 0 to high(fDBServers) do
       begin
@@ -798,7 +809,7 @@ begin
           fDBServers[i].Server.OnNotifyCallback := nil;
       end;
     finally
-      fSafe.UnLock;
+      fSafe.WriteUnLock;
     end;
   end;
 end;
@@ -808,12 +819,12 @@ begin
   result := nil;
   if self = nil then
     exit;
-  fSafe.Lock; // protect fDBServers[]
+  fSafe.ReadOnlyLock; // protect fDBServers[]
   try
     if cardinal(Index) < cardinal(length(fDBServers)) then
       result := fDBServers[Index].Server;
   finally
-    fSafe.UnLock;
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
@@ -827,21 +838,21 @@ procedure TRestHttpServer.SetDBServerAccessRight(Index: integer;
 begin
   if self = nil then
     exit;
-  fSafe.Lock; // protect fDBServers[]
+  fSafe.WriteLock; // protect fDBServers[]
   try
     if Value = nil then
       Value := HTTP_DEFAULT_ACCESS_RIGHTS;
     if cardinal(Index) < cardinal(length(fDBServers)) then
       fDBServers[Index].RestAccessRights := Value;
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
 procedure TRestHttpServer.SetDBServer(aIndex: integer; aServer: TRestServer;
   aSecurity: TRestHttpServerSecurity; aRestAccessRights: POrmAccessRights);
 begin
-  // note: caller should have made fSafe.Lock
+  // note: caller should have made fSafe.WriteLock
   if self = nil then
     exit;
   if cardinal(aIndex) < cardinal(length(fDBServers)) then
@@ -1017,7 +1028,7 @@ begin
     else
     begin
       // thread-safe use of dynamic fDBServers[] array
-      fSafe.Lock;
+      fSafe.ReadOnlyLock;
       try
         for i := 0 to length(fDBServers) - 1 do
           with fDBServers[i] do
@@ -1032,12 +1043,12 @@ begin
               break;
             end;
       finally
-        fSafe.UnLock;
+        fSafe.ReadOnlyUnLock;
       end;
-      if (match = rmNoMatch) or
-         (serv = nil) then
-        exit;
     end;
+    if (match = rmNoMatch) or
+       (serv = nil) then
+      exit;
     if (rsoRedirectServerRootUriForExactCase in fOptions) and
        (match = rmMatchWithCaseChange) then
     begin
@@ -1107,12 +1118,12 @@ var
 begin
   if self = nil then
     exit;
-  fSafe.Lock; // protect fDBServers[]
+  fSafe.WriteLock; // protect fDBServers[]
   try
     for i := 0 to high(fDBServers) do
       fDBServers[i].Server.Run.EndCurrentThread(Sender);
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -1124,12 +1135,12 @@ begin
     exit;
   if CurrentThreadName = '' then
     SetCurrentThreadName('% %% %', [self, fPort, fDBServerNames, Sender]);
-  fSafe.Lock; // protect fDBServers[]
+  fSafe.WriteLock; // protect fDBServers[]
   try
     for i := 0 to high(fDBServers) do
       fDBServers[i].Server.Run.BeginCurrentThread(Sender);
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 

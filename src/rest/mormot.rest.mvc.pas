@@ -1597,11 +1597,11 @@ var
   action: TMvcAction;
   exec: TInterfaceMethodExecute;
   isAction: boolean;
-  WR: TTextWriter;
+  WR: TJsonWriter;
   m: PInterfaceMethod;
   methodOutput: RawUtf8;
   renderContext, info: variant;
-  err: shortstring;
+  err: ShortString;
   tmp: TTextWriterStackBuffer;
 begin
   action.ReturnedStatus := HTTP_SUCCESS;
@@ -1613,7 +1613,7 @@ begin
         try
           m := @fApplication.fFactory.Methods[fMethodIndex];
           isAction := m^.ArgsResultIsServiceCustomAnswer;
-          WR := TJsonSerializer.CreateOwnedStream(tmp);
+          WR := TJsonWriter.CreateOwnedStream(tmp);
           try
             WR.CustomOptions := WR.CustomOptions + [twoForceJsonExtended];
             WR.Add('{');

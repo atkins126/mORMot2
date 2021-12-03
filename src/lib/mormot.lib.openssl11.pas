@@ -187,7 +187,8 @@ function OpenSslIsAvailable: boolean;
 // OPENSSLFULLAPI or OPENSSLSTATIC conditionals have been defined
 function OpenSslInitialize(
    const libcryptoname: TFileName = LIB_CRYPTO;
-   const libsslname: TFileName = LIB_SSL): boolean;
+   const libsslname: TFileName = LIB_SSL;
+   const libprefix: RawUtf8 = _PU): boolean;
 
 
 { ******************** OpenSSL Library Constants }
@@ -324,6 +325,10 @@ const
   EVP_PKEY_CTRL_GET_RSA_OAEP_MD = EVP_PKEY_ALG_CTRL + 11;
   EVP_PKEY_CTRL_GET_RSA_OAEP_LABEL = EVP_PKEY_ALG_CTRL + 12;
   EVP_PKEY_CTRL_RSA_KEYGEN_PRIMES = EVP_PKEY_ALG_CTRL + 13;
+
+  EVP_F_EVP_PKEY_DERIVE = 153;
+  EVP_F_EVP_PKEY_DERIVE_INIT = 154;
+  EVP_F_EVP_PKEY_DERIVE_SET_PEER = 155;
 
   BIO_FLAGS_READ = $01;
   BIO_FLAGS_WRITE = $02;
@@ -1069,6 +1074,9 @@ function EVP_PKEY_CTX_ctrl(ctx: PEVP_PKEY_CTX; keytype: integer; optype: integer
   cmd: integer; p1: integer; p2: pointer): integer; cdecl;
 function EVP_PKEY_CTX_new(pkey: PEVP_PKEY; e: PENGINE): PEVP_PKEY_CTX; cdecl;
 procedure EVP_PKEY_CTX_free(ctx: PEVP_PKEY_CTX); cdecl;
+function EVP_PKEY_derive_init(ctx: PEVP_PKEY_CTX): integer; cdecl;
+function EVP_PKEY_derive_set_peer(ctx: PEVP_PKEY_CTX; peer: PEVP_PKEY): integer; cdecl;
+function EVP_PKEY_derive(ctx: PEVP_PKEY_CTX; key: PByte; keylen: PPtrUInt): integer; cdecl;
 function PEM_write_bio_PrivateKey(bp: PBIO; x: PEVP_PKEY; enc: PEVP_CIPHER;
   kstr: PByte; klen: integer; cb: Ppem_password_cb; u: pointer): integer; cdecl;
 function PEM_write_bio_PUBKEY(bp: PBIO; x: PEVP_PKEY): integer; cdecl;
@@ -1108,7 +1116,7 @@ function BIO_ToString(b: PBIO; andfree: boolean = false): RawUtf8; overload;
 procedure OpenSSL_Free(ptr: pointer);
 function SSL_error(error: integer): RawUtf8; overload;
 procedure SSL_error(error: integer; var result: RawUtf8); overload;
-function SSL_error_short(error: integer): shortstring;
+function SSL_error_short(error: integer): ShortString;
 function SSL_is_fatal_error(error: integer): boolean;
 procedure WritelnSSL_error; // very useful when debugging
 
@@ -1579,6 +1587,9 @@ type
     EVP_PKEY_CTX_ctrl: function(ctx: PEVP_PKEY_CTX; keytype: integer; optype: integer; cmd: integer; p1: integer; p2: pointer): integer; cdecl;
     EVP_PKEY_CTX_new: function(pkey: PEVP_PKEY; e: PENGINE): PEVP_PKEY_CTX; cdecl;
     EVP_PKEY_CTX_free: procedure(ctx: PEVP_PKEY_CTX); cdecl;
+    EVP_PKEY_derive_init: function(ctx: PEVP_PKEY_CTX): integer; cdecl;
+    EVP_PKEY_derive_set_peer: function(ctx: PEVP_PKEY_CTX; peer: PEVP_PKEY): integer; cdecl;
+    EVP_PKEY_derive: function(ctx: PEVP_PKEY_CTX; key: PByte; keylen: PPtrUInt): integer; cdecl;
     PEM_write_bio_PrivateKey: function(bp: PBIO; x: PEVP_PKEY; enc: PEVP_CIPHER; kstr: PByte; klen: integer; cb: Ppem_password_cb; u: pointer): integer; cdecl;
     PEM_write_bio_PUBKEY: function(bp: PBIO; x: PEVP_PKEY): integer; cdecl;
     OpenSSL_version_num: function(): cardinal; cdecl;
@@ -1586,7 +1597,7 @@ type
   end;
 
 const
-  LIBCRYPTO_ENTRIES: array[0..107] of RawUtf8 = (
+  LIBCRYPTO_ENTRIES: array[0..110] of RawUtf8 = (
     'CRYPTO_malloc', 'CRYPTO_set_mem_functions', 'CRYPTO_free',
     'ERR_remove_state', 'ERR_error_string_n',
     'ERR_get_error', 'ERR_remove_thread_state', 'ERR_load_BIO_strings',
@@ -1618,8 +1629,10 @@ const
     'ECDSA_sign', 'EC_POINT_new', 'EC_POINT_oct2point', 'ECDH_compute_key',
     'EVP_PKEY_CTX_new_id', 'EVP_PKEY_paramgen_init', 'EVP_PKEY_paramgen',
     'EVP_PKEY_keygen_init', 'EVP_PKEY_keygen', 'EVP_PKEY_CTX_ctrl',
-    'EVP_PKEY_CTX_new', 'EVP_PKEY_CTX_free', 'PEM_write_bio_PrivateKey',
-    'PEM_write_bio_PUBKEY', 'OpenSSL_version_num', 'X509_print');
+    'EVP_PKEY_CTX_new', 'EVP_PKEY_CTX_free',
+    'EVP_PKEY_derive_init', 'EVP_PKEY_derive_set_peer', 'EVP_PKEY_derive',
+    'PEM_write_bio_PrivateKey', 'PEM_write_bio_PUBKEY',
+    'OpenSSL_version_num', 'X509_print');
 
 var
   libcrypto: TLibCrypto;
@@ -2165,6 +2178,20 @@ begin
   libcrypto.EVP_PKEY_CTX_free(ctx);
 end;
 
+function EVP_PKEY_derive_init(ctx: PEVP_PKEY_CTX): integer;
+begin
+  result := libcrypto.EVP_PKEY_derive_init(ctx);
+end;
+function EVP_PKEY_derive_set_peer(ctx: PEVP_PKEY_CTX; peer: PEVP_PKEY): integer;
+begin
+  result := libcrypto.EVP_PKEY_derive_set_peer(ctx, peer);
+end;
+
+function EVP_PKEY_derive(ctx: PEVP_PKEY_CTX; key: PByte; keylen: PPtrUInt): integer;
+begin
+  result := libcrypto.EVP_PKEY_derive(ctx, key, keylen);
+end;
+
 function PEM_write_bio_PrivateKey(bp: PBIO; x: PEVP_PKEY; enc: PEVP_CIPHER;
   kstr: PByte; klen: integer; cb: Ppem_password_cb; u: pointer): integer;
 begin
@@ -2230,7 +2257,8 @@ begin
   end;
 end;
 
-function OpenSslInitialize(const libcryptoname, libsslname: TFileName): boolean;
+function OpenSslInitialize(const libcryptoname, libsslname: TFileName;
+  const libprefix: RawUtf8): boolean;
 var
   P: PPointerArray;
   api: PtrInt;
@@ -2260,7 +2288,7 @@ begin
         ], EOpenSsl);
       P := @@libcrypto.CRYPTO_malloc;
       for api := low(LIBCRYPTO_ENTRIES) to high(LIBCRYPTO_ENTRIES) do
-        libcrypto.Resolve(pointer(_PU + LIBCRYPTO_ENTRIES[api]),
+        libcrypto.Resolve(pointer(libprefix + LIBCRYPTO_ENTRIES[api]),
           @P[api], {onfail=}EOpenSsl);
       // attempt to load libssl
       libssl.TryLoadLibrary([
@@ -2276,7 +2304,7 @@ begin
         ], EOpenSsl);
       P := @@libssl.SSL_CTX_new;
       for api := low(LIBSSL_ENTRIES) to high(LIBSSL_ENTRIES) do
-        libssl.Resolve(pointer(_PU + LIBSSL_ENTRIES[api]),
+        libssl.Resolve(pointer(libprefix + LIBSSL_ENTRIES[api]),
           @P[api], {onfail=}EOpenSsl);
       // nothing is to be initialized with OpenSSL 1.1.*
       {$ifdef OPENSSLUSERTLMM}
@@ -2784,6 +2812,15 @@ function EVP_PKEY_CTX_new(pkey: PEVP_PKEY; e: PENGINE): PEVP_PKEY_CTX; cdecl;
 procedure EVP_PKEY_CTX_free(ctx: PEVP_PKEY_CTX); cdecl;
   external LIB_CRYPTO name _PU + 'EVP_PKEY_CTX_free';
 
+function EVP_PKEY_derive_init(ctx: PEVP_PKEY_CTX): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_PKEY_derive_init';
+
+function EVP_PKEY_derive_set_peer(ctx: PEVP_PKEY_CTX; peer: PEVP_PKEY): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_PKEY_derive_set_peer';
+
+function EVP_PKEY_derive(ctx: PEVP_PKEY_CTX; key: PByte; keylen: PPtrUInt): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_PKEY_derive';
+
 function PEM_write_bio_PrivateKey(bp: PBIO; x: PEVP_PKEY; enc: PEVP_CIPHER; kstr: PByte; klen: integer; cb: Ppem_password_cb; u: pointer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'PEM_write_bio_PrivateKey';
 
@@ -2889,7 +2926,7 @@ begin
   FastSetString(result, @tmp, mormot.core.base.StrLen(@tmp));
 end;
 
-function SSL_error_short(error: integer): shortstring;
+function SSL_error_short(error: integer): ShortString;
 begin
   ERR_error_string_n(error, @result[1], 254);
   result[0] := AnsiChar(mormot.core.base.StrLen(@result[1]));

@@ -25,7 +25,6 @@ uses
   classes,
   variants,
   contnrs,
-  mormot.lib.z, // we use zlib crc32 as default URI signature
   {$ifdef DOMAINRESTAUTH}
   mormot.lib.sspi, // do-nothing units on non compliant system
   mormot.lib.gssapi,
@@ -273,7 +272,7 @@ type
   end;
 
   /// authentication using HTTP Basic scheme
-  // - this protocol send both name and password as clear (just base-64 encoded)
+  // - this protocol send both name and password as clear (just Base64 encoded)
   // so should only be used over SSL / HTTPS, or for compatibility reasons
   // - match TRestServerAuthenticationHttpBasic class on server side
   // - will rely on TRestClientAuthenticationNone for authorization
@@ -620,7 +619,7 @@ type
     // - also unlock all still locked records by this client
     destructor Destroy; override;
     /// called by TRestOrm.Create overriden constructor to set fOrm from IRestOrm
-    procedure SetOrmInstance(aORM: TInterfacedObject); override;
+    procedure SetOrmInstance(aORM: TRestOrmParent); override;
     /// save the TSqlRestClientUri properties into a persistent storage object
     // - CreateFrom() will expect Definition.UserName/Password to store the
     // credentials which will be used by SetUser()
@@ -811,7 +810,7 @@ type
     // of high activity
     // - map TOnTextWriterEcho signature, so that you will be able to set e.g.:
     // ! TSqlLog.Family.EchoCustom := aClient.ServerRemoteLog;
-    function ServerRemoteLog(Sender: TBaseWriter; Level: TSynLogInfo;
+    function ServerRemoteLog(Sender: TTextWriter; Level: TSynLogInfo;
       const Text: RawUtf8): boolean; overload; virtual;
     /// internal method able to emulate a call to TSynLog.Add.Log()
     // - will compute timestamp and event text, than call the overloaded
@@ -1167,28 +1166,30 @@ end;
 
 { TRestClientAuthentication }
 
+const
+  AUTH_N: array[0..9] of PUtf8Char = (
+    'result',        // 0
+    'data',          // 1
+    'server',        // 2
+    'version',       // 3
+    'logonid',       // 4
+    'logonname',     // 5
+    'logondisplay',  // 6
+    'logongroup',    // 7
+    'timeout',       // 8
+    'algo');         // 9
+
 class function TRestClientAuthentication.ClientGetSessionKey(
   Sender: TRestClientUri; User: TAuthUser;
   const aNameValueParameters: array of const): RawUtf8;
 var
   resp: RawUtf8;
-  values: array[0..9] of TValuePUtf8Char;
+  values: array[0..high(AUTH_N)] of TValuePUtf8Char;
   a: integer;
   algo: TRestAuthenticationSignedUriAlgo absolute a;
 begin
   if (Sender.CallBackGet('auth', aNameValueParameters, resp) <> HTTP_SUCCESS) or
-     (JsonDecode(pointer({%H-}resp),
-      ['result',        // 0
-       'data',          // 1
-       'server',        // 2
-       'version',       // 3
-       'logonid',       // 4
-       'logonname',     // 5
-       'logondisplay',  // 6
-       'logongroup',    // 7
-       'timeout',       // 8
-       'algo'           // 9
-      ], @values) = nil) then
+     (JsonDecode(pointer({%H-}resp), @AUTH_N, length(AUTH_N), @values) = nil) then
   begin
     Sender.fSession.Data := ''; // reset temporary 'data' field
     result := ''; // error
@@ -1196,10 +1197,10 @@ begin
   else
   begin
     values[0].ToUtf8(result);
-    Base64ToBin(PAnsiChar(values[1].Value), values[1].ValueLen, Sender.fSession.Data);
+    Base64ToBin(PAnsiChar(values[1].Text), values[1].Len, Sender.fSession.Data);
     values[2].ToUtf8(Sender.fSession.Server);
     values[3].ToUtf8(Sender.fSession.Version);
-    User.IDValue := GetInt64(values[4].Value);
+    User.IDValue := values[4].ToInt64;
     User.LogonName := values[5].ToUtf8; // set/fix using values from server
     User.DisplayName := values[6].ToUtf8;
     User.GroupRights := pointer(values[7].ToInteger);
@@ -1207,7 +1208,7 @@ begin
     if Sender.fSession.ServerTimeout <= 0 then
       Sender.fSession.ServerTimeout := 60; // default 1 hour if not suppplied
     a := GetEnumNameValueTrimmed(TypeInfo(TRestAuthenticationSignedUriAlgo),
-      values[9].Value, values[9].ValueLen);
+      values[9].Text, values[9].Len);
     if a >= 0 then
       Sender.fComputeSignature :=
         TRestClientAuthenticationSignedUri.GetComputeSignature(algo);
@@ -2170,7 +2171,7 @@ begin
   end;
 end;
 
-procedure TRestClientUri.SetOrmInstance(aORM: TInterfacedObject);
+procedure TRestClientUri.SetOrmInstance(aORM: TRestOrmParent);
 begin
   inherited SetOrmInstance(aORM); // set fOrm
   if not fOrmInstance.GetInterface(IRestOrmClient, fClient) then
@@ -2257,11 +2258,11 @@ var
   url, root, interfmethod, interf, id, method, frames: RawUtf8;
   callback: TRestClientCallbackItem;
   methodIndex: integer;
-  WR: TTextWriter;
+  WR: TJsonWriter;
   temp: TTextWriterStackBuffer;
   ok: boolean;
 
-  procedure Call(methodIndex: integer; const par: RawUtf8; res: TTextWriter);
+  procedure Call(methodIndex: integer; const par: RawUtf8; res: TJsonWriter);
   var
     method: PInterfaceMethod;
     exec: TInterfaceMethodExecute;
@@ -2334,7 +2335,7 @@ begin
       callback.Factory.Methods[methodIndex].InterfaceDotMethodName) then
   try
     // execute the method using JSON as data representation
-    WR := TTextWriter.CreateOwnedStream(temp);
+    WR := TJsonWriter.CreateOwnedStream(temp);
     try
       WR.AddShort('{"result":[');
       if frames = '[0]' then
@@ -2526,7 +2527,7 @@ function TRestClientUri.CallBackPut(const aMethodName, aSentData: RawUtf8;
   out aResponse: RawUtf8; aTable: TOrmClass; aID: TID;
   aResponseHead: PRawUtf8): integer;
 begin
-  result := callback(mPUT, aMethodName, aSentData, aResponse, aTable, aID, aResponseHead);
+  result := Callback(mPUT, aMethodName, aSentData, aResponse, aTable, aID, aResponseHead);
 end;
 
 function TRestClientUri.CallBack(method: TUriMethod; const aMethodName,
@@ -2543,7 +2544,7 @@ begin
   begin
     u := fModel.GetUriCallBack(aMethodName, aTable, aID);
     log := fLogClass.Enter('Callback %', [u], self);
-    m := TrimLeftLowerCaseShort(GetEnumName(TypeInfo(TUriMethod), ord(method)));
+    m := MethodText(method);
     result := Uri(u, m, @aResponse, aResponseHead, @aSentData);
     InternalLog('% result=% resplen=%',
       [m, result, length(aResponse)], sllServiceReturn);
@@ -2702,7 +2703,7 @@ begin
   end;
 end;
 
-function TRestClientUri.ServerRemoteLog(Sender: TBaseWriter;
+function TRestClientUri.ServerRemoteLog(Sender: TTextWriter;
   Level: TSynLogInfo; const Text: RawUtf8): boolean;
 begin
   if fRemoteLogThread = nil then

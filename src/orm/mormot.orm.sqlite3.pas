@@ -73,7 +73,7 @@ type
     // - uses a TOrmTableJson internally: all currency is transformed to its
     // floating point TEXT representation, and allows efficient caching
     // - if the SQL statement is in the DB cache, it's retrieved from its
-    // cached value: our JSON parsing is a lot faster than SQLite3 engine
+    // cached value: our JSON parsing is a lot faster than the SQLite3 engine
     // itself, and uses less memory
     // - will raise an Exception on any error
     constructor Create(aDB: TSqlDatabase; const Tables: array of TOrmClass;
@@ -462,7 +462,7 @@ begin
       inherited CreateFromTables(Tables, aSql, jsoncached);
       Assert(n = fRowCount);
     finally
-      aDB.UnLockJson(jsoncached, n);
+      aDB.UnLockJson(aSql, jsoncached, n);
     end
   else
   begin
@@ -1254,7 +1254,7 @@ end;
 procedure TRestOrmServerDB.GetAndPrepareStatementRelease(E: Exception;
   const Format: RawUtf8; const Args: array of const; ForceBindReset: boolean);
 var
-  msg: shortstring;
+  msg: ShortString;
 begin
   FormatShort(Format, Args, msg);
   GetAndPrepareStatementRelease(E, msg, ForceBindReset);
@@ -1350,14 +1350,17 @@ begin
   else
   begin
     fRest.AcquireExecution[execOrmWrite].Safe.Lock; // protect fJsonDecoder
-    fJsonDecoder.Decode(SentData, nil, pInlined, result, false);
-    if (fOwner <> nil) and
-       (props.RecordVersionField <> nil) then
-      fOwner.RecordVersionHandle(ooInsert, TableModelIndex, fJsonDecoder,
-        props.RecordVersionField);
-    sql := fJsonDecoder.EncodeAsSql('INSERT INTO ', sql, {update=}false);
-    Finalize(fJsonDecoder); // release temp values memory ASAP
-    fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
+    try
+      fJsonDecoder.Decode(SentData, nil, pInlined, result, false);
+      if (fOwner <> nil) and
+         (props.RecordVersionField <> nil) then
+        fOwner.RecordVersionHandle(ooInsert, TableModelIndex, fJsonDecoder,
+          props.RecordVersionField);
+      sql := fJsonDecoder.EncodeAsSql('INSERT INTO ', sql, {update=}false);
+      Finalize(fJsonDecoder); // release temp values memory ASAP
+    finally
+      fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
+    end;
   end;
   if InternalExecute(sql, true, nil, nil, nil, PInt64(@result)) then
     InternalUpdateEvent(oeAdd, TableModelIndex, result, SentData, nil, nil);
@@ -1616,7 +1619,7 @@ function TRestOrmServerDB.InternalExecute(const aSql: RawUtf8;
   LastChangeCount: PInteger): boolean;
 var
   n, res: integer;
-  msg: shortstring;
+  msg: ShortString;
 begin
   msg := '';
   if (self <> nil) and
@@ -1649,7 +1652,7 @@ begin
           until fStatement^.Step <> SQLITE_ROW;
           if LastInsertedID <> nil then
           begin
-            LastInsertedID^ := DB.LastInsertRowID;
+            LastInsertedID^ := sqlite3.last_insert_rowid(DB.DB);
             FormatShort(' lastInsertedID=%', [LastInsertedID^], msg);
           end;
           if LastChangeCount <> nil then
@@ -1799,7 +1802,7 @@ begin
           GetAndPrepareStatementRelease(E);
       end;
     finally
-      DB.UnLockJson(result, rows);
+      DB.UnLockJson(SQL, result, rows);
     end;
   end;
   if ReturnedRowCount <> nil then
@@ -1930,10 +1933,11 @@ var
   props: TOrmProperties;
   sql: RawUtf8;
 begin
+  result := false;
   if (TableModelIndex < 0) or
      (ID <= 0) then
-    result := false
-  else if SentData = '' then
+    exit;
+  if SentData = '' then
     // update with no simple field -> valid no-op
     result := true
   else
@@ -1941,13 +1945,16 @@ begin
     // this sql statement use :(inlined params): for all values
     props := fModel.TableProps[TableModelIndex].Props;
     fRest.AcquireExecution[execOrmWrite].Safe.Lock; // protect fJsonDecoder
-    fJsonDecoder.Decode(SentData, nil, pInlined, ID, false);
-    if props.RecordVersionField <> nil then
-      fOwner.RecordVersionHandle(ooUpdate, TableModelIndex,
-        fJsonDecoder, props.RecordVersionField);
-    sql := fJsonDecoder.EncodeAsSql('', '', {update=}true);
-    Finalize(fJsonDecoder); // release temp values memory ASAP
-    fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
+    try
+      fJsonDecoder.Decode(SentData, nil, pInlined, ID, false);
+      if props.RecordVersionField <> nil then
+        fOwner.RecordVersionHandle(ooUpdate, TableModelIndex,
+          fJsonDecoder, props.RecordVersionField);
+      sql := fJsonDecoder.EncodeAsSql('', '', {update=}true);
+      Finalize(fJsonDecoder); // release temp values memory ASAP
+    finally
+      fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
+    end;
     if sql = '' then
       raise ERestStorage.CreateUtf8('%.MainEngineUpdate: invalid input [%]',
         [self, EscapeToShort(SentData)]);

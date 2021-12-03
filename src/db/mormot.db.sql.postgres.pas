@@ -189,7 +189,7 @@ type
     function ColumnBlob(Col: integer): RawByteString; override;
     /// append all columns values of the current Row to a JSON stream
     // - overriden method to avoid temporary memory allocation or conversion
-    procedure ColumnsToJson(WR: TJsonWriter); override;
+    procedure ColumnsToJson(WR: TResultsWriter); override;
     /// how many parameters founded during prepare stage
     property PreparedParamsCount: integer
       read fPreparedParamsCount;
@@ -446,6 +446,7 @@ end;
 function TSqlDBPostgresConnectionProperties.NewConnection: TSqlDBConnection;
 begin
   result := TSqlDBPostgresConnection.Create(self);
+  TSqlDBPostgresConnection(result).InternalProcess(speCreated);
 end;
 
 function TSqlDBPostgresConnectionProperties.Oid2FieldType(
@@ -454,7 +455,7 @@ var
   i: PtrInt;
 begin
   if cOID <= 65535 then
-  begin
+  begin // fast brute force search within L1 CPU cache
     i := WordScanIndex(pointer(fOids), fOidsCount, cOID);
     if i >= 0 then
       result := fOidsFieldTypes[i]
@@ -493,7 +494,7 @@ var
   cName: RawUtf8;
 begin
   fColumn.Clear;
-  fColumn.ReHash;
+  fColumn.ForceReHash;
   nCols := PQ.nfields(fRes);
   fColumn.Capacity := nCols;
   for c := 0 to nCols - 1 do
@@ -739,7 +740,7 @@ begin
   SetString(result, P, BlobInPlaceDecode(P, PQ.GetLength(fRes, fCurrentRow, col)));
 end;
 
-procedure TSqlDBPostgresStatement.ColumnsToJson(WR: TJsonWriter);
+procedure TSqlDBPostgresStatement.ColumnsToJson(WR: TResultsWriter);
 var
   col: integer;
   P: pointer;

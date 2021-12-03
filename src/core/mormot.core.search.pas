@@ -60,7 +60,7 @@ type
     /// fill the item properties from a FindFirst/FindNext's TSearchRec
     procedure FromSearchRec(const Directory: TFileName; const F: TSearchRec);
     /// returns some ready-to-be-loggued text
-    function ToText: shortstring;
+    function ToText: ShortString;
   end;
   {$A+}
 
@@ -526,8 +526,8 @@ type
   // for a disk/database storage or transmission over a network
   // - internally, several (hardware-accelerated) crc32c hash functions will be
   // used, with some random seed values, to simulate several hashing functions
-  // - Insert/MayExist/Reset methods are thread-safe
-  TSynBloomFilter = class(TSynLocked)
+  // - all methods are thread-safe, and MayExist can be concurrent (via a TRWLock)
+  TSynBloomFilter = class(TSynPersistent)
   private
     fSize: cardinal;
     fFalsePositivePercent: double;
@@ -535,7 +535,7 @@ type
     fHashFunctions: cardinal;
     fInserted: cardinal;
     fStore: RawByteString;
-    function GetInserted: cardinal;
+    fSafe: TRWLock;
   public
     /// initialize the internal bits storage for a given number of items
     // - by default, internal bits array size will be guess from a 1 % false
@@ -561,21 +561,24 @@ type
     procedure Reset; virtual;
     /// returns TRUE if the supplied items was probably set via Insert()
     // - some false positive may occur, but not much than FalsePositivePercent
-    // - this method is thread-safe
+    // - this method is thread-safe, and allow concurrent calls (via a TRWLock)
     function MayExist(const aValue: RawByteString): boolean; overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// returns TRUE if the supplied items was probably set via Insert()
     // - some false positive may occur, but not much than FalsePositivePercent
-    // - this method is thread-safe
+    // - this method is thread-safe, and allow concurrent calls (via a TRWLock)
     function MayExist(aValue: pointer; aValueLen: integer): boolean; overload;
     /// store the internal bits array into a binary buffer
     // - may be used to transmit or store the state of a dataset, avoiding
     // to recompute all Insert() at program startup, or to synchronize
     // networks nodes information and reduce the number of remote requests
+    // - this method is thread-safe, and won't block MayExist (via a TRWLock)
     function SaveTo(aMagic: cardinal = $B1003F11): RawByteString; overload;
     /// store the internal bits array into a binary buffer
     // - may be used to transmit or store the state of a dataset, avoiding
     // to recompute all Insert() at program startup, or to synchronize
     // networks nodes information and reduce the number of remote requests
+    // - this method is thread-safe, and won't block MayExist (via a TRWLock)
     procedure SaveTo(aDest: TBufferWriter;
       aMagic: cardinal = $B1003F11); overload;
     /// read the internal bits array from a binary buffer
@@ -603,7 +606,7 @@ type
       read fHashFunctions;
     /// how many times the Insert() method has been called
     property Inserted: cardinal
-      read GetInserted;
+      read fInserted;
   end;
 
   /// implements a thread-safe differential Bloom Filter storage
@@ -1306,7 +1309,7 @@ type
   // - note that each instance is thread-safe
   TSynTimeZone = class
   protected
-    fLock: TRTLCriticalSection;
+    fSafe: TRWLock;
     fZone: TTimeZoneDataDynArray;
     fZoneCount: integer;
     fZones: TDynArrayHashed;
@@ -1314,7 +1317,7 @@ type
     fLastIndex: integer;
     fIds: TStringList;
     fDisplays: TStringList;
-    function FindZoneIndex(const TzId: TTimeZoneID): PtrInt;
+    function LockedFindZoneIndex(const TzId: TTimeZoneID): PtrInt;
   public
     /// initialize the internal storage
     // - but no data is available, until Load* methods are called
@@ -1440,7 +1443,7 @@ begin
   Timestamp := SearchRecToDateTime(F);
 end;
 
-function TFindFiles.ToText: shortstring;
+function TFindFiles.ToText: ShortString;
 begin
   FormatShort('% % %', [Name, KB(Size), DateTimeToFileShort(Timestamp)], result);
 end;
@@ -3628,7 +3631,6 @@ constructor TSynBloomFilter.Create(aSize: integer; aFalsePositivePercent: double
 const
   LN2 = 0.69314718056;
 begin
-  inherited Create;
   if aSize < 0 then
     fSize := 1000
   else
@@ -3651,7 +3653,6 @@ end;
 
 constructor TSynBloomFilter.Create(const aSaved: RawByteString; aMagic: cardinal);
 begin
-  inherited Create;
   if not LoadFrom(aSaved, aMagic) then
     raise ESynException.CreateUtf8('%.Create with invalid aSaved content', [self]);
 end;
@@ -3675,7 +3676,7 @@ begin
     h2 := 0
   else
     h2 := crc32c(h1, aValue, aValueLen);
-  Safe.Lock;
+  fSafe.WriteLock;
   try
     for h := 0 to fHashFunctions - 1 do
     begin
@@ -3684,17 +3685,7 @@ begin
     end;
     inc(fInserted);
   finally
-    Safe.UnLock;
-  end;
-end;
-
-function TSynBloomFilter.GetInserted: cardinal;
-begin
-  Safe.Lock;
-  try
-    result := fInserted; // Delphi 5 does not support LockedInt64[]
-  finally
-    Safe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -3718,7 +3709,7 @@ begin
     h2 := 0
   else
     h2 := crc32c(h1, aValue, aValueLen);
-  Safe.Lock;
+  fSafe.ReadOnlyLock; // allow concurrent reads
   try
     for h := 0 to fHashFunctions - 1 do
       if GetBitPtr(pointer(fStore), h1 mod fBits) then
@@ -3726,21 +3717,21 @@ begin
       else
         exit;
   finally
-    Safe.UnLock;
+    fSafe.ReadOnlyUnLock;
   end;
   result := true;
 end;
 
 procedure TSynBloomFilter.Reset;
 begin
-  Safe.Lock;
+  fSafe.WriteLock;
   try
     if fStore = '' then
       SetLength(fStore, (fBits shr 3) + 1);
     FillcharFast(pointer(fStore)^, length(fStore), 0);
     fInserted := 0;
   finally
-    Safe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -3768,7 +3759,7 @@ procedure TSynBloomFilter.SaveTo(aDest: TBufferWriter; aMagic: cardinal);
 begin
   aDest.Write4(aMagic);
   aDest.Write1(BLOOM_VERSION);
-  Safe.Lock;
+  fSafe.ReadOnlyLock;
   try
     aDest.Write8(@fFalsePositivePercent);
     aDest.Write4(fSize);
@@ -3777,7 +3768,7 @@ begin
     aDest.Write4(fInserted);
     ZeroCompress(pointer(fStore), Length(fStore), aDest);
   finally
-    Safe.UnLock;
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
@@ -3802,7 +3793,7 @@ begin
   inc(P);
   if version > BLOOM_VERSION then
     exit;
-  Safe.Lock;
+  fSafe.WriteLock;
   try
     fFalsePositivePercent := unaligned(PDouble(P)^);
     inc(P, 8);
@@ -3825,7 +3816,7 @@ begin
     ZeroDecompress(P, PLen - (PAnsiChar(P) - PAnsiChar(start)), fStore);
     result := length(fStore) = integer(fBits shr 3) + 1;
   finally
-    Safe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -3844,19 +3835,19 @@ type
 
 procedure TSynBloomFilterDiff.Insert(aValue: pointer; aValueLen: integer);
 begin
-  Safe.Lock;
+  fSafe.WriteLock;
   try
     inherited Insert(aValue, aValueLen);
     inc(fRevision);
     inc(fSnapshotInsertCount);
   finally
-    Safe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
 procedure TSynBloomFilterDiff.Reset;
 begin
-  Safe.Lock;
+  fSafe.WriteLock;
   try
     inherited Reset;
     fSnapshotAfterInsertCount := fSize shr 5;
@@ -3867,13 +3858,13 @@ begin
     fKnownRevision := 0;
     fKnownStore := '';
   finally
-    Safe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
 procedure TSynBloomFilterDiff.DiffSnapshot;
 begin
-  Safe.Lock;
+  fSafe.WriteLock;
   try
     fKnownRevision := fRevision;
     fSnapshotInsertCount := 0;
@@ -3883,7 +3874,7 @@ begin
     else
       fSnapshotTimestamp := GetTickCount64 + fSnapShotAfterMinutes * 60000;
   finally
-    Safe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -3893,7 +3884,7 @@ var
   W: TBufferWriter;
   temp: array[word] of byte;
 begin
-  Safe.Lock;
+  fSafe.ReadWriteLock; // DiffSnapshot makes a WriteLock
   try
     if aKnownRevision = fRevision then
       head.kind := bdUpToDate
@@ -3938,7 +3929,7 @@ begin
       W.Free;
     end;
   finally
-    Safe.UnLock;
+    fSafe.ReadWriteUnLock;
   end;
 end;
 
@@ -3973,7 +3964,7 @@ begin
     exit;
   inc(P, SizeOf(head^));
   dec(PLen, SizeOf(head^));
-  Safe.Lock;
+  fSafe.WriteLock;
   try
     case head.kind of
       bdFull:
@@ -3990,9 +3981,10 @@ begin
       fInserted := head.inserted;
     end;
   finally
-    Safe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
+
 
 procedure ZeroCompress(P: PAnsiChar; Len: integer; Dest: TBufferWriter);
 var
@@ -4235,11 +4227,11 @@ function crc32c32sse42(buf: pointer): cardinal;
 asm
         mov     edx, eax
         xor     eax, eax
-        {$ifdef ISDELPHI2010}
+        {$ifdef FPC}
         crc32   eax, dword ptr [edx]
         {$else}
         db $F2, $0F, $38, $F1, $02
-        {$endif ISDELPHI2010}
+        {$endif FPC}
 end;
 {$else}
 function crc32c32sse42(buf: pointer): cardinal;
@@ -5149,7 +5141,7 @@ begin
     'MaxLength', // 0
     'Utf8Length' // 1
     ], @V);
-  fMaxLength := GetCardinalDef(V[0].value, 0);
+  fMaxLength := V[0].ToCardinal(0);
   fUtf8Length := V[1].ToBoolean;
   tmp.Done;
 end;
@@ -5232,9 +5224,9 @@ begin
     'ForbiddenDomains',  // 2
     'AnyTLD'             // 3
     ], @V);
-  LowerCaseCopy(V[0].value, V[0].ValueLen, fAllowedTLD);
-  LowerCaseCopy(V[1].value, V[1].ValueLen, fForbiddenTLD);
-  LowerCaseCopy(V[2].value, V[2].ValueLen, fForbiddenDomains);
+  LowerCaseCopy(V[0].Text, V[0].Len, fAllowedTLD);
+  LowerCaseCopy(V[1].Text, V[1].Len, fForbiddenTLD);
+  LowerCaseCopy(V[2].Text, V[2].Len, fForbiddenDomains);
   AnyTLD := V[3].ToBoolean;
   tmp.Done;
 end;
@@ -5392,7 +5384,7 @@ end;
 procedure TSynValidateText.SetParameters(const value: RawUtf8);
 var
   V: array[0..high(TSynValidateTextProps) + {Utf8Length} 1] of TValuePUtf8Char;
-  i: integer;
+  i: PtrInt;
   tmp: TSynTempBuffer;
 const
   DEFAULT: TSynValidateTextProps = (
@@ -5440,7 +5432,7 @@ begin
       'MaxSpaceCount',
       'Utf8Length'], @V);
     for i := 0 to high(fProps) do
-      fProps[i] := GetCardinalDef(V[i].value, fProps[i]);
+      fProps[i] := V[i].ToCardinal(fProps[i]);
     with V[high(V)] do
       fUtf8Length := ToBoolean;
   finally
@@ -5517,7 +5509,6 @@ constructor TSynTimeZone.Create;
 begin
   fZones.InitSpecific(TypeInfo(TTimeZoneDataDynArray),
     fZone, ptRawUtf8, @fZoneCount);
-  InitializeCriticalSection(fLock);
 end;
 
 constructor TSynTimeZone.CreateDefault(dummycpp: integer);
@@ -5537,7 +5528,6 @@ begin
   inherited Destroy;
   fIds.Free;
   fDisplays.Free;
-  DeleteCriticalSection(fLock);
 end;
 
 var
@@ -5550,7 +5540,8 @@ begin
     GlobalLock;
     try
       if SharedSynTimeZone = nil then
-        SharedSynTimeZone := TSynTimeZone.CreateDefault;
+        SharedSynTimeZone :=
+          RegisterGlobalShutdownRelease(TSynTimeZone.CreateDefault);
     finally
       GlobalUnLock;
     end;
@@ -5560,11 +5551,11 @@ end;
 
 function TSynTimeZone.SaveToBuffer: RawByteString;
 begin
-  EnterCriticalSection(fLock);
+  fSafe.ReadOnlyLock;
   try
     result := AlgoSynLZ.Compress(fZones.SaveTo);
   finally
-    LeaveCriticalSection(fLock);
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
@@ -5583,14 +5574,14 @@ procedure TSynTimeZone.LoadFromBuffer(const Buffer: RawByteString);
 begin
   if Buffer = '' then
    exit;
-  EnterCriticalSection(fLock);
+  fSafe.WriteLock;
   try
     fZones.LoadFromBinary(AlgoSynLZ.Decompress(Buffer));
-    fZones.ReHash;
+    fZones.ForceReHash;
     FreeAndNil(fIds);
     FreeAndNil(fDisplays);
   finally
-    LeaveCriticalSection(fLock);
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -5625,79 +5616,72 @@ var
   i, first, last, year, n: integer;
   item: TTimeZoneData;
 begin
-  fZones.Clear;
-  if reg.ReadOpen(wrLocalMachine, REGKEY) then
-    keys := reg.ReadEnumEntries
-  else
-    keys := nil; // make Delphi 6 happy
-  n := length(keys);
-  fZones.Capacity := n;
-  for i := 0 to n - 1 do
-  begin
-    Finalize(item);
-    FillcharFast(item.tzi, SizeOf(item.tzi), 0);
-    if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i], {reopen=}true) then
+  fSafe.WriteLock;
+  try
+    fZones.Clear;
+    if reg.ReadOpen(wrLocalMachine, REGKEY) then
+      keys := reg.ReadEnumEntries
+    else
+      keys := nil; // make Delphi 6 happy
+    n := length(keys);
+    fZones.Capacity := n;
+    for i := 0 to n - 1 do
     begin
-      item.id := keys[i];
-      item.Display := reg.ReadString('Display');
-      reg.ReadBuffer('TZI', @item.tzi, SizeOf(item.tzi));
-      if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i] + '\Dynamic DST', true) then
+      Finalize(item);
+      FillcharFast(item.tzi, SizeOf(item.tzi), 0);
+      if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i], {reopen=}true) then
       begin
-        // warning: never defined on XP/2003, and not for all entries
-        first := reg.ReadDword('FirstEntry');
-        last := reg.ReadDword('LastEntry');
-        if (first > 0) and
-           (last >= first) then
+        item.id := keys[i];
+        item.Display := reg.ReadString('Display');
+        reg.ReadBuffer('TZI', @item.tzi, SizeOf(item.tzi));
+        if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i] + '\Dynamic DST', true) then
         begin
-          n := 0;
-          SetLength(item.dyn, last - first + 1);
-          for year := first to last do
-            if reg.ReadBuffer(Utf8ToSynUnicode(UInt32ToUtf8(year)),
-              @item.dyn[n].tzi, SizeOf(TTimeZoneInfo)) then
-            begin
-              item.dyn[n].year := year;
-              inc(n);
-            end;
-          SetLength(item.dyn, n);
+          // warning: never defined on XP/2003, and not for all entries
+          first := reg.ReadDword('FirstEntry');
+          last := reg.ReadDword('LastEntry');
+          if (first > 0) and
+             (last >= first) then
+          begin
+            n := 0;
+            SetLength(item.dyn, last - first + 1);
+            for year := first to last do
+              if reg.ReadBuffer(Utf8ToSynUnicode(UInt32ToUtf8(year)),
+                @item.dyn[n].tzi, SizeOf(TTimeZoneInfo)) then
+              begin
+                item.dyn[n].year := year;
+                inc(n);
+              end;
+            SetLength(item.dyn, n);
+          end;
         end;
+        fZones.Add(item);
       end;
-      fZones.Add(item);
     end;
+    reg.Close;
+    fZones.ForceReHash;
+    FreeAndNil(fIds);
+    FreeAndNil(fDisplays);
+  finally
+    fSafe.WriteUnLock;
   end;
-  reg.Close;
-  fZones.ReHash;
-  FreeAndNil(fIds);
-  FreeAndNil(fDisplays);
 end;
 
 {$endif OSWINDOWS}
 
-function TSynTimeZone.FindZoneIndex(const TzId: TTimeZoneID): PtrInt;
+function TSynTimeZone.LockedFindZoneIndex(const TzId: TTimeZoneID): PtrInt;
 begin
-  if (self = nil) or
-     (TzId = '') then
+  if TzId = '' then
     result := -1
   else
   begin
-    EnterCriticalSection(fLock);
-    {$ifdef HASFASTTRYFINALLY} // make a huge performance difference
-    try
-    {$endif HASFASTTRYFINALLY}
-      if TzId = fLastZone then
-        result := fLastIndex
-      else
-      begin
-        result := fZones.FindHashed(TzId);
-        fLastZone := TzId;
-        flastIndex := result;
-      end;
-    {$ifdef HASFASTTRYFINALLY}
-    finally
-    {$endif HASFASTTRYFINALLY}
-      LeaveCriticalSection(fLock);
-    {$ifdef HASFASTTRYFINALLY}
+    if TzId = fLastZone then
+      result := fLastIndex
+    else
+    begin
+      result := fZones.FindHashed(TzId);
+      fLastZone := TzId;
+      flastIndex := result;
     end;
-    {$endif HASFASTTRYFINALLY}
   end;
 end;
 
@@ -5705,7 +5689,8 @@ function TSynTimeZone.GetDisplay(const TzId: TTimeZoneID): RawUtf8;
 var
   ndx: PtrInt;
 begin
-  ndx := FindZoneIndex(TzId);
+  fSafe.ReadOnlyLock;
+  ndx := LockedFindZoneIndex(TzId);
   if ndx < 0 then
     if TzId = 'UTC' then // e.g. on XP
       result := TzId
@@ -5713,6 +5698,7 @@ begin
       result := ''
   else
     result := fZone[ndx].display;
+  fSafe.ReadOnlyUnLock;
 end;
 
 function TSynTimeZone.GetBiasForDateTime(const Value: TDateTime;
@@ -5724,46 +5710,51 @@ var
   tzi: PTimeZoneInfo;
   std, dlt: TDateTime;
 begin
-  ndx := FindZoneIndex(TzId);
-  if ndx < 0 then
-  begin
-    Bias := 0;
-    HaveDaylight := false;
-    result := TzId = 'UTC'; // e.g. on XP
-    exit;
-  end;
-  d.FromDate(Value); // faster than DecodeDate
-  tzi := fZone[ndx].GetTziFor(d.Year);
-  if tzi.change_time_std.IsZero then
-  begin
-    HaveDaylight := false;
-    Bias := tzi.Bias + tzi.bias_std;
-  end
-  else
-  begin
-    HaveDaylight := true;
-    std := tzi.change_time_std.EncodeForTimeChange(d.Year);
-    dlt := tzi.change_time_dlt.EncodeForTimeChange(d.Year);
-    if ValueIsUtc then
+  fSafe.ReadOnlyLock;
+  try
+    ndx := LockedFindZoneIndex(TzId);
+    if ndx < 0 then
     begin
-      // Std shifts by the DST bias to convert to UTC
-      std := ((std * MinsPerDay) + tzi.Bias + tzi.bias_dlt) / MinsPerDay;
-      // Dst shifts by the STD bias
-      dlt := ((dlt * MinsPerDay) + tzi.Bias + tzi.bias_std) / MinsPerDay;
+      Bias := 0;
+      HaveDaylight := false;
+      result := TzId = 'UTC'; // e.g. on XP
+      exit;
     end;
-    if std < dlt then
-      if (std <= Value) and
-         (Value < dlt) then
-        Bias := tzi.Bias + tzi.bias_std
-      else
-        Bias := tzi.Bias + tzi.bias_dlt
-    else if (dlt <= Value) and
-            (Value < std) then
-      Bias := tzi.Bias + tzi.bias_dlt
-    else
+    d.FromDate(Value); // faster than DecodeDate
+    tzi := fZone[ndx].GetTziFor(d.Year);
+    if tzi.change_time_std.IsZero then
+    begin
+      HaveDaylight := false;
       Bias := tzi.Bias + tzi.bias_std;
+    end
+    else
+    begin
+      HaveDaylight := true;
+      std := tzi.change_time_std.EncodeForTimeChange(d.Year);
+      dlt := tzi.change_time_dlt.EncodeForTimeChange(d.Year);
+      if ValueIsUtc then
+      begin
+        // STD shifts by the DLT bias to convert to UTC
+        std := ((std * MinsPerDay) + tzi.Bias + tzi.bias_dlt) / MinsPerDay;
+        // DLT shifts by the STD bias
+        dlt := ((dlt * MinsPerDay) + tzi.Bias + tzi.bias_std) / MinsPerDay;
+      end;
+      if std < dlt then
+        if (std <= Value) and
+           (Value < dlt) then
+          Bias := tzi.Bias + tzi.bias_std
+        else
+          Bias := tzi.Bias + tzi.bias_dlt
+      else if (dlt <= Value) and
+              (Value < std) then
+        Bias := tzi.Bias + tzi.bias_dlt
+      else
+        Bias := tzi.Bias + tzi.bias_std;
+    end;
+    result := true;
+  finally
+    fSafe.ReadOnlyUnLock;
   end;
-  result := true;
 end;
 
 function TSynTimeZone.UtcToLocal(const UtcDateTime: TDateTime;
@@ -5810,8 +5801,10 @@ begin
   if fIDs = nil then
   begin
     fIDs := TStringList.Create;
+    fSafe.ReadOnlyLock;
     for i := 0 to length(fZone) - 1 do
       fIDs.Add(Utf8ToString(RawUtf8(fZone[i].id)));
+    fSafe.ReadOnlyUnLock;
   end;
   result := fIDs;
 end;
@@ -5823,8 +5816,10 @@ begin
   if fDisplays = nil then
   begin
     fDisplays := TStringList.Create;
+    fSafe.ReadOnlyLock;
     for i := 0 to length(fZone) - 1 do
       fDisplays.Add(Utf8ToString(fZone[i].Display));
+    fSafe.ReadOnlyUnLock;
   end;
   result := fDisplays;
 end;
@@ -5857,10 +5852,5 @@ begin
   result := TSynTimeZone.Default.LocalToUtc(LocalDateTime, TzId);
 end;
 
-
-initialization
-
-finalization
-  FreeAndNilSafe(SharedSynTimeZone);
 
 end.

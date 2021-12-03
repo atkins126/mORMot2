@@ -179,7 +179,7 @@ type
     // - this overridden version will adjust the size in the message header
     procedure ToBsonDocument(var result: TBsonDocument); override;
     /// write the main parameters of the request as JSON
-    procedure ToJson(W: TTextWriter; Mode: TMongoJsonMode); overload; virtual;
+    procedure ToJson(W: TJsonWriter; Mode: TMongoJsonMode); overload; virtual;
     /// write the main parameters of the request as JSON
     function ToJson(Mode: TMongoJsonMode): RawUtf8; overload;
     /// identify the message, after call to any reintroduced Create() constructor
@@ -227,7 +227,7 @@ type
       const Selector, Update: variant;
       Flags: TMongoUpdateFlags = []); reintroduce;
     /// write the main parameters of the request as JSON
-    procedure ToJson(W: TTextWriter; Mode: TMongoJsonMode); override;
+    procedure ToJson(W: TJsonWriter; Mode: TMongoJsonMode); override;
   end;
 
   /// a MongoDB client message to insert one or more documents in a collection
@@ -282,7 +282,7 @@ type
       const Selector: variant;
       Flags: TMongoDeleteFlags = []); reintroduce;
     /// write the main parameters of the request as JSON
-    procedure ToJson(W: TTextWriter; Mode: TMongoJsonMode); override;
+    procedure ToJson(W: TJsonWriter; Mode: TMongoJsonMode); override;
   end;
 
   /// a MongoDB client message to query one or more documents in a collection
@@ -320,7 +320,7 @@ type
       const Query, ReturnFieldsSelector: variant; NumberToReturn: integer;
       NumberToSkip: integer = 0; Flags: TMongoQueryFlags = []); reintroduce;
     /// write the main parameters of the request as JSON
-    procedure ToJson(W: TTextWriter; Mode: TMongoJsonMode); override;
+    procedure ToJson(W: TJsonWriter; Mode: TMongoJsonMode); override;
     /// retrieve the NumberToReturn parameter as set to the constructor
     property NumberToReturn: integer
       read fNumberToReturn;
@@ -359,7 +359,7 @@ type
     constructor Create(const FullCollectionName: RawUtf8;
       const CursorIDs: array of Int64); reintroduce;
     /// write the main parameters of the request as JSON
-    procedure ToJson(W: TTextWriter; Mode: TMongoJsonMode); override;
+    procedure ToJson(W: TJsonWriter; Mode: TMongoJsonMode); override;
   end;
 
 
@@ -529,7 +529,7 @@ type
     // if there is only one document in this reply
     // - this method is very optimized and will convert the BSON binary content
     // directly into JSON
-    procedure FetchAllToJson(W: TTextWriter;
+    procedure FetchAllToJson(W: TJsonWriter;
       Mode: TMongoJsonMode = modMongoStrict; WithHeader: boolean = false;
       MaxSize: cardinal = 0);
     /// return all documents content as a JSON array, or one JSON object
@@ -636,7 +636,7 @@ type
     function Send(Request: TMongoRequest): boolean;
     function GetOpened: boolean;
     function GetLocked: boolean;
-    // will call TMongoReplyCursor.FetchAllToJson(TTextWriter(Opaque))
+    // will call TMongoReplyCursor.FetchAllToJson(TJsonWriter(Opaque))
     procedure ReplyJsonStrict(Request: TMongoRequest;
       const Reply: TMongoReplyCursor; var Opaque);
     procedure ReplyJsonExtended(Request: TMongoRequest;
@@ -1554,7 +1554,7 @@ type
     {$ifndef NOEXCEPTIONINTERCEPT}
     /// used to customize the exception log to contain information about the Query
     // - it will log the database parameters
-    function CustomLog(WR: TBaseWriter;
+    function CustomLog(WR: TTextWriter;
       const Context: TSynLogExceptionContext): boolean; override;
     {$endif NOEXCEPTIONINTERCEPT}
   published
@@ -1586,7 +1586,7 @@ type
     {$ifndef NOEXCEPTIONINTERCEPT}
     /// used to customize the exception log to contain information about the Query
     // - it will log both the failing request and the returned error message
-    function CustomLog(WR: TBaseWriter;
+    function CustomLog(WR: TTextWriter;
       const Context: TSynLogExceptionContext): boolean; override;
     {$endif NOEXCEPTIONINTERCEPT}
     /// the associated error reply document
@@ -1693,7 +1693,7 @@ begin
   result := fBSONDocument;
 end;
 
-procedure TMongoRequest.ToJson(W: TTextWriter; Mode: TMongoJsonMode);
+procedure TMongoRequest.ToJson(W: TJsonWriter; Mode: TMongoJsonMode);
 begin
   if self = nil then
   begin
@@ -1717,10 +1717,10 @@ end;
 
 function TMongoRequest.ToJson(Mode: TMongoJsonMode): RawUtf8;
 var
-  W: TTextWriter;
+  W: TJsonWriter;
   tmp: TTextWriterStackBuffer;
 begin
-  W := TTextWriter.CreateOwnedStream(tmp);
+  W := TJsonWriter.CreateOwnedStream(tmp);
   try
     ToJson(W, Mode);
     W.SetText(result);
@@ -1744,7 +1744,7 @@ begin
   BsonWriteParam(Update);
 end;
 
-procedure TMongoRequestUpdate.ToJson(W: TTextWriter; Mode: TMongoJsonMode);
+procedure TMongoRequestUpdate.ToJson(W: TJsonWriter; Mode: TMongoJsonMode);
 begin
   inherited;
   W.CancelLastChar('}');
@@ -1802,7 +1802,7 @@ begin
   BsonWriteParam(Selector);
 end;
 
-procedure TMongoRequestDelete.ToJson(W: TTextWriter; Mode: TMongoJsonMode);
+procedure TMongoRequestDelete.ToJson(W: TJsonWriter; Mode: TMongoJsonMode);
 begin
   inherited;
   W.CancelLastChar('}');
@@ -1831,7 +1831,7 @@ begin
     BsonWriteParam(ReturnFieldsSelector);
 end;
 
-procedure TMongoRequestQuery.ToJson(W: TTextWriter; Mode: TMongoJsonMode);
+procedure TMongoRequestQuery.ToJson(W: TJsonWriter; Mode: TMongoJsonMode);
 begin
   inherited;
   W.CancelLastChar('}');
@@ -1887,7 +1887,7 @@ begin
   Write(pointer(fCursors), n);
 end;
 
-procedure TMongoRequestKillCursor.ToJson(W: TTextWriter; Mode: TMongoJsonMode);
+procedure TMongoRequestKillCursor.ToJson(W: TJsonWriter; Mode: TMongoJsonMode);
 var
   i: PtrInt;
 begin
@@ -2092,7 +2092,7 @@ begin
     raise EMongoException.Create('Invalid opReply Documents');
 end;
 
-procedure TMongoReplyCursor.FetchAllToJson(W: TTextWriter; Mode: TMongoJsonMode;
+procedure TMongoReplyCursor.FetchAllToJson(W: TJsonWriter; Mode: TMongoJsonMode;
   WithHeader: boolean; MaxSize: cardinal);
 var
   b: PByte;
@@ -2129,7 +2129,7 @@ end;
 function TMongoReplyCursor.ToJson(Mode: TMongoJsonMode; WithHeader: boolean;
   MaxSize: cardinal): RawUtf8;
 var
-  W: TTextWriter;
+  W: TJsonWriter;
   tmp: TTextWriterStackBuffer;
 begin
   if (fReply = '') or
@@ -2137,7 +2137,7 @@ begin
     result := 'null'
   else
   begin
-    W := TTextWriter.CreateOwnedStream(tmp);
+    W := TJsonWriter.CreateOwnedStream(tmp);
     try
       FetchAllToJson(W, Mode, WithHeader, MaxSize);
       W.SetText(result);
@@ -2251,8 +2251,9 @@ end;
 function TMongoConnection.GetBsonAndFree(Query: TMongoRequestQuery): TBsonDocument;
 var
   W: TBsonWriter;
+  tmp: TTextWriterStackBuffer;
 begin
-  W := TBsonWriter.Create(TRawByteStringStream);
+  W := TBsonWriter.Create(tmp);
   try
     W.BSONDocumentBegin;
     GetRepliesAndFree(Query, ReplyBson, W); // W.Tag = item number in array
@@ -2266,12 +2267,12 @@ end;
 function TMongoConnection.GetJsonAndFree(Query: TMongoRequestQuery; Mode:
   TMongoJsonMode): RawUtf8;
 var
-  W: TTextWriter;
+  W: TJsonWriter;
   ReturnAsJsonArray: boolean;
   tmp: TTextWriterStackBuffer;
 begin
   ReturnAsJsonArray := Query.NumberToReturn > 1;
-  W := TTextWriter.CreateOwnedStream(tmp);
+  W := TJsonWriter.CreateOwnedStream(tmp);
   try
     if ReturnAsJsonArray then
       W.Add('[');
@@ -2359,7 +2360,7 @@ end;
 procedure TMongoConnection.ReplyJsonStrict(Request: TMongoRequest;
   const Reply: TMongoReplyCursor; var Opaque);
 var
-  W: TTextWriter absolute Opaque;
+  W: TJsonWriter absolute Opaque;
 begin
   Reply.FetchAllToJson(W, modMongoStrict, false);
   W.AddComma;
@@ -2368,7 +2369,7 @@ end;
 procedure TMongoConnection.ReplyJsonExtended(Request: TMongoRequest;
   const Reply: TMongoReplyCursor; var Opaque);
 var
-  W: TTextWriter absolute Opaque;
+  W: TJsonWriter absolute Opaque;
 begin
   Reply.FetchAllToJson(W, modMongoShell, false);
   W.AddComma;
@@ -2377,7 +2378,7 @@ end;
 procedure TMongoConnection.ReplyJsonNoMongo(Request: TMongoRequest;
   const Reply: TMongoReplyCursor; var Opaque);
 var
-  W: TTextWriter absolute Opaque;
+  W: TJsonWriter absolute Opaque;
 begin
   Reply.FetchAllToJson(W, modNoMongo, false);
   W.AddComma;
@@ -2623,21 +2624,21 @@ begin
 end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
-function EMongoRequestException.CustomLog(WR: TBaseWriter;
+function EMongoRequestException.CustomLog(WR: TTextWriter;
   const Context: TSynLogExceptionContext): boolean;
 begin
   inherited CustomLog(WR, Context);
   if fRequest <> nil then
   begin
     WR.AddInstanceName(fRequest, ':');
-    if WR.InheritsFrom(TTextWriter) then
-      fRequest.ToJson(TTextWriter(WR), modMongoShell)
+    if WR.InheritsFrom(TJsonWriter) then
+      fRequest.ToJson(TJsonWriter(WR), modMongoShell)
     else
       WR.AddNull;
   end;
   if (fError.Reply <> '') and
-     WR.InheritsFrom(TTextWriter) then
-    fError.FetchAllToJson(TTextWriter(WR), modMongoShell, True);
+     WR.InheritsFrom(TJsonWriter) then
+    fError.FetchAllToJson(TJsonWriter(WR), modMongoShell, True);
   result := false; // log stack trace
 end;
 {$endif NOEXCEPTIONINTERCEPT}
@@ -2681,12 +2682,12 @@ begin
 end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
-function EMongoDatabaseException.CustomLog(WR: TBaseWriter;
+function EMongoDatabaseException.CustomLog(WR: TTextWriter;
   const Context: TSynLogExceptionContext): boolean;
 begin
   inherited CustomLog(WR, Context);
-  if WR.InheritsFrom(TTextWriter) then
-    TTextWriter(WR).AddJsonEscape(['Database', fDatabase.Name]);
+  if WR.InheritsFrom(TJsonWriter) then
+    TJsonWriter(WR).AddJsonEscape(['Database', fDatabase.Name]);
   result := false; // log stack trace
 end;
 {$endif NOEXCEPTIONINTERCEPT}
@@ -2824,7 +2825,8 @@ begin
         result := fConnections[GetUnlockedSecondaryIndex]
       else
         result := fConnections[0];
-    rpSecondary, rpSecondaryPreferred:
+    rpSecondary,
+    rpSecondaryPreferred:
       result := fConnections[GetUnlockedSecondaryIndex];
     rpNearest:
       begin

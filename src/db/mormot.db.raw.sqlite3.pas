@@ -4528,7 +4528,7 @@ type
     // - will use WR.Expand to guess the expected output format
     // - BLOB field value is saved as Base64, in the '"\uFFF0base64encodedbinary"
     // format and contains true BLOB data
-    procedure FieldsToJson(WR: TJsonWriter; DoNotFetchBlobs: boolean = false);
+    procedure FieldsToJson(WR: TResultsWriter; DoNotFetchBlobs: boolean = false);
     /// the column/field count of the current ROW
     // - fields numerotation starts with 0
     property FieldCount: integer
@@ -4780,7 +4780,7 @@ type
     // - caller must provide the JSON result for the SQL statement previously set
     //  by LockJson()
     // - do proper caching of the JSON response for this SQL statement
-    procedure UnLockJson(const aJsonResult: RawUtf8; aResultCount: PtrInt);
+    procedure UnLockJson(const aSql, aJsonResult: RawUtf8; aResultCount: PtrInt);
     /// (re)open the database from file fFileName
     // - TSqlDatabase.Create already opens the database: this method is to be
     // used only on particular cases, e.g. to close temporary a DB file and
@@ -5989,13 +5989,13 @@ begin
       (LibraryResolve(fLoader.Handle, SQLITE3_ENTRIES[171]) <> @snapshot_free)) then
     raise ESqlite3Exception.CreateUtf8( // paranoid check
       '%.Create: please check SQLITE3_ENTRIES[] order for %', [self, LibraryName]);
-  if not Assigned(initialize) or
-     not Assigned(libversion) or
-     not Assigned(open) or
-     not Assigned(close) or
-     not Assigned(create_function) or
-     not Assigned(prepare_v2) or
-     not Assigned(create_module_v2) then
+  if (not Assigned(initialize)) or
+     (not Assigned(libversion)) or
+     (not Assigned(open)) or
+     (not Assigned(close)) or
+     (not Assigned(create_function)) or
+     (not Assigned(prepare_v2)) or
+     (not Assigned(create_module_v2)) then
      // note: some APIs like config() key() or trace() may not be available
      // -> use the "if Assigned(xxx) then xxx(...)" pattern for safety
   begin
@@ -6559,7 +6559,7 @@ begin
   fFileDefaultPageSize := aDefaultPageSize;
   fFileDefaultCacheSize := aDefaultCacheSize;
   if (fOpenV2Flags <> (SQLITE_OPEN_READWRITE or SQLITE_OPEN_CREATE)) and
-     not Assigned(sqlite3.open_v2) then
+     (not Assigned(sqlite3.open_v2)) then
     raise ESqlite3Exception.CreateUtf8(
       'Your % version of SQLite3 does not support custom OpenV2Flags=%',
       [sqlite3.libversion, fOpenV2Flags]);
@@ -6795,7 +6795,7 @@ begin
     if aResultCount <> nil then
       aResultCount^ := Count;
   finally
-    UnLockJson(result, Count);
+    UnLockJson(aSql, result, Count);
     fLog.Add.Log(sllSQL, '% % returned % bytes %', [Timer.Stop,
       FileNameWithoutPath, length(result), aSql], self);
   end;
@@ -6874,8 +6874,8 @@ function TSqlDataBase.TotalChangeCount: integer;
 begin
   if (self = nil) or
      (DB = 0) or
-     not Assigned(sqlite3.total_changes) then
-    result := 0
+     (not Assigned(sqlite3.total_changes)) then
+    result := 0 // no DB or old API
   else
   try
     Lock;
@@ -7027,14 +7027,14 @@ begin
   end;
 end;
 
-procedure TSqlDataBase.UnLockJson(const aJsonResult: RawUtf8;
+procedure TSqlDataBase.UnLockJson(const aSql, aJsonResult: RawUtf8;
   aResultCount: PtrInt);
 begin
   if self <> nil then
   try
     if fLog <> nil then
       fLog.Add.Log(sllResult, aJsonResult, self, fLogResultMaximumSize);
-    fCache.Add(aJsonResult, aResultCount); // no-op if Reset was made just before
+    fCache.AddOrUpdate(aSql, aJsonResult, aResultCount); // no-op if Reset was made just before
   finally
     fSafe.UnLock; // on non-concurent calls, this API is very fast
   end;
@@ -7094,7 +7094,7 @@ begin
   result := false;
   if (self = nil) or
      (BackupFileName = '') or
-     not Assigned(sqlite3.backup_init) or
+     (not Assigned(sqlite3.backup_init)) or
      (fBackupBackgroundInProcess <> nil) then
     exit;
   fLog.Add.Log(sllDB,'BackupBackground("%") started on %',
@@ -7138,7 +7138,7 @@ begin
   result := false;
   if (self = nil) or
      (BackupDB = nil) or
-     not Assigned(sqlite3.backup_init) or
+     (not Assigned(sqlite3.backup_init)) or
      (fBackupBackgroundInProcess <> nil) then
     exit;
   fLog.Add.Log(sllDB,'BackupBackgroundToDB("%") started on %',
@@ -7154,7 +7154,7 @@ end;
 procedure TSqlDataBase.BackupBackgroundWaitUntilFinished(
   TimeOutSeconds: integer);
 
-  function StepAsText: shortstring;
+  function StepAsText: ShortString;
   begin
     Lock;
     if fBackupBackgroundInProcess = nil then
@@ -7234,7 +7234,7 @@ begin
   if log <> nil then
     log.Log(sllDB,'closing [%] %', [FileName, KB(GetFileSize)], self);
   if (sqlite3 = nil) or
-     not Assigned(sqlite3.close) then
+     (not Assigned(sqlite3.close)) then
     raise ESqlite3Exception.CreateUtf8(
       '%.DBClose called with no sqlite3 global', [self]);
   if fBackupBackgroundInProcess <> nil then
@@ -7256,7 +7256,7 @@ begin
   if log <> nil then
     log.Log(sllDB, 'Enable custom tokenizer for [%]', [FileName], self);
   if (sqlite3 = nil) or
-     not Assigned(sqlite3.db_config) then
+     (not Assigned(sqlite3.db_config)) then
     raise ESqlite3Exception.CreateUtf8(
       '%.EnableCustomTokenizer called with no sqlite3 engine', [self]);
   result := sqlite3.db_config(fDB, SQLITE_DBCONFIG_ENABLE_FTS3_TOKENIZER, 1);
@@ -7273,7 +7273,7 @@ begin
     raise ESqlite3Exception.Create('DBOpen called twice');
   // open the database with the proper API call
   if (sqlite3 = nil) or
-     not Assigned(sqlite3.open) then
+     (not Assigned(sqlite3.open)) then
     raise ESqlite3Exception.Create('DBOpen called with no sqlite3 global');
   StringToUtf8(fFileName, u);
   {$ifdef OSPOSIX}
@@ -7514,7 +7514,7 @@ function TSqlDataBase.GetLimit(Category: TSqlLimitCategory): integer;
 begin
   if (self = nil) or
      (fDB = 0) or
-     not Assigned(sqlite3.limit) then
+     (not Assigned(sqlite3.limit)) then
     result := 0
   else
     result := sqlite3.limit(fDB, ord(Category), -1);
@@ -7876,11 +7876,11 @@ function TSqlRequest.Execute(aDB: TSqlite3DB; const aSql: RawUtf8;
 // expand=false: { "FieldCount":2,"Values":["col1","col2",val11,"val12",val21,..] }
 var
   i: PtrInt;
-  W: TJsonWriter;
+  W: TResultsWriter;
   tmp: TTextWriterStackBuffer;
 begin
   result := 0;
-  W := TJsonWriter.Create(Json, Expand, false, nil, 0, @tmp);
+  W := TResultsWriter.Create(Json, Expand, false, nil, 0, @tmp);
   try
     W.CustomOptions := W.CustomOptions + Options;
     // prepare the SQL request
@@ -8244,7 +8244,7 @@ begin
   result := sqlite3.stmt_readonly(Request) <> 0;
 end;
 
-procedure TSqlRequest.FieldsToJson(WR: TJsonWriter; DoNotFetchBlobs: boolean);
+procedure TSqlRequest.FieldsToJson(WR: TResultsWriter; DoNotFetchBlobs: boolean);
 var
   i: PtrInt;
   P: PUtf8Char;
@@ -8545,7 +8545,7 @@ begin
     Cache[i].Timer.Free;
   end;
   Caches.Clear;
-  Caches.ReHash; // need to refresh all hashs
+  Caches.ForceReHash; // need to refresh all hashs
 end;
 
 function StatementCacheTotalTimeCompare(const A, B): integer;
@@ -8619,91 +8619,92 @@ begin
   try
     try
       try
-        NotifyProgressAndContinue(backupStart);
-        repeat
-          fSourceDB.Lock; // naive multi-thread protection of main process
-          res := sqlite3.backup_step(fBackup, fStepPageNumber);
-          fSourceDB.UnLock;
-          fStepNumberToFinish := sqlite3.backup_remaining(fBackup);
-          fStepNumberTotal := sqlite3.backup_pagecount(fBackup);
-          case res of
-            SQLITE_OK:
-              NotifyProgressAndContinue(backupStepOk);
-            SQLITE_BUSY:
-              begin
-                NotifyProgressAndContinue(backupStepBusy);
-                if fStepSleepMS = 0 then
-                  SleepHiRes(1);
-              end;
-            SQLITE_LOCKED:
-              NotifyProgressAndContinue(backupStepLocked);
-            SQLITE_DONE:
-              break;
-          else
-            raise ESqlite3Exception.Create(fDestDB.DB, res, 'Backup');
-          end;
-          if Terminated then
-            raise ESqlite3Exception.Create('Backup process forced to terminate');
-          SleepHiRes(fStepSleepMS);
-        until false;
-        if fDestDB <> nil then
-        begin
-          sqlite3.backup_finish(fBackup);
-          // close destination backup database
-          if fOwnerDest then
-            FreeAndNil(fDestDB);
-          fDestDB := nil; // no abort below
-        end;
-        if not IdemPChar(pointer(fn), SQLITE_MEMORY_DATABASE_NAME) then
-        begin
-          if fStepSynLzCompress then
+        try
+          NotifyProgressAndContinue(backupStart);
+          repeat
+            fSourceDB.Lock; // naive multi-thread protection of main process
+            res := sqlite3.backup_step(fBackup, fStepPageNumber);
+            fSourceDB.UnLock;
+            fStepNumberToFinish := sqlite3.backup_remaining(fBackup);
+            fStepNumberTotal := sqlite3.backup_pagecount(fBackup);
+            case res of
+              SQLITE_OK:
+                NotifyProgressAndContinue(backupStepOk);
+              SQLITE_BUSY:
+                begin
+                  NotifyProgressAndContinue(backupStepBusy);
+                  if fStepSleepMS = 0 then
+                    SleepHiRes(1);
+                end;
+              SQLITE_LOCKED:
+                NotifyProgressAndContinue(backupStepLocked);
+              SQLITE_DONE:
+                break;
+            else
+              raise ESqlite3Exception.Create(fDestDB.DB, res, 'Backup');
+            end;
+            if Terminated then
+              raise ESqlite3Exception.Create('Backup process forced to terminate');
+            SleepHiRes(fStepSleepMS);
+          until false;
+          if fDestDB <> nil then
           begin
-            NotifyProgressAndContinue(backupStepSynLz);
-            fn2 := ChangeFileExt(fn, '.db.tmp');
-            DeleteFile(fn2);
-            if not RenameFile(fn, fn2) then
-              raise ESqlite3Exception.CreateUtf8(
-                '%.Execute: RenameFile(%,%) failed', [self, fn, fn2]);
-            if not TSqlDatabase.BackupSynLZ(fn2, fn, true) then
-              raise ESqlite3Exception.CreateUtf8(
-                '%.Execute: BackupSynLZ(%,%) failed', [self, fn, fn2]);
-            if Assigned(log) then
-              log.Log(sllTrace, 'TSqlDatabase.BackupSynLZ into % %',
-                [KB(FileSize(fn)), fn], self);
+            sqlite3.backup_finish(fBackup);
+            // close destination backup database
+            if fOwnerDest then
+              FreeAndNil(fDestDB);
+            fDestDB := nil; // no abort below
           end;
-          fSourceDB.fBackupBackgroundLastFileName := ExtractFileName(fn);
+          if not IdemPChar(pointer(fn), SQLITE_MEMORY_DATABASE_NAME) then
+          begin
+            if fStepSynLzCompress then
+            begin
+              NotifyProgressAndContinue(backupStepSynLz);
+              fn2 := ChangeFileExt(fn, '.db.tmp');
+              DeleteFile(fn2);
+              if not RenameFile(fn, fn2) then
+                raise ESqlite3Exception.CreateUtf8(
+                  '%.Execute: RenameFile(%,%) failed', [self, fn, fn2]);
+              if not TSqlDatabase.BackupSynLZ(fn2, fn, true) then
+                raise ESqlite3Exception.CreateUtf8(
+                  '%.Execute: BackupSynLZ(%,%) failed', [self, fn, fn2]);
+              if Assigned(log) then
+                log.Log(sllTrace, 'TSqlDatabase.BackupSynLZ into % %',
+                  [KB(FileSize(fn)), fn], self);
+            end;
+            fSourceDB.fBackupBackgroundLastFileName := ExtractFileName(fn);
+          end;
+          NotifyProgressAndContinue(backupSuccess);
+        finally
+          if fDestDB <> nil then
+          begin
+            if Assigned(log) then
+              log.Log(sllWarning, 'Execute Aborted', self);
+            sqlite3.backup_finish(fBackup);
+            if fOwnerDest then
+              // close destination backup database if not already
+              fDestDB.Free;
+          end;
         end;
-        NotifyProgressAndContinue(backupSuccess);
-      finally
-        if fDestDB <> nil then
+      except
+        on E: Exception do
         begin
-          if Assigned(log) then
-            log.Log(sllWarning, 'Execute Aborted', self);
-          sqlite3.backup_finish(fBackup);
-          if fOwnerDest then
-            // close destination backup database if not already
-            fDestDB.Free;
+          fError := E;
+          fStep := backupFailure;
+          if Assigned(fOnProgress) then
+            fOnProgress(self);
         end;
       end;
-    except
-      on E: Exception do
-      begin
-        fError := E;
-        fStep := backupFailure;
-        if Assigned(fOnProgress) then
-          fOnProgress(self);
-      end;
+    finally
+      fSourceDB.fBackupBackgroundLastTime := fTimer.Stop;
+      fSourceDB.fBackupBackgroundInProcess := nil;
+      if Assigned(log) then
+        log.Log(sllTrace, 'Execute Finished', self);
+      log := nil;
     end;
-  finally
-    fSourceDB.fBackupBackgroundLastTime := fTimer.Stop;
-    fSourceDB.Lock;
-    fSourceDB.fBackupBackgroundInProcess := nil;
-    fSourceDB.Unlock;
-    if Assigned(log) then
-      log.Log(sllTrace, 'Execute Finished', self);
-    log := nil;
-    SQLite3Log.Add.NotifyThreadEnded;
+  except
   end;
+  SQLite3Log.Add.NotifyThreadEnded;
 end;
 
 function IsSQLite3File(const FileName: TFileName; PageSize: PInteger): boolean;

@@ -330,7 +330,15 @@ const
   // - see TJwtClaim enumeration and TJwtClaims set
   // - RFC standard expects those to be case-sensitive
   JWT_CLAIMS_TEXT: array[TJwtClaim] of RawUtf8 = (
-    'iss', 'sub', 'aud', 'exp', 'nbf', 'iat', 'jti', 'data');
+    'iss',    // jrcIssuer
+    'sub',    // jrcSubject
+    'aud',    // jrcAudience
+    'exp',    // jrcExpirationTime
+    'nbf',    // jrcNotBefore
+    'iat',    // jrcIssuedAt
+    'jti',    // jrcJwtID
+    'data');  // jrcData
+
 
 function ToText(res: TJwtResult): PShortString; overload;
 function ToCaption(res: TJwtResult): string; overload;
@@ -491,8 +499,16 @@ const
   // - SHA-1 will fallback to HS256 (since there will never be SHA-1 support)
   // - SHA-3 is not yet officially defined in @http://tools.ietf.org/html/rfc7518
   JWT_TEXT: array[TSignAlgo] of RawUtf8 = (
-    'HS256', 'HS256', 'HS384', 'HS512',
-    'S3224', 'S3256', 'S3384', 'S3512', 'S3S128', 'S3S256');
+    'HS256',
+    'HS256',
+    'HS384',
+    'HS512',
+    'S3224',
+    'S3256',
+    'S3384',
+    'S3512',
+    'S3S128',
+    'S3S256');
 
   /// able to instantiate any of the TJwtSynSignerAbstract instance expected
   // - SHA-1 will fallback to TJwtHS256 (since SHA-1 will never be supported)
@@ -500,8 +516,16 @@ const
   // - typical use is the following:
   // ! result := JWT_CLASS[algo].Create(master, round, claims, [], expirationMinutes);
   JWT_CLASS: array[TSignAlgo] of TJwtSynSignerAbstractClass = (
-    TJwtHS256, TJwtHS256, TJwtHS384, TJwtHS512,
-    TJwtS3224, TJwtS3256, TJwtS3384, TJwtS3512, TJwtS3S128, TJwtS3S256);
+    TJwtHS256,
+    TJwtHS256,
+    TJwtHS384,
+    TJwtHS512,
+    TJwtS3224,
+    TJwtS3256,
+    TJwtS3384,
+    TJwtS3512,
+    TJwtS3S128,
+    TJwtS3S256);
 
 
 { **************  JWT Implementation of ES256 Algorithm }
@@ -510,12 +534,18 @@ type
   /// implements JSON Web Tokens using 'ES256' algorithm
   // - i.e. ECDSA using the P-256 curve and the SHA-256 hash algorithm
   // - as defined in http://tools.ietf.org/html/rfc7518 paragraph 3.4
-  // - since ECDSA signature and verification is CPU consumming (under x86, it
-  // takes 2.5 ms, but only 0.3 ms on x64) you may enable CacheTimeoutSeconds
-  // - will use the OpenSSL library if available (much faster than our unit)
+  // - since ECDSA signature and verification is CPU consumming (especially
+  // under x86) you may enable CacheTimeoutSeconds
+  // - will use the OpenSSL library if available - about 5 times faster than
+  // our pascal/asm code - here are some numbers on x86_64:
+  //  TJwtES256 pascal:   100 ES256 in 33.57ms i.e. 2.9K/s, aver. 335us
+  //  TJwtES256 OpenSSL:  100 ES256 in 6.90ms i.e. 14.1K/s, aver. 69us
+  // - pre-compute the public key so is even faster than TJwtES256Osl:
+  //    TJwtES256Osl:     100 ES256 in 9.56ms i.e. 10.2K/s, aver. 95us
   TJwtES256 = class(TJwtAbstract)
   protected
     fCertificate: TEccCertificate;
+    fVerify: TEcc256r1VerifyAbstract; // faster pre-computed public key
     fOwnCertificate: boolean;
     function ComputeSignature(const headpayload: RawUtf8): RawUtf8; override;
     procedure CheckSignature(const headpayload: RawUtf8; const signature: RawByteString;
@@ -654,7 +684,7 @@ function TJwtAbstract.Compute(const DataNameValue: array of const;
   const Issuer, Subject, Audience: RawUtf8; NotBefore: TDateTime;
   ExpirationMinutes: integer; Signature: PRawUtf8): RawUtf8;
 var
-  payload, headpayload, signat: RawUtf8;
+  payload, headpayload, sig: RawUtf8;
 begin
   result := '';
   if self = nil then
@@ -662,13 +692,13 @@ begin
   payload := PayloadToJson(DataNameValue, Issuer, Subject, Audience,
     NotBefore, ExpirationMinutes);
   headpayload := fHeaderB64 + BinToBase64Uri(payload);
-  signat := ComputeSignature(headpayload);
-  result := headpayload + '.' + signat;
+  sig := ComputeSignature(headpayload);
+  result := headpayload + '.' + sig;
   if length(result) > JWT_MAXSIZE then
     raise EJwtException.CreateUtf8('%.Compute oversize: len=%',
       [self, length(result)]);
   if Signature <> nil then
-    Signature^ := signat;
+    Signature^ := sig;
 end;
 
 function TJwtAbstract.ComputeAuthorizationHeader(
@@ -827,6 +857,11 @@ begin
   JWT.result := jwtValid;
 end;
 
+const
+  JWT_HEAD: array[0..1] of PUtf8Char = (
+    'alg',  // 0
+    'typ'); // 1
+
 procedure TJwtAbstract.Parse(const Token: RawUtf8; var JWT: TJwtContent;
   out headpayload: RawUtf8; out signature: RawByteString; excluded: TJwtClaims);
 var
@@ -838,7 +873,7 @@ var
   claim: TJwtClaim;
   requiredclaims: TJwtClaims;
   value: variant;
-  head: array[0..1] of TValuePUtf8Char;
+  head: array[0..high(JWT_HEAD)] of TValuePUtf8Char;
   aud: TDocVariantData;
   tok: PAnsiChar absolute Token;
   temp: TSynTempBuffer;
@@ -864,11 +899,9 @@ begin
        (headerlen > 512) then
       exit;
     if not Base64UriToBin(tok, headerlen - 1, temp) or
-       (JsonDecode(temp.buf, ['alg', // 0
-                              'typ'  // 1
-                             ], @head) = nil) or
+       (JsonDecode(temp.buf, @JWT_HEAD, length(JWT_HEAD), @head) = nil) or
        not {%H-}head[0].Idem(fAlgorithm) or
-       ((head[1].Value <> nil) and
+       ((head[1].Text <> nil) and
         not head[1].Idem('JWT')) then
       headerlen := 0;
     temp.Done;
@@ -1020,13 +1053,21 @@ begin
   result := JWT.result = jwtValid;
 end;
 
+const
+  JWT_PLD: array[0..4] of PUtf8Char = (
+    'iss',  // 0
+    'aud',  // 1
+    'exp',  // 2
+    'nbf',  // 3
+    'sub'); // 4
+
 class function TJwtAbstract.VerifyPayload(const Token,
   ExpectedAlgo, ExpectedSubject, ExpectedIssuer, ExpectedAudience: RawUtf8;
   Expiration: PUnixTime; Signature: PRawUtf8; Payload: PVariant;
   IgnoreTime: boolean; NotBeforeDelta: TUnixTime): TJwtResult;
 var
   P, B: PUtf8Char;
-  V: array[0..4] of TValuePUtf8Char;
+  V: array[0..high(JWT_PLD)] of TValuePUtf8Char;
   now, time: PtrUInt;
   temp, temp2: TSynTempBuffer;
 begin
@@ -1038,9 +1079,9 @@ begin
   begin
     B := pointer(Token);
     if not Base64UriToBin(PAnsiChar(B), P - B, temp) or
-       (JsonDecode(temp.buf, ['alg'], @V, false) = nil) or
+       (JsonDecode(temp.buf, @JWT_HEAD, 1, @V, false) = nil) or
        ((ExpectedAlgo <> '') and
-        not IdemPropNameU(ExpectedAlgo, {%H-}V[0].Value, {%H-}V[0].ValueLen)) then
+        not {%H-}V[0].Idem(ExpectedAlgo)) then
       B := nil;
     temp.Done;
     if B = nil then
@@ -1065,12 +1106,7 @@ begin
     temp2.Done;
   end;
   repeat // avoid try..finally for temp.Done
-    if JsonDecode(temp.buf, ['iss', // 0
-                             'aud', // 1
-                             'exp', // 2
-                             'nbf', // 3
-                             'sub'  // 4
-                            ], @V, true) = nil then
+    if JsonDecode(temp.buf, @JWT_PLD, length(JWT_PLD), @V, true) = nil then
       break;
     result := jwtUnexpectedClaim;
     if ((ExpectedSubject <> '') and
@@ -1084,11 +1120,11 @@ begin
       break;
     if Expiration <> nil then
       Expiration^ := 0;
-    if (V[2].value <> nil) or
-       (V[3].value <> nil) then
+    if (V[2].Text <> nil) or
+       (V[3].Text <> nil) then
     begin
       now := UnixTimeUtc;
-      if V[2].value <> nil then
+      if V[2].Text <> nil then
       begin
         time := V[2].ToCardinal;
         result := jwtExpired;
@@ -1099,7 +1135,7 @@ begin
           Expiration^ := time;
       end;
       if not IgnoreTime and
-         (V[3].value <> nil) then
+         (V[3].Text <> nil) then
       begin
         time := V[3].ToCardinal;
         result := jwtNotBeforeFailed;
@@ -1285,12 +1321,14 @@ begin
   inherited Create('ES256', aClaims, aAudience, aExpirationMinutes,
     aIDIdentifier, aIDObfuscationKey, aIDObfuscationKeyNewKdf);
   fCertificate := aCertificate;
+  fVerify := TEcc256r1Verify.Create(fCertificate.Content.Signed.PublicKey);
 end;
 
 destructor TJwtES256.Destroy;
 begin
   if fOwnCertificate then
     fCertificate.Free;
+  fVerify.Free;
   inherited;
 end;
 
@@ -1304,7 +1342,7 @@ begin
   if length(signature) <> SizeOf(TEccSignature) then
     exit;
   sha.Full(pointer(headpayload), length(headpayload), hash);
-  if Ecc256r1Verify(fCertificate.Content.Signed.PublicKey, hash, PEccSignature(signature)^) then
+  if fVerify.Verify(hash, PEccSignature(signature)^) then
     JWT.result := jwtValid;
 end;
 

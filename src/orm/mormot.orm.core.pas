@@ -39,9 +39,6 @@ uses
   contnrs,
   {$ifndef FPC}
   typinfo, // for proper Delphi inlining
-  {$ifdef ISDELPHI2010} // Delphi 2009/2010 generics are buggy
-  Generics.Collections,
-  {$endif ISDELPHI2010}
   {$endif FPC}
   mormot.core.base,
   mormot.core.os,
@@ -55,6 +52,9 @@ uses
   mormot.core.log,
   mormot.core.json,
   mormot.core.threads,
+  {$ifdef ORMGENERICS}
+  mormot.core.collections,
+  {$endif ORMGENERICS}
   mormot.core.search,
   mormot.crypt.secure, // for TSynUniqueIdentifierGenerator
   mormot.db.core,
@@ -131,7 +131,7 @@ type
     /// this method will recognize if the TOrm was allocated by
     // a Create*Joined() constructor: in this case, it will write the ID
     // of the nested property, and not the PtrInt() transtyped value
-    procedure GetJsonValues(Instance: TObject; W: TTextWriter); override;
+    procedure GetJsonValues(Instance: TObject; W: TJsonWriter); override;
   end;
 
   TOrmPropInfoRttiIDObjArray = array of TOrmPropInfoRttiID;
@@ -185,10 +185,6 @@ type
 
 
   { -------------------- IRestOrm IRestOrmServer IRestOrmClient Definitions }
-
-  {$ifdef ISDELPHI2010} // Delphi 2009/2010 generics support is buggy :(
-  TRestOrmGenerics = class;
-  {$endif ISDELPHI2010}
 
   /// Object-Relational-Mapping calls for CRUD access to a database
   // - as implemented in TRest.ORM
@@ -465,22 +461,57 @@ type
     // follow the order of values supplied in BoundsSqlWhere open array - use
     // DateToSql()/DateTimeToSql() for TDateTime, or directly any integer,
     // double, currency, RawUtf8 values to be bound to the request as parameters
-    // - aCustomFieldsCsv can be the CSV list of field names to be retrieved
-    // - if aCustomFieldsCsv is '', will get all simple fields, excluding BLOBs
-    // - if aCustomFieldsCsv is '*', will get ALL fields, including ID and BLOBs
+    // - CustomFieldsCSV can be the CSV list of field names to be retrieved
+    // - if CustomFieldsCSV is '', will get all simple fields, excluding BLOBs
+    // - if CustomFieldsCSV is '*', will get ALL fields, including ID and BLOBs
     // - return a TObjectList on success (possibly with Count=0) - caller is
     // responsible of freeing the instance
     // - this TObjectList will contain a list of all matching records
     // - return nil on error
     function RetrieveList(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const aCustomFieldsCsv: RawUtf8 = ''): TObjectList; overload;
-    {$ifdef ISDELPHI2010} // Delphi 2009/2010 generics support is buggy :(
-    /// access to ORM parametrized/generics methods
-    // - since Delphi interface cannot have parametrized methods, we need
-    // to return a TRestOrmGenerics abstract class to use generics signature
-    function Generics: TRestOrmGenerics;
-    {$endif ISDELPHI2010}
+      const CustomFieldsCSV: RawUtf8 = ''): TObjectList; overload;
+    {$ifdef ORMGENERICS}
+    /// get a IList<TOrm> of members from a SQL statement
+    // - implements REST GET collection
+    // - CustomFieldsCSV can be the CSV list of field names to be retrieved
+    // - if CustomFieldsCSV is '', will get all simple fields, excluding BLOBs
+    // - if CustomFieldsCSV is '*', will get ALL fields, including ID and BLOBs
+    // - return true and a IList<T> in Result on success (maybe with Count=0)
+    // - return false on error
+    // - untyped "var IList" and not directly IList<T: TOrm> because neither
+    // Delphi nor FPC allow parametrized interface methods
+    // - our IList<> and IKeyValue<> interfaces are faster and generates smaller
+    // executables than Generics.Collections, and need no try..finally Free: a
+    // single TSynListSpecialized<TOrm> class will be reused for all IList<>
+    // - you can write for instance:
+    // !var list: IList<TOrmTest>;
+    // !    R: TOrmTest;
+    // !    orm: IRestOrm
+    // ! ...
+    // !    if orm.RetrieveIList(TOrmTest, list, 'ID,Test') then
+    // !      for R in list do
+    // !        writeln(R.ID, '=', R.Test);
+    function RetrieveIList(T: TOrmClass; var IList;
+      const CustomFieldsCsv: RawUtf8 = ''): boolean; overload;
+    /// get a IList<TOrm> of members from a SQL statement
+    // - implements REST GET collection with a WHERE clause
+    // - for better server speed, the WHERE clause should use bound parameters
+    // identified as '?' in the FormatSqlWhere statement, which is expected to
+    // follow the order of values supplied in BoundsSqlWhere open array - use
+    // DateToSql()/DateTimeToSql() for TDateTime, or directly any integer,
+    // double, currency, RawUtf8 values to be bound to the request as parameters
+    // - CustomFieldsCSV can be the CSV list of field names to be retrieved
+    // - if CustomFieldsCSV is '', will get all simple fields, excluding BLOBs
+    // - if CustomFieldsCSV is '*', will get ALL fields, including ID and BLOBs
+    // - return true and a IList<T> in Result on success (maybe with Count=0)
+    // - return false on error
+    // - untyped "var IList" and not directly IList<T: TOrm> because neither
+    // Delphi nor FPC allow parametrized interface methods
+    function RetrieveIList(T: TOrmClass; var IList;
+      const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
+      const CustomFieldsCSV: RawUtf8 = ''): boolean; overload;
+    {$endif ORMGENERICS}
     /// get a list of members from a SQL statement as RawJson
     // - implements REST GET collection
     // - for better server speed, the WHERE clause should use bound parameters
@@ -616,7 +647,7 @@ type
     // - is just a wrapper around TOrm.AppendFillAsJsonArray()
     procedure AppendListAsJsonArray(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const OutputFieldName: RawUtf8; W: TJsonSerializer;
+      const OutputFieldName: RawUtf8; W: TOrmWriter;
       const CustomFieldsCsv: RawUtf8 = '');
     /// dedicated method used to retrieve matching IDs using a fast R-Tree index
     // - a TOrmRTree is associated to a TOrm with a specified BLOB
@@ -1071,10 +1102,10 @@ type
     function AsyncBatchRawAdd(Table: TOrmClass; const SentData: RawUtf8): integer;
     /// append some JSON content in a BATCH to be writen in a background thread
     // - could be used to emulate AsyncBatchAdd() with an already pre-computed
-    // JSON object, as stored in a TTextWriter instance
+    // JSON object, as stored in a TJsonWriter instance
     // - is a wrapper around BackgroundTimer.AsyncBatchRawAppend()
     // - this method is thread-safe
-    procedure AsyncBatchRawAppend(Table: TOrmClass; SentData: TTextWriter);
+    procedure AsyncBatchRawAppend(Table: TOrmClass; SentData: TJsonWriter);
     /// update an ORM member in a BATCH to be written in a background thread
     // - should have been preceded by a call to AsyncBatchStart(), or returns -1
     // - is a wrapper around BackgroundTimer.AsyncBatchUpdate()
@@ -1605,12 +1636,12 @@ type
     class procedure RttiCustomSetParser(Rtti: TRttiCustom); override;
     /// fake nested TOrm classes would be serialized as integer
     function IsPropClassInstance(Prop: PRttiCustomProp): boolean; virtual;
-    function RttiWritePropertyValue(W: TBaseWriter; Prop: PRttiCustomProp;
+    function RttiWritePropertyValue(W: TTextWriter; Prop: PRttiCustomProp;
       Options: TTextWriterWriteObjectOptions): boolean; override;
     function RttiBeforeReadPropertyValue(Ctxt: pointer;
       Prop: PRttiCustomProp): boolean; override;
     class procedure RttiJsonRead(var Context: TJsonParserContext; Instance: TObject);
-    class procedure RttiJsonWrite(W: TTextWriter; Instance: TObject;
+    class procedure RttiJsonWrite(W: TJsonWriter; Instance: TObject;
       Options: TTextWriterWriteObjectOptions);
   protected
     fInternalState: cardinal;
@@ -2123,8 +2154,8 @@ type
     // (which calls our very fast ISO TEXT to Int64 conversion routine)
     // - an individual bit set in UniqueField forces the corresponding field to
     // be marked as UNIQUE (an unique index is automaticaly created on the specified
-    // column); use TOrmModel fIsUnique[] array, which set the bits values
-    // to 1 if a property field was published with "stored AS_UNIQUE"
+    // column); use TOrmProperties.IsUniqueFieldsBits[] array, which set the bits
+    // values to 1 if a property field was published with "stored AS_UNIQUE"
     // (i.e. "stored false")
     // - this method will handle TOrmFts* classes like FTS* virtual tables,
     // TOrmRTree as RTREE virtual table, and TOrmVirtualTable*ID
@@ -2163,17 +2194,17 @@ type
     // for conveniency
     function GetSqlSet: RawUtf8;
     /// return the UTF-8 encoded JSON objects for the values of this TOrm
-    // - layout and fields should have been set at TJsonSerializer construction:
-    // to append some content to an existing TJsonSerializer, call the
+    // - layout and fields should have been set at TOrmWriter construction:
+    // to append some content to an existing TOrmWriter, call the
     // AppendAsJsonObject() method
-    procedure GetJsonValues(W: TJsonSerializer); overload;
+    procedure GetJsonValues(W: TOrmWriter); overload;
     /// return the UTF-8 encoded JSON objects for the values of this TOrm
     // - the JSON buffer will be finalized if needed (e.g. non expanded mode),
-  	// and the supplied TJsonSerializer instance will be freed by this method
-    // - layout and fields should have been set at TJsonSerializer construction:
-    // to append some content to an existing TJsonSerializer, call the
+  	// and the supplied TOrmWriter instance will be freed by this method
+    // - layout and fields should have been set at TOrmWriter construction:
+    // to append some content to an existing TOrmWriter, call the
     // AppendAsJsonObject() method
-    procedure GetJsonValuesAndFree(Json: TJsonSerializer); overload;
+    procedure GetJsonValuesAndFree(Json: TOrmWriter); overload;
     /// return the UTF-8 encoded JSON objects for the values contained
     // in the current published fields of a TOrm child
     // - only simple fields (i.e. not RawBlob/TOrmMany) are retrieved:
@@ -2188,26 +2219,26 @@ type
     // JSON string (which is the default, as expected by the database storage),
     // or if an "ID_str" string field should be added for JavaScript
     procedure GetJsonValues(Json: TStream; Expand, withID: boolean;
-      Occasion: TOrmOccasion; OrmOptions: TJsonSerializerOrmOptions = []); overload;
+      Occasion: TOrmOccasion; OrmOptions: TOrmWriterOptions = []); overload;
     /// same as overloaded GetJsonValues(), but returning result into a RawUtf8
     // - if UsingStream is not set, it will use a temporary TRawByteStringStream
     function GetJsonValues(Expand, withID: boolean;
       Occasion: TOrmOccasion; UsingStream: TRawByteStringStream = nil;
-      OrmOptions: TJsonSerializerOrmOptions = []): RawUtf8; overload;
+      OrmOptions: TOrmWriterOptions = []): RawUtf8; overload;
     /// same as overloaded GetJsonValues(), but allowing to set the fields to
     // be retrieved, and returning result into a RawUtf8
     function GetJsonValues(Expand, withID: boolean; const Fields: TFieldBits;
-      OrmOptions: TJsonSerializerOrmOptions = []): RawUtf8; overload;
+      OrmOptions: TOrmWriterOptions = []): RawUtf8; overload;
     /// same as overloaded GetJsonValues(), but allowing to set the fields to
     // be retrieved, and returning result into a RawUtf8
     function GetJsonValues(Expand, withID: boolean; const FieldsCsv: RawUtf8;
-      OrmOptions: TJsonSerializerOrmOptions = []): RawUtf8; overload;
+      OrmOptions: TOrmWriterOptions = []): RawUtf8; overload;
     /// will append the record fields as an expanded JSON object
-    // - GetJsonValues() will expect a dedicated TJsonSerializer, whereas this
-    // method will add the JSON object directly to any TJsonSerializer
+    // - GetJsonValues() will expect a dedicated TOrmWriter, whereas this
+    // method will add the JSON object directly to any TOrmWriter
     // - by default, will append the simple fields, unless the Fields optional
     // parameter is customized to a non void value
-    procedure AppendAsJsonObject(W: TJsonSerializer; Fields: TFieldBits);
+    procedure AppendAsJsonObject(W: TOrmWriter; Fields: TFieldBits);
     /// will append all the FillPrepare() records as an expanded JSON array
     // - generates '[{rec1},{rec2},...]' using a loop similar to:
     // ! while FillOne do .. AppendJsonObject() ..
@@ -2216,7 +2247,7 @@ type
     // - by default, will append the simple fields, unless the Fields optional
     // parameter is customized to a non void value
     // - see also IRestOrm.AppendListAsJsonArray for a high-level wrapper method
-    procedure AppendFillAsJsonArray(const FieldName: RawUtf8; W: TJsonSerializer;
+    procedure AppendFillAsJsonArray(const FieldName: RawUtf8; W: TOrmWriter;
       const Fields: TFieldBits = []);
     /// change TDocVariantData.Options for all variant published fields
     // - may be used to replace e.g. JSON_FAST_EXTENDED by JSON_FAST
@@ -2447,18 +2478,18 @@ type
     // - Row number is from 1 to Table.RowCount
     // - setter method (write Set*) is called if available
     // - handle UTF-8 SQL to Delphi values conversion (see TPropInfo mapping)
-    // - this method has been made virtual e.g. so that a calculated value can be
-    // used in a custom field
+    // - this method has been made virtual e.g. so that a calculated value can
+    // be used in a custom field
     function FillRow(aRow: integer; aDest: TOrm = nil): boolean; virtual;
     /// fill all published properties of this object from the next available
     // TOrmTable prepared row
     // - FillPrepare() must have been called before
-    // - the Row number is taken from property FillCurrentRow
+    // - the Row number is taken from FillContext.FillCurrentRow property
     // - return true on success, false if no more Row data is available
     // - internally call FillRow() to update published properties values
     function FillOne(aDest: TOrm = nil): boolean;
     /// go to the first prepared row, ready to loop through all rows with FillOne()
-    // - the Row number (property FillCurrentRow) is reset to 1
+    // - the Row number (FillContext.FillCurrentRow property) is reset to 1
     // - return true on success, false if no Row data is available
     // - you can use it e.g. as:
     // ! while Rec.FillOne do
@@ -2477,7 +2508,7 @@ type
     /// will iterate over all FillPrepare items, appending them as a JSON array
     // - creates a JSON array of all record rows, using
     // ! while FillOne do GetJsonValues(W)...
-    procedure AppendFillAsJsonValues(W: TJsonSerializer);
+    procedure AppendFillAsJsonValues(W: TOrmWriter);
 
     /// fill all published properties of this object from a TOrmTable result row
     // - call FillPrepare() then FillRow(Row)
@@ -2651,77 +2682,19 @@ type
   TOrmArray = array[0..MaxInt div SizeOf(TOrm) - 1] of TOrm;
   POrmArray = ^TOrmArray;
 
-  {$ifdef ISDELPHI2010} // Delphi 2009/2010 generics support is buggy :(
-
-  /// since Delphi interfaces cannot have parametrized methods, we need
-  // to use this abstract class to use generics signature
-  TRestOrmGenerics = class(TInterfacedObject)
-  protected
-    // needed to implement RetrieveList<T> actual data retrieval
-    function MultiFieldValues(Table: TOrmClass; const FieldNames: RawUtf8;
-      const WhereClauseFormat: RawUtf8; const BoundsSqlWhere: array of const): TOrmTable;
-      overload; virtual; abstract;
-  public
-    /// access to ORM parametrized/generic methods
-    // - since Delphi interface cannot have parametrized methods, we need
-    // to return this abstract class to use generics signature
-    function Generics: TRestOrmGenerics;
-    /// get a list of members from a SQL statement
-    // - implements REST GET collection
-    // - aCustomFieldsCsv can be the CSV list of field names to be retrieved
-    // - if aCustomFieldsCsv is '', will get all simple fields, excluding BLOBs
-    // - if aCustomFieldsCsv is '*', will get ALL fields, including ID and BLOBs
-    // - return a TObjectList<T> on success (possibly with Count=0) - caller is
-    // responsible of freeing the instance
-    // - return nil on error
-    // - since Delphi interface cannot have parametrized methods, we need to
-    // call this overloaded TRestOrmGenerics method to use generics signature
-    // - you can write for instance:
-    // !var list: TObjectList<TOrmTest>;
-    // !    R: TOrmTest;
-    // !    orm: IRestOrm
-    // ! ...
-    // !    list := orm.Generics.RetrieveList<TOrmTest>('ID,Test');
-    // !    if list <> nil then
-    // !    try
-    // !      for R in list do
-    // !        writeln(R.ID, '=', R.Test);
-    // !    finally
-    // !      list.Free;
-    // !    end;
-    function RetrieveList<T: TOrm>(
-      const aCustomFieldsCsv: RawUtf8 = ''): TObjectList<T>; overload;
-       {$ifdef HASINLINE}inline;{$endif}
-    /// get a list of members from a SQL statement
-    // - implements REST GET collection with a WHERE clause
-    // - for better server speed, the WHERE clause should use bound parameters
-    // identified as '?' in the FormatSqlWhere statement, which is expected to
-    // follow the order of values supplied in BoundsSqlWhere open array - use
-    // DateToSql()/DateTimeToSql() for TDateTime, or directly any integer,
-    // double, currency, RawUtf8 values to be bound to the request as parameters
-    // - aCustomFieldsCsv can be the CSV list of field names to be retrieved
-    // - if aCustomFieldsCsv is '', will get all simple fields, excluding BLOBs
-    // - if aCustomFieldsCsv is '*', will get ALL fields, including ID and BLOBs
-    // - return a TObjectList<T> on success (possibly with Count=0) - caller is
-    // responsible of freeing the instance
-    // - return nil on error
-    // - since Delphi interface cannot have parametrized methods, we need to
-    // call this overloaded TRestOrmGenerics method to use generics signature
-    function RetrieveList<T: TOrm>(const FormatSqlWhere: RawUtf8;
-      const BoundsSqlWhere: array of const;
-      const aCustomFieldsCsv: RawUtf8 = ''): TObjectList<T>; overload;
-  end;
-
-  TRestOrmParent = class(TRestOrmGenerics);
-
-  {$else}
-
   /// parent class of TRestOrm, to implement IRestOrm methods
-  // - since Delphi interface cannot have parametrized methods, we need
-  // to define a TRestOrmGenerics abstract class to use generics signature
-  TRestOrmParent = class(TInterfacedObject);
-
-  {$endif ISDELPHI2010}
+  // - only has some low-level methods used directly from mormot.rest.core.pas
+  TRestOrmParent = class(TInterfacedObject)
+  public
+    /// ensure the current thread will be taken into account during process
+    // - this abstract method won't do anything, but overriden versions may
+    // - low-level method used directly from mormot.rest.core.pas
+    procedure BeginCurrentThread(Sender: TThread); virtual;
+    /// called when thread is finished to ensure
+    // - this abstract method won't do anything, but overriden versions may
+    // - low-level method used directly from mormot.rest.core.pas
+    procedure EndCurrentThread(Sender: TThread); virtual;
+  end;
 
 
   { -------------------- RecordRef Wrapper Definition }
@@ -2885,14 +2858,14 @@ type
     // of the first associated record class (from internal QueryTables[])
     procedure ToObjectList(DestList: TObjectList;
       RecordType: TOrmClass = nil); overload;
-    {$ifdef ISDELPHI2010} // Delphi 2009/2010 generics are buggy
-    /// create a TObjectList<TOrm> with TOrm instances corresponding
-    // to this TOrmTable result set
-    // - use the specified TOrm class or create instances
-    // of the first associated record class (from internal QueryTables[])
-    // - always returns an instance, even if the TOrmTable is nil or void
-    function ToObjectList<T: TOrm>: TObjectList<T>; overload;
-    {$endif ISDELPHI2010}
+    {$ifdef ORMGENERICS}
+    /// create a IList<TOrm> with TOrm instances corresponding to this resultset
+    // - always returns an IList<> instance, even if the TOrmTable is nil or void
+    // - our IList<> and IKeyValue<> interfaces are faster and generates smaller
+    // executables than Generics.Collections, and need no try..finally Free: a
+    // single TSynListSpecialized<TOrm> class will be reused for all IList<>
+    procedure ToNewIList(Item: TOrmClass; var Result);
+    {$endif ORMGENERICS}
     /// fill an existing T*ObjArray variable with TOrm instances
     // corresponding to this TOrmTable result set
     // - use the specified TOrm class or create instances
@@ -3703,11 +3676,11 @@ type
     // - on error (i.e. if FieldIndex is out of range) will return TRUE
     // - otherwise, will return FALSE and append the external field name to Text
     function AppendFieldName(FieldIndex: integer; var Text: RawUtf8): boolean; overload;
-    /// append a field name to a TTextWriter instance
+    /// append a field name to a TJsonWriter instance
     // - if FieldIndex=VIRTUAL_TABLE_ROWID_COLUMN (-1), appends RowIDFieldName
     // - on error (i.e. if FieldIndex is out of range) will return TRUE
     // - otherwise, will return FALSE and append the external field name to Text
-    function AppendFieldName(FieldIndex: integer; WR: TTextWriter): boolean; overload;
+    function AppendFieldName(FieldIndex: integer; WR: TJsonWriter): boolean; overload;
     /// return the field name as RawUtf8 value
     // - if FieldIndex=VIRTUAL_TABLE_ROWID_COLUMN (-1), appends RowIDFieldName
     // - otherwise, will return the external field name
@@ -3904,7 +3877,6 @@ type
     procedure SetRoot(const aRoot: RawUtf8);
     procedure SetTableProps(aIndex: integer);
     function GetTableProps(aClass: TOrmClass): TOrmModelProperties;
-    /// get the enumerate type information about the possible actions to be
     function GetLocks(aTable: TOrmClass): POrmLocks;
     function GetTable(const SqlTableName: RawUtf8): TOrmClass;
     function GetTableExactIndex(const TableName: RawUtf8): PtrInt;
@@ -3913,8 +3885,6 @@ type
     /// initialize the Database Model
     // - set the Tables to be associated with this Model, as TOrm classes
     // - set the optional Root URI path of this Model
-    // - initialize the fIsUnique[] array from "stored AS_UNIQUE" (i.e. "stored
-    // false") published properties of every TOrmClass
     constructor Create(const Tables: array of TOrmClass;
       const aRoot: RawUtf8 = 'root'); reintroduce; overload;
     /// you should not use this constructor, but one of the overloaded versions,
@@ -3974,7 +3944,7 @@ type
     /// return TRUE if the specified field of this class was marked as unique
     // - an unique field is defined as "stored AS_UNIQUE" (i.e. "stored false")
     // in its property definition
-    // - reflects the internal private fIsUnique propery
+    // - reflects TOrmProperties.IsUniqueFieldsBits[] values
     function GetIsUnique(aTable: TOrmClass; aFieldIndex: integer): boolean;
     /// try to retrieve a table index from a SQL statement
     // - naive search of '... FROM TableName' pattern in the supplied SQL,
@@ -4111,9 +4081,9 @@ type
     /// unlock all previously locked records
     procedure UnLockAll;
     /// return true if a specified record is locked
-    function isLocked(aTable: TOrmClass; aID: TID): boolean; overload;
+    function IsLocked(aTable: TOrmClass; aID: TID): boolean; overload;
     /// return true if a specified record is locked
-    function isLocked(aRec: TOrm): boolean; overload;
+    function IsLocked(aRec: TOrm): boolean; overload;
     /// delete all the locked IDs entries, after a specified time
     // - to be used to release locked records if the client crashed
     // - default value is 30 minutes, which seems correct for common usage
@@ -4324,7 +4294,7 @@ type
     fInternalBufferSize: integer;
     fCalledWithinRest: boolean;
     fPreviousTableMatch: boolean;
-    fBatch: TJsonSerializer;
+    fBatch: TOrmWriter;
     fTable: TOrmClass;
     fTableIndex: integer;
     fBatchCount: integer;
@@ -4446,7 +4416,7 @@ type
     /// allow to append some JSON content to the internal raw buffer
     // - could be used to emulate Add/Update/Delete
     // - FullRow=TRUE will increment the global Count
-    function RawAppend(FullRow: boolean = true): TTextWriter;
+    function RawAppend(FullRow: boolean = true): TJsonWriter;
     /// allow to append some JSON content to the internal raw buffer for a POST
     // - could be used to emulate Add() with an already pre-computed JSON object
     // - returns the corresponding index in the current BATCH sequence, -1 on error
@@ -4747,6 +4717,10 @@ const
     DELETE: ALL_ACCESS_RIGHTS
   );
 
+var
+  /// TAuthGroup will be injected by mormot.rest.core.pas
+  DefaultTAuthGroupClass: TOrmClass;
+
 
 { ************** TOrm High-Level Parents }
 
@@ -4913,7 +4887,7 @@ begin
   inherited SetValue(Instance, Value, ValueLen, wasString);
 end;
 
-procedure TOrmPropInfoRttiID.GetJsonValues(Instance: TObject; W: TTextWriter);
+procedure TOrmPropInfoRttiID.GetJsonValues(Instance: TObject; W: TJsonWriter);
 var
   ID: PtrUInt;
 begin
@@ -4984,10 +4958,10 @@ procedure EncodeMultiInsertSQLite3(Props: TOrmProperties;
   var result: RawUtf8);
 var
   f: PtrInt;
-  W: TTextWriter;
+  W: TJsonWriter;
   temp: TTextWriterStackBuffer;
 begin
-  W := TTextWriter.CreateOwnedStream(temp);
+  W := TJsonWriter.CreateOwnedStream(temp);
   try
     if boInsertOrIgnore in BatchOptions then
       W.AddShort('insert or ignore into ')
@@ -5302,46 +5276,42 @@ begin
   fOwnedRecords.Add(result);
 end;
 
-{$ifdef ISDELPHI2010} // Delphi 2009/2010 generics are buggy
+{$ifdef ORMGENERICS}
 
-function TOrmTable.ToObjectList<T>: TObjectList<T>;
+procedure TOrmTable.ToNewIList(Item: TOrmClass; var Result);
 var
-  cloned, item: TOrm;
+  list: TSynListSpecialized<TOrm>;
+  cloned, one: TOrm;
   r: integer;
-  {$ifdef ISDELPHIXE3}
   rec: POrm;
-  {$endif ISDELPHIXE3}
 begin
-  result := TObjectList<T>.Create; // TObjectList<T> will free each T instance
+  list := TSynListSpecialized<TOrm>.Create(
+    [], ptClass, TypeInfo(TOrmObjArray), Item.ClassInfo);
+  // all IList<T> share the same VMT -> assign same TSynListSpecialized<TOrm>
+  IList<TOrm>(Result) := list;
+  // IList<T> will own and free each T instance
   if (self = nil) or
      (fRowCount = 0) then
     exit;
-  cloned := TOrmClass(T).Create;
+  cloned := Item.Create;
   try
     cloned.FillPrepare(self);
-    {$ifdef ISDELPHIXE3}
-    result.Count := fRowCount; // faster than manual Add()
-    rec := pointer(result.List);
+    list.SetCount(fRowCount); // allocate once
+    rec := list.First;        // fast direct iteration
     for r := 1 to fRowCount do
     begin
-      item := TOrmClass(T).Create;
-      rec^ := item;
+      one := Item.Create;
+      rec^ := one;
       inc(rec);
-    {$else}
-    for r := 1 to fRowCount do
-    begin
-      item := TOrmClass(T).Create;
-      result.Add(item);
-    {$endif ISDELPHIXE3}
-      cloned.fFill.Fill(r, item);
-      item.fInternalState := fInternalState;
+      cloned.fFill.Fill(r, one);
+      one.fInternalState := fInternalState;
     end;
   finally
     cloned.Free;
   end;
 end;
 
-{$endif ISDELPHI2010}
+{$endif ORMGENERICS}
 
 procedure TOrmTable.FillOrms(P: POrm; RecordType: TOrmClass);
 var
@@ -6074,6 +6044,14 @@ end;
 
 // some methods defined ahead of time for proper inlining
 
+// since "var class" are not available in Delphi 6-7, and is inherited by
+// the children classes under latest Delphi versions (i.e. the "var class" is
+// shared by all inherited classes, whereas we want one var per class), we
+// reused one of the magic VMT slots (i.e. the one for automated methods,
+// AutoTable, a relic from Delphi 2 that is generally not used anymore) - see
+// http://hallvards.blogspot.com/2007/05/hack17-virtual-class-variables-part-ii.html
+// [a slower alternative may have been to use a global TSynDictionary]
+
 class function TOrm.OrmProps: TOrmProperties;
 begin
   result := PPointer(PAnsiChar(self) + vmtAutoTable)^;
@@ -6195,7 +6173,7 @@ begin
   begin
     aRow := aRow * Table.fFieldCount;
     map := pointer(fTableMap);
-    for f := 0 to fTableMapCount - 1 do
+    for f := 1 to fTableMapCount do
     begin
       D := aDest;
       if D = nil then
@@ -6315,21 +6293,13 @@ end;
 
 { TOrm }
 
-// since "var class" are not available in Delphi 6-7, and is inherited by
-// the children classes under latest Delphi versions (i.e. the "var class" is
-// shared by all inherited classes, whereas we want one var per class), we
-// reused one of the magic VMT slots (i.e. the one for automated methods,
-// AutoTable, a relic from Delphi 2 that is generally not used anymore) - see
-// http://hallvards.blogspot.com/2007/05/hack17-virtual-class-variables-part-ii.html
-// [a slower alternative may have been to use a global TSynDictionary]
-
 class function TOrm.PropsCreate: TOrmProperties;
 var
   rtticustom: TRttiCustom;
 begin
   // private sub function for proper TOrm.OrmProps method inlining
   rtticustom := Rtti.RegisterClass(self);
-  Rtti.DoLock;
+  mormot.core.os.EnterCriticalSection(Rtti.RegisterLock);
   try
     result := rtticustom.PrivateSlot; // Private is TOrmProperties
     if Assigned(result) then
@@ -6349,7 +6319,7 @@ begin
        rcfClassMayBeID];  // for IsPropClassInstance
     self.InternalDefineModel(result);
   finally
-    Rtti.DoUnLock;
+    mormot.core.os.LeaveCriticalSection(Rtti.RegisterLock);
   end;
 end;
 
@@ -6821,7 +6791,7 @@ begin
     fFill.UnMap;
 end;
 
-procedure TOrm.AppendFillAsJsonValues(W: TJsonSerializer);
+procedure TOrm.AppendFillAsJsonValues(W: TOrmWriter);
 begin
   W.Add('[');
   while FillOne do
@@ -6954,7 +6924,7 @@ begin
       SimpleFields[f].SetBinary(self, Read);
 end;
 
-procedure TOrm.GetJsonValues(W: TJsonSerializer);
+procedure TOrm.GetJsonValues(W: TOrmWriter);
 var
   f, c: PtrInt;
   Props: TOrmPropInfoList;
@@ -6973,7 +6943,7 @@ begin
   begin
     W.Add(fID);
     W.AddComma;
-    if (jwoID_str in W.OrmOptions) and W.Expand then
+    if (owoID_str in W.OrmOptions) and W.Expand then
     begin
       W.AddShort('"ID_str":"');
       W.Add(fID);
@@ -7000,7 +6970,7 @@ begin
     W.Add('}');
 end;
 
-procedure TOrm.AppendAsJsonObject(W: TJsonSerializer; Fields: TFieldBits);
+procedure TOrm.AppendAsJsonObject(W: TOrmWriter; Fields: TFieldBits);
 var // Fields are not "const" since are modified if zero
   i: PtrInt;
   P: TOrmProperties;
@@ -7029,7 +6999,7 @@ begin
 end;
 
 procedure TOrm.AppendFillAsJsonArray(const FieldName: RawUtf8;
-  W: TJsonSerializer; const Fields: TFieldBits);
+  W: TOrmWriter; const Fields: TFieldBits);
 begin
   if FieldName <> '' then
     W.AddFieldName(FieldName);
@@ -7066,7 +7036,7 @@ begin
         end;
 end;
 
-procedure TOrm.GetJsonValuesAndFree(Json: TJsonSerializer);
+procedure TOrm.GetJsonValuesAndFree(Json: TOrmWriter);
 begin
   if Json <> nil then
   try
@@ -7082,9 +7052,9 @@ begin
 end;
 
 procedure TOrm.GetJsonValues(Json: TStream; Expand, withID: boolean;
-  Occasion: TOrmOccasion; OrmOptions: TJsonSerializerOrmOptions);
+  Occasion: TOrmOccasion; OrmOptions: TOrmWriterOptions);
 var
-  serializer: TJsonSerializer;
+  serializer: TOrmWriter;
   tmp: TTextWriterStackBuffer;
 begin
   if self = nil then
@@ -7097,10 +7067,10 @@ begin
 end;
 
 function TOrm.GetJsonValues(Expand, withID: boolean;
-  const Fields: TFieldBits; OrmOptions: TJsonSerializerOrmOptions): RawUtf8;
+  const Fields: TFieldBits; OrmOptions: TOrmWriterOptions): RawUtf8;
 var
   J: TRawByteStringStream;
-  serializer: TJsonSerializer;
+  serializer: TOrmWriter;
   tmp: TTextWriterStackBuffer;
 begin
   J := TRawByteStringStream.Create;
@@ -7116,7 +7086,7 @@ begin
 end;
 
 function TOrm.GetJsonValues(Expand, withID: boolean;
-  const FieldsCsv: RawUtf8; OrmOptions: TJsonSerializerOrmOptions): RawUtf8;
+  const FieldsCsv: RawUtf8; OrmOptions: TOrmWriterOptions): RawUtf8;
 var
   bits: TFieldBits;
 begin
@@ -7128,7 +7098,7 @@ end;
 
 function TOrm.GetJsonValues(Expand, withID: boolean;
   Occasion: TOrmOccasion; UsingStream: TRawByteStringStream;
-  OrmOptions: TJsonSerializerOrmOptions): RawUtf8;
+  OrmOptions: TOrmWriterOptions): RawUtf8;
 var
   J: TRawByteStringStream;
 begin
@@ -7189,7 +7159,7 @@ begin
         begin
           M := aModel.VirtualTableModule(self);
           if (M = nil) or
-             not Assigned(GetVirtualTableModuleName) then
+             (not Assigned(GetVirtualTableModuleName)) then
             raise EModelException.CreateUtf8('No registered module for %', [self]);
           mname := GetVirtualTableModuleName(M);
           if Props.Props.Fields.Count = 0 then
@@ -7926,7 +7896,7 @@ begin
   result := fFill.JoinedFields;
 end;
 
-function TOrm.RttiWritePropertyValue(W: TBaseWriter; Prop: PRttiCustomProp;
+function TOrm.RttiWritePropertyValue(W: TTextWriter; Prop: PRttiCustomProp;
   Options: TTextWriterWriteObjectOptions): boolean;
 begin
   if (not(rcfClassMayBeID in Prop^.Value.Flags)) or
@@ -7997,7 +7967,11 @@ begin
   Context.ParseEndOfObject;
 end;
 
-class procedure TOrm.RttiJsonWrite(W: TTextWriter; Instance: TObject;
+const
+  ID_JSON: array[boolean] of string[7] = (
+    'RowID', 'ID'); // see also TOrmWriter.SetOrmOptions: Ajax requires ID
+
+class procedure TOrm.RttiJsonWrite(W: TJsonWriter; Instance: TObject;
   Options: TTextWriterWriteObjectOptions);
 var
   cur: POrmPropInfo;
@@ -8010,7 +7984,7 @@ begin
     exit;
   end;
   W.BlockBegin('{', Options);
-  W.AddPropJsonInt64('RowID', TOrm(Instance).fID);
+  W.AddPropJsonInt64(ID_JSON[woIDAsIDstr in Options], TOrm(Instance).fID);
   props := TOrm(Instance).Orm.Fields;
   cur := pointer(props.List);
   n := props.Count;
@@ -8527,38 +8501,18 @@ end;
 {$endif PUREMORMOT2}
 
 
-{$ifdef ISDELPHI2010} // Delphi 2009/2010 generics support is buggy :(
 
-{ TRestOrmGenerics }
+{ TRestOrmParent }
 
-function TRestOrmGenerics.Generics: TRestOrmGenerics;
+procedure TRestOrmParent.BeginCurrentThread(Sender: TThread);
 begin
-  result := self; // circumvent limitation of non parametrized interface definition
+  // nothing do to at this level -> see e.g. TRestOrmServer.BeginCurrentThread
 end;
 
-function TRestOrmGenerics.RetrieveList<T>(const aCustomFieldsCsv: RawUtf8): TObjectList<T>;
+procedure TRestOrmParent.EndCurrentThread(Sender: TThread);
 begin
-  result := RetrieveList<T>('', [], aCustomFieldsCsv);
+  // nothing do to at this level -> see e.g. TRestOrmServer.EndCurrentThread
 end;
-
-function TRestOrmGenerics.RetrieveList<T>(const FormatSqlWhere: RawUtf8;
-  const BoundsSqlWhere: array of const; const aCustomFieldsCsv: RawUtf8): TObjectList<T>;
-var table: TOrmTable;
-begin
-  result := nil;
-  if self = nil then
-    exit;
-  table := MultiFieldValues(TOrmClass(T), aCustomFieldsCsv,
-    FormatSqlWhere, BoundsSqlWhere);
-  if table <> nil then
-  try
-    result := table.ToObjectList<T>;
-  finally
-    table.Free;
-  end;
-end;
-
-{$endif ISDELPHI2010}
 
 
 { ------------ TOrmMany Definition }
@@ -9341,7 +9295,7 @@ var
   aTableName, aFieldName: RawUtf8;
   Props: TOrmModelProperties;
   fields: TOrmPropInfoList;
-  W: TTextWriter;
+  W: TJsonWriter;
 
   procedure RegisterTableForRecordReference(aFieldType: TOrmPropInfo;
     aFieldTable: TClass);
@@ -9419,7 +9373,7 @@ begin
     end;
   if Props.Props.JoinedFieldsTable <> nil then
   begin
-    W := TTextWriter.CreateOwnedStream(1024);
+    W := TJsonWriter.CreateOwnedStream(1024);
     try
       W.AddShorter('SELECT ');
       // JoinedFieldsTable[0] is the class itself
@@ -9961,17 +9915,17 @@ begin
     result := TableProps[aTableIndex].Props.SqlAddField(aFieldIndex);
 end;
 
-function TOrmModel.isLocked(aTable: TOrmClass; aID: TID): boolean;
+function TOrmModel.IsLocked(aTable: TOrmClass; aID: TID): boolean;
 begin
-  result := GetLocks(aTable)^.isLocked(aID);
+  result := GetLocks(aTable)^.IsLocked(aID);
 end;
 
-function TOrmModel.isLocked(aRec: TOrm): boolean;
+function TOrmModel.IsLocked(aRec: TOrm): boolean;
 begin
   if aRec = nil then
     result := false
   else
-    result := isLocked(POrmClass(aRec)^, aRec.fID);
+    result := IsLocked(POrmClass(aRec)^, aRec.fID);
 end;
 
 function TOrmModel.Lock(aTable: TOrmClass; aID: TID): boolean;
@@ -10095,7 +10049,7 @@ begin
   if aClass = nil then
     exit;
   if (aModule = nil) or
-     not Assigned(GetVirtualTableModuleName) or
+     (not Assigned(GetVirtualTableModuleName)) or
      (GetVirtualTableModuleName(aModule) = '') then
     raise EModelException.CreateUtf8('Unexpected %.VirtualTableRegister(%,%)',
       [self, aClass, aModule]);
@@ -10422,7 +10376,7 @@ type
   TComputeSqlContent = (
     cTableSimpleFields, cUpdateSimple, cUpdateSetAll, cInsertAll);
 
-  procedure SetSQL(W: TTextWriter; withID, withTableName: boolean;
+  procedure SetSQL(W: TJsonWriter; withID, withTableName: boolean;
     var result: RawUtf8; content: TComputeSqlContent = cTableSimpleFields);
   var
     f: PtrInt;
@@ -10468,10 +10422,10 @@ type
   end;
 
 var
-  W: TTextWriter;
+  W: TJsonWriter;
   temp: TTextWriterStackBuffer;
 begin
-  W := TTextWriter.CreateOwnedStream(temp);
+  W := TJsonWriter.CreateOwnedStream(temp);
   try // SQL.TableSimpleFields[withID: boolean; withTableName: boolean]
     SetSQL(W, false, false, fSql.TableSimpleFields[false, false]);
     SetSQL(W, false, true, fSql.TableSimpleFields[false, true]);
@@ -10587,7 +10541,7 @@ begin
 end;
 
 function TOrmPropertiesMapping.AppendFieldName(FieldIndex: integer;
-  WR: TTextWriter): boolean;
+  WR: TJsonWriter): boolean;
 begin
   result := false; // success
   if FieldIndex = VIRTUAL_TABLE_ROWID_COLUMN then
@@ -11036,7 +10990,7 @@ procedure TRestBatch.Reset(aTable: TOrmClass;
   AutomaticTransactionPerRow: cardinal; Options: TRestBatchOptions);
 begin
   fBatch.Free; // full reset for SetExpandedJsonWriter
-  fBatch := TJsonSerializer.CreateOwnedStream(fInternalBufferSize);
+  fBatch := TOrmWriter.CreateOwnedStream(fInternalBufferSize);
   fBatch.Expand := true;
   FillZero(fBatchFields);
   fBatchCount := 0;
@@ -11120,7 +11074,7 @@ begin
   Props.SetJsonWriterColumnNames(fBatch, 0);
 end;
 
-function TRestBatch.RawAppend(FullRow: boolean): TTextWriter;
+function TRestBatch.RawAppend(FullRow: boolean): TJsonWriter;
 begin
   if FullRow then
     inc(fBatchCount);
@@ -11254,7 +11208,7 @@ begin
     for f := 1 to length(props.BlobFields) do
     begin
       if (blob^.PropertyIndex in fields) and
-         blob^.IsNull(Value) then
+         blob^.IsValueVoid(Value) then
         exclude(fields, blob^.PropertyIndex);
       inc(blob);
     end;
@@ -11572,7 +11526,7 @@ begin
   tmp.Init(Value);
   try
     JsonDecode(tmp.buf, ['FieldNames'], @V, True);
-    CsvToRawUtf8DynArray(V[0].Value, fFieldNames);
+    CsvToRawUtf8DynArray(V[0].Text, fFieldNames);
   finally
     tmp.Done;
   end;

@@ -188,7 +188,7 @@ type
     /// compute the time elapsed by count, with appened time resolution (us,ms,s)
     function ByCount(Count: QWord): TShort16;
     /// returns e.g. '16.9 MB in 102.20ms i.e. 165.5 MB/s'
-    function SizePerSec(Size: QWord): shortstring;
+    function SizePerSec(Size: QWord): ShortString;
     /// textual representation of total time elapsed
     // - with appened time resolution (us,ms,s) - from MicroSecToString()
     // - not to be used in normal code (which could rather call the Stop method),
@@ -364,9 +364,10 @@ type
   // - base class shared e.g. for ORM, SOA or DDD, when a repeatable data
   // process is to be monitored
   // - this class is thread-safe for its methods, but you should call explicitly
-  // Lock/UnLock to access its individual properties
-  TSynMonitor = class(TSynPersistentLock)
+  // non-rentrant Lock/UnLock to access its individual properties
+  TSynMonitor = class(TSynPersistent)
   protected
+    fSafe: TLightLock;
     fName: RawUtf8;
     fTaskCount: TSynMonitorCount64;
     fTotalTime: TSynMonitorTime;
@@ -379,11 +380,16 @@ type
     fProcessing: boolean;
     fTaskStatus: (taskNotStarted,taskStarted);
     fLastInternalError: variant;
+    // warning: lock-free Locked* virtual methods because LightLock is not reentrant
+    procedure LockedProcessDoTask; virtual;
     procedure LockedPerSecProperties; virtual;
     procedure LockedFromProcessTimer; virtual;
     procedure LockedSum(another: TSynMonitor); virtual;
-    procedure WriteDetailsTo(W: TBaseWriter); virtual;
-    procedure Changed; virtual;
+    procedure LockedFromExternalMicroSeconds(const MicroSecondsElapsed: QWord);
+      {$ifdef HASINLINE} inline; {$endif}
+    procedure LockedProcessError(const info: variant); virtual;
+    procedure LockedProcessErrorInteger(info: integer);
+    procedure LockedWriteDetailsTo(W: TTextWriter); virtual;
   public
     /// low-level high-precision timer instance
     InternalTimer: TPrecisionTimer;
@@ -395,31 +401,26 @@ type
     constructor Create; overload; override;
     /// finalize the instance
     destructor Destroy; override;
-    /// lock the instance for exclusive access
-    // - needed only if you access directly the instance properties
-    procedure Lock;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// release the instance for exclusive access
-    // - needed only if you access directly the instance properties
-    procedure UnLock;
-      {$ifdef HASINLINE}inline;{$endif}
     /// create Count instances of this actual class in the supplied ObjArr[]
     class procedure InitializeObjArray(var ObjArr; Count: integer); virtual;
     /// should be called when the process starts, to resume the internal timer
-    // - thread-safe method
+    // - this method is not thread-safe, due to the shared InternalTimer: use
+    // an external TPrecisionTimer then FromExternalMicroSeconds()
     procedure ProcessStart; virtual;
     /// should be called each time a pending task is processed
     // - will increase the TaskCount property
-    // - thread-safe method
-    procedure ProcessDoTask; virtual;
+    // - this method is not thread-safe, due to the shared InternalTimer: use
+    // an external TPrecisionTimer then FromExternalMicroSeconds()
+    procedure ProcessDoTask;
     /// should be called when the process starts, and a task is processed
     // - similar to ProcessStart + ProcessDoTask
-    // - thread-safe method
+    // - this method is not thread-safe, due to the shared InternalTimer: use
+    // an external TPrecisionTimer then FromExternalMicroSeconds()
     procedure ProcessStartTask; virtual;
     /// should be called when an error occurred
     // - typical use is with ObjectToVariant(E,...) kind of information
     // - thread-safe method
-    procedure ProcessError(const info: variant); virtual;
+    procedure ProcessError(const info: variant);
     /// should be called when an error occurred
     // - typical use is with a HTTP status, e.g. as ProcessError(Call.OutStatus)
     // - just a wraper around overloaded ProcessError(), so a thread-safe method
@@ -431,7 +432,8 @@ type
     // - just a wraper around overloaded ProcessError(), so a thread-safe method
     procedure ProcessErrorRaised(E: Exception);
     /// should be called when the process stops, to pause the internal timer
-    // - thread-safe method
+    // - this method is not thread-safe, due to the shared InternalTimer: use
+    // an external TPrecisionTimer then FromExternalMicroSeconds()
     procedure ProcessEnd; virtual;
     /// could be used to manage information average or sums
     // - thread-safe method calling LockedSum protected virtual method
@@ -441,7 +443,7 @@ type
     function ComputeDetailsJson: RawUtf8;
     /// appends a JSON content with all published properties information
     // - thread-safe method
-    procedure ComputeDetailsTo(W: TBaseWriter); virtual;
+    procedure ComputeDetailsTo(W: TTextWriter); virtual;
     /// returns a TDocVariant with all published properties information
     // - thread-safe method
     function ComputeDetails: variant;
@@ -450,19 +452,17 @@ type
     // use this method to update the timing from many threads
     // - if you use this method, ProcessStart, ProcessDoTask and ProcessEnd
     // methods are disallowed, and the global fTimer won't be used any more
-    // - will return the processing time, converted into micro seconds, ready
-    // to be logged if needed
-    // - thread-safe method
-    function FromExternalQueryPerformanceCounters(const CounterDiff: QWord): QWord;
-    /// used to allow thread safe timing
-    // - by default, the internal TPrecisionTimer is not thread safe: you can
-    // use this method to update the timing from many threads
-    // - if you use this method, ProcessStart, ProcessDoTask and ProcessEnd
-    // methods are disallowed, and the global fTimer won't be used any more
-    // - thread-safe method
+    // - this method is to be used with an external timer for thread-safety
     procedure FromExternalMicroSeconds(const MicroSecondsElapsed: QWord);
-    // customize JSON Serialization to set woEnumSetsAsText
-    function RttiBeforeWriteObject(W: TBaseWriter;
+    /// non-reentrant exclusive lock acquisition - wrap fSafe.Lock
+    // - warning: this non-reentrant method would deadlock if called twice
+    procedure Lock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// release the non-reentrant exclusive lock - wrap fSafe.UnLock
+    procedure UnLock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// customize JSON Serialization to set woEnumSetsAsText for readibility
+    function RttiBeforeWriteObject(W: TTextWriter;
       var Options: TTextWriterWriteObjectOptions): boolean; override;
     /// an identifier associated to this monitored resource
     // - is used e.g. for TSynMonitorUsage persistence/tracking
@@ -518,7 +518,10 @@ type
     destructor Destroy; override;
     /// increase the internal size counter
     // - thread-safe method
-    procedure AddSize(const Bytes: QWord);
+    procedure AddSize(const Bytes: QWord); overload;
+    /// increase the internal size counter and the current timer
+    // - thread-safe method
+    procedure AddSize(const Bytes, MicroSecs: QWord); overload;
   published
     /// how many total data has been hanlded during all working process
     property Size: TSynMonitorSize
@@ -547,6 +550,8 @@ type
     /// increase the internal size counters
     // - thread-safe method
     procedure AddSize(const Incoming, Outgoing: QWord);
+    /// encapsulate AddSite + ProcessErrorNumber + FromExternalMicroSeconds
+    procedure Notify(const Incoming, Outgoing, MicroSec: QWord; Status: integer);
   published
     /// how many data has been received
     property Input: TSynMonitorSize
@@ -584,9 +589,10 @@ type
     // - thread-safe method
     function GetClientsCurrent: TSynMonitorOneCount;
     /// how many concurrent requests are currently processed
-    // - returns the updated number of requests
+    // - diff is expected to be either 0, -1 or 1
     // - thread-safe method
-    function AddCurrentRequestCount(diff: integer): integer;
+    procedure AddCurrentRequestCount(diff: integer);
+      {$ifdef HASINLINE} inline; {$endif}
   published
     /// current count of connected clients
     property ClientsCurrent: TSynMonitorOneCount
@@ -717,6 +723,7 @@ type
   /// abstract class to track, compute and store TSynMonitor detailed statistics
   // - you should inherit from this class to implement proper data persistence,
   // e.g. using TSynMonitorUsageRest for ORM-based storage
+  // - SaveDB may take some time, so a TSynLocker OS lock is used, not TRWLock
   TSynMonitorUsage = class(TSynPersistentLock)
   protected
     fLog: TSynLogFamily;
@@ -828,7 +835,7 @@ type
   // to gather low-level CPU and RAM information for the given set of processes
   // - is able to keep an history of latest sample values
   // - use Current class function to access a process-wide instance
-  TSystemUse = class(TSynPersistentLock)
+  TSystemUse = class(TSynPersistentRWLock)
   protected
     fProcess: TSystemUseProcessDynArray;
     fProcesses: TDynArray;
@@ -1249,7 +1256,7 @@ begin
     result := (Count * 1000000) div fTime;
 end;
 
-function TPrecisionTimer.SizePerSec(Size: QWord): shortstring;
+function TPrecisionTimer.SizePerSec(Size: QWord): ShortString;
 begin
   FormatShort('% in % i.e. %/s', [KB(Size), Stop, KB(PerSec(Size))], result);
 end;
@@ -1422,22 +1429,8 @@ begin
   inherited Destroy;
 end;
 
-procedure TSynMonitor.Lock;
-begin
-  fSafe^.Lock;
-end;
 
-procedure TSynMonitor.UnLock;
-begin
-  fSafe^.UnLock;
-end;
-
-procedure TSynMonitor.Changed;
-begin
-  // do nothing by default - overriden classes may track modified changes
-end;
-
-function TSynMonitor.RttiBeforeWriteObject(W: TBaseWriter;
+function TSynMonitor.RttiBeforeWriteObject(W: TTextWriter;
   var Options: TTextWriterWriteObjectOptions): boolean;
 begin
  if woFullExpand in Options then
@@ -1454,53 +1447,35 @@ procedure TSynMonitor.ProcessStart;
 begin
   if fProcessing then
     raise ESynException.CreateUtf8('Unexpected %.ProcessStart', [self]);
-  fSafe^.Lock;
-  try
-    InternalTimer.Resume;
-    fTaskStatus := taskNotStarted;
-    fProcessing := true;
-  finally
-    fSafe^.UnLock;
-  end;
+  InternalTimer.Resume;
+  fTaskStatus := taskNotStarted;
+  fProcessing := true;
+end;
+
+procedure TSynMonitor.LockedProcessDoTask;
+begin
+  inc(fTaskCount);
+  fTaskStatus := taskStarted;
 end;
 
 procedure TSynMonitor.ProcessDoTask;
 begin
-  fSafe^.Lock;
-  try
-    inc(fTaskCount);
-    fTaskStatus := taskStarted;
-    Changed;
-  finally
-    fSafe^.UnLock;
-  end;
+  LockedProcessDoTask;
 end;
 
 procedure TSynMonitor.ProcessStartTask;
 begin
   if fProcessing then
     raise ESynException.CreateUtf8('Reentrant %.ProcessStart', [self]);
-  fSafe^.Lock;
-  try
-    InternalTimer.Resume;
-    fProcessing := true;
-    inc(fTaskCount);
-    fTaskStatus := taskStarted;
-    Changed;
-  finally
-    fSafe^.UnLock;
-  end;
+  InternalTimer.Resume;
+  fProcessing := true;
+  LockedProcessDoTask;
 end;
 
 procedure TSynMonitor.ProcessEnd;
 begin
-  fSafe^.Lock;
-  try
-    InternalTimer.Pause;
-    LockedFromProcessTimer;
-  finally
-    fSafe^.UnLock;
-  end;
+  InternalTimer.Pause;
+  LockedFromProcessTimer;
 end;
 
 procedure TSynMonitor.LockedFromProcessTimer;
@@ -1518,38 +1493,45 @@ begin
   end;
   LockedPerSecProperties;
   fProcessing := false;
-  Changed;
 end;
 
-function TSynMonitor.FromExternalQueryPerformanceCounters(const CounterDiff: QWord): QWord;
+procedure TSynMonitor.LockedFromExternalMicroSeconds(const MicroSecondsElapsed: QWord);
 begin
-  fSafe^.Lock;
-  try // thread-safe ProcessStart+ProcessDoTask+ProcessEnd
-    inc(fTaskCount);
-    fTaskStatus := taskStarted;
-    result := InternalTimer.FromExternalQueryPerformanceCounters(CounterDiff);
-    LockedFromProcessTimer;
-  finally
-    fSafe^.UnLock;
-  end;
+  LockedProcessDoTask;
+  InternalTimer.FromExternalMicroSeconds(MicroSecondsElapsed);
+  LockedFromProcessTimer;
 end;
 
 procedure TSynMonitor.FromExternalMicroSeconds(const MicroSecondsElapsed: QWord);
 begin
-  fSafe^.Lock;
-  try // thread-safe ProcessStart+ProcessDoTask+ProcessEnd
-    inc(fTaskCount);
-    fTaskStatus := taskStarted;
-    InternalTimer.FromExternalMicroSeconds(MicroSecondsElapsed);
-    LockedFromProcessTimer;
+  fSafe.Lock;
+  // thread-safe ProcessStart+ProcessDoTask+ProcessEnd
+  {$ifdef HASFASTTRYFINALLY}
+  try
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    LockedFromExternalMicroSeconds(MicroSecondsElapsed);
+  {$ifdef HASFASTTRYFINALLY}
   finally
-    fSafe^.UnLock;
+  {$endif HASFASTTRYFINALLY}
+    fSafe.UnLock;
   end;
+end;
+
+procedure TSynMonitor.Lock;
+begin
+  fSafe.Lock;
+end;
+
+procedure TSynMonitor.UnLock;
+begin
+  fSafe.UnLock;
 end;
 
 class procedure TSynMonitor.InitializeObjArray(var ObjArr; Count: integer);
 var
-  i: integer;
+  i: PtrInt;
 begin
   ObjArrayClear(ObjArr);
   SetLength(TPointerDynArray(ObjArr), Count);
@@ -1557,16 +1539,28 @@ begin
     TPointerDynArray(ObjArr)[i] := Create;
 end;
 
+procedure TSynMonitor.LockedProcessError(const info: variant);
+begin
+  if not VarIsEmptyOrNull(info) then
+    inc(fInternalErrors);
+  fLastInternalError := info;
+end;
+
+procedure TSynMonitor.LockedProcessErrorInteger(info: integer);
+begin
+  try
+    LockedProcessError(info);
+  except
+  end;
+end;
+
 procedure TSynMonitor.ProcessError(const info: variant);
 begin
-  fSafe^.Lock;
+  fSafe.Lock;
   try
-    if not VarIsEmptyOrNull(info) then
-      inc(fInternalErrors);
-    fLastInternalError := info;
-    Changed;
+    LockedProcessError(info);
   finally
-    fSafe^.UnLock;
+    fSafe.UnLock;
   end;
 end;
 
@@ -1598,13 +1592,13 @@ begin
   if (self = nil) or
      (another = nil) then
     exit;
-  fSafe^.Lock;
-  another.fSafe^.Lock;
+  fSafe.Lock;
+  another.fSafe.Lock;
   try
     LockedSum(another);
   finally
-    another.fSafe^.UnLock;
-    fSafe^.UnLock;
+    another.fSafe.UnLock;
+    fSafe.UnLock;
   end;
 end;
 
@@ -1622,33 +1616,28 @@ begin
   inc(fInternalErrors, another.Errors);
 end;
 
-procedure TSynMonitor.WriteDetailsTo(W: TBaseWriter);
+procedure TSynMonitor.LockedWriteDetailsTo(W: TTextWriter);
 begin
-  fSafe^.Lock;
-  try
-    W.WriteObject(self);
-  finally
-    fSafe^.UnLock;
-  end;
+  W.WriteObject(self); // simply use RTTI of published fields
 end;
 
-procedure TSynMonitor.ComputeDetailsTo(W: TBaseWriter);
+procedure TSynMonitor.ComputeDetailsTo(W: TTextWriter);
 begin
-  fSafe^.Lock;
+  fSafe.Lock;
   try
     LockedPerSecProperties; // may not have been calculated after Sum()
-    WriteDetailsTo(W);
+    LockedWriteDetailsTo(W);
   finally
-    fSafe^.UnLock;
+    fSafe.UnLock;
   end;
 end;
 
 function TSynMonitor.ComputeDetailsJson: RawUtf8;
 var
-  W: TBaseWriter;
+  W: TJsonWriter;
   temp: TTextWriterStackBuffer;
 begin
-  W := DefaultTextWriterSerializer.CreateOwnedStream(temp);
+  W := TJsonWriter.CreateOwnedStream(temp);
   try
     ComputeDetailsTo(W);
     W.SetText(result);
@@ -1687,12 +1676,17 @@ end;
 
 procedure TSynMonitorWithSize.AddSize(const Bytes: QWord);
 begin
-  fSafe^.Lock;
-  try
-    fSize.Bytes := fSize.Bytes + Bytes;
-  finally
-    fSafe^.UnLock;
-  end;
+  fSafe.Lock;
+  fSize.Bytes := fSize.Bytes + Bytes;
+  fSafe.UnLock;
+end;
+
+procedure TSynMonitorWithSize.AddSize(const Bytes, MicroSecs: QWord);
+begin
+  fSafe.Lock;
+  fSize.Bytes := fSize.Bytes + Bytes;
+  LockedFromExternalMicroSeconds(MicroSecs);
+  fSafe.UnLock;
 end;
 
 procedure TSynMonitorWithSize.LockedSum(another: TSynMonitor);
@@ -1708,9 +1702,9 @@ end;
 constructor TSynMonitorInputOutput.Create;
 begin
   inherited Create;
-  fInput := TSynMonitorSize.Create({nospace=}false);
+  fInput  := TSynMonitorSize.Create({nospace=}false);
   fOutput := TSynMonitorSize.Create({nospace=}false);
-  fInputThroughput := TSynMonitorThroughput.Create({nospace=}false);
+  fInputThroughput  := TSynMonitorThroughput.Create({nospace=}false);
   fOutputThroughput := TSynMonitorThroughput.Create({nospace=}false);
 end;
 
@@ -1726,19 +1720,34 @@ end;
 procedure TSynMonitorInputOutput.LockedPerSecProperties;
 begin
   inherited LockedPerSecProperties;
-  fInputThroughput.BytesPerSec := fTotalTime.PerSecond(fInput.Bytes);
+  fInputThroughput.BytesPerSec  := fTotalTime.PerSecond(fInput.Bytes);
   fOutputThroughput.BytesPerSec := fTotalTime.PerSecond(fOutput.Bytes);
 end;
 
 procedure TSynMonitorInputOutput.AddSize(const Incoming, Outgoing: QWord);
 begin
-  fSafe^.Lock;
-  try
-    fInput.Bytes := fInput.Bytes + Incoming;
-    fOutput.Bytes := fOutput.Bytes + Outgoing;
-  finally
-    fSafe^.UnLock;
-  end;
+  fSafe.Lock;
+  fInput.Bytes  := fInput.Bytes + Incoming;
+  fOutput.Bytes := fOutput.Bytes + Outgoing;
+  fSafe.UnLock;
+end;
+
+procedure TSynMonitorInputOutput.Notify(
+  const Incoming, Outgoing, MicroSec: QWord; Status: integer);
+var
+  error: boolean;
+begin
+  error := not StatusCodeIsSuccess(Status);
+  fSafe.Lock;
+  // inlined AddSize
+  fInput.Bytes  := fInput.Bytes + Incoming;
+  fOutput.Bytes := fOutput.Bytes + Outgoing;
+  // inlined FromExternalMicroSeconds
+  LockedFromExternalMicroSeconds(MicroSec);
+  // inlined ProcessErrorNumber(Status)
+  if error then
+    LockedProcessErrorInteger(Status);
+  fSafe.UnLock;
 end;
 
 procedure TSynMonitorInputOutput.LockedSum(another: TSynMonitor);
@@ -1746,7 +1755,7 @@ begin
   inherited LockedSum(another);
   if another.InheritsFrom(TSynMonitorInputOutput) then
   begin
-    fInput.Bytes := fInput.Bytes + TSynMonitorInputOutput(another).Input.Bytes;
+    fInput.Bytes  := fInput.Bytes  + TSynMonitorInputOutput(another).Input.Bytes;
     fOutput.Bytes := fOutput.Bytes + TSynMonitorInputOutput(another).Output.Bytes;
   end;
 end;
@@ -1758,14 +1767,13 @@ procedure TSynMonitorServer.ClientConnect;
 begin
   if self = nil then
     exit;
-  fSafe^.Lock;
+  fSafe.Lock;
   try
     inc(fClientsCurrent);
     if fClientsCurrent > fClientsMax then
       fClientsMax := fClientsCurrent;
-    Changed;
   finally
-    fSafe^.UnLock;
+    fSafe.UnLock;
   end;
 end;
 
@@ -1773,13 +1781,12 @@ procedure TSynMonitorServer.ClientDisconnect;
 begin
   if self = nil then
     exit;
-  fSafe^.Lock;
+  fSafe.Lock;
   try
     if fClientsCurrent > 0 then
       dec(fClientsCurrent);
-    Changed;
   finally
-    fSafe^.UnLock;
+    fSafe.UnLock;
   end;
 end;
 
@@ -1787,44 +1794,29 @@ procedure TSynMonitorServer.ClientDisconnectAll;
 begin
   if self = nil then
     exit;
-  fSafe^.Lock;
+  fSafe.Lock;
   try
     fClientsCurrent := 0;
-    Changed;
   finally
-    fSafe^.UnLock;
+    fSafe.UnLock;
   end;
 end;
 
 function TSynMonitorServer.GetClientsCurrent: TSynMonitorOneCount;
 begin
   if self = nil then
-  begin
-    result := 0;
-    exit;
-  end;
-  fSafe^.Lock;
-  try
+    result := 0
+  else
     result := fClientsCurrent;
-  finally
-    fSafe^.UnLock;
-  end;
 end;
 
-function TSynMonitorServer.AddCurrentRequestCount(diff: integer): integer;
+procedure TSynMonitorServer.AddCurrentRequestCount(diff: integer);
 begin
-  if self = nil then
-  begin
-    result := 0;
-    exit;
-  end;
-  fSafe^.Lock;
-  try
-    inc(fCurrentRequestCount, diff);
-    result := fCurrentRequestCount;
-  finally
-    fSafe^.UnLock;
-  end;
+  if self <> nil then
+    if diff > 0 then
+      LockedInc32(@fCurrentRequestCount)
+    else if diff < 0 then
+      LockedDec32(@fCurrentRequestCount);
 end;
 
 
@@ -1960,6 +1952,7 @@ function TSynMonitorUsage.TrackPropLock(Instance: TObject;
 var
   i, j: PtrInt;
 begin
+  result := nil;
   fSafe.Lock;
   for i := 0 to length(fTracked) - 1 do
     if fTracked[i].Instance = Instance then
@@ -1971,27 +1964,27 @@ begin
             // returns found entry locked
             result := @Props[j];
             exit;
+            // warning: caller should eventually make fSafe.ReadOnlyUnLock
           end;
         break;
       end;
   fSafe.UnLock;
-  result := nil;
 end;
 
 const
   // maps TTimeLogbits mask
   TL_MASK_SECONDS = pred(1 shl 6);
   TL_MASK_MINUTES = pred(1 shl 12);
-  TL_MASK_HOURS = pred(1 shl 17);
-  TL_MASK_DAYS = pred(1 shl 22);
-  TL_MASK_MONTHS = pred(1 shl 26);
+  TL_MASK_HOURS   = pred(1 shl 17);
+  TL_MASK_DAYS    = pred(1 shl 22);
+  TL_MASK_MONTHS  = pred(1 shl 26);
 
   // truncates a TTimeLogbits value to a granularity
-  AS_MINUTES =not TL_MASK_SECONDS;
-  AS_HOURS =not TL_MASK_MINUTES;
-  AS_DAYS =not TL_MASK_HOURS;
-  AS_MONTHS =not TL_MASK_DAYS;
-  AS_YEARS =not TL_MASK_MONTHS;
+  AS_MINUTES = not TL_MASK_SECONDS;
+  AS_HOURS   = not TL_MASK_MINUTES;
+  AS_DAYS    = not TL_MASK_HOURS;
+  AS_MONTHS  = not TL_MASK_DAYS;
+  AS_YEARS   = not TL_MASK_MONTHS;
 
 function TSynMonitorUsage.Modified(Instance: TObject): integer;
 begin
@@ -2054,7 +2047,7 @@ function TSynMonitorUsage.Modified(Instance: TObject;
         if (high(PropNames) < 0) or
            (FindPropName(PropNames, Name) >= 0) then
         begin
-          v := info^.GetInt64Value(Instance);
+          v := Info^.GetInt64Value(Instance);
           diff := v - ValueLast;
           if diff <> 0 then
           begin
@@ -2082,7 +2075,7 @@ begin
   result := 0;
   if Instance = nil then
     exit;
-  fSafe.Lock;
+  fSafe.Lock; // this single lock could make this method inefficient
   try
     for i := 0 to length(fTracked) - 1 do
       if fTracked[i].Instance = Instance then
@@ -2093,7 +2086,7 @@ begin
     if Instance.InheritsFrom(TSynMonitor) and
        (TSynMonitor(Instance).Name <> '') then
     begin
-      i := track(Instance, TSynMonitor(Instance).Name);
+      i := Track(Instance, TSynMonitor(Instance).Name);
       if i >= 0 then
         save(fTracked[i]);
       exit;
@@ -2280,7 +2273,8 @@ begin
     case gran of
       mugYear:
         inc(result, USAGE_ID_YEAROFFSET);
-      mugDay, mugMonth:
+      mugDay,
+      mugMonth:
         if not monthdaystartat0 then
           inc(result);
       mugHour:
@@ -2319,7 +2313,8 @@ begin
   case gran of
     mugYear:
       dec(aValue, USAGE_ID_YEAROFFSET);
-    mugDay, mugMonth:
+    mugDay,
+    mugMonth:
       dec(aValue);
     mugHour:
       ;
@@ -2384,14 +2379,14 @@ function ToText(const aArm32CPUFeatures: TArm32HwCaps;
   const Sep: RawUtf8): RawUtf8;
 begin
   result := FeaturesToText(
-    TypeInfo(TArm32HwCaps), aArm32CPUFeatures, Sep, 6);
+    TypeInfo(TArm32HwCap), aArm32CPUFeatures, Sep, 6);
 end;
 
 function ToText(const aArm64CPUFeatures: TArm64HwCaps;
   const Sep: RawUtf8): RawUtf8;
 begin
   result := FeaturesToText(
-    TypeInfo(TArm64HwCaps), aArm64CPUFeatures, Sep, 6);
+    TypeInfo(TArm64HwCap), aArm64CPUFeatures, Sep, 6);
 end;
 
 
@@ -2448,7 +2443,7 @@ begin
     exit;
   fTimer := Sender;
   now := NowUtc;
-  fSafe.Lock;
+  fSafe.WriteLock;
   try
     inc(fDataIndex);
     if fDataIndex >= fHistoryDepth then
@@ -2464,7 +2459,7 @@ begin
           // if GetLastError=ERROR_INVALID_PARAMETER then
           fProcesses.Delete(i);
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -2509,7 +2504,7 @@ begin
   if aProcessID = 0 then
     aProcessID := GetCurrentProcessID;
   {$endif OSWINDOWS}
-  fSafe.Lock;
+  fSafe.WriteLock;
   try
     n := length(fProcess);
     for i := 0 to n - 1 do
@@ -2519,7 +2514,7 @@ begin
     fProcess[n].ID := aProcessID;
     SetLength(fProcess[n].Data, fHistoryDepth);
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -2530,7 +2525,7 @@ begin
   result := false;
   if self = nil then
     exit;
-  fSafe.Lock;
+  fSafe.WriteLock;
   try
     i := ProcessIndex(aProcessID);
     if i >= 0 then
@@ -2539,13 +2534,13 @@ begin
       result := true;
     end;
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
 function TSystemUse.ProcessIndex(aProcessID: integer): PtrInt;
 begin
-  // caller should have made fSafe.Enter
+  // caller should have made any fSafe lock
   {$ifdef OSWINDOWS}
   if aProcessID = 0 then
     aProcessID := GetCurrentProcessID;
@@ -2564,7 +2559,7 @@ begin
   result := false;
   if self <> nil then
   begin
-    fSafe.Lock;
+    fSafe.ReadOnlyLock;
     try
       i := ProcessIndex(aProcessID);
       if i >= 0 then
@@ -2576,7 +2571,7 @@ begin
           exit;
       end;
     finally
-      fSafe.UnLock;
+      fSafe.ReadOnlyUnLock;
     end;
   end;
   FillCharFast(aData, SizeOf(aData), 0);
@@ -2621,7 +2616,7 @@ begin
   result := nil;
   if self = nil then
     exit;
-  fSafe.Lock;
+  fSafe.ReadOnlyLock;
   try
     i := ProcessIndex(aProcessID);
     if i >= 0 then
@@ -2650,7 +2645,7 @@ begin
         end;
       end;
   finally
-    fSafe.UnLock;
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
@@ -2678,7 +2673,8 @@ begin
     GlobalLock; // paranoid thread-safety
     try
       if ProcessSystemUse = nil then
-        ProcessSystemUse := TSystemUse.Create(60);
+        ProcessSystemUse := RegisterGlobalShutdownRelease(
+          TSystemUse.Create(60));
     finally
       GlobalUnLock;
     end;
@@ -2739,7 +2735,7 @@ var
   i: PtrInt;
   parts: TDiskPartitions;
 
-  function GetInfo(var p: TDiskPartition): shortstring;
+  function GetInfo(var p: TDiskPartition): ShortString;
   const
     F: array[boolean] of RawUtf8 = ('% % (% / %)', '% % (%/%)');
   var
@@ -3017,9 +3013,6 @@ begin
   result := 1; // should never be 0 (mark release of TSynFpuException instance)
 end;
 
-var
-  GlobalSynFpuExceptionInstances: TObjectDynArray;
-
 threadvar
   GlobalSynFpuExceptionDelphi,
   GlobalSynFpuExceptionLibrary: TSynFpuException;
@@ -3039,7 +3032,7 @@ begin
   if result <> nil then
     exit;
   obj := TSynFpuException.Create(ffLibrary);
-  ObjArrayAdd(GlobalSynFpuExceptionInstances, obj);
+  RegisterGlobalShutdownRelease(obj);
   GlobalSynFpuExceptionLibrary := obj;
   result := obj;
 end;
@@ -3052,7 +3045,7 @@ begin
   if result <> nil then
     exit;
   obj := TSynFpuException.Create(ffPascal);
-  ObjArrayAdd(GlobalSynFpuExceptionInstances, obj);
+  RegisterGlobalShutdownRelease(obj);
   GlobalSynFpuExceptionDelphi := obj;
   result := obj;
 end;
@@ -3065,20 +3058,14 @@ begin
   CpuFeaturesText := LowerCase(ToText(CpuFeatures, ' '));
   if CpuFeaturesText = '' then
   {$endif CPUINTELARM}
-  {$ifdef OSLINUXANDROID}
-  CpuFeaturesText := LowerCase(CpuInfoFeatures); // fallback to /proc/cpuinfo
-  {$endif OSLINUXANDROID}
+    {$ifdef OSLINUXANDROID}
+    CpuFeaturesText := LowerCase(CpuInfoFeatures); // fallback to /proc/cpuinfo
+    {$endif OSLINUXANDROID}
 end;
 
 initialization
   InitializeUnit;
 
-finalization
-  {$ifdef CPUINTEL}
-  ObjArrayClear(GlobalSynFpuExceptionInstances);
-  {$endif CPUINTEL}
-  ProcessSystemUse.Free;
-  
 end.
 
 

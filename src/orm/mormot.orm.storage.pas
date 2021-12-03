@@ -506,20 +506,21 @@ type
     fStoredClassRecordProps: TOrmProperties;
     fStoredClassMapping: POrmPropertiesMapping;
     fStorageLockShouldIncreaseOwnerInternalState: boolean;
-    fStorageLockLogTrace: boolean;
     fModified: boolean;
-    fOwner: TRestOrmServer;
-    fStorageCriticalSection: TRTLCriticalSection;
+    fOutInternalStateForcedRefresh: boolean;
+    {$ifdef DEBUGSTORAGELOCK}
     fStorageCriticalSectionCount: integer;
+    {$endif DEBUGSTORAGELOCK}
+    fOwner: TRestOrmServer;
+    fStorageVirtual: TOrmVirtualTable;
     fBasicSqlCount: RawUtf8;
     fBasicSqlHasRows: array[boolean] of RawUtf8;
-    fStorageVirtual: TOrmVirtualTable;
-    /// any set bit in this field indicates UNIQUE field value
-    fIsUnique: TFieldBits;
-    fOutInternalStateForcedRefresh: boolean;
+    fStorageCriticalSection: TRTLCriticalSection;
+    fTempBuffer: PTextWriterStackBuffer;
     procedure RecordVersionFieldHandle(Occasion: TOrmOccasion;
       var Decoder: TJsonObjectDecoder);
     function GetStoredClassName: RawUtf8;
+    function GetTempBuffer: PTextWriterStackBuffer;
   public
     /// initialize the abstract storage data
     constructor Create(aClass: TOrmClass; aServer: TRestOrmServer); reintroduce; virtual;
@@ -528,10 +529,12 @@ type
 
     /// should be called before any access to the storage content
     // - and protected with a try ... finally StorageUnLock; end section
-    procedure StorageLock(WillModifyContent: boolean; const msg: RawUtf8); virtual;
+    procedure StorageLock(WillModifyContent: boolean
+        {$ifdef DEBUGSTORAGELOCK}; const msg: shortstring{$endif}); virtual;
     /// should be called after any StorageLock-protected access to the content
     // - e.g. protected with a try ... finally StorageUnLock; end section
-    procedure StorageUnLock; virtual;
+    procedure StorageUnLock;
+      {$ifndef DEBUGSTORAGELOCK} {$ifdef FPC} inline; {$endif} {$endif}
     /// low-level access to how StorageLock(true) affetcs TRestServer.InternalState
     property StorageLockShouldIncreaseOwnerInternalState: boolean
       read fStorageLockShouldIncreaseOwnerInternalState
@@ -561,7 +564,7 @@ type
     /// create one index for all specific FieldNames at once
     // - do nothing virtual/abstract method by default: will return FALSE (i.e. error)
     function CreateSqlMultiIndex(Table: TOrmClass; const FieldNames: array of RawUtf8;
-      Unique: boolean; IndexName: RawUtf8=''): boolean; virtual;
+      Unique: boolean; IndexName: RawUtf8 = ''): boolean; virtual;
     /// search for a numerical field value
     // - return true on success (i.e. if some values have been added to ResultID)
     // - store the results into the ResultID dynamic array
@@ -593,10 +596,6 @@ type
     /// read only access to the TRestOrmServer using this storage engine
     property Owner: TRestOrmServer
       read fOwner;
-    /// enable low-level trace of StorageLock/StorageUnlock methods
-    // - may be used to resolve low-level race conditions
-    property StorageLockLogTrace: boolean
-      read fStorageLockLogTrace write fStorageLockLogTrace;
     /// read only access to the class defining the record type stored in this
     // REST storage
     property StoredClass: TOrmClass
@@ -720,7 +719,7 @@ type
   // default, if BinaryFile parameter is left to false; a proprietary compressed
   // binary format can be used instead) if a file name is supplied at creating
   // the TRestStorageInMemory instance
-  // - our TRestStorage database engine is very optimized and is a lot
+  // - our TRestStorageInMemory database engine is very optimized and is a lot
   // faster than SQLite3 for such queries - but its values remain in RAM,
   // therefore it is not meant to deal with more than 100,000 rows or if
   // ACID commit on disk is required
@@ -738,7 +737,6 @@ type
     fUnique, fUniquePerField: array of TRestStorageInMemoryUnique;
     fMaxID: TID;
     fValues: TDynArrayHashed; // hashed by ID
-    fTempBuffer: PTextWriterStackBuffer;
     function UniqueFieldsUpdateOK(aRec: TOrm; aUpdateIndex: integer;
       aFields: PFieldBits): boolean;
     function GetItem(Index: integer): TOrm;
@@ -1074,8 +1072,8 @@ type
     // cache used at SQLite3 database level; but TOrmVirtualTableJson virtual
     // tables could flush the database content without proper notification
     // - this overridden implementation will call Owner.FlushInternalDBCache
-    procedure StorageLock(WillModifyContent: boolean;
-      const msg: RawUtf8); override;
+    procedure StorageLock(WillModifyContent: boolean
+      {$ifdef DEBUGSTORAGELOCK}; const msg: shortstring {$endif}); override;
   end;
 
 
@@ -1737,7 +1735,6 @@ begin
   end;
   fStoredClassProps := fModel.Props[aClass];
   fStoredClassMapping := @fStoredClassProps.ExternalDB;
-  fIsUnique := fStoredClassRecordProps.IsUniqueFieldsBits;
   fBasicSqlCount := 'SELECT COUNT(*) FROM ' +
     fStoredClassRecordProps.SqlTableName;
   fBasicSqlHasRows[false] := 'SELECT RowID FROM ' +
@@ -1749,9 +1746,11 @@ end;
 destructor TRestStorage.Destroy;
 begin
   inherited;
+  {$ifdef DEBUGSTORAGELOCK}
   if fStorageCriticalSectionCount <> 0 then
     raise ERestStorage.CreateUtf8('%.Destroy with CS=%',
       [self, fStorageCriticalSectionCount]);
+  {$endif DEBUGSTORAGELOCK}
   DeleteCriticalSection(fStorageCriticalSection);
   if fStorageVirtual <> nil then
   begin
@@ -1759,6 +1758,8 @@ begin
     fStorageVirtual.fStatic := nil;
     fStorageVirtual.fStaticStorage := nil;
   end;
+  if fTempBuffer <> nil then
+    FreeMem(fTempBuffer);
 end;
 
 function TRestStorage.CreateSqlMultiIndex(Table: TOrmClass;
@@ -1792,15 +1793,19 @@ begin
   result := false; // no refresh necessary with "normal" static tables
 end;
 
-procedure TRestStorage.StorageLock(WillModifyContent: boolean;
-  const msg: RawUtf8);
+procedure TRestStorage.StorageLock(WillModifyContent: boolean
+  {$ifdef DEBUGSTORAGELOCK}; const msg: shortstring {$endif});
 begin
+  {$ifdef DEBUGSTORAGELOCK}
   if fStorageLockLogTrace or
      (fStorageCriticalSectionCount > 1) then
     InternalLog('StorageLock % [%] %',
       [fStoredClass, msg, fStorageCriticalSectionCount]);
-  EnterCriticalSection(fStorageCriticalSection);
+  {$endif DEBUGSTORAGELOCK}
+  mormot.core.os.EnterCriticalSection(fStorageCriticalSection);
+  {$ifdef DEBUGSTORAGELOCK}
   inc(fStorageCriticalSectionCount);
+  {$endif DEBUGSTORAGELOCK}
   if WillModifyContent and
      fStorageLockShouldIncreaseOwnerInternalState and
      (Owner <> nil) then
@@ -1809,6 +1814,7 @@ end;
 
 procedure TRestStorage.StorageUnLock;
 begin
+  {$ifdef DEBUGSTORAGELOCK}
   dec(fStorageCriticalSectionCount);
   if fStorageLockLogTrace then
     InternalLog('StorageUnlock % %',
@@ -1816,7 +1822,8 @@ begin
   if fStorageCriticalSectionCount < 0 then
     raise ERestStorage.CreateUtf8('%.StorageUnLock with CS=%',
       [self, fStorageCriticalSectionCount]);
-  LeaveCriticalSection(fStorageCriticalSection);
+  {$endif DEBUGSTORAGELOCK}
+  mormot.core.os.LeaveCriticalSection(fStorageCriticalSection);
 end;
 
 function TRestStorage.GetCurrentSessionUserID: TID;
@@ -1866,6 +1873,13 @@ begin
     ClassToText(fStoredClass, result);
 end;
 
+function TRestStorage.GetTempBuffer: PTextWriterStackBuffer;
+begin
+  if fTempBuffer = nil then
+    GetMem(fTempBuffer, SizeOf(fTempBuffer^)); // 8KB pre-allocated buffer
+  result := fTempBuffer;
+end;
+
 
 
 { ************ TRestStorageInMemory as Stand-Alone JSON/Binary Storage }
@@ -1884,7 +1898,7 @@ begin
   rec := fStoredClass.Create;
   try
     rec.FillFrom(SentData);
-    StorageLock(true, 'EngineAdd');
+    StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'EngineAdd'{$endif});
     try
       result := AddOne(rec, rec.IDValue > 0, SentData);
     finally
@@ -1941,7 +1955,7 @@ begin
     if rec.FillFromArray(Fields, Sent) then
     begin
       rec.IDValue := id;
-      StorageLock(true, 'InternalBatchDirect');
+      StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'InternalBatchDirect' {$endif});
       try
         if Encoding = encPutHexID then
           if UpdateOne(rec, Fields, '') then // no SentData
@@ -1973,18 +1987,18 @@ begin
     result := false; // mark error
     exit;
   end;
-  StorageLock(true, 'EngineUpdate');
+  rec := fStoredClass.Create;
   try
-    rec := fStoredClass.Create;
+    rec.FillFrom(SentData, @fields);
+    rec.IDValue := ID;
+    StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'EngineUpdate'{$endif});
     try
-      rec.FillFrom(SentData, @fields);
-      rec.IDValue := ID;
       result := UpdateOne(rec, fields, SentData);
     finally
-      rec.Free;
+      StorageUnLock;
     end;
   finally
-    StorageUnLock;
+    rec.Free;
   end;
 end;
 
@@ -1992,6 +2006,7 @@ function TRestStorageTOrm.UpdateOne(ID: TID;
   const Values: TSqlVarDynArray): boolean;
 var
   rec: TOrm;
+  sentdata: RawUtf8;
 begin
   if ID <= 0 then
   begin
@@ -2002,10 +2017,10 @@ begin
   try
     rec.SetFieldSqlVars(Values);
     rec.IDValue := ID;
-    StorageLock(true, 'UpdateOne');
+    sentdata := rec.GetJsonValues(true, False, ooUpdate);
+    StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'UpdateOne' {$endif});
     try
-      result := UpdateOne(rec, rec.Orm.CopiableFieldsBits,
-        rec.GetJsonValues(true, False, ooUpdate));
+      result := UpdateOne(rec, rec.Orm.CopiableFieldsBits, sentdata);
     finally
       StorageUnLock;
     end;
@@ -2086,14 +2101,14 @@ begin
         StringReplaceAll(fBasicUpperSqlSelect[false], ' ROWID,', ' ID,');
     end;
   fields := fStoredClassRecordProps.Fields;
-  n := GetBitsCount(fIsUnique, fields.Count);
+  n := GetBitsCount(fStoredClassRecordProps.IsUniqueFieldsBits, fields.Count);
   if n > 0 then
   begin
     SetLength(fUnique, n);
     SetLength(fUniquePerField, fields.Count);
     n := 0;
     for f := 0 to fields.Count - 1 do
-      if byte(f) in fIsUnique then
+      if byte(f) in fStoredClassRecordProps.IsUniqueFieldsBits then
       begin
         fUnique[n] := TRestStorageInMemoryUnique.Create(self, fields.List[f]);
         fUniquePerField[f] := fUnique[n];
@@ -2109,8 +2124,6 @@ begin
   ObjArrayClear(fUnique);
   fValues.Clear; // to free all stored TOrm instances
   fSearchRec.Free;
-  if fTempBuffer <> nil then
-    FreeMem(fTempBuffer);
   inherited Destroy;
 end;
 
@@ -2216,7 +2229,7 @@ begin
     result := false
   else
   begin
-    StorageLock(True, 'EngineDelete');
+    StorageLock(True {$ifdef DEBUGSTORAGELOCK}, 'EngineDelete'{$endif});
     try
       result := DeleteOne(IDToIndex(ID));
     finally
@@ -2315,7 +2328,7 @@ begin
   n := length(IDs);
   SetLength(ndx, n);
   dec(n);
-  StorageLock(True, 'EngineDeleteWhere');
+  StorageLock(True {$ifdef DEBUGSTORAGELOCK}, 'EngineDeleteWhere' {$endif});
   try
     for i := 0 to n do
     begin
@@ -2364,7 +2377,7 @@ end;
 procedure TRestStorageInMemory.GetJsonValuesEvent(aDest: pointer;
   aRec: TOrm; aIndex: integer);
 var
-  W: TJsonSerializer absolute aDest;
+  W: TOrmWriter absolute aDest;
 begin
   aRec.GetJsonValues(W);
   W.AddComma;
@@ -2445,7 +2458,7 @@ var
 begin
   result := 0;
   if (self = nil) or
-     not Assigned(OnFind) or
+     (not Assigned(OnFind)) or
      (fCount = 0) then
     exit;
   if IsRowID(pointer(WhereFieldName)) then
@@ -2527,7 +2540,7 @@ begin
     // nothing to search (e.g. oftUnknown or oftMany)
     exit;
   // use fUnique[] hash array for O(1) search if available
-  if WhereField in fIsUnique then
+  if WhereField in fStoredClassRecordProps.IsUniqueFieldsBits then
   begin
     if FoundOffset <= 0 then
     begin
@@ -2641,7 +2654,7 @@ begin
   // prepare the search
   result := 0;
   if (self = nil) or
-     not Assigned(OnFind) or
+     (not Assigned(OnFind)) or
      (fCount = 0) then
     exit;
   case WhereOp of
@@ -2778,9 +2791,9 @@ var
 begin
   if (self = nil) or
      (fCount = 0) or
-     not Assigned(OnEachProcess) then
+     (not Assigned(OnEachProcess)) then
     exit;
-  StorageLock(WillModifyContent, 'ForEach');
+  StorageLock(WillModifyContent {$ifdef DEBUGSTORAGELOCK}, 'ForEach' {$endif});
   try
     for i := 0 to fCount - 1 do
       OnEachProcess(Dest, fValue[i], i);
@@ -2795,7 +2808,7 @@ var
   ndx, KnownRowsCount: PtrInt;
   j: PtrInt;
   id: Int64;
-  W: TJsonSerializer;
+  W: TOrmWriter;
   IsNull: boolean;
   Prop: TOrmPropInfo;
   bits: TFieldBits;
@@ -2810,9 +2823,7 @@ begin
     raise ERestStorage.CreateUtf8('%.GetJsonValues on % with Stmt.Where[]=%:' +
       ' our in-memory engine only supports a single WHERE clause operation',
       [self, fStoredClass, length(Stmt.Where)]);
-  if fTempBuffer = nil then
-    GetMem(fTempBuffer, SizeOf(fTempBuffer^)); // 8KB pre-allocated buffer
-  tmp := fTempBuffer; // aBufSize=65500 is ignored if tmp<>nil
+  tmp := GetTempBuffer; // aBufSize=65500 is ignored if tmp<>nil
   if Stmt.Where = nil then
     // no WHERE statement -> get all rows -> guess rows count
     if (Stmt.Limit > 0) and
@@ -2885,22 +2896,17 @@ begin
           if Stmt.Where[0].Field > 0 then
           begin
             Prop := fStoredClassRecordProps.Fields.List[Stmt.Where[0].Field - 1];
-            if Prop.InheritsFrom(TOrmPropInfoRttiRawBlob) then
-            begin
-              IsNull := Stmt.Where[0].Operation = opIsNull;
-              for ndx := 0 to fCount - 1 do
-                if TOrmPropInfoRttiRawBlob(Prop).IsNull(fValue[ndx]) = IsNull then
-                begin
-                  fValue[ndx].GetJsonValues(W);
-                  W.AddComma;
-                  inc(result);
-                  if (Stmt.Limit > 0) and
-                    (result >= Stmt.Limit) then
-                    break;
-                end;
-            end
-            else
-              goto err;
+            IsNull := Stmt.Where[0].Operation = opIsNull;
+            for ndx := 0 to fCount - 1 do
+              if Prop.IsValueVoid(fValue[ndx]) = IsNull then
+              begin
+                fValue[ndx].GetJsonValues(W);
+                W.AddComma;
+                inc(result);
+                if (Stmt.Limit > 0) and
+                  (result >= Stmt.Limit) then
+                  break;
+              end;
           end
           else
             goto err;
@@ -2929,7 +2935,7 @@ procedure TRestStorageInMemory.GetAllIDs(out ID: TIDDynArray);
 var
   i: PtrInt;
 begin
-  StorageLock(false, 'GetAllIDs');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'GetAllIDs' {$endif});
   try
     SetLength(ID, fCount);
     for i := 0 to Count - 1 do
@@ -2958,64 +2964,69 @@ var
 begin
   result := '';
   ResCount := 0;
-  StorageLock(false, 'EngineList');
-  try
-    if IdemPropNameU(fBasicSqlCount, SQL) then
-      SetCount(TableRowCount(fStoredClass))
-    else if IdemPropNameU(fBasicSqlHasRows[false], SQL) or
-            IdemPropNameU(fBasicSqlHasRows[true], SQL) then
-      if TableHasRows(fStoredClass) then
-      begin
-        // return one expanded row with fake ID=1 - enough for the ORM usecase
-        result := '[{"RowID":1}]'#$A;
-        ResCount := 1;
-      end
-      else
-      begin
-        // return the not expanded field name if no row, as a regular SQL engine
-        result := '{"fieldCount":1,"values":["RowID"]}'#$A;
-        ResCount := 0;
-      end
+  if IdemPropNameU(fBasicSqlCount, SQL) then
+    SetCount(TableRowCount(fStoredClass))
+  else if IdemPropNameU(fBasicSqlHasRows[false], SQL) or
+          IdemPropNameU(fBasicSqlHasRows[true], SQL) then
+    if TableHasRows(fStoredClass) then
+    begin
+      // return one expanded row with fake ID=1 - enough for the ORM usecase
+      result := '[{"RowID":1}]'#$A;
+      ResCount := 1;
+    end
     else
     begin
-      // parse SQL SELECT with a single where clause
-      Stmt := TSelectStatement.Create(SQL,
-        fStoredClassRecordProps.Fields.IndexByName,
-        fStoredClassRecordProps.SimpleFieldSelect);
-      try
-        if (Stmt.SqlStatement = '') or // parsing failed
-           (length(Stmt.Where) > 1) or // only a SINGLE expression is allowed yet
-           not IdemPropNameU(Stmt.TableName, fStoredClassRecordProps.SqlTableName) then
-          // invalid request -> return ''
-          exit;
-        if Stmt.SelectFunctionCount = 0 then
-        begin
-          // save rows as JSON, with appropriate search according to Where.* arguments
-          MS := TRawByteStringStream.Create;
+      // return the not expanded field name if no row, as a regular SQL engine
+      result := '{"fieldCount":1,"values":["RowID"]}'#$A;
+      ResCount := 0;
+    end
+  else
+  begin
+    // parse SQL SELECT with a single where clause
+    Stmt := TSelectStatement.Create(SQL,
+      fStoredClassRecordProps.Fields.IndexByName,
+      fStoredClassRecordProps.SimpleFieldSelect);
+    try
+      if (Stmt.SqlStatement = '') or // parsing failed
+         (length(Stmt.Where) > 1) or // only a SINGLE expression is allowed yet
+         not IdemPropNameU(Stmt.TableName, fStoredClassRecordProps.SqlTableName) then
+        // invalid request -> return ''
+        exit;
+      if Stmt.SelectFunctionCount = 0 then
+      begin
+        // save rows as JSON, with appropriate search according to Where.* arguments
+        MS := TRawByteStringStream.Create;
+        try
+          ForceAjax := ForceAjax or
+                       not Owner.Owner.NoAjaxJson;
+          StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'GetJsonValues' {$endif});
           try
-            ForceAjax := ForceAjax or
-                         not Owner.Owner.NoAjaxJson;
             ResCount := GetJsonValues(MS, ForceAjax, Stmt);
-            result := MS.DataString;
           finally
-            MS.Free;
+            StorageUnLock;
           end;
-        end
-        else if (length(Stmt.Select) <> 1) or
-                (Stmt.SelectFunctionCount <> 1) or
-                (Stmt.Limit > 1) or
-                (Stmt.Offset <> 0) then
-          // handle a single max() or count() function with no LIMIT nor OFFSET
-          exit
-        else
-          case Stmt.Select[0].FunctionKnown of
-            funcCountStar:
-              if Stmt.Where = nil then
-                // was e.g. "SELECT Count(*) FROM TableName;"
-                SetCount(TableRowCount(fStoredClass))
-              else
-              begin
-                // was e.g. "SELECT Count(*) FROM TableName WHERE ..."
+          result := MS.DataString;
+        finally
+          MS.Free;
+        end;
+      end
+      else if (length(Stmt.Select) <> 1) or
+              (Stmt.SelectFunctionCount <> 1) or
+              (Stmt.Limit > 1) or
+              (Stmt.Offset <> 0) then
+        // handle a single max() or count() function with no LIMIT nor OFFSET
+        exit
+      else
+        case Stmt.Select[0].FunctionKnown of
+          funcCountStar:
+            if Stmt.Where = nil then
+              // was e.g. "SELECT Count(*) FROM TableName;"
+              SetCount(TableRowCount(fStoredClass))
+            else
+            begin
+              // was e.g. "SELECT Count(*) FROM TableName WHERE ..."
+              StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'Count' {$endif});
+              try
                 ResCount := FindWhereEqual(Stmt.Where[0].Field,
                   Stmt.Where[0].Value, DoNothingEvent, nil, 0, 0);
                 case Stmt.Where[0].Operation of
@@ -3024,24 +3035,31 @@ begin
                   opNotEqualTo:
                     SetCount(TableRowCount(fStoredClass) - ResCount);
                 end;
+              finally
+                StorageUnLock;
               end;
-            funcMax:
-              if (Stmt.Where = nil) and
-                 FindMax(Stmt.Select[0].Field, max) then
-              begin
-                FormatUtf8('[{"Max()":%}]'#$A, [max], result);
-                ResCount := 1;
+            end;
+          funcMax:
+            if Stmt.Where = nil then
+            begin
+              StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'Max' {$endif});
+              try
+                if FindMax(Stmt.Select[0].Field, max) then
+                begin
+                  FormatUtf8('[{"Max()":%}]'#$A, [max], result);
+                  ResCount := 1;
+                end;
+              finally
+                StorageUnLock;
               end;
-          else
-            // unhandled Distinct() or other SQL functions
-            exit;
-          end;
-      finally
-        Stmt.Free;
-      end;
+            end;
+        else
+          // unhandled Distinct() or other SQL functions
+          exit;
+        end;
+    finally
+      Stmt.Free;
     end;
-  finally
-    StorageUnLock;
   end;
   if ReturnedRowCount <> nil then
     ReturnedRowCount^ := ResCount;
@@ -3052,7 +3070,7 @@ var
   f: PtrInt;
   timer: TPrecisionTimer;
 begin
-  StorageLock(true, 'DropValues');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'DropValues' {$endif});
   try
     fUnSortedID := false;
     fMaxID := 0;
@@ -3060,8 +3078,8 @@ begin
     begin
       timer.Start;
       for f := 0 to length(fUnique) - 1 do
-        fUnique[f].Hasher.Clear;
-      fValues.Hasher.Clear;
+        fUnique[f].Hasher.ForceReHash;
+      fValues.Hasher.ForceReHash;
       fValues.Clear;
       if andUpdateFile then
       begin
@@ -3101,13 +3119,13 @@ begin
   loaded.Pause;
   timer.Start;
   fCount := length(fValue);
-  dup := fValues.ReHash;
+  dup := fValues.ForceReHash;
   if dup > 0 then
     dupfield := ID_TXT
   else
     for f := 0 to length(fUnique) - 1 do
     begin
-      dup := fUnique[f].Hasher.ReHash({forced=}true);
+      dup := fUnique[f].Hasher.ForceReHash;
       if dup > 0 then
       begin
         dupfield := fUnique[f].PropInfo.Name;
@@ -3143,9 +3161,9 @@ var
   T: TOrmTableJson;
   timer: TPrecisionTimer;
 begin
-  StorageLock(true, 'LoadFromJson');
+  timer.Start;
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'LoadFromJson' {$endif});
   try
-    timer.Start;
     if fCount > 0 then
       DropValues({andupdatefile=}false);
     fModified := false;
@@ -3169,12 +3187,12 @@ end;
 procedure TRestStorageInMemory.SaveToJson(Stream: TStream; Expand: boolean);
 var
   i, j: PtrInt;
-  W: TJsonSerializer;
+  W: TOrmWriter;
   ndx: TIntegerDynArray;
 begin
   if self = nil then
     exit;
-  StorageLock(false, 'SaveToJson');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'SaveToJson' {$endif});
   try
     if fUnSortedID then
       fValues.CreateOrderedIndex(ndx, nil); // write in ascending ID order
@@ -3261,11 +3279,11 @@ begin
   MS := AlgoSynLZ.StreamUnCompress(Stream, TRESTSTORAGEINMEMORY_MAGIC);
   if MS = nil then
     exit;
-  StorageLock(true, 'LoadFromBinary');
+  R.Init(MS.Memory, MS.Size);
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'LoadFromBinary' {$endif});
   try
     try
       // check header: expect same exact RTTI
-      R.Init(MS.Memory, MS.Size);
       R.VarUtf8(s);
       if (s <> '') and // 0='' in recent mORMot 1.18 format
          not IdemPropNameU(s, 'TSqlRecordProperties') then // old buggy format
@@ -3365,11 +3383,11 @@ begin
   MS := TMemoryStream.Create;
   W := TBufferWriter.Create(MS, 1 shl 20);
   try
-    StorageLock(false, 'SaveToBinary');
+    // primitive magic and fields signature for file type identification
+    W.Write1(0); // ClassName='TSqlRecordProperties' in old buggy format
+    fStoredClassRecordProps.SaveBinaryHeader(W);
+    StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'SaveToBinary' {$endif});
     try
-      // primitive magic and fields signature for file type identification
-      W.Write1(0); // ClassName='TSqlRecordProperties' in old buggy format
-      fStoredClassRecordProps.SaveBinaryHeader(W);
       // write IDs - in increasing order
       if fUnSortedID then
         fValues.CreateOrderedIndex(ndx, nil);
@@ -3440,7 +3458,7 @@ var
   i: PtrInt;
 begin
   // TableModelIndex is not useful here
-  StorageLock(false, 'EngineRetrieve');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'EngineRetrieve' {$endif});
   try
     i := IDToIndex(ID);
     if i < 0 then
@@ -3460,7 +3478,7 @@ begin
     result := nil
   else
   begin
-    StorageLock(false, 'GetOne');
+    StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'GetOne' {$endif});
     try
       i := IDToIndex(aID);
       if i < 0 then
@@ -3490,13 +3508,13 @@ begin
   P := fStoredClassProps.Prop[FieldName];
   if P = nil then
     exit;
-  if P.PropertyIndex in fIsUnique then
+  if P.PropertyIndex in fStoredClassRecordProps.IsUniqueFieldsBits then
   begin
     InternalLog('EngineUpdateFieldIncrement(%) on UNIQUE %.%',
       [ID, fStoredClass, P.Name], sllDB);
     exit;
   end;
-  StorageLock(false, 'EngineUpdateFieldIncrement');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'EngineUpdateFieldIncrement' {$endif});
   try
     i := IDToIndex(ID);
     if i < 0 then
@@ -3544,7 +3562,7 @@ begin
   P := fStoredClassRecordProps.Fields.ByRawUtf8Name(SetFieldName);
   if P = nil then
     exit; // don't allow setting ID field, which is Read Only
-  if P.PropertyIndex in fIsUnique then
+  if P.PropertyIndex in fStoredClassRecordProps.IsUniqueFieldsBits then
   begin
     InternalLog('EngineUpdateField on UNIQUE %.%', [fStoredClass, P.Name], sllDB);
     exit; { TODO : allow update UNIQUE field? }
@@ -3573,7 +3591,7 @@ begin
     WhereValueString := WhereValue;
   // search indexes, then apply updates
   match := TSynList.Create;
-  StorageLock(true, 'EngineUpdateField');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'EngineUpdateField' {$endif});
   try
     // find matching match[]
     if FindWhereEqual(WhereFieldIndex, WhereValueString,
@@ -3626,7 +3644,7 @@ begin
     result := True;
     exit;
   end;
-  StorageLock(true, 'EngineUpdate');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'EngineUpdate' {$endif});
   try
     i := IDToIndex(ID);
     if (i < 0) or
@@ -3670,7 +3688,7 @@ begin
      (POrmClass(Rec)^ <> fStoredClass) or
      (Rec.IDValue <= 0) then
     exit;
-  StorageLock(true, 'UpdateOne');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'UpdateOne' {$endif});
   try
     i := IDToIndex(Rec.IDValue);
     if (i < 0) or
@@ -3703,7 +3721,7 @@ begin
   result := false;
   if ID <= 0 then
     exit;
-  StorageLock(true, 'UpdateOne');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'UpdateOne' {$endif});
   try
     i := IDToIndex(ID);
     if (i < 0) or
@@ -3745,7 +3763,7 @@ begin
   if (TableModelIndex <> fStoredClassProps.TableIndex) or
      not BlobField^.IsRawBlob then
     exit;
-  StorageLock(false, 'EngineRetrieveBlob');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'EngineRetrieveBlob' {$endif});
   try
     i := IDToIndex(aID);
     if i < 0 then
@@ -3769,7 +3787,7 @@ begin
     with Value.Orm do
       if BlobFields <> nil then
       begin
-        StorageLock(false, 'RetrieveBlobFields');
+        StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'RetrieveBlobFields' {$endif});
         try
           i := IDToIndex(Value.IDValue);
           if i < 0 then
@@ -3794,7 +3812,7 @@ begin
      (TableModelIndex <> fStoredClassProps.TableIndex) or
      not BlobField^.IsRawBlob then
     exit;
-  StorageLock(true, 'EngineUpdateBlob');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'EngineUpdateBlob' {$endif});
   try
     i := IDToIndex(aID);
     if (i < 0) or
@@ -3826,7 +3844,7 @@ begin
     with Value.Orm do
     if BlobFields <> nil then
     begin
-      StorageLock(true, 'UpdateBlobFields');
+      StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'UpdateBlobFields' {$endif});
       try
         i := IDToIndex(Value.IDValue);
         if (i < 0) or
@@ -3864,7 +3882,7 @@ end;
 function TRestStorageInMemory.MemberExists(Table: TOrmClass;
   ID: TID): boolean;
 begin
-  StorageLock(false, 'UpdateFile');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'UpdateFile' {$endif});
   try
     result := (Table = fStoredClass) and
               (IDToIndex(ID) >= 0);
@@ -3883,7 +3901,7 @@ begin
      (FileName = '') then
     exit;
   timer.Start;
-  StorageLock(false, 'UpdateFile');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'UpdateFile' {$endif});
   try
     DeleteFile(FileName); // always overwrite previous file
     if fCount > 0 then
@@ -3967,7 +3985,7 @@ begin
   end;
   match := TSynList.Create;
   try
-    StorageLock(false, 'SearchField');
+    StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'SearchField' {$endif});
     try
       n := FindWhereEqual(WhereField, FieldValue, DoAddToListEvent, match, 0, 0);
       if n = 0 then
@@ -3994,7 +4012,7 @@ begin
      (fCount = 0) or
      (FieldName = '') then
     exit;
-  StorageLock(false, 'SearchEvent');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'SearchEvent' {$endif});
   try
     result := FindWhere(FieldName, FieldValue, Op, OnFind, Dest,
       FoundLimit, FoundOffset, CaseInsensitive);
@@ -4081,10 +4099,10 @@ begin
   fStorageLockShouldIncreaseOwnerInternalState := false; // done by overriden StorageLock()
 end;
 
-procedure TRestStorageInMemoryExternal.StorageLock(WillModifyContent: boolean;
-  const msg: RawUtf8);
+procedure TRestStorageInMemoryExternal.StorageLock(WillModifyContent: boolean
+   {$ifdef DEBUGSTORAGELOCK}; const msg: shortstring {$endif});
 begin
-  inherited StorageLock(WillModifyContent, msg);
+  inherited StorageLock(WillModifyContent {$ifdef DEBUGSTORAGELOCK}, msg {$endif});
   if WillModifyContent and
      (Owner <> nil) then
     Owner.FlushInternalDBCache;
@@ -4158,7 +4176,7 @@ begin
       fMax := store.fCount - 1;
       if Prepared.IsWhereOneFieldEquals then
         with Prepared.Where[0] do
-          if Column in store.fIsUnique then
+          if Column in store.fStoredClassRecordProps.IsUniqueFieldsBits then
           begin
             store.fStoredClassRecordProps.Fields.List[Column].SetFieldSqlVar(
               store.fSearchRec, Value);
@@ -4254,7 +4272,7 @@ begin
     if Prepared.IsWhereOneFieldEquals then
       with Prepared.Where[0] do
         if (Column >= 0) and
-           (Column in fStaticInMemory.fIsUnique) then
+           (Column in fStaticInMemory.fStoredClassRecordProps.IsUniqueFieldsBits) then
         begin
           Value.VType := ftNull; // mark TOrmVirtualTableCursorJson expects it
           OmitCheck := true;
@@ -4563,7 +4581,7 @@ procedure TRestStorageShard.RemoveShard(aShardIndex: integer);
 var
   rest: TRestOrm;
 begin
-  StorageLock(true, 'RemoveShard');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'RemoveShard' {$endif});
   try
     if (fShards <> nil) and
        (cardinal(aShardIndex) <= cardinal(fShardLast)) then
@@ -4657,7 +4675,7 @@ begin
   if JsonGetID(pointer(SentData), result) then
     raise ERestStorage.CreateUtf8('%.EngineAdd(%) unexpected ID in %',
       [self, fStoredClass, SentData]);
-  StorageLock(true, 'EngineAdd');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardAdd' {$endif});
   try
     inc(fShardLastID);
     if fShardLastID >= fShardNextID then
@@ -4698,7 +4716,7 @@ var
   tableIndex, shardIndex: integer;
   rest: TRestOrm;
 begin
-  StorageLock(true, 'EngineDelete');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardDelete' {$endif});
   try
     if not ShardFromID(ID, tableIndex, rest, ooDelete, @shardIndex) then
       result := false
@@ -4724,7 +4742,7 @@ begin
   if (IDs = nil) or
      (ssoNoDelete in fOptions) then
     exit;
-  StorageLock(true, 'EngineDeleteWhere');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardDeleteWhere' {$endif});
   try
     SetLength(id, fShardLast + 1);
     SetLength(idn, fShardLast + 1);
@@ -4755,7 +4773,7 @@ end;
 
 function TRestStorageShard.EngineExecute(const aSql: RawUtf8): boolean;
 begin
-  StorageLock(false, 'EngineExecute');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardExecute' {$endif});
   try
     if (fShardLast >= 0) and
        not (ssoNoExecute in fOptions) then
@@ -4790,7 +4808,7 @@ var
   ResCount: PtrInt;
 begin
   result := ''; // indicates error occurred
-  StorageLock(false, 'EngineList');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardList' {$endif});
   try
     ResCount := 0;
     if IdemPropNameU(fBasicSqlCount, SQL) then
@@ -4827,7 +4845,7 @@ var
   tableIndex: integer;
   rest: TRestOrm;
 begin
-  StorageLock(false, 'EngineRetrieve');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardRetrieve' {$endif});
   try
     if not ShardFromID(ID, tableIndex, rest) then
       result := ''
@@ -4844,7 +4862,7 @@ var
   tableIndex: integer;
   rest: TRestOrm;
 begin
-  StorageLock(false, 'EngineRetrieveBlob');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardRetrieveBlob' {$endif});
   try
     if not ShardFromID(aID, tableIndex, rest) then
       result := false
@@ -4861,7 +4879,7 @@ var
   tableIndex, shardIndex: integer;
   rest: TRestOrm;
 begin
-  StorageLock(true, 'EngineUpdate');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardUpdate' {$endif});
   try
     if not ShardFromID(ID, tableIndex, rest, ooUpdate, @shardIndex) then
       result := false
@@ -4884,7 +4902,7 @@ var
   rest: TRestOrm;
 begin
   result := false;
-  StorageLock(true, 'EngineUpdateBlob');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardUpdateBlob' {$endif});
   try
     if ShardFromID(aID, tableIndex, rest, ooUpdate) then
       result := rest.EngineUpdateBlob(tableIndex, aID, BlobField, BlobData);
@@ -4897,7 +4915,7 @@ function TRestStorageShard.EngineUpdateField(TableModelIndex: integer;
   const SetFieldName, SetValue, WhereFieldName, WhereValue: RawUtf8): boolean;
 begin
   result := false;
-  StorageLock(true, 'EngineUpdateField');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardUpdateField' {$endif});
   try
     if not ((ssoNoUpdate in fOptions) or
        (ssoNoUpdateField in fOptions)) then
@@ -4915,7 +4933,7 @@ var
   rest: TRestOrm;
 begin
   result := false;
-  StorageLock(true, 'EngineUpdateFieldIncrement');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardUpdateFieldIncrement' {$endif});
   try
     if ShardFromID(ID, tableIndex, rest, ooUpdate) then
       result := rest.EngineUpdateFieldIncrement(tableIndex,
@@ -4932,7 +4950,7 @@ begin
   if ssoNoBatch in fOptions then
     exit;
   // lock is protected by try..finally in TRestOrmServer.RunBatch caller method
-  StorageLock(true, 'InternalBatchStart');
+  StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardBatchStart' {$endif});
   try
     if fShardBatch <> nil then
       raise ERestStorage.CreateUtf8('%.InternalBatchStop should have been called', [self]);

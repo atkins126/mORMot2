@@ -82,7 +82,7 @@ type
 
 /// append a TBcd value as text to the output buffer
 // - very optimized for speed
-procedure AddBcd(WR: TBaseWriter; const AValue: TBcd);
+procedure AddBcd(WR: TTextWriter; const AValue: TBcd);
 
 type
   /// a string buffer, used by InternalBcdToBuffer to store its output text
@@ -251,7 +251,7 @@ type
     // - will use WR.Expand to guess the expected output format
     // - BLOB field value is saved as Base64, in the '"\uFFF0base64encodedbinary"
     // format and contains true BLOB data
-    procedure ColumnsToJson(WR: TJsonWriter); override;
+    procedure ColumnsToJson(WR: TResultsWriter); override;
   end;
 
   ///	implements a statement via the DB.pas TDataSet/TQuery-like connection
@@ -341,7 +341,7 @@ begin
   result := PEnd - PBeg;
 end;
 
-procedure AddBcd(WR: TBaseWriter; const AValue: TBcd);
+procedure AddBcd(WR: TTextWriter; const AValue: TBcd);
 var
   len: PtrInt;
   PBeg: PAnsiChar;
@@ -589,7 +589,7 @@ begin
       fQuery.Open;
       fCurrentRow := -1;
       fColumnCount := 0;
-      fColumn.ReHash;
+      fColumn.ForceReHash;
       fColumn.Capacity := fQuery.FieldCount;
       for i := 0 to fQuery.FieldCount - 1 do
       begin
@@ -735,7 +735,7 @@ begin
   result := fQuery.Fields[col];
 end;
 
-procedure TSqlDBDatasetStatementAbstract.ColumnsToJson(WR: TJsonWriter);
+procedure TSqlDBDatasetStatementAbstract.ColumnsToJson(WR: TResultsWriter);
 var
   col: PtrInt;
   f: TField;

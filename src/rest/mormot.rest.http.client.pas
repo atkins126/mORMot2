@@ -304,6 +304,7 @@ type
     fOnWebSocketsClosed: TNotifyEvent;
     fWebSocketLoopDelay: integer;
     fWebSocketProcessSettings: TWebSocketProcessSettings;
+    fUpgradeCount: integer;
     function CallbackRequest(
       Ctxt: THttpServerRequestAbstract): cardinal; virtual;
     procedure InternalOpen; override;
@@ -382,6 +383,11 @@ type
     // - apply to all protocols on this client instance
     function Settings: PWebSocketProcessSettings;
       {$ifdef HASINLINE}inline;{$endif}
+  published
+    /// how many times the connection has been upgraded
+    // - reconnections may occur on a weak link - see Settings^.ClientAutoUpgrade
+    property UpgradeCount: integer
+      read fUpgradeCount;
   end;
 
 {$endif NOHTTPCLIENTWEBSOCKETS}
@@ -631,9 +637,7 @@ begin
     'SendTimeout', fSendTimeout,
     'ReceiveTimeout', fReceiveTimeout,
     'ProxyName', fProxyName,
-    'ProxyByPass', fProxyByPass]);
-  Definition.DatabaseName :=
-    copy(Definition.DatabaseName, 2, MaxInt); // trim leading '?'
+    'ProxyByPass', fProxyByPass], {TrimLeadingQuestionMark=}true);
 end;
 
 constructor TRestHttpClientGeneric.RegisteredClassCreateFrom(aModel: TOrmModel;
@@ -649,17 +653,17 @@ begin
   P := Pointer(aDefinition.DataBaseName);
   while P <> nil do
   begin
-    if UrlDecodeCardinal(P, 'CONNECTTIMEOUT', V) then
+    if UrlDecodeCardinal(P, 'CONNECTTIMEOUT=', V) then
       fConnectTimeout := V
-    else if UrlDecodeCardinal(P, 'SENDTIMEOUT', V) then
+    else if UrlDecodeCardinal(P, 'SENDTIMEOUT=', V) then
       fSendTimeout := V
-    else if UrlDecodeCardinal(P, 'RECEIVETIMEOUT', V) then
+    else if UrlDecodeCardinal(P, 'RECEIVETIMEOUT=', V) then
       fReceiveTimeout := V
-    else if UrlDecodeValue(P, 'PROXYNAME', tmp) then
+    else if UrlDecodeValue(P, 'PROXYNAME=', tmp) then
       fProxyName := CurrentAnsiConvert.Utf8ToAnsi(tmp)
-    else if UrlDecodeValue(P, 'PROXYBYPASS', tmp) then
+    else if UrlDecodeValue(P, 'PROXYBYPASS=', tmp) then
       fProxyByPass := CurrentAnsiConvert.Utf8ToAnsi(tmp);
-    if UrlDecodeCardinal(P, 'IGNORESSLCERTIFICATEERRORS', V, @P) then
+    if UrlDecodeCardinal(P, 'IGNORESSLCERTIFICATEERRORS=', V, @P) then
       fExtendedOptions.IgnoreSSLCertificateErrors := boolean(V);
   end;
   inherited RegisteredClassCreateFrom(aModel, aDefinition, false); // call SetUser()
@@ -668,15 +672,15 @@ end;
 constructor TRestHttpClientGeneric.Create(const aServer: TRestServerUriString;
   aModel: TOrmModel; aDefaultPort: integer; aHttps: boolean);
 var
-  URI: TRestServerUri;
+  uri: TRestServerUri;
 begin
-  URI.Uri := aServer;
-  if URI.Root <> '' then
-    aModel.Root := URI.Root;
-  if (URI.Port = '') and
+  uri.Uri := aServer;
+  if uri.Root <> '' then
+    aModel.Root := uri.Root;
+  if (uri.Port = '') and
      (aDefaultPort <> 0) then
-    URI.Port := Int32ToUtf8(aDefaultPort);
-  Create(URI.Address, URI.Port, aModel, aHttps);
+    uri.Port := Int32ToUtf8(aDefaultPort);
+  Create(uri.Address, uri.Port, aModel, aHttps);
 end;
 
 function TRestHttpClientGeneric.HostName: RawUtf8;
@@ -692,7 +696,6 @@ end;
 
 
 { ************ TRestHttpClientSocket REST Client Class over Sockets }
-
 
 { TRestHttpClientSocket }
 
@@ -724,7 +727,7 @@ end;
 procedure TRestHttpClientSocket.InternalClose;
 begin
   if fSocket <> nil then
-  InternalLog('InternalClose: fSocket.Free', sllTrace);
+    InternalLog('InternalClose: fSocket.Free', sllTrace);
   FreeAndNilSafe(fSocket);
 end;
 
@@ -832,8 +835,6 @@ function TRestHttpClientWebsockets.IsOpen: boolean;
           raise ERestHttpClient.CreateUtf8(
             '%.InternalOpen: WebSocketsUpgrade failed - %', [self, err]);
         end;
-        if Assigned(fOnWebSocketsUpgraded) then
-          fOnWebSocketsUpgraded(self);
       end;
   end;
 
@@ -873,8 +874,8 @@ begin
     raise EServiceException.CreateUtf8('Missing %.WebSocketsUpgrade() call', [self]);
   FormatUtf8('{"%":%}', [Factory.InterfaceTypeInfo^.RawName, FakeCallbackID], body);
   CallbackNonBlockingSetHeader(head); // frames gathering + no wait
-  result := CallBack(mPOST, 'CacheFlush/_callback_', body, resp, nil, 0, @head)
-    in [HTTP_SUCCESS, HTTP_NOCONTENT];
+  result := CallBack(
+    mPOST, 'CacheFlush/_callback_', body, resp, nil, 0, @head) = HTTP_SUCCESS;
 end;
 
 function TRestHttpClientWebsockets.CallbackRequest(
@@ -949,6 +950,7 @@ function TRestHttpClientWebsockets.WebSocketsUpgrade(
   aRaiseExceptionOnFailure: ESynExceptionClass): RawUtf8;
 var
   sockets: THttpClientWebSockets;
+  prevconn: THttpServerConnectionID;
   log: ISynLog;
 begin
   log := fLogFamily.SynLog.Enter(self, 'WebSocketsUpgrade');
@@ -959,10 +961,15 @@ begin
   begin
     if fWebSocketLoopDelay > 0 then
       sockets.Settings^.LoopDelay := fWebSocketLoopDelay;
+    if sockets.WebSockets <> nil then
+      prevconn := sockets.WebSockets.ConnectionID
+    else
+      prevconn := 0;
     result := sockets.WebSocketsUpgrade(
       Model.Root, aWebSocketsEncryptionKey,
       aWebSocketsAjax, aWebSocketsBinaryOptions, nil, fCustomHeader);
     if result = '' then
+    begin
       // no error message = success
       with fWebSocketParams do
       begin
@@ -971,9 +978,17 @@ begin
         Key := aWebSocketsEncryptionKey;
         BinaryOptions := aWebSocketsBinaryOptions;
         Ajax := aWebSocketsAjax;
-        if Assigned(fOnWebSocketsUpgraded) then
-          fOnWebSocketsUpgraded(self);
       end;
+      if sockets.Settings^.ClientRestoreCallbacks and
+         (prevconn <> 0) then
+        // call TServiceContainerServer.FakeCallbackReplaceConnectionID
+        if CallBack(mPOST, 'CacheFlush/_replaceconn_',
+            Int64ToUtf8(prevconn), result) = HTTP_SUCCESS then
+          result := ''; // on error, log result = server response
+      if Assigned(fOnWebSocketsUpgraded) then
+        fOnWebSocketsUpgraded(self);
+      inc(fUpgradeCount);
+    end;
   end;
   if log <> nil then
     if result <> '' then

@@ -19,7 +19,7 @@ unit mormot.core.base;
     - Sorting/Comparison Functions
     - Some Convenient TStream descendants and File access functions
     - Faster Alternative to RTL Standard Functions
-    - Raw Shared Types Definitions
+    - Raw Shared Constants / Types Definitions
 
    Aim of those types and functions is to be cross-platform and cross-compiler,
   without any dependency but the main FPC/Delphi RTL. It also detects the
@@ -97,7 +97,7 @@ const
   /// fake code page used to recognize RawBlob
   // - RawBlob internal code page will be CP_RAWBYTESTRING = 65535, but our ORM
   // will identify the RawBlob type and unserialize it using CP_RAWBLOB instead
-  // - TTextWriter.AddAnyAnsiBuffer will recognize it and use Base-64 encoding
+  // - TJsonWriter.AddAnyAnsiBuffer will recognize it and use Base-64 encoding
   CP_RAWBLOB = 65534;
 
   /// US English Windows Code Page, i.e. WinAnsi standard character encoding
@@ -482,7 +482,7 @@ type
   TShort16 = string[16];
   PShort16 = ^TShort16;
 
-  /// used e.g. for TBaseWriter.AddShorter small text constants
+  /// used e.g. for TTextWriter.AddShorter small text constants
   TShort8 = string[8];
   PShort8 = ^TShort8;
 
@@ -594,6 +594,9 @@ const
   // - to be used inlined e.g. as PRefCnt(p - _STRREFCNT)^
   _STRREFCNT = SizeOf(TRefCnt) + _STRLEN;
 
+  /// used to calc the beginning of memory allocation of a dynamic array
+  _DARECSIZE = SizeOf(TDynArrayRec);
+
   /// cross-compiler negative offset to TDynArrayRec.high/length field
   // - to be used inlined e.g. as
   // ! PDALen(PAnsiChar(Values) - _DALEN)^ + _DAOFF
@@ -618,6 +621,9 @@ const
   // - even if a dynamic array can handle PtrInt length, consider other patterns
   _DAMAXSIZE = $5fffffff;
 
+/// same as SetLength() but without any memory resize - len should be > 0
+procedure DynArrayFakeLength(var arr; len: TDALen);
+  {$ifdef HASINLINE} inline; {$endif}
 
 {$ifndef CPUARM}
 type
@@ -629,7 +635,7 @@ function ToByte(value: cardinal): cardinal; inline;
 {$endif CPUARM}
 
 const
-  /// used to mark the end of ASCIIZ buffer, or return a void shortstring
+  /// used to mark the end of ASCIIZ buffer, or return a void ShortString
   NULCHAR: AnsiChar = #0;
 
   /// a TGUID containing '{00000000-0000-0000-0000-00000000000}'
@@ -720,42 +726,42 @@ procedure GetMemAligned(var holder: RawByteString; fillwith: pointer; len: PtrUI
 function UniqueRawUtf8(var u: RawUtf8): pointer;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// direct conversion of an ANSI-7 shortstring into an AnsiString
+/// direct conversion of an ANSI-7 ShortString into an AnsiString
 // - can be used e.g. for names retrieved from RTTI to convert them into RawUtf8
-function ShortStringToAnsi7String(const source: shortstring): RawByteString; overload;
+function ShortStringToAnsi7String(const source: ShortString): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// direct conversion of an ANSI-7 shortstring into an AnsiString
+/// direct conversion of an ANSI-7 ShortString into an AnsiString
 // - can be used e.g. for names retrieved from RTTI to convert them into RawUtf8
-procedure ShortStringToAnsi7String(const source: shortstring; var result: RawUtf8); overload;
+procedure ShortStringToAnsi7String(const source: ShortString; var result: RawUtf8); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// direct conversion of an ANSI-7 AnsiString into an shortstring
+/// direct conversion of an ANSI-7 AnsiString into an ShortString
 // - can be used e.g. for names retrieved from RTTI
-procedure Ansi7StringToShortString(const source: RawUtf8; var result: shortstring);
+procedure Ansi7StringToShortString(const source: RawUtf8; var result: ShortString);
   {$ifdef FPC}inline;{$endif}
 
 /// simple concatenation of a 32-bit integer as text into a shorstring
-procedure AppendShortInteger(value: integer; var dest: shortstring);
+procedure AppendShortInteger(value: integer; var dest: ShortString);
 
 /// simple concatenation of a 64-bit integer as text into a shorstring
-procedure AppendShortInt64(value: Int64; var dest: shortstring);
+procedure AppendShortInt64(value: Int64; var dest: ShortString);
 
 /// simple concatenation of a character into a shorstring
-procedure AppendShortChar(chr: AnsiChar; var dest: shortstring);
+procedure AppendShortChar(chr: AnsiChar; var dest: ShortString);
   {$ifdef FPC} inline; {$endif}
 
-/// simple concatenation of a shortstring text into a shorstring
-procedure AppendShort(const src: shortstring; var dest: shortstring);
+/// simple concatenation of a ShortString text into a shorstring
+procedure AppendShort(const src: ShortString; var dest: ShortString);
   {$ifdef FPC} inline; {$endif}
 
 /// simple concatenation of a #0 ending text into a shorstring
 // - if Len is < 0, will use StrLen(buf)
-procedure AppendShortBuffer(buf: PAnsiChar; len: integer; var dest: shortstring);
+procedure AppendShortBuffer(buf: PAnsiChar; len: integer; var dest: ShortString);
 
 /// simple concatenation of an ANSI-7 AnsiString into a shorstring
 // - if Len is < 0, will use StrLen(buf)
-procedure AppendShortAnsi7String(const buf: RawByteString; var dest: shortstring);
+procedure AppendShortAnsi7String(const buf: RawByteString; var dest: ShortString);
   {$ifdef FPC}inline;{$endif}
 
 /// just a wrapper around vmtClassName to avoid a string conversion
@@ -1526,7 +1532,7 @@ function TIntegerDynArrayFrom(const Values: array of integer): TIntegerDynArray;
 // raiseExceptionOnOverflow is FALSE and the returned array slot is filled
 // with maxInt/minInt
 function TIntegerDynArrayFrom64(const Values: TInt64DynArray;
-  raiseExceptionOnOverflow: boolean=true): TIntegerDynArray;
+  raiseExceptionOnOverflow: boolean = true): TIntegerDynArray;
 
 /// quick helper to initialize a dynamic array of 64-bit integers from 32-bit values
 // - see also FromI64() for 64-bit signed integer values input
@@ -1699,7 +1705,7 @@ function ObjArrayNotNilCount(const aObjArray): integer;
 // - for proper serialization on Delphi 7-2009, use Rtti.RegisterObjArray()
 // - do nothing if the index is out of range in the dynamic array
 procedure ObjArrayDelete(var aObjArray; aItemIndex: PtrInt;
-  aContinueOnException: boolean=false; aCount: PInteger=nil); overload;
+  aContinueOnException: boolean = false; aCount: PInteger = nil); overload;
 
 /// wrapper to delete an item in a T*ObjArray dynamic array storage
 // - for proper serialization on Delphi 7-2009, use Rtti.RegisterObjArray()
@@ -1966,8 +1972,10 @@ type
   10: (
        i: array[0..7] of Int64);
   11: (
-       r: array[0..3] of THash128Rec);
+       q: array[0..7] of QWord);
   12: (
+       r: array[0..3] of THash128Rec);
+  13: (
        l, h: THash256Rec);
   end;
   /// pointer to 512-bit hash map variable record
@@ -2367,6 +2375,24 @@ function RefCntDecFree(var refcnt: TRefCnt): boolean; inline;
 
 {$endif CPUINTEL}
 
+/// fast atomic compare-and-swap operation on a pointer-sized integer value
+// - via Intel/AMD custom asm or FPC RTL InterlockedCompareExchange(pointer)
+// - true if Target was equal to Comparand, and Target set to NewValue
+// - used e.g. as thread-safe atomic operation for TLightLock/TRWLock
+// - Target should be aligned, which is the case when defined as a class field
+function LockedExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt): boolean;
+
+/// fast atomic addition operation on a pointer-sized integer value
+// - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(pointer)
+// - Target should be aligned, which is the case when defined as a class field
+procedure LockedInc(var Target: PtrUInt; Increment: PtrUInt);
+
+/// fast atomic substraction operation on a pointer-sized integer value
+// - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(-pointer)
+// - Target should be aligned, which is the case when defined as a class field
+procedure LockedDec(var Target: PtrUInt; Decrement: PtrUInt);
+
+
 {$ifndef FPC}
 
 /// return the position of the leftmost set bit in a 32-bit value
@@ -2595,7 +2621,7 @@ function IsAnsiCompatibleW(PW: PWideChar; Len: PtrInt): boolean; overload;
 
 
 type
-  /// low-level object implementing a 32-bit Pierre L'Ecuyer software generator
+  /// low-level implementation a 32-bit Pierre L'Ecuyer software random generator
   // - cross-compiler and cross-platform efficient randomness generator, very
   // fast with a much better distribution than Delphi system's Random() function
   // see https://www.gnu.org/software/gsl/doc/html/rng.html#c.gsl_rng_taus2
@@ -2625,7 +2651,7 @@ type
     /// XOR some memory buffer with random bytes
     procedure Fill(dest: pointer; count: integer);
     /// fill some string[size] with 7-bit ASCII random text
-    procedure FillShort(var dest: shortstring; size: PtrUInt);
+    procedure FillShort(var dest: ShortString; size: PtrUInt);
     /// fill some string[31] with 7-bit ASCII random text
     procedure FillShort31(var dest: TShort31);
   end;
@@ -2665,6 +2691,10 @@ function RandomDouble: double;
 // - consider the cryptographic-level TAesPrng.Main.FillRandom() method
 // - thread-safe and non-blocking function using a per-thread TLecuyer engine
 procedure RandomBytes(Dest: PByte; Count: integer);
+
+/// fill some string[31] with 7-bit ASCII random text
+// - thread-safe and non-blocking function using a per-thread TLecuyer engine
+procedure RandomShort31(var dest: TShort31);
 
 {$ifndef PUREMORMOT2}
 /// fill some 32-bit memory buffer with values from the gsl_rng_taus2 generator
@@ -2713,7 +2743,7 @@ procedure bswap64array(a, b: PQWordArray; n: PtrInt);
 // - since this function uses an unsafe typeless EventList parameter, you should
 // not use it in high-level code, but only as wrapper within dedicated methods
 // - will add Event to EventList[] unless Event is already registered
-// - is used e.g. by TTextWriter as such:
+// - is used e.g. by TJsonWriter as such:
 // ! ...
 // !   fEchos: array of TOnTextWriterEcho;
 // ! ...
@@ -2736,13 +2766,13 @@ function MultiEventAdd(var EventList; const Event: TMethod): boolean;
 // callback already registered by MultiEventAdd() to this list of events
 // - since this function uses an unsafe typeless EventList parameter, you should
 // not use it in high-level code, but only as wrapper within dedicated methods
-// - is used e.g. by TTextWriter as such:
+// - is used e.g. by TJsonWriter as such:
 // ! ...
 // !   fEchos: array of TOnTextWriterEcho;
 // ! ...
 // !   procedure EchoRemove(const aEcho: TOnTextWriterEcho);
 // ! ...
-// ! procedure TTextWriter.EchoRemove(const aEcho: TOnTextWriterEcho);
+// ! procedure TJsonWriter.EchoRemove(const aEcho: TOnTextWriterEcho);
 // ! begin
 // !   MultiEventRemove(fEchos,TMethod(aEcho));
 // ! end;
@@ -2994,6 +3024,14 @@ var
   // for macCrc128c or TAesAbstractAead.MacCheckError
   crcblocks: procedure(crc128, data128: PBlock128; count: integer) = crcblocksfast;
 
+  /// compute CRC32 checksum on the supplied buffer
+  // - is only available if mormot.lib.z.pas unit is included in the project
+  crc32: THasher;
+
+  /// compute ADLER32 checksum on the supplied buffer
+  // - is only available if mormot.lib.z.pas unit is included in the project
+  adler32: THasher;
+
 /// compute CRC16-CCITT checkum on the supplied buffer
 // - i.e. 16-bit CRC-CCITT, with polynomial x^16 + x^12 + x^5 + 1 ($1021)
 // and $ffff as initial value
@@ -3049,22 +3087,47 @@ var
   // - set to crc32csse42() if SSE4.2 or ARMv8 are available on this CPU,
   // or fallback to xxHash32() which is faster than crc32cfast() e.g. on ARM
   // - mormot.crypt.core may assign safer and faster AesNiHash32() if available
+  // - so the hash value may change on another computer or after program restart
   DefaultHasher: THasher = xxHash32;
 
   /// the 32-bit hash function used by TRawUtf8Interning
   // - set to crc32csse42() if SSE4.2 or ARMv8 are available on this CPU,
   // or fallback to xxHash32() which performs better than crc32cfast()
   // - mormot.crypt.core may assign safer and faster AesNiHash32() if available
+  // - so the hash value may change on another computer or after program restart
   InterningHasher: THasher = xxHash32;
 
   /// a 64-bit hasher function
   // - crc32cTwice() by default, but mormot.crypt.core may assign AesNiHash64()
+  // - so the hash value may change on another computer or after program restart
   DefaultHasher64: THasher64 = crc32cTwice;
 
   /// a 128-bit hasher function
   // - crc32c128() by default, but mormot.crypt.core may assign AesNiHash128()
+  // - so the hash value may change on another computer or after program restart
   DefaultHasher128: THasher128 = crc32c128;
 
+/// compute a 32-bit hash of any string using DefaultHasher()
+// - so the hash value may change on another computer or after program restart
+function DefaultHash(const s: RawByteString): cardinal; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// compute a 32-bit hash of any array of bytes using DefaultHasher()
+// - so the hash value may change on another computer or after program restart
+function DefaultHash(const b: TBytes): cardinal; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// compute a 32-bit hash of any string using the CRC32C checksum
+// - the returned hash value will be stable on all platforms, and use HW opcodes
+// if available on the current CPU
+function crc32cHash(const s: RawByteString): cardinal; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// compute a 32-bit hash of any array of bytes using the CRC32C checksum
+// - the returned hash value will be stable on all platforms, and use HW opcodes
+// if available on the current CPU
+function crc32cHash(const b: TBytes): cardinal; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// get maximum possible (worse) SynLZ compressed size
 function SynLZcompressdestlen(in_len: integer): integer;
@@ -3447,7 +3510,7 @@ type
   // not compatible with previous versions or FPC, and it makes more sense to
   // work with RawByteString/RawUtf8 in our UTF-8 oriented framework
   // - just like TStringStream, is designed for appending data, not modifying
-  // in-place, as requested e.g. by TTextWriter or TBufferWriter classes
+  // in-place, as requested e.g. by TJsonWriter or TBufferWriter classes
   TRawByteStringStream = class(TStreamWithPosition)
   protected
     fDataString: RawByteString;
@@ -4057,22 +4120,22 @@ begin
   result := @u[1];
 end;
 
-function ShortStringToAnsi7String(const source: shortstring): RawByteString;
+function ShortStringToAnsi7String(const source: ShortString): RawByteString;
 begin
   FastSetString(RawUtf8(result), @source[1], ord(source[0]));
 end;
 
-procedure ShortStringToAnsi7String(const source: shortstring; var result: RawUtf8);
+procedure ShortStringToAnsi7String(const source: ShortString; var result: RawUtf8);
 begin
   FastSetString(result, @source[1], ord(source[0]));
 end;
 
-procedure Ansi7StringToShortString(const source: RawUtf8; var result: shortstring);
+procedure Ansi7StringToShortString(const source: RawUtf8; var result: ShortString);
 begin
   SetString(result, PAnsiChar(pointer(source)), length(source));
 end;
 
-procedure AppendShort(const src: shortstring; var dest: shortstring);
+procedure AppendShort(const src: ShortString; var dest: ShortString);
 var
   len: PtrInt;
 begin
@@ -4084,7 +4147,7 @@ begin
   inc(dest[0], len);
 end;
 
-procedure AppendShortChar(chr: AnsiChar; var dest: shortstring);
+procedure AppendShortChar(chr: AnsiChar; var dest: ShortString);
 begin
   if dest[0] = #255 then
     exit;
@@ -4092,23 +4155,23 @@ begin
   dest[ord(dest[0])] := chr;
 end;
 
-procedure AppendShortInteger(value: integer; var dest: shortstring);
+procedure AppendShortInteger(value: integer; var dest: ShortString);
 var
-  temp: shortstring;
+  temp: ShortString;
 begin
   str(value, temp); // fast enough for our purpose
   AppendShort(temp, dest);
 end;
 
-procedure AppendShortInt64(value: Int64; var dest: shortstring);
+procedure AppendShortInt64(value: Int64; var dest: ShortString);
 var
-  temp: shortstring;
+  temp: ShortString;
 begin
   str(value, temp);
   AppendShort(temp, dest);
 end;
 
-procedure AppendShortBuffer(buf: PAnsiChar; len: integer; var dest: shortstring);
+procedure AppendShortBuffer(buf: PAnsiChar; len: integer; var dest: ShortString);
 begin
   if len < 0 then
     len := StrLen(buf);
@@ -4119,7 +4182,7 @@ begin
   inc(dest[0], len);
 end;
 
-procedure AppendShortAnsi7String(const buf: RawByteString; var dest: shortstring);
+procedure AppendShortAnsi7String(const buf: RawByteString; var dest: ShortString);
 begin
   if buf <> '' then
     AppendShortBuffer(pointer(buf), PStrLen(PtrUInt(buf) - _STRLEN)^, dest);
@@ -4127,7 +4190,7 @@ end;
 
 function ClassNameShort(C: TClass): PShortString;
 // new TObject.ClassName is UnicodeString (since Delphi 2009) -> inline code
-// with vmtClassName = UTF-8 encoded text stored in a shortstring = -44
+// with vmtClassName = UTF-8 encoded text stored in a ShortString = -44
 begin
   result := PPointer(PtrInt(PtrUInt(C)) + vmtClassName)^;
 end;
@@ -5387,6 +5450,11 @@ begin
   {$else}
   result := IntegerScanIndex(pointer(P), Count, Value);
   {$endif CPU64}
+end;
+
+procedure DynArrayFakeLength(var arr; len: TDALen);
+begin
+  PDALen(PAnsiChar(arr) - _DALEN)^ := len - _DAOFF;
 end;
 
 {$ifdef FPC} // some FPC-specific low-level code due to diverse compiler or RTL
@@ -6746,7 +6814,7 @@ begin
   if n = 0 then
     exit;
   if aContinueOnException then
-    for i := 0 to n - 1 do
+    for i := n - 1 downto 0 do
     try
       a[i].Free;
     except
@@ -7526,17 +7594,17 @@ end;
 
 function TrimU(const S: RawUtf8): RawUtf8;
 var
-  I, L: PtrInt;
+  i, L: PtrInt;
 begin
   L := Length(S);
-  I := 1;
-  while (I <= L) and
-        (S[I] <= ' ') do
-    inc(I);
-  if I > L then
+  i := 1;
+  while (i <= L) and
+        (S[i] <= ' ') do
+    inc(i);
+  if i > L then
     // void string
     FastAssignNew(result)
-  else if (I = 1) and
+  else if (i = 1) and
           (S[L] > ' ') then
     // nothing to trim: reference counted copy
     result := S
@@ -7545,7 +7613,7 @@ begin
     // allocate a new trimmed UTF-8 string
     while S[L] <= ' ' do
       dec(L);
-    result := Copy(S, I, L - I + 1);
+    result := Copy(S, i, L - i + 1);
   end;
 end;
 
@@ -7811,11 +7879,11 @@ begin
 end;
 
 {$ifdef OSDARWIN} // FPC CreateGUID calls /dev/urandom which is not advised
-function mach_absolute_time: UInt64; cdecl external 'c';
+function mach_absolute_time: Int64; cdecl external 'c';
 
 procedure CreateGUID(var guid: TGUID);
 begin
-  guid.time_low := mach_absolute_time;  // monotonic time in nanoseconds
+  PInt64(@guid)^ := mach_absolute_time;  // monotonic time in nanoseconds
   crc128c(@guid, SizeOf(guid), THash128(guid)); // good enough diffusion
 end;
 {$endif OSDARWIN}
@@ -7841,7 +7909,7 @@ begin
   e.r[1].c1 := e.r[1].c1 xor lec^.rs2;
   e.r[1].c2 := e.r[1].c2 xor lec^.rs3;
   e.r[1].c3 := e.r[1].c3 xor PtrUInt(lec); // any threadvar is thread-specific
-  // Windows CoCreateGuid, Linux/proc/sys/kernel/random/uuid, FreeBSD syscall,
+  // Windows CoCreateGuid, Linux /proc/sys/kernel/random/uuid, FreeBSD syscall,
   // then fallback to /dev/urandom or RTL mtwist_u32rand - may be slow
   CreateGUID(TGuid(e.r[2].b));
   // no mormot.core.os yet, so we can't use QueryPerformanceMicroSeconds()
@@ -7951,7 +8019,7 @@ begin
   until count = 0;
 end;
 
-procedure TLecuyer.FillShort(var dest: shortstring; size: PtrUInt);
+procedure TLecuyer.FillShort(var dest: ShortString; size: PtrUInt);
 begin
   if size > 255 then
     size := 255;
@@ -8008,6 +8076,11 @@ procedure RandomBytes(Dest: PByte; Count: integer);
 begin
   if Count > 0 then
     _Lecuyer.Fill(pointer(Dest), Count);
+end;
+
+procedure RandomShort31(var dest: TShort31);
+begin
+  _Lecuyer.FillShort31(dest);
 end;
 
 {$ifndef PUREMORMOT2}
@@ -8482,14 +8555,15 @@ procedure mul64x64(constref left, right: QWord; out product: THash128Rec);
 var
   l: TQWordRec absolute left;
   r: TQWordRec absolute right;
-  t1, t2, t3: TQWordRec;
+  t1, t2: TQWordRec;
 begin
   // CPU-neutral implementation
   t1.V := QWord(l.L) * r.L;
+  product.c0 := t1.L;
   t2.V := QWord(l.H) * r.L + t1.H;
-  t3.V := QWord(l.L) * r.H + t2.L;
-  product.H := QWord(l.H) * r.H + t2.H + t3.H;
-  product.L := t3.V shl 32 or t1.L;
+  t1.V := QWord(l.L) * r.H + t2.L;
+  product.H := QWord(l.H) * r.H + t2.H + t1.H;
+  product.c1 := t1.V;
 end;
 
 function SynLZcompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): integer;
@@ -8531,6 +8605,22 @@ begin
     if InterlockedIncrement(Lo) = 0 then
       InterlockedIncrement(Hi); // collission is highly unprobable
   {$endif FPC_64}
+end;
+
+function LockedExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt): boolean;
+begin
+  result := InterlockedCompareExchange(
+    pointer(Target), pointer(NewValue), pointer(Comperand)) = pointer(Comperand);
+end;
+
+procedure LockedInc(var Target: PtrUInt; Increment: PtrUInt);
+begin
+  InterlockedExchangeAdd(pointer(Target), pointer(Increment));
+end;
+
+procedure LockedDec(var Target: PtrUInt; Decrement: PtrUInt);
+begin
+  InterlockedExchangeAdd(pointer(Target), pointer(-PtrInt(Decrement)));
 end;
 
 procedure bswap64array(a,b: PQWordArray; n: PtrInt);
@@ -9505,6 +9595,26 @@ begin
   result := Hash32(pointer(Text), Length(Text));
 end;
 
+function DefaultHash(const s: RawByteString): cardinal;
+begin
+  result := DefaultHasher(0, pointer(s), length(s));
+end;
+
+function DefaultHash(const b: TBytes): cardinal;
+begin
+  result := DefaultHasher(0, pointer(b), length(b));
+end;
+
+function crc32cHash(const s: RawByteString): cardinal;
+begin
+  result := crc32c(0, pointer(s), length(s));
+end;
+
+function crc32cHash(const b: TBytes): cardinal;
+begin
+  result := crc32c(0, pointer(b), length(b));
+end;
+
 function xxHash32Mixup(crc: cardinal): cardinal;
 begin
   result := crc;
@@ -10308,7 +10418,7 @@ end;
 
 function SortDynArrayUnicodeString(const A, B): integer;
 begin
-  // works for tkWString and tkUString
+  // works for both tkWString and tkUString
   result := StrCompW(PWideChar(A), PWideChar(B));
 end;
 
@@ -10633,7 +10743,6 @@ begin
   // initialize CPU-specific asm
   TestCpuFeatures;
 end;
-
 
 initialization
   InitializeUnit;

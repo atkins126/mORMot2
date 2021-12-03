@@ -472,7 +472,7 @@ type
     fSockPort: RawUtf8;
     fHeaderRetrieveAbortDelay: cardinal;
     fHeadersUnFiltered: boolean;
-    fExecuteMessage: string;
+    fExecuteMessage: RawUtf8;
     function GetStat(one: THttpServerSocketGetRequestResult): integer;
     procedure IncStat(one: THttpServerSocketGetRequestResult);
       {$ifdef HASINLINE} inline; {$endif}
@@ -716,7 +716,7 @@ type
     fServerSessionID: HTTP_SERVER_SESSION_ID;
     fUrlGroupID: HTTP_URL_GROUP_ID;
     fLogData: pointer;
-    fLogDataStorage: array of byte;
+    fLogDataStorage: TBytes;
     fLoggingServiceName: RawUtf8;
     fAuthenticationSchemes: THttpApiRequestAuthentications;
     fReceiveBufferSize: cardinal;
@@ -1138,8 +1138,8 @@ type
     // - for aPingTimeout explanation see PingTimeout property documentation
     constructor Create(CreateSuspended: boolean; aSocketThreadsCount: integer = 1;
       aPingTimeout: integer = 0; const QueueName: SynUnicode = '';
-      const aOnWSThreadStart: TOnNotifyThread=nil;
-      const aOnWSThreadTerminate: TOnNotifyThread=nil); reintroduce;
+      const aOnWSThreadStart: TOnNotifyThread = nil;
+      const aOnWSThreadTerminate: TOnNotifyThread = nil); reintroduce;
     /// create a WebSockets processing clone from the main thread
     // - do not use directly - is called during thread pool creation
     constructor CreateClone(From: THttpApiServer); override;
@@ -1270,8 +1270,8 @@ begin
   begin
     ExtractHeader(fOutCustomHeaders, 'CONTENT-TYPE:', fOutContentType);
     Utf8ToFileName(OutContent, fn);
-    if not Assigned(OnSendFile) or
-       not OnSendFile(self, fn) then
+    if (not Assigned(OnSendFile)) or
+       (not OnSendFile(self, fn)) then
       if Context.ContentFromFile(fn, CompressGz) then
         OutContent := Context.Content
       else
@@ -1357,7 +1357,7 @@ begin
   if Sender = nil then
     raise EHttpServer.CreateUtf8('%.NotifyThreadStart(nil)', [self]);
   if Assigned(fOnHttpThreadStart) and
-     not Assigned(Sender.StartNotified) then
+     (not Assigned(Sender.StartNotified)) then
   begin
     fOnHttpThreadStart(Sender);
     Sender.StartNotified := self;
@@ -1400,7 +1400,7 @@ begin
   else
   begin
     if Assigned(Ctxt.ConnectionThread) and
-       not Assigned(Ctxt.ConnectionThread.StartNotified) then
+       (not Assigned(Ctxt.ConnectionThread.StartNotified)) then
       NotifyThreadStart(Ctxt.ConnectionThread);
     if Assigned(OnRequest) then
       result := OnRequest(Ctxt)
@@ -1560,9 +1560,15 @@ var
 begin
   tix := mormot.core.os.GetTickCount64 + Seconds * 1000; // never wait forever
   repeat
-    if Terminated or
-       (GetExecuteState in [esRunning, esFinished]) then
+    if Terminated then
       exit;
+    case GetExecuteState of
+      esRunning:
+        exit;
+      esFinished:
+        raise EHttpServer.CreateUtf8('%.Execute aborted due to %',
+          [self, fExecuteMessage]);
+    end;
     Sleep(1); // warning: waits typically 1-15 ms on Windows
     if mormot.core.os.GetTickCount64 > tix then
       raise EHttpServer.CreateUtf8('%.WaitStarted timeout after % seconds [%]',
@@ -1764,7 +1770,7 @@ begin
   try
     fSock := TCrtSocket.Bind(fSockPort); // BIND + LISTEN
     fExecuteState := esRunning;
-    if not fSock.SockIsDefined then // paranoid (Bind would have raise an exception)
+    if not fSock.SockIsDefined then // paranoid check
       raise EHttpServer.CreateUtf8('%.Execute: %.Bind failed', [self, fSock]);
     while not Terminated do
     begin
@@ -1821,7 +1827,7 @@ begin
   except
     on E: Exception do
       // any exception would break and release the thread
-      fExecuteMessage := E.ClassName + ' [' + E.Message + ']';
+      FormatUtf8('% [%]', [E, E.Message], fExecuteMessage);
   end;
   EnterCriticalSection(fProcessCS);
   fExecuteState := esFinished;
@@ -1862,8 +1868,8 @@ var
     result := true;
     ExtractHeader(ctxt.fOutCustomHeaders, 'CONTENT-TYPE:', ctxt.fOutContentType);
     Utf8ToFileName(ctxt.OutContent, fn);
-    if not Assigned(fOnSendFile) or
-       not fOnSendFile(ctxt, fn) then
+    if (not Assigned(fOnSendFile)) or
+       (not fOnSendFile(ctxt, fn)) then
     begin
        ctxt.OutContent := StringFromFile(fn);
        if ctxt.OutContent = '' then
@@ -2581,7 +2587,7 @@ var
   i: PtrInt;
 begin
   if (fReqQueue = 0) or
-     not Assigned(OnRequest) or
+     (not Assigned(OnRequest)) or
      (ChildThreadCount <= 0) or
      (fClones <> nil) then
     exit; // nothing to clone (need a queue and a process event)
@@ -3644,7 +3650,7 @@ constructor THttpApiWebSocketServerProtocol.Create(const aName: RawUtf8;
   const aOnFragment: TOnHttpApiWebSocketServerMessageEvent);
 begin
   if aManualFragmentManagement and
-     not Assigned(aOnFragment) then
+     (not Assigned(aOnFragment)) then
     raise EWebSocketApi.CreateFmt(
       'Error register WebSocket protocol. Protocol %s does not use buffer, ' +
       'but OnFragment handler is not assigned', [aName]);

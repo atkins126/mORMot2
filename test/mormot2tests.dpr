@@ -15,7 +15,7 @@ program mormot2tests;
 {$endif OSWINDOWS}
 
 uses
-  {$I ..\src\mormot.uses.inc}
+  {$I ..\src\mormot.uses.inc} // may include mormot.core.fpcx64mm.pas
   {$ifdef UNIX}
   cwstring, // needed as fallback if ICU is not available
   {$endif UNIX}
@@ -97,7 +97,7 @@ begin
   AddCase([
   //
     TTestCoreBase, TTestCoreProcess,
-    {$ifdef HASGENERICS} // do-nothing on oldest compilers (e.g. <= Delphi 2010)
+    {$ifdef HASGENERICS} // do-nothing on oldest compilers (e.g. <= Delphi XE7)
     TTestCoreCollections,
     {$endif HASGENERICS}
     TTestCoreCrypto, TTestCoreEcc,

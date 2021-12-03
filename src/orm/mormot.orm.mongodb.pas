@@ -101,7 +101,6 @@ type
     fBatchWriter: TBsonWriter;
     fBatchIDs: TIDDynArray;
     fBatchIDsCount: integer;
-    fStorageTemp: PTextWriterStackBuffer;
     function EngineNextID: TID;
     function DocFromJson(const Json: RawUtf8; Occasion: TOrmOccasion;
       var Doc: TDocVariantData): TID;
@@ -110,7 +109,7 @@ type
       const Fields: TFieldBits; BsonFieldNames: PRawUtf8DynArray;
       const SubFields: TRawUtf8DynArray): integer;
     function GetJsonValues(const Res: TBsonDocument;
-      const extFieldNames: TRawUtf8DynArray; W: TJsonSerializer): integer;
+      const extFieldNames: TRawUtf8DynArray; W: TOrmWriter): integer;
   public
     // overridden methods calling the MongoDB external server
     function EngineRetrieve(TableModelIndex: integer; ID: TID): RawUtf8; override;
@@ -316,7 +315,7 @@ var
   name: RawUtf8;
 begin
   sf := length(SubFields);
-  W := TBsonWriter.Create(TRawByteStringStream);
+  W := TBsonWriter.Create(GetTempBuffer^);
   try
     W.BsonDocumentBegin;
     if WithID then
@@ -400,7 +399,6 @@ begin
   inherited;
   FreeAndNilSafe(fBatchWriter);
   fEngineGenerator.Free;
-  Freemem(fStorageTemp);
   InternalLog('Destroy for % using %', [fStoredClass, Collection], sllInfo);
 end;
 
@@ -910,8 +908,7 @@ procedure TRestStorageMongoDB.JsonFromDoc(var doc: TDocVariantData;
 var
   i: PtrInt;
   name: RawUtf8;
-  W: TTextWriter;
-  tmp: TTextWriterStackBuffer;
+  W: TJsonWriter;
 begin
   if (doc.VarType <> DocVariantType.VarType) or
      (doc.Kind <> dvObject) or
@@ -920,7 +917,7 @@ begin
     result := '';
     exit;
   end;
-  W := TTextWriter.CreateOwnedStream(tmp);
+  W := TJsonWriter.CreateOwnedStream(GetTempBuffer^);
   try
     W.Add('{');
     for i := 0 to doc.Count - 1 do
@@ -1061,7 +1058,7 @@ begin
 end;
 
 function TRestStorageMongoDB.GetJsonValues(const Res: TBsonDocument;
-  const extFieldNames: TRawUtf8DynArray; W: TJsonSerializer): integer;
+  const extFieldNames: TRawUtf8DynArray; W: TOrmWriter): integer;
 
   function itemFind(item: PBsonElement; itemcount, o1ndx: integer;
     const aName: RawUtf8): PBsonElement;
@@ -1247,7 +1244,7 @@ var
         [ClassType, SQL], sllError);
       exit;
     end;
-    B := TBsonWriter.Create(TRawByteStringStream);
+    B := TBsonWriter.Create(GetTempBuffer^);
     try
       B.BsonDocumentBegin;
       if Stmt.OrderByField <> nil then
@@ -1319,7 +1316,7 @@ var
           distinct := Stmt.Select[i].Field;
           distinctName := fStoredClassMapping^.FieldNameByIndex(distinct - 1);
         end;
-    B := TBsonWriter.Create(TRawByteStringStream);
+    B := TBsonWriter.Create(GetTempBuffer^);
     try
       B.BsonDocumentBegin;
       if Stmt.Where <> nil then
@@ -1434,7 +1431,7 @@ var
 
 var
   T: TOrmTableJson;
-  W: TJsonSerializer;
+  W: TOrmWriter;
   MS: TRawByteStringStream;
   Res: TBsonDocument;
   limit: PtrInt;
@@ -1449,7 +1446,7 @@ begin
   if self = nil then
     exit;
   InternalLog(SQL, sllSQL);
-  StorageLock(false, 'EngineList');
+  StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'MongoList' {$endif});
   try
     if IdemPropNameU(fBasicSqlCount, SQL) then
       SetCount(TableRowCount(fStoredClass))
@@ -1508,11 +1505,9 @@ begin
           Res := fCollection.FindBson(Query, Projection, limit, Stmt.Offset);
           MS := TRawByteStringStream.Create;
           try
-            if fStorageTemp = nil then
-              Getmem(fStorageTemp, SizeOf(fStorageTemp^));
             W := fStoredClassRecordProps.CreateJsonWriter(MS,
               ForceAjax or (Owner = nil) or not Owner.Owner.NoAjaxJson,
-              withID, bits, {rowcounts=}0, 0, fStorageTemp);
+              withID, bits, {rowcounts=}0, 0, GetTempBuffer);
             try
               ResCount := GetJsonValues(Res, extFieldNames, W);
               result := MS.DataString;
@@ -1559,7 +1554,7 @@ begin
   if Encoding in [encPost, encDelete] then
   begin
     // lock is protected by try..finally in TRestServer.RunBatch
-    StorageLock(true, 'InternalBatchStart');
+    StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'MongoBatchStart' {$endif});
     try
       if (fBatchMethod <> mNone) or
          (fBatchWriter <> nil) then
@@ -1571,6 +1566,7 @@ begin
         mPOST:
           // POST=ADD=INSERT -> EngineAdd() will add to fBatchWriter
           fBatchWriter := TBsonWriter.Create(TRawByteStringStream);
+          // 64KB buffer for fBatchWriter instead of 8KB GetTempBuffer^
       end;
       result := true; // means BATCH mode is supported
     finally

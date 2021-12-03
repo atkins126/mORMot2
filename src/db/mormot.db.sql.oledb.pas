@@ -266,7 +266,7 @@ type
     fRowStepHandleRetrieved: PtrUInt;
     fRowStepHandleCurrent: PtrUInt;
     fRowStepHandles: TPtrUIntDynArray;
-    fRowSetData: array of byte;
+    fRowSetData: TBytes;
     fParamBindings: TDBBindingDynArray;
     fColumnBindings: TDBBindingDynArray;
     fHasColumnValueByRef: boolean;
@@ -465,7 +465,7 @@ type
     // - fast overridden implementation with no temporary variable
     // - BLOB field value is saved as Base64, in the '"\uFFF0base64encodedbinary"
     // format and contains true BLOB data
-    procedure ColumnsToJson(WR: TJsonWriter); override;
+    procedure ColumnsToJson(WR: TResultsWriter); override;
     /// return a Column as a variant
     // - this implementation will retrieve the data with no temporary variable
     // (since TQuery calls this method a lot, we tried to optimize it)
@@ -867,7 +867,7 @@ function TSqlDBOleDBStatement.GetCol(Col: integer;
   out Column: PSqlDBColumnProperty): pointer;
 begin
   CheckCol(Col); // check Col value
-  if not Assigned(fRowSet) or
+  if (not Assigned(fRowSet)) or
      (fColumnCount = 0) then
     raise EOleDBException.CreateUtf8('%.Column*() with no prior Execute', [self]);
   if CurrentRow <= 0 then
@@ -1093,7 +1093,7 @@ begin
   end;
 end;
 
-procedure TSqlDBOleDBStatement.ColumnsToJson(WR: TJsonWriter);
+procedure TSqlDBOleDBStatement.ColumnsToJson(WR: TResultsWriter);
 var
   col: integer;
   C: PSqlDBColumnProperty;
@@ -1490,7 +1490,7 @@ begin
   result := false;
   sav := fCurrentRow;
   fCurrentRow := 0;
-  if not Assigned(fRowSet) or
+  if (not Assigned(fRowSet)) or
      (fColumnCount = 0) then
     exit; // no row available at all (e.g. for SQL UPDATE) -> return false
   if fRowSetAccessor = 0 then
@@ -1584,7 +1584,7 @@ begin
   if fColumnCount > 0 then
   begin
     fColumn.Clear;
-    fColumn.ReHash;
+    fColumn.ForceReHash;
     // faster if full command is re-prepared!
     fCommand := nil;
     Prepare(fSql, fExpectResults);
@@ -1849,8 +1849,8 @@ procedure TSqlDBOleDBConnection.OleDBCheck(aStmt: TSqlDBStatement;
       ErrorRecords := ErrorInfo as IErrorRecords;
       ErrorRecords.GetRecordCount(ErrorCount);
       for i := 0 to ErrorCount - 1 do
-        if not Assigned(OleDBProperties.OnCustomError) or
-           not OleDBProperties.OnCustomError(self, ErrorRecords, i) then
+        if (not Assigned(OleDBProperties.OnCustomError)) or
+           (not OleDBProperties.OnCustomError(self, ErrorRecords, i)) then
         begin
           // retrieve generic error info if OnCustomError() didn't handle it
           OleCheck(ErrorRecords.GetErrorInfo(i, GetSystemDefaultLCID, ErrorInfoDetails));
@@ -2246,6 +2246,7 @@ end;
 function TSqlDBOleDBConnectionProperties.NewConnection: TSqlDBConnection;
 begin
   result := TSqlDBOleDBConnection.Create(self);
+  TSqlDBOleDBConnection(result).InternalProcess(speCreated);
 end;
 
 procedure TSqlDBOleDBConnectionProperties.SetInternalProperties;

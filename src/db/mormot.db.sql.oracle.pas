@@ -322,7 +322,7 @@ type
     // faster when run over high number of data rows)
     // - BLOB field value is saved as Base64, in the '"\uFFF0base64encodedbinary"
     // format and contains true BLOB data
-    procedure ColumnsToJson(WR: TJsonWriter); override;
+    procedure ColumnsToJson(WR: TResultsWriter); override;
     /// return a special CURSOR Column content as a mormot.db.sql result set
     // - Cursors are not handled internally by mORMot, but Oracle usually use
     // such structures to get data from strored procedures
@@ -416,6 +416,7 @@ end;
 function TSqlDBOracleConnectionProperties.NewConnection: TSqlDBConnection;
 begin
   result := TSqlDBOracleConnection.Create(self);
+  TSqlDBOracleConnection(result).InternalProcess(speCreated);
 end;
 
 procedure TSqlDBOracleConnectionProperties.PasswordChanged(
@@ -922,7 +923,7 @@ begin
   result := GetCol(Col, C) = nil;
 end;
 
-procedure TSqlDBOracleStatement.ColumnsToJson(WR: TJsonWriter);
+procedure TSqlDBOracleStatement.ColumnsToJson(WR: TResultsWriter);
 var
   V: pointer;
   col, indicator: integer;
@@ -930,8 +931,8 @@ var
   U: RawUtf8;
 begin
   // dedicated version to avoid as much memory allocation than possible
-  if not Assigned(fStatement) or
-      (CurrentRow <= 0) then
+  if (not Assigned(fStatement)) or
+     (CurrentRow <= 0) then
     raise ESqlDBOracle.CreateUtf8('%.ColumnsToJson() with no prior Step', [self]);
   if WR.Expand then
     WR.Add('{');
@@ -1920,7 +1921,7 @@ function TSqlDBOracleStatement.GetCol(Col: integer; out Column:
   PSqlDBColumnProperty): pointer;
 begin
   CheckCol(Col); // check Col value  against fColumnCount
-  if not Assigned(fStatement) or
+  if (not Assigned(fStatement)) or
      (fColumnCount = 0) or
      (fRowCount = 0) or
      (fRowBuffer = nil) then

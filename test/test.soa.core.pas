@@ -49,6 +49,7 @@ uses
   mormot.soa.core,
   mormot.soa.client,
   mormot.soa.server,
+  mormot.soa.codegen,
   mormot.rest.core,
   mormot.rest.client,
   mormot.rest.server,
@@ -56,6 +57,7 @@ uses
   mormot.rest.sqlite3,
   mormot.rest.http.client,
   mormot.rest.http.server,
+  mormot.rest.mvc,
   mormot.db.raw.sqlite3,
   mormot.db.raw.sqlite3.static,
   test.core.data,
@@ -254,7 +256,7 @@ type
       aOptions: TInterfaceMethodOptions = []);
     procedure ClientAlgo(algo: TRestAuthenticationSignedUriAlgo);
     class procedure CustomReader(var Context: TJsonParserContext; Data: pointer);
-    class procedure CustomWriter(W: TTextWriter; Data: pointer;
+    class procedure CustomWriter(W: TJsonWriter; Data: pointer;
       Options: TTextWriterWriteObjectOptions);
     procedure SetOptions(aAsJsonObject: boolean; aOptions: TInterfaceMethodOptions);
     procedure IntSubtractJson(Ctxt: TOnInterfaceStubExecuteParamsJson);
@@ -496,7 +498,7 @@ function TServiceCalculator.RepeatJsonArray(
 var
   buf: array[word] of byte;
 begin
-  with TTextWriter.CreateOwnedStream(@buf, SizeOf(buf)) do
+  with TJsonWriter.CreateOwnedStream(@buf, SizeOf(buf)) do
   try
     Add('[');
     while count > 0 do
@@ -519,7 +521,7 @@ function TServiceCalculator.RepeatTextArray(
 var
   buf: array[word] of byte;
 begin
-  with TTextWriter.CreateOwnedStream(@buf, SizeOf(buf)) do
+  with TJsonWriter.CreateOwnedStream(@buf, SizeOf(buf)) do
   try
     while count > 0 do
     begin
@@ -1786,6 +1788,7 @@ end;
 procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithSHA512;
 begin
   ClientAlgo(suaSHA512);
+  // restore to the default hasher
   (fClient.Server.AuthenticationRegister(TRestServerAuthenticationDefault) as
     TRestServerAuthenticationDefault).Algorithm := suaCRC32;
 end;
@@ -1841,13 +1844,13 @@ begin
   // {"ID":1786554763,"Timestamp":323618765,"Json":"D:\\TestSQL3.exe"}
   if Context.ParseObject(['ID', 'Timestamp', 'Json'], @Values) then
   begin
-    V.ID := GetInt64(Values[0].Value);
+    V.ID := Values[0].ToInt64;
     V.Timestamp512 := Values[1].ToCardinal;
     Values[2].ToUtf8(V.Json);
   end;
 end;
 
-class procedure TTestServiceOrientedArchitecture.CustomWriter(W: TTextWriter;
+class procedure TTestServiceOrientedArchitecture.CustomWriter(W: TJsonWriter;
   Data: pointer; Options: TTextWriterWriteObjectOptions);
 var
   V: ^TRestCacheEntryValue absolute Data;

@@ -332,7 +332,7 @@ type
     /// return a Column as a blob value of the current Row, first Col is 0
     function ColumnBlob(Col: integer): RawByteString; override;
     /// return all columns values into JSON content
-    procedure ColumnsToJson(WR: TJsonWriter); override;
+    procedure ColumnsToJson(WR: TResultsWriter); override;
     /// direct access to the data buffer of the current row
     // - points to Double/Currency value, or variable-length Int64/UTF-8/Blob
     // - points to nil if the column value is NULL
@@ -436,7 +436,8 @@ type
     // - you can specify a User/Password credential pair to also test the
     // authentication via TSynAuthentication
     constructor Create(aProps: TSqlDBConnectionProperties;
-      const aUserID,aPassword: RawUtf8; aProtocol: TSqlDBProxyConnectionProtocolClass); reintroduce;
+      const aUserID, aPassword: RawUtf8;
+      aProtocol: TSqlDBProxyConnectionProtocolClass); reintroduce;
   end;
 
 
@@ -1074,6 +1075,7 @@ end;
 function TSqlDBProxyConnectionPropertiesAbstract.NewConnection: TSqlDBConnection;
 begin
   result := TSqlDBProxyConnection.Create(self);
+  TSqlDBProxyConnection(result).InternalProcess(speCreated);
 end;
 
 procedure TSqlDBProxyConnectionPropertiesAbstract.GetFields(
@@ -1398,7 +1400,7 @@ begin
     PtrUInt(Reader) - PtrUInt(fDataCurrentRowValuesStart);
 end;
 
-procedure TSqlDBProxyStatementAbstract.ColumnsToJson(WR: TJsonWriter);
+procedure TSqlDBProxyStatementAbstract.ColumnsToJson(WR: TResultsWriter);
 var
   col, len: PtrInt;
   data: PByte;

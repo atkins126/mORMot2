@@ -62,16 +62,15 @@ end;
 const
   UnixDelta = 25569;
   UnixFileTimeDelta = 116444736000000000; // from year 1601 to 1970
-  DateFileTimeDelta =  94353120000000000; // from year 1601 to 1899
 
-procedure UnixTimeToFileTime(I64: Int64; out FT: TFileTime);
+procedure UnixTimeToFileTime(I64: TUnixTime; out FT: TFileTime);
 begin
   I64 := I64 * 10000000;
   inc(I64, UnixFileTimeDelta);
   Int64ToFileTime(I64, FT);
 end;
 
-procedure UnixTimeToLocalTime(I64: Int64; out Local: TSystemTime);
+procedure UnixTimeToLocalTime(I64: TUnixTime; out Local: TSystemTime);
 var
   ft, lt: TFileTime;
 begin
@@ -80,8 +79,7 @@ begin
   FileTimeToSystemTime(lt, Local);
 end;
 
-function FileTimeToUnixTime(const FT: TFileTime): Int64;
-  {$ifdef HASINLINE} inline; {$endif}
+function FileTimeToUnixTime(const FT: TFileTime): TUnixTime;
 {$ifdef CPU64}
 var
   nano100: Int64; // TFileTime is in 100 ns unit
@@ -95,7 +93,7 @@ begin
   {$endif CPU64}
 end;
 
-function FileTimeToUnixMSTime(const FT: TFileTime): Int64;
+function FileTimeToUnixMSTime(const FT: TFileTime): TUnixMSTime;
 {$ifdef CPU64}
 var
   nano100: Int64; // TFileTime is in 100 ns unit
@@ -109,7 +107,7 @@ begin
   {$endif CPU64}
 end;
 
-function UnixTimeUtc: Int64;
+function UnixTimeUtc: TUnixTime;
 var
   ft: TFileTime;
 begin
@@ -122,7 +120,7 @@ var
   // - points to GetSystemTimeAsFileTime() before Windows 8
   GetSystemTimePreciseAsFileTime: procedure(var ft: TFILETIME); stdcall;
 
-function UnixMSTimeUtc: Int64;
+function UnixMSTimeUtc: TUnixMSTime;
 var
   ft: TFileTime;
 begin
@@ -130,7 +128,7 @@ begin
   result := FileTimeToUnixMSTime(ft);
 end;
 
-function UnixMSTimeUtcFast: Int64;
+function UnixMSTimeUtcFast: TUnixMSTime;
 var
   ft: TFileTime;
 begin
@@ -149,6 +147,7 @@ procedure AllocConsole;               external kernel32;
 function  CloseHandle;                external kernel32;
 procedure FileClose;                  external kernel32 name 'CloseHandle';
 function  GetCurrentThreadId;         external kernel32;
+procedure SwitchToThread;             external kernel32;
 function  GetCurrentProcessId;        external kernel32;
 function  WaitForSingleObject;        external kernel32;
 function  GetEnvironmentStringsW;     external kernel32;
@@ -254,19 +253,18 @@ begin
 end;
 
 var
-  _QueryPerformanceFrequency: QWord; // is documented as stable after boot
+  // value is documented as stable after boot, so we get it at startup
+  _QueryPerformanceFrequency: QWord;
+  // from HyperV or if HPET disabled e.g. -> direct division
+  _QueryPerformanceFrequencyPer10: boolean;
 
 procedure QueryPerformanceMicroSeconds(out Value: Int64);
-var
-  cnt, freq: QWord;
 begin
-  QueryPerformanceCounter(PInt64(@cnt)^);
-  freq := _QueryPerformanceFrequency;
-  if freq = 10000000 then
-    // from HyperV or if HPET disabled e.g. -> faster division by a constant
-    Value := cnt div 10
+  QueryPerformanceCounter(PInt64(@Value)^);
+  if _QueryPerformanceFrequencyPer10 then
+    Value := QWord(Value) div 10 // faster division by a constant (especially on FPC_64)
   else
-    Value := (cnt * 1000000) div freq;
+    Value := QWord((QWord(Value) * 1000000) div _QueryPerformanceFrequency);
 end;
 
 const
@@ -461,16 +459,12 @@ begin
   result := p^.V;
 end; // warning: FPC's GetTickCount64 doesn't handle 49 days wrap on XP :(
 
-{$ifdef FPC} // oddly not defined in fpc\rtl\win
-function SwitchToThread: BOOL;
-  stdcall; external kernel32 name 'SwitchToThread';
-{$endif FPC}
-
 procedure SleepHiRes(ms: cardinal);
 begin
-  if (ms <> 0) or
-     not SwitchToThread then
-    Windows.Sleep(ms); // follow the HW timer: typically up to 16ms on Windows
+  if ms <> 0 then
+    Windows.Sleep(ms) // follow the HW timer: typically up to 16ms on Windows
+  else
+     SwitchToThread;
 end;
 
 {$ifdef FPC}
@@ -998,7 +992,7 @@ begin
 end;
 
 // local RTL wrapper function to avoid linking mormot.core.unicode.pas
-procedure RawUnicodeToUtf8(P: PWideChar; Len: integer; out res: RawUtf8);
+procedure Win32PWideCharToUtf8(P: PWideChar; Len: integer; out res: RawUtf8);
 var
   tmp: TSynTempBuffer;
 begin
@@ -1023,7 +1017,7 @@ begin
   while (Len > 0) and
         (ord(Buffer[Len - 1]) in [0..32, ord('.')]) do
     dec(Len);
-  RawUnicodeToUtf8(Buffer, Len, result);
+  Win32PWideCharToUtf8(Buffer, Len, result);
 end;
 
 function EnumProcessName(PID: cardinal): RawUtf8;
@@ -1042,11 +1036,11 @@ begin
       begin
         len := high(name);
         if QueryFullProcessImageNameW(h, 0, name, @len) then
-          RawUnicodeToUtf8(name, len, result);
+          Win32PWideCharToUtf8(name, len, result);
       end
       else
         if GetModuleFileNameExW(h, 0, name, high(name)) <> 0 then
-          RawUnicodeToUtf8(name, StrLenW(name), result);
+          Win32PWideCharToUtf8(name, StrLenW(name), result);
     finally
       CloseHandle(h);
     end;
@@ -1078,8 +1072,8 @@ var
   mem: TProcessMemoryCounters;
 begin
   result := false;
-  if not Assigned(GetProcessTimes) or
-     not Assigned(GetProcessMemoryInfo) then
+  if (not Assigned(GetProcessTimes)) or
+     (not Assigned(GetProcessMemoryInfo)) then
     exit;
   h := OpenProcess(OpenProcessAccess, false, PID);
   if h = 0 then
@@ -1381,7 +1375,7 @@ begin
       if GetDiskInfo(fn, av, fr, tot, @volume) then
       begin
         SetLength(result, n + 1);
-        RawUnicodeToUtf8(pointer(volume), length(volume), result[n].name);
+        Win32PWideCharToUtf8(pointer(volume), length(volume), result[n].name);
         volume := '';
         result[n].mounted := fn;
         result[n].size := tot;
@@ -1517,6 +1511,11 @@ begin
   result := S; // no conversion needed if text is plain ASCII-7 content
 end;
 
+procedure FormatU(const fmt: string; const args: array of const; var result: RawUtf8);
+begin
+  result := RawUtf8(format(fmt, args));
+end;
+
 constructor TFileVersion.Create(const aFileName: TFileName;
   aMajor, aMinor, aRelease, aBuild: integer);
 var
@@ -1539,7 +1538,7 @@ var
     u := Utf8Decode('\StringFileInfo\' + LanguageInfo + '\' + From);
     VerQueryValueW(Pt, pointer(u), StrValPt, sz);
     if sz > 0 then
-      RawUnicodeToUtf8(StrValPt, StrLenW(StrValPt), result)
+      Win32PWideCharToUtf8(StrValPt, StrLenW(StrValPt), result)
     else
       result := '';
   end;
@@ -1580,7 +1579,7 @@ begin
         VerQueryValue(Pt, '\VarFileInfo\Translation', pointer(Trans), Size2);
         if Size2 >= 4 then
         begin
-          LanguageInfo := RawUtf8(format('%4.4x%4.4x', [Trans^[0], Trans^[1]]));
+          FormatU('%4.4x%4.4x', [Trans^[0], Trans^[1]], LanguageInfo);
           CompanyName := ReadResourceByName('CompanyName');
           FileDescription := ReadResourceByName('FileDescription');
           FileVersion := ReadResourceByName('FileVersion');
@@ -1610,21 +1609,20 @@ var
 begin
   tmpsize := SizeOf(tmp);
   GetComputerNameW(tmp{%H-}, tmpsize);
-  RawUnicodeToUtf8(@tmp, StrLenW(tmp), Host);
+  Win32PWideCharToUtf8(@tmp, StrLenW(tmp), Host);
   tmpsize := SizeOf(tmp);
   GetUserNameW(tmp, tmpsize);
-  RawUnicodeToUtf8(@tmp, StrLenW(tmp), User);
+  Win32PWideCharToUtf8(@tmp, StrLenW(tmp), User);
 end;
 
-// avoid unneeded reference to ShlObj.pas
-function SHGetFolderPath(hwnd: hwnd; csidl: integer; hToken: THandle;
-  dwFlags: DWord; pszPath: PChar): HRESULT;
-    stdcall; external 'SHFolder.dll' name 'SHGetFolderPath' + _AW;
-
 var
-  _SystemPath: array[TSystemPath] of TFileName;
+  // avoid unneeded reference to ShlObj.pas
+  // - late binding is mandatory to be used on WinPE which does NOT have this dll
+  SHGetFolderPath: function(hwnd: hwnd; csidl: integer; hToken: THandle;
+    dwFlags: DWord; pszPath: PChar): HRESULT; stdcall;
+  _SystemPath: array[TSystemPath] of TFileName; // cache
 
-function GetSystemPath(kind: TSystemPath): TFileName;
+function ComputeSystemPath(kind: TSystemPath): TFileName;
 const
   CSIDL_PERSONAL = $0005;
   CSIDL_LOCAL_APPDATA = $001C; // local non roaming user folder
@@ -1640,23 +1638,36 @@ const
 var
   tmp: array[0..MAX_PATH] of char;
 begin
-  result := _SystemPath[kind];
-  if result <> '' then
-    exit;
   if (kind = spLog) and
      IsDirectoryWritable(Executable.ProgramFilePath) then
     result := EnsureDirectoryExists(Executable.ProgramFilePath + 'log')
   else if (csidl[kind] <> 0) and
+          Assigned(SHGetFolderPath) and
           (SHGetFolderPath(0, csidl[kind], 0, 0, @tmp) = S_OK) then
     result := IncludeTrailingPathDelimiter(tmp)
   else
   begin
     result := GetEnvironmentVariable(ENV[kind]);
     if result = '' then
+    begin
       result := GetEnvironmentVariable('APPDATA');
+      if result = '' then
+      begin
+        result := GetEnvironmentVariable('TEMP');
+        if result = '' then
+          result := Executable.ProgramFilePath;
+      end;
+    end;
     result := IncludeTrailingPathDelimiter(result);
   end;
   _SystemPath[kind] := result;
+end;
+
+function GetSystemPath(kind: TSystemPath): TFileName;
+begin
+  result := _SystemPath[kind];
+  if result = '' then
+    result := ComputeSystemPath(kind);
 end;
 
 procedure PatchCode(Old, New: pointer; Size: PtrInt; Backup: pointer;
@@ -1727,7 +1738,7 @@ begin
   begin
     case rtype of
       REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ:
-        RawUnicodeToUtf8(tmp.buf, StrLenW(tmp.buf), result);
+        Win32PWideCharToUtf8(tmp.buf, StrLenW(tmp.buf), result);
     end;
     if andtrim then
       result := TrimU(result);
@@ -1782,7 +1793,7 @@ begin
   begin
     len := maxlen;
     if RegEnumKeyExW(key, i, tmp.buf, len, nil, nil, nil, nil) = 0 then
-      RawUnicodeToUtf8(tmp.buf, len, result[i]);
+      Win32PWideCharToUtf8(tmp.buf, len, result[i]);
   end;
   tmp.Done;
 end;
@@ -2311,6 +2322,7 @@ begin
       inc(P);
     end;
   end;
+  // note: CryptSignMessage and CryptVerifyMessageSignature are in crypt32.dll
 end;
 
 type
@@ -3255,10 +3267,12 @@ begin
   QueryPerformanceFrequency(PInt64(@_QueryPerformanceFrequency)^);
   if _QueryPerformanceFrequency = 0 then
     raise Exception.Create('QueryPerformanceFrequency=0'); // paranoid
+  _QueryPerformanceFrequencyPer10 := _QueryPerformanceFrequency = 10000000;
   IsWow64Process := GetProcAddress(h, 'IsWow64Process');
   Res := false;
   IsWow64 := Assigned(IsWow64Process) and
-             IsWow64Process(GetCurrentProcess, Res) and Res;
+             IsWow64Process(GetCurrentProcess, Res) and
+             Res;
   if IsWow64 then
     // see http://msdn.microsoft.com/en-us/library/ms724381(v=VS.85).aspx
     GetNativeSystemInfo := GetProcAddress(h, 'GetNativeSystemInfo')
@@ -3275,6 +3289,10 @@ begin
     //@EnumProcessModules := GetProcAddress(h, 'EnumProcessModules');
     @GetProcessMemoryInfo := GetProcAddress(h, 'GetProcessMemoryInfo');
   end;
+  h := Windows.LoadLibrary('SHFolder.dll');
+  if h >= 32 then
+    // e.g. WinPE doesn't have it - https://stackoverflow.com/q/8683038/458259
+    @SHGetFolderPath := GetProcAddress(h, 'SHGetFolderPath' + _AW);
   // retrieve system information
   TimeZoneLocalBias := -GetLocalTimeOffset;
   FillcharFast(SystemInfo, SizeOf(SystemInfo), 0);
@@ -3354,12 +3372,13 @@ begin
     OpenProcessAccess := PROCESS_QUERY_INFORMATION or PROCESS_VM_READ;
   with OSVersionInfo do
     if wServicePackMajor = 0 then
-      OSVersionText := RawUtf8(Format('Windows %s (%d.%d.%d)',
-        [WINDOWS_NAME[Vers], dwMajorVersion, dwMinorVersion, dwBuildNumber]))
+      FormatU('Windows %s (%d.%d.%d)',
+        [WINDOWS_NAME[Vers], dwMajorVersion, dwMinorVersion, dwBuildNumber],
+        OSVersionText)
     else
-      OSVersionText := RawUtf8(Format(
-        'Windows %s SP%d (%d.%d.%d)', [WINDOWS_NAME[Vers],
-         wServicePackMajor, dwMajorVersion, dwMinorVersion, dwBuildNumber]));
+      FormatU('Windows %s SP%d (%d.%d.%d)', [WINDOWS_NAME[Vers],
+         wServicePackMajor, dwMajorVersion, dwMinorVersion, dwBuildNumber],
+         OSVersionText);
   OSVersion32.os := osWindows;
   OSVersion32.win := Vers;
   OSVersion32.winbuild := OSVersionInfo.dwBuildNumber;
@@ -3411,8 +3430,8 @@ begin
   if {%H-}cpu = '' then
     cpu := RawUtf8(GetEnvironmentVariable('PROCESSOR_IDENTIFIER'));
   cpu := TrimU(cpu);
-  CpuInfoText := RawUtf8(Format('%d x %s (' + CPU_ARCH_TEXT + ')',
-    [SystemInfo.dwNumberOfProcessors, cpu]));
+  FormatU('%d x %s (' + CPU_ARCH_TEXT + ')',
+    [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
   TrimDualSpaces(OSVersionText);
   TrimDualSpaces(OSVersionInfoEx);
   TrimDualSpaces(BiosInfoText);

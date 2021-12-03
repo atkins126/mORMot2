@@ -19,6 +19,7 @@ Legal Notice: as stated by [our licensing terms](../../LICENCE.md), make sure th
 
 High-Performance Cryptographic features shared by all framework units
 - Low-Level Memory Buffers Helper Functions
+- 256-bit BigInt Low-Level Computation for ECC
 - AES Encoding/Decoding with optimized asm and AES-NI/CLMUL support
 - AES-256 Cryptographic Pseudorandom Number Generator (CSPRNG)
 - SHA-2 SHA-3 Secure Hashing
@@ -40,6 +41,8 @@ Authentication and Security types shared by all framework units.
 - High-Level `TSynSigner`/`TSynHasher` Multi-Algorithm Wrappers
 - 64-bit `TSynUniqueIdentifier` and its efficient Generator
 - `IProtocol` Safe Communication with Unilateral or Mutual Authentication
+- `Rnd`/`Hash`/`Sign`/`Cipher`/`Asym` High-Level Algorithms Factories
+- Minimal `PEM`/`DER` Encoding/Decoding
 
 ### mormot.crypt.ecc256r1
 
@@ -55,6 +58,7 @@ If `mormot.crypt.openssl.RegisterOpenSsl` is called, faster *OpenSSL* library wi
 Certificate-based Public Key Cryptography Classes
 - High-Level Certificate-based Public Key Cryptography
 - `IProtocol` Implemented using Public Key Cryptography
+- Registration of our ECC Engine to the `TCryptAsym` Factory
 
 ### mormot.crypt.jwt
 

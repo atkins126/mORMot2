@@ -452,7 +452,7 @@ type
   TInterfacedObjectFakeClient = class(TInterfacedObjectFake)
   protected
     fClient: TServiceFactoryClient;
-    procedure InterfaceWrite(W: TTextWriter; const aMethod: TInterfaceMethod;
+    procedure InterfaceWrite(W: TJsonWriter; const aMethod: TInterfaceMethod;
       const aParamInfo: TInterfaceMethodArgument; aParamValue: Pointer); override;
   public
     constructor Create(aClient: TServiceFactoryClient;
@@ -477,7 +477,7 @@ begin
   inherited Create(aClient.fInterface, aClient, opt, aInvoke, aNotifyDestroy);
 end;
 
-procedure TInterfacedObjectFakeClient.InterfaceWrite(W: TTextWriter;
+procedure TInterfacedObjectFakeClient.InterfaceWrite(W: TJsonWriter;
   const aMethod: TInterfaceMethod; const aParamInfo: TInterfaceMethodArgument;
   aParamValue: Pointer);
 begin
@@ -715,7 +715,7 @@ begin
       if (JsonDecode(pointer(resp), ['result', // 0
                                      'id'      // 1
                                     ], @Values, true) = nil) or
-         ({%H-}Values[0].Value = nil) then
+         ({%H-}Values[0].Text = nil) then
       begin
         // no "result":... layout
         if aErrorMsg <> nil then
@@ -729,7 +729,7 @@ begin
       if aResult <> nil then
         Values[0].ToUtf8(aResult^);
       if (aFakeID <> nil) and
-         (Values[1].Value <> nil) then
+         (Values[1].Text <> nil) then
         // keep ID if no "id":...
         aFakeID^ := Values[1].ToCardinal;
     end;

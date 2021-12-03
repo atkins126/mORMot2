@@ -120,7 +120,7 @@ type
     procedure SaveToExe(const aExeName: TFileName);
     /// save all debugging information as JSON content
     // - may be useful from debugging purposes
-    procedure SaveToJson(W: TBaseWriter); overload;
+    procedure SaveToJson(W: TTextWriter); overload;
     /// save all debugging information as a JSON file
     // - may be useful from debugging purposes
     procedure SaveToJson(const aJsonFile: TFileName;
@@ -129,7 +129,7 @@ type
     // - create a global TDebugFile instance for the current process, if needed
     // - if no debugging information is available (.map/.dbg/.mab), will write
     // the raw address pointer as hexadecimal
-    class function Log(W: TBaseWriter; aAddressAbsolute: PtrUInt;
+    class function Log(W: TTextWriter; aAddressAbsolute: PtrUInt;
       AllowNotCodeAddr: boolean; SymbolNameNotFilename: boolean = false): boolean;
     /// compute the relative memory address from its absolute (pointer) value
     function AbsoluteToOffset(aAddressAbsolute: PtrUInt): integer;
@@ -157,7 +157,7 @@ type
     // - returns only the hexadecimal value if no match is found in .map/.gdb info
     // - won't allocate any heap memory during the text creation
     // - mormot.core.os.pas' GetExecutableLocation() redirects to this method
-    function FindLocationShort(aAddressAbsolute: PtrUInt): shortstring;
+    function FindLocationShort(aAddressAbsolute: PtrUInt): ShortString;
     /// load .map/.gdb info and return the symbol location according
     // to the supplied ESynException
     // - i.e. unit name, symbol name and line number (if any), as plain text
@@ -458,7 +458,7 @@ type
   ISynLog = interface(IUnknown)
     ['{527AC81F-BC41-4717-B089-3F74DE56F1AE}']
     /// call this method to add some information to the log at a specified level
-    // - will use TBaseWriter.Add(...,twOnSameLine) to append its content
+    // - will use TTextWriter.Add(...,twOnSameLine) to append its content
     // - % = #37 indicates a string, integer, floating-point, class parameter
     // to be appended as text (e.g. class name), any variant as JSON...
     // - note that cardinal values should be type-casted to Int64() (otherwise
@@ -971,14 +971,14 @@ type
   // per-thread (if Family.PerThreadLog=ptOneFilePerThread) or global private
   // log file instance
   // - was very optimized for speed, if no logging is written, and even during
-  // log write (using an internal TBaseWriter)
+  // log write (using an internal TTextWriter)
   // - can use available debugging information via the TDebugFile class, for
   // stack trace logging for exceptions, sllStackTrace, and Enter/Leave labelling
   TSynLog = class(TObject, ISynLog)
   // note: don't inherit from TSynInterfacedObject to avoid a method call
   protected
     fFamily: TSynLogFamily;
-    fWriter: TTextWriter;
+    fWriter: TJsonWriter;
     fWriterEcho: TEchoWriter;
     fThreadContext: PSynLogThreadContext;
     fThreadID: TThreadID;
@@ -1040,7 +1040,7 @@ type
     procedure ThreadContextRehash;
     function NewRecursion: PSynLogThreadRecursion;
     function Instance: TSynLog;
-    function ConsoleEcho(Sender: TBaseWriter; Level: TSynLogInfo;
+    function ConsoleEcho(Sender: TTextWriter; Level: TSynLogInfo;
       const Text: RawUtf8): boolean; virtual;
   public
     /// intialize for a TSynLog class instance
@@ -1162,7 +1162,7 @@ type
     class procedure DebuggerNotify(Level: TSynLogInfo; const Format: RawUtf8;
       const Args: array of const);
     /// call this method to add some information to the log at the specified level
-    // - will use TBaseWriter.Add(...,twOnSameLine) to append its content
+    // - will use TTextWriter.Add(...,twOnSameLine) to append its content
     // - % = #37 indicates a string, integer, floating-point, class parameter
     // to be appended as text (e.g. class name), any variant as JSON...
     // - note that cardinal values should be type-casted to Int64() (otherwise
@@ -1256,7 +1256,7 @@ type
     procedure ForceRotation;
     /// direct access to the low-level writing content
     // - should usually not be used directly, unless you ensure it is safe
-    property Writer: TTextWriter
+    property Writer: TJsonWriter
       read fWriter;
   published
     /// the associated file name containing the log
@@ -1329,7 +1329,7 @@ type
   // for any incoming event, using e.g. TSynLogCallbacks.Subscribe
   ISynLogCallback = interface(IInvokable)
     ['{9BC218CD-A7CD-47EC-9893-97B7392C37CF}']
-    /// each line of the TBaseWriter internal instance will trigger this method
+    /// each line of the TTextWriter internal instance will trigger this method
     // - similar to TOnTextWriterEcho, as defined in mormot.core.text
     // - an initial call with Level=sllNone and the whole previous Text may be
     // transmitted, if ReceiveExistingKB is set for TSynLogCallbacks.Subscribe()
@@ -1370,7 +1370,7 @@ type
     procedure Unsubscribe(const Callback: ISynLogCallback); virtual;
     /// notify a given log event
     // - matches the TOnTextWriterEcho signature
-    function OnEcho(Sender: TBaseWriter; Level: TSynLogInfo;
+    function OnEcho(Sender: TTextWriter; Level: TSynLogInfo;
       const Text: RawUtf8): boolean;
   published
     /// how many registrations are currently defined
@@ -1970,7 +1970,7 @@ type
     isdwarf64, debugtoconsole: boolean;
     debug: TDebugFile;
     map: TMemoryMap;
-    function FindSections(const filename: shortstring): boolean;
+    function FindSections(const filename: ShortString): boolean;
     procedure ReadInit(aBase, aLimit: Int64);
     function ReadLeb128: Int64;
     function ReadAddress(addr_size: PtrInt): QWord; inline;
@@ -1999,9 +1999,9 @@ end;
 
 {$I-}
 
-function TDwarfReader.FindSections(const filename: shortstring): boolean;
+function TDwarfReader.FindSections(const filename: ShortString): boolean;
 var
-  dbgfn: shortstring;
+  dbgfn: ShortString;
   e: TExeFile; // use RTL's cross-OS exeinfo.pp unit
 begin
   result := false;
@@ -2287,7 +2287,7 @@ var
   header64: TDwarfLineInfoHeader64;
   header32: TDwarfLineInfoHeader32;
   u: PDebugUnit;
-  s: shortstring;
+  s: ShortString;
   filesdir: array[0..15] of byte;
   numoptable: array[1..255] of byte;
 begin
@@ -2493,7 +2493,7 @@ var
   unit_length, low_pc, high_pc: QWord;
   abbr, level: cardinal;
   i: PtrInt;
-  name, typname: shortstring;
+  name, typname: ShortString;
 begin
   // check if DWARF 32-bit or 64-bit format
   ReadInit(file_offset, file_size);
@@ -3159,8 +3159,8 @@ begin
     W.Flush; // now MS contains the uncompressed binary data
     AlgoSynLZ.StreamCompress(MS, aStream, MAGIC_MAB, {hash32=}true);
   finally
-    MS.Free;
     W.Free;
+    MS.Free;
   end;
 end;
 
@@ -3168,7 +3168,7 @@ const
   _TDebugSymbol = 'Name:RawUtf8 Start,Stop:integer';
   _TDebugUnit ='Symbol:TDebugSymbol FileName:RawUtf8 Line,Addr:TIntegerDynArray';
 
-procedure TDebugFile.SaveToJson(W: TBaseWriter);
+procedure TDebugFile.SaveToJson(W: TTextWriter);
 begin
   if Rtti.RegisterType(TypeInfo(TDebugSymbol)).Props.Count = 0 then
     Rtti.RegisterFromText([TypeInfo(TDebugSymbol), _TDebugSymbol,
@@ -3183,10 +3183,10 @@ end;
 procedure TDebugFile.SaveToJson(const aJsonFile: TFileName;
   aJsonFormat: TTextWriterJsonFormat);
 var
-  W: TBaseWriter;
+  W: TJsonWriter;
   json: RawUtf8;
 begin
-  W := DefaultTextWriterSerializer.CreateOwnedStream(65536);
+  W := TJsonWriter.CreateOwnedStream(65536);
   try
     SaveToJson(W);
     W.SetText(json, aJsonFormat);
@@ -3331,7 +3331,7 @@ begin
     result := PtrInt(aAddressAbsolute) - PtrInt(fCodeOffset);
 end;
 
-class function TDebugFile.Log(W: TBaseWriter; aAddressAbsolute: PtrUInt;
+class function TDebugFile.Log(W: TTextWriter; aAddressAbsolute: PtrUInt;
   AllowNotCodeAddr, SymbolNameNotFilename: boolean): boolean;
 var
   u, s, Line, offset: integer;
@@ -3352,7 +3352,8 @@ begin
      (aAddressAbsolute = 0) then
     exit;
   debug := GetInstanceDebugFile;
-  if debug.HasDebugInfo then
+  if (debug <> nil) and
+     debug.HasDebugInfo then
   begin
     offset := debug.AbsoluteToOffset(aAddressAbsolute);
     s := debug.FindSymbol(offset);
@@ -3401,7 +3402,7 @@ begin
   ShortStringToAnsi7String(FindLocationShort(aAddressAbsolute), result);
 end;
 
-function TDebugFile.FindLocationShort(aAddressAbsolute: PtrUInt): shortstring;
+function TDebugFile.FindLocationShort(aAddressAbsolute: PtrUInt): ShortString;
 var
   u, s, line, offset: integer;
 begin
@@ -3443,7 +3444,7 @@ begin
     result := GetInstanceDebugFile.FindLocation(PtrUInt(exc.RaisedAt));
 end;
 
-function _GetExecutableLocation(aAddress: pointer): shortstring;
+function _GetExecutableLocation(aAddress: pointer): ShortString;
 begin
   result := GetInstanceDebugFile.FindLocationShort(PtrUInt(aAddress));
 end;
@@ -3860,7 +3861,7 @@ var
 begin
   if (self = nil) or
      (SynLogFile = nil) or
-     not Assigned(aEvent) then
+     (not Assigned(aEvent)) then
     exit;
   EnterCriticalSection(GlobalThreadLock);
   try
@@ -4078,7 +4079,7 @@ begin
       // TSynLog.Family / TSynLog.Add expect TRttiCustom in the first slot
       raise ESynLogException.CreateUtf8(
         '%.FamilyCreate: vmtAutoTable=% not %', [self, vmt, rtticustom]);
-    Rtti.DoLock;
+    EnterCriticalSection(Rtti.RegisterLock);
     try
       result := rtticustom.PrivateSlot;
       if Assigned(result) then
@@ -4092,7 +4093,7 @@ begin
       result := TSynLogFamily.Create(self); // stored in SynLogFamily[]
       rtticustom.PrivateSlot := result; // will be owned by this TRttiCustom
     finally
-      Rtti.DoUnlock;
+      LeaveCriticalSection(Rtti.RegisterLock);
     end;
   end
   else
@@ -4596,7 +4597,7 @@ begin
   result := self;
 end;
 
-function TSynLog.ConsoleEcho(Sender: TBaseWriter; Level: TSynLogInfo;
+function TSynLog.ConsoleEcho(Sender: TTextWriter; Level: TSynLogInfo;
   const Text: RawUtf8): boolean;
 {$ifdef OSLINUX}
 var
@@ -4763,7 +4764,7 @@ end;
 procedure TSynLog.DisableRemoteLog(value: boolean);
 begin
   if (fDisableRemoteLog = value) or
-     not Assigned(fFamily.fEchoRemoteEvent) then
+     (not Assigned(fFamily.fEchoRemoteEvent)) then
     exit;
   if value then
   begin
@@ -5036,67 +5037,6 @@ begin
     LogFileInit;
 end;
 
-{$ifdef FPC_X64MM}
-// include mormot.core.fpcx64mm information
-
-procedure WriteArena(W: TBaseWriter; const name: shortstring;
-  const a: TMMStatusArena);
-begin
-  {$ifdef FPCMM_DEBUG}
-  W.Add('  %: %=%/%=% peak=% sleep=% ',
-    [name, K(a.CumulativeAlloc - a.CumulativeFree), KBNoSpace(a.CurrentBytes),
-     K(a.CumulativeAlloc), KBNoSpace(a.CumulativeBytes),
-     KBNoSpace(a.PeakBytes), K(a.SleepCount)]);
-  {$else}
-  W.Add(' %: %/% sleep=% ', [name, KBNoSpace(a.CurrentBytes),
-    KBNoSpace(a.CumulativeBytes), K(a.SleepCount)]);
-  {$endif FPCMM_DEBUG}
-end;
-
-procedure WriteX64MM(W: TBaseWriter);
-var
-  s: TMMStatus;
-  cont: TSmallBlockContentionDynArray;
-  small: TSmallBlockStatusDynArray;
-  sc, sb: PtrUInt;
-  i: PtrInt;
-begin
-  W.AddShort(FPCMM_FLAGS);
-  s := CurrentHeapStatus;
-  small := GetSmallBlockStatus(10, obTotal, @sc, @sb);
-  W.Add('  Small: %=%/%=%',
-    [K(s.SmallBlocks), KBNoSpace(s.SmallBlocksSize), K(sc), KBNoSpace(sb)]);
-  for i := 0 to high(small) do
-    with small[i] do
-    W.Add(' %:%=%/%=%', [BlockSize, K(Current),
-      KBNoSpace(Current * BlockSize), K(Total), KBNoSpace(Total * BlockSize)]);
-  WriteArena(W, 'Medium', s.Medium);
-  WriteArena(W, 'Large', s.Large);
-  W.Add('  Sleep: count=% ', [K(s.SleepCount)]);
-  {$ifdef FPCMM_DEBUG}
-  {$ifdef FPCMM_SLEEPTSC}
-  W.Add(' rdtsc=%', [K(s.SleepCycles)]);
-  {$endif FPCMM_SLEEPTSC}
-  {$ifdef FPCMM_LOCKLESSFREE}
-  W.Add(' locklessspin=%', [K(s.SmallFreememLockLessSpin)]);
-  {$endif FPCMM_LOCKLESSFREE}
-  {$endif FPCMM_DEBUG}
-  W.Add(' getmem=% freemem=%',
-    [K(s.SmallGetmemSleepCount), K(s.SmallFreememSleepCount)]);
-  if s.SmallGetmemSleepCount + s.SmallFreememSleepCount > 1000 then
-  begin
-    cont := GetSmallBlockContention(8);
-    for i := 0 to high(cont) do
-      with cont[i] do
-        if GetmemBlockSize > 0 then
-          W.Add(' getmem(%)=%', [GetmemBlockSize, K(SleepCount)])
-        else
-          W.Add(' freemem(%)=%', [FreememBlockSize, K(SleepCount)])
-  end;
-end;
-
-{$endif FPC_X64MM}
-
 procedure TSynLog.AddMemoryStats;
 var
   info: TMemoryInfo; // cross-compiler and cross-platform
@@ -5108,7 +5048,9 @@ begin
        KBNoSpace(info.filetotal), KBNoSpace(info.filefree),
        KBNoSpace(info.allocreserved), KBNoSpace(info.allocused)]);
   {$ifdef FPC_X64MM}
-  WriteX64MM(fWriter);
+  // include mormot.core.fpcx64mm raw information
+  fWriter.AddNoJsonEscapeString(GetHeapStatus(
+    ' - fpcx64mm', 16, 16, {flags=}true, {sameline=}true));
   {$endif FPC_X64MM}
   fWriter.AddShorter('   ');
 end;
@@ -5269,8 +5211,8 @@ begin
     if Text = '' then
     begin
       if Instance <> nil then
-        if PClass(fWriter)^ = TBaseWriter then
-          // WriteObject() requires TTextWriter from mormot.core.json.pas
+        if PClass(fWriter)^ = TTextWriter then
+          // WriteObject() requires TJsonWriter from mormot.core.json.pas
           fWriter.AddInstancePointer(Instance, #0, {unit=}true, {ptr=}true)
         else
           // by definition, a JSON object is serialized on the same line
@@ -5414,11 +5356,11 @@ begin
       fWriterStream.Seek(0, soEnd); // in rotation mode, append at the end
   end;
   if fWriterClass = nil then
-    // use TTextWriter since mormot.core.json.pas is linked
-    fWriterClass := DefaultTextWriterSerializer;
+    // use TJsonWriter since mormot.core.json.pas is linked
+    fWriterClass := TJsonWriter;
   if fWriter = nil then
   begin
-    fWriter := fWriterClass.Create(fWriterStream, fFamily.BufferSize) as TTextWriter;
+    fWriter := fWriterClass.Create(fWriterStream, fFamily.BufferSize) as TJsonWriter;
     fWriter.CustomOptions := fWriter.CustomOptions +
       [twoEnumSetsAsTextInRecord, twoFullSetsAsStar, twoForceJsonExtended];
     fWriterEcho := TEchoWriter.Create(fWriter);
@@ -5978,7 +5920,7 @@ begin
   inherited Destroy;
 end;
 
-function TSynLogCallbacks.OnEcho(Sender: TBaseWriter; Level: TSynLogInfo;
+function TSynLogCallbacks.OnEcho(Sender: TTextWriter; Level: TSynLogInfo;
   const Text: RawUtf8): boolean;
 var
   i: PtrInt;
@@ -5987,7 +5929,7 @@ begin
   if (Count = 0) or
      fCurrentlyEchoing then
     exit;
-  Safe.Lock;
+  Safe.Lock; // not really concurrent, but faster
   try
     fCurrentlyEchoing := true; // avoid stack overflow if exception below
     for i := Count - 1 downto 0 do
@@ -6051,6 +5993,7 @@ begin
     Safe.UnLock;
   end;
 end;
+
 
 { TSynLogSettings }
 
@@ -6170,7 +6113,7 @@ begin
       // not exact YYYYMMDD hhmmsszz layout -> try plain ISO-8601
       Iso8601ToDateTimePUtf8CharVar(P, 17, result)
     else if TryEncodeDate(Y, M, D, result) then
-      // MS shl 4 = 16 ms resolution in TBaseWriter.AddCurrentLogTime()
+      // MS shl 4 = 16 ms resolution in TTextWriter.AddCurrentLogTime()
       result := result + EncodeTime(HH, MM, SS, MS shl 4)
     else
       result := 0;
@@ -6665,7 +6608,7 @@ end;
 
 procedure TSynLogFile.ProcessOneLine(LineBeg, LineEnd: PUtf8Char);
 var
-  thread, n: cardinal;
+  thread, n, i: PtrUInt;
   MS: integer;
   L: TSynLogInfo;
 begin
@@ -6745,13 +6688,15 @@ begin
   case L of
     sllEnter:
       begin
-        if cardinal(fLogProcStackCount[thread]) >=
-            cardinal(length(fLogProcStack[thread])) then
-          SetLength(fLogProcStack[thread], length(fLogProcStack[thread]) + 256);
-        fLogProcStack[thread][fLogProcStackCount[thread]] := fLogProcNaturalCount;
+        n := length(fLogProcStack[thread]);
+        i := fLogProcStackCount[thread];
+        if i >= n then
+          SetLength(fLogProcStack[thread], i + 256);
+        fLogProcStack[thread][i] := fLogProcNaturalCount;
         inc(fLogProcStackCount[thread]);
-        if cardinal(fLogProcNaturalCount) >= cardinal(length(fLogProcNatural)) then
-          SetLength(fLogProcNatural, length(fLogProcNatural) + 32768);
+        n := length(fLogProcNatural);
+        if PtrUInt(fLogProcNaturalCount) >= n then
+          SetLength(fLogProcNatural, NextGrow(fLogProcNaturalCount));
         // fLogProcNatural[].Index will be set in TSynLogFile.LoadFromMap
         inc(fLogProcNaturalCount);
       end;

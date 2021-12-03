@@ -107,7 +107,7 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         ret
 @nofwe: {$endif WITH_ERMS}
         mov     r9, dst
-        {$ifdef ASMX64AVX} // no AVX asm on Delphi (even 10.4) :(
+        {$ifdef ASMX64AVX} // no AVX asm on Delphi (even 11 is buggy) :(
         cmp     rax, 256                     // vzeroupper penaly for cnt>255
         jb      @fsse2
         test    byte ptr [rip + CPUIDX64], 1 shl cpuAVX
@@ -151,7 +151,7 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         ja      @favxn                       // bypass cache for cnt>512KB
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
 @favxr: vmovups ymm0, yword ptr [src + rax]  // regular loop
-        vmovaps [r10 + rax], ymm0
+        vmovaps [r10 + rax], ymm0            // most CPUs have one store unit
         add     rax, 32
         jl      @favxr
 @favxe: vmovups yword ptr [r10], ymm1        // last 32
@@ -567,14 +567,13 @@ asm
         mov     qword ptr [d], s
         test    rax, rax
         jz      @z
-        mov     d, rax
+        lea     d, qword ptr [rax - _STRRECSIZE]
         cmp     qword ptr [rax - _STRREFCNT], 0 // refcnt=-1 for const
         jl      @z
 lock    dec     qword ptr [rax - _STRREFCNT]
         jbe     @free
 @z:     ret
-@free:  sub     d, _STRRECSIZE
-        jmp     _Freemem
+@free:  jmp     _Freemem
 end;
 
 {$endif FPC}
@@ -748,7 +747,7 @@ procedure DynArrayHashTableAdjust16(P: PWordArray; deleted: cardinal; count: Ptr
         jnz     @1
 end;
 
-{$ifdef ASMX64AVX} // AVX2 ASM not available on Delphi yet
+{$ifdef ASMX64AVX} // AVX2 ASM not available on Delphi < 11
 // adapted from https://github.com/simdjson/simdjson - Apache License 2.0
 function IsValidUtf8Avx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
   {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
@@ -1819,7 +1818,7 @@ asm // rcx=src, edx=size, r8=dest
         add     r8, 4
         pxor    xmm0, xmm0
         mov     eax, 32768 - 64
-@06:    movaps  dqword ptr [off + rax - 48], xmm0 // stack is aligned to 16 bytes
+@06:    movaps  dqword ptr [off + rax - 48], xmm0 // stack is 16 bytes aligned
         movaps  dqword ptr [off + rax - 32], xmm0
         movaps  dqword ptr [off + rax - 16], xmm0
         movaps  dqword ptr [off + rax], xmm0
@@ -1932,7 +1931,7 @@ end;
 
 function SynLZdecompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): integer;
 var off: TOffsets;
-asm // rcx=src, edx=size, r8=dest
+asm     // rcx=src, edx=size, r8=dest
         {$ifdef WIN64ABI} // additional registers to preserve
         push    rsi
         push    rdi
@@ -2114,6 +2113,23 @@ function RefCntDecFree(var refcnt: TRefCnt): boolean;
 {$endif FPC}
         setbe   al
 end; // don't check for ismultithread global since lock is cheaper on new CPUs
+
+function LockedExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt): boolean;
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        mov     rax, Comperand
+   lock cmpxchg qword ptr [Target], NewValue
+        setz    al
+end;
+
+procedure LockedInc(var Target: PtrUInt; Increment: PtrUInt);
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+   lock add     qword ptr [Target], Increment
+end;
+
+procedure LockedDec(var Target: PtrUInt; Decrement: PtrUInt);
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+   lock sub     qword ptr [Target], Decrement
+end;
 
 {$ifndef FPC}
 

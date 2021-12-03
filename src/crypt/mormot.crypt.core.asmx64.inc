@@ -17,8 +17,8 @@
 {$ifdef ASMX64}
 
 procedure AesEncryptAsm(const ctxt: TAesContext; bi, bo: PWA4);
-{$ifdef FPC}nostackframe; assembler; asm{$else}
-asm // input: rcx/rdi=TAesContext, rdx/rsi=source, r8/rdx=dest
+{$ifdef FPC} nostackframe; assembler; asm {$else}
+asm     // input: rcx/rdi=TAesContext, rdx/rsi=source, r8/rdx=dest
         .noframe
 {$endif}
         // rolled optimized encryption asm version by A. Bouchez
@@ -197,8 +197,8 @@ const
   STACK_SIZE = 32 {$ifndef SYSVABI} + 7 * 16 {$endif};
 
 procedure Sha256Sse4(var input_data; var digest; num_blks: PtrUInt);
-{$ifdef FPC}nostackframe; assembler; asm{$else}
-asm // rcx=input_data rdx=digest r8=num_blks (Linux: rdi,rsi,rdx)
+{$ifdef FPC} nostackframe; assembler; asm {$else}
+asm     // rcx=input_data rdx=digest r8=num_blks (Linux: rdi,rsi,rdx)
         .noframe
 {$endif FPC}
         push    rbx
@@ -1443,9 +1443,9 @@ end;
 
 
 procedure Sha256ExpandMessageBlocks(W, Buf: PIntegerArray);
-{$ifdef FPC}nostackframe; assembler; asm{$else}
-asm // W=rcx Buf=rdx
-  .noframe
+{$ifdef FPC} nostackframe; assembler; asm {$else}
+asm     // W=rcx Buf=rdx
+        .noframe
 {$endif}
         {$ifndef WIN64ABI}
         mov     rdx, rsi
@@ -1537,6 +1537,32 @@ asm // W=rcx Buf=rdx
         pop     rsi
 end;
 
+// see http://nicst.de/crc.pdf
+function gf2_multiply(x, y, m, bits: PtrUInt): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        mov     rax, x
+        and     rax, 1
+        cmovne  rax, y
+@s:     mov     r10, rax
+        mov     r11, m
+        shr     r10, 1
+        xor     r11, r10
+        test    al, 1
+        mov     rax, r10
+        cmovne  rax, r11
+        shr     x, 1
+        mov     r10, rax
+        xor     r10, y
+        {$ifdef WIN64ABI}
+        test    cl, 1
+        {$else}
+        test    dil, 1
+        {$endif WIN64ABI}
+        cmovne  rax, r10
+        dec     bits
+        jne     @s
+end;
+
 procedure bswap256(s, d: PIntegerArray);
 {$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
         mov     eax, dword ptr [s]
@@ -1584,73 +1610,82 @@ procedure bswap160(s, d: PIntegerArray);
         mov     dword ptr [d + 16], eax
 end;
 
-// see http://nicst.de/crc.pdf
-
-function gf2_multiply(x, y, m, bits: PtrUInt): PtrUInt;
+function _add256(out Output: THash256Rec; const Left, Right: THash256Rec): PtrUInt;
 {$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
-        mov     rax, x
-        and     rax, 1
-        cmovne  rax, y
-@s:     mov     r10, rax
-        mov     r11, m
-        shr     r10, 1
-        xor     r11, r10
-        test    al, 1
-        mov     rax, r10
-        cmovne  rax, r11
-        shr     x, 1
-        mov     r10, rax
-        xor     r10, y
-        {$ifdef WIN64ABI}
-        test    cl, 1
-        {$else}
-        test    dil, 1
-        {$endif WIN64ABI}
-        cmovne  rax, r10
-        dec     bits
-        jne     @s
-end;
-
-function _add256(out Output; const Left, Right): PtrUInt;
-{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif}
         // rcx/rdi=Output rdx/rsi=Left r8/rdx=Right
+        xor    eax, eax
         mov    r9,  qword ptr [Left]
         mov    r10, qword ptr [Left + 8]
         mov    r11, qword ptr [Left + 16]
-        mov    rax, qword ptr [Left + 24]
+        mov    Left, qword ptr [Left + 24]
         add    r9,  qword ptr [Right]
         adc    r10, qword ptr [Right + 8]
         adc    r11, qword ptr [Right + 16]
-        adc    rax, qword ptr [Right + 24]
+        adc    Left, qword ptr [Right + 24]
         mov    qword ptr [Output], r9
         mov    qword ptr [Output + 8], r10
         mov    qword ptr [Output + 16], r11
-        mov    qword ptr [Output+ 24], rax
-        mov    eax, 0  // xor eax,eax is shorter but would change the carry
+        mov    qword ptr [Output + 24], Left
         adc    eax, eax
 end;
 
-function _sub256(out Output; const Left, Right): PtrUInt;
-{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif}
+function _inc256(var Value: THash256Rec; const Added: THash256Rec): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Value rdx/rsi=Added
+        xor    eax, eax
+        mov    r8,  qword ptr [Added]
+        mov    r9 , qword ptr [Added + 8]
+        mov    r10, qword ptr [Added + 16]
+        mov    r11, qword ptr [Added + 24]
+        add    qword ptr [Value], r8
+        adc    qword ptr [Value + 8], r9
+        adc    qword ptr [Value + 16], r10
+        adc    qword ptr [Value + 24], r11
+        adc    eax, eax
+end;
+
+function _dec256(var Value: THash256Rec; const Subs: THash256Rec): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Value rdx/rsi=Subs
+        xor    eax, eax
+        mov    r8,  qword ptr [Subs]
+        mov    r9 , qword ptr [Subs + 8]
+        mov    r10, qword ptr [Subs + 16]
+        mov    r11, qword ptr [Subs + 24]
+        sub    qword ptr [Value], r8
+        sbb    qword ptr [Value + 8], r9
+        sbb    qword ptr [Value + 16], r10
+        sbb    qword ptr [Value + 24], r11
+        adc    eax, eax
+end;
+
+function _sub256(out Output: THash256Rec; const Left, Right: THash256Rec): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
         // rcx/rdi=Output rdx/rsi=Left r8/rdx=Right
+        xor    eax, eax
         mov    r9,  qword ptr [Left]
         mov    r10, qword ptr [Left + 8]
         mov    r11, qword ptr [Left + 16]
-        mov    rax, qword ptr [Left + 24]
+        mov    Left, qword ptr [Left + 24]
         sub    r9,  qword ptr [Right]
         sbb    r10, qword ptr [Right + 8]
         sbb    r11, qword ptr [Right + 16]
-        sbb    rax, qword ptr [Right + 24]
+        sbb    Left, qword ptr [Right + 24]
         mov    qword ptr [Output], r9
         mov    qword ptr [Output + 8], r10
         mov    qword ptr [Output + 16], r11
-        mov    qword ptr [Output+ 24], rax
-        mov    eax, 0  // xor eax,eax is shorter but would change the carry
+        mov    qword ptr [Output+ 24], Left
         adc    eax, eax
 end;
 
-procedure _mult128(const l, r; out product);
-  {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif}
+{$ifdef FPC} // constref to force passing by reference (as Delphi does)
+procedure _mult128(constref l, r: THash128Rec; out product: THash256Rec);
+  nostackframe; assembler; asm
+{$else}
+procedure _mult128(const l, r: THash128Rec; out product: THash256Rec);
+asm
+        .noframe
+{$endif FPC}
         // rcx/rdi=l rdx/rsi=r r8/rdx=product
         // -> preserve rdx, which is used as result by mul opcode
         {$ifdef WIN64ABI}
@@ -1661,10 +1696,9 @@ procedure _mult128(const l, r; out product);
         {$endif WIN64ABI}
         // t1.V := l.L * r.L;
         xor    r9, r9
-        mov    rdx, qword ptr [rsi].THash128Rec.L
-        mov    rax, qword ptr [l].THash128Rec.L
-        mul    rdx
         mov    r10, qword ptr [rsi].THash128Rec.L
+        mov    rax, qword ptr [l].THash128Rec.L
+        mul    r10
         mov    qword ptr [r8].THash256Rec.L.L, rax
         mov    r11, rdx
         // t2.V := l.H * r.L + t1.H;
@@ -1695,8 +1729,139 @@ procedure _mult128(const l, r; out product);
         {$endif WIN64ABI}
 end;
 
-procedure _inc64(var Value; var Added);
-  {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif}
+procedure _mult256(out Output: THash512Rec; const Left, Right: THash256Rec);
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Output rdx/rsi=Left r8/rdx=Right
+        {$ifdef WIN64ABI}
+        push    rdi
+        push    rsi
+        mov     rdi, Output
+        {$endif WIN64ABI}
+        push    r15
+        push    r14
+        push    r13
+        push    r12
+        mov     r12, qword ptr [Right]
+        mov     r13, qword ptr [Right + 8H]
+        mov     r14, qword ptr [Right + 10H]
+        mov     r15, qword ptr [Right + 18H]
+        mov     r8,  qword ptr [Left]
+        mov     r9,  qword ptr [Left + 8H]
+        mov     r10, qword ptr [Left + 10H]
+        mov     r11, qword ptr [Left + 18H]
+        xor     rsi, rsi
+        mov     rax, r8
+        mul     r12
+        mov     qword ptr [rdi], rax
+        mov     rcx, rdx
+        mov     rax, r9
+        mul     r12
+        add     rax, rcx
+        adc     rdx, rsi
+        mov     qword ptr [rdi + 8H], rax
+        mov     rcx, rdx
+        mov     rax, r10
+        mul     r12
+        add     rax, rcx
+        adc     rdx, rsi
+        mov     qword ptr [rdi + 10H], rax
+        mov     rcx, rdx
+        mov     rax, r11
+        mul     r12
+        add     rax, rcx
+        adc     rdx, rsi
+        mov     qword ptr [rdi + 18H], rax
+        mov     qword ptr [rdi + 20H], rdx
+        mov     rax, r8
+        mul     r13
+        add     qword ptr [rdi + 8H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r9
+        mul     r13
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 10H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r10
+        mul     r13
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 18H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r11
+        mul     r13
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 20H], rax
+        adc     rdx, rsi
+        mov     qword ptr [rdi + 28H], rdx
+        mov     rax, r8
+        mul     r14
+        add     qword ptr [rdi + 10H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r9
+        mul     r14
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 18H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r10
+        mul     r14
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 20H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r11
+        mul     r14
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 28H], rax
+        adc     rdx, rsi
+        mov     qword ptr [rdi + 30H], rdx
+        mov     rax, r8
+        mul     r15
+        add     qword ptr [rdi + 18H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r9
+        mul     r15
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 20H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r10
+        mul     r15
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 28H], rax
+        adc     rdx, rsi
+        mov     rcx, rdx
+        mov     rax, r11
+        mul     r15
+        add     rax, rcx
+        adc     rdx, rsi
+        add     qword ptr [rdi + 30H], rax
+        adc     rdx, rsi
+        mov     qword ptr [rdi + 38H], rdx
+        pop     r12
+        pop     r13
+        pop     r14
+        pop     r15
+        {$ifdef WIN64ABI}
+        pop     rsi
+        pop     rdi
+        {$endif WIN64ABI}
+end;
+
+procedure _inc64(var Value: THash128Rec; var Added: QWord);
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
         // rcx/rdi=Value rdx/rsi=Added
         mov    rax, qword ptr [Added]
         xor    rdx, rdx
@@ -1704,8 +1869,8 @@ procedure _inc64(var Value; var Added);
         adc    qword ptr [Value + 8], rdx
 end;
 
-procedure _inc128(var Value; var Added);
-  {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif}
+procedure _inc128(var Value: THash256Rec; var Added: THash128Rec);
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
         // rcx/rdi=Value rdx/rsi=Added
         mov    rax, qword ptr [Added]
         mov    rdx, qword ptr [Added + 8]
@@ -5019,7 +5184,7 @@ var
 procedure _AesNiHashXmm0(seedfromhash32: cardinal; data: pointer; len: PtrUInt); forward;
 
 function _AesNiHash64(seed: QWord; data: pointer; len: PtrUInt): QWord;
-  {$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
         // rcx/rdi=seed, rdx/rsi=data, r8/rdx=len
         movq    xmm0, seed
         call    _AesNiHashXmm0
@@ -5027,7 +5192,7 @@ function _AesNiHash64(seed: QWord; data: pointer; len: PtrUInt): QWord;
 end;
 
 procedure _AesNiHash128(hash: PHash128; data: pointer; len: PtrUInt);
-  {$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
         // rcx/rdi=seed&result, rdx/rsi=data, r8/rdx=len
         movups  xmm0, dqword ptr [hash]
         call    _AesNiHashXmm0
@@ -5053,7 +5218,6 @@ procedure _AesNiHashXmm0(seedfromhash32: cardinal; data: pointer; len: PtrUInt);
         mov     rax, qword ptr [rip + AESNIHASHKEYSCHED]
         pshufhw xmm0, xmm0, 00H
         shl     r10, 4
-        movdqa  xmm1, xmm0
         pxor    xmm0, dqword ptr [rax]
         movups  xmm1, dqword ptr [data + len - 16] // no read after end of page
         lea     r11, [rip + @shifts] // (heap has header so no read before EOP)
@@ -5061,7 +5225,7 @@ procedure _AesNiHashXmm0(seedfromhash32: cardinal; data: pointer; len: PtrUInt);
         cmp     len, 16 // 1..16 bytes have no branch
         ja      @17up
         je      @16
-        pshufb  xmm1, dqword ptr [r11 + r10]  // shuffle data bits to lower xmm2
+        pshufb  xmm1, dqword ptr [r11 + r10]  // shuffle data bits to lower xmm1
 @16:    aesenc  xmm1, xmm0
         aesenc  xmm1, xmm1
         aesenc  xmm1, xmm1
@@ -5376,7 +5540,8 @@ function crc32_iscsi_01(buf: PAnsiChar; len: PtrUInt; crc: cardinal): cardinal;
   {$ifdef FPC}cdecl;{$endif} external;
 
 function crc32c_sse42_aesni(crc: PtrUInt; buf: PAnsiChar; len: PtrUInt): cardinal;
-{$ifdef FPC}nostackframe; assembler; asm{$else}asm .noframe {$endif}
+{$ifdef FPC} {$ifndef OSWINDOWS} nostackframe; {$endif} assembler; {$endif}
+asm
         mov     rax, crc
         mov     rcx, len
         not     eax
@@ -5411,7 +5576,11 @@ function crc32c_sse42_aesni(crc: PtrUInt; buf: PAnsiChar; len: PtrUInt): cardina
         jz      @0
         crc32   eax, byte ptr [buf]
 @0:     not     eax
+        {$ifdef OSWINDOWS}
+        jmp     @done
+        {$else}
         ret
+        {$endif OSWINDOWS}
 @big:   // our  call: rcx/rdi=crc rdx/rsi=buf r8/rdx=len
         // iscsi_01:  rcx/rdi=buf rdx/rsi=len r8/rdx=crc
         mov     crc, buf
@@ -5419,6 +5588,7 @@ function crc32c_sse42_aesni(crc: PtrUInt; buf: PAnsiChar; len: PtrUInt): cardina
         mov     len, rax
         call    crc32_iscsi_01
         not     eax
+@done:  // on Win64, a stack frame is required when calling sub functions
 end;
 
 {$endif CRC32C_X64}

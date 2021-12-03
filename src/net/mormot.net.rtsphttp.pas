@@ -52,7 +52,7 @@ type
   TPostConnection = class(TAsyncConnection)
   protected
     fRtspTag: TPollSocketTag;
-    // redirect the POST base-64 encoded command to the RTSP socket
+    // redirect the POST Base64 encoded command to the RTSP socket
     function OnRead: TPollAsyncSocketOnReadWrite; override;
     // will release the associated TRtspConnection instance
     procedure BeforeDestroy; override;
@@ -94,6 +94,7 @@ type
     /// initialize the proxy HTTP server forwarding specified RTSP server:port
     // - default aThreadPoolCount=1 is the best and fastest for our RTSP/HTTP
     // tunneling process, which is almost non blocking
+    // - warning: should call WaitStarted() to let Execute bind and run
     constructor Create(const aRtspServer, aRtspPort, aHttpPort: RawUtf8;
       aLog: TSynLogClass; const aOnStart, aOnStop: TOnNotifyThread;
       aOptions: TAsyncConnectionsOptions = []; aThreadPoolCount: integer = 1); reintroduce;
@@ -153,7 +154,7 @@ end;
 procedure TRtspConnection.BeforeDestroy;
 begin
   fGetBlocking.Free;
-  inherited BeforeDestroy;
+  // inherited BeforeDestroy; // void parent method
 end;
 
 
@@ -171,14 +172,14 @@ begin
   if decoded = '' then
     exit; // maybe some pending command chars
   fRd.Reset;
-  rtsp := fOwner.ConnectionFindLocked(fRtspTag);
+  rtsp := fOwner.ConnectionFindAndLock(fRtspTag, cReadOnly);
   if rtsp <> nil then
   try
     fOwner.WriteString(rtsp, decoded); // async sending to RTSP server
     fOwner.Log.Add.Log(sllDebug, 'OnRead % POST forwarded RTSP command [%]',
       [Handle, decoded], self);
   finally
-    fOwner.Unlock;
+    fOwner.Unlock(cReadOnly);
   end
   else
   begin
@@ -191,7 +192,7 @@ end;
 procedure TPostConnection.BeforeDestroy;
 begin
   fOwner.ConnectionRemove(fRtspTag); // disable associated RTSP and GET sockets
-  inherited BeforeDestroy;
+  // inherited BeforeDestroy; // void parent method
 end;
 
 
@@ -280,7 +281,7 @@ begin
         cookie := sock.HeaderGetValue('X-SESSIONCOOKIE');
         if cookie = '' then
           exit;
-        fPendingGet.Safe.Lock;
+        fPendingGet.Safe.WriteLock;
         try
           found := -1;
           now := mormot.core.os.GetTickCount64 shr 10;
@@ -338,7 +339,7 @@ begin
             end;
           end;
         finally
-          fPendingGet.Safe.UnLock;
+          fPendingGet.Safe.WriteUnLock;
         end;
       end
       else if log <> nil then

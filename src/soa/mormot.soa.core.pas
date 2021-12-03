@@ -25,7 +25,7 @@ uses
   sysutils,
   classes,
   variants,
-  mormot.lib.z, // for contract hashing
+  mormot.lib.z, // use crc32() for contract hashing
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -387,7 +387,7 @@ type
     fResultAsJsonObject: boolean;
     fResultAsJsonObjectWithoutResult: boolean;
     fResultAsXMLObject: boolean;
-    fResultAsJsonObjectIfAccept: boolean;
+    fResultAsXMLObjectIfAcceptOnlyXML: boolean;
     fResultAsXMLObjectNameSpace: RawUtf8;
     fExcludeServiceLogCustomAnswer: boolean;
     function GetAuthGroupIDs(const aGroup: array of RawUtf8;
@@ -484,12 +484,16 @@ type
     // - if no method name is given (i.e. []), option will be set for all methods
     // - include optExecInMainThread will force the method(s) to be called within
     // a RunningThread.Synchronize() call - slower, but thread-safe
-    // - this method returns self in order to allow direct chaining of security
+    // - this method returns self in order to allow direct chaining of settings
     // calls, in a fluent interface
     function SetOptions(const aMethod: array of RawUtf8;
       aOptions: TInterfaceMethodOptions;
       aAction: TServiceMethodOptionsAction = moaReplace): TServiceFactoryServerAbstract;
-    /// define the the instance life time-out, in seconds
+    /// define execution options for the whole interface
+    // - fluent alternative of setting homonymous boolean properties of this class
+    // - this method returns self in order to allow direct chaining of settings
+    function SetWholeOptions(aOptions: TInterfaceOptions): TServiceFactoryServerAbstract; 
+    /// define the instance life time-out, in seconds
     // - for sicClientDriven, sicPerSession, sicPerUser or sicPerGroup modes
     // - raise an exception for other kind of execution
     // - this method returns self in order to allow direct chaining of setting
@@ -557,7 +561,7 @@ type
     // - using this method allows to mix standard JSON requests (from JSON
     // or AJAX clients) and XML requests (from XML-only clients)
     property ResultAsXMLObjectIfAcceptOnlyXML: boolean
-      read fResultAsJsonObjectIfAccept write fResultAsJsonObjectIfAccept;
+      read fResultAsXMLObjectIfAcceptOnlyXML write fResultAsXMLObjectIfAcceptOnlyXML;
     /// specify a custom name space content when returning a XML object
     // - by default, no name space will be appended - but such rough XML will
     // have potential validation problems
@@ -610,7 +614,7 @@ type
   TServiceContainerInterfaceMethods = array of TServiceContainerInterfaceMethod;
 
   /// used in TServiceContainer to identify fListInterfaceMethod[] entries
-  // - maximum bit of 255 is a limitation of the pascal compiler itself
+  // - maximum bit count of 255 is a limitation of the pascal compiler itself
   TServiceContainerInterfaceMethodBits = set of 0..255;
 
   /// a global services provider class
@@ -643,10 +647,6 @@ type
     constructor Create(aOwner: TInterfaceResolver); virtual;
     /// release all registered services
     destructor Destroy; override;
-    /// release all services of a TRest instance before shutdown
-    // - will allow to properly release any pending callbacks
-    // - TRest.Services.Release will call FreeAndNil(fServices)
-    procedure Release;
     /// return the number of registered service interfaces
     // - you can use InterfaceList[] to access the instances
     function Count: integer;
@@ -844,7 +844,7 @@ type
   TServicesPublishedInterfacesDynArray = array of TServicesPublishedInterfaces;
 
   /// used e.g. by TRestServer to store a list of TServicesPublishedInterfaces
-  TServicesPublishedInterfacesList = class(TSynPersistentLock)
+  TServicesPublishedInterfacesList = class(TSynPersistentRWLock)
   private
     fDynArray: TDynArray;
     fDynArrayTimeoutTix: TDynArray;
@@ -901,7 +901,7 @@ type
     // a TServicesPublishedInterfaces JSON array, e.g.
     // $ [{"PublicUri":{"Address":"1.2.3.4","Port":"123","Root":"root"},"Names":['Calculator']},...]
     procedure FindServiceAll(const aServiceName: RawUtf8;
-      aWriter: TTextWriter); overload;
+      aWriter: TJsonWriter); overload;
     /// the number of milliseconds after which an entry expires
     // - is 0 by default, meaning no expiration
     // - you can set it to a value so that any service URI registered with
@@ -912,9 +912,6 @@ type
 
 
 implementation
-
-uses
-  mormot.rest.core;
 
 
 { ************ TOrmServiceLog TOrmServiceNotifications Classes }
@@ -1084,7 +1081,8 @@ var
   i: PtrInt;
 begin
   result := (self <> nil) and
-    fOrm.MainFieldIDs(fOrm.Model.GetTableInherited(TAuthGroup), aGroup, IDs);
+    fOrm.MainFieldIDs(
+      fOrm.Model.GetTableInherited(DefaultTAuthGroupClass), aGroup, IDs);
   if result then
     for i := 0 to high(IDs) do
       // fExecution[].Denied set is able to store IDs up to 256 only
@@ -1166,7 +1164,8 @@ var
 begin
   if self <> nil then
     for m := 0 to high(aMethod) do
-      FillcharFast(fExecution[fInterface.CheckMethodIndex(aMethod[m])].Denied,
+      FillcharFast(
+        fExecution[fInterface.CheckMethodIndex(aMethod[m])].Denied,
         SizeOf(fExecution[0].Denied), 0);
   result := self;
 end;
@@ -1204,7 +1203,8 @@ var
 begin
   if self <> nil then
     for m := 0 to high(aMethod) do
-      FillcharFast(fExecution[fInterface.CheckMethodIndex(aMethod[m])].Denied,
+      FillcharFast(
+        fExecution[fInterface.CheckMethodIndex(aMethod[m])].Denied,
         SizeOf(fExecution[0].Denied), 255);
   result := self;
 end;
@@ -1273,6 +1273,20 @@ begin
   result := self;
 end;
 
+function TServiceFactoryServerAbstract.SetWholeOptions(
+  aOptions: TInterfaceOptions): TServiceFactoryServerAbstract;
+begin
+  if self <> nil then
+  begin
+    fByPassAuthentication := (optByPassAuthentication in aOptions);
+    fResultAsJsonObject := (optResultAsJsonObject in aOptions);
+    fResultAsJsonObjectWithoutResult := (optResultAsJsonObjectWithoutResult in aOptions);
+    fResultAsXMLObject := (optResultAsXMLObject in aOptions);
+    fResultAsXMLObjectIfAcceptOnlyXML := (optResultAsXMLObjectIfAcceptOnlyXML in aOptions);
+    fExcludeServiceLogCustomAnswer := (optExcludeServiceLogCustomAnswer in aOptions);
+  end;
+  result := self;
+end;
 
 
 { ************ TServiceContainer Abstract Services Holder }
@@ -1295,12 +1309,6 @@ begin
   for i := 0 to high(fInterface) do
     fInterface[i].Service.Free;
   inherited;
-end;
-
-procedure TServiceContainer.Release;
-begin
-  if self <> nil then
-    TRest(fOwner).ServicesRelease(self);
 end;
 
 function TServiceContainer.Count: integer;
@@ -1541,7 +1549,7 @@ begin
   if (self = nil) or
      (fInterface = nil) then
     exit;
-  WR := TJsonSerializer.CreateOwnedStream(temp);
+  WR := TTextWriter.CreateOwnedStream(temp);
   try
     WR.Add('[');
     for i := 0 to high(fInterface) do
@@ -1629,7 +1637,7 @@ var
   tix: Int64;
 begin
   tix := GetTickCount64;
-  Safe.Lock;
+  Safe.ReadOnlyLock;
   try
     for result := 0 to Count - 1 do
       if List[result].PublicUri.Equals(aPublicUri) then
@@ -1638,7 +1646,7 @@ begin
           exit;
     result := -1;
   finally
-    Safe.UnLock;
+    Safe.ReadOnlyUnLock;
   end;
 end;
 
@@ -1650,7 +1658,7 @@ var
 begin
   tix := GetTickCount64;
   result := nil;
-  Safe.Lock;
+  Safe.ReadOnlyLock;
   try
     n := 0;
     for i := Count - 1 downto 0 do
@@ -1664,7 +1672,7 @@ begin
           inc(n);
         end;
   finally
-    Safe.UnLock;
+    Safe.ReadOnlyUnLock;
   end;
 end;
 
@@ -1678,7 +1686,7 @@ begin
   tix := GetTickCount64;
   result := nil;
   n := 0;
-  Safe.Lock;
+  Safe.ReadOnlyLock;
   try
     for i := Count - 1 downto 0 do
       // downwards to return the latest first
@@ -1687,19 +1695,19 @@ begin
            (fTimeoutTix[i] < tix) then
           AddRawUtf8(TRawUtf8DynArray(result), n, List[i].PublicUri.Uri);
   finally
-    Safe.UnLock;
+    Safe.ReadOnlyUnLock;
   end;
   SetLength(result, n);
 end;
 
 procedure TServicesPublishedInterfacesList.FindServiceAll(
-  const aServiceName: RawUtf8; aWriter: TTextWriter);
+  const aServiceName: RawUtf8; aWriter: TJsonWriter);
 var
   i: PtrInt;
   tix: Int64;
 begin
   tix := GetTickCount64;
-  Safe.Lock;
+  Safe.ReadOnlyLock;
   try
     aWriter.Add('[');
     if aServiceName = '*' then
@@ -1727,7 +1735,7 @@ begin
     aWriter.CancelLastComma;
     aWriter.Add(']');
   finally
-    Safe.UnLock;
+    Safe.ReadOnlyUnLock;
   end;
 end;
 
@@ -1749,7 +1757,7 @@ var
   tix: Int64;
   i: PtrInt;
 begin
-  Safe.Lock;
+  Safe.WriteLock;
   try
     fDynArray.LoadFromJson(pointer(PublishedJson));
     fDynArrayTimeoutTix.Count := Count;
@@ -1761,7 +1769,7 @@ begin
     for i := 0 to Count - 1 do
       fTimeoutTix[i] := tix;
   finally
-    Safe.UnLock;
+    Safe.WriteUnLock;
   end;
 end;
 
@@ -1790,7 +1798,7 @@ begin
      (nfo.PublicUri.Address = '') then
     // invalid supplied JSON content
     exit;
-  Safe.Lock;
+  Safe.WriteLock;
   try
     // store so that the latest updated version is always at the end
     for i := 0 to Count - 1 do
@@ -1813,7 +1821,7 @@ begin
     end;
     fLastPublishedJson := crc;
   finally
-    Safe.UnLock;
+    Safe.WriteUnLock;
   end;
 end;
 

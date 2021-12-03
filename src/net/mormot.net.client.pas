@@ -1352,11 +1352,13 @@ begin
     if consoledisplay then
       params.OnProgress := TStreamRedirect.ProgressToConsole;
     if params.WGet(url, destfile,
-         tunnel, tls, sockettimeout, redirectmax) <> destfile then
+         tunnel, tls, sockettimeout, redirectmax) = destfile then
+      result := ''
+    else
       result := 'WGet: unexpected destfile'; // paranoid
   except
     on E: Exception do
-      result := E.Message;
+      FormatString('[%] %', [E, E.Message], result);
   end;
 end;
 
@@ -1374,7 +1376,7 @@ begin
   if not _PROXYSET then
   begin
     GlobalLock;
-    StringToUtf8(GetEnvironmentVariable('HTTP_PROXY'), _PROXY[false]);
+    StringToUtf8(GetEnvironmentVariable('HTTP_PROXY'),  _PROXY[false]);
     StringToUtf8(GetEnvironmentVariable('HTTPS_PROXY'), _PROXY[true]);
     if _PROXY[true] = '' then
       _PROXY[true] := _PROXY[false];
@@ -1636,7 +1638,7 @@ begin
     ctxt.retry := [rMain]
   else
     ctxt.retry := [];
-  if not Assigned(fOnBeforeRequest) or
+  if (not Assigned(fOnBeforeRequest)) or
      fOnBeforeRequest(self, ctxt) then
   begin
     fRedirected := '';
@@ -2504,23 +2506,21 @@ begin
        @SECURITY_FLAT_IGNORE_CERTIFICATES, SizeOf(SECURITY_FLAT_IGNORE_CERTIFICATES)) then
       RaiseLastModuleError(winhttpdll, EWinHttp);
   L := length(aData);
-  if not _SendRequest(L) or not WinHttpApi.ReceiveResponse(fRequest, nil) then
-  begin
-    if not fHTTPS then
-      RaiseLastModuleError(winhttpdll, EWinHttp);
-    if (GetLastError = ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) and
-      IgnoreSSLCertificateErrors then
-    begin
-      if not WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
-         @SECURITY_FLAT_IGNORE_CERTIFICATES, SizeOf(SECURITY_FLAT_IGNORE_CERTIFICATES)) then
-        RaiseLastModuleError(winhttpdll, EWinHttp);
-      if not WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
-         pointer(WINHTTP_NO_CLIENT_CERT_CONTEXT), 0) then
-        RaiseLastModuleError(winhttpdll, EWinHttp);
-      if not _SendRequest(L) or not WinHttpApi.ReceiveResponse(fRequest, nil) then
-        RaiseLastModuleError(winhttpdll, EWinHttp);
-    end;
-  end;
+  if _SendRequest(L) and
+     WinHttpApi.ReceiveResponse(fRequest, nil) then
+    exit; // success
+  if fHTTPS and
+     (GetLastError = ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) and
+     IgnoreSSLCertificateErrors and
+     WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
+       @SECURITY_FLAT_IGNORE_CERTIFICATES, SizeOf(SECURITY_FLAT_IGNORE_CERTIFICATES)) and
+     WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
+       pointer(WINHTTP_NO_CLIENT_CERT_CONTEXT), 0) and
+     _SendRequest(L) and
+     WinHttpApi.ReceiveResponse(fRequest, nil) then
+    exit; // success with no certificate validation
+  // if we reached here, an error occured
+  RaiseLastModuleError(winhttpdll, EWinHttp);
 end;
 
 function TWinHttp.InternalGetInfo(Info: cardinal): RawUtf8;
