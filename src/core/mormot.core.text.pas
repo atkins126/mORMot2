@@ -1986,6 +1986,12 @@ procedure K(value: Int64; out result: TShort16); overload;
 function K(value: Int64): TShort16; overload;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
+/// convert a milliseconds elapsed time into a human readable value
+// - append 'ms', 's', 'm', 'h' and 'd' symbol for the given value range,
+// with two fractional digits
+function MilliSecToString(MS: QWord): TShort16; overload;
+  {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
+
 /// convert a micro seconds elapsed time into a human readable value
 // - append 'us', 'ms', 's', 'm', 'h' and 'd' symbol for the given value range,
 // with two fractional digits
@@ -5740,12 +5746,18 @@ end;
 
 procedure TTextWriter.AddInstancePointer(Instance: TObject; SepChar: AnsiChar;
   IncludeUnitName, IncludePointer: boolean);
+var
+  u: PShortString;
 begin
   if IncludeUnitName and
      Assigned(ClassUnit) then
   begin
-    AddShort(ClassUnit(PClass(Instance)^)^);
-    Add('.');
+    u := ClassUnit(PClass(Instance)^);
+    if u^[0] <> #0 then
+    begin
+      AddShort(u^);
+      Add('.');
+    end;
   end;
   AddShort(PPShortString(PPAnsiChar(Instance)^ + vmtClassName)^^);
   if IncludePointer then
@@ -9833,6 +9845,11 @@ begin
     dec(L);
   for i := 1 to L div 3 do
     insert(ThousandSep, result, Len - i * 3);
+end;
+
+function MilliSecToString(MS: QWord): TShort16;
+begin
+  MicroSecToString(MS * 1000, result);
 end;
 
 function MicroSecToString(Micro: QWord): TShort16;

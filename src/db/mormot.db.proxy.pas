@@ -380,7 +380,8 @@ type
     // - this overridden implementation will use JSON for transmission, and
     // binary encoding only for parameters (to avoid unneeded conversions, e.g.
     // when called from mormot.orm.sql.pas)
-    procedure ExecutePreparedAndFetchAllAsJson(Expanded: boolean; out Json: RawUtf8); override;
+    procedure ExecutePreparedAndFetchAllAsJson(Expanded: boolean;
+      out Json: RawUtf8; ReturnedRowCount: PPtrInt = nil); override;
     /// append all rows content as binary stream
     // - will save the column types and name, then every data row in optimized
     // binary format (faster and smaller than JSON)
@@ -1110,17 +1111,17 @@ var
   msgin, msgout, msgRaw: RawByteString;
   header: TRemoteMessageHeader;
   outheader: PRemoteMessageHeader;
-  intext: RawUtf8 absolute Input;
+  intext: RawUtf8                             absolute Input;
   inexec: TSqlDBProxyConnectionCommandExecute absolute Input;
   msg: PAnsiChar;
-  outdef: TSqlDBDefinition absolute Output;
-  outint64: Int64 absolute Output;
-  outboolean: boolean absolute Output;
-  outcolarr: TSqlDBColumnDefineDynArray absolute Output;
-  outindexarr: TSqlDBIndexDefineDynArray absolute Output;
-  outarr: TRawUtf8DynArray absolute Output;
-  oututf8: RawUtf8 absolute Output;
-  outnamevalue: TSynNameValue absolute Output;
+  outdef: TSqlDBDefinition                    absolute Output;
+  outint64: Int64                             absolute Output;
+  outboolean: boolean                         absolute Output;
+  outcolarr: TSqlDBColumnDefineDynArray       absolute Output;
+  outindexarr: TSqlDBIndexDefineDynArray      absolute Output;
+  outarr: TRawUtf8DynArray                    absolute Output;
+  oututf8: RawUtf8                            absolute Output;
+  outnamevalue: TSynNameValue                 absolute Output;
 begin
   // use our optimized RecordLoadSave/DynArrayLoadSave binary serialization
   header.Magic := REMOTE_MAGIC;
@@ -1167,7 +1168,11 @@ begin
       outint64 := PInt64(msg)^;
     cGetDbms:
       outdef := TSqlDBDefinition(msg^);
-    cConnect, cDisconnect, cCommit, cRollback, cQuit:
+    cConnect,
+    cDisconnect,
+    cCommit,
+    cRollback,
+    cQuit:
       ; // no output parameters here
     cTryStartTransaction:
       outboolean := boolean(msg^);
@@ -1179,7 +1184,10 @@ begin
       DynArrayLoad(outarr, msg, TypeInfo(TRawUtf8DynArray));
     cGetForeignKeys:
       outnamevalue.SetBlobDataPtr(msg);
-    cExecute, cExecuteToBinary, cExecuteToJson, cExecuteToExpandedJson:
+    cExecute,
+    cExecuteToBinary,
+    cExecuteToJson,
+    cExecuteToExpandedJson:
       FastSetString(oututf8, msg, length(msgout) - SizeOf(header));
     cExceptionRaised: // msgout is ExceptionClassName+#0+ExceptionMessage
       raise ESqlDBRemote.CreateUtf8('%.Process(%): server raised % with ''%''',
@@ -1709,10 +1717,13 @@ begin
 end;
 
 procedure TSqlDBProxyStatement.ExecutePreparedAndFetchAllAsJson(
-  Expanded: boolean; out Json: RawUtf8);
+  Expanded: boolean; out Json: RawUtf8; ReturnedRowCount: PPtrInt);
 var
   exec: TSqlDBProxyConnectionCommandExecute;
 begin
+  if ReturnedRowCount <> nil then
+    raise ESqlDBRemote.CreateUtf8('%.ExecutePreparedAndFetchAllAsJson() ' +
+      'does not support ReturnedRowCount', [self]);
   ParamsToCommand(exec);
   TSqlDBProxyConnectionPropertiesAbstract(fConnection.Properties).Process(
     EXECUTE_PREPARED_JSON[Expanded], exec, Json);

@@ -2351,11 +2351,9 @@ end;
 
 function Utf8TruncatedLength(text: PAnsiChar; textlen, maxBytes: PtrUInt): PtrInt;
 begin
+  result := textlen;
   if textlen < maxBytes then
-  begin
-    result := textlen;
     exit;
-  end;
   result := maxBytes;
   while (result > 0) and
         (ord(text[result]) and $c0 = $80) do
@@ -2405,6 +2403,7 @@ end;
 var
   // internal list of TSynAnsiConvert instances
   SynAnsiConvertList: array of TSynAnsiConvert;
+  SynAnsiConvertListLock: TRWLock;
   SynAnsiConvertListCount: integer;
   SynAnsiConvertListCodePage: TWordDynArray; // for fast lookup in CPU L1 cache
 
@@ -2586,6 +2585,7 @@ function GetEngine(aCodePage: cardinal): TSynAnsiConvert;
 var
   i: PtrInt;
 begin
+  SynAnsiConvertListLock.ReadOnlyLock; // concurrent read lock
   {$ifdef FPC}
   i := IndexWord(pointer(SynAnsiConvertListCodePage)^,
   {$else}
@@ -2596,6 +2596,7 @@ begin
     result := SynAnsiConvertList[i]
   else
     result := nil;
+  SynAnsiConvertListLock.ReadOnlyUnLock;
 end;
 
 function NewEngine(aCodePage: cardinal): TSynAnsiConvert;
@@ -2614,8 +2615,10 @@ begin
     else
       result := TSynAnsiConvert.Create(aCodePage);
     RegisterGlobalShutdownRelease(result);
+    SynAnsiConvertListLock.WriteLock;
     ObjArrayAdd(SynAnsiConvertList, result);
     AddWord(SynAnsiConvertListCodePage, SynAnsiConvertListCount, aCodePage);
+    SynAnsiConvertListLock.WriteUnLock;
   finally
     GlobalUnLock;
   end;
