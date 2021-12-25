@@ -151,7 +151,7 @@ type
   TServiceFactoryServer = class(TServiceFactoryServerAbstract)
   protected
     fRestServer: TRestServer; // just a transtyped fResolver value
-    fInstanceLock: TRWLock;
+    fInstanceLock: TRWLightLock;
     fInstance: TServiceFactoryServerInstanceDynArray;
     fInstances: TDynArray;
     fInstanceCapacity: integer; // some void entries may have P^.InstanceID=0
@@ -169,7 +169,7 @@ type
     fSharedInterface: IInterface;
     fBackgroundThread: TSynBackgroundThreadMethod;
     fOnMethodExecute: TOnServiceCanExecute;
-    fOnExecute: array of TOnInterfaceMethodExecute;
+    fOnExecute: TInterfaceMethodExecuteEventDynArray;
     fExecuteLock: TRTLCriticalSection;
     procedure SetServiceLogByIndex(const aMethods: TInterfaceFactoryMethodBits;
       const aLogRest: IRestOrm; aLogClass: TOrmServiceLogClass);
@@ -812,7 +812,7 @@ begin
      not (fInstanceCreation in [sicClientDriven, sicPerSession]) then
     exit;
   tix := GetTickCount64 shr 10;
-  fInstanceLock.ReadOnlyLock;
+  fInstanceLock.ReadLock;
   try
     P := pointer(fInstance);
     for i := 1 to fInstanceCapacity do
@@ -825,7 +825,7 @@ begin
       inc(P);
     end;
   finally
-    fInstanceLock.ReadOnlyUnLock;
+    fInstanceLock.ReadUnLock;
   end;
 end;
 
@@ -840,7 +840,7 @@ begin
      (not Assigned(aEvent)) or
      (fInstanceCount = 0) then
     exit;
-  fInstanceLock.ReadOnlyLock;
+  fInstanceLock.ReadLock;
   try
     P := pointer(fInstance);
     for i := 1 to fInstanceCapacity do
@@ -851,7 +851,7 @@ begin
       inc(P);
     end;
   finally
-    fInstanceLock.ReadOnlyUnLock;
+    fInstanceLock.ReadUnLock;
   end;
 end;
 
@@ -1027,7 +1027,7 @@ begin
   if fInstanceCount > 0 then
   begin
     // non-blocking regular retrieval of any existing TInterfacedObject
-    fInstanceLock.ReadOnlyLock;
+    fInstanceLock.ReadLock;
     try
       P := FindInstance(pointer(fInstance), fInstanceCapacity, Inst.InstanceID);
       if P <> nil then
@@ -1038,7 +1038,7 @@ begin
         exit;
       end;
     finally
-      fInstanceLock.ReadOnlyUnLock;
+      fInstanceLock.ReadUnLock;
     end;
   end;
   // new TInterfacedObject corresponding to this session/user/group/thread
@@ -1346,7 +1346,7 @@ begin
         exec.BackgroundExecutionThread := fBackgroundThread;
         exec.OnCallback := Ctxt.ExecuteCallback;
         if fOnExecute <> nil then
-          exec.AddInterceptors(exec.OnExecute);
+          exec.AddInterceptors(fOnExecute);
         if Ctxt.ServiceExecution^.LogRest <> nil then
           exec.AddInterceptor(OnLogRestExecuteMethod);
         if (fImplementationClassKind = ickFake) and

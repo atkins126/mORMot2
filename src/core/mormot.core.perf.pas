@@ -835,7 +835,7 @@ type
   // to gather low-level CPU and RAM information for the given set of processes
   // - is able to keep an history of latest sample values
   // - use Current class function to access a process-wide instance
-  TSystemUse = class(TSynPersistentRWLock)
+  TSystemUse = class(TSynPersistentRWLightLock)
   protected
     fProcess: TSystemUseProcessDynArray;
     fProcesses: TDynArray;
@@ -845,7 +845,7 @@ type
     fOnMeasured: TOnSystemUseMeasured;
     fTimer: TObject;
     fUnsubscribeProcessOnAccessError: boolean;
-    function ProcessIndex(aProcessID: integer): PtrInt;
+    function LockedProcessIndex(aProcessID: integer): PtrInt;
   public
     /// a VCL's TTimer.OnTimer compatible event
     // - to be run every few seconds and retrieve the CPU and RAM use:
@@ -1566,7 +1566,7 @@ end;
 
 procedure TSynMonitor.ProcessErrorFmt(const Fmt: RawUtf8; const Args: array of const);
 begin
-  ProcessError(RawUtf8ToVariant(FormatUtf8(Fmt, Args)));
+  ProcessError(FormatVariant(Fmt, Args));
 end;
 
 procedure TSynMonitor.ProcessErrorRaised(E: Exception);
@@ -2414,6 +2414,12 @@ begin
       'disk', GetDiskPartitionsText({nocache=}false, {withfree=}true)]);
 end;
 
+{$ifdef NOEXCEPTIONINTERCEPT}
+function GetLastExceptions(Depth: integer): variant;
+begin
+  VarClear(result{%H-});
+end;
+{$else}
 function GetLastExceptions(Depth: integer): variant;
 var
   info: TSynLogExceptionInfoDynArray;
@@ -2427,6 +2433,7 @@ begin
   for i := 0 to high(info) do
     TDocVariantData(result).AddItemText(ToText(info[i]));
 end;
+{$endif NOEXCEPTIONINTERCEPT}
 
 
 { TSystemUse }
@@ -2527,7 +2534,7 @@ begin
     exit;
   fSafe.WriteLock;
   try
-    i := ProcessIndex(aProcessID);
+    i := LockedProcessIndex(aProcessID);
     if i >= 0 then
     begin
       fProcesses.Delete(i);
@@ -2538,7 +2545,7 @@ begin
   end;
 end;
 
-function TSystemUse.ProcessIndex(aProcessID: integer): PtrInt;
+function TSystemUse.LockedProcessIndex(aProcessID: integer): PtrInt;
 begin
   // caller should have made any fSafe lock
   {$ifdef OSWINDOWS}
@@ -2559,9 +2566,9 @@ begin
   result := false;
   if self <> nil then
   begin
-    fSafe.ReadOnlyLock;
+    fSafe.ReadLock;
     try
-      i := ProcessIndex(aProcessID);
+      i := LockedProcessIndex(aProcessID);
       if i >= 0 then
       begin
         with fProcess[i] do
@@ -2571,7 +2578,7 @@ begin
           exit;
       end;
     finally
-      fSafe.ReadOnlyUnLock;
+      fSafe.ReadUnLock;
     end;
   end;
   FillCharFast(aData, SizeOf(aData), 0);
@@ -2616,9 +2623,9 @@ begin
   result := nil;
   if self = nil then
     exit;
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   try
-    i := ProcessIndex(aProcessID);
+    i := LockedProcessIndex(aProcessID);
     if i >= 0 then
       with fProcess[i] do
       begin
@@ -2645,7 +2652,7 @@ begin
         end;
       end;
   finally
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
 end;
 

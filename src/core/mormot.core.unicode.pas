@@ -1096,7 +1096,8 @@ function IdemPCharWithoutWhiteSpace(p: PUtf8Char; up: PAnsiChar): boolean;
 // - chars are compared as 7-bit Ansi only (no accentuated characters)
 // - warning: this function expects upArray[] items to have AT LEAST TWO
 // CHARS (it will use a fast 16-bit comparison of initial 2 bytes)
-function IdemPCharArray(p: PUtf8Char; const upArray: array of PAnsiChar): integer; overload;
+// - consider IdemPPChar() which is faster but a bit more verbose
+function IdemPCharArray(p: PUtf8Char; const upArray: array of PAnsiChar): integer;
 
 /// returns the index of a matching beginning of p^ in nil-terminated up^ array
 // - returns -1 if no item matched
@@ -1110,7 +1111,7 @@ function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): PtrInt;
 // - returns -1 if no item matched
 // - ignore case - upArray^ must be already Upper
 // - chars are compared as 7-bit Ansi only (no accentuated characters)
-function IdemPCharArray(p: PUtf8Char; const upArrayBy2Chars: RawUtf8): PtrInt; overload;
+function IdemPCharArrayBy2(p: PUtf8Char; const upArrayBy2Chars: RawUtf8): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// returns true if the beginning of p^ is the same as up^
@@ -1205,6 +1206,15 @@ function StrIComp(Str1, Str2: pointer): PtrInt;
 
 /// StrIComp-like function with a lookup table and Str1/Str2 expected not nil
 function StrICompNotNil(Str1, Str2: pointer; Up: PNormTableByte): PtrInt;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// StrIComp-like function with a length, lookup table and Str1/Str2 expected not nil
+function StrICompLNotNil(Str1, Str2: pointer; Up: PNormTableByte; L: PtrInt): PtrInt;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// StrIComp function with a length, lookup table and Str1/Str2 expected not nil
+// - returns L for whole match, or < L for a partial match
+function StrILNotNil(Str1, Str2: pointer; Up: PNormTableByte; L: PtrInt): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
 type
@@ -1352,6 +1362,11 @@ function SortDynArrayStringI(const A, B): integer;
 /// compare two "array of WideString/UnicodeString" elements, with no case sensitivity
 // - implemented here since would call AnsiICompW()
 function SortDynArrayUnicodeStringI(const A, B): integer;
+
+var
+  /// a quick wrapper to SortDynArrayAnsiString or SortDynArrayAnsiStringI
+  // comparison functions
+  SortDynArrayAnsiStringByCase: array[{CaseInsensitive=}boolean] of TDynArraySortCompare;
 
 /// SameText() overloaded function with proper UTF-8 decoding
 // - fast version using NormToUpper[] array for all WinAnsi characters
@@ -2403,7 +2418,7 @@ end;
 var
   // internal list of TSynAnsiConvert instances
   SynAnsiConvertList: array of TSynAnsiConvert;
-  SynAnsiConvertListLock: TRWLock;
+  SynAnsiConvertListLock: TRWLightLock;
   SynAnsiConvertListCount: integer;
   SynAnsiConvertListCodePage: TWordDynArray; // for fast lookup in CPU L1 cache
 
@@ -2585,18 +2600,14 @@ function GetEngine(aCodePage: cardinal): TSynAnsiConvert;
 var
   i: PtrInt;
 begin
-  SynAnsiConvertListLock.ReadOnlyLock; // concurrent read lock
-  {$ifdef FPC}
-  i := IndexWord(pointer(SynAnsiConvertListCodePage)^,
-  {$else}
+  SynAnsiConvertListLock.ReadLock; // concurrent read lock
   i := WordScanIndex(pointer(SynAnsiConvertListCodePage),
-  {$endif FPC}
     SynAnsiConvertListCount, aCodePage);
   if i >= 0 then
     result := SynAnsiConvertList[i]
   else
     result := nil;
-  SynAnsiConvertListLock.ReadOnlyUnLock;
+  SynAnsiConvertListLock.ReadUnLock;
 end;
 
 function NewEngine(aCodePage: cardinal): TSynAnsiConvert;
@@ -4427,28 +4438,13 @@ begin
   result := -1;
 end;
 
-function IdemPCharArray(p: PUtf8Char; const upArrayBy2Chars: RawUtf8): PtrInt;
-var
-  w: word;
-  u: PWordArray; // better code generation when inlined
-  {$ifdef CPUX86NOTPIC}
-  tab: TNormTableByte absolute NormToUpperAnsi7;
-  {$else}
-  tab: PByteArray; // faster on PIC/ARM and x86_64
-  {$endif CPUX86NOTPIC}
+function IdemPCharArrayBy2(p: PUtf8Char; const upArrayBy2Chars: RawUtf8): PtrInt;
 begin
   if p <> nil then
-  begin
-    {$ifndef CPUX86NOTPIC}
-    tab := @NormToUpperAnsi7;
-    {$endif CPUX86NOTPIC}
-    w := tab[ord(p[0])] + tab[ord(p[1])] shl 8;
-    u := pointer(upArrayBy2Chars);
-    for result := 0 to pred(length(upArrayBy2Chars) shr 1) do
-      if u[result] = w then
-        exit;
-  end;
-  result := -1;
+    result := WordScanIndex(pointer(upArrayBy2Chars), length(upArrayBy2Chars) shr 1,
+      NormToUpperAnsi7Byte[ord(p[0])] + NormToUpperAnsi7Byte[ord(p[1])] shl 8)
+  else
+    result := -1;
 end;
 
 function IdemPCharU(p, up: PUtf8Char): boolean;
@@ -4804,6 +4800,35 @@ begin
     result := C1 - C2;
   end;
 end;
+
+function StrICompLNotNil(Str1, Str2: pointer; Up: PNormTableByte; L: PtrInt): PtrInt;
+begin
+  result := 0;
+  repeat
+    if Up[PByteArray(Str1)[result]] = Up[PByteArray(Str2)[result]] then
+    begin
+      inc(result);
+      if result < L then
+        continue
+      else
+        break;
+    end;
+    result := PByteArray(Str1)[result] - PByteArray(Str2)[result];
+    exit;
+  until false;
+  result := 0;
+end;
+
+function StrILNotNil(Str1, Str2: pointer; Up: PNormTableByte; L: PtrInt): PtrInt;
+begin
+  result := 0;
+  repeat
+    if Up[PByteArray(Str1)[result]] <> Up[PByteArray(Str2)[result]] then
+      exit;
+    inc(result);
+  until result = L;
+end;
+
 
 function StrIComp(Str1, Str2: pointer): PtrInt;
 var
@@ -5959,8 +5984,11 @@ end;
 // freely inspired by Bero's PUCU library, released under zlib license
 //  https://github.com/BeRo1985/pucu  (C)2016-2020 Benjamin Rosseaux
 
+{$define UU_COMPRESSED}
+// 1KB compressed static table in the exe renders into our 20KB UU[] array :)
+
 type
-  // 20,016 bytes for full Unicode 10.0 case folding branchless conversion :)
+  // 20,016 bytes for full Unicode 10.0 case folding branchless conversion
   TUnicodeUpperTable = object
     Block: array[0..37, 0..127] of integer;
     IndexHi: array[0..271] of byte;
@@ -5981,6 +6009,9 @@ const
   UU_MAX = $10ffff;
 
 var
+  {$ifdef UU_COMPRESSED}
+  UU: TUnicodeUpperTable;
+  {$else}
   UU: TUnicodeUpperTable = (
     Block: (
      (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -6257,6 +6288,7 @@ var
       12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 37, 12, 12,
       12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12));
   );
+  {$endif UU_COMPRESSED}
 
 function TUnicodeUpperTable.Ucs4Upper(c: PtrUInt): PtrUInt;
 var
@@ -6785,13 +6817,9 @@ nxt:u0 := U;
 end;
 
 
-procedure InitializeUnit;
-var
-  i: PtrInt;
-  c: AnsiChar;
 const
-  n2u: array[138..255] of byte =
-    // reference 8-bit upper chars as in WinAnsi / code page 1252
+  // reference 8-bit upper chars as in WinAnsi / code page 1252
+  WinAnsiToUp: array[138..255] of byte =
     (83, 139, 140, 141, 90, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152,
      153, 83, 155, 140, 157, 90, 89, 160, 161, 162, 163, 164, 165, 166, 167,
      168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181,
@@ -6800,6 +6828,84 @@ const
      79, 215, 79, 85, 85, 85, 85, 89, 222, 223, 65, 65, 65, 65, 65, 65,
      198, 67, 69, 69, 69, 69, 73, 73, 73, 73, 68, 78, 79, 79, 79, 79,
      79, 247, 79, 85, 85, 85, 85, 89, 222, 89);
+
+{$ifdef UU_COMPRESSED}
+
+  // 1KB compressed buffer which renders into our 20,016 bytes UU[] array
+  UU_: array[byte] of cardinal = (
+    $040019FD, $FF5A6024, $00855A00, $FFFFFFE0, $5A5201F0, $02E700E8, $FFE0AA5A,
+    $E0045A4B, $5A790BFF, $045A0007, $A045A1FF, $DB1878BA, $01A82B01, $0145A000,
+    $1DA45008, $041E5A80, $401DA450, $5A8F185A, $FFFFFED4, $590B5AC3, $0C5A84A4,
+    $5314A453, $610008A4, $A4520F5A, $82F5A1A3, $F1EBB5AB, $5A44DDF7, $52105A84,
+    $5A845AA4, $5A4A5AC4, $5A385AC6, $11A45217, $10ABA500, $45A00200, $4F5A4401,
+    $0000B15A, $A05A4F04, $5A830145, $C65A0018, $5EBAA05A, $20245AC0, $85A1A452,
+    $5BB55700, $00002A3F, $065A2A3F, $5B04A453, $1F055A40, $A11C02A1, $02A11E02,
+    $3200012E, $45A10001, $C2000133, $3645A10C, $45A10001, $4F000135, $00550690,
+    $000E5AA5, $A54B0CC2, $013165A1, $2845A100, $440000A5, $012FAC02, $00012D00,
+    $F70A5144, $41000029, $000A5AA5, $2AC4A16B, $45A10D22, $2B0291FD, $85A10001,
+    $1C00022A, $A129E700, $000226A5, $0D930008, $512A000C, $BB0D920A, $05270001,
+    $0001B900, $0644145A, $25000107, $00280002, $120A5115, $F1F552A5, $54009C55,
+    $A453AF5A, $5AC45A44, $0082000C, $5A208400, $FFDA00BB, $AD6EFFFF, $09DB15D5,
+    $F045A100, $01E13201, $1201F000, $C10001C0, $45A10005, $C70001C2, $C5A10001,
+    $CA0001D1, $01F80001, $A045A100, $01AA33BA, $0001B000, $D0000007, $001EFBFB,
+    $A2FFFF8C, $0002A0AB, $85A15A83, $E0D0BAA2, $01F00BFF, $2E01F012, $04F004F2,
+    $3645A02A, $240D45A0, $5A44A459, $847E5A40, $115A405A, $400002F1, $45A0115A,
+    $CC5A400D, $1FD000C4, $01255507, $8202F000, $55F1F555, $00C955F4, $700001F8,
+    $85A10200, $FFFFE792, $9C018193, $859E0181, $01819D01, $DB0181A4, $89C20181,
+    $00C5F558, $3C90F1E4, $E5A18A04, $E5A10EE6, $5A40BAA2, $CC5A40CC, $01C50014,
+    $A045B100, $45AAFFBA, $00000008, $5A070080, $04800023, $80002B5A, $80000604,
+    $00000635, $BC2F5A0E, $00F75B6D, $D875A108, $050A30A7, $014A0009, $5604A200,
+    $056A0001, $42000164, $00018006, $01700802, $7E070200, $A17E0001, $070080B5,
+    $80080001, $00022635, $35860002, $C4304825, $810975A1, $01E3DBB5, $090010A5,
+    $8004335A, $80053B5A, $5A07000F, $F1CA0137, $E4006C55, $84A501FF, $0001F000,
+    $8E2A00F0, $5AEDC05B, $55F15B04, $002F55F4, $900001E6, $F5525201, $87FFD019,
+    $5A1202F0, $000C5A84, $FFFFD5D5, $AA02A1D8, $1845A545, $5A84A453, $40A45328,
+    $5A40CC5A, $FB5FC736, $445804BF, $305B045A, $01C1A000, $A182C5E0, $B1C5E245,
+    $F4C5E345, $A4504E55, $A4504C77, $1E55F441, $C417A450, $405A445A, $588A9C5A,
+    $5A405A84, $045B0406, $C05A445B, $592C2A5A, $C6F021A4, $6E55F49B, $01FC6000,
+    $300070A5, $60FFFF68, $0970FF7C, $F1F55219, $FFE00655, $35F55257, $0001D800,
+    $528A0270, $2255F1F5, $527F7FD0, $F20011F5, $00063B03, $B603F000, $E035F552,
+    $01F057FF, $09F55206, $0001DE00, $5A720210, $020100F1, $0403075A, $0503045A,
+    $0C5A0706, $F15A0803, $00000012, $03120103, $08675104, $5A0B0A09, $5A0D0C1B,
+    $0F0E0C11, $1211100C, $140C0C13, $0C055A15, $00005A16, $0C0E0000, $5A191817,
+    $1B1A0C31, $065A1D1C, $5A1F1E0C, $5A200C26, $22210C09, $230C0F5A, $0000175A,
+    $240C0000, $250C205A, $000C0D5A, $00000000);
+
+procedure InitializeUU;
+var
+  tmp: array[0..7000] of byte; // need only 6653 bytes
+begin
+  // Uppercase Unicode table RLE + SynLZ decompression from 1KB to 20KB :)
+  if (RleUnCompress(@tmp, @UU, SynLZdecompress1(@UU_, 1019, @tmp)) <> SizeOf(UU)) or
+     (crc32c(0, @UU, SizeOf(UU)) <> $7343D053) then
+    raise ESynUnicode.Create('UU Table Decompression Failed'); // paranoid
+end;
+
+{$endif UU_COMPRESSED}
+
+(*
+procedure doUU;
+var
+  tmp1, tmp2: array[0..5500] of cardinal;
+  rle, lz, i: PtrInt;
+  l: RawUtf8;
+begin
+  rle := RleCompress(@UU, @tmp1, SizeOf(UU), SizeOf(tmp1));
+  lz := SynLZCompress1(@tmp1, rle, @tmp2);
+  writeln(SizeOf(UU)); writeln(rle); writeln(lz);
+  writeln('UU_ = array[byte] of cardinal = ('); l := '  ';
+  for i := 0 to 255 do begin
+    l := l + '$' + HexStr(tmp2[i], 8) + ',';
+    if length(l) > 70 then begin writeln(l); l := '  '; end;
+  end;
+  writeln(l, ');');
+end;
+*)
+
+procedure InitializeUnit;
+var
+  i: PtrInt;
+  c: AnsiChar;
 begin
   // initialize internal lookup tables for various text conversions
   for i := 0 to 255 do
@@ -6808,7 +6914,7 @@ begin
   for i := ord('a') to ord('z') do
     dec(NormToUpperAnsi7Byte[i], 32);
   MoveFast(NormToUpperAnsi7, NormToUpper, 138);
-  MoveFast(n2u, NormToUpperByte[138], SizeOf(n2u));
+  MoveFast(WinAnsiToUp, NormToUpperByte[138], SizeOf(WinAnsiToUp));
   for i := 0 to 255 do
   begin
     c := NormToUpper[AnsiChar(i)];
@@ -6839,6 +6945,12 @@ begin
   end;
   StrCompByCase[false] := @StrComp;
   StrCompByCase[true] := @StrIComp;
+  {$ifdef CPUINTEL}
+  SortDynArrayAnsiStringByCase[false] := @SortDynArrayAnsiString;
+  {$else}
+  SortDynArrayAnsiStringByCase[false] := @SortDynArrayRawByteString;
+  {$endif CPUINTEL}
+  SortDynArrayAnsiStringByCase[true] := @SortDynArrayAnsiStringI;
   // setup basic Unicode conversion engines
   SetLength(SynAnsiConvertListCodePage, 16); // no resize -> more thread safe
   CurrentAnsiConvert := TSynAnsiConvert.Engine(Unicode_CodePage);
@@ -6856,6 +6968,9 @@ end;
 
 
 initialization
+  {$ifdef UU_COMPRESSED}
+  InitializeUU;
+  {$endif UU_COMPRESSED}
   InitializeUnit;
 
 

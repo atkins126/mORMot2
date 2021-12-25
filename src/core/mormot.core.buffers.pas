@@ -8,7 +8,7 @@ unit mormot.core.buffers;
 
    Low-Level Memory Buffers Processing Functions shared by all framework units
    - Variable Length Integer Encoding / Decoding
-   - TAlgoCompress Compression/Decompression Classes - with AlgoSynLZ
+   - TAlgoCompress Compression/Decompression Classes - with AlgoSynLZ AlgoRleLZ
    - TFastReader / TBufferWriter Binary Streams
    - Base64, Base64Uri, Base58 and Baudot Encoding / Decoding
    - URI-Encoded Text Buffer Process
@@ -234,7 +234,7 @@ type
     /// contains a genuine byte identifier for this algorithm
     // - 0 is reserved for stored, 1 for TAlgoSynLz, 2/3 for TAlgoDeflate/Fast
     // (in mormot.core.zip.pas), 4/5/6 for TAlgoLizard/Fast/Huffman
-    // (in mormot.lib.lizard.pas)
+    // (in mormot.lib.lizard.pas), 7/8 for TAlgoRleLZ/TAlgoRle
     property AlgoID: byte
       read fAlgoID;
   public
@@ -451,7 +451,7 @@ type
   TAlgoCompressWithNoDestLen = class(TAlgoCompress)
   protected
     /// inherited classes should implement this single method for the actual process
-    // - dstMax is oinly used for doUncompressPartial
+    // - dstMax is mainly used for doUncompressPartial
     function RawProcess(src, dst: pointer; srcLen, dstLen, dstMax: integer;
       process: TAlgoCompressWithNoDestLenProcess): integer; virtual; abstract;
   public
@@ -466,11 +466,52 @@ type
       Partial: pointer; PartialLen, PartialLenMax: integer): integer; override;
   end;
 
+  /// implement our SynLZ compression with RLE preprocess as a TAlgoCompress class
+  // - SynLZ is very good with JSON or text, but not so efficient when its input
+  // has a lot of padding (e.g. a database file, or unoptimized raw binary)
+  // - this class would make a first pass with RleCompress() before SynLZ
+  // - if RLE has no effect during compression, will fallback to plain SynLZ
+  // with no RLE pass during decompression
+  TAlgoRleLZ = class(TAlgoCompressWithNoDestLen)
+  protected
+    function RawProcess(src, dst: pointer; srcLen, dstLen, dstMax: integer;
+      process: TAlgoCompressWithNoDestLenProcess): integer; override;
+  public
+    /// set AlgoID = 7 as genuine byte identifier for RLE + SynLZ
+    constructor Create; override;
+    /// get maximum possible (worse) compressed size for the supplied length
+    function AlgoCompressDestLen(PlainLen: integer): integer; override;
+  end;
+
+  /// implement RLE compression as a TAlgoCompress class
+  // - if RLE has no effect during compression, will fallback to plain store
+  TAlgoRle = class(TAlgoCompressWithNoDestLen)
+  protected
+    function RawProcess(src, dst: pointer; srcLen, dstLen, dstMax: integer;
+      process: TAlgoCompressWithNoDestLenProcess): integer; override;
+  public
+    /// set AlgoID = 8 as genuine byte identifier for RLE
+    constructor Create; override;
+    /// get maximum possible (worse) compressed size for the supplied length
+    function AlgoCompressDestLen(PlainLen: integer): integer; override;
+  end;
+
 var
-  /// acccess to our fast SynLZ compression as a TAlgoCompress class
+  /// our fast SynLZ compression as a TAlgoCompress class
   // - please use this global variable methods instead of the deprecated
   // SynLZCompress/SynLZDecompress wrapper functions
   AlgoSynLZ: TAlgoCompress;
+
+  /// SynLZ compression with RLE preprocess as a TAlgoCompress class
+  // - SynLZ is not efficient when its input has a lot of identical characters
+  // (e.g. a database content, or a raw binary buffer) - try with this class
+  // which is slower than AlgoSynLZ but may have better ratio on such content
+  AlgoRleLZ: TAlgoCompress;
+
+  /// Run-Length-Encoding (RLE) compression as a TAlgoCompress class
+  // - if RLE has no effect during compression, will fallback to plain store
+  AlgoRle: TAlgoCompress;
+
 
 const
   /// CompressionSizeTrigger parameter SYNLZTRIG[true] will disable then
@@ -481,6 +522,9 @@ const
   /// used e.g. as when ALGO_SAFE[SafeDecompression] for TAlgoCompress.Decompress
   ALGO_SAFE: array[boolean] of TAlgoCompressLoad = (
     aclNormal, aclSafeSlow);
+
+  COMPRESS_STORED = #0;
+  COMPRESS_SYNLZ = 1;
 
 
 /// fast concatenation of several AnsiStrings
@@ -702,6 +746,9 @@ type
     function RemainingLength: PtrUInt;
       {$ifdef HASINLINE}inline;{$endif}
   end;
+
+  /// exception raised during buffer processing
+  EBufferException = class(ESynException);
 
   /// available kind of integer array storage, corresponding to the data layout
   // of TBufferWriter
@@ -1850,6 +1897,9 @@ type
     // - optionally call OnLog and OnProgress callbacks
     function DoReport(Sender: TObject; ReComputeElapsed: boolean): boolean;
   end;
+
+  /// exception raised during TStreamRedirect processing
+  EStreamRedirect = class(ESynException);
 
   /// an abstract pipeline stream able to redirect and hash read/written content
   // - can be used either Read() or Write() calls during its livetime
@@ -3942,7 +3992,7 @@ begin
   if BufLen > 1 shl 22 then
     fBufLen := 1 shl 22 // 4 MB sounds right enough
   else if BufLen < 128 then
-    raise ESynException.CreateUtf8('%.Create(BufLen=%)', [self, BufLen]);
+    raise EBufferException.CreateUtf8('%.Create(BufLen=%)', [self, BufLen]);
   fBufLen := BufLen;
   fBufLen16 := fBufLen - 16;
   fStream := aStream;
@@ -4001,7 +4051,7 @@ begin
   if fStream.InheritsFrom(TRawByteStringStream) and
      (fTotalFlushed > _STRMAXSIZE) then
     // Delphi strings have a 32-bit length so you should change your algorithm
-    raise ESynException.CreateUtf8('%.Write: % overflow (%)',
+    raise EBufferException.CreateUtf8('%.Write: % overflow (%)',
       [self, fStream, KBNoSpace(fTotalFlushed)]);
   fStream.WriteBuffer(Data^, DataLen);
 end;
@@ -4560,7 +4610,7 @@ begin
             PBeg := PAnsiChar(P) + 4; // leave space for chunk size
             P := PByte(CleverStoreInteger(pointer(Values), PBeg, PEnd, ValuesCount, n));
             if P = nil then
-              raise ESynException.CreateUtf8(
+              raise EBufferException.CreateUtf8(
                 '%.WriteVarUInt32Array: data not sorted', [self]);
             PInteger(PBeg - 4)^ := PAnsiChar(P) - PBeg;
           end;
@@ -4663,7 +4713,7 @@ begin
   result := nil;
   siz := GetTotalWritten;
   if siz > _DAMAXSIZE then
-    raise ESynException.CreateUtf8('%.FlushToBytes: overflow (%)', [KB(siz)]);
+    raise EBufferException.CreateUtf8('%.FlushToBytes: overflow (%)', [KB(siz)]);
   SetLength(result, siz);
   if fStream.Position = 0 then
     // direct assignment from internal buffer
@@ -4698,10 +4748,6 @@ end;
 { ************ TAlgoCompress Compression/Decompression Classes }
 
 { TAlgoCompress }
-
-const
-  COMPRESS_STORED = #0;
-  COMPRESS_SYNLZ = 1;
 
 var
   // don't use TObjectList before mormot.core.json registered TRttiJson
@@ -4877,7 +4923,7 @@ begin
     inc(R, BufferOffset);
     PCardinal(R)^ := crc;
     len := AlgoCompress(Plain, PlainLen, R + 9);
-    if len + 64 >= PlainLen then
+    if len >= PlainLen then
     begin
       // store if compression was not worth it
       R[4] := COMPRESS_STORED;
@@ -5599,6 +5645,119 @@ begin
 end;
 
 
+{ TAlgoRleLZ }
+
+function TAlgoRleLZ.RawProcess(src, dst: pointer; srcLen, dstLen, dstMax: integer;
+  process: TAlgoCompressWithNoDestLenProcess): integer;
+var
+  tmp: TSynTempBuffer;
+  rle: integer;
+begin
+  case process of
+    doCompress:
+      begin
+        tmp.Init(srcLen - srcLen shr 3); // RLE should reduce at least by 1/8
+        rle := RleCompress(src, tmp.buf, srcLen, tmp.Len);
+        if rle < 0 then
+          // RLE was not worth it -> apply only SynLZ
+          PByte(dst)^ := 0
+        else
+        begin
+          // the RLE first pass did reduce the size
+          PByte(dst)^ := 1;
+          src := tmp.buf;
+          srcLen := rle;
+        end;
+        inc(PByte(dst));
+        result := SynLZcompress1(src, srcLen, dst) + 1;
+        tmp.Done;
+      end;
+    doUnCompress:
+      begin
+        rle := PByte(src)^;
+        inc(PByte(src));
+        dec(srcLen);
+        if rle <> 0 then
+        begin
+          // process SynLZ with final RLE pass
+          tmp.Init(SynLZdecompressdestlen(src));
+          rle := SynLZdecompress1(src, srcLen, tmp.buf);
+          result := RleUnCompress(tmp.buf, dst, rle);
+          tmp.Done;
+        end
+        else
+          // only SynLZ was used
+          result := SynLZdecompress1(src, srcLen, dst);
+      end;
+    doUncompressPartial:
+      begin
+        rle := PByte(src)^;
+        inc(PByte(src));
+        dec(srcLen);
+        if rle <> 0 then
+        begin
+          // process full SynLZ with partial RLE pass (not optimal, but works)
+          tmp.Init(SynLZdecompressdestlen(src));
+          rle := SynLZdecompress1(src, srcLen, tmp.buf);
+          result := RleUnCompressPartial(tmp.buf, dst, rle, dstLen);
+          tmp.Done;
+        end
+        else
+          // only SynLZ was used
+          result := SynLZDecompress1Partial(src, srcLen, dst, dstLen);
+      end;
+  else
+    result := 0;
+  end;
+end;
+
+constructor TAlgoRleLZ.Create;
+begin
+  fAlgoID := 7;
+  inherited Create;
+end;
+
+function TAlgoRleLZ.AlgoCompressDestLen(PlainLen: integer): integer;
+begin
+  result := SynLZcompressdestlen(PlainLen);
+end;
+
+
+{ TAlgoRle }
+
+function TAlgoRle.RawProcess(src, dst: pointer; srcLen, dstLen, dstMax: integer;
+  process: TAlgoCompressWithNoDestLenProcess): integer;
+begin
+  case process of
+    doCompress:
+      begin
+        // RLE should reduce at least by 1/8
+        result := RleCompress(src, dst, srcLen, srcLen - srcLen shr 3);
+        if result < 0 then
+          // RLE was not worth it -> caller would fallback to plain store
+          result := dstLen; // to indicate no compression
+      end;
+    doUnCompress:
+      result := RleUnCompress(src, dst, srcLen);
+    doUncompressPartial:
+      result := RleUnCompressPartial(src, dst, srcLen, dstLen);
+  else
+    result := 0;
+  end;
+end;
+
+constructor TAlgoRle.Create;
+begin
+  fAlgoID := 8;
+  inherited Create;
+end;
+
+function TAlgoRle.AlgoCompressDestLen(PlainLen: integer): integer;
+begin
+  result := PlainLen + 16;
+end;
+
+
 function RawByteStringArrayConcat(const Values: array of RawByteString): RawByteString;
 var
   i, L: PtrInt;
@@ -6036,7 +6195,7 @@ var
   outlen, last: PtrUInt;
 begin
   outlen := BinToBase64Length(len);
-  inc(outlen, 2 * (outlen shr 6)); // one CRLF per line
+  inc(outlen, 2 * (outlen shr 6) + 2); // one CRLF per line
   FastSetString(result, nil, PtrInt(outlen) + length(Prefix) + length(Suffix));
   rp := pointer(result);
   if Prefix <> '' then
@@ -6072,6 +6231,7 @@ begin
     MoveFast(pointer(Suffix)^, rp^, PStrLen(PAnsiChar(pointer(Suffix)) - _STRLEN)^);
     inc(rp, PStrLen(PAnsiChar(pointer(Suffix)) - _STRLEN)^);
   end;
+  rp^ := #0;
   PStrLen(PAnsiChar(pointer(result)) - _STRLEN)^ := rp - pointer(result);
 end;
 
@@ -6967,11 +7127,9 @@ var
     TrimCopy(line, i + 9, 200, boundary);
     if (boundary <> '') and
        (boundary[1] = '"') then
-      // "boundary" -> boundary
-      boundary := copy(boundary, 2, length(boundary) - 2);
-    boundary := '--' + boundary;
-    endBoundary := boundary + '--' + #13#10;
-    boundary := boundary + #13#10;
+      TrimChars(boundary, 1, 1); // "boundary" -> boundary
+    endBoundary := '--' + boundary + '--' + #13#10;
+    boundary := '--' + boundary + #13#10;
     result := true;
   end;
 
@@ -7038,7 +7196,7 @@ begin
           else
             part.ContentType := TEXT_CONTENT_TYPE;
           {$ifdef HASCODEPAGE}
-          SetCodePage(part.Content, CP_UTF8, false); // ensure raw value is UTF-8
+          SetCodePage(part.Content, CP_UTF8, false); // ensure value is UTF-8
           {$endif HASCODEPAGE}
         end;
         if IdemPropNameU(part.Encoding, 'base64') then
@@ -8065,7 +8223,8 @@ begin
       $a5a5a5a5, // .mab file = MAGIC_MAB in mormot.core.log.pas
       $a5aba5a5, // .data = TRESTSTORAGEINMEMORY_MAGIC in mormot.orm.server.pas
       LOG_MAGIC, // .log.synlz with SynLZ or Lizard compression
-      $aba5a5ab, // .dbsynlz = SQLITE3_MAGIC in mormot.db.raw.sqlite3.pas
+      $aba5a5ab ..
+        $aba5a5ab + 7, // .dbsynlz = SQLITE3_MAGIC in mormot.db.raw.sqlite3.pas
       $afbc7a37, // 'application/x-7z-compressed' = 37 7A BC AF 27 1C
       $b7010000,
       $ba010000, // mpeg = 00 00 01 Bx
@@ -8364,7 +8523,7 @@ var
   P: PUtf8Char;
 begin
   if high(Buffers) > high(lens) then
-    raise ESynException.Create('Too many params in AppendBuffersToRawUtf8()');
+    raise EBufferException.Create('Too many params in AppendBuffersToRawUtf8()');
   len := 0;
   for i := 0 to high(Buffers) do
   begin
@@ -8948,10 +9107,10 @@ var
   read: PtrInt;
 begin
   if fRedirected = nil then
-    raise ESynException.CreateUtf8('%.Append(%): Redirected=nil',
+    raise EStreamRedirect.CreateUtf8('%.Append(%): Redirected=nil',
       [self, fInfo.Context]);
   if fMode = mRead then
-    raise ESynException.CreateUtf8('%.Append(%) after Read()',
+    raise EStreamRedirect.CreateUtf8('%.Append(%) after Read()',
       [self, fInfo.Context]);
   fMode := mWrite;
   if GetHashFileExt = '' then // DoHash() does nothing
@@ -9019,7 +9178,7 @@ begin
       begin
         if (fTimeOut <> 0) and
            (fInfo.Elapsed > fTimeOut) then
-          raise ESynException.CreateUtf8('%.%(%) timeout after %',
+          raise EStreamRedirect.CreateUtf8('%.%(%) timeout after %',
             [self, Caller, fInfo.Context, MilliSecToString(fInfo.Elapsed)]);
         if fLimitPerSecond > 0 then
         begin
@@ -9036,7 +9195,7 @@ begin
                 DoReport(true);
               dec(tosleep, 300);
               if fTerminated then
-                raise ESynException.CreateUtf8('%.%(%) Terminated',
+                raise EStreamRedirect.CreateUtf8('%.%(%) Terminated',
                   [self, Caller, fInfo.Context]);
             end;
             SleepHiRes(tosleep);
@@ -9050,18 +9209,18 @@ begin
      Assigned(fInfo.OnLog) then
     DoReport(false);
   if fTerminated then
-    raise ESynException.CreateUtf8('%.%(%) Terminated',
+    raise EStreamRedirect.CreateUtf8('%.%(%) Terminated',
       [self, Caller, fInfo.Context]);
 end;
 
 function TStreamRedirect.Read(var Buffer; Count: Longint): Longint;
 begin
   if fMode = mWrite then
-    raise ESynException.CreateUtf8('%.Read(%) in Write() mode',
+    raise EStreamRedirect.CreateUtf8('%.Read(%) in Write() mode',
       [self, fInfo.Context]);
   fMode := mRead;
   if fRedirected = nil then
-    raise ESynException.CreateUtf8('%.Read(%) with Redirected=nil',
+    raise EStreamRedirect.CreateUtf8('%.Read(%) with Redirected=nil',
       [self, fInfo.Context]);
   result := fRedirected.Read(Buffer, Count);
   ReadWriteHash(Buffer, result);
@@ -9071,7 +9230,7 @@ end;
 function TStreamRedirect.Write(const Buffer; Count: Longint): Longint;
 begin
   if fMode = mRead then
-    raise ESynException.CreateUtf8('%.Write(%) in Read() mode',
+    raise EStreamRedirect.CreateUtf8('%.Write(%) in Read() mode',
       [self, fInfo.Context]);
   fMode := mWrite;
   ReadWriteHash(Buffer, Count);
@@ -10431,6 +10590,8 @@ begin
   EMOJI_AFTERDOTS['S'] := eScream;
   // setup internal lists and function wrappers
   AlgoSynLZ := TAlgoSynLZ.Create;
+  AlgoRleLZ := TAlgoRleLZ.Create;
+  AlgoRle := TAlgoRle.Create;
 end;
 
 

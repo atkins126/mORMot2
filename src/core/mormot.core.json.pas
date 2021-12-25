@@ -435,7 +435,7 @@ function RemoveCommentsFromJson(const s: RawUtf8): RawUtf8; overload;
 // - if P^ contains ['*'], would fill all bits
 // - returns P=nil if reached prematurely the end of content, or returns
 // the value separator (e.g. , or }) in EndOfObject (like GetJsonField)
-function GetSetNameValue(Names: PShortString; MaxValue: integer;
+function GetSetNameValue(Names: PShortString; MinValue, MaxValue: integer;
   var P: PUtf8Char; out EndOfObject: AnsiChar): QWord; overload;
 
 /// helper to retrieve the bit mapped integer value of a set from its JSON text
@@ -521,6 +521,36 @@ procedure QuotedStrJson(P: PUtf8Char; PLen: PtrInt; var result: RawUtf8;
 function QuotedStrJson(const aText: RawUtf8): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+const
+  FIELDCOUNT_PATTERN: PUtf8Char = '{"fieldCount":'; // PatternLen = 14 chars
+  ROWCOUNT_PATTERN: PUtf8Char   = ',"rowCount":';   // PatternLen = 12 chars
+  VALUES_PATTERN: PUtf8Char     = ',"values":[';    // PatternLen = 11 chars
+
+/// quickly check if an UTF-8 buffer start with the supplied Pattern
+// - PatternLen is at least 8 bytes long, typically FIELDCOUNT_PATTERN,
+// ROWCOUNT_PATTERN or VALUES_PATTERN constants
+// - defined here for TDocVariantData.InitArrayFromResults
+function Expect(var P: PUtf8Char; Pattern: PUtf8Char; PatternLen: PtrInt): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// parse JSON content in not-expanded format
+// - i.e. stored as
+// $ {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+// - search and extract "fieldCount" and "rowCount" field information
+// - defined here for TDocVariantData.InitArrayFromResults
+function IsNotExpandedBuffer(var P: PUtf8Char; PEnd: PUtf8Char;
+  var FieldCount, RowCount: PtrInt): boolean;
+
+/// efficient retrieval of the number of rows in non-expanded layout
+// - search for "rowCount": at the end of the JSON buffer
+function NotExpandedBufferRowCountPos(P, PEnd: PUtf8Char): PUtf8Char;
+
+/// low-level prepare GetFieldCountExpanded() parsing returning '{' or ']'
+function GotoFieldCountExpanded(P: PUtf8Char): PUtf8Char;
+
+/// low-level parsing of the first expanded JSON object to guess fields count
+function GetFieldCountExpanded(P: PUtf8Char): integer;
+
 /// fast Format() function replacement, handling % and ? parameters
 // - will include Args[] for every % in Format
 // - will inline Params[] for every ? in Format, handling special "inlined"
@@ -591,7 +621,8 @@ type
     // a comma (',')
     procedure AddPropJsonString(const PropName: ShortString; const Text: RawUtf8);
     /// append a JSON field name, followed by a number value and a comma (',')
-    procedure AddPropJsonInt64(const PropName: ShortString; Value: Int64);
+    procedure AddPropJsonInt64(const PropName: ShortString; Value: Int64;
+      WithQuote: AnsiChar = #0);
     /// append CR+LF (#13#10) chars and #9 indentation
     // - will also flush any fBlockComment
     procedure AddCRAndIndent; override;
@@ -1005,7 +1036,7 @@ type
     fMaxRamUsed: cardinal;
     fTimeoutSeconds: cardinal;
     fTimeoutTix: cardinal;
-    fSafe: TRWLock;
+    fSafe: TRWLightLock;
     procedure ResetIfNeeded;
   public
     /// initialize the internal storage
@@ -1038,7 +1069,7 @@ type
     function Reset: boolean;
     /// access to the internal R/W locker, for thread-safe process
     // - Find/AddOrUpdate methods are protected by this R/W lock
-    property Safe: TRWLock
+    property Safe: TRWLightLock
       read fSafe;
   published
     /// number of entries in the cache
@@ -1120,14 +1151,14 @@ type
       aCompare: TDynArraySortCompare): boolean;
     procedure SetTimeouts;
     function ComputeNextTimeOut: cardinal;
-    function KeyFullHash(const Elem): cardinal;
-    function KeyFullCompare(const A, B): integer;
     function GetCapacity: integer;
     procedure SetCapacity(const Value: integer);
     function GetTimeOutSeconds: cardinal; {$ifdef FPC} inline; {$endif}
     procedure SetTimeOutSeconds(Value: cardinal);
     function GetThreadUse: TSynLockerUse;
+      {$ifdef HASINLINE} inline; {$endif}
     procedure SetThreadUse(const Value: TSynLockerUse);
+      {$ifdef HASINLINE} inline; {$endif}
   public
     /// initialize the dictionary storage, specifyng dynamic array keys/values
     // - aKeyTypeInfo should be a dynamic array TypeInfo() RTTI pointer, which
@@ -1233,7 +1264,7 @@ type
       KeyCompare, ValueCompare: TDynArraySortCompare; const aKey, aValue;
       Opaque: pointer = nil; MayModify: boolean = true): integer; overload;
     /// touch the entry timeout field so that it won't be deprecated sooner
-    // - this method is not thread-safe, and is expected to be execute e.g.
+    // - this method is not thread-safe, and is expected to be executed e.g.
     // from a ForEach() TOnSynDictionary callback
     procedure SetTimeoutAtIndex(aIndex: PtrInt);
     /// search aArrayValue item in a dynamic-array value associated via aKey
@@ -3163,16 +3194,45 @@ begin
 end;
 
 function GotoEndJsonItemString(P: PUtf8Char): PUtf8Char;
+var
+  tab: PJsonCharSet;
 begin
+  // see TOrmTableJson.ParseAndConvert and TDocVariantData.InitArrayFromResults
+  if P <> nil then
+    repeat
+      if P^ = '"' then
+      begin
+        inc(P);
+        tab := @JSON_CHARS;
+        repeat // inlined GotoEndOfJsonString2()
+          if not (jcJsonStringMarker in tab[P^]) then
+          begin
+            inc(P);   // not [#0, '"', '\']
+            continue; // very fast parsing of most UTF-8 chars
+          end;
+          if P^ = '"' then
+          begin
+            repeat
+              inc(P);
+            until not (P^ in [#1..' ']);
+            result := P;
+            exit;
+          end
+          else if (P^ = #0) or
+                  (P[1] = #0) then
+            // end of string/buffer, or buffer overflow detected as \#0
+            break;
+          inc(P, 2); // P^ was '\' -> ignore \# ou \u0123
+        until false;
+        break;
+      end
+      else if P^ = #0 then
+        break
+      else if P^ <= ' ' then
+        continue;
+      break;
+    until false;
   result := nil;
-  if P = nil then
-    exit;
-  P := GotoNextNotSpace(P);
-  if P^ <> '"' then
-    exit;
-  P := GotoEndOfJsonString2(P + 1, @JSON_CHARS);
-  if P^ = '"' then
-    result := GotoNextNotSpace(P + 1);
 end;
 
 function TryGotoEndOfComment(P: PUtf8Char): PUtf8Char;
@@ -4003,7 +4063,7 @@ begin
   result := P;
 end;
 
-function GetSetNameValue(Names: PShortString; MaxValue: integer;
+function GetSetNameValue(Names: PShortString; MinValue, MaxValue: integer;
   var P: PUtf8Char; out EndOfObject: AnsiChar): QWord;
 var
   Text: PUtf8Char;
@@ -4013,6 +4073,7 @@ begin
   result := 0;
   if (P = nil) or
      (Names = nil) or
+     (MinValue < 0) or
      (MaxValue < 0) then
     exit;
   while (P^ <= ' ') and
@@ -4050,7 +4111,7 @@ begin
           i := -1;
         if i < 0 then
           i := FindShortStringListTrimLowerCase(names, MaxValue, Text, TextLen);
-        if i >= 0 then
+        if i >= MinValue then
           SetBitPtr(@result, i);
         // unknown enum names (i=-1) would just be ignored
       until EndOfObject = ']';
@@ -4058,6 +4119,8 @@ begin
         exit; // avoid GPF below if already reached the input end
     end;
     P := ParseEndOfObject(P, EndOfObject); // mimics GetJsonField()
+    if EndOfObject = #0 then
+      P := nil; // as in mORMot 1
   end
   else
     SetQWord(GetJsonField(P, P, nil, @EndOfObject), result);
@@ -4067,12 +4130,12 @@ function GetSetNameValue(Info: PRttiInfo;
   var P: PUtf8Char; out EndOfObject: AnsiChar): QWord;
 var
   Names: PShortString;
-  MaxValue: integer;
+  MinValue, MaxValue: integer;
 begin
   if (Info <> nil) and
      (Info^.Kind = rkSet) and
-     (Info^.SetEnumType(Names, MaxValue) <> nil) then
-    result := GetSetNameValue(Names, MaxValue, P, EndOfObject)
+     (Info^.SetEnumType(Names, MinValue, MaxValue) <> nil) then
+    result := GetSetNameValue(Names, MinValue, MaxValue, P, EndOfObject)
   else
     result := 0;
 end;
@@ -4258,6 +4321,115 @@ begin
   end;
 end;
 
+function Expect(var P: PUtf8Char; Pattern: PUtf8Char; PatternLen: PtrInt): boolean;
+var
+  i: PtrInt;
+begin // PatternLen is at least 8 bytes long
+  result := false;
+  if P = nil then
+    exit;
+  while (P^ <= ' ') and
+        (P^ <> #0) do
+    inc(P);
+  if PPtrInt(P)^ = PPtrInt(Pattern)^ then
+  begin
+    for i := SizeOf(PtrInt) to PatternLen - 1 do
+      if P[i] <> Pattern[i] then
+        exit;
+    inc(P, PatternLen);
+    result := true;
+  end;
+end;
+
+function IsNotExpandedBuffer(var P: PUtf8Char; PEnd: PUtf8Char;
+  var FieldCount, RowCount: PtrInt): boolean;
+var
+  RowCountPos: PUtf8Char;
+begin
+  if not Expect(P, FIELDCOUNT_PATTERN, 14) then
+  begin
+    result := false;
+    exit;
+  end;
+  FieldCount := GetNextItemCardinal(P, #0);
+  if Expect(P, ROWCOUNT_PATTERN, 12) then
+    RowCount := GetNextItemCardinal(P, #0)    // initial "rowCount":xxxx
+  else
+  begin
+    if PEnd = nil then
+      PEnd := P + mormot.core.base.StrLen(P); // late search of ending
+    RowCountPos := NotExpandedBufferRowCountPos(P, PEnd);
+    if RowCountPos = nil then
+      RowCount := -1                          // no "rowCount":xxxx
+    else
+      RowCount := GetCardinal(RowCountPos);   // trailing "rowCount":xxxx
+  end;
+  result := (FieldCount <> 0) and
+            Expect(P, VALUES_PATTERN, 11);
+  if result and
+     (RowCount < 0) then
+  begin
+    RowCount := JsonArrayCount(P, PEnd) div FieldCount; // 900MB/s browse
+    if RowCount <= 0 then
+      RowCount := -1; // bad format -> no data
+  end;
+end;
+
+function NotExpandedBufferRowCountPos(P, PEnd: PUtf8Char): PUtf8Char;
+var
+  i: PtrInt;
+begin
+  // search for "rowCount": at the end of the JSON buffer
+  result := nil;
+  if (PEnd <> nil) and
+     (PEnd - P > 24) then
+    for i := 1 to 24 do
+      case PEnd[-i] of
+        ']',
+        ',':
+          exit;
+        ':':
+          begin
+            if CompareMemFixed(PEnd - i - 11, pointer(ROWCOUNT_PATTERN), 11) then
+              result := PEnd - i + 1;
+            exit;
+          end;
+      end;
+end;
+
+function GotoFieldCountExpanded(P: PUtf8Char): PUtf8Char;
+begin
+  result := nil;
+  while P^ <> '[' do
+    if P^ = #0 then
+      exit
+    else
+      inc(P); // need an array of objects
+  repeat
+    inc(P);
+    if P^ = #0 then
+      exit;
+  until P^ in ['{', ']']; // go to object beginning
+  result := P;
+end;
+
+function GetFieldCountExpanded(P: PUtf8Char): integer;
+var
+  EndOfObject: AnsiChar;
+begin
+  result := 0;
+  repeat
+    P := GotoNextJsonItem(P, 2, @EndOfObject); // ignore Name+Value items
+    if P = nil then
+    begin // unexpected end
+      result := 0;
+      exit;
+    end;
+    inc(result);
+    if EndOfObject = '}' then
+      break; // end of object
+  until false;
+end;
 
 function FormatUtf8(const Format: RawUtf8; const Args, Params: array of const;
   JsonFormat: boolean): RawUtf8;
@@ -4646,7 +4818,8 @@ begin
     Ctxt.W.BlockBegin('{', Ctxt.Options);
     i := 0;
     repeat
-      Ctxt.AddShortBoolean(PS, GetBitPtr(Data, i));
+      if i >= Ctxt.Info.Cache.EnumMin then
+        Ctxt.AddShortBoolean(PS, GetBitPtr(Data, i));
       if i = Ctxt.Info.Cache.EnumMax then
         break;
       inc(i);
@@ -4669,7 +4842,8 @@ begin
       PS := Ctxt.Info.Cache.EnumList;
       for i := 0 to Ctxt.Info.Cache.EnumMax do
       begin
-        if GetBitPtr(Data, i) then
+        if (i >= Ctxt.Info.Cache.EnumMin) and
+           GetBitPtr(Data, i) then
         begin
           Ctxt.W.Add('"');
           Ctxt.W.AddShort(PS^);
@@ -4729,6 +4903,70 @@ begin
     Ctxt.W, Data, Ctxt.Options);
 end;
 
+type
+  TCCHook = class(TObjectWithCustomCreate); // to access its protected methods
+  TCCHookClass = class of TCCHook;
+
+procedure _JS_OneProp(var c: TJsonSaveContext; p: PRttiCustomProp; Data: PAnsiChar);
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  if (woHideSensitivePersonalInformation in c.Options) and
+     (rcfSpi in p^.Value.Flags) then
+    c.W.AddShorter('"***"')
+  else if p^.OffsetGet >= 0 then
+  begin
+    // direct value write (record field or plain class property)
+    c.Info := p^.Value;
+    TRttiJsonSave(c.Info.JsonSave)(Data + p^.OffsetGet, c);
+  end
+  else
+    // need to call a getter method
+    p^.AddValueJson(c.W, Data, c.Options);
+end;
+
+procedure _JS_NonExpanded(var c: TJsonSaveContext; Data: PAnsiChar; n: integer);
+var
+  v: PAnsiChar;
+  item: TRttiCustom;
+  p: PRttiCustomProp;
+  f: integer;
+begin
+  // {"fieldCount":2,"rowCount":20,"values":["f1","f2","1v1",1v2,"2v1",2v2...]}
+  item := c.Info;
+  c.W.BlockBegin('{', c.Options);
+  c.W.AddShort('"fieldCount":');
+  c.W.AddU(item.Props.CountNonVoid);
+  c.W.AddShort(',"rowCount":');
+  c.W.AddU(n);
+  c.W.AddShort(',"values":[');
+  c.W.AddString(item.Props.NamesAsJsonArray); // include trailing ,
+  if n <> 0 then
+    repeat
+      if item.Kind = rkClass then
+        v := PPointer(Data)^
+      else
+        v := Data;
+      p := pointer(item.Props.List);
+      f := item.Props.Count;
+      repeat
+        if p^.Name <> '' then
+        begin
+          if not (rcfHookWriteProperty in item.Flags) or
+             not TCCHook(v).RttiWritePropertyValue(c.W, p, c.Options) then
+            _JS_OneProp(c, p, v);
+          c.W.AddComma; // no c.W.BlockAfterItem() within non-expanded layout
+        end;
+        inc(p);
+        dec(f);
+      until f = 0;
+      inc(Data, item.Cache.Size);
+      dec(n);
+    until n = 0;
+  c.W.CancelLastComma;
+  c.W.Add(']');
+  c.W.BlockEnd('}', c.Options);
+end;
+
 procedure _JS_DynArray(Data: PPointer; const Ctxt: TJsonSaveContext);
 var
   n, s: PtrInt;
@@ -4737,6 +4975,19 @@ var
   c: TJsonSaveContext;
 begin
   {%H-}c.Init(Ctxt.W, Ctxt.Options, Ctxt.Info.ArrayRtti);
+  if (twoNonExpandedArrays in c.W.CustomOptions) and
+     (c.Info <> nil) and
+     (c.Info.Props.CountNonVoid > 0) and
+     (Data^ <> nil) then
+  begin
+    // non-expanded format efficient serialization
+    n := PDALen(PAnsiChar(Data^) - _DALEN)^ + _DAOFF; // length(Data)
+    if n <> 1 then // expanded is fine for a single object array
+    begin
+      _JS_NonExpanded(c, Data^, n);
+      exit;
+    end;
+  end;
   c.W.BlockBegin('[', c.Options);
   if Data^ <> nil then
   begin
@@ -4795,10 +5046,6 @@ const
   // - typecast to TRttiJsonSave for proper function call
   PTC_JSONSAVE: array[TRttiParserComplexType] of pointer = (
     nil, nil, nil, nil, @_JS_ID, @_JS_ID, @_JS_QWord, @_JS_QWord, @_JS_QWord);
-
-type
-  TCCHook = class(TObjectWithCustomCreate); // to access its protected methods
-  TCCHookClass = class of TCCHook;
 
 procedure AppendExceptionLocation(w: TJsonWriter; e: ESynException);
 begin // call TDebugFile.FindLocationShort if mormot.core.log is used
@@ -4903,18 +5150,7 @@ begin
           c.W.WriteObjectPropName(pointer(p^.Name), length(p^.Name), c.Options);
           if not (rcfHookWriteProperty in Ctxt.Info.Flags) or
              not TCCHook(Data).RttiWritePropertyValue(c.W, p, c.Options) then
-            if (woHideSensitivePersonalInformation in c.Options) and
-               (rcfSpi in p^.Value.Flags) then
-              c.W.AddShorter('"***"')
-            else if p^.OffsetGet >= 0 then
-            begin
-              // direct value write (record field or plain class property)
-              c.Info := p^.Value;
-              TRttiJsonSave(c.Info.JsonSave)(Data + p^.OffsetGet, c);
-            end
-            else
-              // need to call a getter method
-              p^.AddValueJson(c.W, Data, c.Options);
+            _JS_OneProp(c, p, Data);
         end;
         dec(n);
         if n = 0 then
@@ -5180,15 +5416,19 @@ procedure TJsonWriter.AddPropJsonString(const PropName: ShortString;
   const Text: RawUtf8);
 begin
   AddProp(@PropName[1], ord(PropName[0]));
-  AddJsonString(Text);
+  AddJsonString(Text); // " + AddJsonEscape(Text) + "
   AddComma;
 end;
 
 procedure TJsonWriter.AddPropJsonInt64(const PropName: ShortString;
-  Value: Int64);
+  Value: Int64; WithQuote: AnsiChar);
 begin
   AddProp(@PropName[1], ord(PropName[0]));
+  if WithQuote <> #0 then
+    Add(WithQuote);
   Add(Value);
+  if WithQuote <> #0 then
+    Add(WithQuote);
   AddComma;
 end;
 
@@ -7023,7 +7263,8 @@ begin
     begin
       v := GetInteger(Ctxt.Value, err);
       if (err <> 0) or
-         (PtrUInt(v) > Ctxt.Info.Cache.EnumMax) then
+         (PtrUInt(v) > Ctxt.Info.Cache.EnumMax) or
+         (PtrUInt(v) < Ctxt.Info.Cache.EnumMin) then
         v := -1;
     end;
     if v < 0 then
@@ -7039,8 +7280,8 @@ procedure _JL_Set(Data: pointer; var Ctxt: TJsonParserContext);
 var
   v: QWord;
 begin
-  v := GetSetNameValue(Ctxt.Info.Cache.EnumList,
-    Ctxt.Info.Cache.EnumMax, Ctxt.Json, Ctxt.EndOfObject);
+  with Ctxt.Info.Cache do
+    v := GetSetNameValue(EnumList, EnumMin, EnumMax, Ctxt.Json, Ctxt.EndOfObject);
   Ctxt.Valid := Ctxt.Json <> nil;
   MoveSmall(@v, Data, Ctxt.Info.Size);
 end;
@@ -7189,7 +7430,7 @@ begin
       // class instances are accessed by reference, records are stored by value
       Data := PPointer(Data)^;
       if (rcfHookRead in Ctxt.Info.Flags) and
-         (TCCHook(Data).RttiBeforeReadObject(@Ctxt)) then
+         TCCHook(Data).RttiBeforeReadObject(@Ctxt) then
         exit;
     end
     else
@@ -7292,6 +7533,100 @@ begin
   TOnRttiJsonRead(TRttiJson(Ctxt.Info).fJsonReader)(Ctxt, Data);
 end;
 
+function _JL_DynArray_FromResults(Data: PAnsiChar; var Ctxt: TJsonParserContext): boolean;
+var
+  fieldcount, rowcount, r, f: PtrInt;
+  arrinfo, iteminfo: TRttiCustom;
+  item: PAnsiChar;
+  prop: PRttiCustomProp;
+  props: PRttiCustomPropDynArray;
+begin
+  // Not Expanded (more optimized) format as array of values
+  // {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+  result := IsNotExpandedBuffer(Ctxt.Json, nil, fieldcount, rowcount);
+  if not result then
+    exit; // indicates not the expected format: caller will try Ctxt.ParseArray
+  // 1. check rowcount and fieldcount
+  Ctxt.Valid := false;
+  if (rowcount < 0) or
+     (fieldcount = 0) then
+    exit;
+  // 2. initialize the items lookup from the trailing field names
+  arrinfo := Ctxt.Info;
+  iteminfo := arrinfo.ArrayRtti;
+  if (iteminfo = nil) or
+     (iteminfo.Props.Count = 0) then
+    exit; // expect an array of objects (classes or records)
+  SetLength(props, fieldcount);
+  for f := 0 to fieldcount - 1 do
+  begin
+    if not Ctxt.ParseNext or
+       not Ctxt.WasString then
+      exit; // should start with field names
+    prop := iteminfo.props.Find(Ctxt.Value, Ctxt.ValueLen);
+    if (prop = nil) and
+       (itemInfo.ValueRtlClass = vcObjectWithID) and
+       (PInteger(Ctxt.Value)^ and $dfdfdfdf =
+                 ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
+       (PWord(Ctxt.Value + 4)^ and $ffdf = ord('D')) then
+      prop := @iteminfo.Props.List[0]; // 'RowID' = first TObjectWithID field
+    if (prop = nil) and
+       not (jpoIgnoreUnknownProperty in Ctxt.Options) then
+      exit;
+    props[f] := prop;
+  end;
+  // 3. fill all nested items from incoming values
+  Data := DynArrayNew(PPointer(Data), rowcount, arrinfo.Cache.ItemSize); // alloc
+  for r := 1 to rowcount do
+  begin
+    if iteminfo.Kind = rkClass then
+    begin
+      Ctxt.Info := iteminfo; // as in _JL_RttiCustom()
+      PPointer(Data)^ := TRttiJson(iteminfo).fClassNewInstance(iteminfo);
+      item := PPointer(Data)^; // class are accessed by reference
+      if (rcfHookRead in iteminfo.Flags) and
+         TCCHook(item).RttiBeforeReadObject(@Ctxt) then
+      begin
+        inc(PPointer(Data));
+        if Ctxt.Valid then
+          continue
+        else
+          break;
+      end;
+    end
+    else
+      item := Data; // record (or object) are stored by value
+    for f := 0 to fieldcount - 1 do
+      if props[f] = nil then
+        Ctxt.Json := GotoNextJsonItem(Ctxt.Json, 1, @Ctxt.EndOfObject)
+      else if not JsonLoadProp(item, props[f]^, Ctxt) then
+      begin
+        Ctxt.Json := nil;
+        break;
+      end
+      else if Ctxt.EndOfObject = '}' then
+      if Ctxt.EndOfObject = '}' then
+        break;
+    if Ctxt.Json = nil then
+        break;
+    if rcfHookRead in iteminfo.Flags then
+      TCCHook(item).RttiAfterReadObject;
+    inc(Data, arrinfo.Cache.ItemSize);
+  end;
+  Ctxt.Valid := false;
+  if Ctxt.Json <> nil then
+  begin
+    while not (Ctxt.Json^ in [#0, '}']) do
+      inc(Ctxt.Json);
+    if Ctxt.Json^ = '}' then
+    begin
+      inc(Ctxt.Json); // reached final ..],"rowCount":20}
+      Ctxt.Valid := true;
+    end;
+  end;
+  Ctxt.Info := arrinfo; // restore
+end;
+
 procedure _JL_DynArray(Data: PAnsiChar; var Ctxt: TJsonParserContext);
 var
   load: TRttiJsonLoad;
@@ -7302,10 +7637,14 @@ begin
   arr := pointer(Data);
   if arr^ <> nil then
     Ctxt.Info.ValueFinalize(arr); // reset whole array variable
+  Ctxt.Json := GotoNextNotSpace(Ctxt.Json);
+  if (PCardinal(Ctxt.Json)^ <> ord('{') + ord('"') shl 8 + ord('f') shl 16 +
+      ord('i') shl 24) or // FIELDCOUNT_PATTERN = '{"fieldCount":...
+    not _JL_DynArray_FromResults(Data, Ctxt) then
   if not Ctxt.ParseArray then
     // detect void (i.e. []) or invalid array
-    exit;
-  if PCardinal(Ctxt.Json)^ = JSON_BASE64_MAGIC_QUOTE_C then
+    exit
+  else if PCardinal(Ctxt.Json)^ = JSON_BASE64_MAGIC_QUOTE_C then
     // raw RTTI binary layout with a single Base64 encoded item
     Ctxt.Valid := Ctxt.ParseNext and
               (Ctxt.EndOfObject = ']') and
@@ -7375,7 +7714,7 @@ begin
         FastDynArrayClear(arr^, arrinfo.Cache.ItemInfo)
       else
         DynArrayFakeLength(arr^, n); // faster than SetLength()
-    Ctxt.Info := arrinfo;
+    Ctxt.Info := arrinfo; // restore
   end;
   Ctxt.ParseEndOfObject; // mimics GetJsonField() / Ctxt.ParseNext
 end;
@@ -7522,6 +7861,9 @@ begin
     exit;
   root := Ctxt.Info;
   Ctxt.Info := Ctxt.ObjectListItem;
+  if (Ctxt.Info = nil) and
+     (Data^.ItemClass <> nil) then
+    Ctxt.Info := Rtti.RegisterClass(Data^.ItemClass);
   repeat
     item := Ctxt.ParseNewObject;
     if item = nil then
@@ -8275,7 +8617,7 @@ begin
   if (self = nil) or
      (aKey = '') then
     exit;
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   ndx := fNameValue.Find(aKey);
   if ndx >= 0 then
     with fNameValue.List[ndx] do
@@ -8284,7 +8626,7 @@ begin
       if aResultTag <> nil then
         aResultTag^ := Tag;
     end;
-  fSafe.ReadOnlyUnLock;
+  fSafe.ReadUnLock;
 end;
 
 function TSynCache.AddOrUpdate(const aKey, aValue: RawUtf8; aTag: PtrInt): boolean;
@@ -8338,52 +8680,29 @@ end;
 { TSynDictionary }
 
 const // use fSafe.Padding[DIC_*] slots for Keys/Values place holders
-  DIC_KEYCOUNT = 0;
-  DIC_KEY = 1;
-  DIC_VALUECOUNT = 2;
-  DIC_VALUE = 3;
-  DIC_TIMECOUNT = 4;
-  DIC_TIMESEC = 5;
-  DIC_TIMETIX = 6;
-
-function TSynDictionary.KeyFullHash(const Elem): cardinal;
-begin
-  result := fKeys.Hasher.Hasher(0, @Elem, fKeys.Info.Cache.ItemSize);
-end;
-
-function TSynDictionary.KeyFullCompare(const A, B): integer;
-var
-  i: PtrInt;
-begin
-  for i := 0 to fKeys.Info.Cache.ItemSize - 1 do
-  begin
-    result := TByteArray(A)[i];
-    dec(result, TByteArray(B)[i]); // in two steps for better asm generation
-    if result <> 0 then
-      exit;
-  end;
-  result := 0;
-end;
+  DIC_KEYCOUNT   = 0;   // Keys.Count integer
+  DIC_KEY        = 1;   // Key.Value pointer
+  DIC_VALUECOUNT = 2;   // Values.Count integer
+  DIC_VALUE      = 3;   // Values.Value pointer
+  DIC_TIMECOUNT  = 4;   // Timeouts.Count integer
+  DIC_TIMESEC    = 5;   // Timeouts Seconds integer
+  DIC_TIMETIX    = 6;   // last GetTickCount64 shr 10 integer
 
 constructor TSynDictionary.Create(aKeyTypeInfo, aValueTypeInfo: PRttiInfo;
   aKeyCaseInsensitive: boolean; aTimeoutSeconds: cardinal;
   aCompressAlgo: TAlgoCompress; aHasher: THasher);
 begin
   inherited Create;
-  fSafe.Padding[DIC_KEYCOUNT].VType := varInteger;    // Keys.Count integer
-  fSafe.Padding[DIC_VALUECOUNT].VType := varInteger;  // Values.Count integer
-  fSafe.Padding[DIC_KEY].VType := varUnknown;         // Key.Value pointer
-  fSafe.Padding[DIC_VALUE].VType := varUnknown;       // Values.Value pointer
-  fSafe.Padding[DIC_TIMECOUNT].VType := varInteger;   // Timeouts.Count integer
-  fSafe.Padding[DIC_TIMESEC].VType := varInteger;     // Timeouts Seconds
-  fSafe.Padding[DIC_TIMETIX].VType := varInteger;  // last GetTickCount64 shr 10
+  fSafe.Padding[DIC_KEYCOUNT].VType   := varInteger;  // Keys.Count
+  fSafe.Padding[DIC_KEY].VType        := varUnknown;  // Key.Value
+  fSafe.Padding[DIC_VALUECOUNT].VType := varInteger;  // Values.Count
+  fSafe.Padding[DIC_VALUE].VType      := varUnknown;  // Values.Value
+  fSafe.Padding[DIC_TIMECOUNT].VType  := varInteger;  // Timeouts.Count
+  fSafe.Padding[DIC_TIMESEC].VType    := varInteger;  // Timeouts Seconds
+  fSafe.Padding[DIC_TIMETIX].VType    := varInteger;  // GetTickCount64 shr 10
   fSafe.PaddingUsedCount := DIC_TIMETIX + 1;
   fKeys.Init(aKeyTypeInfo, fSafe.Padding[DIC_KEY].VAny, nil, nil, aHasher,
     @fSafe.Padding[DIC_KEYCOUNT].VInteger, aKeyCaseInsensitive);
-  if not Assigned(fKeys.HashItem) then
-    fKeys.EventHash := KeyFullHash;
-  if not Assigned(fKeys.{$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}Compare) then
-    fKeys.EventCompare := KeyFullCompare;
   fValues.Init(aValueTypeInfo, fSafe.Padding[DIC_VALUE].VAny,
     @fSafe.Padding[DIC_VALUECOUNT].VInteger);
   fTimeouts.Init(TypeInfo(TIntegerDynArray), fTimeOut,
@@ -8489,7 +8808,7 @@ begin
   fSafe.Lock; // = RWLock(cWrite);
   try
     fKeys.Clear;
-    fKeys.Hasher.ForceReHash; // mandatory to avoid GPF
+    fKeys.Hasher.ForceReHash(nil); // mandatory to avoid GPF
     fValues.Clear;
     if fSafe.Padding[DIC_TIMESEC].VInteger > 0 then
       fTimeOuts.Clear;
@@ -8655,7 +8974,7 @@ function TSynDictionary.FindKeyFromValue(const aValue;
 var
   ndx: PtrInt;
 begin
-  fSafe.RwLock(RW_UPGRADE[aUpdateTimeOut]);
+  fSafe.RwLock(cReadOnly); // cReadOnly is good enough for SetTimeoutAtIndex()
   try
     ndx := fValues.IndexOf(aValue); // use fast RTTI for value search
     result := ndx >= 0;
@@ -8670,7 +8989,7 @@ begin
       end;
     end;
   finally
-    fSafe.RwUnLock(RW_UPGRADE[aUpdateTimeOut]);
+    fSafe.RwUnLock(cReadOnly);
   end;
 end;
 
@@ -9020,13 +9339,13 @@ begin
   fSafe.Lock;
   try
     try
-      RTTI_BINARYLOAD[rkDynArray](fKeys.Value, rdr, fKeys.Info.Info);
+      RTTI_BINARYLOAD[rkDynArray](fKeys.Value,   rdr, fKeys.Info.Info);
       RTTI_BINARYLOAD[rkDynArray](fValues.Value, rdr, fValues.Info.Info);
       n := fKeys.Capacity;
       if n = fValues.Capacity then
       begin
         // RTTI_BINARYLOAD[rkDynArray]() did not set the external count
-        fSafe.Padding[DIC_KEYCOUNT].VInteger := n;
+        fSafe.Padding[DIC_KEYCOUNT].VInteger   := n;
         fSafe.Padding[DIC_VALUECOUNT].VInteger := n;      
         SetTimeouts;  // set ComputeNextTimeOut for all items
         fKeys.ForceReHash; // optimistic: input from TSynDictionary.SaveToBinary
@@ -9170,6 +9489,7 @@ function TRttiJson.SetParserType(aParser: TRttiParserType;
   aParserComplex: TRttiParserComplexType): TRttiCustom;
 var
   C: TClass;
+  n: integer;
 begin
   // set Name and Flags from Props[]
   inherited SetParserType(aParser, aParserComplex);
@@ -9228,7 +9548,10 @@ begin
         fClassNewInstance := @_New_ObjectWithCustomCreate;
         // allow any kind of customization for TObjectWithCustomCreate children
         // - is used e.g. by TOrm or TObjectWithID
+        n := Props.Count;
         TCCHookClass(fValueClass).RttiCustomSetParser(self);
+        if n > Props.Count then
+          fFlags := fFlags + fProps.AdjustAfterAdded; // added a prop
       end
       else if C = TSynObjectList then
       begin

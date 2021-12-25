@@ -795,7 +795,7 @@ end;
 procedure TTestCoreProcess.MustacheHelper(const Value: variant; out Result: variant);
 begin
   with _Safe(Value)^ do
-    RawUtf8ToVariant(FormatUtf8('a=%,b=%', [U['a'], i['b']]), Result);
+    Result := FormatVariant('a=%,b=%', [U['a'], i['b']]);
 end;
 
 
@@ -1220,7 +1220,7 @@ var
   GDtoObject, G2: TDtoObject;
   owv: TObjectWithVariant;
   Trans: TTestCustomJson2;
-  Disco: TTestCustomDiscogs;
+  Disco, Disco2: TTestCustomDiscogs;
   Cache: TRestCacheEntryValue;
   peop: TOrmPeople;
   K: RawUtf8;
@@ -2841,6 +2841,8 @@ begin
   end;
   U := RecordSaveJson(Trans, TypeInfo(TTestCustomJson2));
   FileFromString(U, WorkDir + 'transactions.json');
+  SaveJson(Trans, TypeInfo(TTestCustomJson2), [twoNonExpandedArrays], U);
+  TestTrans;
   Rtti.RegisterFromText(TypeInfo(TTestCustomJson2Title), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJson2), '');
   U := RecordSaveJson(Trans, TypeInfo(TTestCustomJson2));
@@ -2867,7 +2869,17 @@ begin
   TRttiJson(Parser).IncludeWriteOptions := [woHumanReadable];
   U := RecordSaveJson(Disco, TypeInfo(TTestCustomDiscogs));
   Check(IsValidJson(U));
+  Check(IsValidUtf8(U));
   FileFromString(U, WorkDir + 'discoExtract.json');
+  TRttiJson(Parser).IncludeWriteOptions := [];
+  SaveJson(Disco, TypeInfo(TTestCustomDiscogs), [twoNonExpandedArrays], U);
+  Check(IsValidJson(U));
+  Check(IsValidUtf8(U)); 
+  FileFromString(U, WorkDir + 'discoExtractNonExp.json');
+  FillCharFast(Disco2, SizeOf(Disco), 0);
+  RecordLoadJson(Disco2, pointer(U), TypeInfo(TTestCustomDiscogs));
+  Check(RecordEquals(Disco, Disco2, TypeInfo(TTestCustomDiscogs)), 'disco2');
+  Finalize(Disco2);
   Finalize(Disco);
   FillCharFast(Disco, SizeOf(Disco), 0);
   U := '{"pagination":{"per_page":1},"releases":[{"title":"TEST","id":10}]}';
@@ -3003,8 +3015,9 @@ const
 var
   people, sample, notexpanded, j0, j1, j2, j3: RawUtf8;
   peoples: string;
+  peoplehash: cardinal;
   P: PUtf8Char;
-  count, len, lennexp, i, interned: integer;
+  count, len, lennexp, i, c, interned: integer;
   dv: TDocVariantData;
   table: TOrmTableJson;
   timer: TPrecisionTimer;
@@ -3069,17 +3082,18 @@ begin
   P := @people[2]; // point just after initial '[' for JsonArrayCount
   count := JsonArrayCount(P);
   check(count > 8200); // = 8227 in current People.json ORM tests file
+  c := -(count * ITER); // -c to hide the trailing count number
   i := JsonArrayCount(P, P + 10000);
   check(i < 0);
   check(abs(i) < count);
   timer.Start;
   for i := 1 to ITER do
     Check(JsonArrayCount(P) = count);
-  NotifyTestSpeed('JsonArrayCount(P)', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('JsonArrayCount(P)', c, len, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER do
     Check(JsonArrayCount(P, P + length(people)) = count);
-  NotifyTestSpeed('JsonArrayCount(P,PMax)', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('JsonArrayCount(P,PMax)', c, len, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER * 5000 do
     Check(JsonObjectPropCount(P + 3) = 6, 'first TOrmPeople object');
@@ -3093,6 +3107,9 @@ begin
   for i := 1 to ITER do
     j0 := JsonReformat(people, jsonHumanReadable);
   NotifyTestSpeed('jsonHumanReadable', 0, length(j0) * ITER, @timer, ONLYLOG);
+  dv.InitJson(people);
+  peoplehash := Hash32(dv.ToJson);
+  dv.Clear; // to reuse dv
   interned := DocVariantType.InternNames.Count;
   timer.Start;
   for i := 1 to ITER do
@@ -3101,7 +3118,7 @@ begin
     Check(dv.count = count);
     dv.Clear; // to reuse dv
   end;
-  NotifyTestSpeed('TDocVariant', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('TDocVariant', c, len, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER do
   begin
@@ -3109,7 +3126,7 @@ begin
     Check(dv.count = count);
     dv.Clear; // to reuse dv
   end;
-  NotifyTestSpeed('TDocVariant no guess', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('TDocVariant no guess', c, len, @timer, ONLYLOG);
   Check(DocVariantType.InternNames.Count = interned, 'no intern');
   DocVariantType.InternNames.Clean;
   timer.Start;
@@ -3119,7 +3136,7 @@ begin
     Check(dv.count = count);
     dv.Clear; // to reuse dv
   end;
-  NotifyTestSpeed('TDocVariant dvoInternNames', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('TDocVariant dvoIntern', c, len, @timer, ONLYLOG);
   Check(DocVariantType.InternNames.Count - interned = 6, 'intern');
   Check(DocVariantType.InternNames.Clean = 6, 'clean');
   Check(DocVariantType.InternNames.Count = interned, 'cleaned');
@@ -3133,7 +3150,7 @@ begin
       lennexp := length(notexpanded);
       Check(lennexp < length(people), 'notexpanded');
     end;
-    NotifyTestSpeed('TOrmTableJson GetJsonValues', 0, lennexp * ITER, @timer, ONLYLOG);
+    NotifyTestSpeed('TOrmTableJson save', c, lennexp * ITER, @timer, ONLYLOG);
   finally
     table.Free;
   end;
@@ -3147,7 +3164,7 @@ begin
       table.Free;
     end;
   end;
-  NotifyTestSpeed('TOrmTableJson expanded', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('TOrmTableJson exp', c, len, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER do
   begin
@@ -3158,7 +3175,29 @@ begin
       table.Free;
     end;
   end;
-  NotifyTestSpeed('TOrmTableJson not expanded', 0, lennexp * ITER, @timer, ONLYLOG);
+  NotifyTestSpeed('TOrmTableJson not exp', c, lennexp * ITER, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    Check(dv.InitArrayFromResults(people));
+    Check(dv.count = count);
+    dv.Clear; // to reuse dv
+  end;
+  NotifyTestSpeed('TDocVariant FromResults exp', c, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    Check(dv.InitArrayFromResults(notexpanded));
+    Check(dv.count = count);
+    dv.Clear; // to reuse dv
+  end;
+  NotifyTestSpeed('TDocVariant FromResults not exp', c, lennexp * ITER, @timer, ONLYLOG);
+  Check(dv.InitArrayFromResults(people));
+  CheckEqual(peoplehash, Hash32(dv.ToJson));
+  dv.Clear; // to reuse dv
+  Check(dv.InitArrayFromResults(notexpanded));
+  CheckEqual(peoplehash, Hash32(dv.ToJson));
+  dv.Clear; // to reuse dv
   timer.Start;
   for i := 1 to ITER do
   begin
@@ -3166,7 +3205,15 @@ begin
     Check(DynArrayLoadJson(rec, people, TypeInfo(TRecordPeopleDynArray)));
     Check(length(rec) = count);
   end;
-  NotifyTestSpeed('DynArrayLoadJson', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('DynArrayLoadJson exp', c, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    // default serialization (with ID=0) TOrmPeopleObjArray in 79.14ms, 247.6 MB/s
+    Check(DynArrayLoadJson(rec, notexpanded, TypeInfo(TRecordPeopleDynArray)));
+    Check(length(rec) = count);
+  end;
+  NotifyTestSpeed('DynArrayLoadJson non exp', c, lennexp * ITER, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER do
   begin
@@ -3175,7 +3222,15 @@ begin
     //FileFromString(DynArraySaveJson(objarr, TypeInfo(TOrmPeopleObjArray)), WorkDir + 'objarray.json');
     ObjArrayClear(objarr);
   end;
-  NotifyTestSpeed('TOrmPeopleObjArray', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('TOrmPeopleObjArray exp', c, len, @timer, ONLYLOG);
+  timer.Start;
+  for i := 1 to ITER do
+  begin
+    Check(DynArrayLoadJson(objarr, notexpanded, TypeInfo(TOrmPeopleObjArray)));
+    Check(length(objarr) = count);
+    ObjArrayClear(objarr);
+  end;
+  NotifyTestSpeed('TOrmPeopleObjArray non exp', c, lennexp * ITER, @timer, ONLYLOG);
   {$ifdef JSONBENCHMARK_FPJSON}
   timer.Start;
   for i := 1 to ITER div 10 do // div 10 since fpjson is slower
@@ -3189,7 +3244,7 @@ begin
         fpjson.Free;
       end;
   end;
-  NotifyTestSpeed('fpjson', 0, len div 10, @timer, ONLYLOG);
+  NotifyTestSpeed('fpjson', c div 10, len div 10, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_FPJSON}
   {$ifdef JSONBENCHMARK_JSONTOOLS}
   timer.Start;
@@ -3207,7 +3262,7 @@ begin
       jt.Free;
     end;
   end;
-  NotifyTestSpeed('jsontools', 0, len div 10, @timer, ONLYLOG);
+  NotifyTestSpeed('jsontools', c div 10, len div 10, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_JSONTOOLS}
   {$ifdef JSONBENCHMARK_DELPHIJSON}
   timer.Start;
@@ -3222,7 +3277,7 @@ begin
         djson.Free;
       end;
   end;
-  NotifyTestSpeed('Delphi JSON', 0, len div 10, @timer, ONLYLOG);
+  NotifyTestSpeed('Delphi JSON', c div 10, len div 10, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_DELPHIJSON}
   {$ifdef JSONBENCHMARK_JDO}
   timer.Start;
@@ -3237,7 +3292,7 @@ begin
         jdo.Free;
       end;
   end;
-  NotifyTestSpeed('JsonDataObjects', 0, len, @timer, ONLYLOG);
+  NotifyTestSpeed('JsonDataObjects', c, len, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_JDO}
   {$ifdef JSONBENCHMARK_SO}
   s := supertypes.SOString(people); // convert to UTF-8 once
@@ -3248,8 +3303,9 @@ begin
     if not CheckFailed(so <> nil) then
       if not CheckFailed(so.IsType(stArray)) then
         Check(so.AsArray.Length = count);
+    so := nil;
   end;
-  NotifyTestSpeed('SuperObject', 0, len div 10, @timer, ONLYLOG);
+  NotifyTestSpeed('SuperObject', c div 10, len div 10, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_SO}
   {$ifdef JSONBENCHMARK_XSO}
   timer.Start;
@@ -3258,8 +3314,9 @@ begin
     xso := xsuperobject.SA(peoples);
     if not CheckFailed(xso <> nil) then
       Check(xso.Length = count);
+    xso := nil;
   end;
-  NotifyTestSpeed('X-SuperObject', 0, len div ITER, @timer, ONLYLOG);
+  NotifyTestSpeed('X-SuperObject', count, len div ITER, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_SO}
   {$ifdef JSONBENCHMARK_GRIJJY}
   timer.Start;
@@ -3268,7 +3325,7 @@ begin
     g := TgoBsonArray.Parse(peoples);
     Check(g.Count = count);
   end;
-  NotifyTestSpeed('Grijjy', 0, len div 10, @timer, ONLYLOG);
+  NotifyTestSpeed('Grijjy', c div 10, len div 10, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_GRIJJY}
   {$ifdef JSONBENCHMARK_DWS}
   timer.Start;
@@ -3281,7 +3338,7 @@ begin
       dws.Free;
     end;
   end;
-  NotifyTestSpeed('dwsJSON', 0, len div 10, @timer, ONLYLOG);
+  NotifyTestSpeed('dwsJSON', c div 10, len div 10, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_DWS}
   {$ifdef JSONBENCHMARK_WSFT}
   WinJson.TJsonParser.Create.Free; // run it once for the trial popup to show
@@ -3301,7 +3358,7 @@ begin
         Free;
       end;
   end;
-  NotifyTestSpeed('WinSoft WinJson', 0, len div 10, @timer, ONLYLOG);
+  NotifyTestSpeed('WinSoft WinJson', c div 10, len div 10, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_WSFT}
   sample := StringFromFile(WorkDir + 'sample.json');
   if sample <> '' then
@@ -4284,6 +4341,30 @@ const
     '"1234","RELATION_ID":11,"TIMESTAMP_CALL":"2017-10-26T04:48:14"},' +
     '{"REC_ID":3,"CHANNEL":174,"PHONE":"9149556917","RELATION_ID":12,' +
     '"TIMESTAMP_CALL":"2017-10-26T04:48:14"}]';
+  TEST_DATA_2 = '{"ID":1,"licence_nr":"95c583ef-95f6-4825-9690-6e17b1ddb88a",' +
+    '"password":"random","licenced_to":"test","contact_email":"mail","count":' +
+    '200,"valid_from":"2021-12-07T00:00:0","valid_until":"2021-12-07T23:59:0"' +
+    ',"archived":0,"try_licence":0,"billing":0,"support":0,"support_create_pa' +
+    'quet":0,"note":"","order_id":-1,"raw_licence":"{\"licence_nr\":\"95c583e' +
+    'f-95f6-4825-9690-6e17b1ddb88a\",\"count\":200,\"valid_from\":\"2021-12-0' +
+    '7T00:00:0\",\"valid_until\":\"2021-12-07T23:59:0\",\"product\":\"WAPT En' +
+    'terprise\",\"licenced_to\":\"test\",\"contact_email\":\"mail\",\"domain\' +
+    '":\"\",\"renewal_url\":\"\",\"features\":[\"full\"],\"signature_date\":\' +
+    '"2021-12-07T12:30:41\",\"signer\":\"\",\"signer_certificate\":\"-----BEG' +
+    'IN RSA PRIVATE KEY-----\\r\\nProc-Type: 4,ENCRYPTED\\r\\nDEK-Info: AES-2' +
+    '56-CBC,284BCA8E252D2C16EA2B59EB2BA9B4C1\\r\\n\\r\\npSZEZrApSb/1ToccFnyun' +
+    'B\\r\\nrdAxopYaIYbiG/IgQ019iE4ptqYkbTTeSlvBYMURGJydUaIHdB4x8MqZcya9hWac\' +
+    '\r\\n50X4KB7lGEFOiM1TPwpBuxzSHlCRv1HfDFIn3cL3YdL/QsZVmpG4sR2n4g7Mal/j\\r' +
+    '\\n0U200IXnv8pS7ICntgwtFMOPm8GDp3ZMtDYoc77wAm16M/O8KHMzJMk3RTrLb7w9\\r\\' +
+    'n-----END RSA PRIVATE KEY-----\",\"signed_attributes\":[\"licence_nr\",\' +
+    '"count\",\"valid_from\",\"valid_until\",\"product\",\"licenced_to\",\"co' +
+    'ntact_email\",\"domain\",\"renewal_url\",\"features\",\"signature_date\"' +
+    ',\"signer\",\"signer_certificate\",\"signed_attributes\"],\"signature\":' +
+    '\"UKjRMatlLmig3FsQESZ4iAH0kV2lD1mj3HbHp1dgmvFLz0AE2+VJ/pW+hAywkBrO0n2zOv' +
+    'GeHy7v7AIjMYB3s7/ORaQ4tfGL7BGLpjqWTquXaXIUiosUYelh1LIlEoZlyyOvhBX5QPc55b' +
+    'k+tfEp/Rig1M2l0Day6GOFz9PXpWPV+9aOkVVnNtBmvmzvH94kKPAtgk3L9T3ooor9nS5av/' +
+    'LCYwN8kzuRagxRfDCqVLWZHFFUIb1GMhaKz1jq2oZriTqIByEBSLcbkE+V1fecalJYI6rkaE' +
+    'hQ0BLF3X83x91dqC0kKEyvG1HnKIj/c0oe7CauRIKgbwFo0mT00MRTog==\"}"}]';
 var
   Doc, Doc2: TDocVariantData;
   model, m2: TDocVariantModel;
@@ -4672,6 +4753,17 @@ begin
     lTable.Free;
   end;
   Doc.Clear;
+  Check(Doc.InitJson(TEST_DATA_2));
+  s := Doc.U['raw_licence'];
+  Check(s <> '');
+  Check(IsValidJson(s, {strict=}true));
+  Doc.Clear;
+  Doc.InitJson('{"order_id": -1}');
+  CheckEqual(Doc.I['order_id'], -1);
+  Doc2.Clear;
+  Doc2.InitJson('{"order_id": -1}');
+  Check(Doc.Equals(Doc2));
+  Doc.Clear;
   Doc.InitJson(
    '{' + #13#10 +
    '	"CostCenter": {' + #13#10 +
@@ -4711,6 +4803,9 @@ begin
     '572327,PropertyID:174,DoubleValue:51.5208320617676,ShortStringValue:"51.5208",' +
     'PropertyType:7,PropertyName:"Latitude",PropertyNotation:"Latitude",' +
     'IsRequired:false}]}}');
+  Doc2.Clear;
+  Doc2.InitJson(J, JSON_FAST_FLOAT);
+  Check(Doc2.Equals(Doc));
   J := StringFromFile(WorkDir + 'm1.json');
   if J <> '' then
   begin
@@ -4750,6 +4845,11 @@ begin
   result := nil;
 end;
 
+type
+  TMyEnum = (enFirst, enTwo, enThree, enFour, enFive);
+  TMyEnumPart = enTwo .. enFour;
+  TSetMyEnum = set of TMyEnum;
+  TSetMyEnumPart = set of TMyEnumPart; // validate partial sets
 
 procedure TTestCoreProcess._RTTI;
 var
@@ -4761,7 +4861,25 @@ var
   P: PUtf8Char;
   eoo: AnsiChar;
   e: TEmoji;
+  ep: TSetMyEnumPart;
 begin
+  ep := [enTwo];
+  CheckEqual(byte(ep), 2);
+  tmp := '["enTwo"]';
+  p := UniqueRawUtf8(tmp);
+  i := GetSetNameValue(TypeInfo(TSetMyEnum), p, eoo);
+  checkEqual(i, 2, 'TSetMyEnum');
+  Check(p = nil); // as in mORMot 1
+  tmp := '["enTwo"]';
+  p := UniqueRawUtf8(tmp);
+  i := GetSetNameValue(TypeInfo(TSetMyEnumPart), p, eoo);
+  checkEqual(i, 2, 'TSetMyEnumPart');
+  Check(p = nil);
+  tmp := '["enFirst", "entwo"  ]';
+  p := UniqueRawUtf8(tmp);
+  i := GetSetNameValue(TypeInfo(TSetMyEnumPart), p, eoo);
+  checkEqual(i, 2, 'TSetMyEnumPart');
+  Check(p = nil);
   check(EMOJI_UTF8[eNone] = '');
   checkEqual(BinToHex(EMOJI_UTF8[eGrinning]), 'F09F9880');
   checkEqual(BinToHex(EMOJI_UTF8[ePray]), 'F09F998F');
@@ -5552,10 +5670,10 @@ begin
   end;
 end;
 
-function Spaces(n: integer): RawUtf8;
+function By1(pattern: byte; n: integer): RawUtf8;
 begin
   SetString(result, nil, n);
-  FillCharFast(pointer(result)^, n, 32);
+  FillCharFast(pointer(result)^, n, pattern);
 end;
 
 function By4(pattern, n: integer): RawUtf8;
@@ -5568,8 +5686,21 @@ begin
 end;
 
 procedure TTestCoreCompression._SynLZ;
+
+  procedure TestOne(const v: RawByteString);
+  var
+    s, t: RawByteString;
+  begin
+    s := AlgoSynLZ.Compress(v);
+    t := AlgoSynLZ.Decompress(s);
+    Check(t = v);
+    s := AlgoRleLZ.Compress(v);
+    t := AlgoRleLZ.Decompress(s);
+    Check(t = v);
+  end;
+
 var
-  s, t, rle: RawByteString;
+  s, t: RawByteString;
   i, j, complen2: integer;
   comp2, dec1: array of byte;
   {$ifdef CPUINTEL}
@@ -5577,20 +5708,13 @@ var
   complen1: integer;
   {$endif CPUINTEL}
 begin
-  for i := 1 to 200 do
-  begin
-    s := AlgoSynLZ.Compress(RawUtf8OfChar(AnsiChar(i), i));
-    t := AlgoSynLZ.Decompress(s);
-    Check(t = RawUtf8OfChar(AnsiChar(i), i));
-  end;
-  rle := 'hello' + Spaces(10000) + 'hello' + Spaces(1000) + 'world';
-  s := AlgoSynLZ.Compress(rle);
-  t := AlgoSynLZ.Decompress(s);
-  Check(t = rle);
-  rle := 'hello' + by4($3031333, 10000) + 'hello' + by4($3031333, 1000) + 'world';
-  s := AlgoSynLZ.Compress(rle);
-  t := AlgoSynLZ.Decompress(s);
-  Check(t = rle);
+  for i := 0 to 200 do
+    TestOne(RawUtf8OfChar(AnsiChar(i), i));
+  TestOne('hello' + by1(32, 10000) + 'hello' + by1(32, 1000) + 'world');
+  TestOne('hello' + by1($33, 10000) + 'hello' + by1($33, 1000) + 'world');
+  for i := 1 to 150 do
+    TestOne('hello' + by1(i, Random32(200)) + 'hello' + by1(i + 100, Random32(200)) + 'world');
+  TestOne('hello' + by4($3031333, 10000) + 'hello' + by4($3031333, 1000) + 'world');
   for i := 0 to 1000 do
   begin
     s := RawUtf8OfChar(' ', 20);
@@ -5679,18 +5803,18 @@ procedure TTestCoreCompression._TAlgoCompress;
       if log <> '' then
         break;
     end;
-    AddConsole(format('%s %s->%s: comp %d:%dMB/s decomp %d:%dMB/s',
+    AddConsole(format('%s %s->%s: comp %s/s decomp %s/s',
       [algo.ClassName, KB(plain), KB(comp),
-       ((plain * Int64(1000 * 1000)) div timecomp) shr 20,
-       ((comp * Int64(1000 * 1000)) div timecomp) shr 20,
-       ((comp * Int64(1000 * 1000)) div timedecomp) shr 20,
-       ((plain * Int64(1000 * 1000)) div timedecomp) shr 20]));
+       KBNoSpace((plain * Int64(1000 * 1000)) div timecomp),
+       KBNoSpace((plain * Int64(1000 * 1000)) div timedecomp)]));
     s2 := algo.Decompress(algo.Compress(s), aclNoCrcFast);
     Check(s2 = s, algo.ClassName);
   end;
 
 begin
   TestAlgo(AlgoSynLZ);
+  TestAlgo(AlgoRleLZ); // don't compress better, but validate the class
+  TestAlgo(AlgoRle);   // don't compress exe nor log, but validate the class
   Check(AlgoSynLZ.AlgoName = 'synlz');
   {$ifdef OSWINDOWS}
   if (Lizard = nil) and

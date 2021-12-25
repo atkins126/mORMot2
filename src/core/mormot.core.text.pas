@@ -193,7 +193,7 @@ function UnQuoteSqlString(const Value: RawUtf8): RawUtf8;
 
 /// unquote a SQL-compatible symbol name
 // - e.g. '[symbol]' -> 'symbol' or '"symbol"' -> 'symbol'
-function UnQuotedSQLSymbolName(const ExternalDBSymbol: RawUtf8): RawUtf8;
+function UnQuotedSqlSymbolName(const ExternalDBSymbol: RawUtf8): RawUtf8;
 
 
 /// get the next character after a quoted buffer
@@ -632,6 +632,9 @@ type
   // writing the fields with default values, i.e. enable soWriteIgnoreDefault
   // when published properties are serialized
   // - twoDateTimeWithZ appends an ending 'Z' to TDateTime/TDateTimeMS values
+  // - twoNonExpandedArrays will force the 'non expanded' optimized JSON layout
+  // for array of records or classes, ignoring other formatting options:
+  // $ {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
   TTextWriterOption = (
     twoStreamIsOwned,
     twoFlushToStreamNoAutoResize,
@@ -644,7 +647,8 @@ type
     twoEndOfLineCRLF,
     twoBufferIsExternal,
     twoIgnoreDefaultInRecord,
-    twoDateTimeWithZ);
+    twoDateTimeWithZ,
+    twoNonExpandedArrays);
     
   /// options set for a TTextWriter / TTextWriter instance
   // - allows to override e.g. AddRecordJson() and AddDynArrayJson() behavior;
@@ -1908,6 +1912,9 @@ function FormatString(const Format: RawUtf8; const Args: array of const): string
 procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
   var result: TShort16);
 
+/// fast Format() function replacement, for UTF-8 content stored in variant
+function FormatVariant(const Format: RawUtf8; const Args: array of const): variant;
+
 /// append some path parts into a single file name with proper path delimiters
 // - set EndWithDelim=true if you want to create e.g. full a folder name
 function MakePath(const Part: array of const; EndWithDelim: boolean = false;
@@ -2493,8 +2500,7 @@ function RawByteStringToStream(const aString: RawByteString): TStream;
 // !  WriteStringToStream(Stream,aUtf8Text);
 // !  Stream.Seek(0,soBeginning);
 // !  str := ReadStringFromStream(Stream);
-function ReadStringFromStream(S: TStream;
-  MaxAllowedSize: integer = 255): RawUtf8;
+function ReadStringFromStream(S: TStream; MaxAllowedSize: integer = 255): RawUtf8;
 
 /// write an UTF-8 text into a TStream with a len prefix - see ReadStringFromStream
 // - format is Length(integer):Text - use RawByteStringToStream for raw data
@@ -2903,12 +2909,10 @@ begin
     result := S
   else
   begin
-    {$ifdef FPC} // will use fast FPC SSE version
     if length(OldPattern) = 1 then
-      found := IndexByte(pointer(S)^, PStrLen(PtrUInt(S) - _STRLEN)^,
+      found := ByteScanIndex(pointer(S), PStrLen(PtrUInt(S) - _STRLEN)^,
         byte(OldPattern[1])) + 1
     else
-    {$endif FPC}
       found := PosEx(OldPattern, S, 1); // our PosEx() is faster than RTL Pos()
     if found = 0 then
       result := S
@@ -2934,20 +2938,22 @@ end;
 function StringReplaceChars(const Source: RawUtf8; OldChar, NewChar: AnsiChar): RawUtf8;
 var
   i, j, n: PtrInt;
+  P: PAnsiChar;
 begin
   if (OldChar <> NewChar) and
      (Source <> '') then
   begin
     n := length(Source);
-    for i := 0 to n - 1 do
-      if PAnsiChar(pointer(Source))[i] = OldChar then
-      begin
-        FastSetString(result, PAnsiChar(pointer(Source)), n);
-        for j := i to n - 1 do
-          if PAnsiChar(pointer(result))[j] = OldChar then
-            PAnsiChar(pointer(result))[j] := NewChar;
-        exit;
-      end;
+    i := ByteScanIndex(pointer(Source), n, ord(OldChar));
+    if i >= 0 then
+    begin
+      FastSetString(result, PAnsiChar(pointer(Source)), n);
+      P := pointer(result);
+      for j := i to n - 1 do
+        if P[j] = OldChar then
+          P[j] := NewChar;
+      exit;
+    end;
   end;
   result := Source;
 end;
@@ -3042,22 +3048,11 @@ var
   c: AnsiChar;
 begin
   nquote := 0;
-  {$ifdef FPC}
-  quote1 := IndexByte(P^, PLen, byte(Quote)); // to use fast FPC RTL SSE2 asm
+  quote1 := ByteScanIndex(pointer(P), PLen, byte(Quote)); // asm if available
   if quote1 >= 0 then
     for i := quote1 to PLen - 1 do
       if P[i] = Quote then
         inc(nquote);
-  {$else}
-  quote1 := 0;
-  for i := 0 to PLen - 1 do
-    if P[i] = Quote then
-    begin
-      if nquote = 0 then
-        quote1 := i;
-      inc(nquote);
-    end;
-  {$endif FPC}
   FastSetString(result, nil, PLen + nquote + 2);
   R := pointer(result);
   R^ := Quote;
@@ -3268,7 +3263,7 @@ begin
   UnQuoteSqlStringVar(pointer(Value), result);
 end;
 
-function UnQuotedSQLSymbolName(const ExternalDBSymbol: RawUtf8): RawUtf8;
+function UnQuotedSqlSymbolName(const ExternalDBSymbol: RawUtf8): RawUtf8;
 begin
   if (ExternalDBSymbol <> '') and
      (ExternalDBSymbol[1] in ['[', '"', '''', '(']) then
@@ -6528,6 +6523,13 @@ begin
   result := -1;
 end;
 
+function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer;
+begin
+  result := high(Names);
+  if result >= 0 then
+    result := FindPropName(@Names[0], Name, result + 1);
+end;
+
 function FindRawUtf8(const Values: TRawUtf8DynArray; const Value: RawUtf8;
   CaseSensitive: boolean): integer;
 begin
@@ -6540,13 +6542,6 @@ begin
   result := high(Values);
   if result >= 0 then
     result := FindRawUtf8(@Values[0], Value, result + 1, CaseSensitive);
-end;
-
-function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer;
-begin
-  result := high(Names);
-  if result >= 0 then
-    result := FindPropName(@Names[0], Name, result + 1);
 end;
 
 function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
@@ -9381,6 +9376,12 @@ end;
 function FormatUtf8(const Format: RawUtf8; const Args: array of const): RawUtf8;
 begin
   FormatUtf8(Format, Args, result);
+end;
+
+function FormatVariant(const Format: RawUtf8; const Args: array of const): variant;
+begin
+  ClearVariantForString(result);
+  FormatUtf8(Format, Args, RawUtf8(TVarData(result).VString));
 end;
 
 type

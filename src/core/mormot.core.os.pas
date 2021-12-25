@@ -116,6 +116,8 @@ const
 /// retrieve the HTTP reason text from its integer code
 // - e.g. StatusCodeToReason(200)='OK'
 // - as defined in http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
+// - returns the generic 'Invalid Request' for unknown Code
+// - use an internal cache for efficiency
 // - see also StatusCodeToErrorMsg() from mormot.core.text if you need
 // the HTTP error as both integer and text, returned as ShortString
 function StatusCodeToReason(Code: cardinal): RawUtf8; overload;
@@ -1929,8 +1931,18 @@ function SafeFileNameU(const FileName: RawUtf8): boolean;
 
 /// get a file date and time, from its name
 // - returns 0 if file doesn't exist
+// - returns the local file age, encoded as TDateTime
 // - under Windows, will use GetFileAttributesEx fast API
 function FileAgeToDateTime(const FileName: TFileName): TDateTime;
+
+/// get a file date and time, from its name, as seconds since Unix Epoch
+// - returns 0 if file (or folder if AllowDir is true) doesn't exist
+// - returns the system API file age (not converted local), encoded as TUnixTime
+// - under Windows, will use GetFileAttributesEx and FileTimeToUnixTime
+// - under POSIX, will call directly the stat API
+// - slightly faster than FileAgeToDateTime() since don't convert to local time
+function FileAgeToUnixTimeUtc(const FileName: TFileName;
+  AllowDir: boolean = false): TUnixTime;
 
 /// get the date and time of one file into a Windows File 32-bit TimeStamp
 // - this cross-system function is used e.g. by mormot.core.zip which expects
@@ -2078,7 +2090,7 @@ function FileStreamSequentialRead(const FileName: string): THandleStream;
 // - content can be binary or text
 // - returns '' if file was not found or any read error occured
 // - wil use GetFileSize() API by default, unless HasNoSize is defined,
-// and read will be done using a buffer (required e.g. for char files under Linux)
+// and read will be done using a buffer (required e.g. for POSIX char files)
 // - uses RawByteString for byte storage, whatever the codepage is
 function StringFromFile(const FileName: TFileName;
   HasNoSize: boolean = false): RawByteString;
@@ -2525,6 +2537,8 @@ type
   // deadlock: use TRWLock or TSynLocker/TRTLCriticalSection for reentrant methods
   // - light locks are expected to be kept a very small amount of time: use
   // TSynLocker or TRTLCriticalSection if the lock may block too long
+  // - several lightlocks, each protecting a few variables (e.g. a list), may
+  // be more efficient than a more global TRTLCriticalSection/TRWLock
   // - only consume 4 bytes on CPU32, 8 bytes on CPU64
   {$ifdef USERECORDWITHMETHODS}
   TLightLock = record
@@ -2544,13 +2558,64 @@ type
     procedure Lock;
       {$ifdef HASINLINE} inline; {$endif}
     /// try to enter an exclusive non-rentrant lock
-    // - if returned true, caller should eventually call LightUnLock()
-    // - several lightlocks, each protecting a few variables (e.g. a list), may be
-    // more efficient than a more global TRTLCriticalSection/TRWLock
+    // - if returned true, caller should eventually call UnLock()
     function TryLock: boolean;
       {$ifdef HASINLINE} inline; {$endif}
     /// leave an exclusive non-rentrant lock
     procedure UnLock;
+      {$ifdef HASINLINE} inline; {$endif}
+  end;
+
+  /// a lightweight multiple Reads / exclusive Write non-upgradable lock
+  // - calls SwitchToThread after some spinning, but don't use any R/W OS API
+  // - warning: ReadLocks are reentrant and allow concurrent acccess, but calling
+  // WriteLock within a ReadLock, or within another WriteLock, would deadlock
+  // - consider TRWLock is you need an upgradable lock
+  // - light locks are expected to be kept a very small amount of time: use
+  // TSynLocker or TRTLCriticalSection if the lock may block too long
+  // - several lightlocks, each protecting a few variables (e.g. a list), may
+  // be more efficient than a more global TRTLCriticalSection/TRWLock
+  // - only consume 4 bytes on CPU32, 8 bytes on CPU64
+  {$ifdef USERECORDWITHMETHODS}
+  TRWLightLock = record
+  {$else}
+  TRWLightLock = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    Flags: PtrUInt; // bit 0 = WriteLock, >0 = ReadLock
+    // low-level function called by the Lock method when inlined
+    procedure ReadLockSpin;
+  public
+    /// to be called if the instance has not been filled with 0
+    // - e.g. not needed if TRWLightLock is defined as a class field
+    procedure Init;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// enter a non-upgradable multiple reads lock
+    // - read locks maintain a thread-safe counter, so are reentrant and non blocking
+    // - warning: nested WriteLock call after a ReadLock would deadlock
+    procedure ReadLock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// try to enter a non-upgradable multiple reads lock
+    // - if returned true, caller should eventually call ReadUnLock()
+    // - read locks maintain a thread-safe counter, so are reentrant and non blocking
+    // - warning: nested WriteLock call after a ReadLock would deadlock
+    function TryReadLock: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// leave a non-upgradable multiple reads lock
+    procedure ReadUnLock;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// enter a non-rentrant non-upgradable exclusive write lock
+    // - warning: nested WriteLock call after a ReadLock or another WriteLock
+    // would deadlock
+    procedure WriteLock;
+    /// try to enter a non-rentrant non-upgradable exclusive write lock
+    // - if returned true, caller should eventually call UnLock()
+    // - warning: nested TryWriteLock call after a ReadLock or another WriteLock
+    // would deadlock
+    function TryWriteLock: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// leave a non-rentrant non-upgradable exclusive write lock
+    procedure WriteUnLock;
       {$ifdef HASINLINE} inline; {$endif}
   end;
 
@@ -2561,7 +2626,7 @@ type
     cReadWrite,
     cWrite);
 
-  /// a lightweight multiple Reads / exclusive Write lock
+  /// a lightweight multiple Reads / exclusive Write reentrant lock
   // - calls SwitchToThread after some spinning, but don't use any R/W OS API
   // - locks are expected to be kept a very small amount of time: use TSynLocker
   // or TRTLCriticalSection if the lock may block too long
@@ -2588,7 +2653,7 @@ type
     procedure AssertDone;
     /// wait for the lock to be available for reading, but not upgradable to write
     // - several readers could acquire the lock simultaneously
-    // - ReadOnlyLock is reentrant since there is an internal counter
+    // - ReadOnlyLock is reentrant since there is a thread-safe internal counter
     // - warning: calling ReadWriteLock/WriteLock after ReadOnlyLock would deadlock
     // - typical usage is the following:
     // ! rwlock.ReadOnlyLock; // won't block concurrent ReadOnlyLock
@@ -2654,10 +2719,10 @@ type
   PRWLock = ^TRWLock;
 
 const
-  RW_FORCE: array[{write}boolean] of TRWLockContext = (
+  RW_FORCE: array[{write:}boolean] of TRWLockContext = (
     cReadOnly,
     cWrite);
-  RW_UPGRADE: array[{write}boolean] of TRWLockContext = (
+  RW_UPGRADE: array[{write:}boolean] of TRWLockContext = (
     cReadOnly,
     cReadWrite);
 
@@ -4735,17 +4800,18 @@ end;
 type
   // internal memory buffer created with PAGE_EXECUTE_READWRITE flags
   TFakeStubBuffer = class
-  protected
-    fStub: PByteArray;
-    fStubUsed: cardinal;
   public
+    Stub: PByteArray;
+    StubUsed: cardinal;
     constructor Create;
     destructor Destroy; override;
+    function Reserve(size: cardinal): pointer;
   end;
 
 var
   CurrentFakeStubBuffer: TFakeStubBuffer;
   CurrentFakeStubBuffers: array of TFakeStubBuffer;
+  CurrentFakeStubBufferLock: TLightLock;
   {$ifdef UNIX}
   MemoryProtection: boolean = false; // set to true if PROT_EXEC seems to fail
   {$endif UNIX}
@@ -4753,32 +4819,41 @@ var
 constructor TFakeStubBuffer.Create;
 begin
   {$ifdef OSWINDOWS}
-  fStub := VirtualAlloc(nil, STUB_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-  if fStub = nil then
+  Stub := VirtualAlloc(nil, STUB_SIZE, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+  if Stub = nil then
   {$else OSWINDOWS}
   if not MemoryProtection then
-    fStub := StubCallAllocMem(STUB_SIZE, PROT_READ or PROT_WRITE or PROT_EXEC);
-  if (fStub = MAP_FAILED) or
+    Stub := StubCallAllocMem(STUB_SIZE, PROT_READ or PROT_WRITE or PROT_EXEC);
+  if (Stub = MAP_FAILED) or
      MemoryProtection then
   begin
     // i.e. on OpenBSD, we can have w^x protection
-    fStub := StubCallAllocMem(STUB_SIZE, PROT_READ OR PROT_WRITE);
-    if fStub <> MAP_FAILED then
+    Stub := StubCallAllocMem(STUB_SIZE, PROT_READ OR PROT_WRITE);
+    if Stub <> MAP_FAILED then
       MemoryProtection := True;
   end;
-  if fStub = MAP_FAILED then
+  if Stub = MAP_FAILED then
   {$endif OSWINDOWS}
     raise EOSException.Create('ReserveExecutableMemory(): OS memory allocation failed');
+  ObjArrayAdd(CurrentFakeStubBuffers, self);
 end;
 
 destructor TFakeStubBuffer.Destroy;
 begin
   {$ifdef OSWINDOWS}
-  VirtualFree(fStub, 0, MEM_RELEASE);
+  VirtualFree(Stub, 0, MEM_RELEASE);
   {$else}
-  fpmunmap(fStub, STUB_SIZE);
+  fpmunmap(Stub, STUB_SIZE);
   {$endif OSWINDOWS}
   inherited;
+end;
+
+function TFakeStubBuffer.Reserve(size: cardinal): pointer;
+begin
+  result := @Stub[StubUsed];
+  while size and 7 <> 0 do
+    inc(size); // ensure the returned buffers are 8 bytes aligned
+  inc(StubUsed, size);
 end;
 
 function ReserveExecutableMemory(size: cardinal): pointer;
@@ -4786,23 +4861,14 @@ begin
   if size > STUB_SIZE then
     raise EOSException.CreateFmt('ReserveExecutableMemory(size=%d>%d)',
       [size, STUB_SIZE]);
-  GlobalLock;
+  CurrentFakeStubBufferLock.Lock;
   try
-    if (CurrentFakeStubBuffer <> nil) and
-       (CurrentFakeStubBuffer.fStubUsed + size > STUB_SIZE) then
-      CurrentFakeStubBuffer := nil;
-    if CurrentFakeStubBuffer = nil then
-    begin
+    if (CurrentFakeStubBuffer = nil) or
+       (CurrentFakeStubBuffer.StubUsed + size > STUB_SIZE) then
       CurrentFakeStubBuffer := TFakeStubBuffer.Create;
-      ObjArrayAdd(CurrentFakeStubBuffers, CurrentFakeStubBuffer);
-    end;
-    with CurrentFakeStubBuffer do
-    begin
-      result := @fStub[fStubUsed];
-      inc(fStubUsed, size);
-    end;
+    result := CurrentFakeStubBuffer.Reserve(size);
   finally
-    GlobalUnLock;
+    CurrentFakeStubBufferLock.UnLock;
   end;
 end;
 
@@ -5186,7 +5252,7 @@ begin
 end;
 
 var
-  InternalGarbageCollection: record
+  InternalGarbageCollection: record // RegisterGlobalShutdownRelease() list
     Instances:  TObjectDynArray;
     Count: integer;
     Shutdown: boolean; // paranoid check to avoid messing with Instances[]
@@ -5385,6 +5451,75 @@ begin
   Flags := 0;
 end;
 
+
+{ TRWLightLock }
+
+procedure TRWLightLock.Init;
+begin
+  Flags := 0; // bit 0=WriteLock, >0=ReadLock counter
+end;
+
+procedure TRWLightLock.ReadLockSpin;
+var
+  f, spin: PtrUInt;
+begin
+  spin := SPIN_COUNT;
+  repeat
+    spin := DoSpin(spin);
+    f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
+  until LockedExc(Flags, f + 2, f);
+end;
+
+procedure TRWLightLock.ReadLock;
+var
+  f: PtrUInt;
+begin
+  // if not writing, atomically increase the RD counter in the upper flag bits
+  f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
+  if not LockedExc(Flags, f + 2, f) then
+    ReadLockSpin;
+end;
+
+function TRWLightLock.TryReadLock: boolean;
+var
+  f: PtrUInt;
+begin
+  // if not writing, atomically increase the RD counter in the upper flag bits
+  f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
+  result := LockedExc(Flags, f + 2, f);
+end;
+
+procedure TRWLightLock.ReadUnLock;
+begin
+  LockedDec(Flags, 2);
+end;
+
+procedure TRWLightLock.WriteLock;
+var
+  spin, f: PtrUInt;
+begin
+  spin := SPIN_COUNT;
+  // acquire the WR flag bit
+  repeat
+    f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
+    if LockedExc(Flags, f + 1, f) then
+      exit;
+    spin := DoSpin(spin);
+  until false;
+end;
+
+function TRWLightLock.TryWriteLock: boolean;
+var
+  f: PtrUInt;
+begin
+  f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock
+  result := LockedExc(Flags, f + 1, f);
+end;
+
+procedure TRWLightLock.WriteUnLock;
+begin
+  LockedDec(Flags, 1);
+end;
 
 
 { TRWLock }
@@ -6194,7 +6329,8 @@ begin
             include(result, pcHasSubCommand)
           else
             include(result, pcHasShellVariable);
-      '*', '?':
+      '*',
+      '?':
         if posix and
            (state * [sInSQ, sInDQ] = []) then
           include(result, pcHasWildcard);

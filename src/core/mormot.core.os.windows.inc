@@ -38,25 +38,10 @@ function LibraryResolve(Lib: TLibHandle; ProcName: PAnsiChar): pointer;
   external kernel32 name 'GetProcAddress';
 
 procedure FileTimeToInt64(const FT: TFileTime; out I64: Int64);
-  {$ifdef HASINLINE} inline; {$endif}
+  {$ifdef HASINLINE} inline; {$endif} 
 begin
-  {$ifdef CPU64}
-  PInt64Rec(@I64)^.Lo := FT.dwLowDateTime;
+  PInt64Rec(@I64)^.Lo := FT.dwLowDateTime; // Delphi 2007 bug with PInt64()
   PInt64Rec(@I64)^.Hi := FT.dwHighDateTime;
-  {$else}
-  I64 := PInt64(@FT)^;
-  {$endif CPU64}
-end;
-
-procedure Int64ToFileTime(const I64: Int64; out FT: TFileTime);
-  {$ifdef HASINLINE} inline; {$endif}
-begin
-  {$ifdef CPU64}
-  FT.dwLowDateTime := PInt64Rec(@I64)^.Lo;
-  FT.dwHighDateTime := PInt64Rec(@I64)^.Hi;
-  {$else}
-  PInt64(@FT)^ := I64;
-  {$endif CPU64}
 end;
 
 const
@@ -67,7 +52,8 @@ procedure UnixTimeToFileTime(I64: TUnixTime; out FT: TFileTime);
 begin
   I64 := I64 * 10000000;
   inc(I64, UnixFileTimeDelta);
-  Int64ToFileTime(I64, FT);
+  FT.dwLowDateTime  := PInt64Rec(@I64)^.Lo; // Delphi 2007 bug with PInt64()
+  FT.dwHighDateTime := PInt64Rec(@I64)^.Hi;
 end;
 
 procedure UnixTimeToLocalTime(I64: TUnixTime; out Local: TSystemTime);
@@ -281,6 +267,19 @@ begin
      FileTimeToSystemTime({%H-}FA.ftLastWriteTime, ST) and
      SystemTimeToTzSpecificLocalTime(nil, ST, LT) then
     result := SystemTimeToDateTime(LT)
+  else
+    result := 0;
+end;
+
+function FileAgeToUnixTimeUtc(const FileName: TFileName; AllowDir: boolean): TUnixTime;
+var
+  FA: WIN32_FILE_ATTRIBUTE_DATA;
+begin
+  // 5 times faster than CreateFile, GetFileSizeEx, CloseHandle
+  if GetFileAttributesEx(pointer(FileName), GetFileExInfoStandard, @FA) and
+     (AllowDir or
+      (({%H-}FA.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY) = 0)) then
+    result := FileTimeToUnixTime(FA.ftLastWriteTime) // no local time conversion
   else
     result := 0;
 end;
@@ -508,6 +507,13 @@ end;
 
 {$endif NOSETTHREADNAME}
 
+type
+  // avoid linking of ComObj.pas just for EOleSysError
+  EOleSysError = class(Exception)
+  public
+    ErrorCode: cardinal;
+  end;
+
 {$ifndef NOEXCEPTIONINTERCEPT}
 
 const
@@ -703,13 +709,6 @@ const
     $8002000a,
     $80131047,
     $80028ca0);
-
-type
-  // avoid linking of ComObj.pas just for EOleSysError
-  EOleSysError = class(Exception)
-  public
-    ErrorCode: cardinal;
-  end;
 
 function ExceptionInheritsFrom(E: TClass; const Name: ShortString): boolean;
 begin
@@ -3086,13 +3085,15 @@ end;
 
 var
   EnvironmentCache: SynUnicode;
+  EnvironmentCacheLock: TLightLock;
 
 function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName;
   envaddexisting: boolean; parsed: PParseCommands): integer;
 var
   startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
   processinfo: TProcessInformation;
-  path: TFileName;
+  exe, path: TFileName;
+  // CreateProcess can alter the strings -> use local SynUnicode temp variables
   wcmd, wenv, wpath: SynUnicode;
   e, p: PWideChar;
   exitcode: cardinal;
@@ -3100,36 +3101,40 @@ var
 begin
   // https://support.microsoft.com/en-us/help/175986/info-understanding-createprocess-and-command-line-arguments
   result := -1;
+  // extract path and exe from cmd input
   if cmd = '' then
     exit;
-  // CreateProcess can alter the strings -> use local SynUnicode temp variable
-  wcmd := SynUnicode(cmd);
-  UniqueString(wcmd);
   if cmd[1] = '"' then
   begin
-    path := copy(cmd, 2, maxInt);
-    i := Pos('"', path);
+    exe := copy(cmd, 2, maxInt);
+    i := Pos('"', exe);
     if i = 0 then
       exit;
-    SetLength(path, i - 1); // unquote "path" string
+    SetLength(exe, i - 1); // unquote "exe" string
   end
   else
   begin
     i := Pos(' ', cmd);
-    if i <= 1 then
-      exit;
-    path := copy(cmd, 1, i - 1);
+    if i = 0 then
+      exe := cmd // no parameter
+    else
+      exe := copy(cmd, 1, i - 1); // split exe and parameter(s)
   end;
-  path := ExtractFilePath(path);
-  if path = '' then
-    path := Executable.ProgramFilePath;
+  if exe <> '' then
+    path := ExtractFilePath(exe);
+  if (path = '') and
+     FileExists(Executable.ProgramFilePath + exe) then
+    path := Executable.ProgramFilePath; // prefers the current folder
+  // prepare the CreateProcess arguments
+  wcmd := SynUnicode(cmd);
+  UniqueString(wcmd);
   wpath := SynUnicode(path);
   if env <> '' then
   begin
     wenv := SynUnicode(env);
     if envaddexisting then
     begin
-      GlobalLock;
+      EnvironmentCacheLock.Lock;
       try
         if EnvironmentCache = '' then
         begin
@@ -3142,19 +3147,20 @@ begin
         end;
         wenv := EnvironmentCache + wenv;
       finally
-        GlobalUnLock;
+        EnvironmentCacheLock.UnLock;
       end;
     end
     else
       UniqueString(wenv);
   end;
+  // launch the process
   FillCharFast(startupinfo, SizeOf(startupinfo), 0);
   startupinfo.cb := SizeOf(startupinfo);
   FillCharFast(processinfo, SizeOf(processinfo), 0);
   // https://docs.microsoft.com/pl-pl/windows/desktop/ProcThread/process-creation-flags
   if CreateProcessW(nil, pointer(wcmd), nil, nil, false,
     CREATE_UNICODE_ENVIRONMENT or CREATE_DEFAULT_ERROR_MODE or
-    DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP,
+      DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP,
     pointer({%H-}wenv), pointer(wpath), startupinfo, processinfo) then
   begin
     if waitfor then

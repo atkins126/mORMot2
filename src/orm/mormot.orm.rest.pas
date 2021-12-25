@@ -376,8 +376,8 @@ type
     function UpdateField(Table: TOrmClass;
       const WhereFieldName: RawUtf8; const WhereFieldValue: variant;
       const FieldName: RawUtf8; const FieldValue: variant): boolean; overload;
-    function UpdateField(Table: TOrmClass; const IDs: array of Int64;
-      const FieldName: RawUtf8; const FieldValue: variant): boolean; overload;
+    function UpdateFieldAt(Table: TOrmClass; const IDs: array of TID;
+      const FieldName: RawUtf8; const FieldValue: variant): boolean;
     function UpdateFieldIncrement(Table: TOrmClass; ID: TID;
       const FieldName: RawUtf8; Increment: Int64 = 1): boolean;
     function RecordCanBeUpdated(Table: TOrmClass; ID: TID;
@@ -690,7 +690,7 @@ end;
 
 function TRestOrm.GetServerTimestamp: TTimeLog;
 begin
-  result := fRest.GetServerTimeStamp;
+  result := fRest.GetServerTimeStamp(0);
 end;
 
 procedure TRestOrm.WriteLock;
@@ -872,46 +872,55 @@ function TRestOrm.MultiFieldValue(Table: TOrmClass;
   const FieldName: array of RawUtf8; var FieldValue: array of RawUtf8;
   const WhereClause: RawUtf8): boolean;
 var
-  SQL: RawUtf8;
-  n, i: PtrInt;
+  sql, where: RawUtf8;
+  v, f: PtrInt;
   T: TOrmTable;
-  P: PUtf8Char;
-  PLen: integer;
 begin
   result := false;
-  n := length(FieldName);
   if (self <> nil) and
      (Table <> nil) and
-     (n = length(FieldValue)) then
+     (high(FieldName) = high(FieldValue)) then
     with Table.OrmProps do
     begin
-      if (n = 1) and
+      where := SqlTableName + SqlFromWhere(WhereClause);
+      if (high(FieldName) = 0) and
          IdemPChar(pointer(FieldName[0]), 'COUNT(*)') then
-        SQL := 'SELECT COUNT(*) FROM ' + SqlTableName + SqlFromWhere(WhereClause)
+        sql := 'SELECT COUNT(*) FROM ' + where
       else
       begin
-        for i := 0 to high(FieldName) do
-          if not IsFieldNameOrFunction(FieldName[i]) then
-            // prevent SQL error or security breach
+        for f := 0 to high(FieldName) do
+          if not IsFieldNameOrFunction(FieldName[f]) then
+            // prevent sql error or security breach
             exit
-          else if SQL = '' then
-            SQL := 'SELECT ' + FieldName[i]
+          else if sql = '' then
+            sql := 'SELECT ' + FieldName[f]
           else
-            SQL := SQL + ',' + FieldName[i];
-        SQL := SQL + ' FROM ' + SqlTableName + SqlFromWhere(WhereClause) +
-                     ' LIMIT 1';
+            sql := sql + ',' + FieldName[f];
+        sql := sql + ' FROM ' + where + ' LIMIT 1';
       end;
-      T := ExecuteList([Table], SQL);
+      T := ExecuteList([Table], sql);
       if T <> nil then
       try
         if (T.FieldCount <> length(FieldName)) or
            (T.RowCount <= 0) then
           exit;
         // get field values from the first (and unique) row
-        for i := 0 to T.FieldCount - 1 do
+        for f := 0 to high(FieldName) do
         begin
-          P := T.Get(1, i, PLen);
-          FastSetString(FieldValue[i], P, PLen);
+          v := f; // regular SQL SELECT order by default
+          if (high(FieldName) <> 0) and
+             not IdemPropNameU(FieldName[f], T.Results[f], T.ResultsLen[f]) then
+          begin
+            // RowID/ID or wrong order (e.g. TRestStorageInMemory = TOrm order)
+            v := T.FieldIndex(pointer(FieldName[f]));
+            if v < 0 then
+              if IsSqlFunction(pointer(FieldName[f])) then
+                v := f // function result could be renamed but in-order
+              else
+                exit;  // something went wrong
+          end;
+          inc(v, T.FieldCount); // value offset
+          FastSetString(FieldValue[f], T.Results[v], T.ResultsLen[v]);
         end;
         result := true;
       finally
@@ -950,8 +959,8 @@ function TRestOrm.OneFieldValues(Table: TOrmClass;
 var
   T: TOrmTable;
   V: Int64;
-  prop: RawUtf8;
   P: PUtf8Char;
+  field: shortstring;
 begin
   Data := nil;
   // handle naive expressions like SELECT ID from Table where ID=10
@@ -959,8 +968,8 @@ begin
      (length(WhereClause) > 2) then
   begin
     P := pointer(WhereClause);
-    GetNextFieldProp(P, prop);
-    if IsRowIDShort(prop) and
+    GetNextFieldPropSameLine(P, field);
+    if IsRowIDShort(field) and
        (StrPosI('AND', P) = nil) and
        (StrPosI('OR', P) = nil) then
       case P^ of
@@ -1874,7 +1883,7 @@ begin
   // warning: this may not update the internal cache
 end;
 
-function TRestOrm.UpdateField(Table: TOrmClass; const IDs: array of Int64;
+function TRestOrm.UpdateFieldAt(Table: TOrmClass; const IDs: array of TID;
   const FieldName: RawUtf8; const FieldValue: variant): boolean;
 var
   value, where: RawUtf8;
@@ -1973,7 +1982,7 @@ begin
     for i := 0 to length(IDs) - 1 do
       if not RecordCanBeUpdated(Table, IDs[i], oeDelete) then
         exit;
-    fCache.NotifyDeletions(t, TInt64DynArray(IDs));
+    fCache.NotifyDeletions(t, IDs);
   end;
   result := true;
 end;

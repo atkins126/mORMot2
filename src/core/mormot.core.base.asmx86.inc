@@ -13,7 +13,7 @@
   {$WARN 7122 off : Check size of XMM memory operand }
 {$endif FPC}
 
-{$ifdef ASMX86}
+{$ifdef ASMX86} // i386 asm with global - disabled on PIC targets
 
 {$define WITH_ERMS} // we enable it as fallback on old CPU without SSE2
 
@@ -440,11 +440,7 @@ asm
         pop     edi
         pop     esi
 @done:  sub     ecx, 8
-        jl      @tail
-        pop     ebp
-        pop     ebx
-        not     eax
-        ret
+        jge     @e
 @tail:  movzx   ebx, byte[edx + ecx]
         xor     bl, al
         shr     eax, 8
@@ -470,6 +466,7 @@ asm
         xor     edx, dword ptr [edi]
         xor     ecx, dword ptr [edi + 4]
         movzx   esi, dl
+        // note: since we have "+ 1024 * n" offsets, crc32ctab is left immediate
         mov     eax, dword ptr [esi * 4 + crc32ctab + 1024 * 3]
         movzx   esi, dh
         shr     edx, 16
@@ -589,134 +586,6 @@ asm
         pop     ebx
         pop     esi
         pop     edi
-end;
-
-function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
-{$ifdef FPC}nostackframe; assembler;{$endif}
-asm
-        // eax=P, edx=Count, Value=ecx
-        test    eax, eax
-        jz      @ok0 // avoid GPF
-        cmp     edx, 8
-        jb      @s2
-        nop
-        nop
-        nop // @s1 loop align
-@s1:    sub     edx, 8
-        cmp     [eax], ecx
-        je      @ok0
-        cmp     [eax + 4], ecx
-        je      @ok4
-        cmp     [eax + 8], ecx
-        je      @ok8
-        cmp     [eax + 12], ecx
-        je      @ok12
-        cmp     [eax + 16], ecx
-        je      @ok16
-        cmp     [eax + 20], ecx
-        je      @ok20
-        cmp     [eax + 24], ecx
-        je      @ok24
-        cmp     [eax + 28], ecx
-        je      @ok28
-        add     eax, 32
-        cmp     edx, 8
-        jae     @s1
-@s2:    test    edx, edx
-        jz      @z
-        cmp     [eax], ecx
-        je      @ok0
-        dec     edx
-        jz      @z
-        cmp     [eax + 4], ecx
-        je      @ok4
-        dec     edx
-        jz      @z
-        cmp     [eax + 8], ecx
-        je      @ok8
-        dec     edx
-        jz      @z
-        cmp     [eax + 12], ecx
-        je      @ok12
-        dec     edx
-        jz      @z
-        cmp     [eax + 16], ecx
-        je      @ok16
-        dec     edx
-        jz      @z
-        cmp     [eax + 20], ecx
-        je      @ok20
-        dec     edx
-        jz      @z
-        cmp     [eax + 24], ecx
-        je      @ok24
-@z:     xor     eax, eax // return nil if not found
-        ret
-@ok0:   rep     ret
-@ok28:  add     eax, 28
-        ret
-@ok24:  add     eax, 24
-        ret
-@ok20:  add     eax, 20
-        ret
-@ok16:  add     eax, 16
-        ret
-@ok12:  add     eax, 12
-        ret
-@ok8:   add     eax, 8
-        ret
-@ok4:   add     eax, 4
-end;
-
-function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): boolean;
-{$ifdef FPC}nostackframe; assembler;{$endif}
-asm
-        // eax=P, edx=Count, Value=ecx
-        test    eax, eax
-        jz      @z // avoid GPF
-        cmp     edx, 8
-        jae     @s1
-        jmp     dword ptr [edx * 4 + @Table]
-@Table: dd      @z, @1, @2, @3, @4, @5, @6, @7
-@s1:    // fast search by 8 integers (pipelined instructions)
-        sub     edx, 8
-        cmp     [eax], ecx
-        je      @ok
-        cmp     [eax + 4], ecx
-        je      @ok
-        cmp     [eax + 8], ecx
-        je      @ok
-        cmp     [eax + 12], ecx
-        je      @ok
-        cmp     [eax + 16], ecx
-        je      @ok
-        cmp     [eax + 20], ecx
-        je      @ok
-        cmp     [eax + 24], ecx
-        je      @ok
-        cmp     [eax + 28], ecx
-        je      @ok
-        add     eax, 32
-        cmp     edx, 8
-        jae     @s1
-        jmp     dword ptr [edx * 4 + @Table]
-@7:     cmp     [eax + 24], ecx
-        je      @ok
-@6:     cmp     [eax + 20], ecx
-        je      @ok
-@5:     cmp     [eax + 16], ecx
-        je      @ok
-@4:     cmp     [eax + 12], ecx
-        je      @ok
-@3:     cmp     [eax + 8], ecx
-        je      @ok
-@2:     cmp     [eax + 4], ecx
-        je      @ok
-@1:     cmp     [eax], ecx
-        je      @ok
-@z:     xor     eax, eax
-        ret
-@ok:    mov     al, 1
 end;
 
 function StrLenSSE2(S: pointer): PtrInt;
@@ -1049,6 +918,346 @@ asm
         and     eax, $3f
 end;
 
+{$ifdef HASNOSSE2} // fallback to simple pascal code if no SSE2 available
+
+function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
+begin
+  result := 0;
+  if P <> nil then
+    repeat
+      if result >= Count then
+        break;
+      if P^[result] = Value then
+        exit;
+      inc(result);
+    until false;
+  result := -1;
+end;
+
+function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
+begin
+  result := 0;
+  if P <> nil then
+    repeat
+      if result >= Count then
+        break;
+      if P^[result] = Value then
+        exit;
+      inc(result);
+    until false;
+  result := -1;
+end;
+
+function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): PtrInt;
+begin
+  result := PtrUInt(IntegerScan(P, Count, Value));
+  if result = 0 then
+    dec(result)
+  else
+  begin
+    dec(result, PtrUInt(P));
+    result := result shr 2;
+  end;
+end;
+
+function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        // eax=P, edx=Count, Value=ecx
+        test    eax, eax
+        jz      @ok0 // avoid GPF
+        cmp     edx, 8
+        jb      @s2
+        nop
+        nop
+        nop // @s1 loop align
+@s1:    sub     edx, 8
+        cmp     [eax], ecx
+        je      @ok0
+        cmp     [eax + 4], ecx
+        je      @ok4
+        cmp     [eax + 8], ecx
+        je      @ok8
+        cmp     [eax + 12], ecx
+        je      @ok12
+        cmp     [eax + 16], ecx
+        je      @ok16
+        cmp     [eax + 20], ecx
+        je      @ok20
+        cmp     [eax + 24], ecx
+        je      @ok24
+        cmp     [eax + 28], ecx
+        je      @ok28
+        add     eax, 32
+        cmp     edx, 8
+        jae     @s1
+@s2:    test    edx, edx
+        jz      @z
+        cmp     [eax], ecx
+        je      @ok0
+        dec     edx
+        jz      @z
+        cmp     [eax + 4], ecx
+        je      @ok4
+        dec     edx
+        jz      @z
+        cmp     [eax + 8], ecx
+        je      @ok8
+        dec     edx
+        jz      @z
+        cmp     [eax + 12], ecx
+        je      @ok12
+        dec     edx
+        jz      @z
+        cmp     [eax + 16], ecx
+        je      @ok16
+        dec     edx
+        jz      @z
+        cmp     [eax + 20], ecx
+        je      @ok20
+        dec     edx
+        jz      @z
+        cmp     [eax + 24], ecx
+        je      @ok24
+@z:     xor     eax, eax // return nil if not found
+        ret
+@ok0:   rep     ret
+@ok28:  add     eax, 28
+        ret
+@ok24:  add     eax, 24
+        ret
+@ok20:  add     eax, 20
+        ret
+@ok16:  add     eax, 16
+        ret
+@ok12:  add     eax, 12
+        ret
+@ok8:   add     eax, 8
+        ret
+@ok4:   add     eax, 4
+end;
+
+function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): boolean;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        // eax=P, edx=Count, Value=ecx
+        test    eax, eax
+        jz      @z // avoid GPF
+        cmp     edx, 8
+        jae     @s1
+        jmp     dword ptr [edx * 4 + @Table]
+{$ifdef FPC} align   4 {$endif FPC}
+@Table: dd      @z, @1, @2, @3, @4, @5, @6, @7
+@s1:    // fast search by 8 integers (pipelined instructions)
+        sub     edx, 8
+        cmp     [eax], ecx
+        je      @ok
+        cmp     [eax + 4], ecx
+        je      @ok
+        cmp     [eax + 8], ecx
+        je      @ok
+        cmp     [eax + 12], ecx
+        je      @ok
+        cmp     [eax + 16], ecx
+        je      @ok
+        cmp     [eax + 20], ecx
+        je      @ok
+        cmp     [eax + 24], ecx
+        je      @ok
+        cmp     [eax + 28], ecx
+        je      @ok
+        add     eax, 32
+        cmp     edx, 8
+        jae     @s1
+        jmp     dword ptr [edx * 4 + @Table]
+@7:     cmp     [eax + 24], ecx
+        je      @ok
+@6:     cmp     [eax + 20], ecx
+        je      @ok
+@5:     cmp     [eax + 16], ecx
+        je      @ok
+@4:     cmp     [eax + 12], ecx
+        je      @ok
+@3:     cmp     [eax + 8], ecx
+        je      @ok
+@2:     cmp     [eax + 4], ecx
+        je      @ok
+@1:     cmp     [eax], ecx
+        je      @ok
+@z:     xor     eax, eax
+        ret
+@ok:    mov     al, 1
+end;
+
+{$else}
+
+function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        // eax=P, edx=Count, cl=Value
+        push    ebx
+        mov     ebx, eax
+        movzx   eax, cl
+        mov     ecx, ebx
+        test    edx, edx
+        jbe     @no
+        // eax=Value, ecx=P edx=Count
+        imul    eax, $01010101
+        and     ecx, -16
+        movd    xmm1, eax
+        movaps  xmm0, [ecx]
+        add     ecx, 16
+        pshufd  xmm1, xmm1, 0
+        sub     ecx, ebx
+        pcmpeqb xmm0, xmm1
+        pmovmskb eax, xmm0
+        shl     eax, cl
+        and     eax, $FFFF0000
+        shr     eax, cl
+        jnz     @fnd
+        cmp     edx, ecx
+        jbe     @no
+{$ifdef FPC} align 16 {$endif}
+@by16:  movaps  xmm0, [ebx + ecx]
+        add     ecx, 16
+        pcmpeqb xmm0, xmm1
+        pmovmskb eax, xmm0
+        bsf     eax, eax
+        jnz     @fnd2
+        cmp     edx, ecx
+        ja      @by16
+@no:    mov     eax, -1
+        pop     ebx
+        ret
+@fnd:   bsf     eax, eax
+@fnd2:  lea     eax, [ecx + eax - 16]
+        cmp     edx, eax
+        jbe     @no
+        pop     ebx
+end;
+
+function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        // eax=P, edx=Count, cx=Value
+        push    ebx
+        mov     ebx, eax
+        movzx   eax, cx
+        mov     ecx, ebx
+        test    edx, edx
+        jbe     @no
+        test    cl, 1
+        jnz     @unal
+        // eax=Value, ecx=P edx=Count
+        movd    xmm1, eax
+        and     ecx, -16
+        punpcklwd xmm1, xmm1
+        movaps  xmm0, [ecx]
+        add     ecx, 16
+        pshufd  xmm1, xmm1, 0
+        sub     ecx, ebx
+        pcmpeqw xmm0, xmm1
+        pmovmskb eax, xmm0
+        shl     eax, cl
+        and     eax, $FFFF0000
+        shr     eax, cl
+        shr     ecx, 1
+        test    eax, eax
+        jz      @nxt
+        bsf     eax, eax
+@fnd:   shr     eax, 1
+        lea     eax, [ecx + eax - 8]
+        cmp     edx, eax
+        jbe     @no
+        pop     ebx
+        ret
+        nop // manual loop alignment
+@by16:  movaps  xmm0, [ebx + ecx * 2]
+        add     ecx, 8
+        pcmpeqw xmm0, xmm1
+        pmovmskb eax, xmm0
+        bsf     eax, eax
+        jnz     @fnd
+@nxt:   cmp     edx, ecx
+        ja      @by16
+@no:    mov     eax, -1
+        pop     ebx
+        ret
+        // 16bit-unaligned loop (seldom called)
+@unal:  lea     ecx, [ecx + edx * 2]
+        neg     edx
+@unals: cmp     word ptr [ecx + edx * 2], ax
+        jz      @unale
+        inc     edx
+        jnz     @unals
+        jmp     @no
+@unale: lea     eax, [ecx + edx * 2]
+        sub     eax, ebx
+        shr     eax, 1
+        pop     ebx
+end;
+
+function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): PtrInt;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+        // eax=P, edx=Count, ecx=Value
+        push    ebx
+        movd    xmm1, ecx
+        mov     ebx, eax
+        mov     eax, ecx
+        mov     ecx, ebx
+        test    edx, edx
+        jbe     @no
+        test    cl, 3
+        jnz     @unal
+        // eax=Value, ecx=P edx=Count
+        and     ecx, -16
+        movaps  xmm0, [ecx]
+        add     ecx, 16
+        pshufd  xmm1, xmm1, 0
+        sub     ecx, ebx
+        pcmpeqd xmm0, xmm1
+        pmovmskb eax, xmm0
+        shl     eax, cl
+        and     eax, $FFFF0000
+        shr     eax, cl
+        shr     ecx, 2
+        bsf     eax, eax
+        jz      @nxt
+@fnd:   shr     eax, 2
+        lea     eax, [ecx + eax - 4]
+        cmp     edx, eax
+        jbe     @no
+        pop     ebx
+        ret
+{$ifdef FPC} align 16 {$else} nop;nop;nop;nop;nop;nop {$endif FPC}
+@by16:  movaps  xmm0, [ebx + ecx * 4]
+        add     ecx, 4
+        pcmpeqd xmm0, xmm1
+        pmovmskb eax, xmm0
+        bsf     eax, eax
+        jnz     @fnd
+@nxt:   cmp     edx, ecx
+        ja      @by16
+@no:    mov     eax, -1
+        pop     ebx
+        ret
+        // 32bit-unaligned loop (seldom called)
+@unal:  lea     ecx, [ecx + edx * 4]
+        neg     edx
+@unals: cmp     dword ptr [ecx + edx * 4], eax
+        jz      @unale
+        inc     edx
+        jnz     @unals
+        jmp     @no
+@unale: lea     eax, [ecx + edx * 4]
+        sub     eax, ebx
+        shr     eax, 2
+        pop     ebx
+end;
+
+{$endif HASNOSSE2}
+
 procedure mul64x64(const left, right: QWord; out product: THash128Rec);
 {$ifdef FPC}nostackframe; assembler; {$endif}
 asm
@@ -1090,7 +1299,7 @@ end;
 function bswap32(a: cardinal): cardinal;
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
-  bswap eax
+        bswap eax
 end;
 
 function bswap64({$ifdef FPC}constref{$else}const{$endif} a: QWord): QWord;
@@ -2125,7 +2334,7 @@ end;
 function RefCntDecFree(var refcnt: TRefCnt): boolean;
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
-        lock dec dword ptr [refcnt]  // TRefCnt=longint on Delphi and FPC 32-bit
+   lock dec dword ptr [refcnt]  // TRefCnt=longint on Delphi and FPC 32-bit
         setbe   al
 end; // don't check for ismultithread global since lock is cheaper on new CPUs
 
@@ -2152,9 +2361,9 @@ end;
 function IsXmmYmmOSEnabled: boolean;
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm // see https://software.intel.com/en-us/blogs/2011/04/14/is-avx-enabled
-        xor     ecx, ecx  // specify control register XCR0 = XFEATURE_ENABLED_MASK
+        xor     ecx, ecx  // get control register XCR0 = XFEATURE_ENABLED_MASK
         db  $0f, $01, $d0 // XGETBV reads XCR0 into EDX:EAX
-        and     eax, 6    // check OS has enabled both XMM (bit 1) and YMM (bit 2)
+        and     eax, 6    // check OS enabled both XMM (bit 1) and YMM (bit 2)
         cmp     al, 6
         sete    al
 end;

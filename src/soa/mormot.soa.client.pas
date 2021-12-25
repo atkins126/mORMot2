@@ -284,7 +284,7 @@ function TServiceContainerClientAbstract.AddInterface(
   aContractExpected: RawUtf8): boolean;
 var
   i: PtrInt;
-  F: TServiceFactoryClient;
+  f: TServiceFactoryClient;
 begin
   result := false;
   if (self = nil) or
@@ -293,9 +293,9 @@ begin
   CheckInterface(aInterfaces);
   for i := 0 to high(aInterfaces) do
   begin
-    F := fServicesFactoryClients.Create(
+    f := fServicesFactoryClients.Create(
       fOwner as TRest, aInterfaces[i], aInstanceCreation, aContractExpected);
-    AddServiceInternal(F);
+    AddServiceInternal(f);
     aContractExpected := ''; // supplied contract is only for the 1st interface
   end;
   result := true;
@@ -398,10 +398,11 @@ begin
       else
         count := 1;
       output.InitObject([
-        'errorcount', count,
-        'lasterror', error,
-        'lasttime', NowUtcToString(true, 'T'),
-        'lastelapsed', timer.Stop], JSON_FAST_EXTENDED);
+        'errorcount',  count,
+        'lasterror',   error,
+        'lasttime',    NowUtcToString(true, 'T'),
+        'lastelapsed', timer.Stop],
+        JSON_FAST_EXTENDED);
       pending.Output := variant(output);
       fClient.fSendNotificationsRest.ORM.Update(pending, 'Output', true);
       raise EServiceException.CreateUtf8(

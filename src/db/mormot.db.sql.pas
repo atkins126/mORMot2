@@ -866,11 +866,13 @@ type
     function Instance: TSqlDBStatement;
     // return all rows content as a JSON string
     // - JSON data is retrieved with UTF-8 encoding
-    // - if Expanded is true, JSON data is an array of objects, for direct use
-    // with any Ajax or .NET client:
-    // & [ {"col1":val11,"col2":"val12"},{"col1":val21,... ]
-    // - if Expanded is false, JSON data is serialized (used in TOrmTableJson)
-    // & { "FieldCount":1,"Values":["col1","col2",val11,"val12",val21,..] }
+    // - if Expanded is true, JSON output is a standard array of objects, for
+    // direct use with any Ajax or .NET client:
+    // & [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...]
+    // - if Expanded is false, JSON data is serialized in non-expanded format:
+    // & {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+    // resulting in lower space use and faster process - it could be parsed by
+    // TOrmTableJson or TDocVariantData.InitArrayFromResults
     // - BLOB field value is saved as Base64, in the '"\uFFF0base64encodedbinary"'
     // format and contains true BLOB data
     // - if ReturnedRowCount points to an integer variable, it will be filled with
@@ -880,11 +882,13 @@ type
     function FetchAllAsJson(Expanded: boolean; ReturnedRowCount: PPtrInt = nil): RawUtf8;
     // append all rows content as a JSON stream
     // - JSON data is added to the supplied TStream, with UTF-8 encoding
-    // - if Expanded is true, JSON data is an array of objects, for direct use
-    // with any Ajax or .NET client:
-    // & [ {"col1":val11,"col2":"val12"},{"col1":val21,... ]
-    // - if Expanded is false, JSON data is serialized (used in TOrmTableJson)
-    // & { "FieldCount":1,"Values":["col1","col2",val11,"val12",val21,..] }
+    // - if Expanded is true, JSON output is a standard array of objects, for
+    // direct use with any Ajax or .NET client:
+    // & [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...]
+    // - if Expanded is false, JSON data is serialized in non-expanded format:
+    // & {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+    // resulting in lower space use and faster process - it could be parsed by
+    // TOrmTableJson or TDocVariantData.InitArrayFromResults
     // - BLOB field value is saved as Base64, in the '"\uFFF0base64encodedbinary"'
     // format and contains true BLOB data
     // - similar to corresponding TSqlRequest.Execute method in the
@@ -1064,11 +1068,13 @@ type
     procedure ExecutePrepared;
     // execute a prepared SQL statement and return all rows content as a JSON string
     // - JSON data is retrieved with UTF-8 encoding
-    // - if Expanded is true, JSON data is an array of objects, for direct use
-    // with any Ajax or .NET client:
-    // & [ {"col1":val11,"col2":"val12"},{"col1":val21,... ]
-    // - if Expanded is false, JSON data is serialized (used in TOrmTableJson)
-    // & { "FieldCount":1,"Values":["col1","col2",val11,"val12",val21,..] }
+    // - if Expanded is true, JSON output is a standard array of objects, for
+    // direct use with any Ajax or .NET client:
+    // & [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...]
+    // - if Expanded is false, JSON data is serialized in non-expanded format:
+    // & {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+    // resulting in lower space use and faster process - it could be parsed by
+    // TOrmTableJson or TDocVariantData.InitArrayFromResults
     // - BLOB field value is saved as Base64, in the '"\uFFF0base64encodedbinary"'
     // format and contains true BLOB data
     procedure ExecutePreparedAndFetchAllAsJson(Expanded: boolean;
@@ -2609,7 +2615,7 @@ type
   // connection pool
   TSqlDBConnectionPropertiesThreadSafe = class(TSqlDBConnectionProperties)
   protected
-    fConnectionPool: TSynObjectListLocked;
+    fConnectionPool: TSynObjectListLightLocked;
     fLatestConnectionRetrievedInPool: PtrInt;
     fConnectionPoolDeprecatedTix: cardinal;
     fThreadingMode: TSqlDBConnectionPropertiesThreadSafeThreadingMode;
@@ -6921,14 +6927,14 @@ end;
 
 function TSqlDBConnection.IsOutdated(tix: Int64): boolean;
 label
-  ok;
+  old;
 begin
   if (self = nil) or
      (fProperties.fConnectionTimeOutTicks = 0) then
     result := false
   else if fLastAccessTicks < 0 then
     // connection release was forced by ClearConnectionPool
-    goto ok
+    goto old
   else if (fLastAccessTicks = 0) or
           (tix - fLastAccessTicks < fProperties.fConnectionTimeOutTicks) then
   begin
@@ -6938,7 +6944,7 @@ begin
   end
   else
     // notify connection is clearly outdated
-ok: result := true;
+old:result := true;
 end;
 
 function TSqlDBConnection.GetInTransaction: boolean;
@@ -7241,7 +7247,7 @@ end;
 constructor TSqlDBConnectionPropertiesThreadSafe.Create(
   const aServerName, aDatabaseName, aUserID, aPassWord: RawUtf8);
 begin
-  fConnectionPool := TSynObjectListLocked.Create;
+  fConnectionPool := TSynObjectListLightLocked.Create;
   fLatestConnectionRetrievedInPool := -1;
   inherited Create(aServerName, aDatabaseName, aUserID, aPassWord);
 end;
@@ -7258,8 +7264,7 @@ begin
     id := GetCurrentThreadId;
     // most of the time, we are from the same thread: use simple cache
     result := fLatestConnectionRetrievedInPool;
-    if (result >= 0) and
-       (result < fConnectionPool.Count) and
+    if (PtrUInt(result) < PtrUInt(fConnectionPool.Count)) and
        (TSqlDBConnectionThreadSafe(fConnectionPool.List[result]).
          fThreadID = id) then
         exit;
@@ -7315,11 +7320,11 @@ begin
   case fThreadingMode of
     tmThreadPool:
       begin
-        // first delete any deprecated connection(s)
+        // first delete any deprecated connection(s) - every 16 seconds
         if fConnectionTimeOutTicks <> 0 then
         begin
           tix := GetTickCount64;
-          tix32 := tix shr 14; // it is enough to check every 16 seconds
+          tix32 := tix shr 14; // search every 16.384 seconds
           if (not fDeleteConnectionInOwnThread) and
              (fConnectionPoolDeprecatedTix <> tix32) then
           begin
@@ -7346,19 +7351,20 @@ begin
           tix := 0;
         // search for an existing connection
         result := nil;
-        fConnectionPool.Safe.ReadOnlyLock; // concurrent non blocking search
+        fConnectionPool.Safe.ReadLock; // concurrent non blocking search
         i := LockedPerThreadIndex;
         if i >= 0 then
           result := fConnectionPool.List[i];
-        fConnectionPool.Safe.ReadOnlyUnLock;
+        fConnectionPool.Safe.ReadUnLock;
         if result <> nil then
-          if result.IsOutdated(tix) then
+          if (tix <> 0) and
+             result.IsOutdated(tix) then
             // release this deprecated connection
             EndCurrentThread
           else
             // we found a valid connection for this TThreadID
             exit;
-        // we need to create a new connection
+        // we need to (re)create a new connection
         fConnectionPool.Safe.WriteLock;
         try
           result := NewConnection; // no need to release the lock (fast method)

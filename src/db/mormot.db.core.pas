@@ -31,10 +31,11 @@ uses
   variants,
   mormot.core.base,
   mormot.core.os,
-  mormot.core.buffers,
   mormot.core.unicode,
   mormot.core.text,
   mormot.core.datetime,
+  mormot.core.buffers,
+  mormot.core.data,
   mormot.core.variants,
   mormot.core.rtti,
   mormot.core.json;
@@ -394,6 +395,20 @@ type
   // VCL string=AnsiString like string(aField) but use VariantToString(aField)
   TNullableUtf8Text = type variant;
 
+  /// can identify the TNullable* supported variant types
+  // - as used by NullableVariantType()
+  TNullableVariantType = (
+    nvtNone,
+    nvtInteger,
+    nvtBoolean,
+    nvtFloat,
+    nvtCurrency,
+    nvtDateTime,
+    nvtTimeLog,
+    nvtUtf8Text);
+
+/// detect a TypeInfo(TNullable*) RTTI pointer to nullable variant types
+function NullableVariantType(info: PRttiInfo): TNullableVariantType;
 
 var
   /// a nullable integer value containing null
@@ -756,7 +771,7 @@ function SelectInClause(const PropName: RawUtf8; const Values: array of RawUtf8;
 // or 'PropName in (:(Values0):,:(Values1):,...)' if length(Values)<ValuesInlinedMax
 // - PropName can be used as a prefix to the 'in ()' clause, in conjunction
 // with optional Suffix value
-function SelectInClause(const PropName: RawUtf8; const Values: array of Int64;
+function SelectInClause(const PropName: RawUtf8; const Values: array of TID;
   const Suffix: RawUtf8 = ''; ValuesInlinedMax: integer = 0): RawUtf8; overload;
 
 /// naive search of '... FROM TableName ...' pattern in the supplied SQL
@@ -903,29 +918,29 @@ type
 
   /// one recognized WHERE expression for TSelectStatement
   TSelectStatementWhere = record
-    /// any '(' before the actual expression
-    ParenthesisBefore: RawUtf8;
-    /// any ')' after the actual expression
-    ParenthesisAfter: RawUtf8;
     /// expressions are evaluated as AND unless this field is set to TRUE
     JoinedOR: boolean;
     /// if this expression is preceded by a NOT modifier
     NotClause: boolean;
+    /// the operator of the WHERE expression
+    Operation: TSelectStatementOperator;
     /// the index of the field used for the WHERE expression
-    // - WhereField=0 for ID, 1 for field # 0, 2 for field #1,
+    // - WhereField=0 for ID, 1 for field #0, 2 for field #1,
     // and so on... (i.e. WhereField = RTTI field index +1)
     Field: integer;
     /// MongoDB-like sub field e.g. 'mainfield.subfield1.subfield2'
     // - still identifying 'mainfield' in Field index, and setting
     // SubField='.subfield1.subfield2'
     SubField: RawUtf8;
-    /// the operator of the WHERE expression
-    Operation: TSelectStatementOperator;
     /// the SQL function name associated to a Field and Value
     // - e.g. 'INTEGERDYNARRAYCONTAINS' and Field=0 for
     // IntegerDynArrayContains(RowID,10) and ValueInteger=10
     // - Value does not contain anything
     FunctionName: RawUtf8;
+    /// any '(' before the actual expression
+    ParenthesisBefore: RawUtf8;
+    /// any ')' after the actual expression
+    ParenthesisAfter: RawUtf8;
     /// the value used for the WHERE expression
     Value: RawUtf8;
     /// the raw value SQL buffer used for the WHERE expression
@@ -1209,17 +1224,6 @@ function GetJsonObjectAsSql(var P: PUtf8Char; const Fields: TRawUtf8DynArray;
 function GetJsonObjectAsSql(const Json: RawUtf8; Update, InlinedParams: boolean;
   RowID: TID = 0; ReplaceRowIDWithID: boolean = false): RawUtf8; overload;
 
-const
-  FIELDCOUNT_PATTERN: PUtf8Char = '{"fieldCount":'; // PatternLen = 14 chars
-  ROWCOUNT_PATTERN: PUtf8Char   = ',"rowCount":';   // PatternLen = 12 chars
-  VALUES_PATTERN: PUtf8Char     = ',"values":[';    // PatternLen = 11 chars
-
-/// quickly check if an UTF-8 buffer start with the supplied Pattern
-// - PatternLen is at least 8 bytes long, typically FIELDCOUNT_PATTERN,
-// ROWCOUNT_PATTERN or VALUES_PATTERN constants
-function Expect(var P: PUtf8Char; Pattern: PUtf8Char; PatternLen: PtrInt): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
-
 /// get the FIRST field value of the FIRST row, from a JSON content
 // - e.g. useful to get an ID without converting a JSON content into a TOrmTableJson
 function UnJsonFirstField(var P: PUtf8Char): RawUtf8;
@@ -1228,16 +1232,6 @@ function UnJsonFirstField(var P: PUtf8Char): RawUtf8;
 // - i.e. as plain [{"ID":10,"FirstName":"John","LastName":"Smith"}...]
 // - i.e. not as '{"fieldCount":3,"values":["ID","FirstName","LastName",...']}
 function IsNotAjaxJson(P: PUtf8Char): boolean;
-
-/// efficient retrieval of the number of rows in non-expanded layout
-// - search for "rowCount": at the end of the JSON buffer
-function NotExpandedBufferRowCountPos(P, PEnd: PUtf8Char): PUtf8Char;
-
-/// parse JSON content in not-expanded format
-// - i.e. stored as '{"fieldCount":3,"values":["ID","FirstName","LastName",...']}
-// - search and extract "fieldCount" and "rowCount" field information
-function IsNotExpandedBuffer(var P: PUtf8Char; PEnd: PUtf8Char;
-  var FieldCount, RowCount: PtrInt): boolean;
 
 /// retrieve a JSON '{"Name":Value,....}' object
 // - P is nil in return in case of an invalid object
@@ -1255,6 +1249,7 @@ function JsonGetObject(var P: PUtf8Char; ExtractID: PID;
 // "Name":Value pairs, as generated by TOrm.GetJsonValues(W)
 // - returns TRUE if a ID/RowID>0 has been found, and set ID with the value
 function JsonGetID(P: PUtf8Char; out ID: TID): boolean;
+
 
 
 implementation
@@ -1684,6 +1679,36 @@ end;
 
 { ************ Nullable Values Stored as Variant }
 
+function NullableVariantType(info: PRttiInfo): TNullableVariantType;
+begin
+  if info <> nil then
+    if info <> TypeInfo(TNullableInteger) then
+      if info <> TypeInfo(TNullableUtf8Text) then
+        if info <> TypeInfo(TNullableBoolean) then
+          if info <> TypeInfo(TNullableFloat) then
+            if info <> TypeInfo(TNullableCurrency) then
+              if info <> TypeInfo(TNullableDateTime) then
+                if info <> TypeInfo(TNullableTimeLog) then
+                  result := nvtNone
+                else
+                  result := nvtTimeLog
+              else
+                result := nvtDateTime
+            else
+              result := nvtCurrency
+          else
+            result := nvtFloat
+        else
+          result := nvtBoolean
+      else
+        result := nvtUtf8Text
+    else
+      result := nvtInteger
+  else
+    result := nvtNone;
+end;
+
+
 // TNullableInteger
 
 function NullableInteger(const Value: Int64): TNullableInteger;
@@ -2044,12 +2069,8 @@ begin
     Where := Where + ' and ' + Condition;
 end;
 
-function SqlWhereIsEndClause(const Where: RawUtf8): boolean;
-begin
-  if Where = '' then
-    result := false
-  else
-    result := IdemPCharArray(GotoNextNotSpace(pointer(Where)), [
+const
+  _ENDCLAUSE: array[0..9] of PUtf8Char = (
       'ORDER BY ',
       'GROUP BY ',
       'LIMIT ',
@@ -2058,7 +2079,13 @@ begin
       'RIGHT ',
       'INNER ',
       'OUTER ',
-      'JOIN ']) >= 0;
+      'JOIN ',
+      nil);
+
+function SqlWhereIsEndClause(const Where: RawUtf8): boolean;
+begin
+  result := (Where <> '') and
+            (IdemPPChar(GotoNextNotSpace(pointer(Where)), @_ENDCLAUSE) >= 0);
 end;
 
 function SqlFromWhere(const Where: RawUtf8): RawUtf8;
@@ -2127,7 +2154,7 @@ begin
     result := '';
 end;
 
-function SelectInClause(const PropName: RawUtf8; const Values: array of Int64;
+function SelectInClause(const PropName: RawUtf8; const Values: array of TID;
   const Suffix: RawUtf8; ValuesInlinedMax: integer): RawUtf8;
 var
   n, i: integer;
@@ -2451,11 +2478,11 @@ begin
   else
   begin
     AddShort('{"fieldCount":');
-    Add(length(ColNames));
+    AddU(length(ColNames));
     if aKnownRowsCount > 0 then
     begin
       AddShort(',"rowCount":');
-      Add(aKnownRowsCount);
+      AddU(aKnownRowsCount);
     end;
     AddShort(',"values":["');
     // first row is FieldNames
@@ -2564,25 +2591,31 @@ end;
 
 const
   NULL_UPP = ord('N') + ord('U') shl 8 + ord('L') shl 16 + ord('L') shl 24;
+  ENDCLAUSE: array[0..4] of PAnsiChar = (
+    'LIMIT',   // 0
+    'OFFSET',  // 1
+    'ORDER',   // 2
+    'GROUP',   // 3
+    nil);
 
 constructor TSelectStatement.Create(const SQL: RawUtf8;
   const GetFieldIndex: TOnGetFieldIndex; const SimpleFields: TSelectStatementSelectDynArray);
 var
-  Prop, whereBefore: RawUtf8;
+  prop, whereBefore: RawUtf8;
   P, B: PUtf8Char;
   ndx, order, err, len, selectCount, whereCount: integer;
   whereWithOR, whereNotClause: boolean;
 
   function GetPropIndex: integer;
   begin
-    if not GetNextFieldProp(P, Prop) then
+    if not GetNextFieldProp(P, prop) then
       result := -1
-    else if IsRowID(pointer(Prop)) then
+    else if IsRowID(pointer(prop)) then
       result := 0
     else
     begin
       // 0 = ID field
-      result := GetFieldIndex(Prop);
+      result := GetFieldIndex(prop);
       if result >= 0 then // -1 = no valid field name
         inc(result);  // otherwise: PropertyIndex+1
     end;
@@ -2601,9 +2634,9 @@ var
       if P^ <> '(' then // Field not found -> try function(field)
         exit;
       P := GotoNextNotSpace(P + 1);
-      select.FunctionName := Prop;
+      select.FunctionName := prop;
       inc(fSelectFunctionCount);
-      if IdemPropNameU(Prop, 'COUNT') and
+      if IdemPropNameU(prop, 'COUNT') and
          (P^ = '*') then
       begin
         select.Field := 0; // count( * ) -> count(ID)
@@ -2612,9 +2645,9 @@ var
       end
       else
       begin
-        if IdemPropNameU(Prop, 'DISTINCT') then
+        if IdemPropNameU(prop, 'DISTINCT') then
           select.FunctionKnown := funcDistinct
-        else if IdemPropNameU(Prop, 'MAX') then
+        else if IdemPropNameU(prop, 'MAX') then
           select.FunctionKnown := funcMax;
         select.Field := GetPropIndex;
         if select.Field < 0 then
@@ -2892,7 +2925,7 @@ begin
   begin
     // all simple (not RawBlob/TOrmMany) fields
     inc(P);
-    GetNextFieldProp(P, Prop);
+    GetNextFieldProp(P, prop);
     if SimpleFields = nil then
       exit;
     fSelect := copy(SimpleFields); // use precalculated array of simple fields
@@ -2901,24 +2934,24 @@ begin
     // we need at least one field name
     exit
   else if P^ <> ',' then
-    GetNextFieldProp(P, Prop)
+    GetNextFieldProp(P, prop)
   else
     repeat
       while P^ in [',', #1..' '] do
         inc(P); // trim left
     until not GetNextSelectField; // add other CSV field names
   // 2. get FROM clause
-  if not IdemPropNameU(Prop, 'FROM') then
+  if not IdemPropNameU(prop, 'FROM') then
     exit; // incorrect SQL statement
-  GetNextFieldProp(P, Prop);
-  fTableName := Prop;
+  GetNextFieldProp(P, prop);
+  fTableName := prop;
   // 3. get WHERE clause
   whereCount := 0;
   whereWithOR := false;
   whereNotClause := false;
   whereBefore := '';
-  GetNextFieldProp(P, Prop);
-  if IdemPropNameU(Prop, 'WHERE') then
+  GetNextFieldProp(P, prop);
+  if IdemPropNameU(prop, 'WHERE') then
   begin
     repeat
       B := P;
@@ -2936,7 +2969,7 @@ begin
       ndx := GetPropIndex;
       if ndx < 0 then
       begin
-        if IdemPropNameU(Prop, 'NOT') then
+        if IdemPropNameU(prop, 'NOT') then
         begin
           whereNotClause := true;
           continue;
@@ -2951,12 +2984,12 @@ begin
             ParenthesisBefore := whereBefore;
             JoinedOR := whereWithOR;
             NotClause := whereNotClause;
-            FunctionName := UpperCase(Prop);
+            FunctionName := UpperCase(prop);
             // Byte/Word/Integer/cardinal/Int64/CurrencyDynArrayContains(BlobField,I64)
-            len := length(Prop);
+            len := length(prop);
             if (len > 16) and
                IdemPropName('DynArrayContains',
-                 PUtf8Char(@PByteArray(Prop)[len - 16]), 16) then
+                 PUtf8Char(@PByteArray(prop)[len - 16]), 16) then
               Operation := opContains
             else
               Operation := opFunction;
@@ -2984,80 +3017,86 @@ begin
       if not GetWhereExpression(ndx, fWhere[whereCount]) then
         exit; // invalid SQL statement
       inc(whereCount);
-      GetNextFieldProp(P, Prop);
-      if IdemPropNameU(Prop, 'OR') then
+      GetNextFieldProp(P, prop);
+      if IdemPropNameU(prop, 'OR') then
         whereWithOR := true
-      else if IdemPropNameU(Prop, 'AND') then
+      else if IdemPropNameU(prop, 'AND') then
         whereWithOR := false
       else
         goto lim2;
       whereNotClause := false;
       whereBefore := '';
     until false;
-    // 4. get optional LIMIT/OFFSET/ORDER clause
+    // 4. get optional LIMIT/OFFSET/ORDER/GROUP end clause
 lim:P := GotoNextNotSpace(P);
     while (P <> nil) and
           not (P^ in [#0, ';']) do
     begin
-      GetNextFieldProp(P, Prop);
-lim2: if IdemPropNameU(Prop, 'LIMIT') then
-        fLimit := GetNextItemCardinal(P, ' ')
-      else if IdemPropNameU(Prop, 'OFFSET') then
-        fOffset := GetNextItemCardinal(P, ' ')
-      else if IdemPropNameU(Prop, 'ORDER') then
-      begin
-        GetNextFieldProp(P, Prop);
-        if IdemPropNameU(Prop, 'BY') or
-           (fOrderByField <> nil) then
-        begin
-          repeat
-            ndx := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
-            if ndx < 0 then
-              exit; // incorrect SQL statement
-            order := AddFieldIndex(fOrderByField, ndx);
-            if P^ <> ',' then
+      GetNextFieldProp(P, prop);
+lim2: case IdemPPChar(pointer(prop), @ENDCLAUSE) of
+        0:
+          // LIMIT
+          fLimit := GetNextItemCardinal(P, ' ');
+        1:
+          // OFFSET
+          fOffset := GetNextItemCardinal(P, ' ');
+        2:
+          begin
+            // ORDER BY
+            GetNextFieldProp(P, prop);
+            if IdemPropNameU(prop, 'BY') or
+               (fOrderByField <> nil) then
             begin
-              // check ORDER BY ... ASC/DESC
-              if GetNextFieldProp(P, Prop) then
-                if IdemPropNameU(Prop, 'DESC') then
-                  include(fOrderByFieldDesc, order)
-                else if not IdemPropNameU(Prop, 'ASC') then
-                  goto lim2; // parse LIMIT OFFSET clauses after ORDER
-              if P^ <> ',' then
-                break; // no more fields in this ORDER BY clause
-            end;
-            P := GotoNextNotSpace(P + 1);
-          until P^ in [#0, ';'];
-        end
-        else
-          exit; // incorrect SQL statement
-      end
-      else if IdemPropNameU(Prop, 'GROUP') then
-      begin
-        GetNextFieldProp(P, Prop);
-        if IdemPropNameU(Prop, 'BY') then
-        begin
-          repeat
-            ndx := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
-            if ndx < 0 then
+              repeat
+                ndx := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
+                if ndx < 0 then
+                  exit; // incorrect SQL statement
+                order := AddFieldIndex(fOrderByField, ndx);
+                if P^ <> ',' then
+                begin
+                  // check ORDER BY ... ASC/DESC
+                  if GetNextFieldProp(P, prop) then
+                    if IdemPropNameU(prop, 'DESC') then
+                      include(fOrderByFieldDesc, order)
+                    else if not IdemPropNameU(prop, 'ASC') then
+                      goto lim2; // parse LIMIT OFFSET clauses after ORDER
+                  if P^ <> ',' then
+                    break; // no more fields in this ORDER BY clause
+                end;
+                P := GotoNextNotSpace(P + 1);
+              until P^ in [#0, ';'];
+            end
+            else
               exit; // incorrect SQL statement
-            AddFieldIndex(fGroupByField, ndx);
-            if P^ <> ',' then
-              break;
-            P := GotoNextNotSpace(P + 1);
-          until P^ in [#0, ';'];
-        end
-        else
-          exit; // incorrect SQL statement
-      end
-      else if (Prop <> '') or
+          end;
+        3:
+          begin
+            // GROUP BY
+            GetNextFieldProp(P, prop);
+            if IdemPropNameU(prop, 'BY') then
+            begin
+              repeat
+                ndx := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
+                if ndx < 0 then
+                  exit; // incorrect SQL statement
+                AddFieldIndex(fGroupByField, ndx);
+                if P^ <> ',' then
+                  break;
+                P := GotoNextNotSpace(P + 1);
+              until P^ in [#0, ';'];
+            end
+            else
+              exit; // incorrect SQL statement
+          end;
+      else if (prop <> '') or
               not (GotoNextNotSpace(P)^ in [#0, ';']) then
         exit // incorrect SQL statement
       else
         break; // reached the end of the statement
     end;
+    end;
   end
-  else if Prop <> '' then
+  else if prop <> '' then
     goto lim2; // handle LIMIT OFFSET ORDER
   fSqlStatement := SQL; // make a private copy e.g. for Where[].ValueSql
 end;
@@ -3552,26 +3591,6 @@ begin
   result := Decoder.EncodeAsSql('', '', Update);
 end;
 
-function Expect(var P: PUtf8Char; Pattern: PUtf8Char; PatternLen: PtrInt): boolean;
-var
-  i: PtrInt;
-begin // PatternLen is at least 8 bytes long
-  result := false;
-  if P = nil then
-    exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
-    inc(P);
-  if PPtrInt(P)^ = PPtrInt(Pattern)^ then
-  begin
-    for i := SizeOf(PtrInt) to PatternLen - 1 do
-      if P[i] <> Pattern[i] then
-        exit;
-    inc(P, PatternLen);
-    result := true;
-  end;
-end;
-
 function UnJsonFirstField(var P: PUtf8Char): RawUtf8;
 // expand=true: [ {"col1":val11} ] -> val11
 // expand=false: { "fieldCount":1,"values":["col1",val11] } -> vall11
@@ -3612,60 +3631,6 @@ end;
 function IsNotAjaxJson(P: PUtf8Char): boolean;
 begin
   result := Expect(P, FIELDCOUNT_PATTERN, 14);
-end;
-
-function NotExpandedBufferRowCountPos(P, PEnd: PUtf8Char): PUtf8Char;
-var
-  i: PtrInt;
-begin
-  // search for "rowCount": at the end of the JSON buffer
-  result := nil;
-  if (PEnd <> nil) and
-     (PEnd - P > 24) then
-    for i := 1 to 24 do
-      case PEnd[-i] of
-        ']',
-        ',':
-          exit;
-        ':':
-          begin
-            if CompareMemFixed(PEnd - i - 11, pointer(ROWCOUNT_PATTERN), 11) then
-              result := PEnd - i + 1;
-            exit;
-          end;
-      end;
-end;
-
-function IsNotExpandedBuffer(var P: PUtf8Char; PEnd: PUtf8Char;
-  var FieldCount, RowCount: PtrInt): boolean;
-var
-  RowCountPos: PUtf8Char;
-begin
-  if not Expect(P, FIELDCOUNT_PATTERN, 14) then
-  begin
-    result := false;
-    exit;
-  end;
-  FieldCount := GetNextItemCardinal(P, #0);
-  if Expect(P, ROWCOUNT_PATTERN, 12) then
-    RowCount := GetNextItemCardinal(P, #0) // initial "rowCount":xxxx
-  else
-  begin
-    RowCountPos := NotExpandedBufferRowCountPos(P, PEnd);
-    if RowCountPos = nil then
-      RowCount := -1                        // no "rowCount":xxxx
-    else
-      RowCount := GetCardinal(RowCountPos); // trailing "rowCount":xxxx
-  end;
-  result := (FieldCount <> 0) and
-            Expect(P, VALUES_PATTERN, 11);
-  if result and
-     (RowCount < 0) then
-  begin
-    RowCount := JsonArrayCount(P, PEnd) div FieldCount; // 900MB/s browse
-    if RowCount <= 0 then
-      RowCount := -1; // bad format -> no data
-  end;
 end;
 
 function StartWithQuotedID(P: PUtf8Char; out ID: TID): boolean;
@@ -3763,6 +3728,7 @@ begin
     FastSetString(result, Beg, P - Beg - 1);
   end;
 end;
+
 
 
 initialization

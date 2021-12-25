@@ -1997,7 +1997,7 @@ var
   d, dprev: double;
   n, h, nprev, aead, pub, priv, pub2, priv2: RawUtf8;
   r, s: RawByteString;
-  c: TAesAbstract;
+  aes: TAesAbstract;
   key: THash256;
   rnd: TCryptRandom;
   hsh: TCryptHasher;
@@ -2005,6 +2005,8 @@ var
   cip: TCryptCipherAlgo;
   asy: TCryptAsym;
   en, de: ICryptCipher;
+  crt: TCryptCertAlgo;
+  c1, c2, c3: ICryptCert;
   alg: TCryptAlgos;
 begin
   // validate AesAlgoNameEncode / TAesMode
@@ -2018,17 +2020,17 @@ begin
       CheckUtf8(AesAlgoNameDecode(n, k2) = TAesFast[m], n);
       UpperCaseSelf(n);
       CheckUtf8(AesAlgoNameDecode(n, k2) = TAesFast[m], n);
-      c := TAesFast[m].Create(key, 128 + k * 64);
+      aes := TAesFast[m].Create(key, 128 + k * 64);
       try
-        Check(c.AlgoMode = m);
-        Check(IdemPropName(c.AlgoName, pointer(n), length(n)));
+        Check(aes.AlgoMode = m);
+        Check(IdemPropName(aes.AlgoName, pointer(n), length(n)));
       finally
-        c.Free;
+        aes.Free;
       end;
       n[10] := ' ';
       CheckUtf8(AesAlgoNameDecode(n, k2) = nil, n);
     end;
-  // validate Rnd/Hash/Sign/Cipher/Asym High-Level Algorithms Factories
+  // validate Rnd High-Level Algorithms Factory
   alg := TCryptRandom.Instances;
   for a := 0 to high(alg) do
   begin
@@ -2050,6 +2052,7 @@ begin
       check(length(n) = i);
     end;
   end;
+  // validate Hash High-Level Algorithms Factory
   alg := TCryptHasher.Instances;
   for a := 0 to high(alg) do
   begin
@@ -2064,6 +2067,7 @@ begin
     end;
     CheckUtf8(hsh.Full(n) = h, hsh.AlgoName);
   end;
+  // validate Sign High-Level Algorithms Factory
   alg := TCryptSigner.Instances;
   for a := 0 to high(alg) do
   begin
@@ -2085,6 +2089,7 @@ begin
       Check(h <> sig.NewPbkdf2('sec', 'salt', i + 1).Update(n).Final);
     end;
   end;
+  // validate Cipher High-Level Algorithms Factory
   alg := TCryptCipherAlgo.Instances;
   for a := 0 to high(alg) do
   begin
@@ -2106,6 +2111,7 @@ begin
       nprev := r;
     end;
   end;
+  // validate Asym High-Level Algorithms Factory
   alg := TCryptAsym.Instances;
   for a := 0 to high(alg) do
   begin
@@ -2128,6 +2134,65 @@ begin
     s := asy.SharedSecret(pub, priv2);
     if s <> '' then
       CheckEqual(asy.SharedSecret(pub2, priv), s, asy.AlgoName);
+  end;
+  // validate Cert High-Level Algorithms Factory
+  alg := TCryptCertAlgo.Instances;
+  for a := 0 to high(alg) do
+  begin
+    crt := alg[a] as TCryptCertAlgo;
+    c1 := crt.New;
+    Check(c1.GetSerial = '');
+    Check(not c1.HasPrivateSecret);
+    if crt.AlgoName = 'syn-es256-v1' then
+    begin
+      // TEccCertificate V1 has limited Usage and Subjects support
+      c1.Generate([cuCA, cuDigitalSignature], ' s1, s2 ', nil);
+      CheckEqual(RawUtf8ArrayToCsv(c1.GetSubjects), 's1,s2');
+      check(c1.GetUsage = CERTIFICATE_USAGE_ALL);
+      CheckEqual(c1.GetSubject, 's1');
+    end
+    else
+    begin
+      // X509 and TEccCertificate V2 have proper Usage and Subjects support
+      c1.Generate([cuCA, cuDigitalSignature],
+        ' synopse.info, www.synopse.info ', nil);
+      CheckEqual(RawUtf8ArrayToCsv(c1.GetSubjects),
+        'synopse.info,www.synopse.info');
+      check(c1.GetUsage = [cuCA, cuDigitalSignature]);
+      CheckEqual(c1.GetSubject, 'synopse.info');
+    end;
+    Check(c1.GetSerial <> '');
+    Check(c1.HasPrivateSecret);
+    check(c1.GetNotBefore < NowUtc);
+    check(c1.GetNotAfter > NowUtc);
+    c2 := crt.New;
+    Check(not c2.IsEqual(c1));
+    check(c2.FromBinary(c1.ToBinary));
+    Check(not c2.HasPrivateSecret, 'nopwd=pubonly');
+    Check(c1.IsEqual(c2));
+    CheckEqual(c1.GetSerial, c1.GetSerial);
+    CheckEqual(c2.GetSubject, c1.GetSubject);
+    CheckEqual(c2.GetIssuerName, c1.GetIssuerName);
+    CheckEqual(c2.GetIssuerSerial, c1.GetIssuerSerial);
+    CheckSame(c2.GetNotAfter, c1.GetNotAfter);
+    CheckSame(c2.GetNotBefore, c1.GetNotBefore);
+    CheckEqual(word(c2.GetUsage), word(c1.GetUsage));
+    CheckEqual(c2.GetPeerInfo, c1.GetPeerInfo);
+    c3 := crt.New;
+    Check(not c3.IsEqual(c1));
+    Check(not c3.IsEqual(c2));
+    check(c3.FromBinary(c1.ToBinary('pwd'), 'pwd'));
+    Check(c3.HasPrivateSecret, 'pwd=priv');
+    Check(c3.IsEqual(c1));
+    Check(c3.IsEqual(c2));
+    CheckEqual(c1.GetSerial, c1.GetSerial);
+    CheckEqual(c3.GetSubject, c1.GetSubject);
+    CheckEqual(c3.GetIssuerName, c1.GetIssuerName);
+    CheckEqual(c3.GetIssuerSerial, c1.GetIssuerSerial);
+    CheckSame(c3.GetNotAfter, c1.GetNotAfter);
+    CheckSame(c3.GetNotBefore, c1.GetNotBefore);
+    CheckEqual(word(c3.GetUsage), word(c1.GetUsage));
+    CheckEqual(c3.GetPeerInfo, c1.GetPeerInfo);
   end;
 end;
 

@@ -575,7 +575,7 @@ type
     class function Guid2TypeInfo(const aGuid: TGUID): PRttiInfo; overload;
     /// returns the list of all declared TInterfaceFactory
     // - as used by SOA and mocking/stubing features of this unit
-    class function GetUsedInterfaces: TSynObjectListLocked;
+    class function GetUsedInterfaces: TSynObjectListLightLocked;
     /// add some TInterfaceFactory instances from their GUID
     class procedure AddToObjArray(var Obj: TInterfaceFactoryObjArray;
       const aGuids: array of TGUID);
@@ -889,18 +889,15 @@ type
   TOnResolverCreateInstance = procedure(
     Sender: TInterfaceResolver; Instance: TInterfacedObject) of object;
 
-  /// register a list of classes to implement some interfaces
+  /// register a thread-safe list of classes to implement some interfaces
   // - as used e.g. by TInterfaceResolverInjected.RegisterGlobal()
-  // - this class is thread-safe
   TInterfaceResolverList = class(TInterfaceResolver)
   protected
     fEntry: TInterfaceResolverListEntries;
+    fSafe: TRWLightLock;
     fOnCreateInstance: TOnResolverCreateInstance;
-    fSafe: TRWLock;
-    function PrepareAddAndLock(aInterface: PRttiInfo;
-      aImplementationClass: TClass): PInterfaceEntry;
-    function LockedFind(aInterface: PRttiInfo): PInterfaceResolverListEntry;
-      {$ifdef HASINLINE} inline; {$endif}
+    function PrepareAddAndWriteLock(aInterface: PRttiInfo;
+      aImplementationClass: TClass): PInterfaceEntry; // fSafe.WriteUnLock after
     function TryResolve(aInterface: PRttiInfo; out Obj): boolean; override;
   public
     /// check if a given interface can be resolved, from its RTTI
@@ -921,8 +918,12 @@ type
     property OnCreateInstance: TOnResolverCreateInstance
       read fOnCreateInstance write fOnCreateInstance;
     /// low-level access to the internal registered interface/class list
+    // - should be protected via the Safe locking methods
     property Entry: TInterfaceResolverListEntries
       read fEntry;
+    /// low-level access to the internal lock for thread-safety
+    property Safe: TRWLightLock
+      read fSafe;
   end;
 
   /// abstract factory class targetting any kind of interface
@@ -2590,9 +2591,11 @@ begin
         8:
           result := PInt64(V)^ = 0;
       end;
-    imvRawUtf8..imvWideString, imvObject..imvInterface:
+    imvRawUtf8..imvWideString,
+    imvObject..imvInterface:
       result := PPointer(V)^ = nil;
-    imvBinary, imvRecord:
+    imvBinary,
+    imvRecord:
       result := IsZeroSmall(V, SizeInStorage);
     imvVariant:
       result := PVarData(V)^.vtype <= varNull;
@@ -2851,7 +2854,7 @@ begin
       begin
         obj := ArgRtti.ClassNewInstance;
         try
-          if DocVariantToObject(_Safe(Value)^, obj) then
+          if DocVariantToObject(_Safe(Value)^, obj, ArgRtti) then
             Value := _ObjFast(obj, [woEnumSetsAsText]);
         finally
           obj.Free;
@@ -2865,7 +2868,7 @@ begin
         try
           VariantSaveJson(Value, twJsonEscape, json);
           dyn.LoadFromJson(pointer(json));
-          json := dyn.SaveToJson(true);
+          json := dyn.SaveToJson({EnumSetsAsText=}true);
           _Json(json, Value, JSON_FAST);
         finally
           dyn.Clear;
@@ -3624,18 +3627,19 @@ const
     imvNone);          //  ptCustom
 
 var
-  InterfaceFactoryCache: TSynObjectListLocked;
+  InterfaceFactoryCache: TSynObjectListLightLocked;
 
-procedure InitializeInterfaceFactoryCache;
+function InitializeInterfaceFactoryCache: TSynObjectListLightLocked;
 begin
   GlobalLock;
   try
     if InterfaceFactoryCache = nil then // paranoid thread-safety
       InterfaceFactoryCache :=
-        RegisterGlobalShutdownRelease(TSynObjectListLocked.Create);
+        RegisterGlobalShutdownRelease(TSynObjectListLightLocked.Create);
   finally
     GlobalUnLock;
   end;
+  result := InterfaceFactoryCache;
 end;
 
 function FactorySearch(F: PInterfaceFactory; n: integer; nfo: PRttiInfo): TInterfaceFactory;
@@ -3652,31 +3656,32 @@ begin
 end;
 
 class function TInterfaceFactory.Get(aInterface: PRttiInfo): TInterfaceFactory;
+var
+  cache: TSynObjectListLightLocked;
 begin
   if (aInterface = nil) or
      (aInterface^.Kind <> rkInterface) then
     raise EInterfaceFactory.CreateUtf8('%.Get(invalid)', [self]);
-  if InterfaceFactoryCache = nil then
-    InitializeInterfaceFactoryCache
+  cache := InterfaceFactoryCache;
+  if cache = nil then
+    cache := InitializeInterfaceFactoryCache
   else
   begin
-    InterfaceFactoryCache.Safe.ReadOnlyLock; // multiple reads lock
-    result := FactorySearch(pointer(InterfaceFactoryCache.List),
-      InterfaceFactoryCache.Count, aInterface);
-    InterfaceFactoryCache.Safe.ReadOnlyUnLock;
+    cache.Safe.ReadLock; // multiple reads lock
+    result := FactorySearch(pointer(cache.List), cache.Count, aInterface);
+    cache.Safe.ReadUnLock;
     if result <> nil then
       exit; // retrieved from cache
   end;
-  InterfaceFactoryCache.Safe.WriteLock; // exclusive write lock
+  cache.Safe.WriteLock; // exclusive write lock
   try
-    result := FactorySearch(pointer(InterfaceFactoryCache.List),
-      InterfaceFactoryCache.Count, aInterface);
+    result := FactorySearch(pointer(cache.List), cache.Count, aInterface);
     if result <> nil then
       exit; // paranoid
     // not existing -> create new instance from RTTI
     {$ifdef HASINTERFACERTTI}
     result := TInterfaceFactoryRtti.Create(aInterface);
-    InterfaceFactoryCache.Add(result);
+    cache.Add(result);
     {$else}
     result := nil; // make compiler happy
     raise EInterfaceFactory.CreateUtf8('No RTTI available for I%: please ' +
@@ -3684,7 +3689,7 @@ begin
       [aInterface^.RawName]);
     {$endif HASINTERFACERTTI}
   finally
-    InterfaceFactoryCache.Safe.WriteUnLock;
+    cache.Safe.WriteUnLock;
   end;
 end;
 
@@ -3739,16 +3744,16 @@ class function TInterfaceFactory.Get(constref aGuid: TGUID): TInterfaceFactory;
 class function TInterfaceFactory.Get(const aGuid: TGUID): TInterfaceFactory;
 {$endif FPC_HAS_CONSTREF}
 var
-  cache: TSynObjectListLocked;
+  cache: TSynObjectListLightLocked;
 begin
   cache := InterfaceFactoryCache;
   if cache <> nil then
   begin
-    cache.Safe.ReadOnlyLock; // no GPF expected within loop -> no try...finally
+    cache.Safe.ReadLock; // no GPF expected within loop -> no try...finally
     result := FindGuid(pointer(cache.List), cache.Count,
       {$ifdef CPU64} PHash128Rec(@aGuid)^.L, PHash128Rec(@aGuid)^.H
       {$else} @aGuid {$endif});
-    cache.Safe.ReadOnlyUnLock;
+    cache.Safe.ReadUnLock;
   end
   else
     result := nil;
@@ -3793,31 +3798,33 @@ end;
 class function TInterfaceFactory.Get(const aInterfaceName: RawUtf8): TInterfaceFactory;
 var
   L, i: integer;
-  F: ^TInterfaceFactory;
+  f: ^TInterfaceFactory;
+  cache: TSynObjectListLightLocked;
 begin
   result := nil;
   L := length(aInterfaceName);
-  if (InterfaceFactoryCache <> nil) and
+  cache := InterfaceFactoryCache;
+  if (cache <> nil) and
      (L <> 0) then
   begin
-    InterfaceFactoryCache.Safe.ReadOnlyLock;
+    cache.Safe.ReadLock;
     try
-      F := pointer(InterfaceFactoryCache.List);
-      for i := 1 to InterfaceFactoryCache.Count do
-        if IdemPropNameU(F^.fInterfaceName, pointer(aInterfaceName), L) then
+      f := pointer(cache.List);
+      for i := 1 to cache.Count do
+        if IdemPropNameU(f^.fInterfaceName, pointer(aInterfaceName), L) then
         begin
-          result := F^;
+          result := f^;
           exit; // retrieved from cache
         end
         else
-          inc(F);
+          inc(f);
     finally
-      InterfaceFactoryCache.Safe.ReadOnlyUnLock;
+      cache.Safe.ReadUnLock;
     end;
   end;
 end;
 
-class function TInterfaceFactory.GetUsedInterfaces: TSynObjectListLocked;
+class function TInterfaceFactory.GetUsedInterfaces: TSynObjectListLightLocked;
 begin
   result := InterfaceFactoryCache;
 end;
@@ -3874,7 +3881,8 @@ begin
   if MethodsCount > MAX_METHOD_COUNT then
     raise EInterfaceFactory.CreateUtf8(
       '%.Create(%): interface has too many methods (%), so breaks the ' +
-      'Interface Segregation Principle', [self, fInterfaceName, MethodsCount]);
+      'Interface Segregation Principle and our internal buffers provision',
+      [self, fInterfaceName, MethodsCount]);
   fMethodIndexCurrentFrameCallback := -1;
   fMethodIndexCallbackReleased := -1;
   SetLength(fMethods, MethodsCount);
@@ -4087,14 +4095,16 @@ begin
             SizeInStorage := ArgRtti.Cache.EnumInfo.SizeInStorageAsSet;
             if not (SizeInStorage in [1, 2, 4]) then
               raise EInterfaceFactory.CreateUtf8(
-                '%.Create: invalid SizeInStorage=% in %.% method % parameter for % set',
+                '%.Create: unexpected SizeInStorage=% in %.% method % parameter' +
+                ' for % set - we support only byte/integer/Int64 sizes',
                 [self, SizeInStorage, fInterfaceName, URI, ParamName^, ArgTypeName^]);
           end;
         imvRecord:
           if ArgRtti.Size <= POINTERBYTES then
             raise EInterfaceFactory.CreateUtf8(
-              '%.Create: % record too small in %.% method % parameter',
-              [self, ArgTypeName^, fInterfaceName, URI, ParamName^])
+              '%.Create: % record too small in %.% method % parameter: it ' +
+              'should be at least % bytes (i.e. a pointer) to be on stack',
+              [self, ArgTypeName^, fInterfaceName, URI, ParamName^, POINTERBYTES])
           else
             SizeInStorage := POINTERBYTES; // handle only records when passed by ref
         imvBinary:
@@ -4179,7 +4189,7 @@ begin
         begin
           // put in an integer register
           {$ifdef CPUARM}
-          // on 32-bit ARM, ordinals>POINTERBYTES are also placed in normal registers
+          // on 32-bit ARM, ordinals>POINTERBYTES are also placed in registers
           if (SizeInStack>POINTERBYTES) and
              ((reg and 1) = 0) then
             inc(reg); // must be aligned on even boundary
@@ -4189,7 +4199,7 @@ begin
             // no space, put on stack
             InStackOffset := ArgsSizeInStack;
             inc(ArgsSizeInStack, SizeInStack);
-            // all other parameters following the current one, must also be placed on stack
+            // all params following the current one, must also be placed on stack
             reg := PARAMREG_LAST + 1;
             continue;
           end;
@@ -4207,7 +4217,7 @@ begin
     end;
     if ArgsSizeInStack > MAX_EXECSTACK then
       raise EInterfaceFactory.CreateUtf8(
-        '%.Create: Stack size % > % for %.% method',
+        '%.Create: Stack size % > % for %.% method parameters',
         [self, ArgsSizeInStack, MAX_EXECSTACK, fInterfaceName, URI]);
     {$ifdef CPUX86}
     // pascal/register convention are passed left-to-right -> reverse order
@@ -4563,14 +4573,70 @@ end;
 
 {$endif CPUX64}
 
-{$ifndef CPUX86}  // i386 stub requires "ret ArgsSizeInStack"
+var
+  VmtSafe: TLightLock;
+
+{$ifdef CPUX86}  // i386 stub requires "ret ArgsSizeInStack"
+
+function TInterfaceFactory.GetMethodsVirtualTable: pointer;
+var
+  P: PCardinal;
+  i: PtrInt;
+begin
+  result := fFakeVTable;
+  if result <> nil then
+    exit;
+  // it is the first time we use this interface -> create JITed VMT
+  VmtSafe.Lock;
+  try
+    // we need to JIT with an explicit ArgsSizeInStack adjustement
+    if fFakeVTable = nil then // avoid race condition
+    begin
+      SetLength(fFakeVTable, MethodsCount + RESERVED_VTABLE_SLOTS);
+      // set IInterface required methods
+      fFakeVTable[0] := @TInterfacedObjectFake.FakeQueryInterface;
+      fFakeVTable[1] := @TInterfacedObjectFake.Fake_AddRef;
+      fFakeVTable[2] := @TInterfacedObjectFake.Fake_Release;
+      // set JITted VMT stubs for each method of this interface
+      if MethodsCount <> 0 then
+      begin
+        P := ReserveExecutableMemory(MethodsCount * VMTSTUBSIZE);
+        for i := 0 to MethodsCount - 1 do
+        begin
+          fFakeVTable[RESERVED_VTABLE_SLOTS + i] := P;
+          P^ := $68ec8b55;
+          inc(P);                 // push ebp; mov ebp, esp
+          P^ := i;
+          inc(P);                 // push {MethodIndex}
+          P^ := $e2895251;
+          inc(P);                 // push ecx; push edx; mov edx, esp
+          PByte(P)^ := $e8;
+          inc(PByte(P));          // call FakeCall
+          P^ := PtrUInt(@TInterfacedObjectFake.FakeCall) - PtrUInt(P) - 4;
+          inc(P);
+          P^ := $c25dec89;        // mov esp, ebp; pop ebp; ret {StackSize}
+          inc(PByte(P), 3);       // overlap c2=ret to avoid GPF
+          P^ := (fMethods[i].ArgsSizeInStack shl 8) or $900000c2;
+          inc(P);
+        end;
+        ReserveExecutableMemoryPageAccess(
+          fFakeVTable[RESERVED_VTABLE_SLOTS], {exec=}true);
+      end;
+    end;
+    result := pointer(fFakeVTable);
+  finally
+    VmtSafe.UnLock;
+  end;
+end;
+
+{$else}
 
 var
   // reuse the very same JITted stubs for all interfaces
   _FAKEVMT: array of pointer;
 
 // JIT MAX_METHOD_COUNT VMT stubs for every method of any interface
-// - internal function protected by InterfaceFactoryCache.Safe lock
+// - internal function protected by VmtSafe.Lock
 procedure Compute_FAKEVMT;
 var
   P: PCardinal;
@@ -4592,16 +4658,16 @@ begin
   for i := 0 to MAX_METHOD_COUNT - 1 do
   begin
     _FAKEVMT[i + RESERVED_VTABLE_SLOTS] := P;
-    {$ifdef CPUX64} // note: on Posix, (stub-P) > 32-bit -> need absolute jmp
-    P^ := $ba49;        // mov r10, x64FakeStub
+    {$ifdef CPUX64}    // note: on Posix, (stub-P) > 32-bit -> need absolute jmp
+    P^ := $ba49;       // mov r10, x64FakeStub
     inc(PWord(P));
     PPointer(P)^ := @x64FakeStub;
     inc(PPointer(P));
-    PByte(P)^ := $b8;   // mov eax, MethodIndex
+    PByte(P)^ := $b8;  // mov eax, MethodIndex
     inc(PByte(P));
     P^ := i;
     inc(P);
-    P^ := $66e2ff41;    // jmp r10  (faster than push + ret)
+    P^ := $66e2ff41;   // jmp r10  (faster than push + ret)
     inc(P);
     P^ := $00441f0f;   // multi-byte nop
     inc(PByte(P), 5);
@@ -4654,70 +4720,23 @@ begin
     _FAKEVMT[RESERVED_VTABLE_SLOTS], {exec=}true);
 end;
 
-{$endif CPUX86}
-
 function TInterfaceFactory.GetMethodsVirtualTable: pointer;
-{$ifdef CPUX86}
-var
-  P: PCardinal;
-  i: PtrInt;
-{$endif CPUX86}
 begin
-  {$ifdef CPUX86}
-  result := fFakeVTable;
-  {$else}
   result := pointer(_FAKEVMT);
-  {$endif CPUX86}
   if result <> nil then
     exit;
   // it is the first time we use this interface -> create JITed VMT
-  InterfaceFactoryCache.Safe.WriteLock;
+  VmtSafe.Lock;
   try
-    {$ifdef CPUX86}
-    // we need to JIT with an explicit ArgsSizeInStack adjustement
-    if fFakeVTable = nil then // avoid race condition
-    begin
-      SetLength(fFakeVTable, MethodsCount + RESERVED_VTABLE_SLOTS);
-      // set IInterface required methods
-      fFakeVTable[0] := @TInterfacedObjectFake.FakeQueryInterface;
-      fFakeVTable[1] := @TInterfacedObjectFake.Fake_AddRef;
-      fFakeVTable[2] := @TInterfacedObjectFake.Fake_Release;
-      // set JITted VMT stubs for each method of this interface
-      if MethodsCount <> 0 then
-      begin
-        P := ReserveExecutableMemory(MethodsCount * VMTSTUBSIZE);
-        for i := 0 to MethodsCount - 1 do
-        begin
-          fFakeVTable[RESERVED_VTABLE_SLOTS + i] := P;
-          P^ := $68ec8b55;
-          inc(P);                 // push ebp; mov ebp, esp
-          P^ := i;
-          inc(P);                 // push {MethodIndex}
-          P^ := $e2895251;
-          inc(P);                 // push ecx; push edx; mov edx, esp
-          PByte(P)^ := $e8;
-          inc(PByte(P));          // call FakeCall
-          P^ := PtrUInt(@TInterfacedObjectFake.FakeCall) - PtrUInt(P) - 4;
-          inc(P);
-          P^ := $c25dec89;        // mov esp, ebp; pop ebp; ret {StackSize}
-          inc(PByte(P), 3);       // overlap c2=ret to avoid GPF
-          P^ := (fMethods[i].ArgsSizeInStack shl 8) or $900000c2;
-          inc(P);
-        end;
-        ReserveExecutableMemoryPageAccess(
-          fFakeVTable[RESERVED_VTABLE_SLOTS], {exec=}true);
-      end;
-    end;
-    result := pointer(fFakeVTable);
-    {$else}
-    if _FAKEVMT = nil then // avoid race condition
+    if _FAKEVMT = nil then
       Compute_FAKEVMT;
-    result := pointer(_FAKEVMT);  // we can reuse pre-JITted stubs
-    {$endif CPUX86}
   finally
-    InterfaceFactoryCache.Safe.WriteUnLock;
+    VmtSafe.UnLock;
   end;
+  result := pointer(_FAKEVMT);  // we can reuse pre-JITted stubs
 end;
+
+{$endif CPUX86}
 
 
 {$ifdef HASINTERFACERTTI}
@@ -4817,21 +4836,23 @@ begin
 end;
 
 class procedure TInterfaceFactoryGenerated.RegisterInterface(aInterface: PRttiInfo);
+var
+  cache: TSynObjectListLightLocked;
 begin
   if (aInterface = nil) or
      (self = TInterfaceFactoryGenerated) then
     raise EInterfaceFactory.CreateUtf8('%.RegisterInterface(nil)', [self]);
-  if InterfaceFactoryCache = nil then
-    InitializeInterfaceFactoryCache;
-  InterfaceFactoryCache.Safe.WriteLock;
+  cache := InterfaceFactoryCache;
+  if cache = nil then
+    cache := InitializeInterfaceFactoryCache;
+  cache.Safe.WriteLock;
   try
-    if FactorySearch(pointer(InterfaceFactoryCache.List),
-         InterfaceFactoryCache.Count, aInterface) <> nil then
+    if FactorySearch(pointer(cache.List), cache.Count, aInterface) <> nil then
       raise EInterfaceFactory.CreateUtf8('Duplicated %.RegisterInterface(%)',
         [self, aInterface^.RawName]);
-    InterfaceFactoryCache.Add(Create(aInterface));
+    cache.Add(Create(aInterface));
   finally
-    InterfaceFactoryCache.Safe.WriteUnLock;
+    cache.Safe.WriteUnLock;
   end;
 end;
 
@@ -5088,7 +5109,7 @@ end;
 
 { TInterfaceResolverList }
 
-function TInterfaceResolverList.PrepareAddAndLock(aInterface: PRttiInfo;
+function TInterfaceResolverList.PrepareAddAndWriteLock(aInterface: PRttiInfo;
   aImplementationClass: TClass): PInterfaceEntry;
 var
   i: PtrInt;
@@ -5119,7 +5140,7 @@ var
   e: PInterfaceEntry;
   n: PtrInt;
 begin
-  e := PrepareAddAndLock(aInterface, aImplementationClass);
+  e := PrepareAddAndWriteLock(aInterface, aImplementationClass);
   try
     // here we are protected within a fSafe.WriteLock
     n := length(fEntry);
@@ -5141,7 +5162,7 @@ var
   e: PInterfaceEntry;
   n: PtrInt;
 begin
-  e := PrepareAddAndLock(aInterface, aImplementation.ClassType);
+  e := PrepareAddAndWriteLock(aInterface, aImplementation.ClassType);
   try
     // here we are protected within a fSafe.WriteLock
     n := length(fEntry);
@@ -5188,15 +5209,16 @@ begin
   end;
 end;
 
-function TInterfaceResolverList.LockedFind(
+function LockedFind(aList: TInterfaceResolverList;
   aInterface: PRttiInfo): PInterfaceResolverListEntry;
+  {$ifdef HASINLINE} inline; {$endif}
 var
   n: integer;
 begin
-  result := pointer(fEntry);
+  result := pointer(aList.fEntry);
   if result = nil then
     exit;
-  // fast brute-force search in the L1 cache
+  // fast brute-force search in L1 cache (TInterfaceResolverListEntries)
   n := PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF;
   repeat
     if result^.TypeInfo = aInterface then
@@ -5215,9 +5237,9 @@ var
 begin
   new := nil;
   result := true;
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock; // Multiple Read / Exclusive Write lock
   try
-    e := LockedFind(aInterface);
+    e := LockedFind(self, aInterface);
     if e <> nil then
     begin
       if e^.Instance <> nil then
@@ -5235,12 +5257,12 @@ begin
       end;
     end;
   finally
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
   if new <> nil then
   begin
     if Assigned(fOnCreateInstance) then
-      // this event should be called outside fSafe.Lock
+      // this event should be called outside fSafe lock
       fOnCreateInstance(self, new);
     exit;
   end;
@@ -5249,9 +5271,9 @@ end;
 
 function TInterfaceResolverList.Implements(aInterface: PRttiInfo): boolean;
 begin
-  fSafe.ReadOnlyLock;
-  result := LockedFind(aInterface) <> nil;
-  fSafe.ReadOnlyUnLock;
+  fSafe.ReadLock; // Multiple Read / Exclusive Write lock
+  result := LockedFind(self, aInterface) <> nil;
+  fSafe.ReadUnLock;
 end;
 
 

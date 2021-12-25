@@ -535,7 +535,7 @@ type
     fHashFunctions: cardinal;
     fInserted: cardinal;
     fStore: RawByteString;
-    fSafe: TRWLock;
+    fSafe: TRWLock; // need an upgradable lock for TSynBloomFilterDiff
   public
     /// initialize the internal bits storage for a given number of items
     // - by default, internal bits array size will be guess from a 1 % false
@@ -1309,7 +1309,7 @@ type
   // - note that each instance is thread-safe
   TSynTimeZone = class
   protected
-    fSafe: TRWLock;
+    fSafe: TRWLightLock;
     fZone: TTimeZoneDataDynArray;
     fZoneCount: integer;
     fZones: TDynArrayHashed;
@@ -2607,7 +2607,7 @@ begin
   else if aCaseInsensitive then
     Search := SearchContainsU
   else
-    Search := SearchContains1; // todo: use IndexByte() on FPC?
+    Search := SearchContains1; // todo: use ByteScanIndex() asm?
   Pattern := pointer(aPattern);
 end;
 
@@ -5551,11 +5551,11 @@ end;
 
 function TSynTimeZone.SaveToBuffer: RawByteString;
 begin
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   try
     result := AlgoSynLZ.Compress(fZones.SaveTo);
   finally
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -5631,8 +5631,8 @@ begin
       FillcharFast(item.tzi, SizeOf(item.tzi), 0);
       if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i], {reopen=}true) then
       begin
-        item.id := keys[i];
-        item.Display := reg.ReadString('Display');
+        item.id := keys[i]; // registry keys are genuine by definition
+        item.display := reg.ReadString('Display');
         reg.ReadBuffer('TZI', @item.tzi, SizeOf(item.tzi));
         if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i] + '\Dynamic DST', true) then
         begin
@@ -5689,7 +5689,7 @@ function TSynTimeZone.GetDisplay(const TzId: TTimeZoneID): RawUtf8;
 var
   ndx: PtrInt;
 begin
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   ndx := LockedFindZoneIndex(TzId);
   if ndx < 0 then
     if TzId = 'UTC' then // e.g. on XP
@@ -5698,7 +5698,7 @@ begin
       result := ''
   else
     result := fZone[ndx].display;
-  fSafe.ReadOnlyUnLock;
+  fSafe.ReadUnLock;
 end;
 
 function TSynTimeZone.GetBiasForDateTime(const Value: TDateTime;
@@ -5710,7 +5710,7 @@ var
   tzi: PTimeZoneInfo;
   std, dlt: TDateTime;
 begin
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   try
     ndx := LockedFindZoneIndex(TzId);
     if ndx < 0 then
@@ -5753,7 +5753,7 @@ begin
     end;
     result := true;
   finally
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -5801,10 +5801,10 @@ begin
   if fIDs = nil then
   begin
     fIDs := TStringList.Create;
-    fSafe.ReadOnlyLock;
+    fSafe.ReadLock;
     for i := 0 to length(fZone) - 1 do
       fIDs.Add(Utf8ToString(RawUtf8(fZone[i].id)));
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
   result := fIDs;
 end;
@@ -5816,10 +5816,10 @@ begin
   if fDisplays = nil then
   begin
     fDisplays := TStringList.Create;
-    fSafe.ReadOnlyLock;
+    fSafe.ReadLock;
     for i := 0 to length(fZone) - 1 do
-      fDisplays.Add(Utf8ToString(fZone[i].Display));
-    fSafe.ReadOnlyUnLock;
+      fDisplays.Add(Utf8ToString(fZone[i].display));
+    fSafe.ReadUnLock;
   end;
   result := fDisplays;
 end;

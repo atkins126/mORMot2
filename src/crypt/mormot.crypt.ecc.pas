@@ -8,8 +8,8 @@ unit mormot.crypt.ecc;
 
    Certificate-based Public Key Cryptography Classes
     - High-Level Certificate-based Public Key Cryptography
-    - IProtocol Implemented using Public Key Cryptography
-    - Registration of our ECC Engine to the TCryptAsym Factory
+    - IProtocol Implemented using our Public Key Cryptography
+    - Registration of our ECC Engine to the TCryptAsym/TCryptCert Factories
 
   *****************************************************************************
 
@@ -165,6 +165,7 @@ type
   protected
     fContent: TEccCertificateContent;
     fStoreOnlyPublicKey: boolean;
+    fMaxVersion: byte;
     function GetAuthorityIssuer: RawUtf8;
     function GetAuthoritySerial: RawUtf8;
     function GetIssueDate: RawUtf8;
@@ -172,16 +173,18 @@ type
     function GetSerial: RawUtf8;
     function GetValidityEnd: RawUtf8;
     function GetValidityStart: RawUtf8;
+    function GetUsage: TCryptCertUsages;
+    function GetSubject: RawUtf8;
     function GetIsSelfSigned: boolean;
-    function InternalLoad(const data: RawByteString): boolean; virtual;
-    function InternalSave: RawByteString; virtual;
     procedure SetBase64(const base64: RawUtf8);
+    // do nothing by default but TEccCertificateSecret will include private key
+    function AppendLoad(const data: RawByteString): boolean; virtual;
+    function AppendSave: RawByteString; virtual;
   public
     /// initialize this certificate
     constructor Create; override;
-    /// initialize this certificate from a supplied certificate binary
-    // - will raise an EECCException if the supplied binary is incorrect
-    constructor CreateFrom(const binary: TEccCertificateContent); virtual;
+    /// initialize this certificate with an explicit maximum version support
+    constructor CreateVersion(MaxVers: integer);
     /// initialize this certificate from a supplied Base64 encoded binary
     // - will raise an EECCException if the supplied base64 is incorrect
     constructor CreateFromBase64(const base64: RawUtf8); virtual;
@@ -194,10 +197,13 @@ type
       AuthSerial: RawUtf8); virtual;
     /// the certification information, digitaly signed in the Signature field
     property Signed: TEccCertificateSigned
-      read fContent.Signed;
+      read fContent.Head.Signed;
     /// SHA-256 + ECDSA secp256r1 signature of the Certificate record
     property Signature: TEccSignature
-      read fContent.Signature;
+      read fContent.Head.Signature;
+    /// persist the certificate as some binary
+    // - will use SaveToStream serialization
+    function SaveToBinary: RawByteString;
     /// persist the certificate as some Base64 encoded binary
     // - will use SaveToStream serialization
     function ToBase64: RawUtf8;
@@ -205,6 +211,10 @@ type
     // - will use LoadFromStream serialization
     // - returns true on success, false otherwise
     function FromBase64(const base64: RawUtf8): boolean;
+    /// retrieve the certificate from some binary
+    // - will use LoadFromStream serialization, so the SaveToBinary format
+    // - returns true on success, false otherwise
+    function LoadFromBinary(const binary: RawByteString): boolean;
     /// retrieve the certificate from the "Base64": JSON entry of a .public file
     // - will use FromBase64/LoadFromStream serialization
     // - returns true on success, false otherwise
@@ -222,6 +232,9 @@ type
     // - could be used to safely publish the public information of a newly
     // created certificate
     function PublicToBase64: RawUtf8;
+    /// compare all fields of two Certificates
+    // - don't compare the private key for inherited TEccCertificateSecret
+    function IsEqual(another: TEccCertificate): boolean;
     /// persist the certificate as some binary
     // - returns true on success (i.e. this class stores a certificate),
     // false otherwise
@@ -234,6 +247,9 @@ type
     // - does not validate the certificate against the certificates chain, nor
     // perform any ECC signature: use TEccCertificateChain.IsValid instead
     function CheckCRC: boolean;
+    /// use this Certificate as Authority to verify an ECC digital signature
+    function Verify(const hash: THash256;
+      const Signature: TEccSignatureCertifiedContent): TEccValidity; overload;
     /// encrypt using the ECIES scheme, using this public certificate as key,
     // via AES-256-CFB/PKCS7 overPbkdf2HmacSha256, and HmacSha256
     // - returns the encrypted content, in the .synecc optimized format
@@ -266,11 +282,27 @@ type
     /// returns a TDocVariant object of all published properties of this instance
     // - excludes the Base64 property content if withBase64 is set to false
     function ToVariant(withBase64: boolean = true): variant;
+    /// save the public key as a JSON content
+    // - i.e. like the ToFile() .public json file
+    function ToJson(withBase64: boolean = true): RawUtf8;
     /// save the public key as a .public json file
     // - i.e. a json containing all published properties of this instance
     // - persist ToVariant() as an human-readable JSON file
     function ToFile(const filename: TFileName): boolean;
-    /// low-level access to the binary buffer used ECC secp256r1 cryptography
+    /// the maximum storage version allowed for this Certificate
+    // - is 1 by default, but could be set e.g. to 2 to enable long Subject and
+    // Usage fields
+    property MaxVersion: byte
+      read fMaxVersion write fMaxVersion;
+    /// the allowed usages of this certificate
+    // - only encoded with V2 format, so not published as JSON property
+    property Usage: TCryptCertUsages
+      read GetUsage;
+    /// the CSV-encoded subjects of this certificate
+    // - stored in Issuer on V1 format, in a separated field on V2 format
+    property Subject: RawUtf8
+      read GetSubject;
+    /// low-level access to the ECC secp256r1 cryptography binary buffer
     // - you should not use this property, but other methods
     property Content: TEccCertificateContent
       read fContent write fContent;
@@ -278,7 +310,7 @@ type
     /// the TEccCertificate format version
     // - currently equals 1
     property Version: word
-      read fContent.Version;
+      read fContent.Head.Version;
     /// the genuine identifier of this certificate, as hexadecimal text
     property Serial: RawUtf8
       read GetSerial;
@@ -311,6 +343,7 @@ type
     property Base64: RawUtf8
       read PublicToBase64 write SetBase64;
   end;
+  PEccCertificate = ^TEccCertificate;
 
   /// used to store a list of TEccCertificate instances
   // - e.g. in TEccCertificateChain.Items
@@ -326,8 +359,9 @@ type
   protected
     fPrivateKey: TEccPrivateKey;
     fAFSplitStripes: integer;
-    function InternalLoad(const data: RawByteString): boolean; override;
-    function InternalSave: RawByteString; override;
+    // include the private key, with AFSplitStripes, to the output stream
+    function AppendLoad(const data: RawByteString): boolean; override;
+    function AppendSave: RawByteString; override;
   public
     /// generate a new certificate, signed using the supplied Authority
     // - if Authority is nil, will generate a self-signed certificate
@@ -337,10 +371,12 @@ type
     // - you may specify some validity time range, if needed
     // - default ParanoidVerify=true will validate the certificate digital
     // signature via a call ecdsa_verify() to ensure its usefulness
-    // - would take around 4 ms under a 32-bit compiler, and 1 ms under 64-bit
+    // - warning: signature would take around 1 ms under a 32-bit compiler
     constructor CreateNew(Authority: TEccCertificateSecret;
       const IssuerText: RawUtf8 = ''; ExpirationDays: integer = 0;
-      StartDate: TDateTime = 0; ParanoidVerify: boolean = true);
+      StartDate: TDateTime = 0; ParanoidVerify: boolean = true;
+      Usage: TCryptCertUsages = CERTIFICATE_USAGE_ALL; const
+      Subjects: RawUtf8 = ''; MaxVers: byte = 1);
     /// create a certificate with its private secret key from a password-protected
     // secure binary buffer
     // - perform all reverse steps from SaveToSecureBinary() method
@@ -582,7 +618,7 @@ type
   /// a ECDSA secp256r1 digital signature of some content, signed by an authority
   TEccSignatureCertified = class(TSynPersistent)
   protected
-    fContent: TEccSignatureCertifiedContent;
+    fCertified: TEccSignatureCertifiedContent;
     function GetAuthorityIssuer: RawUtf8;
     function GetAuthoritySerial: RawUtf8;
     function GetDate: RawUtf8;
@@ -665,13 +701,13 @@ type
     function SaveToPEMFile(const FileName: TFileName): boolean;
     /// low-level access to the binary buffer used ECDSA secp256r1 cryptography
     // - you should not use this property, but other methods
-    property Content: TEccSignatureCertifiedContent
-      read fContent write fContent;
+    property Certified: TEccSignatureCertifiedContent
+      read fCertified write fCertified;
   published
     /// the TEccSignatureCertified format version
     // - currently equals 1
     property Version: word
-      read fContent.Version;
+      read fCertified.Version;
     /// when this signature was generated, as ISO-8601 text
     property Date: RawUtf8
       read GetDate;
@@ -740,16 +776,18 @@ type
   /// manage PKI certificates using ECC secp256r1 cryptography
   // - will implement a simple and efficient public-key infrastructure (PKI),
   // based on JSON objects or even plain Base64 encoded JSON strings
-  TEccCertificateChain = class(TSynPersistentRWLock)
+  // - store certificates list and revoked serials (CRL)
+  TEccCertificateChain = class(TSynPersistentRWLightLock)
   protected
     fItems: TEccCertificateObjArray;
+    fCrl: TEccCertificateRevocationDynArray;
     fIsValidCached: boolean;
     fIsValidCacheCount: integer;
-    fIsValidCache: TInt64DynArray;
+    fIsValidCache: THash128DynArray; // valid TEccCertificateContent.ComputeCrc128
     function GetCount: integer;
-    function InternalAdd(cert: TEccCertificate; expected: TEccValidity): integer;
+    procedure LockedClear;
+    function InternalAdd(cert: TEccCertificate; expected: TEccValidity): PtrInt;
     procedure SetIsValidCached(const Value: boolean);
-    function IndexBySerial(const Serial: TEccCertificateID): integer;
   public
     /// initialize the certificate store from some JSON array of strings
     // - the serialization format is just a JSON array of Base64 encoded
@@ -764,24 +802,33 @@ type
     /// finalize the certificate store
     destructor Destroy; override;
     /// delete all stored certificates
-    // - this method is thread-safe, calling Safe.Lock/Unlock
+    // - this method is thread-safe, calling Safe.WriteLock/WriteUnlock
     procedure Clear;
     /// search for a certificate from its hexadecimal text identifier
-    // - this method is not thread-safe, unless you use Safe.Lock/Unlock
+    // - this method is not thread-safe, unless you use Safe.ReadLock/ReadUnlock
     function GetBySerial(const Serial: RawUtf8): TEccCertificate; overload;
     /// search for a certificate from its binary identifier
-    // - this method is not thread-safe, unless you use Safe.Lock/Unlock
+    // - this method is not thread-safe, unless you use Safe.ReadLock/ReadUnlock
     function GetBySerial(const Serial: TEccCertificateID): TEccCertificate; overload;
-    /// search for a certificate binary content from its binary identifier
-    // - returns TRUE if the Serial identifier was found, FALSE otherwise
-    // - this method is thread-safe, since it will make a private copy of the content
-    function GetBySerial(const Serial: TEccCertificateID;
-      out Content: TEccCertificateContent): boolean; overload;
     /// search for a certificate public key from its binary identifier
-    // - returns TRUE if the Serial identifier was found, FALSE otherwise
-    // - this method is thread-safe, since it will make a private copy of the key
-    function GetBySerial(const Serial: TEccCertificateID;
-      out PublicKey: TEccPublicKey): boolean; overload;
+    // - returns ecvValidSigned/ecvValidSelfSigned if the Serial identifier
+    // was found and not deprecated/revoked
+    // - returns ecvUnknownAuthority/ecvDeprecatedAuthority/ecvRevoked otherwise
+    // - this method is thread-safe, since it makes a private copy of the key
+    function GetKeyBySerial(const Serial: TEccCertificateID;
+      out PublicKey: TEccPublicKey; valid: TEccValidity = ecvUnknown): TEccValidity;
+    /// quickly check if a given certificate ID is part of the CRL
+    // - will check the internal Certificate Revocation List and the current date
+    function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason; overload;
+    /// quickly check if a given certificate ID is part of the CRL
+    // - will check the internal Certificate Revocation List and the current date
+    function IsRevoked(const Serial: TEccCertificateID): TCryptCertRevocationReason; overload;
+    /// add a new Serial number to the internal Certificate Revocation List
+    function Revoke(const Serial: RawUtf8; RevocationDate: TDateTime;
+      Reason: TCryptCertRevocationReason): boolean; overload;
+    /// add a new Serial number to the internal Certificate Revocation List
+    function Revoke(const Serial: TEccCertificateID; RevocationDate: TDateTime;
+      Reason: TCryptCertRevocationReason): boolean; overload;
     /// check if the certificate is valid, against known certificates chain
     // - will check internal properties of the certificate (e.g. validity dates),
     // and validate the stored ECDSA signature according to the public key of
@@ -789,27 +836,27 @@ type
     // - consider setting IsValidCached property to TRUE to reduce resource use
     // - this method is thread-safe, and not blocking
     function IsValid(cert: TEccCertificate): TEccValidity; overload;
-    /// check if the certificate is valid, against known certificates chain
+    /// check if the raw certificate is valid, against known certificates chain
     // - will check internal properties of the certificate (e.g. validity dates,
     // unless ignoreDate=TRUE), and validate the stored ECDSA signature
     // according to the public key of the associated signing authority (which
     // should be valid, and stored in Items[])
     // - consider setting IsValidCached property to TRUE to reduce resource use
     // - this method is thread-safe, and not blocking
-    function IsValid(const content: TEccCertificateContent;
-      ignoreDate: boolean = false): TEccValidity; overload;
+    function IsValidRaw(const content: TEccCertificateContent;
+      ignoreDate: boolean = false): TEccValidity;
     /// check all stored certificates and their authorization chain
     // - returns nil if all items were valid
     // - returns the list of any invalid instances
     // - do not free the returned items, since they are reference to Items[]
     function ValidateItems: TEccCertificateObjArray;
     /// check if the digital signature is recognized by the stored certificates
-    // - will check that sign.AuthoritySerial is part of the Items[] list
+    // - ensure that sign.AuthoritySerial is part of Items[] list but not the CRL
     // - this method won't perform the ECDSA verification: use IsSigned() instead
     // - this method is thread-safe, and not blocking
     function IsAuthorized(sign: TEccSignatureCertified): boolean; overload;
     /// check if the digital signature is recognized by the stored certificates
-    // - will check that sign.AuthoritySerial is part of the Items[] list
+    // - ensure that sign.AuthoritySerial is part of Items[] list but not the CRL
     // - this method won't perform the ECDSA verification: use IsSigned() instead
     // - this method is thread-safe, and not blocking
     function IsAuthorized(const sign: TEccSignatureCertifiedContent): boolean; overload;
@@ -882,14 +929,14 @@ type
     // serial was already part of the internal list
     // - any self-signed certificate will be rejected: use AddSelfSigned() instead
     // - this method is thread-safe
-    function Add(cert: TEccCertificate): integer;
+    function Add(cert: TEccCertificate): PtrInt;
     /// register a self-signed certificate in the internal certificate chain
     // - a self-signed certificate will have its AuthoritySerial/AuthorityIssuer
     // fields matching Serial/Issuer, and should be used as "root" certificates
     // - returns -1 on error, e.g. if the certificate was not valid,
     // not self-signed or its serial was already part of the internal list
     // - this method is thread-safe
-    function AddSelfSigned(cert: TEccCertificate): integer;
+    function AddSelfSigned(cert: TEccCertificate): PtrInt;
     /// save the whole certificates chain as an array of Base64 encoded content
     // - each certificate would be stored via PublicToBase64() into a RawUtf8
     // - any private key would be trimmed from the output: private secret keys
@@ -1050,7 +1097,7 @@ function PemToEcc(const pem: RawUtf8; out priv: TEccPrivateKey): boolean; overlo
 function PemToEcc(const pem: RawUtf8; out pub: TEccPublicKey): boolean; overload;
 
 
-{ ***************** IProtocol Implemented using Public Key Cryptography }
+{ ***************** IProtocol Implemented using our Public Key Cryptography }
 
 {
   On FPC x86_64, from our regression tests:
@@ -1203,7 +1250,7 @@ type
     RndA: THash128;
     /// client public key, with its certificate
     // - may be zero, in case of unilateral authentication (algo=authServer)
-    QCA: TEccCertificateContent;
+    QCA: TEccCertificateContentV1;
     /// client-generated ephemeral public key
     // - may be zero, in case of unilateral authentication (algo=authClient)
     QE: TEccPublicKey;
@@ -1228,11 +1275,11 @@ type
     RndB: THash128;
     /// server public key, with its certificate
     // - may be zero, in case of unilateral authentication (algo=authClient)
-    QCB: TEccCertificateContent;
+    QCB: TEccCertificateContentV1;
     /// server-generated ephemeral public key
     // - may be zero, in case of unilateral authentication (algo=authServer)
     QF: TEccPublicKey;
-    /// SHA-256 + ECDSA secp256r1 signature of the previous fields, computed
+    /// SHA-256 + ECDSA secp256r1 signature of the other fields, computed
     // with the server private key
     // - i.e. ECDSASign(dB,sha256(algo|RndA|RndB|QCB|QF))
     // - may be zero, in case of unilateral authentication (algo=authClient)
@@ -1277,8 +1324,8 @@ type
       out aMAC: THash256Rec);
     // raw ECDHE functions used by ProcessHandshake
     function Verify(frame: PByteArray; len: integer;
-      const QC: TEccCertificateContent; out res: TProtocolResult): boolean;
-    procedure Sign(frame: PByteArray; len: integer; out QC: TEccCertificateContent);
+      const QC: TEccCertificateContentV1; out res: TProtocolResult): boolean;
+    procedure Sign(frame: PByteArray; len: integer; out QC: TEccCertificateContentV1);
     procedure SharedSecret(sA, sB: PHash256);
   public
     /// initialize the ECDHE protocol with a PKI and a private secret key
@@ -1500,6 +1547,7 @@ const
 
 
 
+
 implementation
 
 { ***************** High-Level Certificate-based Public Key Cryptography }
@@ -1695,7 +1743,7 @@ begin
   if length(match) <> 1 then
     match := FindFiles(EccKeyFileFolder, mask);
   if (length(match) <> 1) or
-     (match[0].Size < SizeOf(TEccCertificateContent)) then
+     (match[0].Size < SizeOf(TEccCertificateContentV1)) then
     result := false
   else
     TruncatedFileName := match[0].Name;
@@ -1848,15 +1896,14 @@ end;
 constructor TEccCertificate.Create;
 begin
   inherited Create;
-  fContent.Version := 1;
+  fContent.Head.Version := 1;
+  fMaxVersion := 1;
 end;
 
-constructor TEccCertificate.CreateFrom(const binary: TEccCertificateContent);
+constructor TEccCertificate.CreateVersion(MaxVers: integer);
 begin
   Create;
-  fContent := binary;
-  if not EccCheck(fContent) then
-    raise EECCException.CreateUtf8('Invalid %.CreateFrom', [self]);
+  fMaxVersion := MaxVers;
 end;
 
 constructor TEccCertificate.CreateFromBase64(const base64: RawUtf8);
@@ -1876,62 +1923,78 @@ end;
 
 function TEccCertificate.GetAuthorityIssuer: RawUtf8;
 begin
-  result := EccText(fContent.Signed.AuthorityIssuer);
+  result := EccText(fContent.Head.Signed.AuthorityIssuer);
 end;
 
 function TEccCertificate.GetAuthoritySerial: RawUtf8;
 begin
-  result := EccText(fContent.Signed.AuthoritySerial);
+  result := EccText(fContent.Head.Signed.AuthoritySerial);
 end;
 
 function TEccCertificate.GetIssueDate: RawUtf8;
 begin
-  result := EccText(fContent.Signed.IssueDate);
+  result := EccText(fContent.Head.Signed.IssueDate);
 end;
 
 function TEccCertificate.GetIssuer: RawUtf8;
 begin
-  result := EccText(fContent.Signed.Issuer);
+  result := EccText(fContent.Head.Signed.Issuer);
 end;
 
 function TEccCertificate.GetSerial: RawUtf8;
 begin
-  result := EccText(fContent.Signed.Serial);
+  result := EccText(fContent.Head.Signed.Serial);
 end;
 
 function TEccCertificate.GetValidityEnd: RawUtf8;
 begin
-  result := EccText(fContent.Signed.ValidityEnd);
+  result := EccText(fContent.Head.Signed.ValidityEnd);
 end;
 
 function TEccCertificate.GetValidityStart: RawUtf8;
 begin
-  result := EccText(fContent.Signed.ValidityStart);
+  result := EccText(fContent.Head.Signed.ValidityStart);
+end;
+
+function TEccCertificate.GetUsage: TCryptCertUsages;
+begin
+  result := TCryptCertUsages(word(fContent.GetUsage));
+end;
+
+function TEccCertificate.GetSubject: RawUtf8;
+begin
+  result := fContent.GetSubject;
 end;
 
 function TEccCertificate.GetIsSelfSigned: boolean;
 begin
   result := (self <> nil) and
-            EccSelfSigned(fContent);
+            fContent.IsSelfSigned;
 end;
 
 function TEccCertificate.CheckCRC: boolean;
 begin
   result := (self <> nil) and
-            EccCheck(fContent);
+            fContent.Check;
 end;
 
 function TEccCertificate.FromBase64(const base64: RawUtf8): boolean;
+begin
+  result := LoadFromBinary(Base64ToBinSafe(base64));
+end;
+
+function TEccCertificate.LoadFromBinary(const binary: RawByteString): boolean;
 var
   st: TRawByteStringStream;
 begin
-  if base64 = '' then
+  if binary = '' then
     result := false
   else
   begin
-    st := TRawByteStringStream.Create(Base64ToBinSafe(base64));
+    st := TRawByteStringStream.Create(binary);
     try
-      result := LoadFromStream(st) and EccCheck(fContent);
+      result := LoadFromStream(st) and
+                fContent.Check;
     finally
       st.Free;
     end;
@@ -1954,13 +2017,14 @@ begin
     result := FromBase64(JsonDecode(json, 'Base64', nil, true));
 end;
 
-function TEccCertificate.FromAuth(const AuthPubKey: TFileName; const AuthBase64,
-  AuthSerial: RawUtf8): boolean;
+function TEccCertificate.FromAuth(const AuthPubKey: TFileName;
+  const AuthBase64, AuthSerial: RawUtf8): boolean;
 var
   authfilename: TFileName;
 begin
   result := true;
-  if FromFile(AuthPubKey) or FromBase64(AuthBase64) then
+  if FromFile(AuthPubKey) or
+     FromBase64(AuthBase64) then
     exit;
   if AuthSerial <> '' then
   begin
@@ -1977,17 +2041,23 @@ begin
   FromBase64(base64);
 end;
 
-function TEccCertificate.ToBase64: RawUtf8;
+function TEccCertificate.SaveToBinary: RawByteString;
 var
   st: TRawByteStringStream;
 begin
+  result := '';
   st := TRawByteStringStream.Create;
   try
     if SaveToStream(st) then
-      result := BinToBase64(st.DataString);
+      result := st.DataString;
   finally
     st.Free;
   end;
+end;
+
+function TEccCertificate.ToBase64: RawUtf8;
+begin
+  result := BinToBase64(SaveToBinary);
 end;
 
 function TEccCertificate.PublicToBase64: RawUtf8;
@@ -2000,27 +2070,43 @@ begin
   fStoreOnlyPublicKey := sav;
 end;
 
+function TEccCertificate.IsEqual(another: TEccCertificate): boolean;
+begin
+  result := (self <> nil) and
+            (another <> nil) and
+            self.fContent.FieldsEqual(another.fContent);
+end;
+
 function TEccCertificate.LoadFromStream(Stream: TStream): boolean;
 begin
-  result := (Stream.Read(fContent, SizeOf(fContent)) = SizeOf(fContent)) and
-    InternalLoad(ReadStringFromStream(Stream, 524288));
+  result := fContent.LoadFromStream(Stream, fMaxVersion) and
+            AppendLoad(ReadStringFromStream(Stream, 524288));
 end;
 
 function TEccCertificate.SaveToStream(Stream: TStream): boolean;
 begin
   result := CheckCRC and
-    (Stream.Write(fContent, SizeOf(fContent)) = SizeOf(fContent)) and
-    WriteStringToStream(Stream, InternalSave);
+            fContent.SaveToStream(Stream) and
+            WriteStringToStream(Stream, AppendSave);
 end;
 
-function TEccCertificate.InternalLoad(const data: RawByteString): boolean;
+function TEccCertificate.AppendLoad(const data: RawByteString): boolean;
 begin
-  result := true;
+  result := true; // no additional data by default
 end;
 
-function TEccCertificate.InternalSave: RawByteString;
+function TEccCertificate.AppendSave: RawByteString;
 begin
   result := '';
+end;
+
+function TEccCertificate.Verify(const hash: THash256;
+  const Signature: TEccSignatureCertifiedContent): TEccValidity;
+begin
+  if self = nil then
+    result := ecvUnknownAuthority
+  else
+    result := Signature.Verify(hash, fContent);
 end;
 
 {$ifdef ISDELPHI20062007}
@@ -2052,15 +2138,15 @@ begin
     raise EECCException.CreateUtf8('%.Encrypt: unsupported %', [self, ToText(Algo)^]);
   try
     head.magic := THash128(ECIES_MAGIC[0]);
-    head.rec := fContent.Signed.Issuer;
-    head.recid := fContent.Signed.Serial;
+    head.rec := fContent.Head.Signed.Issuer;
+    head.recid := fContent.Head.Signed.Serial;
     head.size := length(Plain);
     head.date := NowEccDate;
     head.unixts := DateTimeToUnixTime(FileDateTime);
     content := Plain;
     if Signature.Check then
     begin
-      head.sign := Signature.fContent;
+      head.sign := Signature.fCertified;
       if Signature.InheritsFrom(TEccSignatureCertifiedFile) then
         with _Safe(TEccSignatureCertifiedFile(Signature).MetaData)^ do
           if IsObject and
@@ -2075,7 +2161,8 @@ begin
     if not Ecc256r1MakeKey(head.rndpub, rndpriv) then
       raise EECCException.CreateUtf8('%.Encrypt: MakeKey?', [self]);
     SetLength(secret, SizeOf(TEccSecretKey));
-    if not Ecc256r1SharedSecret(fContent.Signed.PublicKey, rndpriv, PEccSecretKey(secret)^) then
+    if not Ecc256r1SharedSecret(
+        fContent.Head.Signed.PublicKey, rndpriv, PEccSecretKey(secret)^) then
       raise EECCException.CreateUtf8('%.Encrypt: SharedSecret?', [self]);
     Pbkdf2HmacSha256(secret, KDFSalt, KDFRounds, aeskey.b, 'salt');
     if Algo in ECIES_SYNLZ then
@@ -2136,9 +2223,9 @@ end;
   {$WARNINGS ON} // circumvent Delphi 2007 false positive warning
 {$endif}
 
-function TEccCertificate.EncryptFile(const FileToCrypt, DestFile: TFileName;
-  const Salt: RawUtf8; SaltRounds: integer; Algo: TEciesAlgo; IncludeSignFile:
-  boolean): boolean;
+function TEccCertificate.EncryptFile(const FileToCrypt: TFileName;
+  const DestFile: TFileName; const Salt: RawUtf8; SaltRounds: integer;
+  Algo: TEciesAlgo; IncludeSignFile: boolean): boolean;
 var
   plain, encrypted: RawByteString;
   cert: TEccSignatureCertified;
@@ -2175,23 +2262,29 @@ end;
 function TEccCertificate.ToVariant(withBase64: boolean): variant;
 begin
   result := _ObjFast([
-    'Version', Version,
-    'Serial', Serial,
-    'Issuer', Issuer,
-    'IssueDate', IssueDate,
-    'ValidityStart', ValidityStart,
-    'ValidityEnd', ValidityEnd,
+    'Version',         Version,
+    'Serial',          Serial,
+    'Issuer',          Issuer,
+    'IssueDate',       IssueDate,
+    'ValidityStart',   ValidityStart,
+    'ValidityEnd',     ValidityEnd,
     'AuthoritySerial', AuthoritySerial,
     'AuthorityIssuer', AuthorityIssuer,
-    'IsSelfSigned', IsSelfSigned]);
+    'IsSelfSigned',    IsSelfSigned]);
   if withBase64 then
-    TDocVariantData(result).AddValue('Base64', RawUtf8ToVariant(ToBase64));
+    TDocVariantData(result).AddValue(
+      'Base64', RawUtf8ToVariant(ToBase64));
+end;
+
+function TEccCertificate.ToJson(withBase64: boolean): RawUtf8;
+begin
+  VariantSaveJson(ToVariant(withBase64), twJsonEscape, result);
 end;
 
 function TEccCertificate.ToFile(const filename: TFileName): boolean;
 begin
   if CheckCRC then
-    result := JsonReformatToFile(VariantSaveJson(ToVariant), filename)
+    result := JsonReformatToFile(ToJson, filename)
   else
     result := false;
 end;
@@ -2201,20 +2294,20 @@ end;
 
 constructor TEccCertificateSecret.CreateNew(Authority: TEccCertificateSecret;
   const IssuerText: RawUtf8; ExpirationDays: integer; StartDate: TDateTime;
-  ParanoidVerify: boolean);
+  ParanoidVerify: boolean; Usage: TCryptCertUsages;
+  const Subjects: RawUtf8; MaxVers: byte);
 var
   priv: PEccPrivateKey;
   pub: PEccPublicKey;
   now: TEccDate;
-  sha: TSha256;
   hash: TSha256Digest;
   temp: TEccSignature;
   retry: boolean;
 begin
-  Create;
-  now := NowEccDate;
-  with fContent.Signed do
+  CreateVersion(MaxVers);
+  with fContent.Head.Signed do
   begin
+    now := NowEccDate;
     IssueDate := now;
     if ExpirationDays > 0 then
     begin
@@ -2225,8 +2318,12 @@ begin
       ValidityEnd := ValidityStart + ExpirationDays;
     end;
     TAesPrng.Fill(TAesBlock(Serial));
+    fContent.SetUsage(word(Usage), MaxVers);
     if IssuerText = '' then
-      TAesPrng.Fill(TAesBlock(Issuer))
+      if Subjects <> '' then
+        fContent.SetSubject(Subjects, MaxVers)
+      else
+        TAesPrng.Fill(TAesBlock(Issuer))
     else
       EccIssuer(IssuerText, Issuer);
     for retry := false to true do
@@ -2242,10 +2339,10 @@ begin
       end
       else
       begin
-        AuthoritySerial := Authority.fContent.Signed.Serial;
-        AuthorityIssuer := Authority.fContent.Signed.Issuer;
+        AuthoritySerial := Authority.fContent.Head.Signed.Serial;
+        AuthorityIssuer := Authority.fContent.Head.Signed.Issuer;
         priv := @Authority.fPrivateKey;
-        pub := @Authority.fContent.Signed.PublicKey;
+        pub := @Authority.fContent.Head.Signed.PublicKey;
         if ParanoidVerify then // check below will be on Authority keys
           if not Ecc256r1Sign(fPrivateKey, hash{%H-}, temp) or
              not Ecc256r1Verify(PublicKey, hash, temp) then
@@ -2254,28 +2351,28 @@ begin
             else
               continue;
       end;
-      sha.Full(@fContent.Signed, SizeOf(TEccCertificateSigned), hash);
-      if not Ecc256r1Sign(priv^, hash, fContent.Signature) then
+      fContent.ComputeHash(hash);
+      if not Ecc256r1Sign(priv^, hash, fContent.Head.Signature) then
         raise EECCException.CreateUtf8('%.CreateNew: ecdsa_sign?', [self]);
       if not ParanoidVerify or
-         Ecc256r1Verify(pub^, hash, fContent.Signature) then
+         Ecc256r1Verify(pub^, hash, fContent.Head.Signature) then
         break
       else if retry then
         raise EECCException.CreateUtf8('%.CreateNew: ParanoidVerify2?', [self]);
     end;
   end;
-  fContent.CRC := fnv32(0, @fContent, SizeOf(fContent) - 4);
+  fContent.Head.CRC := fContent.ComputeCrc32;
 end;
 
-constructor TEccCertificateSecret.CreateFromSecureBinary(const Binary:
-  RawByteString; const PassWord: RawUtf8; Pbkdf2Round: integer;
+constructor TEccCertificateSecret.CreateFromSecureBinary(
+  const Binary: RawByteString; const PassWord: RawUtf8; Pbkdf2Round: integer;
   AES: TAesAbstractClass);
 begin
   CreateFromSecureBinary(pointer(Binary), length(Binary), PassWord, Pbkdf2Round, AES);
 end;
 
-constructor TEccCertificateSecret.CreateFromSecureBinary(Data: pointer; Len:
-  integer; const PassWord: RawUtf8; Pbkdf2Round: integer; AES: TAesAbstractClass);
+constructor TEccCertificateSecret.CreateFromSecureBinary(Data: pointer;
+  Len: integer; const PassWord: RawUtf8; Pbkdf2Round: integer; AES: TAesAbstractClass);
 begin
   Create;
   if not LoadFromSecureBinary(Data, Len, PassWord, Pbkdf2Round, AES) then
@@ -2287,8 +2384,8 @@ constructor TEccCertificateSecret.CreateFromSecureFile(const FileName: TFileName
 begin
   Create;
   if not LoadFromSecureFile(FileName, PassWord, Pbkdf2Round, AES) then
-    raise EECCException.CreateUtf8('Invalid %.CreateFromSecureFile("%")', [self,
-      FileName]);
+    raise EECCException.CreateUtf8(
+      'Invalid %.CreateFromSecureFile("%")', [self, FileName]);
 end;
 
 constructor TEccCertificateSecret.CreateFromSecureFile(
@@ -2306,13 +2403,13 @@ begin
   inherited Destroy;
 end;
 
-function TEccCertificateSecret.InternalLoad(const data: RawByteString): boolean;
+function TEccCertificateSecret.AppendLoad(const data: RawByteString): boolean;
 begin
   result := fStoreOnlyPublicKey or
             TAesPrng.AFUnsplit(data, fPrivateKey, SizeOf(fPrivateKey));
 end;
 
-function TEccCertificateSecret.InternalSave: RawByteString;
+function TEccCertificateSecret.AppendSave: RawByteString;
 begin
   if fStoreOnlyPublicKey then
     result := ''
@@ -2335,13 +2432,12 @@ const
   PRIVKEY_SALTSIZE = 16;
 
 function TEccCertificateSecret.SaveToSecureBinary(const PassWord: RawUtf8;
-  AFStripes, Pbkdf2Round: integer; AES: TAesAbstractClass; NoHeader: boolean):
-  RawByteString;
+  AFStripes, Pbkdf2Round: integer; AES: TAesAbstractClass;
+  NoHeader: boolean): RawByteString;
 var
   pksav: boolean;
   stsav, head: integer;
-  st: TRawByteStringStream;
-  salt, enc: RawByteString;
+  plain, salt, enc: RawByteString;
   aeskey: TAesKey;
   a: TAesAbstract;
   e: PAnsiChar absolute result;
@@ -2353,16 +2449,15 @@ begin
   stsav := fAFSplitStripes;
   try
     fStoreOnlyPublicKey := false;
-    fAFSplitStripes := AFStripes;
-    salt := TAesPrng.Fill(PRIVKEY_SALTSIZE);
-    st := TRawByteStringStream.Create;
-    try
-      if SaveToStream(st) then
-      begin
+    fAFSplitStripes := AFStripes; // for AppendSave/SaveToBinary
+    plain := SaveToBinary;
+    if plain <> '' then
+      try
+        salt := TAesPrng.Fill(PRIVKEY_SALTSIZE);
         Pbkdf2HmacSha256(PassWord, salt, Pbkdf2Round, aeskey);
         a := AES.Create(aeskey);
         try
-          enc := a.EncryptPkcs7(st.DataString, true);
+          enc := a.EncryptPkcs7(plain, true);
           // result := PRIVKEY_MAGIC+salt+enc; fails under FPC :(
           if NoHeader then
             head := 0
@@ -2375,11 +2470,9 @@ begin
         finally
           a.Free;
         end;
+      finally
+        FillcharFast(pointer(plain)^, length(plain), 0);
       end;
-    finally
-      FillcharFast(pointer(st.DataString)^, length(st.DataString), 0);
-      st.Free;
-    end;
   finally
     fStoreOnlyPublicKey := pksav;
     fAFSplitStripes := stsav;
@@ -2400,7 +2493,7 @@ begin
       FormatUtf8('%-%', [Serial, UInt3DigitsToShort(FileNumber)], tmp)
     else
       tmp := Serial;
-    result := Utf8ToString(tmp) + ECCCERTIFICATESECRET_FILEEXT;
+    FormatString('%' + ECCCERTIFICATESECRET_FILEEXT, [tmp], string(result));
   end;
 end;
 
@@ -2488,7 +2581,7 @@ begin
   if (self = nil) or
      (Len <= SizeOf(PRIVKEY_MAGIC) + SizeOf(TAesBlock)) then
     exit;
-  if IsEqual(THash128(PRIVKEY_MAGIC), PHash128(Data)^) then
+  if mormot.core.base.IsEqual(THash128(PRIVKEY_MAGIC), PHash128(Data)^) then
   begin
     dec(Len, 16);
     head := 16;
@@ -2516,7 +2609,7 @@ begin
     st := TRawByteStringStream.Create(decrypted);
     try
       if LoadFromStream(st) then
-        result := EccCheck(fContent) and
+        result := fContent.Check and
                   not IsZero(THash256(fPrivateKey));
     finally
       st.Free;
@@ -2615,16 +2708,16 @@ begin
   sha := Sha256Digest(pointer(content), length(content));
   sign := SignToBase64(sha);
   meta.InitObject([
-    'name', ExtractFileName(FileToSign),
-    'date', DateTimeToIso8601Text(FileAgeToDateTime(FileToSign))],
+    'name',   ExtractFileName(FileToSign),
+    'date',   DateTimeToIso8601Text(FileAgeToDateTime(FileToSign))],
     JSON_FAST);
   meta.AddNameValuesToObject(MetaNameValuePairs);
   doc.InitObject([
-    'meta', variant(meta),
-    'size', length(content),
-    'md5', Md5(content),
+    'meta',   variant(meta),
+    'size',   length(content),
+    'md5',    Md5(content),
     'sha256', Sha256DigestToString(sha),
-    'sign', sign],
+    'sign',   sign],
     JSON_FAST);
   result := FileToSign + ECCCERTIFICATESIGN_FILEEXT;
   FileFromString(doc.ToJson('', '', jsonHumanReadable), result);
@@ -2652,7 +2745,7 @@ begin
   data := @PByteArray(Encrypted)[SizeOf(TEciesHeader)];
   if CheckCRC and HasSecret then
   try
-    if not IsEqual(head.recid, fContent.Signed.Serial) then
+    if not mormot.crypt.ecc256r1.IsEqual(head.recid, fContent.Head.Signed.Serial) then
     begin
       result := ecdInvalidSerial;
       exit;
@@ -2682,7 +2775,7 @@ begin
       // validate the HMAC signature of the encrypted content
       Pbkdf2HmacSha256(secret, MACSalt, MACRounds, mackey.b, 'hmac');
       HmacSha256(@mackey, data, SizeOf(mackey), datalen, hmac);
-      if not IsEqual(hmac, head.hmac) then
+      if not mormot.core.base.IsEqual(hmac, head.hmac) then
         exit;
       // decrypt the content
       SetString(enc, data, datalen);
@@ -2717,7 +2810,7 @@ begin
       else
         FileDateTime^ := UnixTimeToDateTime(head.unixts);
     if (Signature <> nil) and
-       EccCheck(head.sign) then
+       head.sign.Check then
     begin
       result := ecdDecryptedWithSignature;
       Signature^ := head.sign;
@@ -2804,15 +2897,15 @@ end;
 constructor TEccSignatureCertified.Create;
 begin
   inherited Create;
-  fContent.Version := 1;
+  fCertified.Version := 1;
 end;
 
-constructor TEccSignatureCertified.CreateFrom(const binary:
-  TEccSignatureCertifiedContent; NoException: boolean);
+constructor TEccSignatureCertified.CreateFrom(
+  const binary: TEccSignatureCertifiedContent; NoException: boolean);
 begin
   Create;
-  if EccCheck(binary) then
-    fContent := binary
+  if binary.Check then
+    fCertified := binary
   else if not NoException then
     raise EECCException.CreateUtf8(
       'Invalid %.CreateFrom', [self]);
@@ -2854,33 +2947,33 @@ begin
   if IsZero(Hash) then
     raise EECCException.CreateUtf8(
       '%.CreateNew(Hash=0)', [self]);
-  fContent.Date := NowEccDate;
-  fContent.AuthoritySerial := Authority.Content.Signed.Serial;
-  fContent.AuthorityIssuer := Authority.Content.Signed.Issuer;
-  if not Ecc256r1Sign(Authority.fPrivateKey, Hash, fContent.Signature) then
+  fCertified.Date := NowEccDate;
+  fCertified.AuthoritySerial := Authority.Content.Head.Signed.Serial;
+  fCertified.AuthorityIssuer := Authority.Content.Head.Signed.Issuer;
+  if not Ecc256r1Sign(Authority.fPrivateKey, Hash, fCertified.Signature) then
     raise EECCException.CreateUtf8('%.CreateNew: ecdsa_sign?', [self]);
 end;
 
 function TEccSignatureCertified.GetAuthorityIssuer: RawUtf8;
 begin
-  result := EccText(fContent.AuthorityIssuer);
+  result := EccText(fCertified.AuthorityIssuer);
 end;
 
 function TEccSignatureCertified.GetAuthoritySerial: RawUtf8;
 begin
-  result := EccText(fContent.AuthoritySerial);
+  result := EccText(fCertified.AuthoritySerial);
 end;
 
 function TEccSignatureCertified.GetDate: RawUtf8;
 begin
-  result := EccText(fContent.Date);
+  result := EccText(fCertified.Date);
 end;
 
 function TEccSignatureCertified.FromBase64(const base64: RawUtf8): boolean;
 begin
   result := (self <> nil) and
-    Base64ToBin(pointer(base64), @fContent, length(base64), SizeOf(fContent)) and
-    EccCheck(fContent);
+    Base64ToBin(pointer(base64), @fCertified, length(base64), SizeOf(fCertified)) and
+    fCertified.Check;
 end;
 
 function TEccSignatureCertified.FromFile(const signfilename: TFileName): boolean;
@@ -2899,21 +2992,22 @@ end;
 
 function TEccSignatureCertified.ToBase64: RawUtf8;
 begin
-  result := BinToBase64(@fContent, SizeOf(fContent));
+  result := BinToBase64(@fCertified, SizeOf(fCertified));
 end;
 
 function TEccSignatureCertified.ToVariant: variant;
 begin
   result := _ObjFast([
-    'Version', Version,
-    'Date', Date,
+    'Version',         Version,
+    'Date',            Date,
     'AuthoritySerial', AuthoritySerial,
     'AuthorityIssuer', AuthorityIssuer]);
 end;
 
 function TEccSignatureCertified.Check: boolean;
 begin
-  result := (self <> nil) and EccCheck(fContent);
+  result := (self <> nil) and
+            fCertified.Check;
 end;
 
 function TEccSignatureCertified.Verify(Authority: TEccCertificate;
@@ -2921,10 +3015,8 @@ function TEccSignatureCertified.Verify(Authority: TEccCertificate;
 begin
   if self = nil then
     result := ecvBadParameter
-  else if not Authority.CheckCRC then
-    result := ecvUnknownAuthority
   else
-    result := EccVerify(fContent, hash, Authority.fContent);
+    result := Authority.Verify(hash, fCertified);
 end;
 
 function TEccSignatureCertified.Verify(Authority: TEccCertificate;
@@ -2938,7 +3030,7 @@ begin
   if not Check then
     result := ''
   else
-    result := EccToDer(fContent.Signature);
+    result := EccToDer(fCertified.Signature);
 end;
 
 function TEccSignatureCertified.SaveToDERFile(const FileName: TFileName): boolean;
@@ -2954,7 +3046,7 @@ begin
   if not Check then
     result := ''
   else
-    result := DerToPem(EccToDer(fContent.Signature), pemCertificate);
+    result := DerToPem(EccToDer(fCertified.Signature), pemCertificate);
 end;
 
 function TEccSignatureCertified.SaveToPEMFile(const FileName: TFileName): boolean;
@@ -3006,7 +3098,7 @@ var
   MD5: TMd5;
   SHA256: TSha256;
 begin
-  result := EccCheck(Signature);
+  result := Signature.Check;
   if not result then
     exit;
   fSize := length(aDecryptedContent);
@@ -3015,14 +3107,14 @@ begin
   SHA256.Full(pointer(aDecryptedContent), fSize, fSha256Digest);
   fSHA256 := Sha256DigestToString(fSha256Digest);
   fMetaData := _JsonFast(MetaData);
-  fContent := Signature;
+  fCertified := Signature;
   fLowLevelInfo.Clear;
   fLowLevelInfo.InitObject([
-    'size', fSize,
-    'md5', fMD5,
+    'size',   fSize,
+    'md5',    fMD5,
     'sha256', fSHA256,
-    'sign', ToBase64,
-    'meta', fMetaData]);
+    'sign',   ToBase64,
+    'meta',   fMetaData]);
 end;
 
 constructor TEccSignatureCertifiedFile.CreateFromDecryptedFile(
@@ -3065,105 +3157,183 @@ begin
      (cert = nil) then
     result := ecvBadParameter
   else
-    result := IsValid(cert.Content);
+    result := IsValidRaw(cert.Content);
 end;
 
-function TEccCertificateChain.IsValid(const content: TEccCertificateContent;
+function TEccCertificateChain.IsValidRaw(const content: TEccCertificateContent;
   ignoreDate: boolean): TEccValidity;
 var
-  auth: TEccCertificateContent;
-  sha: TSha256;
-  hash: TSha256Digest;
-  crc: Int64;
+  auth: TEccPublicKey;
+  hash: THash256Rec;
+  crc: THash128Rec; // storing crc.Lo 128-bit of SHA-256 is enough
 begin
   result := ecvCorrupted;
-  if not EccCheck(content) then
+  if not content.Check then
     exit;
   if not ignoreDate then
   begin
     result := ecvInvalidDate;
-    if not EccCheckDate(content) then
+    if not content.CheckDate then
       exit;
   end;
-  if EccSelfSigned(content) then
+  if content.IsSelfSigned then
     result := ecvValidSelfSigned
   else
     result := ecvValidSigned;
+  content.ComputeHash(hash.b); // sha-256 cryptographic hash
+  crc.b := hash.Lo;
   if fIsValidCached then
   begin
-    crc := crc64c(@content, SizeOf(content));
-    fSafe.ReadOnlyLock;
+    crc.i0 := crc.i0 xor PtrInt(self); // to avoid flooding on forged input
+    fSafe.ReadLock;
     try
-      if Int64ScanExists(pointer(fIsValidCache), fIsValidCacheCount, crc) then
+      if Hash128Index(pointer(fIsValidCache), fIsValidCacheCount, @crc) >= 0 then
         exit;
     finally
-      fSafe.ReadOnlyUnlock;
+      fSafe.ReadUnlock;
     end;
-  end
-  else
-    crc := 0;
-  if result = ecvValidSelfSigned then
-    auth.Signed.PublicKey := content.Signed.PublicKey
-  else if not GetBySerial(content.Signed.AuthoritySerial, auth) then
-  begin
-    result := ecvUnknownAuthority;
-    exit;
-  end
-  else if not EccCheckDate(auth) then
-  begin
-    result := ecvDeprecatedAuthority;
-    exit;
   end;
-  sha.Full(@content.Signed, SizeOf(content.Signed), hash);
-  if Ecc256r1Verify(auth.Signed.PublicKey, hash, content.Signature) then
+  if result = ecvValidSelfSigned then
+    auth := content.Head.Signed.PublicKey
+  else
   begin
-    fSafe.ReadOnlyLock;
-    try
-      if fIsValidCached and
-         (crc <> 0) then
-        AddInt64(fIsValidCache, fIsValidCacheCount, crc);
-    finally
-      fSafe.ReadOnlyUnlock;
+    result := GetKeyBySerial(content.Head.Signed.AuthoritySerial, auth, result);
+    if not (result in ECC_VALIDSIGN) then
+      exit; // ecvUnknownAuthority/ecvDeprecatedAuthority/ecvRevoked
+  end;
+  if Ecc256r1Verify(auth, hash.b, content.Head.Signature) then
+  begin
+    if fIsValidCached then
+    begin
+      fSafe.WriteLock;
+      try
+        if fIsValidCacheCount > 1024 then
+          fIsValidCacheCount := 0; // time to flush the cache
+        AddHash128(fIsValidCache, crc.b, fIsValidCacheCount);
+      finally
+        fSafe.WriteUnlock;
+      end;
     end;
   end
   else
     result := ecvInvalidSignature;
 end;
 
-function TEccCertificateChain.IndexBySerial(const Serial: TEccCertificateID): integer;
+function TEccCertificateChain.IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason;
 var
-  ser: THash128Rec absolute Serial;
+  id: TEccCertificateID;
 begin
-  if (self <> nil) and
+  if (fCrl <> nil) and
+     EccID(Serial, id) then
+    result := IsRevoked(id)
+  else
+    result := crrNotRevoked;
+end;
+
+function FindRevoked(p: PEccCertificateRevocation; n: integer;
+  ser: PHash128Rec; now: cardinal): TCryptCertRevocationReason;
+begin
+  repeat
+    with THash128Rec(p^.Serial) do
+      {$ifdef CPU64}
+      if (ser.Lo = Lo) and
+         (ser.Hi = Hi) and
+      {$else}
+      if (ser.i0 = i0) and
+         (ser.i1 = i1) and
+         (ser.i2 = i2) and
+         (ser.i3 = i3) and
+      {$endif CPU64}
+        (p^.Date < now) then
+      begin
+        result := TCryptCertRevocationReason(p^.Reason);
+        exit;
+      end;
+    inc(p);
+    dec(n);
+  until n = 0;
+  result := crrNotRevoked;
+end;
+
+function TEccCertificateChain.IsRevoked(
+  const Serial: TEccCertificateID): TCryptCertRevocationReason;
+begin
+  result := crrNotRevoked;
+  if (self = nil) or
+     (fCrl = nil) or
+     IsZero(Serial) then
+    exit;
+  fSafe.ReadLock;
+  try
+    if fCrl <> nil then
+      result := FindRevoked(pointer(fCrl), length(fCrl), @Serial, NowEccDate);
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+function TEccCertificateChain.Revoke(const Serial: RawUtf8;
+  RevocationDate: TDateTime; Reason: TCryptCertRevocationReason): boolean;
+var
+  id: TEccCertificateID;
+begin
+  result := EccID(Serial, id) and
+            Revoke(Serial, RevocationDate, Reason);
+end;
+
+function TEccCertificateChain.Revoke(const Serial: TEccCertificateID;
+  RevocationDate: TDateTime; Reason: TCryptCertRevocationReason): boolean;
+var
+  i: PtrInt;
+begin
+  result := false;
+  if (self = nil) or
+     (RevocationDate = 0) or
+     (Reason = crrNotRevoked) or
+     IsZero(Serial) then
+    exit;
+  fSafe.WriteLock;
+  try
+    i := length(fCrl);
+    SetLength(fCrl, i + 1);
+    if not fCrl[i].From(Serial, RevocationDate, ord(Reason)) then
+      SetLength(fCrl, i);
+  finally
+    fSafe.WriteUnLock;
+  end;
+end;
+
+function FindBySerial(p: PEccCertificate; n: integer;
+  ser: PHash128Rec): TEccCertificate;
+begin
+  if (p <> nil) and
      ((ser.Lo <> 0) or
       (ser.Hi <> 0)) then
-  begin
-    for result := 0 to length(fItems) - 1 do
-      with PHash128Rec(@fItems[result].Signed.Serial)^ do
-      {$ifdef CPU64}
+    repeat
+        with THash128Rec(p^.Signed.Serial) do
+        {$ifdef CPU64}
         if (ser.Lo = Lo) and
            (ser.Hi = Hi) then
-      {$else}
+        {$else}
         if (ser.i0 = i0) and
            (ser.i1 = i1) and
            (ser.i2 = i2) and
            (ser.i3 = i3) then
-      {$endif}
+        {$endif CPU64}
+        begin
+          result := p^;
           exit;
-  end;
-  result := -1;
+        end;
+      inc(p);
+      dec(n);
+    until n = 0;
+  result := nil;
 end;
 
-function TEccCertificateChain.GetBySerial(const Serial: TEccCertificateID):
-  TEccCertificate;
-var
-  i: integer;
+function TEccCertificateChain.GetBySerial(
+  const Serial: TEccCertificateID): TEccCertificate;
 begin
-  i := IndexBySerial(Serial);
-  if i < 0 then
-    result := nil
-  else
-    result := fItems[i];
+  result := FindBySerial(pointer(fItems), length(fItems), @Serial);
 end;
 
 function TEccCertificateChain.GetBySerial(const Serial: RawUtf8): TEccCertificate;
@@ -3171,48 +3341,39 @@ var
   id: TEccCertificateID;
 begin
   if EccID(Serial, id) then
-    result := GetBySerial(id)
+    result := FindBySerial(pointer(fItems), length(fItems), @id)
   else
     result := nil;
 end;
 
-function TEccCertificateChain.GetBySerial(const Serial: TEccCertificateID; out
-  Content: TEccCertificateContent): boolean;
+function TEccCertificateChain.GetKeyBySerial(const Serial: TEccCertificateID;
+  out PublicKey: TEccPublicKey; valid: TEccValidity): TEccValidity;
 var
   cert: TEccCertificate;
+  now: TEccDate;
 begin
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   try
-    cert := GetBySerial(Serial);
-    if cert <> nil then
-    begin
-      Content := cert.Content;
-      result := true;
-    end
+    cert := FindBySerial(pointer(fItems), length(fItems), @Serial);
+    if cert = nil then
+      result := ecvUnknownAuthority
+    else if not cert.fContent.CheckDate(@now) then
+      result := ecvDeprecatedAuthority
+    else if (fCrl <> nil) and
+            (FindRevoked(pointer(fCrl), length(fCrl), @Serial, now) <> crrNotRevoked) then
+      result := ecvRevoked
     else
-      result := false;
-  finally
-    fSafe.ReadOnlyUnLock;
-  end;
-end;
-
-function TEccCertificateChain.GetBySerial(const Serial: TEccCertificateID; out
-  PublicKey: TEccPublicKey): boolean;
-var
-  cert: TEccCertificate;
-begin
-  fSafe.ReadOnlyLock;
-  try
-    cert := GetBySerial(Serial);
-    if cert <> nil then
     begin
-      PublicKey := cert.Content.Signed.PublicKey;
-      result := true;
-    end
-    else
-      result := false;
+      PublicKey := cert.Content.Head.Signed.PublicKey;
+      if valid <> ecvUnknown then
+        result := valid
+      else if cert.Content.IsSelfSigned then
+        result := ecvValidSelfSigned
+      else
+        result := ecvValidSigned;
+    end;
   finally
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -3233,40 +3394,46 @@ begin
   end;
 end;
 
-function TEccCertificateChain.InternalAdd(cert: TEccCertificate; expected:
-  TEccValidity): integer;
+function TEccCertificateChain.InternalAdd(cert: TEccCertificate;
+  expected: TEccValidity): PtrInt;
 begin
   result := -1;
   if (self = nil) or
      (cert = nil) or
-     (IsValid(cert.fContent, true) <> expected) then
+     (IsValidRaw(cert.fContent, true) <> expected) then
     exit;
   fSafe.WriteLock;
   try
-    if IndexBySerial(cert.Signed.Serial) < 0 then
+    if GetBySerial(cert.Signed.Serial) = nil then
       result := ObjArrayAdd(fItems, cert);
   finally
     fSafe.WriteUnLock;
   end;
 end;
 
-function TEccCertificateChain.Add(cert: TEccCertificate): integer;
+function TEccCertificateChain.Add(cert: TEccCertificate): PtrInt;
 begin
   result := InternalAdd(cert, ecvValidSigned);
 end;
 
-function TEccCertificateChain.AddSelfSigned(cert: TEccCertificate): integer;
+function TEccCertificateChain.AddSelfSigned(cert: TEccCertificate): PtrInt;
 begin
   result := InternalAdd(cert, ecvValidSelfSigned);
+end;
+
+procedure TEccCertificateChain.LockedClear;
+begin
+  ObjArrayClear(fItems);
+  fCrl := nil;
+  fIsValidCacheCount := 0;
+  fIsValidCache := nil;
 end;
 
 procedure TEccCertificateChain.Clear;
 begin
   fSafe.WriteLock;
   try
-    ObjArrayClear(fItems);
-    fIsValidCacheCount := 0;
-    fIsValidCache := nil;
+    LockedClear;
   finally
     fSafe.WriteUnLock;
   end;
@@ -3284,25 +3451,34 @@ function TEccCertificateChain.IsAuthorized(sign: TEccSignatureCertified): boolea
 begin
   if (self <> nil) and
      (sign <> nil) then
-    result := IsAuthorized(sign.Content)
+    result := IsAuthorized(sign.Certified)
   else
     result := false;
 end;
 
-function TEccCertificateChain.IsAuthorized(const sign:
-  TEccSignatureCertifiedContent): boolean;
+function TEccCertificateChain.IsAuthorized(
+  const sign: TEccSignatureCertifiedContent): boolean;
 var
-  content: TEccCertificateContent;
+  cert: TEccCertificate;
 begin
-  result := GetBySerial(sign.AuthoritySerial, content) and
-            IsEqual(content.Signed.AuthorityIssuer, sign.AuthorityIssuer);
+  fSafe.ReadLock;
+  try
+    cert := FindBySerial(pointer(fItems), length(fItems), @sign.AuthoritySerial);
+    result := (cert <> nil) and
+        IsEqual(cert.Content.Head.Signed.AuthorityIssuer, sign.AuthorityIssuer) and
+        ((fCrl = nil) or
+         (FindRevoked(pointer(fCrl), length(fCrl),
+            @sign.AuthoritySerial, NowEccDate) = crrNotRevoked));
+  finally
+    fSafe.ReadUnLock;
+  end;
 end;
 
 function TEccCertificateChain.IsAuthorized(const base64sign: RawUtf8): boolean;
 var
   sign: TEccSignatureCertifiedContent;
 begin
-  if EccSign(base64sign, sign) then
+  if sign.FromBase64(base64sign) then
     result := IsAuthorized(sign)
   else
     result := false;
@@ -3328,7 +3504,7 @@ begin
           result := ecvCorrupted;
           exit;
         end;
-    result := IsSigned(sign.Content, hash);
+    result := IsSigned(sign.Certified, hash);
   end
   else
     result := ecvBadParameter;
@@ -3338,7 +3514,7 @@ function TEccCertificateChain.IsSigned(sign: TEccSignatureCertifiedFile): TEccVa
 begin
   if (self <> nil) and
      (sign <> nil) then
-    result := IsSigned(sign.Content, sign.Sha256Digest)
+    result := IsSigned(sign.Certified, sign.Sha256Digest)
   else
     result := ecvBadParameter;
 end;
@@ -3348,7 +3524,7 @@ function TEccCertificateChain.IsSigned(sign: TEccSignatureCertified;
 begin
   if (self <> nil) and
      (sign <> nil) then
-    result := IsSigned(sign.Content, hash)
+    result := IsSigned(sign.Certified, hash)
   else
     result := ecvBadParameter;
 end;
@@ -3368,7 +3544,7 @@ function TEccCertificateChain.IsSigned(const base64sign: RawUtf8;
 var
   sign: TEccSignatureCertifiedContent;
 begin
-  if EccSign(base64sign, sign) then
+  if sign.FromBase64(base64sign) then
     result := IsSigned(sign, hash)
   else
     result := ecvBadParameter;
@@ -3379,7 +3555,7 @@ function TEccCertificateChain.IsSigned(const base64sign: RawUtf8;
 var
   sign: TEccSignatureCertifiedContent;
 begin
-  if EccSign(base64sign, sign) then
+  if sign.FromBase64(base64sign) then
     result := IsSigned(sign, Data, Len)
   else
     result := ecvBadParameter;
@@ -3388,14 +3564,21 @@ end;
 function TEccCertificateChain.IsSigned(const sign: TEccSignatureCertifiedContent;
   const hash: THash256): TEccValidity;
 var
-  auth: TEccCertificateContent;
+  authkey: TEccPublicKey;
 begin
   if self = nil then
     result := ecvBadParameter
-  else if not GetBySerial(sign.AuthoritySerial, auth) then
-    result := ecvUnknownAuthority
   else
-    result := EccVerify(sign, hash, auth);
+  begin
+    fSafe.ReadLock; // non blocking lock
+    try
+      result := GetKeyBySerial(sign.AuthoritySerial, authkey);
+    finally
+      fSafe.ReadUnLock;
+    end;
+    if result in ECC_VALIDSIGN then
+      result := sign.Verify(hash, authkey, result);
+  end;
 end;
 
 function TEccCertificateChain.SaveToJson: RawUtf8;
@@ -3405,15 +3588,20 @@ end;
 
 function TEccCertificateChain.SaveToArray: TRawUtf8DynArray;
 var
-  i: PtrInt;
+  i, n: PtrInt;
 begin
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   try
-    SetLength(result{%H-}, length(fItems));
-    for i := 0 to high(result) do
+    n := length(fItems);
+    SetLength(result{%H-}, n + length(fCrl));
+    // store first the certificates
+    for i := 0 to n - 1 do
       result[i] := fItems[i].PublicToBase64;
+    // then the revocation serials
+    for i := 0 to high(fCrl) do
+      result[i + n] := fCrl[i].ToBase64;
   finally
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -3434,28 +3622,44 @@ end;
 
 function TEccCertificateChain.LoadFromArray(const values: TRawUtf8DynArray): boolean;
 var
-  i: PtrInt;
+  i, n, crl: PtrInt;
 begin
   result := false;
   if self = nil then
     exit;
   fSafe.WriteLock;
   try
-    Clear;
+    LockedClear;
     SetLength(fItems, length(values));
+    n := 0;
+    crl := 0;
     for i := 0 to high(values) do
-    begin
-      fItems[i] := TEccCertificate.Create;
-      if not fItems[i].FromBase64(values[i]) then
-      begin
-        ObjArrayClear(fItems);
-        exit;
-      end;
-    end;
+      if values[i] <> '' then
+        if PWord(values[i])^ = ord('/') + ord('w') shl 8 then
+        begin
+          // this is a base64-encoded TEccCertificateRevocation entry
+          if crl = length(fCrl) then
+            SetLength(fCrl, NextGrow(crl));
+          if not fCrl[crl].FromBase64(values[i]) then
+            exit;
+        end
+        else
+        begin
+          // regular TEccCertificate entry
+          fItems[i] := TEccCertificate.Create;
+          if not fItems[i].FromBase64(values[i]) then
+            exit;
+          inc(n);
+        end;
+    SetLength(fItems, n);
+    if crl <> 0 then
+      DynArrayFakeLength(fCrl, crl);
+    result := true;
   finally
+    if not result then
+      LockedClear;
     fSafe.WriteUnLock;
   end;
-  result := true;
 end;
 
 function TEccCertificateChain.ValidateItems: TEccCertificateObjArray;
@@ -3465,13 +3669,13 @@ begin
   result := nil;
   if self = nil then
     exit;
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   try
     for i := 0 to high(fItems) do
       if not (IsValid(fItems[i]) in ECC_VALIDSIGN) then
         ObjArrayAdd(result, fItems[i]);
   finally
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -3483,7 +3687,8 @@ begin
       'Invalid %.CreateFromFile("%")', [self, jsonfile]);
 end;
 
-constructor TEccCertificateChain.CreateFromFiles(const files: array of TFileName);
+constructor TEccCertificateChain.CreateFromFiles(
+  const files: array of TFileName);
 var
   i: PtrInt;
   auth: TEccCertificate;
@@ -3509,25 +3714,39 @@ end;
 
 function TEccCertificateChain.SaveToFileVariant: variant;
 var
-  pub64, items: TDocVariantData;
-  i, n: PtrInt;
+  pub64, items, crls: TDocVariantData;
+  i, ni, nc: PtrInt;
 begin
-  fSafe.ReadOnlyLock;
+  fSafe.ReadLock;
   try
-    n := length(fItems);
-    pub64.InitFast(n, dvArray);
-    items.InitFast(n, dvArray);
-    for i := 0 to n - 1 do
+    ni := length(fItems);
+    nc := length(fCrl);
+    pub64.InitFast(ni + nc, dvArray);
+    items.InitFast(ni, dvArray);
+    crls.InitFast(nc, dvArray);
+    for i := 0 to ni - 1 do
     begin
       pub64.AddItemText(fItems[i].PublicToBase64);
       items.AddItem(fItems[i].ToVariant(false));
     end;
+    for i := 0 to nc - 1 do
+      with fCrl[i] do
+      begin
+        pub64.AddItemText(ToBase64);
+        crls.AddItem(_ObjFast([
+          'Version',    Version,
+          'Date',       EccText(Date),
+          'Reason',     Reason,
+          'ReasonText', ToText(TCryptCertRevocationReason(Reason))^,
+          'Serial',     EccText(Serial)]));
+      end;
   finally
-    fSafe.ReadOnlyUnLock;
+    fSafe.ReadUnLock;
   end;
   result := _ObjFast([
     'PublicBase64', variant(pub64),
-    'Items', variant(items)]);
+    'Items',        variant(items),
+    'CRL',          variant(crls)]);
 end;
 
 function TEccCertificateChain.SaveToFileContent: RawUtf8;
@@ -4012,20 +4231,23 @@ begin
 end;
 
 function TEcdheProtocol.Verify(frame: PByteArray; len: integer;
-  const QC: TEccCertificateContent; out res: TProtocolResult): boolean;
+  const QC: TEccCertificateContentV1; out res: TProtocolResult): boolean;
 var
   hash: TSha256Digest;
   sha: TSha256;
+  QC2: TEccCertificateContent absolute QC; // V1 is binary compatible with V2
 begin
   result := false;
   res := sprInvalidCertificate;
+  if QC.Version <> 1 then
+    exit;
   if fPKI <> nil then
   begin
-    fCertificateValidity := fPKI.IsValid(QC);
+    fCertificateValidity := fPKI.IsValidRaw(QC2);
     if not (fCertificateValidity in ECC_VALIDSIGN) then
       exit;
   end
-  else if not EccCheck(QC) then
+  else if not QC2.Check then
     exit;
   dec(len, SizeOf(TEccSignature)); // Sign at the latest position
   sha.Full(frame, len, hash);
@@ -4037,12 +4259,14 @@ begin
 end;
 
 procedure TEcdheProtocol.Sign(frame: PByteArray; len: integer;
-  out QC: TEccCertificateContent);
+  out QC: TEccCertificateContentV1);
 var
   hash: TSha256Digest;
   sha: TSha256;
 begin
-  QC := fPrivate.fContent;
+  QC := fPrivate.fContent.Head;
+  if QC.Version <> 1 then
+    raise EECCException.CreateUtf8('%.Sign: require V1 %', [self, fPrivate]);
   dec(len, SizeOf(TEccSignature)); // Sign at the latest position
   sha.Full(frame, len, hash);
   if not Ecc256r1Sign(fPrivate.fPrivateKey, hash, PEccSignature(@frame[len])^) then
@@ -4242,7 +4466,7 @@ begin
 end;
 
 
-{ ****************** Registration of our ECC Engine to the TCryptAsym Factory }
+{ ********* Registration of our ECC Engine to the TCryptAsym/TCryptCert Factories }
 
 type
   TCryptAsymInternal = class(TCryptAsym)
@@ -4258,6 +4482,7 @@ type
       const pub, sig: RawByteString): boolean; override;
     function SharedSecret(const pub, priv: RawByteString): RawByteString; override;
   end;
+
 
 { TCryptAsymInternal }
 
@@ -4345,6 +4570,239 @@ begin
 end;
 
 
+type
+  /// 'syn-es256' ICryptCert algorithm
+  TCryptCertAlgoInternal = class(TCryptCertAlgo)
+  protected
+    fMaxVersion: integer;
+  public
+    constructor Create(const name: RawUtf8); override;
+    function New: ICryptCert; override; // = TCryptCertInternal.Create(self)
+  end;
+
+  /// class implementing ICryptCert using our ECC Public Key Cryptography
+  // - TEccCertificate will store Subjects Baudot-encoded, and as issuer in V1
+  // - with the current implementation, GetUsages returns CERTIFICATE_USAGE_ALL
+  TCryptCertInternal = class(TCryptCert)
+  protected
+    fEcc: TEccCertificate; // TEccCertificate or TEccCertificateSecret
+    fMaxVersion: integer;
+  public
+    destructor Destroy; override;
+    // ICryptCert methods
+    procedure Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8;
+      const Authority: ICryptCert; ExpireDays, ValidDays: integer); override;
+    function FromBinary(const Binary: RawByteString;
+      const PrivatePassword: RawUtf8): boolean; override;
+    function GetSerial: RawUtf8; override;
+    function GetSubject: RawUtf8; override;
+    function GetSubjects: TRawUtf8DynArray; override;
+    function GetIssuerName: RawUtf8; override;
+    function GetIssuerSerial: RawUtf8; override;
+    function GetNotBefore: TDateTime; override;
+    function GetNotAfter: TDateTime; override;
+    function GetUsage: TCryptCertUsages; override;
+    function GetPeerInfo: RawUtf8; override;
+    function ToBinary(const PrivatePassword: RawUtf8): RawByteString; override;
+    function HasPrivateSecret: boolean; override;
+    function IsEqual(const another: ICryptCert): boolean; override;
+    /// low-level access to internal TEccCertificate or TEccCertificateSecret
+    property Ecc: TEccCertificate
+      read fEcc;
+  end;
+
+
+{ TCryptCertAlgoInternal }
+
+constructor TCryptCertAlgoInternal.Create(const name: RawUtf8);
+begin
+  inherited Create(name);
+  if name = 'syn-es256-v1' then
+    fMaxVersion := 1
+  else
+    fMaxVersion := 20;
+end;
+
+function TCryptCertAlgoInternal.New: ICryptCert;
+var
+  cert: TCryptCertInternal;
+begin
+  cert := TCryptCertInternal.Create(self);
+  cert.fMaxVersion := fMaxVersion;
+  result := cert;
+end;
+
+
+{ TCryptCertInternal }
+
+destructor TCryptCertInternal.Destroy;
+begin
+  fEcc.Free;
+  inherited Destroy;
+end;
+
+procedure TCryptCertInternal.Generate(Usages: TCryptCertUsages;
+  const Subjects: RawUtf8; const Authority: ICryptCert;
+  ExpireDays, ValidDays: integer);
+var
+  start: TDateTime;
+  a: TCryptCert;
+  auth: TEccCertificateSecret;
+begin
+  if fEcc <> nil then
+    RaiseError('New: called twice');
+  if ValidDays = 0 then
+    start := 0
+  else
+  begin
+    start := NowUtc + ValidDays;
+    dec(ExpireDays, ValidDays); // TEccCertificateSecret.CreateNew is from start
+  end;
+  auth := nil;
+  if Authority <> nil then
+  begin
+    a := Authority.Instance;
+    if not a.InheritsFrom(TCryptCertInternal) then
+      RaiseError('New: Authority is a % which is unsupported', [a]);
+    if not a.HasPrivateSecret then
+      RaiseError('New: Authority holds % which has no private key', [a]);
+    auth := TCryptCertInternal(a).fEcc as TEccCertificateSecret;
+  end;
+  fEcc := TEccCertificateSecret.CreateNew(
+    auth, '', ExpireDays, start, true, Usages, Subjects, fMaxVersion);
+end;
+
+function TCryptCertInternal.FromBinary(const Binary: RawByteString;
+  const PrivatePassword: RawUtf8): boolean;
+begin
+  if fEcc <> nil then
+    RaiseError('FromBinary: called twice');
+  if PrivatePassword = '' then
+  begin
+    fEcc := TEccCertificate.CreateVersion(fMaxVersion);
+    result := fEcc.LoadFromBinary(Binary); // plain public key only
+  end
+  else
+  begin
+    fEcc := TEccCertificateSecret.CreateVersion(fMaxVersion);
+    result := TEccCertificateSecret(fEcc). // encrypted and with private key
+      LoadFromSecureBinary(Binary, PrivatePassword);
+  end;
+  if not result then
+    FreeAndNil(fEcc);
+end;
+
+function TCryptCertInternal.GetSerial: RawUtf8;
+begin
+  if fEcc <> nil then
+    result := fEcc.Serial
+  else
+    result := '';
+end;
+
+function TCryptCertInternal.GetSubject: RawUtf8;
+begin
+  if fEcc = nil then
+    result := ''
+  else
+    result := GetCsvItem(pointer(fEcc.Content.GetSubject), 0);
+end;
+
+function TCryptCertInternal.GetSubjects: TRawUtf8DynArray;
+begin
+  if fEcc = nil then
+    result := nil
+  else
+    CsvToRawUtf8DynArray(pointer(fEcc.Content.GetSubject), result);
+end;
+
+function TCryptCertInternal.GetIssuerName: RawUtf8;
+begin
+  if fEcc <> nil then
+    result := fEcc.AuthorityIssuer
+  else
+    result := '';
+end;
+
+function TCryptCertInternal.GetIssuerSerial: RawUtf8;
+begin
+  if fEcc <> nil then
+    result := fEcc.AuthoritySerial
+  else
+    result := '';
+end;
+
+function TCryptCertInternal.GetNotBefore: TDateTime;
+begin
+  if fEcc <> nil then
+    result := EccToDateTime(fEcc.Content.Head.Signed.ValidityStart)
+  else
+    result := 0;
+end;
+
+function TCryptCertInternal.GetNotAfter: TDateTime;
+begin
+  if fEcc <> nil then
+    result := EccToDateTime(fEcc.Content.Head.Signed.ValidityEnd)
+  else
+    result := 0;
+end;
+
+function TCryptCertInternal.GetUsage: TCryptCertUsages;
+begin
+  if fEcc <> nil then
+    result := fEcc.GetUsage
+  else
+    result := [];
+end;
+
+function TCryptCertInternal.GetPeerInfo: RawUtf8;
+begin
+  if fEcc <> nil then
+    JsonBufferReformat(pointer(fEcc.ToJson({withbase64=}false)), result)
+  else
+    result := '';
+end;
+
+function TCryptCertInternal.ToBinary(const PrivatePassword: RawUtf8): RawByteString;
+begin
+  if fEcc <> nil then
+    if fEcc.InheritsFrom(TEccCertificateSecret) then
+      if PrivatePassword = '' then
+      begin
+        TEccCertificateSecret(fEcc).StoreOnlyPublicKey := true;
+        result := fEcc.SaveToBinary;
+        TEccCertificateSecret(fEcc).StoreOnlyPublicKey := false;
+      end
+      else
+        result := TEccCertificateSecret(fEcc).SaveToSecureBinary(PrivatePassword)
+    else
+      result := fEcc.SaveToBinary
+  else
+    result := '';
+end;
+
+function TCryptCertInternal.HasPrivateSecret: boolean;
+begin
+  result := (fEcc <> nil) and
+            fEcc.InheritsFrom(TEccCertificateSecret) and
+            TEccCertificateSecret(fEcc).HasSecret;
+end;
+
+function TCryptCertInternal.IsEqual(const another: ICryptCert): boolean;
+var
+  a: TCryptCert;
+begin
+  result := false;
+  // check same exact implementation class
+  if another = nil then
+    exit;
+  a := another.Instance;
+  if PClass(a)^ = PClass(self)^ then
+    // compare all fields at once
+    result := fEcc.IsEqual(TCryptCertInternal(a).fEcc);
+end;
+
 
 initialization
   {$ifndef HASDYNARRAYTYPE}
@@ -4355,6 +4813,7 @@ initialization
   assert(SizeOf(TEcdheFrameClient) = 290);
   assert(SizeOf(TEcdheFrameServer) = 306);
   TCryptAsymInternal.Implements('ES256,secp256r1,NISTP-256,prime256v1');
+  TCryptCertAlgoInternal.Implements('syn-es256,syn-es256-v1');
 
 end.
 

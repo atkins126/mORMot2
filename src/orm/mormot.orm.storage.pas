@@ -1558,21 +1558,29 @@ end;
 
 class function TOrmVirtualTable.ModuleName: RawUtf8;
 const
+  NAM: array[0..6] of PUtf8Char = (
+    'TSQLVIRTUALTABLE',
+    'TSQLVIRTUAL',
+    'TSQL',
+    'TORMVIRTUALTABLE',
+    'TORMVIRTUAL',
+    'TORM',
+    nil);
   LEN: array[-1..5] of byte = (
-    1, 16, 11, 4, 16, 11, 4);
+    1,  // 'T'
+    16, // 'TSQLVIRTUALTABLE'
+    11, // 'TSQLVIRTUAL'
+    4,  // 'TSQL'
+    16, // 'TORMVIRTUALTABLE'
+    11, // 'TORMVIRTUAL'
+    4); // 'TORM'
 begin
   if self = nil then
     result := ''
   else
   begin
     ClassToText(self, result);
-    system.delete(result, 1, LEN[IdemPCharArray(pointer(result),
-      ['TSQLVIRTUALTABLE',  // 0
-       'TSQLVIRTUAL',       // 1
-       'TSQL',              // 2
-       'TORMVIRTUALTABLE',  // 3
-       'TORMVIRTUAL',       // 4
-       'TORM'])]);          // 5
+    system.delete(result, 1, LEN[IdemPPChar(pointer(result), @NAM)]);
   end;
 end;
 
@@ -2271,7 +2279,7 @@ begin
   if n > 0 then
     repeat
       id := p^.IDValue;
-      if id > result then // cmovg on 64-bit FPC
+      if id > result then   // cmovg on 64-bit FPC
         result := id;
       if id <= prev then
         {$ifdef CPUX86}
@@ -2997,8 +3005,7 @@ begin
         // save rows as JSON, with appropriate search according to Where.* arguments
         MS := TRawByteStringStream.Create;
         try
-          ForceAjax := ForceAjax or
-                       not Owner.Owner.NoAjaxJson;
+          ForceAjax := ForceAjax or not Owner.Owner.NoAjaxJson;
           StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'GetJsonValues' {$endif});
           try
             ResCount := GetJsonValues(MS, ForceAjax, Stmt);
@@ -3077,10 +3084,10 @@ begin
     if fCount > 0 then
     begin
       timer.Start;
+      fValues.Clear;
       for f := 0 to length(fUnique) - 1 do
         fUnique[f].Hasher.ForceReHash;
       fValues.Hasher.ForceReHash;
-      fValues.Clear;
       if andUpdateFile then
       begin
         fModified := true;
@@ -3119,13 +3126,13 @@ begin
   loaded.Pause;
   timer.Start;
   fCount := length(fValue);
-  dup := fValues.ForceReHash;
+  fValues.Hasher.ForceReHash(@dup);
   if dup > 0 then
     dupfield := ID_TXT
   else
     for f := 0 to length(fUnique) - 1 do
     begin
-      dup := fUnique[f].Hasher.ForceReHash;
+      fUnique[f].Hasher.ForceReHash(@dup);
       if dup > 0 then
       begin
         dupfield := fUnique[f].PropInfo.Name;

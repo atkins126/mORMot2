@@ -90,10 +90,6 @@ procedure ZeroFill(Value: PVarData);
 // - may be used to cleanup stack-allocated content
 procedure FillZero(var value: variant); overload;
 
-/// convert a FormatUtf8() UTF-8 encoded string into a variant RawUtf8 varString
-procedure FormatUtf8ToVariant(const Fmt: RawUtf8; const Args: array of const;
-  var Value: variant);
-
 /// convert an UTF-8 encoded text buffer into a variant RawUtf8 varString
 // - this overloaded version expects a destination variant type (e.g. varString
 // varOleStr / varUString) - if the type is not handled, will raise an
@@ -1001,6 +997,34 @@ type
     // - will call internally ObjectToVariant() to make the conversion
     procedure InitArrayFromObjArray(const ObjArray; aOptions: TDocVariantOptions;
       aWriterOptions: TTextWriterWriteObjectOptions = [woDontStoreDefault]);
+    /// fill a TDocVariant array from standard or non-expanded JSON ORM/DB result
+    // - accept the ORM/DB results dual formats as recognized by TOrmTableJson,
+    // i.e. both [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...] and
+    // {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+    // - about 2x (expanded) or 3x (non-expanded) faster than Doc.InitJsonInPlace()
+    // - will also use less memory, because all object field names will be shared
+    // - in expanded mode, the fields order won't be checked, as with TOrmTableJson
+    // - warning: the incoming JSON buffer will be modified in-place: so you should
+    // make a private copy before running this method, as overloaded procedures do
+    function InitArrayFromResults(Json: PUtf8Char; JsonLen: PtrInt;
+      aOptions: TDocVariantOptions = JSON_FAST_FLOAT): boolean; overload;
+    /// fill a TDocVariant array from standard or non-expanded JSON ORM/DB result
+    // - accept the ORM/DB results dual formats as recognized by TOrmTableJson
+    // - about 2x (expanded) or 3x (non-expanded) faster than Doc.InitJson()
+    // - will also use less memory, because all object field names will be shared
+    // - in expanded mode, the fields order won't be checked, as with TOrmTableJson
+    // - a private copy of the incoming JSON buffer will be used before parsing
+    function InitArrayFromResults(const Json: RawUtf8;
+      aOptions: TDocVariantOptions = JSON_FAST_FLOAT): boolean; overload;
+    /// fill a TDocVariant array from standard or non-expanded JSON ORM/DB result
+    // - accept the ORM/DB results dual formats as recognized by TOrmTableJson
+    // - about 2x (expanded) or 3x (non-expanded) faster than Doc.InitJson()
+    // - will also use less memory, because all object field names will be shared
+    // - in expanded mode, the fields order won't be checked, as with TOrmTableJson
+    // - a private copy of the incoming JSON buffer will be used before parsing
+    function InitArrayFromResults(const Json: RawUtf8;
+      aModel: TDocVariantModel): boolean; overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// initialize a variant instance to store some document-based object content
     // - object will be initialized with names and values supplied as dynamic arrays
     // - if aNames and aValues are [] or do have matching sizes, the variant
@@ -1019,10 +1043,11 @@ type
     /// initialize a variant instance to store some document-based object content
     // from a supplied JSON array or JSON object content
     // - warning: the incoming JSON buffer will be modified in-place: so you should
-    // make a private copy before running this method, e.g. using TSynTempBuffer
+    // make a private copy before running this method, as InitJson() does
     // - this method is called e.g. by _JsonFmt() _JsonFastFmt() global functions
     // with a temporary JSON buffer content created from a set of parameters
     // - if you call Init*() methods in a row, ensure you call Clear in-between
+    // - consider the faster InitArrayFromResults() from ORM/SQL JSON results
     function InitJsonInPlace(Json: PUtf8Char;
       aOptions: TDocVariantOptions = [];
       aEndOfObject: PUtf8Char = nil): PUtf8Char;
@@ -1034,6 +1059,7 @@ type
     // - if you call Init*() methods in a row, ensure you call Clear in-between
     // - handle only currency for floating point values: set JSON_FAST_FLOAT
     // or dvoAllowDoubleValue option to support double, with potential precision loss
+    // - consider the faster InitArrayFromResults() from ORM/SQL JSON results
     function InitJson(const Json: RawUtf8;
       aOptions: TDocVariantOptions = []): boolean; overload;
     /// initialize a variant instance to store some document-based object content
@@ -1042,6 +1068,7 @@ type
     // - a private copy of the incoming JSON buffer will be made
     // - if you call Init*() methods in a row, ensure you call Clear in-between
     // - handle only currency for floating point values unless you set mFastFloat
+    // - consider the faster InitArrayFromResults() from ORM/SQL JSON results
     function InitJson(const Json: RawUtf8; aModel: TDocVariantModel): boolean; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// initialize a variant instance to store some document-based object content
@@ -1068,6 +1095,12 @@ type
     /// clone a document-based variant with the very same options but no data
     // - if you call Init*() methods in a row, ensure you call Clear in-between
     procedure InitClone(const CloneFrom: TDocVariantData);
+    /// low-level copy a document-based variant with the very same options and count
+    // - if you call Init*() methods in a row, ensure you call Clear in-between
+    // - will copy Count and Names[] by reference, but Values[] only if CloneValues
+    // - returns the first item in Values[]
+    function InitFrom(const CloneFrom: TDocVariantData; CloneValues: boolean): PVariant;
+      {$ifdef HASINLINE}inline;{$endif}
     /// initialize a variant instance to store some document-based object content
     // from a supplied CSV UTF-8 encoded text
     // - the supplied content may have been generated by ToTextPairs() method
@@ -1224,12 +1257,13 @@ type
     // - you may then use InitJsonFromFile() to load and parse this file
     procedure SaveToJsonFile(const FileName: TFileName);
     /// save an array of objects as UTF-8 encoded non expanded layout JSON
-    // - returned content would be a JSON object in mORMot's TOrmTable non
+    // - returned content would be a JSON object in mORMot's TOrmTableJson non
     // expanded format, with reduced JSON size, i.e.
-    // $ {"fieldCount":3,"values":["ID","FirstName","LastName",...']}
+    // $ {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
     // - will write '' if Kind is dvUndefined or dvObject
     // - will raise an exception if the array document is not an array of
     // objects with identical field names
+    // - can be unserialized using the InitArrayFromResults() method
     function ToNonExpandedJson: RawUtf8;
     /// save a document as an array of UTF-8 encoded JSON
     // - will expect the document to be a dvArray - otherwise, will raise a
@@ -2638,6 +2672,13 @@ function JsonToVariantInPlace(var Value: Variant; Json: PUtf8Char;
   AllowDouble: boolean = false): PUtf8Char;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// decode multipart/form-data POST request content into a TDocVariantData
+// - following RFC 1867
+// - decoded sections are encoded as Doc JSON object with its textual values,
+// or with nested objects, if the data was supplied as binary:
+// ! {"name1":{"data":..,"filename":...,"contenttype":...},"name2":...}
+procedure MultiPartToDocVariant(const MultiPart: TMultiPartDynArray;
+  var Doc: TDocVariantData; Options: PDocVariantOptions = nil);
 
 
 { ************** Variant Binary Serialization }
@@ -2917,12 +2958,6 @@ hdr:      handler.Clear(V^)
   until n = 0;
 end;
 
-procedure FormatUtf8ToVariant(const Fmt: RawUtf8; const Args: array of const;
-  var Value: variant);
-begin
-  RawUtf8ToVariant(FormatUtf8(Fmt, Args), Value);
-end;
-
 procedure RawUtf8ToVariant(const Txt: RawUtf8; var Value: TVarData;
   ExpectedValueType: cardinal);
 begin
@@ -3141,7 +3176,7 @@ var
 begin
   VariantToUtf8(A, au, wasString);
   VariantToUtf8(B, bu, wasString);
-  result := StrCompByCase[caseInsensitive](pointer(au), pointer(bu));
+  result := SortDynArrayAnsiStringByCase[caseInsensitive](au, bu);
 end;
 
 function FastVarDataComp(A, B: PVarData; caseInsensitive: boolean): integer;
@@ -4345,7 +4380,7 @@ begin
     with Info.Cache do
     begin
       PS := @EnumList;
-      for bit := EnumInfo.MinValue to EnumMax do
+      for bit := EnumMin to EnumMax do
       begin
         if GetBitPtr(@Value, bit) then
           arr.AddItem(PS^);
@@ -4603,6 +4638,19 @@ begin
   pointer(VName) := nil; // to avoid GPF
   pointer(VValue) := nil;
   VCount := 0;
+end;
+
+function TDocVariantData.InitFrom(
+  const CloneFrom: TDocVariantData; CloneValues: boolean): PVariant;
+begin
+  TRttiVarData(self).VType := TRttiVarData(CloneFrom).VType; // VType+VOptions
+  VName := CloneFrom.VName;    // byref copy
+  if CloneValues then
+    VValue := CloneFrom.VValue // byref copy
+  else
+    SetLength(VValue, CloneFrom.VCount); // setup void values
+  VCount := CloneFrom.VCount;
+  result := pointer(VValue);
 end;
 
 procedure TDocVariantData.Init(aOptions: TDocVariantOptions;
@@ -4935,6 +4983,139 @@ begin
       dec(n);
     until n = 0;
   end;
+end;
+
+function TDocVariantData.InitArrayFromResults(Json: PUtf8Char; JsonLen: PtrInt;
+  aOptions: TDocVariantOptions): boolean;
+var
+  fieldcount, rowcount, capa, r, f: PtrInt;
+  P, V: PUtf8Char;
+  VLen: integer;
+  wasstring: boolean;
+  endofobj: AnsiChar;
+  dv: PDocVariantData;
+  val: PVariant;
+  proto: TDocVariantData;
+begin
+  result := false;
+  Init(aOptions, dvArray);
+  P := GotoNextNotSpace(Json);
+  if IsNotExpandedBuffer(P, Json + JsonLen, fieldcount, rowcount) then
+  begin
+    // A. Not Expanded (more optimized) format as array of values
+    // {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+    // 1. check rowcount and fieldcount
+    if (rowcount < 0) or // IsNotExpandedBuffer() detected invalid input
+       (fieldcount = 0) then
+      exit;
+    // 2. initialize the object prototype with the trailing field names
+    proto.Init(aOptions, dvObject);
+    proto.Capacity := fieldcount;
+    for f := 1 to fieldcount do
+    begin
+      V := GetJsonField(P, P, @wasstring, nil, @VLen);
+      if not wasstring then
+        exit; // should start with field names
+      proto.AddValue(V, VLen, null);
+    end;
+    // 3. fill all nested objects from incoming values
+    Capacity := rowcount;
+    SetCount(rowcount);
+    dv := pointer(Values);
+    for r := 1 to rowcount do
+    begin
+      val := dv^.InitFrom(proto, {values=}false); // names byref + void values
+      for f := 1 to fieldcount do
+      begin
+        GetJsonToAnyVariant(val^, P, @endofobj, @aOptions, false{double=aOptions});
+        if P = nil then
+          exit;
+        inc(val);
+      end;
+      inc(dv); // next object
+    end;
+  end
+  else
+  begin
+    // B. Expanded format as array of objects (each with field names)
+    // [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...]
+    // 1. get first object (will reuse its field names)
+    P := GotoFieldCountExpanded(P);
+    if (P = nil) or
+       (P^ = ']') then
+      exit; // [] -> valid, but void data
+    P := proto.InitJsonInPlace(P, aOptions, @endofobj);
+    if P = nil then
+      exit;
+    rowcount := 0;
+    capa := 16;
+    Capacity := capa;
+    dv := pointer(Values);
+    dv^ := proto;
+    // 2. get values (assume fieldcount are always the same as in the first object)
+    repeat
+      while (P^ <> '{') and
+            (P^ <> ']') do // go to next object beginning
+        if P^ = #0 then
+          exit
+        else
+          inc(P);
+      inc(rowcount);
+      if P^ = ']' then
+        break;
+      inc(P); // jmp '}'
+      if rowcount = capa then
+      begin
+        capa := NextGrow(capa);
+        Capacity := capa;
+        dv := pointer(Values);
+        inc(dv, rowcount);
+      end
+      else
+        inc(dv);
+      val := dv^.InitFrom(proto, {values=}false);
+      for f := 1 to proto.Count do
+      begin
+        P := GotoEndJsonItemString(P); // ignore field names
+        if P = nil then
+          break;
+        inc(P); // ignore jcEndOfJsonFieldOr0
+        GetJsonToAnyVariant(val^, P, @endofobj, @aOptions, false{double=aOptions});
+        if P = nil then
+          break;
+        inc(val);
+      end;
+      if endofobj <> '}' then
+      begin
+        P := nil;
+        break;
+      end;
+    until false;
+    SetCount(rowcount);
+  end;
+  if P = nil then
+    Clear
+  else
+    result := true;
+end;
+
+function TDocVariantData.InitArrayFromResults(const Json: RawUtf8;
+  aOptions: TDocVariantOptions): boolean;
+var
+  tmp: TSynTempBuffer;
+begin
+  tmp.Init(Json);
+  try
+    result := InitArrayFromResults(tmp.buf, tmp.len, aOptions);
+  finally
+    tmp.Done;
+  end;
+end;
+
+function TDocVariantData.InitArrayFromResults(const Json: RawUtf8;
+  aModel: TDocVariantModel): boolean;
+begin
+  result := InitArrayFromResults(Json, JSON_[aModel]);
 end;
 
 procedure TDocVariantData.InitObjectFromVariants(const aNames: TRawUtf8DynArray;
@@ -5330,7 +5511,7 @@ function TDocVariantData.Compare(const Another: TDocVariantData;
   CaseInsensitive: boolean): integer;
 var
   j, n: PtrInt;
-  nameCmp: TUtf8Compare;
+  nameCmp: TDynArraySortCompare;
 begin
   // first validate the type: as { or [ in JSON
   nameCmp := nil;
@@ -5349,7 +5530,7 @@ begin
       exit;
     end
     else
-      nameCmp := StrCompByCase[not (dvoNameCaseSensitive in VOptions)];
+      nameCmp := SortDynArrayAnsiStringByCase[not (dvoNameCaseSensitive in VOptions)];
   // compare as many in-order content as possible
   n := Another.VCount;
   if VCount < n then
@@ -5358,7 +5539,7 @@ begin
   begin
     if Assigned(nameCmp) then
     begin // each name should match
-      result := nameCmp(pointer(VName[j]), pointer(Another.VName[j]));
+      result := nameCmp(VName[j], Another.VName[j]);
       if result <> 0 then
         exit;
     end;
@@ -5390,8 +5571,8 @@ begin
       begin
         v1 := GetVarData(ObjFields[f], nil, @ndx);
         if (cardinal(ndx) < cardinal(Another.VCount)) and
-           (StrCompByCase[not (dvoNameCaseSensitive in VOptions)](
-              pointer(ObjFields[f]), pointer(Another.VName[ndx])) = 0) then
+           (SortDynArrayAnsiStringByCase[not (dvoNameCaseSensitive in VOptions)](
+              ObjFields[f], Another.VName[ndx]) = 0) then
           v2 := @Another.VValue[ndx] // ObjFields are likely at the same position
         else
           v2 := Another.GetVarData(ObjFields[f]); // full safe field name lookup
@@ -8003,7 +8184,8 @@ var
 label
   parse, parsed, astext, endobj;
 begin
-  VarClearProc(V);
+  if PInteger(@V)^ <> 0 then
+    VarClearProc(V);
   if Json = nil then
     exit;
   if EndOfObject <> nil then
@@ -8065,7 +8247,7 @@ endobj: while (P^ <= ' ') and
       end
       else
       begin
-        // parse string/numerical values or true/false/null constants
+        // parse string/numerical values (or true/false/null constants)
 parse:  P := GetJsonField(P, Json, @wasString, EndOfObject, @Plen);
 parsed: if {%H-}wasString or
            not GetVariantFromNotStringJson(P, V, AllowDouble) then
@@ -8557,6 +8739,32 @@ begin
   VariantLoadJson(result, Json, @Options, AllowDouble);
 end;
 
+procedure MultiPartToDocVariant(const MultiPart: TMultiPartDynArray;
+  var Doc: TDocVariantData; Options: PDocVariantOptions);
+var
+  ndx: PtrInt;
+  v: variant;
+begin
+  if Options = nil then
+    Doc.InitFast(dvObject)
+  else
+    Doc.Init(Options^, dvObject);
+  for ndx := 0 to high(multipart) do
+    with MultiPart[ndx] do
+      if ContentType = TEXT_CONTENT_TYPE then
+      begin
+        // append as regular "Name":"TextValue" field
+        RawUtf8ToVariant(Content, v);
+        Doc.AddValue(name, v);
+      end
+      else
+        // append binary file as an object, with Base64-encoded data
+        Doc.AddValue(name, _ObjFast([
+          'data', BinToBase64(Content),
+          'filename', FileName,
+          'contenttype', ContentType]));
+end;
+
 
 { ************** Variant Binary Serialization }
 
@@ -8707,6 +8915,7 @@ var
   vm: TVariantManager; // available since Delphi 7
   vt: cardinal;
   ins: boolean;
+  i: PtrUInt;
   {$ifdef FPC}
   test: variant;
   {$endif FPC}
@@ -8736,9 +8945,11 @@ begin
   // setup FastVarDataComp() efficient lookup comparison functions
   for ins := false to true do
   begin
-    MoveFast(_NUM1, _VARDATACMP[varEmpty, ins],    SizeOf(_NUM1));
-    MoveFast(_NUM2, _VARDATACMP[varShortInt, ins], SizeOf(_NUM2));
+    for i := low(_NUM1) to high(_NUM1) do
+      _VARDATACMP[i, ins] := _NUM1[i];
     _VARDATACMP[varBoolean, ins] := 14;
+    for i := low(_NUM2) to high(_NUM2) do
+      _VARDATACMP[i, ins] := _NUM2[i];
   end;
   _VARDATACMP[varString, false] := 15;
   _VARDATACMP[varString, true]  := 16;

@@ -33,6 +33,7 @@ type
     procedure TestOne<T>;
   published
     procedure _IList;
+    procedure _IKeyValue;
   end;
 
 implementation
@@ -66,7 +67,7 @@ var
   v: PVariantArray;
   {$ifndef USEEQUALOP}
   p0, p1: ^T;
-  {$endif FPC}
+  {$endif USEEQUALOP}
   da: PDynArray;
   name: RawUtf8;
 begin
@@ -78,6 +79,13 @@ begin
   {$ifdef FPC_64}
   li := TSynListSpecialized<T>.Create;
   {$else}
+  {$ifdef TESTHASH128}
+  {$ifndef SPECIALIZE_HASH}
+  if PRttiInfo(TypeInfo(T))^.RttiSize > 8 then
+    li := TSynListSpecialized<T>.Create
+  else
+  {$endif SPECIALIZE_HASH}
+  {$endif TESTHASH128}
   li := Collections.NewList<T>;
   {$endif FPC_64}
   da := li.Data;
@@ -163,6 +171,15 @@ begin
   Check(li.Count = 0);
 end;
 
+type
+  TClassWithoutRtti = class
+  private
+    fSoup: RawUtf8;
+  public
+    property Soup: RawUtf8
+      read fSoup write fSoup;
+  end;
+
 procedure TTestCoreCollections._IList;
 const
   MAX = 1000; // not too big since here we validate also brute force searches
@@ -170,17 +187,26 @@ var
   i: integer;
   pi: PInteger;
   li: IList<integer>;
+  d: double;
+  pd: PDouble;
+  ld: IList<double>;
+  o: TObjectWithID;
+  lo: IList<TObjectWithID>;
+  s: TClassWithoutRtti;
+  ls: IList<TClassWithoutRtti>;
   u: RawUtf8;
   pu: PRawUtf8;
   lu: IList<RawUtf8>;
   lh: IList<THash128>;
   h: THash128;
+  r: TSynTestFailed;
+  lr: IList<TSynTestFailed>;
 begin
   // manual IList<integer> validation
   li := Collections.NewList<integer>;
   for i in li do
     Check(i < 0);
-  li.Capacity := MAX + 1;
+  li.Capacity := MAX + 1;       // faster Add() thanks to pre-allocation
   Check(li.Count = 0);
   for i in li do
     Check(i < 0);
@@ -214,6 +240,82 @@ begin
     Check(li.IndexOf(i) = i);   // O(n) brute force search
   for i in li do
     Check(li.Find(i) = i);      // O(1) hash table search
+  // manual IList<double> validation
+  ld := Collections.NewList<double>;
+  for d in ld do
+    Check(d < 0);
+  ld.Capacity := MAX + 1;       // faster Add() thanks to pre-allocation
+  Check(ld.Count = 0);
+  for d in ld do
+    Check(d < 0);
+  for d in ld.Range(-5) do
+    Check(d < 0);
+  for i := 0 to MAX do          // populate with some data
+    Check(ld.Add(i) = i);
+  for i := 0 to ld.Count - 1 do // regular Items[] access
+    Check(ld[i] = i);
+  for d in ld do                // use an enumerator - safe and clean
+    Check((d >= 0) and (d <= MAX));
+  for d in ld.Range(-5) do      // use an enumerator for the last 5 items
+    Check(d > MAX - 5);
+  for d in ld do
+    Check(ld.IndexOf(d) = trunc(d));   // O(n) brute force search
+  for d in ld do
+    Check(ld.Find(d) = trunc(d));      // O(n) brute force search
+  pd := ld.First;
+  for i := 0 to ld.Count - 1 do // fastest method
+  begin
+    Check(pd^ = i);
+    inc(pd);
+  end;
+  ld := Collections.NewList<double>([loCreateUniqueIndex]);
+  ld.Capacity := MAX + 1;
+  for i := 0 to MAX do          // populate with some data
+    Check(ld.Add(i) = i);
+  for d in ld do                // use an enumerator - safe and clean
+    Check(d <= MAX);
+  for d in ld do
+    Check(ld.IndexOf(d) = trunc(d));   // O(n) brute force search
+  for d in ld do
+    Check(ld.Find(d) = trunc(d));      // O(1) hash table search
+  // manual IList<TObjectWithID> validation
+  lo := Collections.NewList<TObjectWithID>;
+  lo.Capacity := MAX + 1;
+  for i := 0 to MAX do
+    Check(lo.Add(TObjectWithID.CreateWithID(i)) = i);
+  for i := 0 to lo.Count - 1 do
+    Check(lo[i].IDValue = i);
+  for o in lo do
+    Check(o.IDValue <= MAX);
+  for o in lo.Range(-5) do
+    Check(o.IDValue > MAX - 5);
+  lo := Collections.NewList<TObjectWithID>([loCreateUniqueIndex]);
+  for i := 0 to MAX do
+    Check(lo.Add(TObjectWithID.CreateWithID(i)) = i);
+  for i := 0 to MAX do
+    Check(lo.Add(lo[i]) = i); // duplicate found by loCreateUniqueIndex
+  for i := 0 to lo.Count - 1 do
+    Check(lo[i].IDValue = i);
+  for o in lo do
+    Check(o.IDValue <= MAX);
+  for o in lo.Range(-5) do
+    Check(o.IDValue > MAX - 5);
+  lo := Collections.NewList<TObjectWithID>([loCreateUniqueIndex]);
+  i := lo.Add(TObjectWithID.CreateWithID(100));
+  Check(i = 0);
+  CheckEqual(lo[i].IDValue, 100);
+  // manual IList<TClassWithoutRtti> validation
+  ls := Collections.NewList<TClassWithoutRtti>;
+  ls.Capacity := MAX + 1;
+  for i := 0 to MAX do
+  begin
+    s := TClassWithoutRtti.Create;
+    s.Soup := UInt32ToUtf8(i);
+    Check(ls.Add(s) = i);
+    check(ls[i] <> nil);
+   end;
+   for i := 0 to ls.Count - 1 do
+     Check(Utf8ToInteger(ls[i].Soup) = i);
   // manual IList<RawUtf8> validation
   lu := Collections.NewList<RawUtf8>;
   for u in lu do
@@ -259,11 +361,29 @@ begin
     inc(i);
   end;
   // minimal THash128 compilation check
+  {$ifdef SPECIALIZE_HASH}
   lh := Collections.NewList<THash128>;
+  {$else}
+  lh := TSynListSpecialized<THash128>.Create;
+  {$endif SPECIALIZE_HASH}
   FillZero(h);
   lh.Add(h);
   lh.Sort;
   lh := nil;
+  // manual IList<record> validation
+  lr := Collections.NewPlainList<TSynTestFailed>;
+  lr.Capacity := MAX + 1;
+  r.TestName := 'n';
+  for i := 0 to MAX do
+  begin
+    r.Error := IntToStr(i);
+    Check(lr.Add(r) = i);
+    check(lr[i].Error = r.Error);
+   end;
+  for i := 0 to lr.Count - 1 do
+    Check(lr[i].TestName = 'n');
+  for i := 0 to lr.Count - 1 do
+    Check(StrToInt(lr[i].Error) = i);
   // validate and benchmark all main types using a generic sub method
   TestOne<byte>();
   TestOne<word>();
@@ -288,6 +408,101 @@ begin
   TestOne<THash128>();
   TestOne<TGuid>();
   {$endif TESTHASH128}
+end;
+
+procedure TTestCoreCollections._IKeyValue;
+const
+  MAX = 100000; // keys are hashed so we can have some
+var
+  i: integer;
+  vi: Int64;
+  di: IKeyValue<integer, Int64>;
+  u: RawUtf8;
+  pu: PRawUtf8Array;
+  vu: double;
+  du: IKeyValue<RawUtf8, double>;
+  setcapa: boolean;
+  setcapatxt: PUtf8Char;
+  timer: TPrecisionTimer;
+begin
+  setcapatxt := nil;
+  for setcapa := false to true do
+  begin
+    // manual IKeyValue<integer, Int64> validation
+    di := Collections.NewKeyValue<integer, Int64>;
+    if setcapa then
+    begin
+      di.Capacity := MAX + 1;
+      setcapatxt := ' capa';
+    end;
+    timer.Start;
+    for i := 0 to MAX do
+      if i < 1000 then
+        di.Add(i, i)
+      else
+        Check(di.TryAdd(i, i));
+    Check(di.Count = MAX + 1);
+    NotifyTestSpeed('integer,Int64 % add', [setcapatxt], MAX, 0, @timer);
+    for i := 0 to MAX do
+    begin
+      Check(not di.TryAdd(i, i));
+      Check(di.ContainsKey(i)); // key is searched with O(1) hashing
+      if i < 1000 then          // value is searched as O(n)
+        Check(di.ContainsValue(i));
+      Check(di[i] = i);
+      Check(di.TryGetValue(i, vi));
+      Check(vi = i);
+    end;
+    timer.Start;
+    for i := 0 to MAX do
+      Check(di[i] = i);
+    NotifyTestSpeed('integer,Int64 % get', [setcapatxt], MAX, 0, @timer);
+    Check(di.Count = MAX + 1);
+    di.Clear;
+    Check(di.Count = 0);
+    // manual IKeyValue<RawUtf8, double> validation
+    du := Collections.NewKeyValue<RawUtf8, double>([kvoDefaultIfNotFound]);
+    if setcapa then
+      du.Capacity := MAX + 1;
+    timer.Start;
+    for i := 0 to MAX do
+    begin
+      UInt32ToUtf8(i, u);
+      vu := i;
+      if i < 1000 then
+        du.Add(u, vu)
+      else
+        Check(du.TryAdd(u, vu));
+    end;
+    Check(du.Count = MAX + 1);
+    NotifyTestSpeed('RawUtf8,double% add', [setcapatxt], MAX, 0, @timer);
+    for i := 0 to MAX do
+    begin
+      UInt32ToUtf8(i, u);
+      vu := i;
+      Check(not du.TryAdd(u, vu));
+      Check(du.ContainsKey(u));
+      Check(du.GetItem(u) = vu);
+      Check(du[u] = vu);
+      Check(du.GetValueOrDefault(u, -1) = vu);
+      if i < 1000 then
+        Check(du.ContainsValue(vu));
+      Check(du.TryGetValue(u, vu));
+      Check(vu = i);
+      UInt32ToUtf8(i + (MAX * 2), u);
+      Check(not du.ContainsKey(u));
+      Check(not du.TryGetValue(u, vu));
+      Check(du[u] = 0); // kvoDefaultIfNotFound was set
+    end;
+    timer.Start;
+    pu := du.Data.Keys.Value^; // fastest way to browse all keys
+    for i := 0 to MAX do
+      Check(du[pu[i]] = i);
+    NotifyTestSpeed('RawUtf8,double% get', [setcapatxt], MAX, 0, @timer);
+    Check(du.Count = MAX + 1);
+    du.Clear;
+    Check(du.Count = 0);
+  end;
 end;
 
 {$else}

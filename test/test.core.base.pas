@@ -3371,12 +3371,42 @@ procedure TTestCoreBase.Integers;
   end;
 
 var
+  i8: TByteDynArray;
+  i16: TWordDynArray;
   i32: TIntegerDynArray;
   i64: TInt64DynArray;
-  i, n: integer;
+  i, n: PtrInt;
   timer: TPrecisionTimer;
 begin
-  check({%H-}i32 = nil);
+  n := 512;
+  SetLength(i8, n);
+  for i := 0 to n - 1 do
+    i8[i] := i;
+  CheckEqual(ByteScanIndex(pointer(i8), 100, 100), -1);
+  CheckEqual(ByteScanIndex(pointer(i8), 101, 100), 100);
+  CheckEqual(ByteScanIndex(@i8[1], 100, 0), -1, 'aligned read');
+  CheckEqual(ByteScanIndex(@i8[1], 100, 1), 0, 'unaligned read');
+  for i := 0 to n - 1 do
+    Check(ByteScanIndex(pointer(i8), n, i) = i and 255);
+  SetLength(i16, n);
+  for i := 0 to n - 1 do
+    i16[i] := i;
+  CheckEqual(WordScanIndex(pointer(i16), 100, 100), -1);
+  CheckEqual(WordScanIndex(pointer(i16), 101, 100), 100);
+  CheckEqual(WordScanIndex(@i16[1], 100, 0), -1, 'aligned read');
+  CheckEqual(WordScanIndex(@i16[1], 100, 1), 0, 'unaligned read');
+  for i := 0 to n - 1 do
+    Check(WordScanIndex(pointer(i16), n, i) = i);
+  SetLength(i32, n);
+  for i := 0 to n - 1 do
+    i32[i] := i;
+  CheckEqual(IntegerScanIndex(pointer(i32), 100, 100), -1);
+  CheckEqual(IntegerScanIndex(pointer(i32), 101, 100), 100);
+  CheckEqual(IntegerScanIndex(@i32[1], 100, 0), -1, 'aligned read');
+  CheckEqual(IntegerScanIndex(@i32[1], 100, 1), 0, 'unaligned read');
+  for i := 0 to n - 1 do
+    Check(IntegerScanIndex(pointer(i32), n, i) = i);
+  i32 := nil;
   DeduplicateInteger(i32);
   check(i32 = nil);
   SetLength(i32, 2);
@@ -4370,6 +4400,11 @@ begin
   i := StrLenSafe(@res[1]);
   check(mormot.core.base.StrLen(@res[1]) = i);
   res := 'one,two,three';
+  Check(IdemPCharArrayBy2(nil, 'ONTWTH') < 0);
+  Check(IdemPCharArrayBy2(pointer(res), 'OFTWTH') < 0);
+  Check(IdemPCharArrayBy2(pointer(res), 'ONTWTH') = 0);
+  Check(IdemPCharArrayBy2(pointer(res), 'TWONTW') = 1);
+  Check(IdemPCharArrayBy2(pointer(res), 'TWTHON') = 2);
   Check(EndWith('three', 'THREE'));
   Check(EndWith(res, 'E'));
   Check(EndWith(res, 'THREE'));
@@ -4384,6 +4419,19 @@ begin
   Check(EndWithArray(res, ['ONE', 'three', 'THREE']) = 2);
   Check(EndWithArray(res, ['ONE', '', 'THREE']) = 1);
   Check(EndWithArray(res, ['ONE', 'three', 'THREe']) < 0);
+  CheckEqual(TrimControlChars(''), '');
+  CheckEqual(TrimControlChars(' '), '');
+  CheckEqual(TrimControlChars('    '), '');
+  CheckEqual(TrimControlChars('a'), 'a');
+  CheckEqual(TrimControlChars('a '), 'a');
+  CheckEqual(TrimControlChars(' a '), 'a');
+  CheckEqual(TrimControlChars('a '), 'a');
+  CheckEqual(TrimControlChars('a  '), 'a');
+  CheckEqual(TrimControlChars(' a  '), 'a');
+  CheckEqual(TrimControlChars('  a  '), 'a');
+  CheckEqual(TrimControlChars('a  '), 'a');
+  CheckEqual(TrimControlChars('a  b'), 'ab');
+  CheckEqual(TrimControlChars('synopse.info, www.synopse.info'), 'synopse.info,www.synopse.info');
   Check(split(res, ',') = 'one');
   Check(split(res, '*') = res);
   Check(split(res, ',', 5) = 'two');

@@ -768,6 +768,9 @@ procedure ValueVarToVariant(Value: PUtf8Char; ValueLen: integer;
   fieldType: TOrmFieldType; var result: TVarData; createValueTempCopy: boolean;
   typeInfo: PRttiInfo; options: TDocVariantOptions = JSON_FAST);
 
+/// check if P^ is a known SQL function name (max/min/avg/sum/jsonget/jsonhas)
+function IsSqlFunction(P: PUtf8Char): boolean;
+
 
 { ****************** ORM Ready UTF-8 Comparison Functions }
 
@@ -1897,15 +1900,16 @@ type
   POrmPropInfoRttiMany = ^TOrmPropInfoRttiMany;
 
   /// handle a read-only list of fields information for published properties
-  // - is mainly used by our ORM for TOrm RTTI, but may be used for
-  // any TPersistent
+  // - high-level cache generated from RTTI, tuned for TOrm RTTI, but may be
+  // used for any TPersistent/TSynPersistent
   TOrmPropInfoList = class
   protected
     fList: TOrmPropInfoObjArray;
-    fCount: integer;
     fTable: TClass; // TOrmClass
+    fCount: integer;
     fOptions: TOrmPropInfoListOptions;
     fOrderedByName: TByteDynArray;
+    fLast: TOrmPropInfo;
     function GetItem(aIndex: PtrInt): TOrmPropInfo;
     procedure QuickSortByName(L, R: PtrInt);
     procedure InternalAddParentsFirst(aClassType: TClass); overload;
@@ -1966,6 +1970,9 @@ type
     // - note that length(List) may not equal Count, since is its capacity
     property List: TOrmPropInfoObjArray
       read fList;
+    /// low-level access to the last TOrmPropInfo in the list
+    property Last: TOrmPropInfo
+      read fLast;
     /// read-only retrieval of a TOrmPropInfo item
     // - will raise an exception if out of range
     property Items[aIndex: PtrInt]: TOrmPropInfo
@@ -2255,6 +2262,8 @@ type
     // - this method will return a TDocVariant containing a copy of all
     // field values of this row, uncoupled to the TOrmTable instance life time
     // - expand* methods will allow to return human-friendly representations
+    // - if your purpose is to create a TDocVariant array from ORM/SQL JSON,
+    // consider using faster TDocVariantData.InitArrayFromResults() method
     procedure ToDocVariant(Row: PtrInt; out doc: variant;
       options: TDocVariantOptions = JSON_FAST;
       expandTimeLogAsText: boolean = false; expandEnumsAsText: boolean = false;
@@ -2275,6 +2284,8 @@ type
     // will point directly to the TOrmTable, which should remain allocated
     // - if readonly is FALSE, will contain an array of TDocVariant, containing
     // a copy of all field values of this row, uncoupled to the TOrmTable instance
+    // - if your purpose is indeed to create a TDocVariant from ORM/SQL JSON,
+    // consider using faster TDocVariantData.InitArrayFromResults() method
     // - readonly=TRUE is faster to allocate (around 4 times for 10,000 rows), but
     // may be slightly slower to access than readonly=FALSE, if all values are
     // likely be accessed later in the process
@@ -2283,11 +2294,13 @@ type
 
     /// save the table values in JSON format
     // - JSON data is added to TResultsWriter, with UTF-8 encoding, and not flushed
-    // - if Expand is true, JSON data is an array of objects, for direct use
-    // with any Ajax or .NET client:
-    // & [ {"col1":val11,"col2":"val12"},{"col1":val21,... ]
-    // - if W.Expand is false, JSON data is serialized (used in TOrmTableJson)
-    // & { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
+    // - if Expand is true, JSON output is a standard array of objects, for
+    // direct use with any Ajax or .NET client:
+    // & [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...]
+    // - if Expand is false, JSON data is serialized in non-expanded format:
+    // & {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+    // resulting in lower space use and faster process - it could be parsed by
+    // TOrmTableJson or TDocVariantData.InitArrayFromResults
     // - RowFirst and RowLast can be used to ask for a specified row extent
     // of the returned data (by default, all rows are retrieved)
     // - IDBinarySize will force the ID field to be stored as hexadecimal text
@@ -2781,21 +2794,24 @@ type
     /// TDynArray wrapper around the Values[] array
     Value: TDynArray;
     /// used to lock the table cache for multi thread safety
-    Mutex: TRTLCriticalSection;
+    Mutex: TLightLock;
     /// initialize this table cache
     // - will set Value wrapper and Mutex handle - other fields should have
     // been cleared by caller (is the case for a TRestCacheEntryDynArray)
     procedure Init;
     /// reset all settings corresponding to this table cache
     procedure Clear;
-    /// finalize this table cache entry
-    procedure Done;
     /// flush cache for a given Value[] index
-    procedure FlushCacheEntry(Index: integer);
+    // - note: caller should have made Mutex.Lock
+    procedure LockedFlushCacheEntry(Index: integer);
+    /// flush cache for a given Value[]
+    procedure FlushCacheEntries(const aID: array of TID);
     /// flush cache for all Value[]
     procedure FlushCacheAllEntries;
+    /// activate the internal caching for a whole Table
+    procedure SetCache; overload;
     /// add the supplied ID to the Value[] array
-    procedure SetCache(aID: TID);
+    procedure SetCache(aID: TID); overload;
     /// update/refresh the cached JSON serialization of a given ID
     procedure SetJson(aID: TID; const aJson: RawUtf8;
       aTag: cardinal = 0); overload;
@@ -2805,6 +2821,8 @@ type
     /// compute how much memory stored entries are using
     // - will also flush outdated entries
     function CachedMemory(FlushedEntriesCount: PInteger = nil): cardinal;
+    /// returns the number of JSON serialization records within this cache
+    function CachedEntries: cardinal;
   end;
 
   /// for TRestCache, stores all table settings and values
@@ -3881,6 +3899,21 @@ const
     ' INTEGER, ',                    // oftUnixTime
     ' INTEGER, ');                   // oftUnixMSTime
 
+  NULLABLE_TO_ORM: array[TNullableVariantType] of TOrmFieldType = (
+    oftUnknown,    // nvtNone
+    oftInteger,    // nvtInteger
+    oftBoolean,    // nvtBoolean
+    oftFloat,      // nvtFloat
+    oftCurrency,   // nvtCurrency
+    oftDateTime,   // nvtDateTime
+    oftTimeLog,    // nvtTimeLog
+    oftUtf8Text);  // nvtUtf8Text
+
+function NullableTypeToOrmFieldType(aType: PRttiInfo): TOrmFieldType;
+begin
+  result := NULLABLE_TO_ORM[NullableVariantType(aType)];
+end;
+
 
 { TOrmPropInfo }
 
@@ -4099,7 +4132,7 @@ begin
     // slow, always working implementation
     GetValueVar(Item1, false, tmp1, nil);
     GetValueVar(Item2, false, tmp2, nil);
-    result := StrCompByCase[CaseInsensitive](pointer(tmp1), pointer(tmp2));
+    result := SortDynArrayAnsiStringByCase[CaseInsensitive](tmp1, tmp2);
   end;
 end;
 
@@ -4304,7 +4337,7 @@ begin
         C := TOrmPropInfoRttiObject;
       oftVariant:
         begin
-          aOrmFieldType := NullableTypeToOrmFieldType(aType);
+          aOrmFieldType := NULLABLE_TO_ORM[NullableVariantType(aType)];
           if aOrmFieldType = oftUnknown then // no oftNullable type
             aOrmFieldType := oftVariant;     // = regular variant stored as JSON
           C := TOrmPropInfoRttiVariant;
@@ -4809,6 +4842,7 @@ function TOrmPropInfoRttiInt64.CompareValue(Item1, Item2: TObject;
   CaseInsensitive: boolean): integer;
 var
   V1, V2: Int64;
+  o: PtrUInt;
 begin
   if Item1 = Item2 then
     result := 0
@@ -4818,10 +4852,11 @@ begin
     result := 1
   else
   begin
-    if fGetterIsFieldPropOffset <> 0 then // inlined dual GetValueInt64()
+    o := fGetterIsFieldPropOffset;
+    if o <> 0 then // inlined dual GetValueInt64()
     begin
-      V1 := PInt64(PtrUInt(Item1) + fGetterIsFieldPropOffset)^;
-      V2 := PInt64(PtrUInt(Item2) + fGetterIsFieldPropOffset)^;
+      V1 := PInt64(PAnsiChar(Item1) + o)^;
+      V2 := PInt64(PAnsiChar(Item2) + o)^;
     end
     else
     begin
@@ -6466,7 +6501,8 @@ begin
   if wasSqlString <> nil then
     if fOrmFieldType = oftNullable then
       // only TNullableUtf8Text and TNullableDateTime will be actual text
-      wasSqlString^ := (fSqlDBFieldType in TEXT_DBFIELDS) and not VarIsEmptyOrNull(value)
+      wasSqlString^ := (fSqlDBFieldType in TEXT_DBFIELDS) and
+                       not VarIsEmptyOrNull(value)
     else
       // from SQL point of view, variant columns are TEXT or NULL
       wasSqlString^ := not VarIsEmptyOrNull(value);
@@ -7096,6 +7132,10 @@ var
   i: PtrInt;
 begin
   SetLength(fList, fCount);
+  if fCount = 0 then
+    fLast := nil
+  else
+    fLast := fList[fCount - 1];
   // initialize once the ordered lookup indexes, for binary search
   SetLength(fOrderedByName, fCount);
   for i := 0 to fCount - 1 do
@@ -7561,43 +7601,11 @@ begin // very fast, thanks to the TypeInfo() compiler-generated function
   end;
 end;
 
-function NullableTypeToOrmFieldType(aType: PRttiInfo): TOrmFieldType;
-begin
-  if aType <> nil then
-    if aType <> TypeInfo(TNullableInteger) then
-      if aType <> TypeInfo(TNullableUtf8Text) then
-        if aType <> TypeInfo(TNullableBoolean) then
-          if aType <> TypeInfo(TNullableFloat) then
-            if aType <> TypeInfo(TNullableCurrency) then
-              if aType <> TypeInfo(TNullableDateTime) then
-                if aType <> TypeInfo(TNullableTimeLog) then
-                begin
-                  result := oftUnknown;
-                  exit;
-                end
-                else
-                  result := oftTimeLog
-              else
-                result := oftDateTime
-            else
-              result := oftCurrency
-          else
-            result := oftFloat
-        else
-          result := oftBoolean
-      else
-        result := oftUtf8Text
-    else
-      result := oftInteger
-  else
-    result := oftUnknown;
-end;
-
 function OrmFieldTypeToDBField(aOrmFieldType: TOrmFieldType;
   aTypeInfo: PRttiInfo): TSqlDBFieldType;
 begin
   if aOrmFieldType = oftNullable then
-    aOrmFieldType := NullableTypeToOrmFieldType(aTypeInfo);
+    aOrmFieldType := NULLABLE_TO_ORM[NullableVariantType(aTypeInfo)];
   result := SQLFIELDTYPETODBFIELDTYPE[aOrmFieldType];
 end;
 
@@ -7737,7 +7745,7 @@ begin
         InitFieldNames;
       P := pointer(fFieldNames);
       if fFieldCount < ORMTABLE_FIELDNAMEORDERED then
-      begin
+      begin // up to 9 fields do not need binary search
         up := @NormToUpperAnsi7Byte;
         for result := 0 to fFieldCount - 1 do
           if StrICompNotNil(P[result], FieldName, up) = 0 then // good inlining
@@ -7993,7 +8001,7 @@ begin
                   // no TTimeLog use for milliseconds resolution
                   time := UnixMSTimeToString(t.Value);
                 TDocVariantData(value).InitObject([
-                  'Time', time,
+                  'Time',  time,
                   'Value', t.Value], JSON_FAST);
               end;
               exit;
@@ -8115,7 +8123,7 @@ begin
         oftNullable:
           begin
             ContentTypeInfo := FieldTypeInfo;
-            ContentType := NullableTypeToOrmFieldType(FieldTypeInfo);
+            ContentType := NULLABLE_TO_ORM[NullableVariantType(FieldTypeInfo)];
             if ContentType = oftUnknown then
               ContentType := oftNullable;
           end;
@@ -10204,28 +10212,22 @@ procedure TRestCacheEntry.Init;
 begin
   Value.InitSpecific(TypeInfo(TRestCacheEntryValueDynArray),
     Values, ptInt64, @Count); // will search/sort by first ID: TID field
-  InitializeCriticalSection(Mutex);
-end;
-
-procedure TRestCacheEntry.Done;
-begin
-  DeleteCriticalSection(Mutex);
 end;
 
 procedure TRestCacheEntry.Clear;
 begin
-  EnterCriticalSection(Mutex);
+  Mutex.Lock;
   try
     Value.Clear;
     CacheAll := false;
     CacheEnable := false;
     TimeOutMS := 0;
   finally
-    LeaveCriticalSection(Mutex);
+    Mutex.UnLock;
   end;
 end;
 
-procedure TRestCacheEntry.FlushCacheEntry(Index: integer);
+procedure TRestCacheEntry.LockedFlushCacheEntry(Index: integer);
 begin
   if cardinal(Index) < cardinal(Count) then
     if CacheAll then
@@ -10239,13 +10241,28 @@ begin
       end;
 end;
 
+procedure TRestCacheEntry.FlushCacheEntries(const aID: array of TID);
+var
+  i: PtrInt;
+begin
+  if not CacheEnable then
+    exit;
+  Mutex.Lock;
+  try
+    for i := 0 to high(aID) do
+      LockedFlushCacheEntry(Value.Find(aID[i]));
+  finally
+    Mutex.UnLock;
+  end;
+end;
+
 procedure TRestCacheEntry.FlushCacheAllEntries;
 var
   i: PtrInt;
 begin
   if not CacheEnable then
     exit;
-  EnterCriticalSection(Mutex);
+  Mutex.Lock;
   try
     if CacheAll then
       Value.Clear
@@ -10258,16 +10275,29 @@ begin
           Tag := 0;
         end;
   finally
-    LeaveCriticalSection(Mutex);
+    Mutex.UnLock;
+  end;
+end;
+
+procedure TRestCacheEntry.SetCache;
+begin
+  // global cache of all records of this table
+  Mutex.Lock;
+  try
+    CacheEnable := true;
+    CacheAll := true;
+    Value.Clear;
+  finally
+    Mutex.UnLock;
   end;
 end;
 
 procedure TRestCacheEntry.SetCache(aID: TID);
 var
   Rec: TRestCacheEntryValue;
-  i: integer;
+  i: integer; // FastLocateSorted() required integer
 begin
-  EnterCriticalSection(Mutex);
+  Mutex.Lock;
   try
     CacheEnable := true;
     if not CacheAll and
@@ -10280,20 +10310,20 @@ begin
       Value.FastAddSorted(i, Rec);
     end; // do nothing if aID is already in Values[]
   finally
-    LeaveCriticalSection(Mutex);
+    Mutex.UnLock;
   end;
 end;
 
 procedure TRestCacheEntry.SetJson(aID: TID; const aJson: RawUtf8; aTag: cardinal);
 var
   Rec: TRestCacheEntryValue;
-  i: integer;
+  i: integer; // FastLocateSorted() required integer
 begin
   Rec.ID := aID;
   Rec.Json := aJson;
   Rec.Timestamp512 := GetTickCount64 shr 9;
   Rec.Tag := aTag;
-  EnterCriticalSection(Mutex);
+  Mutex.Lock;
   try
     if Value.FastLocateSorted(Rec, i) then
       Values[i] := Rec
@@ -10301,7 +10331,7 @@ begin
             (i >= 0) then
       Value.FastAddSorted(i, Rec);
   finally
-    LeaveCriticalSection(Mutex);
+    Mutex.UnLock;
   end;
 end;
 
@@ -10311,7 +10341,7 @@ var
   i: PtrInt;
 begin
   result := false;
-  EnterCriticalSection(Mutex);
+  Mutex.Lock;
   try
     i := Value.Find(aID); // fast O(log(n)) binary search by first ID field
     if i >= 0 then
@@ -10319,7 +10349,7 @@ begin
         if Timestamp512 <> 0 then // 0 when there is no JSON value cached
           if (TimeOutMS <> 0) and
              ((GetTickCount64 - TimeOutMS) shr 9 > Timestamp512) then
-            FlushCacheEntry(i)
+            LockedFlushCacheEntry(i)
           else
           begin
             if aTag <> nil then
@@ -10328,7 +10358,7 @@ begin
             result := true; // found a non outdated serialized value in cache
           end;
   finally
-    LeaveCriticalSection(Mutex);
+    Mutex.UnLock;
   end;
 end;
 
@@ -10341,8 +10371,11 @@ begin
   if CacheEnable and
      (Count > 0) then
   begin
-    tix512 := (GetTickCount64 - TimeOutMS) shr 9;
-    EnterCriticalSection(Mutex);
+    if TimeOutMS <> 0 then
+      tix512 := (GetTickCount64 - TimeOutMS) shr 9
+    else
+      tix512 := 0; // make compiler happy
+    Mutex.Lock;
     try
       for i := Count - 1 downto 0 do
         with Values[i] do
@@ -10350,14 +10383,33 @@ begin
             if (TimeOutMS <> 0) and
                (tix512 > Timestamp512) then
             begin
-              FlushCacheEntry(i);
+              LockedFlushCacheEntry(i);
               if FlushedEntriesCount <> nil then
                 inc(FlushedEntriesCount^);
             end
             else
               inc(result, length(JSON) + (SizeOf(TRestCacheEntryValue) + 16));
     finally
-      LeaveCriticalSection(Mutex);
+      Mutex.UnLock;
+    end;
+  end;
+end;
+
+function TRestCacheEntry.CachedEntries: cardinal;
+var
+  i: PtrInt;
+begin
+  result := 0;
+  if CacheEnable and
+     (Count > 0) then
+  begin
+    Mutex.Lock;
+    try
+      for i := 0 to Count - 1 do
+        if Values[i].Timestamp512 <> 0 then
+          inc(result);
+    finally
+      Mutex.UnLock;
     end;
   end;
 end;
@@ -10368,7 +10420,7 @@ end;
 constructor TOrmPropertiesAbstract.Create;
 begin
   InitializeCriticalSection(fLock);
-  fSqlTableRetrieveAllFields := ID_TXT;
+  fSqlTableRetrieveAllFields := 'RowID'; // to work with virtual tables
   SetLength(fManyFields, MAX_SQLFIELDS);
   SetLength(fSimpleFields, MAX_SQLFIELDS);
   SetLength(fCopiableFields, MAX_SQLFIELDS);
@@ -10685,6 +10737,18 @@ const
     'JSONGET(',     // 4
     'JSONHAS(',     // 5
     nil);
+
+function IsSqlFunction(P: PUtf8Char): boolean;
+begin
+  case IdemPPChar(P, @FUNCS) of
+    0..3:
+      result := PosChar(P + 4, ')') <> nil;
+    4..5:
+      result := PosChar(P + 8, ')') <> nil;
+  else
+    result := false;
+  end;
+end;
 
 function TOrmPropertiesAbstract.IsFieldNameOrFunction(const PropName: RawUtf8): boolean;
 var

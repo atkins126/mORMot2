@@ -1266,23 +1266,28 @@ function ComparePointer(const A, B: pointer): integer;
 function CompareQWord(const A, B: QWord): integer;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// fast search of an unsigned integer position in an integer array
+/// fast search of an unsigned integer item in a 32-bit integer array
 // - Count is the number of cardinal entries in P^
 // - returns P where P^=Value
 // - returns nil if Value was not found
+// - is implemented via IntegerScanIndex() SSE2 asm on i386 and x86_64
 function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
+  {$ifdef CPUINTEL} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
-/// fast search of an unsigned integer position in an integer array
+/// fast search of an unsigned integer position in a 32-bit integer array
 // - Count is the number of integer entries in P^
 // - return index of P^[index]=Value
 // - return -1 if Value was not found
+// - is implemented with SSE2 asm on i386 and x86_64
 function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): PtrInt;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifndef CPUINTEL}inline;{$endif}
 
-/// fast search of an unsigned integer in an integer array
+/// fast search of an unsigned integer in a 32-bit integer array
 // - returns true if P^=Value within Count entries
 // - returns false if Value was not found
+// - is implemented via IntegerScanIndex() SSE2 asm on i386 and x86_64
 function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): boolean;
+  {$ifdef CPUINTEL} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// fast search of an integer position in a 64-bit integer array
 // - Count is the number of Int64 entries in P^
@@ -1334,17 +1339,17 @@ function PtrUIntScanExists(P: PPtrUIntArray; Count: PtrInt; Value: PtrUInt): boo
 
 /// fast search of an unsigned byte value position in a byte array
 // - Count is the number of byte entries in P^
-// - return index of P^[index]=Value
-// - return -1 if Value was not found
+// - return index of P^[index]=Value, -1 if Value was not found
+// - is implemented with SSE2 asm on i386 and x86_64
 function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifndef CPUINTEL} inline; {$endif}
 
 /// fast search of an unsigned Word value position in a Word array
 // - Count is the number of Word entries in P^
-// - return index of P^[index]=Value
-// - return -1 if Value was not found
+// - return index of P^[index]=Value, -1 if Value was not found
+// - is implemented with SSE2 asm on i386 and x86_64
 function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifndef CPUINTEL} inline; {$endif}
 
 /// sort an integer array, low values first
 procedure QuickSortInteger(ID: PIntegerArray; L, R: PtrInt); overload;
@@ -2003,6 +2008,9 @@ procedure FillZero(out dig: THash128); overload;
 function Hash128Index(P: PHash128Rec; Count: integer;
   h: PHash128Rec): integer;
 
+/// add a 128-bit item in an array of such values
+function AddHash128(var Arr: THash128DynArray; const V: THash128; var Count: integer): PtrInt;
+
 /// returns TRUE if all 20 bytes of this 160-bit buffer equal zero
 // - e.g. a SHA-1 digest
 function IsZero(const dig: THash160): boolean; overload;
@@ -2534,7 +2542,7 @@ function PosExString(const SubStr, S: string; Offset: PtrUInt = 1): PtrInt;
 
 /// optimized version of PosEx() with search text as one AnsiChar
 function PosExChar(Chr: AnsiChar; const Str: RawUtf8): PtrInt;
-  {$ifdef FPC}inline;{$endif}
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// fast retrieve the position of a given character in a #0 ended buffer
 // - will use fast SSE2 asm on x86_64
@@ -2951,10 +2959,10 @@ function crc32cinlined(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 // - by design, such combined hashes cannot be cascaded
 function crc64c(buf: PAnsiChar; len: cardinal): Int64;
 
-/// compute two CRC32C checksum on the supplied buffer for 64-bit hashing
+/// expand a CRC32C checksum on the supplied buffer for 64-bit hashing
 // - will use SSE 4.2 or ARMv8 hardware accelerated instruction, if available
 // - is the default implementation of DefaultHasher64
-function crc32cTwice(seed: QWord; buf: PAnsiChar; len: cardinal): QWord;
+function crc32ctwice(seed: QWord; buf: PAnsiChar; len: cardinal): QWord;
 
 /// compute CRC63C checksum on the supplied buffer, cascading two crc32c
 // - similar to crc64c, but with 63-bit, so no negative value: may be used
@@ -3130,6 +3138,11 @@ function crc32cHash(const s: RawByteString): cardinal; overload;
 function crc32cHash(const b: TBytes): cardinal; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// combine/reduce a 128-bit hash into a 64-bit hash
+// - e.g. from non cryptographic 128-bit hashers with linked lower/higher 64-bit
+function Hash128To64(const b: THash128): QWord;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// get maximum possible (worse) SynLZ compressed size
 function SynLZcompressdestlen(in_len: integer): integer;
   {$ifdef HASINLINE}inline;{$endif}
@@ -3174,6 +3187,22 @@ function SynLZdecompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): intege
 // - will store a hash of both compressed and uncompressed stream: if the
 // data is corrupted during transmission, will instantly return ''
 function CompressSynLZ(var Data: RawByteString; Compress: boolean): RawUtf8;
+
+/// simple Run-Length-Encoding compression of a memory buffer
+// - SynLZ is not good with input of a lot of redundant bytes, e.g. chunks of
+// zeros: you could pre-process RleCompress/RleUnCompress such data before SynLZ
+// - see AlgoRleLZ as such a RLE + SynLZ algorithm
+// - returns the number of bytes written to dst, or -1 on dstsize overflow
+function RleCompress(src, dst: PByteArray; srcsize, dstsize: PtrUInt): PtrInt;
+
+/// simple Run-Length-Encoding uncompression of a memory buffer
+// - SynLZ is not good with input of a lot of redundant bytes, e.g. chunks of
+// zeros: you could pre-process RleCompress/RleUnCompress such data before SynLZ
+// - see AlgoRleLZ as such a RLE + SynLZ algorithm
+function RleUnCompress(src, dst: PByteArray; size: PtrUInt): PtrUInt;
+
+/// partial Run-Length-Encoding uncompression of a memory buffer
+function RleUnCompressPartial(src, dst: PByteArray; size, max: PtrUInt): PtrUInt;
 
 /// internal hash table adjustment as called from TDynArrayHasher.HashDelete
 // - decrement any integer greater or equal to a deleted value
@@ -5330,18 +5359,6 @@ end;
 
 {$endif FPC_OR_UNICODE}
 
-function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): PtrInt;
-begin
-  result := PtrUInt(IntegerScan(P, Count, Value));
-  if result = 0 then
-    dec(result)
-  else
-  begin
-    dec(result, PtrUInt(P));
-    result := result shr 2;
-  end;
-end;
-
 function Int64ScanExists(P: PInt64Array; Count: PtrInt; const Value: Int64): boolean;
 begin
   if P <> nil then
@@ -5470,17 +5487,7 @@ begin
   high := len - 1;
 end;
 
-function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
-begin
-  result := IndexByte(P^, Count, Value); // will use fast FPC SSE version
-end;
-
-function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
-begin
-  result := IndexWord(P^, Count, Value); // will use fast FPC SSE version
-end;
-
-procedure Div100(Y: cardinal; var res: TDiv100Rec); // asm on Delphi
+procedure Div100(Y: cardinal; var res: TDiv100Rec); // Delphi=asm, FPC=inlinedS
 var
   Y100: cardinal;
 begin
@@ -5489,38 +5496,7 @@ begin
   res.M := Y {%H-}- Y100 * 100; // avoid div twice
 end;
 
-{$else not FPC}
-
-function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
-begin
-  result := 0;
-  if P <> nil then
-    repeat
-      if result >= Count then
-        break;
-      if P^[result] = Value then
-        exit;
-      inc(result);
-    until false;
-  result := -1;
-end;
-
-function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
-begin
-  result := 0;
-  if P <> nil then
-    repeat
-      if result >= Count then
-        break;
-      if P^[result] = Value then
-        exit;
-      inc(result);
-    until false;
-  result := -1;
-end;
-
 {$endif FPC}
-
 
 function AddInteger(var Values: TIntegerDynArray; Value: integer; NoDuplicates: boolean): boolean;
 var
@@ -7005,6 +6981,16 @@ end;
 
 {$endif CPU64}
 
+function AddHash128(var Arr: THash128DynArray; const V: THash128;
+  var Count: integer): PtrInt;
+begin
+  result := Count;
+  if result = length(Arr) then
+    SetLength(Arr, NextGrow(result));
+  Arr[result] := V;
+  inc(Count);
+end;
+
 function IsZero(const dig: THash160): boolean;
 var
   a: TIntegerArray absolute dig;
@@ -7367,7 +7353,7 @@ begin
   inc(p, lenSub);
   inc(pSub, lenSub);
   pStart := p;
-  inc(p, Offset + 3);
+  p := @p[Offset + 3];
   ch := pSub[0];
   lenSub := -lenSub;
   if p < pStop then
@@ -7471,16 +7457,9 @@ end;
 function PosExChar(Chr: AnsiChar; const Str: RawUtf8): PtrInt;
 begin
   if Str <> '' then
-  {$ifdef FPC} // will use fast FPC SSE version
-    result := IndexByte(
-      pointer(Str)^, PStrLen(PtrUInt(Str) - _STRLEN)^, byte(Chr)) + 1
+    result := ByteScanIndex(pointer(Str), PStrLen(PtrUInt(Str) - _STRLEN)^, byte(Chr)) + 1
   else
-  {$else} // Delphi "for" loop is faster when not inlined
-    for result := 1 to PInteger(PtrInt(Str) - SizeOf(integer))^ do
-      if Str[result] = Chr then
-        exit;
-  {$endif FPC}
-  result := 0;
+    result := 0;
 end;
 
 {$ifdef UNICODE}
@@ -8172,6 +8151,20 @@ type
 
 // optimized asm for x86 and x86_64 is located in include files
 
+function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
+begin
+  Count := IntegerScanIndex(P, Count, Value); // SSE2 asm on Intel/AMD
+  if Count >= 0 then
+    result := @P[Count]
+  else
+    result := nil;
+end;
+
+function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): boolean;
+begin
+  result := IntegerScanIndex(P, Count, Value) >= 0; // SSE2 asm on Intel/AMD
+end;
+
 type
   TIntelRegisters = record
     eax, ebx, ecx, edx: cardinal;
@@ -8640,6 +8633,95 @@ end;
 function bswap64(const a: QWord): QWord;
 begin
   result := SwapEndian(a); // use fast platform-specific function
+end;
+
+function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
+begin
+  result := IndexByte(P^, Count, Value); // use FPC RTL
+end;
+
+function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
+begin
+  result := IndexWord(P^, Count, Value); // use FPC RTL
+end;
+
+function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
+begin
+  result := nil;
+  if P = nil then
+    exit;
+  Count := PtrUInt(@P[Count - 4]); // per-four loop is faster than FPC RTL
+  repeat
+    if PtrUInt(P) > PtrUInt(Count) then
+      break;
+    if P^[0] <> Value then
+      if P^[1] <> Value then
+        if P^[2] <> Value then
+          if P^[3] <> Value then
+          begin
+            P := @P[4];
+            continue;
+          end
+          else
+            result := @P[3]
+        else
+          result := @P[2]
+      else
+        result := @P[1]
+    else
+      result := pointer(P);
+    exit;
+  until false;
+  inc(Count, 4 * SizeOf(Value));
+  result := pointer(P);
+  repeat
+    if PtrUInt(result) >= PtrUInt(Count) then
+      break;
+    if result^ = Value then
+      exit;
+    inc(result);
+  until false;
+  result := nil;
+end;
+
+function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): boolean;
+begin
+  if P <> nil then
+  begin
+    result := true;
+    Count := PtrInt(@P[Count - 4]);
+    repeat
+      if PtrUInt(P) > PtrUInt(Count) then
+        break;
+      if (P^[0] = Value) or
+         (P^[1] = Value) or
+         (P^[2] = Value) or
+         (P^[3] = Value) then
+        exit;
+      P := @P[4];
+    until false;
+    inc(Count, 4 * SizeOf(Value));
+    repeat
+      if PtrUInt(P) >= PtrUInt(Count) then
+        break;
+      if P^[0] = Value then
+        exit;
+      P := @P[1];
+    until false;
+  end;
+  result := false;
+end;
+
+function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): PtrInt;
+begin
+  result := PtrUInt(IntegerScan(P, Count, Value));
+  if result = 0 then
+    dec(result)
+  else
+  begin
+    dec(result, PtrUInt(P));
+    result := result shr 2;
+  end;
 end;
 
 {$endif CPUINTEL}
@@ -9187,6 +9269,178 @@ begin
   result := 'synlz';
 end;
 
+const
+  RLE_CW = $5a; // any byte would do - this one is nothing special but for me
+
+function RleEncode(dst: PByteArray; v, n: PtrUInt): PByteArray;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  if (n > 3) or
+     (v = RLE_CW) then // encode as dst[0]=RLE_CW dst[1]=count dst[2]=value
+  begin
+    v := v shl 16;
+    inc(v, RLE_CW);
+    while n > 255 do
+    begin
+      PCardinal(dst)^ := v + 255 shl 8;
+      dst := @dst[3];
+      dec(n, 255);
+    end;
+    inc(v, n shl 8);
+    result := @dst[3];
+  end
+  else
+  begin
+    inc(v, (v shl 8) + (v shl 16)); // append the value n (=1,2,3) times
+    result := @dst[n]; // seems faster with branchless move
+  end;
+  PCardinal(dst)^ := v;
+end;
+
+function RleCompress(src, dst: PByteArray; srcsize, dstsize: PtrUInt): PtrInt;
+var
+  dststart: PAnsiChar;
+  c, b, n: PtrUInt;
+begin
+  dststart := PAnsiChar(dst);
+  if srcsize <> 0 then
+  begin
+    dstsize := PtrUInt(@dst[dstsize - 3]); // pointer(dstsize) = dstmax
+    b := src[0];
+    n := 0;
+    repeat
+      c := src[0];
+      inc(PByte(src));
+      if c = b then
+      begin
+        inc(n);
+        dec(srcsize);
+        if (srcsize = 0) or
+           (PtrUInt(dst) >= PtrUInt(dstsize)) then
+          break;
+      end
+      else // dedicated if n = 1 then .. branch was slower
+      begin
+        dst := RleEncode(dst, b, n);
+        n := 1;
+        b := c;
+        dec(srcsize);
+        if (srcsize = 0) or
+           (PtrUInt(dst) >= PtrUInt(dstsize)) then
+          break;
+      end;
+    until false;
+    dst := RleEncode(dst, b, n);
+    if PtrUInt(dst) >= PtrUInt(dstsize) then
+    begin
+      result := -1;
+      exit;
+    end;
+  end;
+  result := PAnsiChar(dst) - dststart;
+end;
+
+{$ifdef CPUINTEL}
+  {$ifndef HASNOSSE2}
+    {$define INLINEDSEARCH} // leverage ByteScanIndex() SSE2 asm
+  {$endif HASNOSSE2}
+{$endif CPUINTEL}
+{.$define INLINEDFILL} // actually slower
+
+function RleUnCompress(src, dst: PByteArray; size: PtrUInt): PtrUInt;
+var
+  dststart: PAnsiChar;
+  {$ifdef INLINEDFILL}
+  c: PtrInt;
+  {$endif INLINEDFILL}
+  v: PtrUInt;
+begin
+  dststart := PAnsiChar(dst);
+  if size > 0 then
+    repeat
+      {$ifdef INLINEDSEARCH}
+      if src[0] <> RLE_CW then
+      begin
+        v := ByteScanIndex(src, size, RLE_CW);
+        if PtrInt(v) < 0 then
+          v := size;
+        MoveFast(src^, dst^, v);
+        inc(PByte(src), v);
+        inc(PByte(dst), v);
+        dec(size, v);
+        if size = 0 then
+          break;
+      end;
+      {$else}
+      v := src[0];
+      if v <> RLE_CW then
+      begin
+        dst[0] := v;
+        inc(PByte(dst));
+        inc(PByte(src));
+        dec(size);
+        if size = 0 then
+          break;
+      end
+      else
+      {$endif INLINEDSEARCH}
+      begin // here src[0]=RLE_CW src[1]=count src[2]=value
+        {$ifdef INLINEDFILL}
+        c := src[1];
+        v := src[2];
+        inc(PByte(dst), c);
+        c := -c;
+        repeat
+          dst[c] := v;
+          inc(c);
+        until c = 0;
+        {$else}
+        v := src[1];
+        FillCharFast(dst^, v, src[2]);
+        inc(PByte(dst), v);
+        {$endif INLINEDFILL}
+        inc(PByte(src), 3);
+        dec(size, 3);
+        if PtrInt(size) <= 0 then
+          break;
+      end
+    until false;
+  result := PAnsiChar(dst) - dststart;
+end;
+
+function RleUnCompressPartial(src, dst: PByteArray; size, max: PtrUInt): PtrUInt;
+var
+  dststart: PAnsiChar;
+  v, m: PtrUInt;
+begin
+  dststart := PAnsiChar(dst);
+  inc(max, PtrUInt(dst));
+  while (size > 0) and
+        (PtrUInt(dst) < max) do
+  begin
+    v := src[0];
+    if v = RLE_CW then
+    begin
+      v := src[1];
+      m := max - PtrUInt(dst);
+      if v > m then
+        v := m; // compile as cmov on FPC
+      FillCharFast(dst^, v, src[2]);
+      inc(PByte(dst), v);
+      inc(PByte(src), 3);
+      dec(size, 3);
+    end
+    else
+    begin
+      dst[0] := v;
+      inc(PByte(dst));
+      inc(PByte(src));
+      dec(size);
+    end;
+  end;
+  result := PAnsiChar(dst) - dststart;
+end;
+
 
 { TSynTempBuffer }
 
@@ -9498,8 +9752,8 @@ end;
 
 function crc32cTwice(seed: QWord; buf: PAnsiChar; len: cardinal): QWord;
 begin
-  result := QWord(crc32c(cardinal(seed), buf, len)) +
-            QWord(crc32c(seed shr 32, buf, len)) shl 32;
+  PQWordRec(@result)^.L := crc32c(PQWordRec(@seed)^.L, buf, len);
+  PQWordRec(@result)^.H := crc32c(PQWordRec(@seed)^.H, buf, len);
 end;
 
 function crc63c(buf: PAnsiChar; len: cardinal): Int64;
@@ -9616,6 +9870,11 @@ begin
   result := crc32c(0, pointer(b), length(b));
 end;
 
+function Hash128To64(const b: THash128): QWord;
+begin
+  result := THash128Rec(b).L xor (THash128Rec(b).H * QWord(2685821657736338717));
+end;
+
 function xxHash32Mixup(crc: cardinal): cardinal;
 begin
   result := crc;
@@ -9721,73 +9980,6 @@ zero:
   result := false;
 end;
 {$endif CPUX64}
-
-function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
-begin
-  result := nil;
-  if P = nil then
-    exit;
-  Count := PtrUInt(@P[Count - 4]);
-  repeat
-    if PtrUInt(P) > PtrUInt(Count) then
-      break;
-    if P^[0] <> Value then
-      if P^[1] <> Value then
-        if P^[2] <> Value then
-          if P^[3] <> Value then
-          begin
-            P := @P[4];
-            continue;
-          end
-          else
-            result := @P[3]
-        else
-          result := @P[2]
-      else
-        result := @P[1]
-    else
-      result := pointer(P);
-    exit;
-  until false;
-  inc(Count, 4 * SizeOf(Value));
-  result := pointer(P);
-  repeat
-    if PtrUInt(result) >= PtrUInt(Count) then
-      break;
-    if result^ = Value then
-      exit;
-    inc(result);
-  until false;
-  result := nil;
-end;
-
-function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): boolean;
-begin
-  if P <> nil then
-  begin
-    result := true;
-    Count := PtrInt(@P[Count - 4]);
-    repeat
-      if PtrUInt(P) > PtrUInt(Count) then
-        break;
-      if (P^[0] = Value) or
-         (P^[1] = Value) or
-         (P^[2] = Value) or
-         (P^[3] = Value) then
-        exit;
-      P := @P[4];
-    until false;
-    inc(Count, 4 * SizeOf(Value));
-    repeat
-      if PtrUInt(P) >= PtrUInt(Count) then
-        break;
-      if P^[0] = Value then
-        exit;
-      P := @P[1];
-    until false;
-  end;
-  result := false;
-end;
 
 procedure crcblockfast(crc128, data128: PBlock128);
 begin

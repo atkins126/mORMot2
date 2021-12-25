@@ -295,7 +295,7 @@
       {$define CPUINTEL}
       {$define FPC_CPUINTEL}
       {$define FPC_X86}
-      {$ifndef FPC_PIC}        // MachOS/OpenBSD/Android require PIC code on i386
+      {$ifndef FPC_PIC}        // MachOS/OpenBSD/Android require PIC on i386
         {$define ASMX86}       // supports asm with globals
         {$define ASMINTEL}     // either ASMX86 or ASMX64
         {$define CPUX86NOTPIC} // use "absolute" instead of local register
@@ -322,6 +322,8 @@
     {$define ORMGENERICS}
     {$define FPCGENERICS}
   {$endif}
+  // FPC generics (aka parameterized types) are available since 2.6
+  {$define HASGENERICSSYNTAX}
 
   {$ifdef FPC_NEWRTTI}
     {$define ISDELPHI2010_OR_FPC_NEWRTTI}
@@ -374,12 +376,13 @@
     {$define HASCODEPAGE}
     {$define FPC_OR_UNICODE}
     {$define USERECORDWITHMETHODS}
+    {$define HASGENERICSSYNTAX}     // Delphi 2009+ compiler has TArray<>
     { due to a bug in Delphi 2009+, we need to fake inheritance of record,
       since TDynArrayHashed = object(TDynArray) fails to initialize
       http://blog.synopse.info/post/2011/01/29/record-and-object-issue-in-Delphi-2010 }
     {$define UNDIRECTDYNARRAY}
   {$else}
-    {$define HASNOSTATICRTTI} // Delphi 7/2007 has no TypeInfo(TGUID)
+    {$define HASNOSTATICRTTI}        // Delphi 7/2007 has no TypeInfo(TGUID)
   {$endif}
 
   {$define ISDELPHI}
@@ -569,10 +572,13 @@
     {$ifdef CPUX64}
       {$define WIN64ABI}    // for asm on x86_64
     {$endif CPUX64}
+    {$define THREADID32}    // TThreadID = 32-bit DWORD on Win32 and Win64
   {$endif OSWINDOWS}
   {$ifdef OSPOSIX}
     {$ifdef CPUX64}
       {$define SYSVABI}     // for asm on x86_64
+    {$else}
+      {$define THREADID32}  // TThreadID = PtrUInt/pointer on pthread
     {$endif CPUX64}
   {$endif OSPOSIX}
   {$define CPUINTELARM}
@@ -581,6 +587,9 @@
   {$ifdef CPUARM3264}
     {$define CPUINTELARM}
   {$endif CPUARM3264}
+  {$ifdef CPU32}
+  {$define THREADID32}    // TThreadID = PtrUInt/pointer on pthread
+  {$endif CPU32}
 {$endif CPUINTEL}
 
 {$ifdef CPU32}

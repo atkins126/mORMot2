@@ -860,8 +860,8 @@ type
     // - warning: this method will call directly EngineExecute(), and will
     // work just fine with SQLite3, but some other DB engines may not allow
     // a huge number of items within the IN(...) clause
-    function UpdateField(Table: TOrmClass; const IDs: array of Int64;
-      const FieldName: RawUtf8; const FieldValue: variant): boolean; overload;
+    function UpdateFieldAt(Table: TOrmClass; const IDs: array of TID;
+      const FieldName: RawUtf8; const FieldValue: variant): boolean;
     /// increments one integer field value
     // - if available, this method will use atomic value modification, e.g.
     // $ UPDATE table SET field=field+?
@@ -1634,7 +1634,7 @@ type
     function GetTable: TOrmTable;
     /// register RttiJsonRead/RttiJsonWrite callbacks for custom serialization
     class procedure RttiCustomSetParser(Rtti: TRttiCustom); override;
-    /// fake nested TOrm classes would be serialized as integer
+    /// 'fake' nested TOrm properties would be serialized as integer
     function IsPropClassInstance(Prop: PRttiCustomProp): boolean; virtual;
     function RttiWritePropertyValue(W: TTextWriter; Prop: PRttiCustomProp;
       Options: TTextWriterWriteObjectOptions): boolean; override;
@@ -2043,7 +2043,7 @@ type
     // missing fields will be left with previous values - but BatchUpdate() can be
     // safely used after FillPrepare (will set only ID, TModTime and mapped fields)
     constructor CreateAndFillPrepare(const aClient: IRestOrm;
-      const aIDs: array of Int64; const aCustomFieldsCsv: RawUtf8 = ''); overload;
+      const aIDs: array of TID; const aCustomFieldsCsv: RawUtf8 = ''); overload;
     /// this constructor initializes the object, and prepares itself to loop
     // through a specified JSON table, which will use a private copy
     // - this method creates a TOrmTableJson, fill it with the supplied JSON buffer,
@@ -2209,10 +2209,13 @@ type
     // in the current published fields of a TOrm child
     // - only simple fields (i.e. not RawBlob/TOrmMany) are retrieved:
     //   BLOB fields are ignored (use direct access via dedicated methods instead)
-    // - if Expand is true, JSON data is an object, for direct use with any Ajax or .NET client:
-    // $ {"col1":val11,"col2":"val12"}
-    // - if Expand is false, JSON data is serialized (as used in TOrmTableJson)
-    // $ { "fieldCount":1,"values":["col1","col2",val11,"val12",val21,..] }
+    // - if Expand is true, JSON output is a standard array of objects, for
+    // direct use with any Ajax or .NET client:
+    // & [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...]
+    // - if Expand is false, JSON data is serialized in non-expanded format:
+    // & {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+    // resulting in lower space use and faster process - it could be parsed by
+    // TOrmTableJson or TDocVariantData.InitArrayFromResults
     // - if withID is true, then the first ID field value is included
     // - you can customize OrmOptions, e.g. if oftObject/oftBlobDynArray
     // property instance will be serialized as a JSON object or array, not a
@@ -2424,8 +2427,7 @@ type
     // you want to Update the retrieved record content later, since any
     // missing fields will be left with previous values - but BatchUpdate() can be
     // safely used after FillPrepare (will set only ID, TModTime and mapped fields)
-    function FillPrepare(const aClient: IRestOrm;
-      const aIDs: array of Int64;
+    function FillPrepare(const aClient: IRestOrm; const aIDs: array of TID;
       const aCustomFieldsCsv: RawUtf8 = ''): boolean; overload;
     // / prepare to loop through a JOINed statement including TOrmMany fields
     // - all TOrmMany.Dest published fields will now contain a true TOrm
@@ -3578,7 +3580,7 @@ type
     fTableName: RawUtf8;
     fRowIDFieldName: RawUtf8;
     fExtFieldNames: TRawUtf8DynArray;
-    fExtFieldNamesUnQuotedSQL: TRawUtf8DynArray;
+    fExtFieldNamesUnQuotedSql: TRawUtf8DynArray;
     fSql: TOrmModelPropertiesSql;
     fFieldNamesMatchInternal: TFieldBits;
     fOptions: TOrmPropertiesMappingOptions;
@@ -3727,8 +3729,8 @@ type
     /// the unquoted external field names, following fProps.Props.Field[] order
     // - excluding ID/RowID field, which is stored in RowIDFieldName
     // - in respect to ExtFieldNames[], this array will never quote the field name
-    property ExtFieldNamesUnQuotedSQL: TRawUtf8DynArray
-      read fExtFieldNamesUnQuotedSQL;
+    property ExtFieldNamesUnQuotedSql: TRawUtf8DynArray
+      read fExtFieldNamesUnQuotedSql;
     /// each bit set, following fProps.Props.Field[]+1 order (i.e. 0=ID,
     // 1=Field[0], ...), indicates that this external field name
     // has not been mapped
@@ -3926,12 +3928,15 @@ type
     /// get the index of a table in Tables[]
     // - expects SqlTableName to be SQL-like formatted (i.e. without TOrm[Record])
     function GetTableIndex(const SqlTableName: RawUtf8): PtrInt; overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// get the index of a table in Tables[], optionally raising EModelException
     function GetTableIndexSafe(aTable: TOrmClass;
       RaiseExceptionIfNotExisting: boolean): PtrInt;
     /// get the index of a table in Tables[]
     // - expects SqlTableName to be SQL-like formatted (i.e. without TOrm[Record])
     function GetTableIndexPtr(SqlTableName: PUtf8Char): PtrInt;
+    /// get the index of a table in Tables[]
+    function GetTableIndexPtrLen(SqlTableName: PUtf8Char; SqlTableNameLen: PtrInt): PtrInt;
     /// return the UTF-8 encoded SQL source to create the table
     function GetSqlCreate(aTableIndex: integer): RawUtf8;
     /// return the UTF-8 encoded SQL source to add the corresponding field
@@ -3954,12 +3959,10 @@ type
     function GetTableIndexFromSqlSelect(const SQL: RawUtf8;
       EnsureUniqueTableInFrom: boolean): integer;
     /// try to retrieve one or several TOrmClass from a SQL statement
-    // - naive search of '... FROM Table1,Table2' pattern in the supplied SQL,
-    // using GetTableNamesFromSqlSelect() function
+    // - naive search of '... FROM Table1,Table2' pattern in the supplied SQL
     function GetTablesFromSqlSelect(const SQL: RawUtf8): TOrmClassDynArray;
     /// try to retrieve one or several table index from a SQL statement
-    // - naive search of '... FROM Table1,Table2' pattern in the supplied SQL,
-    // using GetTableNamesFromSqlSelect() function
+    // - naive search of '... FROM Table1,Table2' pattern in the supplied SQL
     function GetTableIndexesFromSqlSelect(const SQL: RawUtf8): TIntegerDynArray;
     /// check if the supplied URI matches the model's Root property
     // - allows sub-domains, e.g. if Root='root/sub1', then '/root/sub1/toto' and
@@ -4218,8 +4221,8 @@ type
     /// activate the internal caching for a set of specified TOrm
     // - if these items are already cached, do nothing
     // - return true on success
-    function SetCache(aTable: TOrmClass; const aIDs: array of TID):
-      boolean; overload;
+    function SetCache(aTable: TOrmClass; const aIDs: array of TID): boolean;
+      overload;
     /// activate the internal caching for a given TOrm
     // - will cache the specified aRecord.ID item
     // - if this item is already cached, do nothing
@@ -4276,7 +4279,7 @@ type
     procedure NotifyDeletion(aTableIndex: integer; aID: TID); overload;
     /// TRest instance shall call this method when records are deleted
     // - TOrmClass to be specified as its index in Rest.Model.Tables[]
-    procedure NotifyDeletions(aTableIndex: integer; const aIDs: array of Int64); overload;
+    procedure NotifyDeletions(aTableIndex: integer; const aIDs: array of TID); overload;
   end;
 
 
@@ -5810,24 +5813,6 @@ begin
   FastSetString(fPrivateCopy, pointer(aJson), aLen);
 end;
 
-function GetFieldCountExpanded(P: PUtf8Char): integer;
-var
-  EndOfObject: AnsiChar;
-begin
-  result := 0;
-  repeat
-    P := GotoNextJsonItem(P, 2, @EndOfObject); // ignore Name+Value items
-    if P = nil then
-    begin // unexpected end
-      result := 0;
-      exit;
-    end;
-    inc(result);
-    if EndOfObject = '}' then
-      break; // end of object
-  until false;
-end;
-
 function TOrmTableJson.ParseAndConvert(Buffer: PUtf8Char; BufferLen: integer): boolean;
 var
   i, max, resmax, f: PtrInt;
@@ -5849,13 +5834,11 @@ begin
   if IsNotExpandedBuffer(P, Buffer + BufferLen, fFieldCount, fRowCount) then
   begin
     // A. Not Expanded (more optimized) format as array of values
-(* {"fieldCount":9,"values":["ID","Int","Test","Unicode","Ansi","ValFloat","ValWord",
-    "ValDate","Next",0,0,"abcde+?ef+?+?","abcde+?ef+?+?","abcde+?ef+?+?",
-    3.14159265300000E+0000,1203,"2009-03-10T21:19:36",0,..],"rowCount":20} *)
+    // {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
     // 1. check RowCount and DataLen
     if fRowCount < 0 then
     begin
-      // IsNotExpanded() detected invalid input
+      // IsNotExpandedBuffer() detected invalid input
       fRowCount := 0;
       exit;
     end;
@@ -5899,27 +5882,18 @@ begin
   else
   begin
     // B. Expanded format as array of objects (each with field names)
-(* [{"ID":0,"Int":0,"Test":"abcde+?ef+?+?","Unicode":"abcde+?ef+?+?","Ansi":
-    "abcde+?ef+?+?","ValFloat": 3.14159265300000E+0000,"ValWord":1203,
-    "ValDate":"2009-03-10T21:19:36","Next":0},{..}] *)
+    // [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...]
     // 1. get fields count from first row
-    while P^ <> '[' do
-      if P^ = #0 then
-        exit
-      else
-        inc(P); // need an array of objects
-    repeat
-      inc(P);
-      if P^ = #0 then
-        exit;
-    until P^ in ['{', ']']; // go to object beginning
+    P := GotoFieldCountExpanded(P);
+    if P = nil then
+      exit;
     if P^ = ']' then
     begin
       // [] -> valid, but void data
       result := true;
       exit;
     end;
-    inc(P);
+    inc(P); // jmp initial '{'
     fFieldCount := GetFieldCountExpanded(P);
     if fFieldCount = 0 then
       // invalid data for first row
@@ -5992,15 +5966,14 @@ begin
         break;
       inc(fRowCount);
       while (P^ <> '{') and
-            (P^ <> ']') do
-        // go to next object beginning
+            (P^ <> ']') do // go to next object beginning
         if P^ = #0 then
           exit
         else
           inc(P);
       if P^ = ']' then
         break;
-      inc(P); // jmp ']'
+      inc(P); // jmp '}'
     until false;
     if max <> (fRowCount + 1) * fFieldCount then
     begin
@@ -6316,7 +6289,7 @@ begin
     rtticustom.Flags := rtticustom.Flags +
       [rcfDisableStored,  // for AS_UNIQUE
        rcfHookWriteProperty, rcfHookReadProperty, // custom RttiWrite/RttiRead
-       rcfClassMayBeID];  // for IsPropClassInstance
+       rcfClassMayBeID];  // avoid most IsPropClassInstance calls
     self.InternalDefineModel(result);
   finally
     mormot.core.os.LeaveCriticalSection(Rtti.RegisterLock);
@@ -6608,17 +6581,6 @@ begin
 end;
 
 procedure TOrm.FillFrom(P: PUtf8Char; FieldBits: PFieldBits);
-(*
- NOT EXPANDED - optimized format with a JSON array of JSON values, fields first
- {"fieldCount":9,"values":["ID","Int","Test","Unicode","Ansi","ValFloat","ValWord",
-   "ValDate","Next",0,0,"abcde+?ef+?+?","abcde+?ef+?+?","abcde+?ef+?+?",
-   3.14159265300000E+0000,1203,"2009-03-10T21:19:36",0]}
-
- EXPANDED FORMAT - standard format with a JSON array of JSON objects
- {"ID":0,"Int":0,"Test":"abcde+?ef+?+?","Unicode":"abcde+?ef+?+?","Ansi":
-  "abcde+?ef+?+?","ValFloat": 3.14159265300000E+0000,"ValWord":1203,
-  "ValDate":"2009-03-10T21:19:36","Next":0}
-*)
 var
   F: array[0..MAX_SQLFIELDS - 1] of PUtf8Char; // store field/property names
   wasString: boolean;
@@ -6638,7 +6600,8 @@ begin
   // set each property from values using efficient TOrmPropInfo.SetValue()
   if Expect(P, FIELDCOUNT_PATTERN, 14) then
   begin
-    // not expanded format: read the values directly from the input array
+    // NOT EXPANDED - optimized format with a JSON array of JSON values, fields first
+    //  {"fieldCount":2,"values":["f1","f2","1v1",1v2],"rowCount":1}
     n := GetNextItemCardinal(P, #0) - 1;
     if cardinal(n) > high(F) then
       exit;
@@ -6658,7 +6621,8 @@ begin
   end
   else if P^ = '{' then
   begin
-    // expanded format: check each property name
+    // EXPANDED FORMAT - standard format with a JSON array of JSON objects
+    //  [{"f1":"1v1","f2":1v2}]
     inc(P);
     repeat
       Prop := GetJsonPropName(P);
@@ -6732,7 +6696,7 @@ begin
 end;
 
 function TOrm.FillPrepare(const aClient: IRestOrm;
-  const aIDs: array of Int64; const aCustomFieldsCsv: RawUtf8): boolean;
+  const aIDs: array of TID; const aCustomFieldsCsv: RawUtf8): boolean;
 begin
   if high(aIDs) < 0 then
     result := false
@@ -7510,7 +7474,7 @@ begin
 end;
 
 constructor TOrm.CreateAndFillPrepare(const aClient: IRestOrm;
-  const aIDs: array of Int64; const aCustomFieldsCsv: RawUtf8);
+  const aIDs: array of TID; const aCustomFieldsCsv: RawUtf8);
 begin
   Create;
   FillPrepare(aClient, aIDs, aCustomFieldsCsv);
@@ -7905,7 +7869,8 @@ begin
     result := false // default JSON object serialization
   else
   begin
-    W.Add(PPtrInt(PAnsiChar(self) + Prop^.OffsetGet)^); // serialized as integer
+    // a 'fake' nested TOrm published property should be serialized as integer
+    W.Add(PPtrInt(PAnsiChar(self) + Prop^.OffsetGet)^);
     result := true; // abort default serialization
   end;
 end;
@@ -7919,6 +7884,7 @@ begin
     result := false // default JSON object serialization
   else
   begin
+    // a 'fake' nested TOrm published property should be serialized as integer
     PPtrInt(PAnsiChar(self) + Prop^.OffsetSet)^ :=
       PJsonParserContext(Ctxt)^.ParseInteger;
     result := true; // abort default serialization
@@ -7953,7 +7919,10 @@ begin
           IdemPropNameU(cur^.Name, name, namelen) then
        begin
          f := cur^; // optimistic O(1) property lookup
-         inc(cur);
+         if f <> props.Last then
+           inc(cur)
+         else
+           cur := nil;
        end
        else
        begin
@@ -7966,10 +7935,6 @@ begin
   until Context.EndOfObject = '}';
   Context.ParseEndOfObject;
 end;
-
-const
-  ID_JSON: array[boolean] of string[7] = (
-    'RowID', 'ID'); // see also TOrmWriter.SetOrmOptions: Ajax requires ID
 
 class procedure TOrm.RttiJsonWrite(W: TJsonWriter; Instance: TObject;
   Options: TTextWriterWriteObjectOptions);
@@ -7984,7 +7949,13 @@ begin
     exit;
   end;
   W.BlockBegin('{', Options);
-  W.AddPropJsonInt64(ID_JSON[woIDAsIDstr in Options], TOrm(Instance).fID);
+  if woIDAsIDstr in Options then
+  begin
+    W.AddPropJsonInt64('ID', TOrm(Instance).fID);
+    W.AddPropJsonInt64('ID_str', TOrm(Instance).fID, '"'); // for AJAX
+  end
+  else
+    W.AddPropJsonInt64('RowID', TOrm(Instance).fID);
   props := TOrm(Instance).Orm.Fields;
   cur := pointer(props.List);
   n := props.Count;
@@ -9587,26 +9558,40 @@ end;
 
 function TOrmModel.GetTableIndexesFromSqlSelect(const SQL: RawUtf8): TIntegerDynArray;
 var
-  TableNames: TRawUtf8DynArray;
-  i, t, n, ndx: PtrInt;
+  i, j, k, n, ndx: PtrInt;
 begin
   result := nil;
-  TableNames := GetTableNamesFromSqlSelect(SQL);
-  t := length(TableNames);
-  if t = 0 then
-    exit;
-  SetLength(result, t);
   n := 0;
-  for i := 0 to t - 1 do
-  begin
-    ndx := GetTableIndex(TableNames[i]);
-    if ndx < 0 then
-      continue;
-    result[n] := ndx;
-    inc(n);
+  i := PosI(' FROM ', SQL);
+  if i > 0 then
+  begin // same parsing logic than GetTableNamesFromSqlSelect()
+    inc(i, 6);
+    repeat
+      while SQL[i] in [#1..' '] do
+        inc(i);
+      j := 0;
+      while tcIdentifier in TEXT_CHARS[SQL[i + j]] do
+        inc(j);
+      if cardinal(j - 1) > 64 then
+      begin
+        result := nil;
+        exit; // seems too big
+      end;
+      k := i + j;
+      while SQL[k] in [#1..' '] do
+        inc(k);
+      ndx := GetTableIndexPtrLen(PUtf8Char(PtrInt(SQL) + i - 1), j);
+      if ndx >= 0 then
+      begin
+        SetLength(result, n + 1);
+        result[n] := ndx;
+        inc(n);
+      end;
+      if SQL[k] <> ',' then
+        break;
+      i := k + 1;
+    until false;
   end;
-  if n <> t then
-    SetLength(result, n);
 end;
 
 function TOrmModel.GetTable(const SqlTableName: RawUtf8): TOrmClass;
@@ -9703,13 +9688,13 @@ begin
   result := -1;
 end;
 
-function TOrmModel.GetTableIndex(const SqlTableName: RawUtf8): PtrInt;
+function TOrmModel.GetTableIndexPtrLen(SqlTableName: PUtf8Char; SqlTableNameLen: PtrInt): PtrInt;
 begin // use length(SqlTableName)
   if (self <> nil) and
-     (SqlTableName <> '') then
+     (SqlTableName <> nil) then
   begin
     result := FastFindUpperPUtf8CharSorted( // branchless O(log(n)) bin search
-      pointer(fSortedTablesNameUpper), fTablesMax, pointer(SqlTableName), length(SqlTableName));
+      pointer(fSortedTablesNameUpper), fTablesMax, SqlTableName, SqlTableNameLen);
     if result >= 0 then
       result := fSortedTablesNameIndex[result];
   end
@@ -9717,18 +9702,14 @@ begin // use length(SqlTableName)
     result := -1;
 end;
 
+function TOrmModel.GetTableIndex(const SqlTableName: RawUtf8): PtrInt;
+begin
+  result := GetTableIndexPtrLen(pointer(SqlTableName), length(SqlTableName));
+end;
+
 function TOrmModel.GetTableIndexPtr(SqlTableName: PUtf8Char): PtrInt;
 begin
-  if (self <> nil) and
-     (SqlTableName <> nil) then
-  begin
-    result := FastFindUpperPUtf8CharSorted( // branchless O(log(n)) bin search
-      pointer(fSortedTablesNameUpper), fTablesMax, SqlTableName, StrLen(SqlTableName));
-    if result >= 0 then
-      result := fSortedTablesNameIndex[result];
-  end
-  else
-    result := -1;
+  result := GetTableIndexPtrLen(pointer(SqlTableName), StrLen(SqlTableName));
 end;
 
 function TOrmModel.GetUri(aTable: TOrmClass): RawUtf8;
@@ -10308,7 +10289,7 @@ begin
   // setup default values
   fRowIDFieldName := ID_TXT;
   fProps.Fields.NamesToRawUtf8DynArray(fExtFieldNames);
-  fProps.Fields.NamesToRawUtf8DynArray(fExtFieldNamesUnQuotedSQL);
+  fProps.Fields.NamesToRawUtf8DynArray(fExtFieldNamesUnQuotedSql);
   FillcharFast(fFieldNamesMatchInternal, SizeOf(fFieldNamesMatchInternal), 255);
   fMappingVersion := 1;
   if fAutoComputeSql then
@@ -10341,7 +10322,7 @@ begin
     else
     begin
       fExtFieldNames[f] := InternalExternalPairs[i * 2 + 1];
-      fExtFieldNamesUnQuotedSQL[f] := UnQuotedSQLSymbolName(fExtFieldNames[f]);
+      fExtFieldNamesUnQuotedSql[f] := UnQuotedSQLSymbolName(fExtFieldNames[f]);
       if IdemPropNameU(fExtFieldNames[f], fProps.Fields.List[f].Name) then
         include(fFieldNamesMatchInternal, f + 1)
       else // [0]=ID  [1..n]=fields[i-1]
@@ -10506,8 +10487,8 @@ begin
   else
   begin
     // search for customized field mapping
-    for result := 0 to length(fExtFieldNamesUnQuotedSQL) - 1 do
-      if IdemPropNameU(ExtFieldName, fExtFieldNamesUnQuotedSQL[result]) then
+    for result := 0 to length(fExtFieldNamesUnQuotedSql) - 1 do
+      if IdemPropNameU(ExtFieldName, fExtFieldNamesUnQuotedSql[result]) then
         exit;
     result := -2; // indicates not found
   end;
@@ -10610,34 +10591,19 @@ begin
 end;
 
 destructor TRestCache.Destroy;
-var
-  i: PtrInt;
 begin
-  for i := 0 to length(fCache) - 1 do
-    fCache[i].Done;
   pointer(fRest) := nil; // don't change reference count
   inherited Destroy;
 end;
 
 function TRestCache.CachedEntries: cardinal;
 var
-  i, j: PtrInt;
+  i: PtrInt;
 begin
   result := 0;
   if self <> nil then
     for i := 0 to length(fCache) - 1 do
-      with fCache[i] do
-        if CacheEnable then
-        begin
-          EnterCriticalSection(Mutex);
-          try
-            for j := 0 to Count - 1 do
-              if Values[j].Timestamp512 <> 0 then
-                inc(result);
-          finally
-            LeaveCriticalSection(Mutex);
-          end;
-        end;
+      inc(result, fCache[i].CachedEntries);
 end;
 
 function TRestCache.CachedMemory(FlushedEntriesCount: PInteger): cardinal;
@@ -10663,16 +10629,10 @@ begin
   i := fModel.GetTableIndexExisting(aTable);
   if Rest.CacheWorthItForTable(i) then
     if PtrUInt(i) < PtrUInt(Length(fCache)) then
-      with fCache[i] do
-      begin
-        EnterCriticalSection(Mutex);
-        try
-          TimeOutMS := aTimeoutMS;
-        finally
-          LeaveCriticalSection(Mutex);
-        end;
-        result := true;
-      end;
+    begin
+      fCache[i].TimeOutMS := aTimeoutMS;
+      result := true;
+    end;
 end;
 
 function TRestCache.IsCached(aTable: TOrmClass): boolean;
@@ -10700,19 +10660,11 @@ begin
   i := fModel.GetTableIndexExisting(aTable);
   if Rest.CacheWorthItForTable(i) then
     if PtrUInt(i) < PtrUInt(Length(fCache)) then
-      with fCache[i] do
-      begin
-        // global cache of all records of this table
-        EnterCriticalSection(Mutex);
-        try
-          CacheEnable := true;
-          CacheAll := true;
-          Value.Clear;
-          result := true;
-        finally
-          LeaveCriticalSection(Mutex);
-        end;
-      end;
+    begin
+      // global cache of all records of this table
+      fCache[i].SetCache;
+      result := true;
+    end;
 end;
 
 function TRestCache.SetCache(aTable: TOrmClass; aID: TID): boolean;
@@ -10813,35 +10765,14 @@ end;
 procedure TRestCache.Flush(aTable: TOrmClass; aID: TID);
 begin
   if self <> nil then
-    with fCache[fModel.GetTableIndexExisting(aTable)] do
-      if CacheEnable then
-      begin
-        EnterCriticalSection(Mutex);
-        try
-          FlushCacheEntry(Value.Find(aID));
-        finally
-          LeaveCriticalSection(Mutex);
-        end;
-      end;
+    fCache[fModel.GetTableIndexExisting(aTable)].FlushCacheEntries([aID]);
 end;
 
 procedure TRestCache.Flush(aTable: TOrmClass; const aIDs: array of TID);
-var
-  i: PtrInt;
 begin
   if (self <> nil) and
      (length(aIDs) > 0) then
-    with fCache[fModel.GetTableIndexExisting(aTable)] do
-      if CacheEnable then
-      begin
-        EnterCriticalSection(Mutex);
-        try
-          for i := 0 to high(aIDs) do
-            FlushCacheEntry(Value.Find(aIDs[i]));
-        finally
-          LeaveCriticalSection(Mutex);
-        end;
-      end;
+    fCache[fModel.GetTableIndexExisting(aTable)].FlushCacheEntries(aIDs);
 end;
 
 procedure TRestCache.Notify(aTable: TOrmClass; aID: TID;
@@ -10885,37 +10816,16 @@ begin
   if (self <> nil) and
      (aID > 0) and
      (cardinal(aTableIndex) < cardinal(Length(fCache))) then
-    with fCache[aTableIndex] do
-      if CacheEnable then
-      begin
-        EnterCriticalSection(Mutex);
-        try
-          FlushCacheEntry(Value.Find(aID));
-        finally
-          LeaveCriticalSection(Mutex);
-        end;
-      end;
+    fCache[aTableIndex].FlushCacheEntries([aID]);
 end;
 
 procedure TRestCache.NotifyDeletions(aTableIndex: integer;
-  const aIDs: array of Int64);
-var
-  i: PtrInt;
+  const aIDs: array of TID);
 begin
   if (self <> nil) and
      (high(aIDs) >= 0) and
      (cardinal(aTableIndex) < cardinal(Length(fCache))) then
-    with fCache[aTableIndex] do
-      if CacheEnable then
-      begin
-        EnterCriticalSection(Mutex);
-        try
-          for i := 0 to high(aIDs) do
-            FlushCacheEntry(Value.Find(aIDs[i]));
-        finally
-          LeaveCriticalSection(Mutex);
-        end;
-      end;
+    fCache[aTableIndex].FlushCacheEntries(aIDs);
 end;
 
 procedure TRestCache.NotifyDeletion(aTable: TOrmClass; aID: TID);
