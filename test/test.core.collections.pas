@@ -7,8 +7,6 @@ interface
 
 {$I ..\src\mormot.defines.inc}
 
-{$ifdef HASGENERICS} // do-nothing unit on oldest compilers (e.g. < Delphi XE8)
-
 uses
   sysutils,
   classes,
@@ -25,12 +23,13 @@ uses
   mormot.core.perf,
   mormot.core.test;
 
+{$ifdef HASGENERICS} // do-nothing unit on oldest compilers (e.g. < Delphi XE8)
 
 type
   /// regression tests for mormot.core.collections features
   TTestCoreCollections = class(TSynTestCase)
   protected
-    procedure TestOne<T>;
+    procedure TestOne<T>(const li: IList<T>);
   published
     procedure _IList;
     procedure _IKeyValue;
@@ -54,40 +53,24 @@ implementation
   {$undef USEEQUALOP}
 {$endif FPC}
 
-procedure TTestCoreCollections.TestOne<T>;
+procedure TTestCoreCollections.TestOne<T>(const li: IList<T>);
 const
   MAX = 100000;
   ONLYLOG = true; // set to FALSE for verbose benchmarking console output
 var
-  li: IList<T>;
   cop: TArray<T>;
   i, j: T;
   n: integer;
-  timer, all: TPrecisionTimer;
   v: PVariantArray;
+  p: ^T;
   {$ifndef USEEQUALOP}
   p0, p1: ^T;
   {$endif USEEQUALOP}
   da: PDynArray;
   name: RawUtf8;
+  timer, all: TPrecisionTimer;
 begin
   SetLength(cop, MAX);
-  all.Start;
-  // circumvent FPC x86_64/aarch64 internal error 2010021502 :(
-  // - root cause seems to be that T is coming through TestOne<T> generic method
-  // - direct specialization like Collections.NewList<integer> works fine
-  {$ifdef FPC_64}
-  li := TSynListSpecialized<T>.Create;
-  {$else}
-  {$ifdef TESTHASH128}
-  {$ifndef SPECIALIZE_HASH}
-  if PRttiInfo(TypeInfo(T))^.RttiSize > 8 then
-    li := TSynListSpecialized<T>.Create
-  else
-  {$endif SPECIALIZE_HASH}
-  {$endif TESTHASH128}
-  li := Collections.NewList<T>;
-  {$endif FPC_64}
   da := li.Data;
   name := da^.Info.ArrayRtti.Name;
   Check(name <> '');
@@ -100,11 +83,31 @@ begin
   for n := 0 to MAX - 1 do
     da^.ItemRandom(@cop[n]);
   NotifyTestSpeed('random % ', [name], MAX, 0, @timer, ONLYLOG);
-  timer.Start;
+  all.Start;
   li.Capacity := MAX;
+  timer.Start;
   for n := 0 to MAX - 1 do
     Check(li.Add(cop[n]) = n);
   NotifyTestSpeed('add %    ',  [name], MAX, 0, @timer, ONLYLOG);
+  CheckEqual(li.Count, MAX);
+  //timer.Start;
+  li.Clear;
+  //NotifyTestSpeed('clear %    ',  [name], MAX, 0, @timer, ONLYLOG);
+  li.Count := MAX; // pre allocate + set length
+  timer.Start;
+  for n := 0 to MAX - 1 do // count + SetItem (faster)
+    li.Items[n] := cop[n];
+  NotifyTestSpeed('add items %',  [name], MAX, 0, @timer, ONLYLOG);
+  li.Clear;
+  li.Count := MAX; // pre allocate + set length
+  timer.Start;
+  p := li.First;   // use direct pointer assignment (fastest)
+  for n := 0 to MAX - 1 do
+  begin
+    p^ := cop[n];
+    inc(p);
+  end;
+  NotifyTestSpeed('add ptr %',  [name], MAX, 0, @timer, ONLYLOG);
   CheckEqual(li.Count, MAX);
   timer.Start;
   for n := 0 to MAX - 1 do
@@ -113,7 +116,7 @@ begin
     Check(li[n] = cop[n]);
     {$else}
     i := li[n];
-    Check(da.ItemCompare(@i, @cop[n]) = 0);
+    Check(da.ItemCompare(@i, @cop[n]) = 0, 'getitem');
     {$endif USEEQUALOP}
   end;
   NotifyTestSpeed('getitem %', [name], MAX, 0, @timer, ONLYLOG);
@@ -124,13 +127,13 @@ begin
     {$ifdef USEEQUALOP}
     Check(i = cop[n]);
     {$else}
-    Check(da.ItemCompare(@i, @cop[n]) = 0);
+    Check(da.ItemCompare(@i, @cop[n]) = 0, 'in');
     {$endif USEEQUALOP}
     inc(n);
   end;
   NotifyTestSpeed('in %     ', [name], MAX, 0, @timer, ONLYLOG);
   Check(n = MAX);
-  NotifyTestSpeed(' IList<%>', [name], MAX * 4, 0, @all, {onlylog=}false);
+  NotifyTestSpeed(' IList<%>', [name], MAX * 5, 0, @all, {onlylog=}false);
   timer.Start; // Sort is excluded of main "all" timer since is misleading
   li.Sort;
   NotifyTestSpeed('sort %   ', [name], MAX, 0, @timer, ONLYLOG);
@@ -364,7 +367,7 @@ begin
   {$ifdef SPECIALIZE_HASH}
   lh := Collections.NewList<THash128>;
   {$else}
-  lh := TSynListSpecialized<THash128>.Create;
+  lh := Collections.NewPlainList<THash128>;
   {$endif SPECIALIZE_HASH}
   FillZero(h);
   lh.Add(h);
@@ -385,28 +388,40 @@ begin
   for i := 0 to lr.Count - 1 do
     Check(StrToInt(lr[i].Error) = i);
   // validate and benchmark all main types using a generic sub method
-  TestOne<byte>();
-  TestOne<word>();
-  TestOne<integer>();
-  TestOne<cardinal>();
-  TestOne<Int64>();
-  TestOne<QWord>();
-  TestOne<Single>();
-  TestOne<Double>();
-  TestOne<TDateTime>();
-  TestOne<RawUtf8>();
+  // call NewList<> here to circumvent FPC_64 internal error 2010021502 :(
+  // - error appears only if T is coming through TestOne<T> generic method
+  // - direct call of factory methods from here works fine (as in normal code),
+  // and ensures early specifialization is triggered even on FPC x86_64/aarch64
+  TestOne<byte>(Collections.NewList<byte>);
+  TestOne<word>(Collections.NewList<word>);
+  TestOne<integer>(Collections.NewList<integer>);
+  TestOne<cardinal>(Collections.NewList<cardinal>);
+  TestOne<Int64>(Collections.NewList<Int64>);
+  TestOne<QWord>(Collections.NewList<QWord>);
+  TestOne<Single>(Collections.NewList<single>);
+  TestOne<Double>(Collections.NewList<double>);
+  TestOne<TDateTime>(Collections.NewList<TDateTime>);
+  TestOne<RawUtf8>(Collections.NewList<RawUtf8>);
   {$ifdef OSWINDOWS} // OleString on Windows only -> = UnicodeString on POSIX
   // disabled since SPECIALIZE_WSTRING is not set
-  //TestOne<WideString>();
+  //TestOne<WideString>(Collections.NewList<WideString>);
   // note: WideString (BSTR API) is way slower than UnicodeString or RawUtf8
   {$endif OSWINDOWS}
   {$ifdef HASVARUSTRING}
-  TestOne<UnicodeString>();
+  TestOne<UnicodeString>(Collections.NewList<UnicodeString>);
   {$endif HASVARUSTRING}
-  TestOne<Variant>();
+  TestOne<Variant>(Collections.NewList<Variant>);
   {$ifdef TESTHASH128}
-  TestOne<THash128>();
-  TestOne<TGuid>();
+  TestOne<THash128>({$ifdef SPECIALIZE_HASH}
+                    Collections.NewList<THash128>
+                    {$else}
+                    Collections.NewPlainList<THash128>
+                    {$endif SPECIALIZE_HASH});
+  TestOne<TGuid>({$ifdef SPECIALIZE_HASH}
+                 Collections.NewList<TGuid>
+                 {$else}
+                 Collections.NewPlainList<TGuid>
+                 {$endif SPECIALIZE_HASH});
   {$endif TESTHASH128}
 end;
 
@@ -507,7 +522,17 @@ end;
 
 {$else}
 
+type
+  TTestCoreCollections = class(TSynTestCase)
+  published
+    procedure UnsupportedCompiler;
+  end;
+
 implementation
+
+procedure TTestCoreCollections.UnsupportedCompiler;
+begin
+end;
 
 {$endif HASGENERICS} // do-nothing unit on oldest compilers
 

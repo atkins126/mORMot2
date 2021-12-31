@@ -1002,7 +1002,7 @@ begin
 end;
 {$I+}
 
-function FileOpenSequentialRead(const FileName: string): integer;
+function FileOpenSequentialRead(const FileName: TFileName): integer;
 begin
   // SysUtils.FileOpen = fpOpen + fpFlock
   result := fpOpen(pointer(FileName), O_RDONLY); // no fpFlock() call
@@ -1733,10 +1733,10 @@ var
   rd, dev: integer;
 begin
   result := false;
-  dev := FileOpen('/dev/urandom', fmOpenRead); // non blocking on Linux and BSD
+  dev := FileOpenSequentialRead('/dev/urandom');  // non blocking on Linux + BSD
   if (dev <= 0) and
      AllowBlocking then
-    dev := FileOpen('/dev/random', fmOpenRead); // may block until reach entropy
+    dev := FileOpenSequentialRead('/dev/random'); // may block until got entropy
   if dev > 0 then
     try
       rd := 32; // read up to 256 bits - see "man urandom" Usage paragraph

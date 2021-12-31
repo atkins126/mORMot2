@@ -8,6 +8,62 @@
 
 { ****************** Unicode, Time, File process }
 
+// W32() get a PWideChar buffer from a TFileName using a temp static buffer
+{$ifdef UNICODE}
+
+type
+  TW32Temp = byte; // not used
+
+function W32(const FileName: TFileName; var Temp: TW32Temp): PWideChar; inline;
+begin
+  Temp := 0; // make compiler happy
+  result := pointer(FileName); // no conversion needed
+end;
+
+{$else}
+
+type
+  TW32Temp = array[0..MAX_PATH] of WideChar; // no temp alloc for ASCII names
+
+procedure W32Convert(const FileName: TFileName; var Temp: TW32Temp);
+var
+  U: SynUnicode;
+  len: PtrInt;
+begin
+  // identical to FPC RTL, which converts to UnicodeString before Wide API call 
+  U := SynUnicode(FileName); // let the RTL + WinAPI do the conversion
+  len := length(U) * 2 + 2;  // include trailing #0
+  if len > SizeOf(Temp) then
+    Temp[0] := #0 // avoid buffer overflow (will be rejected by Windows anyway)
+  else
+    MoveFast(pointer(U)^, Temp, len);
+end;
+
+function W32(const FileName: TFileName; var Temp: TW32Temp): PWideChar;
+var
+  i, len: PtrInt;
+begin
+  len := length(FileName);
+  if len = 0 then
+    result := nil
+  else
+  begin
+    if IsAnsiCompatible(pointer(FileName), len) then
+    begin
+      // most common case doesn't need any Unicode conversion
+      if len > MAX_PATH then
+        len := 0;
+      for i := 0 to len do // include trailing #0
+        PWordArray(@Temp)[i] := PByteArray(FileName)[i];
+    end
+    else
+      W32Convert(FileName, Temp);
+    result := @Temp;
+  end;
+end;
+
+{$endif UNICODE}
+
 const
   DefaultCharVar: AnsiChar = '?';
 
@@ -23,8 +79,10 @@ end;
 
 
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
+var
+  tmp: TW32Temp;
 begin
-  result := Windows.LoadLibrary(pointer(LibraryName));
+  result := Windows.LoadLibraryW(W32(LibraryName, tmp));
 end;
 
 procedure LibraryClose(Lib: TLibHandle);
@@ -245,12 +303,14 @@ var
   _QueryPerformanceFrequencyPer10: boolean;
 
 procedure QueryPerformanceMicroSeconds(out Value: Int64);
+var
+  v: Int64; // for proper alignment on some old Delphi revisions + Win32
 begin
-  QueryPerformanceCounter(PInt64(@Value)^);
+  QueryPerformanceCounter(v);
   if _QueryPerformanceFrequencyPer10 then
-    Value := QWord(Value) div 10 // faster division by a constant (especially on FPC_64)
+    Value := QWord(v) div 10 // faster div by a constant (especially on FPC_64)
   else
-    Value := QWord((QWord(Value) * 1000000) div _QueryPerformanceFrequency);
+    Value := QWord((QWord(v) * 1000000) div _QueryPerformanceFrequency);
 end;
 
 const
@@ -261,9 +321,10 @@ function FileAgeToDateTime(const FileName: TFileName): TDateTime;
 var
   FA: WIN32_FILE_ATTRIBUTE_DATA;
   ST, LT: TSystemTime;
+  tmp: TW32Temp;
 begin
   // 5 times faster than CreateFile, GetFileSizeEx, CloseHandle
-  if GetFileAttributesEx(pointer(FileName), GetFileExInfoStandard, @FA) and
+  if GetFileAttributesExW(W32(FileName, tmp), GetFileExInfoStandard, @FA) and
      FileTimeToSystemTime({%H-}FA.ftLastWriteTime, ST) and
      SystemTimeToTzSpecificLocalTime(nil, ST, LT) then
     result := SystemTimeToDateTime(LT)
@@ -274,9 +335,10 @@ end;
 function FileAgeToUnixTimeUtc(const FileName: TFileName; AllowDir: boolean): TUnixTime;
 var
   FA: WIN32_FILE_ATTRIBUTE_DATA;
+  tmp: TW32Temp;
 begin
   // 5 times faster than CreateFile, GetFileSizeEx, CloseHandle
-  if GetFileAttributesEx(pointer(FileName), GetFileExInfoStandard, @FA) and
+  if GetFileAttributesExW(W32(FileName, tmp), GetFileExInfoStandard, @FA) and
      (AllowDir or
       (({%H-}FA.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY) = 0)) then
     result := FileTimeToUnixTime(FA.ftLastWriteTime) // no local time conversion
@@ -286,7 +348,7 @@ end;
 
 function FileAgeToWindowsTime(const FileName: TFileName): integer;
 begin
-  result := FileAge(FileName);
+  result := FileAge(FileName); // only called by mormot.core.zip
 end;
 
 function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): boolean;
@@ -336,9 +398,10 @@ end;
 function FileSize(const FileName: TFileName): Int64;
 var
   FA: WIN32_FILE_ATTRIBUTE_DATA;
+  tmp: TW32Temp;
 begin
   // 5 times faster than CreateFile, GetFileSizeEx, CloseHandle
-  if GetFileAttributesEx(pointer(FileName), GetFileExInfoStandard, @FA) then
+  if GetFileAttributesExW(W32(FileName, tmp), GetFileExInfoStandard, @FA) then
   begin
     PInt64Rec(@result)^.Lo := FA.nFileSizeLow;
     PInt64Rec(@result)^.Hi := FA.nFileSizeHigh;
@@ -370,17 +433,49 @@ begin
 end;
 
 function DeleteFile(const aFileName: TFileName): boolean;
+var
+  tmp: TW32Temp;
 begin
   if aFileName = '' then
     result := false
   else
-    result := SysUtils.DeleteFile(aFileName);
+    result := DeleteFileW(W32(aFileName, tmp));
 end;
 
 function FileCreate(const aFileName: TFileName): THandle;
+var
+  tmp: TW32Temp;
 begin
-  result := SysUtils.FileCreate(aFileName);
+  result := CreateFileW(W32(aFileName, tmp), GENERIC_READ or GENERIC_WRITE,
+    0, nil, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
 end;
+
+{$ifndef UNICODE} // W32() is not worth it if aFileName is UnicodeString
+function FileOpen(const aFileName: TFileName; aMode: integer): THandle;
+const
+  FILE_WRITE_ATTRIBUTES = $0100; // not defined on oldest Delphi
+  ACCESS: array[0..2] of DWord = (
+    GENERIC_READ,
+    GENERIC_WRITE,
+    GENERIC_READ or GENERIC_WRITE or FILE_WRITE_ATTRIBUTES);
+  SHARE: array[0..4] of DWord = (
+    0,
+    0,
+    FILE_SHARE_READ,
+    FILE_SHARE_WRITE,
+    FILE_SHARE_READ or FILE_SHARE_WRITE);
+var
+  tmp: TW32Temp;
+  s: PtrInt;
+begin
+  s := (aMode and $f0) shr 4;
+  if s <= high(SHARE) then
+   result := CreateFileW(W32(aFileName, tmp), ACCESS[aMode and 3], SHARE[s],
+     nil, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+  else
+    result := THandle(-1);
+end;
+{$endif UNICODE}
 
 function FileSetDateFrom(const Dest: TFileName; SourceHandle: THandle): boolean;
 var
@@ -404,41 +499,51 @@ begin
 end;
 
 procedure FileSetAttributes(const FileName: TFileName; Secret: boolean);
+const
+  FLAGS: array[boolean] of integer = (
+    FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_HIDDEN or FILE_ATTRIBUTE_READONLY);
+var
+  tmp: TW32Temp;
 begin
   if FileName <> '' then
-    if Secret then
-      SetFileAttributes(pointer(FileName),
-        FILE_ATTRIBUTE_HIDDEN or FILE_ATTRIBUTE_READONLY)
-    else
-      SetFileAttributes(pointer(FileName), FILE_ATTRIBUTE_NORMAL);
+    SetFileAttributesW(W32(FileName, tmp), FLAGS[Secret]);
 end;
 
 function RenameFile(const OldName, NewName: TFileName): boolean;
+var
+  o, n: TW32Temp;
 begin
   if (OldName = '') or
      (NewName = '') then
     result := false
   else
-    result := SysUtils.RenameFile(OldName,NewName);
+    result := MoveFileW(W32(OldName, o), W32(NewName, n));
 end;
 
 function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boolean;
+var
+  s, t: TW32Temp;
 begin
   if (Source = '') or
      (Target = '') then
     result := false
   else
-    result := Windows.CopyFile(pointer(Source), pointer(Target), FailIfExists);
+    result := Windows.CopyFileW(W32(Source, s), W32(Target, t), FailIfExists);
 end;
 
-function FileOpenSequentialRead(const FileName: string): integer;
+function FileOpenSequentialRead(const FileName: TFileName): integer;
+var
+  tmp: TW32Temp;
+  flags: integer;
 begin
   if OSVersion >= wVista then // XP has troubles with the "sequential" flag
-    result := CreateFile(pointer(FileName), GENERIC_READ,
-      FILE_SHARE_READ or FILE_SHARE_WRITE, nil, // same as fmShareDenyNone
-      OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, 0)
+    flags := FILE_FLAG_SEQUENTIAL_SCAN
   else
-    result := FileOpen(FileName, fmOpenRead or fmShareDenyNone);
+    flags := FILE_ATTRIBUTE_NORMAL;
+  result := CreateFileW(W32(FileName, tmp), GENERIC_READ,
+    FILE_SHARE_READ or FILE_SHARE_WRITE, nil, // same as fmShareDenyNone
+    OPEN_EXISTING, flags, 0)
 end;
 
 threadvar // mandatory: GetTickCount seems per-thread on XP :(
@@ -1526,7 +1631,7 @@ var
   Info: ^TVSFixedFileInfo;
   FileTime: TFILETIME;
   SystemTime: TSYSTEMTIME;
-  tmp: TFileName;
+  tmp: SynUnicode;
 
   function ReadResourceByName(const From: RawUtf8): RawUtf8;
   var
@@ -1548,14 +1653,21 @@ begin
   begin
     // GetFileVersionInfo modifies the filename parameter data while parsing
     // Copy the string const into a local variable to create a writeable copy
-    SetString(tmp, PChar(pointer(aFileName)), length(aFileName));
-    Size := GetFileVersionInfoSize(pointer(tmp), Size2);
+    tmp := SynUnicode(aFileName);
+    {$ifdef UNICODE}
+    UniqueString(tmp);
+    {$endif UNICODE}
+    Size := GetFileVersionInfoSizeW(pointer(tmp), Size2);
     if Size > 0 then
     begin
       GetMem(Pt, Size);
       try
-        GetFileVersionInfo(pointer(aFileName), 0, Size, Pt);
-        VerQueryValue(Pt, '\', pointer(Info), Size2);
+        tmp := SynUnicode(aFileName);
+        {$ifdef UNICODE}
+        UniqueString(tmp);
+        {$endif UNICODE}
+        GetFileVersionInfoW(pointer(tmp), 0, Size, Pt);
+        VerQueryValueW(Pt, '\', pointer(Info), Size2);
         with Info^ do
         begin
           if Version32 = 0 then
@@ -1799,98 +1911,63 @@ end;
 
 
 const
-  SE_CREATE_TOKEN_NAME           = 'SeCreateTokenPrivilege';
-  SE_ASSIGNPRIMARYTOKEN_NAME     = 'SeAssignPrimaryTokenPrivilege';
-  SE_LOCK_MEMORY_NAME            = 'SeLockMemoryPrivilege';
-  SE_INCREASE_QUOTA_NAME         = 'SeIncreaseQuotaPrivilege';
-  SE_UNSOLICITED_INPUT_NAME      = 'SeUnsolicitedInputPrivilege';
-  SE_MACHINE_ACCOUNT_NAME        = 'SeMachineAccountPrivilege';
-  SE_TCB_NAME                    = 'SeTcbPrivilege';
-  SE_SECURITY_NAME               = 'SeSecurityPrivilege';
-  SE_TAKE_OWNERSHIP_NAME         = 'SeTakeOwnershipPrivilege';
-  SE_LOAD_DRIVER_NAME            = 'SeLoadDriverPrivilege';
-  SE_SYSTEM_PROFILE_NAME         = 'SeSystemProfilePrivilege';
-  SE_SYSTEMTIME_NAME             = 'SeSystemtimePrivilege';
-  SE_PROF_SINGLE_PROCESS_NAME    = 'SeProfileSingleProcessPrivilege';
-  SE_INC_BASE_PRIORITY_NAME      = 'SeIncreaseBasePriorityPrivilege';
-  SE_CREATE_PAGEFILE_NAME        = 'SeCreatePagefilePrivilege';
-  SE_CREATE_PERMANENT_NAME       = 'SeCreatePermanentPrivilege';
-  SE_BACKUP_NAME                 = 'SeBackupPrivilege';
-  SE_RESTORE_NAME                = 'SeRestorePrivilege';
-  SE_SHUTDOWN_NAME               = 'SeShutdownPrivilege';
-  SE_DEBUG_NAME                  = 'SeDebugPrivilege';
-  SE_AUDIT_NAME                  = 'SeAuditPrivilege';
-  SE_SYSTEM_ENVIRONMENT_NAME     = 'SeSystemEnvironmentPrivilege';
-  SE_CHANGE_NOTIFY_NAME          = 'SeChangeNotifyPrivilege';
-  SE_REMOTE_SHUTDOWN_NAME        = 'SeRemoteShutdownPrivilege';
-  SE_UNDOCK_NAME                 = 'SeUndockPrivilege';
-  SE_SYNC_AGENT_NAME             = 'SeSyncAgentPrivilege';
-  SE_ENABLE_DELEGATION_NAME      = 'SeEnableDelegationPrivilege';
-  SE_MANAGE_VOLUME_NAME          = 'SeManageVolumePrivilege';
-  SE_IMPERSONATE_NAME            = 'SeImpersonatePrivilege';
-  SE_CREATE_GLOBAL_NAME          = 'SeCreateGlobalPrivilege';
-  SE_TRUSTED_CREDMAN_ACCESS_NAME = 'SeTrustedCredManAccessPrivilege';
-  SE_RELABEL_NAME                = 'SeRelabelPrivilege';
-  SE_INC_WORKING_SET_NAME        = 'SeIncreaseWorkingSetPrivilege';
-  SE_TIME_ZONE_NAME              = 'SeTimeZonePrivilege';
-  SE_CREATE_SYMBOLIC_LINK_NAME   = 'SeCreateSymbolicLinkPrivilege';
-
   MAX_SE_NAME_LENGTH = 31;
-
-  WinSystemPrivilegeToSE_NAME: array[TWinSystemPrivilege] of string = (
-    SE_CREATE_TOKEN_NAME,
-    SE_ASSIGNPRIMARYTOKEN_NAME,
-    SE_LOCK_MEMORY_NAME,
-    SE_INCREASE_QUOTA_NAME,
-    SE_UNSOLICITED_INPUT_NAME,
-    SE_MACHINE_ACCOUNT_NAME,
-    SE_TCB_NAME,
-    SE_SECURITY_NAME,
-    SE_TAKE_OWNERSHIP_NAME,
-    SE_LOAD_DRIVER_NAME,
-    SE_SYSTEM_PROFILE_NAME,
-    SE_SYSTEMTIME_NAME,
-    SE_PROF_SINGLE_PROCESS_NAME,
-    SE_INC_BASE_PRIORITY_NAME,
-    SE_CREATE_PAGEFILE_NAME,
-    SE_CREATE_PERMANENT_NAME,
-    SE_BACKUP_NAME,
-    SE_RESTORE_NAME,
-    SE_SHUTDOWN_NAME,
-    SE_DEBUG_NAME,
-    SE_AUDIT_NAME,
-    SE_SYSTEM_ENVIRONMENT_NAME,
-    SE_CHANGE_NOTIFY_NAME,
-    SE_REMOTE_SHUTDOWN_NAME,
-    SE_UNDOCK_NAME,
-    SE_SYNC_AGENT_NAME,
-    SE_ENABLE_DELEGATION_NAME,
-    SE_MANAGE_VOLUME_NAME,
-    SE_IMPERSONATE_NAME,
-    SE_CREATE_GLOBAL_NAME,
-    SE_TRUSTED_CREDMAN_ACCESS_NAME,
-    SE_RELABEL_NAME,
-    SE_INC_WORKING_SET_NAME,
-    SE_TIME_ZONE_NAME,
-    SE_CREATE_SYMBOLIC_LINK_NAME
-  );
+  WINSYSTEMPRIVILEGENAME: array[TWinSystemPrivilege] of string = (
+    'SeCreateTokenPrivilege',          // wspCreateToken
+    'SeAssignPrimaryTokenPrivilege',   // wspAssignPrimaryToken
+    'SeLockMemoryPrivilege',           // wspLockMemory
+    'SeIncreaseQuotaPrivilege',        // wspIncreaseQuota
+    'SeUnsolicitedInputPrivilege',     // wspUnsolicitedInput
+    'SeMachineAccountPrivilege',       // wspMachineAccount
+    'SeTcbPrivilege',                  // wspTCP
+    'SeSecurityPrivilege',             // wspSecurity
+    'SeTakeOwnershipPrivilege',        // wspTakeOwnership
+    'SeLoadDriverPrivilege',           // wspLoadDriver
+    'SeSystemProfilePrivilege',        // wspSystemProfile
+    'SeSystemtimePrivilege',           // wspSystemTime
+    'SeProfileSingleProcessPrivilege', // wspProfSingleProcess
+    'SeIncreaseBasePriorityPrivilege', // wspIncBasePriority
+    'SeCreatePagefilePrivilege',       // wspCreatePageFile
+    'SeCreatePermanentPrivilege',      // wspCreatePermanent
+    'SeBackupPrivilege',               // wspBackup
+    'SeRestorePrivilege',              // wspRestore
+    'SeShutdownPrivilege',             // wspShutdown
+    'SeDebugPrivilege',                // wspDebug
+    'SeAuditPrivilege',                // wspAudit
+    'SeSystemEnvironmentPrivilege',    // wspSystemEnvironment
+    'SeChangeNotifyPrivilege',         // wspChangeNotify
+    'SeRemoteShutdownPrivilege',       // wspRemoteShutdown
+    'SeUndockPrivilege',               // wspUndock
+    'SeSyncAgentPrivilege',            // wspSyncAgent
+    'SeEnableDelegationPrivilege',     // wspEnableDelegation
+    'SeManageVolumePrivilege',         // wspManageVolume
+    'SeImpersonatePrivilege',          // wspImpersonate
+    'SeCreateGlobalPrivilege',         // wspCreateGlobal
+    'SeTrustedCredManAccessPrivilege', // wspTrustedCredmanAccess
+    'SeRelabelPrivilege',              // wspRelabel
+    'SeIncreaseWorkingSetPrivilege',   // wspIncWorkingSet
+    'SeTimeZonePrivilege',             // wspTimeZone
+    'SeCreateSymbolicLinkPrivilege');  // wspCreateSymbolicLink
 
 type
-  PTOKEN_PRIVILEGES = ^TOKEN_PRIVILEGES;
   TOKEN_PRIVILEGES = packed record
     PrivilegeCount : DWORD;
     Privileges : array[0..0] of LUID_AND_ATTRIBUTES;
   end;
+  PTOKEN_PRIVILEGES = ^TOKEN_PRIVILEGES;
 
 function OpenProcessToken(ProcessHandle: THandle; DesiredAccess: DWORD;
   var TokenHandle: THandle): BOOL;
     stdcall; external advapi32 name 'OpenProcessToken';
+
 function LookupPrivilegeValue(lpSystemName, lpName: PChar;
   var lpLuid: TLargeInteger): BOOL;
     stdcall; external advapi32 name 'LookupPrivilegeValue' + _AW;
+
 function LookupPrivilegeName(lpSystemName: LPCSTR; var lpLuid: TLargeInteger;
   lpName: PChar; var cbName: DWORD): BOOL;
     stdcall; external advapi32 name 'LookupPrivilegeName' + _AW;
+
 function AdjustTokenPrivileges(TokenHandle: THandle; DisableAllPrivileges: BOOL;
   const NewState: TOKEN_PRIVILEGES; BufferLength: DWORD;
   PreviousState: PTokenPrivileges; ReturnLength: PDWORD): BOOL;
@@ -2018,7 +2095,7 @@ begin
               [GetLastError, PInt64(@tp.Privileges[i].Luid)^])
         end;
       for p := low(p) to high(p) do
-        if CompareText(name, WinSystemPrivilegeToSE_NAME[p]) = 0 then
+        if CompareText(name, WINSYSTEMPRIVILEGENAME[p]) = 0 then
         begin
           Include(fAvailable, p);
           if tp.Privileges[i].Attributes and SE_PRIVILEGE_ENABLED <> 0 then
@@ -2042,7 +2119,7 @@ begin
   result := false;
   cbprev := SizeOf(TOKEN_PRIVILEGES);
   if not LookupPrivilegeValue(
-           nil, Pointer(WinSystemPrivilegeToSE_NAME[aPrivilege]), id) then
+           nil, Pointer(WINSYSTEMPRIVILEGENAME[aPrivilege]), id) then
     exit;
   tp.PrivilegeCount := 1;
   tp.Privileges[0].Luid := PInt64(@id)^;
@@ -2158,8 +2235,7 @@ function ReadProcessMemory(hProcess: THandle; const lpBaseAddress: Pointer;
   lpBuffer: Pointer; nSize: PtrUInt; var lpNumberOfBytesRead: PtrUInt): BOOL;
     stdcall; external kernel32 name 'ReadProcessMemory';
 
-function InternalGetProcessInfo(aPID: DWORD;
-  out aInfo: TWinProcessInfo): boolean;
+function InternalGetProcessInfo(aPID: DWORD; out aInfo: TWinProcessInfo): boolean;
 var
   bytesread: PtrUInt;
   sizeneeded: DWORD;
@@ -2711,7 +2787,8 @@ end;
 procedure TService.DoCtrlHandle(Code: cardinal);
 begin
   if Assigned(WindowsServiceLog) then
-    WindowsServiceLog(sllInfo, '%: command % received from OS', [ServiceName, Code], self);
+    WindowsServiceLog(sllInfo, '%: command % received from OS',
+      [ServiceName, Code], self);
   try
     case Code of
       SERVICE_CONTROL_STOP:
@@ -2894,12 +2971,12 @@ begin
     SetServiceStatus(fStatusHandle, fStatusRec);
 end;
 
-procedure TService.start;
+procedure TService.Start;
 begin
   with TServiceController.CreateOpenService(
     '', '', fSName, SERVICE_ALL_ACCESS) do
   try
-    start([]);
+    Start([]);
   finally
     Free;
   end;
@@ -3000,15 +3077,15 @@ end;
     
 procedure ServiceProc(ArgCount: cardinal; Args: PPChar); stdcall;
 var
-  i: integer;
+  i: PtrInt;
 begin
   if not Assigned(ServiceSingle) then
     exit;
-  for i := 1 to ArgCount - 1 do
+  SetLength(ServiceSingle.fArgsList, ArgCount - 1);
+  for i := 0 to ArgCount - 2 do
   begin
     Inc(Args);
-    SetLength(ServiceSingle.fArgsList, length(ServiceSingle.fArgsList) + 1);
-    ServiceSingle.fArgsList[high(ServiceSingle.fArgsList)] := Args^;
+    ServiceSingle.fArgsList[i] := Args^;
   end;
   ServiceSingle.fStatusHandle := RegisterServiceCtrlHandler(
     pointer(ServiceSingle.fSName), @ServiceSingle.ControlHandler);
@@ -3087,6 +3164,23 @@ var
   EnvironmentCache: SynUnicode;
   EnvironmentCacheLock: TLightLock;
 
+procedure GetEnvironmentCache;
+var
+  e, p: PWideChar;
+begin
+  EnvironmentCacheLock.Lock;
+  if EnvironmentCache = '' then
+  begin
+    e := GetEnvironmentStringsW;
+    p := e;
+    while p^ <> #0 do
+      inc(p, StrLenW(p) + 1); // go to name=value#0 pairs end
+    SetString(EnvironmentCache, e, (PtrUInt(p) - PtrUInt(e)) shr 1);
+    FreeEnvironmentStringsW(e);
+  end;
+  EnvironmentCacheLock.UnLock;
+end;
+
 function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName;
   envaddexisting: boolean; parsed: PParseCommands): integer;
 var
@@ -3095,7 +3189,6 @@ var
   exe, path: TFileName;
   // CreateProcess can alter the strings -> use local SynUnicode temp variables
   wcmd, wenv, wpath: SynUnicode;
-  e, p: PWideChar;
   exitcode: cardinal;
   i: integer;
 begin
@@ -3134,21 +3227,9 @@ begin
     wenv := SynUnicode(env);
     if envaddexisting then
     begin
-      EnvironmentCacheLock.Lock;
-      try
-        if EnvironmentCache = '' then
-        begin
-          e := GetEnvironmentStringsW;
-          p := e;
-          while p^ <> #0 do
-            inc(p, StrLenW(p) + 1); // go to name=value#0 pairs end
-          SetString(EnvironmentCache, e, (PtrUInt(p) - PtrUInt(e)) shr 1);
-          FreeEnvironmentStringsW(e);
-        end;
-        wenv := EnvironmentCache + wenv;
-      finally
-        EnvironmentCacheLock.UnLock;
-      end;
+      if EnvironmentCache = '' then
+        GetEnvironmentCache;
+      wenv := EnvironmentCache + wenv;
     end
     else
       UniqueString(wenv);

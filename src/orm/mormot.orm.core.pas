@@ -483,7 +483,7 @@ type
     // Delphi nor FPC allow parametrized interface methods
     // - our IList<> and IKeyValue<> interfaces are faster and generates smaller
     // executables than Generics.Collections, and need no try..finally Free: a
-    // single TSynListSpecialized<TOrm> class will be reused for all IList<>
+    // single TIList<TOrm> class will be reused for all IList<>
     // - you can write for instance:
     // !var list: IList<TOrmTest>;
     // !    R: TOrmTest;
@@ -1706,6 +1706,14 @@ type
     // all text fields, after space trimming, won't be void
     // - will only affect RAWTEXT_FIELDS
     class procedure AddFilterNotVoidAllTextFields;
+    {$ifdef ORMGENERICS}
+    /// generate a new IList<TOrm> instance for the specific TOrm class
+    // - a single TIList<TOrm> instance will be shared for all TOrm classes,
+    // even on oldest compilers which do not support specialization
+    // - the returned IList<T: TOrm> will own and free each T instance
+    // - as used e.g. by TOrmTable.ToNewIList()
+    class function NewIList(var IListOrm): TIListParent;
+    {$endif ORMGENERICS}
 
     /// protect several TOrm local variable instances
     // - WARNING: both FPC and Delphi 10.4+ don't keep the IAutoFree instance
@@ -2865,7 +2873,7 @@ type
     // - always returns an IList<> instance, even if the TOrmTable is nil or void
     // - our IList<> and IKeyValue<> interfaces are faster and generates smaller
     // executables than Generics.Collections, and need no try..finally Free: a
-    // single TSynListSpecialized<TOrm> class will be reused for all IList<>
+    // single TIList<TOrm> class will be reused for all IList<>
     procedure ToNewIList(Item: TOrmClass; var Result);
     {$endif ORMGENERICS}
     /// fill an existing T*ObjArray variable with TOrm instances
@@ -5280,26 +5288,21 @@ begin
 end;
 
 {$ifdef ORMGENERICS}
-
 procedure TOrmTable.ToNewIList(Item: TOrmClass; var Result);
 var
-  list: TSynListSpecialized<TOrm>;
+  list: TIListParent;
   cloned, one: TOrm;
   r: integer;
   rec: POrm;
 begin
-  list := TSynListSpecialized<TOrm>.Create(
-    [], ptClass, TypeInfo(TOrmObjArray), Item.ClassInfo);
-  // all IList<T> share the same VMT -> assign same TSynListSpecialized<TOrm>
-  IList<TOrm>(Result) := list;
-  // IList<T> will own and free each T instance
+  list := Item.NewIList(Result);
   if (self = nil) or
      (fRowCount = 0) then
     exit;
   cloned := Item.Create;
   try
     cloned.FillPrepare(self);
-    list.SetCount(fRowCount); // allocate once
+    list.Count := fRowCount;  // allocate once
     rec := list.First;        // fast direct iteration
     for r := 1 to fRowCount do
     begin
@@ -5313,7 +5316,6 @@ begin
     cloned.Free;
   end;
 end;
-
 {$endif ORMGENERICS}
 
 procedure TOrmTable.FillOrms(P: POrm; RecordType: TOrmClass);
@@ -8296,6 +8298,16 @@ begin
         AddFilterOrValidate(f, TSynValidateNonVoidText.Create);
       end;
 end;
+
+{$ifdef ORMGENERICS}
+class function TOrm.NewIList(var IListOrm): TIListParent;
+begin
+  result := TIList<TOrm>.Create(
+    TypeInfo(TOrmObjArray), self.ClassInfo, [], ptClass);
+  // all IList<T> share the same VMT -> assign shared TIList<TOrm>
+  IList<TOrm>(IListOrm) := TIList<TOrm>(result);
+end;
+{$endif ORMGENERICS}
 
 function TOrm.Validate(const aRest: IRestOrm; const aFields: TFieldBits;
   aInvalidFieldIndex: PInteger; aValidator: PSynValidate): string;

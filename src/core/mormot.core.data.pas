@@ -401,6 +401,8 @@ type
     constructor Create; virtual;
     /// add one item to the list
     function Add(item: pointer): PtrInt; virtual;
+    /// insert one item to the list at a given position
+    function Insert(item: pointer; index: PtrInt): PtrInt;
     /// delete all items of the list
     procedure Clear; virtual;
     /// delete one item from the list
@@ -561,10 +563,6 @@ type
   protected
     fSafe: TRWLightLock;
   public
-    /// initialize the list instance
-    // - the stored TObject instances will be owned by this TSynObjectListLightLocked,
-    // unless AOwnsObjects is set to false
-    constructor Create(aOwnsObjects: boolean = true); reintroduce;
     /// the light single Read / exclusive Write LightLock associated to this list
     // - could be used to protect shared resources within the internal process,
     // for index-oriented methods like Delete/Items/Count...
@@ -585,10 +583,6 @@ type
   protected
     fSafe: TRWLock;
   public
-    /// initialize the list instance
-    // - the stored TObject instances will be owned by this TSynObjectListLocked,
-    // unless AOwnsObjects is set to false
-    constructor Create(aOwnsObjects: boolean = true); reintroduce;
     /// add one item to the list using Safe.WriteLock
     function Add(item: pointer): PtrInt; override;
     /// delete all items of the list using Safe.WriteLock
@@ -607,6 +601,36 @@ type
       read fSafe;
   end;
 
+  /// event used by TSynObjectListSorted to compare its instances
+  TOnObjectCompare = function(A, B: TObject): integer;
+
+  /// an ordered thread-safe TSynObjectList
+  // - items will be stored in order, for O(log(n)) fast search
+  TSynObjectListSorted = class(TSynObjectListLocked)
+  protected
+    fCompare: TOnObjectCompare;
+    // returns TRUE and the index of existing Item, or FALSE and the index
+    // where the Item is to be inserted so that the array remains sorted
+    function Locate(item: pointer; out index: PtrInt): boolean;
+  public
+    /// initialize the object list to be sorted with the supplied function
+    constructor Create(const aCompare: TOnObjectCompare;
+      aOwnsObjects: boolean = true); reintroduce;
+    /// add in-order one item to the list using Safe.WriteLock
+    // - returns the sorted index when item was inserted
+    // - returns < 0 if item was found, as -(existingindex + 1)
+    function Add(item: pointer): PtrInt; override;
+    /// fast retrieve one item in the list using O(log(n)) binary search
+    // - this overriden version won't search for the item pointer itself,
+    // but will use the Compare() function until it is 0
+    function IndexOf(item: pointer): PtrInt; override;
+    /// fast retrieve one item in the list using O(log(n)) binary search
+    // - supplied item should have enough information for fCompare to work
+    function Find(item: TObject): TObject;
+    /// how two stored objects are stored
+    property Compare: TOnObjectCompare
+      read fCompare write fCompare;
+  end;
 
 
 { ************ TSynPersistentStore with proper Binary Serialization }
@@ -1325,6 +1349,7 @@ type
     // - warning: Dest must be of the same exact type than the dynamic array
     // - returns true if the item was successfully copied and removed
     // - use PeekHead() if you don't want to remove the item, but get its value
+    // - first slot will be deleted and all content moved, so may take some time
     function PopHead(var Dest): boolean;
     /// get the first element stored in the dynamic array
     // - Add + PopHead/PeekHead will implement a FIFO (First-In-First-Out) stack
@@ -1791,7 +1816,6 @@ type
     property CountExternal: PInteger
       read fCountP;
   end;
-
 
 
 {.$define DYNARRAYHASHCOLLISIONCOUNT} // to be defined also in test.core.base
@@ -3101,6 +3125,22 @@ begin
   inc(fCount);
 end;
 
+function TSynList.Insert(item: pointer; index: PtrInt): PtrInt;
+var
+  n: PtrInt;
+begin
+  n := fCount;
+  if length(fList) = n then
+    SetLength(fList, NextGrow(n));
+  if PtrUInt(index) < PtrUInt(n) then
+    MoveFast(fList[index], fList[index + 1], (n - index) * SizeOf(pointer))
+  else
+    index := n;
+  fList[index] := item;
+  inc(fCount);
+  result := index;
+end;
+
 procedure TSynList.Clear;
 begin
   fList := nil;
@@ -3117,7 +3157,7 @@ end;
 
 function TSynList.Exists(item: pointer): boolean;
 begin
-  result := PtrUIntScanExists(pointer(fList), fCount, PtrUInt(item));
+  result := IndexOf(item) >= 0;
 end;
 
 function TSynList.Get(index: integer): pointer;
@@ -3133,9 +3173,9 @@ begin
   result := PtrUIntScanIndex(pointer(fList), fCount, PtrUInt(item));
 end;
 
-function TSynList.Remove(item: Pointer): PtrInt;
+function TSynList.Remove(item: pointer): PtrInt;
 begin
-  result := PtrUIntScanIndex(pointer(fList), fCount, PtrUInt(item));
+  result := IndexOf(item);
   if result >= 0 then
     Delete(result);
 end;
@@ -3255,19 +3295,7 @@ begin
 end;
 
 
-{ TSynObjectListLightLocked }
-
-constructor TSynObjectListLightLocked.Create(AOwnsObjects: boolean);
-begin
-  inherited Create(AOwnsObjects);
-end;
-
 { TSynObjectListLocked }
-
-constructor TSynObjectListLocked.Create(AOwnsObjects: boolean);
-begin
-  inherited Create(AOwnsObjects);
-end;
 
 function TSynObjectListLocked.Add(item: pointer): PtrInt;
 begin
@@ -3317,6 +3345,92 @@ begin
   finally
     Safe.WriteUnLock;
   end;
+end;
+
+
+{ TSynObjectListSorted }
+
+constructor TSynObjectListSorted.Create(const aCompare: TOnObjectCompare;
+  aOwnsObjects: boolean);
+begin
+  inherited Create(aOwnsObjects);
+  fCompare := aCompare;
+end;
+
+function TSynObjectListSorted.Locate(item: pointer; out index: PtrInt): boolean;
+var
+  n, l, i: PtrInt;
+  cmp: integer;
+begin // see TDynArray.FastLocateSorted below
+  result := false;
+  n := fCount;
+  if n = 0 then // a void array is always sorted
+    index := 0
+  else
+  begin
+    dec(n);
+    cmp := fCompare(fList[n], item);
+    if cmp < 0 then
+    begin
+      // greater than last sorted item (may be a common case)
+      if cmp = 0 then
+        // returns true + index of existing Elem
+        result := true
+      else
+        // returns false + insert after last position
+        inc(n);
+      index := n;
+      exit;
+    end;
+    l := 0;
+    repeat
+      // O(log(n)) binary search of the sorted position
+      i := (l + n) shr 1;
+      cmp := fCompare(fList[i], item);
+      if cmp = 0 then
+      begin
+        // returns true + index of existing Elem
+        index := i;
+        result := true;
+        exit;
+      end
+      else if cmp < 0 then
+        l := i + 1
+      else
+        n := i - 1;
+    until l > n;
+    // Elem not found: returns false + the index where to insert
+    index := l;
+  end;
+end;
+
+function TSynObjectListSorted.Add(item: pointer): PtrInt;
+begin
+  Safe.WriteLock;
+  try
+    if Locate(item, result) then // O(log(n)) binary search
+      result := -(result + 1)
+    else
+      Insert(item, result);
+  finally
+    Safe.WriteUnLock;
+  end;
+end;
+
+function TSynObjectListSorted.IndexOf(item: pointer): PtrInt;
+begin
+  if not Locate(item, result) then // O(log(n)) binary search
+    result := -1;
+end;
+
+function TSynObjectListSorted.Find(item: TObject): TObject;
+var
+  i: PtrInt;
+begin
+  if Locate(item, i) then
+    result := fList[i]
+  else
+    result := nil;
 end;
 
 
@@ -6486,9 +6600,13 @@ begin
 end;
 
 procedure TDynArray.ItemCopy(Source, Dest: pointer);
+var
+  nfo: TRttiCustom;
 begin
-  if fInfo.ArrayRtti <> nil then
-    fInfo.ArrayRtti.ValueCopy(Dest, Source) // also for T*ObjArray
+  nfo := fInfo.ArrayRtti;
+  if (nfo <> nil) and // inlined nfo.ValueCopy() to avoid MoveFast() twice
+     Assigned(nfo.Copy) then
+    nfo.Copy(Dest, Source, nfo.Info) // also for T*ObjArray
   else
     MoveFast(Source^, Dest^, fInfo.Cache.ItemSize);
 end;
@@ -6561,9 +6679,7 @@ var
 begin
   index := GetCount; // in two explicit steps to ensure no problem at inlining
   SetCount(index + 1);
-  result := fValue^;
-  if result <> nil then
-    inc(PByte(result), index * fInfo.Cache.ItemSize)
+  result := PAnsiChar(fValue^) + index * fInfo.Cache.ItemSize;
 end;
 
 function TDynArray.Peek(var Dest): boolean;
@@ -7025,6 +7141,18 @@ begin
   result := true;
 end;
 
+function BruteFind(P, V: PAnsiChar; cmp: TDynArraySortCompare; n, s: PtrInt): PtrInt;
+begin // array is very small, or not sorted -> O(n) iterative search
+  result := 0;
+  repeat
+    if cmp(P^, V^) = 0 then
+      exit;
+    inc(result);
+    inc(P, s);
+  until result = n;
+  result := -1;
+end;
+
 function TDynArray.Find(const Item; const aIndex: TIntegerDynArray;
   aCompare: TDynArraySortCompare): PtrInt;
 var
@@ -7041,7 +7169,7 @@ begin
     if (n > 10) and
        (length(aIndex) >= n) then
     begin
-      // array should be sorted via aIndex[] -> use fast O(log(n)) binary search
+      // fast O(log(n)) binary search over aIndex[]
       L := 0;
       repeat
         result := (L + n) shr 1;
@@ -7059,23 +7187,39 @@ begin
     end
     else
     begin
-      // array is not sorted, or aIndex=nil -> use O(n) iterating search
-      L := fInfo.Cache.ItemSize;
-      for result := 0 to n do
-        if aCompare(P^, Item) = 0 then
-          exit
-        else
-          inc(P, L);
+      result := BruteFind(P, @Item, aCompare, n, fInfo.Cache.ItemSize);
+      exit;
     end;
   end;
   result := -1;
 end;
 
+function SortFind(P, V: PAnsiChar; cmp: TDynArraySortCompare; R, s: PtrInt): PtrInt;
+var
+  m, L: PtrInt;
+  res: integer;
+begin // array is sorted -> use fast O(log(n)) binary search
+  L := 0;
+  dec(R);
+  repeat
+    result := (L + R) shr 1;
+    res := cmp(P[result * s], V^);
+    if res = 0 then
+      exit;
+    m := result - 1;
+    inc(result);
+    if res > 0 then // compile as cmovnle/cmovle opcodes on FPC x86_64
+      R := m
+    else
+      L := result;
+  until L > R;
+  result := -1;
+end;
+
 function TDynArray.Find(const Item; aCompare: TDynArraySortCompare): PtrInt;
 var
-  n, L: PtrInt;
-  cmp: integer;
-  P: PAnsiChar;
+  n: PtrInt;
+  fnd: function(P, V: PAnsiChar; cmp: TDynArraySortCompare; n, s: PtrInt): PtrInt;
 begin
   n := GetCount;
   if not Assigned(aCompare) then
@@ -7083,45 +7227,24 @@ begin
   if n > 0 then
     if Assigned(aCompare) then
     begin
-      P := fValue^;
-      if fSorted and
-         (@aCompare = @fCompare) and
-         (n >= 10) then
-      begin
-        // array is sorted -> use fast O(log(n)) binary search
-        dec(n);
-        L := 0;
-        repeat
-          result := (L + n) shr 1;
-          cmp := aCompare(P[result * fInfo.Cache.ItemSize], Item);
-          if cmp < 0 then
-            L := result + 1
-          else if cmp = 0 then
-            exit
-          else
-            n := result - 1;
-        until L > n;
-      end
-      else
-      begin
-        // array is very small, or not sorted -> O(n) iterative search
-        L := fInfo.Cache.ItemSize;
-        result := 0;
-        repeat
-          if aCompare(P^, Item) = 0 then
-            exit;
-          inc(P, L);
-          inc(result);
-        until result = n; // efficient loop on FPC/x86_64
-      end;
+      fnd := @BruteFind;
+      if n > 10 then
+        if fSorted and
+           (@aCompare = @fCompare) then
+          fnd := @SortFind
+        else if not(rcfArrayItemManaged in fInfo.Flags) and
+                (fInfo.ArrayRtti <> nil) and
+                (@aCompare = @PT_SORT[false, fInfo.ArrayRtti.Parser]) then
+        begin // optimized brute force search with potential SSE2 asm
+          result := AnyScanIndex(fValue^, @Item, n, fInfo.Cache.ItemSize);
+          exit;
+        end;
+      result := fnd(fValue^, @Item, aCompare, n, fInfo.Cache.ItemSize);
     end
     else
-    begin
-      // aCompare/fCompare not set -> fallback to case-sensitive IndexOf()
-      result := IndexOf(Item, {caseinsens=}false);
-      exit;
-    end;
-  result := -1;
+      result := IndexOf(Item, {caseinsens=}false)
+  else
+    result := -1;
 end;
 
 function TDynArray.FindIndex(const Item; aIndex: PIntegerDynArray;
@@ -7207,7 +7330,7 @@ begin
       cmp := fCompare(Item, P[n * fInfo.Cache.ItemSize]);
       if cmp >= 0 then
       begin
-        // greater than last sorted item
+        // greater than last sorted item (may be a common case)
         Index := n;
         if cmp = 0 then
           // returns true + index of existing Elem
@@ -7218,8 +7341,7 @@ begin
         exit;
       end;
       Index := 0;
-      while Index <= n do
-      begin
+      repeat
         // O(log(n)) binary search of the sorted position
         i := (Index + n) shr 1;
         cmp := fCompare(P[i * fInfo.Cache.ItemSize], Item);
@@ -7234,7 +7356,7 @@ begin
           Index := i + 1
         else
           n := i - 1;
-      end;
+      until Index > n;
       // Elem not found: returns false + the index where to insert
     end
     else
@@ -7825,13 +7947,26 @@ begin
   DestDynArray.Copy(@self, ObjArrayByRef);
 end;
 
+function IndexFind(P, V: PAnsiChar; cmp: TRttiCompare; rtti: PRttiInfo; n: integer): PtrInt;
+var
+  comp: integer;
+begin
+  result := 0;
+  repeat
+    inc(P, cmp(P, V, rtti, comp));
+    if comp = 0 then
+      exit;
+    inc(result);
+    dec(n);
+  until n = 0;
+  result := -1;
+end;
+
 function TDynArray.IndexOf(const Item; CaseInSensitive: boolean): PtrInt;
 var
   rtti: PRttiInfo;
   cmp: TRttiCompare;
   n: PtrInt;
-  comp: integer;
-  P: PAnsiChar;
 label
   bin;
 begin
@@ -7847,20 +7982,9 @@ bin:  result := AnyScanIndex(fValue^, @Item, n, fInfo.Cache.ItemSize)
         goto bin;
       cmp := RTTI_COMPARE[CaseInSensitive, rtti.Kind];
       if Assigned(cmp) then
-      begin
-        P := fValue^;
-        result := 0;
-        repeat
-          inc(P, cmp(P, @Item, rtti, comp));
-          if comp = 0 then
-            exit;
-          inc(result);
-          dec(n);
-        until n = 0;
-      end
+        result := IndexFind(fValue^, @Item, cmp, rtti, n)
       else
         goto bin;
-      result := -1;
     end
   else
     result := -1;
