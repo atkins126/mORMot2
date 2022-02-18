@@ -160,6 +160,7 @@ type
   TNetSocket = ^TNetSocketWrap;
 
   TNetSocketDynArray = array of TNetSocket;
+  PNetSocketDynArray = ^TNetSocketDynArray;
 
   PTerminated = ^boolean; // on FPC system.PBoolean doesn't exist :(
 
@@ -182,7 +183,8 @@ type
     procedure SetKeepAlive(keepalive: boolean);
     procedure SetLinger(linger: integer);
     procedure SetNoDelay(nodelay: boolean);
-    function Accept(out clientsocket: TNetSocket; out addr: TNetAddr): TNetResult;
+    function Accept(out clientsocket: TNetSocket; out addr: TNetAddr;
+      async: boolean): TNetResult;
     function GetPeer(out addr: TNetAddr): TNetResult;
     function MakeAsync: TNetResult;
     function MakeBlocking: TNetResult;
@@ -190,7 +192,7 @@ type
     function Recv(Buf: pointer; var len: integer): TNetResult;
     function SendTo(Buf: pointer; len: integer; out addr: TNetAddr): TNetResult;
     function RecvFrom(Buf: pointer; len: integer; out addr: TNetAddr): integer;
-    function WaitFor(ms: integer; scope: TNetEvents): TNetEvents;
+    function WaitFor(ms: integer; scope: TNetEvents; loerr: system.PInteger = nil): TNetEvents;
     function RecvPending(out pending: integer): TNetResult;
     function RecvWait(ms: integer; out data: RawByteString;
       terminated: PTerminated = nil): TNetResult;
@@ -227,6 +229,16 @@ function NewSocket(const address, port: RawUtf8; layer: TNetLayer;
   dobind: boolean; connecttimeout, sendtimeout, recvtimeout, retry: integer;
   out netsocket: TNetSocket; netaddr: PNetAddr = nil): TNetResult;
 
+/// resolve the TNetAddr of the address:port layer - maybe from cache
+function GetSocketAddressFromCache(const address, port: RawUtf8;
+  layer: TNetLayer; out addr: TNetAddr; var fromcache, tobecached: boolean): TNetResult;
+
+/// try to connect to several address:port servers simultaneously
+// - return up to neededcount connected TNetAddr, until timeoutms expires
+// - sockets are closed unless sockets^[] should contain the result[] sockets
+function GetReachableNetAddr(const address, port: array of RawUtf8;
+  timeoutms: integer = 1000; neededcount: integer = 1;
+  sockets: PNetSocketDynArray = nil): TNetAddrDynArray;
 
 var
   /// contains the raw Socket API version, as returned by the Operating System
@@ -253,8 +265,8 @@ var
   RemoteIPLocalHostAsVoidInServers: boolean = true;
 
 
-/// returns the trimmed text of a network result
-// - e.g. ToText(nrNotFound)='NotFound'
+/// returns the plain English text of a network result
+// - e.g. ToText(nrNotFound)='Not Found'
 function ToText(res: TNetResult): PShortString; overload;
 
 
@@ -282,7 +294,8 @@ procedure IP6Short(psockaddr: pointer; var s: ShortString; withport: boolean);
 
 /// convert a MAC address value into a RawUtf8 text
 // - returns e.g. '12:50:b6:1e:c6:aa'
-// - could be used to convert some binary buffer into human-friendly hexa string
+// - could be used to convert some binary buffer into human-friendly hexadecimal
+// string, e.g. by asn1_string_st.ToHex() in our mormot.lib.openssl11 wrapper
 function MacToText(mac: PByteArray; maclen: PtrInt = 6): RawUtf8;
 
 /// enumerate all IP addresses of the current computer
@@ -352,7 +365,7 @@ type
   // - should process the supplied peer information, and return true to continue
   // and accept the connection, or false to abort the connection
   // - Context.PeerIssuer and PeerSubject have been properly populated from Peer
-  // - TLS and Peer are opaque structures, typically OpenSSL PSSL and PX509
+  // - TLS and Peer are opaque structures, typically OpenSSL PSSL and PX509 pointers
   TOnNetTlsEachPeerVerify = function(Socket: TNetSocket; Context: PNetTlsContext;
     wasok: boolean; TLS, Peer: pointer): boolean of object;
 
@@ -471,6 +484,7 @@ type
 
   /// some opaque value (which may be a pointer) associated with a polling event
   TPollSocketTag = type PtrInt;
+  PPollSocketTag = ^TPollSocketTag;
   TPollSocketTagDynArray = TPtrUIntDynArray;
 
   /// modifications notified by TPollSocketAbstract.WaitForModified
@@ -492,6 +506,8 @@ type
   end;
 
   {$M+}
+  TPollSockets = class;
+
   /// abstract parent for TPollSocket* and TPollSockets polling
   TPollAbstract = class
   protected
@@ -505,6 +521,8 @@ type
     // - similar to epoll's EPOLL_CTL_ADD control interface
     function Subscribe(socket: TNetSocket; events: TPollSocketEvents;
       tag: TPollSocketTag): boolean; virtual; abstract;
+    /// should finalize this processing before shutdown
+    procedure Terminate; virtual;
   published
     /// how many TSocket instances are currently tracked
     property Count: integer
@@ -513,7 +531,10 @@ type
   {$M-}
 
   /// abstract parent class for efficient socket polling
-  // - works like Linux epoll API in level-triggered (LT) mode
+  // - on Linux, FollowEpoll=true uses the epoll API in level-triggered (LT) mode
+  // - on other systems (Windows or BSD), fallback to select or poll API, with
+  // FollowEpoll=false - note that Subscribe/Unsubscribe should be delayed
+  // outside the WaitForModified() call using an async separated list
   // - implements libevent-like cross-platform features
   // - use PollSocketClass global function to retrieve the best class depending
   // on the running Operating System
@@ -522,15 +543,10 @@ type
   TPollSocketAbstract = class(TPollAbstract)
   protected
     fMaxSockets: integer;
+    fOwner: TPollSockets;
   public
-    /// class function factory, returning a socket polling instance matching
-    // at best the current operating system
-    // - return a hidden TPollSocketSelect instance under Windows,
-    // TPollSocketEpoll instance under Linux, or TPollSocketPoll on BSD
-    // - just a wrapper around PollSocketClass.Create
-    class function New: TPollSocketAbstract;
     /// initialize the polling
-    constructor Create; virtual;
+    constructor Create(aOwner: TPollSockets); virtual;
     /// stop status modifications tracking on one specified TSocket
     // - the socket should have been monitored by a previous call to Subscribe()
     // - on success, returns true and fill tag with the associated opaque value
@@ -543,6 +559,11 @@ type
     // - returns true and results.Events[0..results.Count-1] notifications
     function WaitForModified(var results: TPollSocketResults;
       timeoutMS: integer): boolean; virtual; abstract;
+    /// if this poll has no size limit, and subscription/wait is thread safe
+    // with edge detection
+    // - false for select/poll, but true for epoll
+    // - follow POLLSOCKETEPOLL conditional within this unit
+    class function FollowEpoll: boolean;
   published
     /// how many TSocket instances could be tracked, at most
     // - depends on the API used
@@ -559,13 +580,15 @@ type
   /// TPollSockets.OnGetOneIdle callback prototype
   TOnPollSocketsIdle = procedure(Sender: TObject; NowTix: Int64) of object;
 
+  // as used by TPollSockets.Subscribe for select/poll thread safety
   TPollSocketsSubscribe = record
     socket: TNetSocket;
     tag: TPollSocketTag;
     events: TPollSocketEvents;
   end;
+  PPollSocketsSubscribe = ^TPollSocketsSubscribe;
 
-  // used internally by TPollSockets.Subscribe/Unsubscribe for thread safety
+  // as used by TPollSockets.Subscribe/Unsubscribe for select/poll thread safety
   TPollSocketsSubscription = record
     Unsubscribe: TNetSocketDynArray;
     Subscribe: array of TPollSocketsSubscribe;
@@ -577,26 +600,29 @@ type
   // - will maintain a pool of TPollSocketAbstract instances, to monitor
   // incoming data or outgoing availability for a set of active connections
   // - call Subscribe/Unsubscribe to setup the monitored sockets
-  // - call GetOne from any consumming threads to process new events
+  // - call GetOne from a main thread, optionally GetOnePending from sub-threads
   TPollSockets = class(TPollAbstract)
   protected
     fPoll: array of TPollSocketAbstract; // each track up to fPoll[].MaxSockets
-    fPollIndex: integer;
     fPending: TPollSocketResults;
     fPendingIndex: PtrInt;
+    fPendingSafe: TLightLock;
+    fPollIndex: integer;
     fGettingOne: integer;
+    fLastUnsubscribeTagCount: integer;
     fTerminated: boolean;
+    fEpollGettingOne: boolean;
+    fUnsubscribeShouldShutdownSocket: boolean;
     fPollClass: TPollSocketClass;
     fOnLog: TSynLogProc;
     fOnGetOneIdle: TOnPollSocketsIdle;
-    fLastUnsubscribeTag: TPollSocketTagDynArray; // protected by fPendingLock
-    fLastUnsubscribeTagCount: integer;
-    fUnsubscribeShouldShutdownSocket: boolean;
-    fSubscriptionLock: TLightLock; // dedicated not to block Accept()
+    fLastUnsubscribeTag: TPollSocketTagDynArray; // protected by fPendingSafe
+    // used for select/poll (FollowEpoll=false) with multiple thread-unsafe fPoll[]
     fSubscription: TPollSocketsSubscription;
+    fSubscriptionSafe: TLightLock; // dedicated not to block Accept()
     fPollLock: TRTLCriticalSection;
-    fPendingLock: TRTLCriticalSection;
-    procedure NoMorePending; {$ifdef HASINLINE} inline; {$endif}
+    function GetSubscribeCount: integer;
+    function GetUnsubscribeCount: integer;
     function IsValidPending(tag: TPollSocketTag): boolean; virtual;
   public
     /// initialize the sockets polling
@@ -610,7 +636,7 @@ type
     destructor Destroy; override;
     /// track modifications on one specified TSocket and tag
     // - the supplied tag value - maybe a PtrInt(aObject) - will be part of
-    // GetOne method results
+    // GetOne/GetOnePending methods TPollSocketResult.Tag results
     // - will create as many TPollSocketAbstract instances as needed, depending
     // on the MaxSockets capability of the actual implementation class
     // - this method is thread-safe, and the actual fPoll[].Subscribe
@@ -627,7 +653,10 @@ type
     // PollForPendingEvents and wait up to timeoutMS milliseconds for events
     // - returns true and set notif.events/tag with the corresponding notification
     // - returns false if no pending event was handled within the timeoutMS period
-    // - this method is thread-safe, and could be called from several threads
+    // - warning: this method should be called from a single thread on Linux
+    // (PollClass.FollowEpoll=true) since epoll_wait() is used - other select/poll
+    // API would work on concurrent call, but with lost resources - typically, a
+    // main thread calls GetOne() while other threads could call GetOnePending()
     function GetOne(timeoutMS: integer; const call: RawUtf8;
       out notif: TPollSocketResult): boolean; virtual;
     /// retrieve the next pending notification
@@ -641,9 +670,10 @@ type
     function PollForPendingEvents(timeoutMS: integer): integer; virtual;
     /// manually append one event to the pending nodifications
     // - ready to be retrieved by GetOnePending
-    procedure AddOnePending(aTag: TPollSocketTag; aEvents: TPollSocketEvents);
+    procedure AddOnePending(aTag: TPollSocketTag; aEvents: TPollSocketEvents;
+      aNoSearch: boolean);
     /// notify any GetOne waiting method to stop its polling loop
-    procedure Terminate; virtual;
+    procedure Terminate; override;
     /// indicates that Unsubscribe() should also call ShutdownAndClose(socket)
     // - Destroy will also shutdown any remaining sockets if PollForPendingEvents
     // has not been called before shutdown
@@ -669,18 +699,21 @@ type
     /// how many notified events are currently in the internal queue
     property PendingCount: PtrInt
       read fPending.Count;
-    /// how many connections are pending to be subscribed
+    /// how many connections are pending to be subscribed (poll/select API)
     property SubscribeCount: integer
-      read fSubscription.SubscribeCount;
-    /// how many connections are pending to be unsubscribed
+      read GetSubscribeCount default 0;
+    /// how many connections are pending to be unsubscribed (poll/select API)
     property UnsubscribeCount: integer
-      read fSubscription.UnsubscribeCount;
+      read GetUnsubscribeCount default 0;
   end;
 
 
-/// the TPollSocketAbstract class best fitting with the current Operating System
-// - as used by TPollSocketAbstract.New method
-// - returns e.g. TPollSocketEpoll on Linux, or TPollSocketSelect on Windows
+function ToText(ev: TPollSocketEvents): TShort8; overload;
+
+/// class function factory, returning a socket polling class matching
+// at best the current operating system
+// - return a hidden TPollSocketSelect class under Windows, TPollSocketEpoll
+// under Linux, or TPollSocketPoll on BSD
 function PollSocketClass: TPollSocketClass;
 
 
@@ -943,7 +976,8 @@ type
     /// check if there are some pending bytes in the input sockets API buffer
     // - returns cspSocketError if the connection is broken or closed
     // - warning: on Windows, may wait a little less than TimeOutMS (select bug)
-    function SockReceivePending(TimeOutMS: integer): TCrtSocketPending;
+    function SockReceivePending(TimeOutMS: integer;
+      loerr: system.PInteger = nil): TCrtSocketPending;
     /// returns the socket input stream as a string
     function SockReceiveString: RawByteString;
     /// fill the Buffer with Length bytes
@@ -990,7 +1024,8 @@ type
     // - returns nil on error or a ResultClass instance on success
     // - if ResultClass is nil, will return a plain TCrtSocket, but you may
     // specify e.g. THttpServerSocket if you expect incoming HTTP requests
-    function AcceptIncoming(ResultClass: TCrtSocketClass = nil): TCrtSocket;
+    function AcceptIncoming(ResultClass: TCrtSocketClass = nil;
+      Async: boolean = false): TCrtSocket;
     /// remote IP address after AcceptRequest() call over TCP
     // - is either the raw connection IP to the current server socket, or
     // a custom header value set by a local proxy as retrieved by inherited
@@ -1244,7 +1279,7 @@ begin
       AF_UNIX:
         begin
           if not localasvoid then
-            result := IP4local;
+            result := IP4local; // by definition, unix sockets are local
           exit;
         end;
       {$endif OSPOSIX}
@@ -1322,22 +1357,14 @@ end;
 
 { ******** TNetSocket Cross-Platform Wrapper }
 
-function NewSocket(const address, port: RawUtf8; layer: TNetLayer;
-  dobind: boolean; connecttimeout, sendtimeout, recvtimeout, retry: integer;
-  out netsocket: TNetSocket; netaddr: PNetAddr): TNetResult;
+function GetSocketAddressFromCache(const address, port: RawUtf8; layer: TNetLayer;
+  out addr: TNetAddr; var fromcache, tobecached: boolean): TNetResult;
 var
-  addr: TNetAddr;
-  sock: TSocket;
-  fromcache, tobecached: boolean;
-  connectendtix: Int64;
   p: cardinal;
 begin
-  netsocket := nil;
   fromcache := false;
   tobecached := false;
-  // resolve the TNetAddr of the address:port layer - maybe from cache
   if (layer in nlIP) and
-     (not dobind) and
      Assigned(NewSocketAddressCache) and
      ToCardinal(port, p, 1) then
     if (address = '') or
@@ -1356,6 +1383,101 @@ begin
     end
   else
     result := addr.SetFrom(address, port, layer);
+end;
+
+function GetReachableNetAddr(const address, port: array of RawUtf8;
+  timeoutms, neededcount: integer; sockets: PNetSocketDynArray): TNetAddrDynArray;
+var
+  i, n: PtrInt;
+  s: TSocket;
+  sock: TNetSocketDynArray;
+  addr: TNetAddrDynArray;
+  res: TNetResult;
+  tix: Int64;
+begin
+  result := nil;
+  if sockets <> nil then
+    sockets^ := nil;
+  if neededcount <= 0 then
+    exit;
+  n := length(address);
+  if (n = 0) or
+     (length(port) <> n) then
+    exit;
+  SetLength(sock, n);
+  SetLength(addr, n);
+  n := 0;
+  for i := 0 to length(sock) - 1 do
+  begin
+    res := addr[n].SetFrom(address[i], port[i], nlTcp); // bypass DNS cache here
+    if res <> nrOK then
+      continue;
+    s := socket(PSockAddr(@addr[n])^.sa_family, _ST[nlTcp], _IP[nlTcp]);
+    if (s < 0) or
+       (TNetSocket(s).MakeAsync <> nrOk) then
+      continue;
+    connect(s, @addr[n], addr[n].Size); // non-blocking connect() once
+    if TNetSocket(s).MakeBlocking <> nrOk then
+      continue;
+    sock[n] := TNetSocket(s);
+    inc(n);
+  end;
+  if n = 0 then
+    exit;
+  if neededcount > n then
+    neededcount := n;
+  SetLength(result, n);
+  if sockets <> nil then
+    SetLength(sockets^, n);
+  n := 0;
+  tix := mormot.core.os.GetTickCount64 + timeoutms;
+  repeat
+    for i := 0 to length(result) - 1 do
+      if (sock[i] <> nil) and
+         (sock[i].WaitFor(1, [neWrite]) = [neWrite]) then
+      begin
+        if sockets = nil then
+          sock[i].ShutdownAndClose(false)
+        else
+          sockets^[n] := sock[i]; // let caller own this socket from now on
+        sock[i] := nil; // mark this socket as closed
+        result[n] := addr[i];
+        inc(n);
+        dec(neededcount);
+        if neededcount = 0 then
+          break;
+      end;
+  until (neededcount = 0) or
+        (mormot.core.os.GetTickCount64 > tix);
+  if n <> length(result) then
+  begin
+    for i := 0 to length(result) - 1 do
+      if sock[i] <> nil then
+        sock[i].ShutdownAndClose(false);
+    SetLength(result, n);
+    if sockets <> nil then
+      SetLength(sockets^, n);
+  end;
+end;
+
+function NewSocket(const address, port: RawUtf8; layer: TNetLayer;
+  dobind: boolean; connecttimeout, sendtimeout, recvtimeout, retry: integer;
+  out netsocket: TNetSocket; netaddr: PNetAddr): TNetResult;
+var
+  addr: TNetAddr;
+  sock: TSocket;
+  fromcache, tobecached: boolean;
+  connectendtix: Int64;
+begin
+  netsocket := nil;
+  // resolve the TNetAddr of the address:port layer - maybe from cache
+  fromcache := false;
+  tobecached := false;
+  if dobind then
+    result := addr.SetFrom(address, port, layer)
+  else
+    result := GetSocketAddressFromCache(
+      address, port, layer, addr, fromcache, tobecached);
   if result <> nrOK then
     exit;
   // create the raw Socket instance
@@ -1522,23 +1644,16 @@ begin
   end;
 end;
 
-{$ifdef OSWINDOWS}
-type
-  tsocklen = integer;
-{$endif OSWINDOWS}
-
 function TNetSocketWrap.Accept(out clientsocket: TNetSocket;
-  out addr: TNetAddr): TNetResult;
+  out addr: TNetAddr; async: boolean): TNetResult;
 var
-  len: tsocklen;
   sock: TSocket;
 begin
   if @self = nil then
     result := nrNoSocket
   else
   begin
-    len := SizeOf(addr);
-    sock := mormot.net.sock.accept(TSocket(@self), @addr, len);
+    sock := doaccept(TSocket(@self), @addr, async);
     if sock = -1 then
     begin
       result := NetLastError;
@@ -1553,7 +1668,10 @@ begin
       clientsocket.SetRecvBufferSize(65536);
       clientsocket.SetSendBufferSize(65536);
       {$endif OSWINDOWS}
-      result := nrOK;
+      if async then
+        result := clientsocket.MakeAsync
+      else
+        result := nrOK;
     end;
   end;
 end;
@@ -1612,6 +1730,7 @@ begin
     result := nrNoSocket
   else
   begin
+//    len := fprecv(TSocket(@self), Buf, len, 0);
     len := mormot.net.sock.recv(TSocket(@self), Buf, len, 0);
     // man recv: Upon successful completion, recv() shall return the length of
     // the message in bytes. If no messages are available to be received and the
@@ -1669,7 +1788,7 @@ var
   events: TNetEvents;
   pending: integer;
 begin
-  events := WaitFor(100, [neRead]);
+  events := WaitFor(ms, [neRead]);
   if (neError in events) or
      (Assigned(terminated) and
       terminated^) then
@@ -1868,6 +1987,7 @@ var
 
   // GetMacAddresses / GetMacAddressesText cache
   MacAddresses: array[{UpAndDown=}boolean] of record
+    Safe: TLightLock;
     Searched: boolean; // searched once: no change during process lifetime
     Addresses: TMacAddressDynArray;
     Text: array[{WithoutName=}boolean] of RawUtf8;
@@ -1884,7 +2004,7 @@ begin
   begin
     if Sep = ' ' then
     begin
-      now := GetTickCount64 shr 15; // refresh every 32768 ms
+      now := mormot.core.os.GetTickCount64 shr 15; // refresh every 32768 ms
       if now <> Tix then
         Tix := now
       else
@@ -1912,7 +2032,7 @@ begin
   begin
     if not Searched then
     begin
-      mormot.core.os.GlobalLock;
+      Safe.Lock;
       try
         if not Searched then
         begin
@@ -1920,7 +2040,7 @@ begin
           Searched := true;
         end;
       finally
-        mormot.core.os.GlobalUnLock;
+        Safe.UnLock;
       end;
     end;
     result := Addresses;
@@ -1959,15 +2079,53 @@ end;
 
 { ******************** Efficient Multiple Sockets Polling }
 
-{ TPollSocketAbstract }
-
-class function TPollSocketAbstract.New: TPollSocketAbstract;
+function ToText(ev: TPollSocketEvents): TShort8;
 begin
-  result := PollSocketClass.Create;
+  result[0] := #0;
+  if pseRead in ev then
+  begin
+    inc(result[0]);
+    result[ord(result[0])] := 'r';
+  end;
+  if pseWrite in ev then
+  begin
+    inc(result[0]);
+    result[ord(result[0])] := 'w';
+  end;
+  if pseError in ev then
+  begin
+    inc(result[0]);
+    result[ord(result[0])] := 'e';
+  end;
+  if pseClosed in ev then
+  begin
+    inc(result[0]);
+    result[ord(result[0])] := 'c';
+  end;
 end;
 
-constructor TPollSocketAbstract.Create;
+
+{ TPollAbstract }
+
+procedure TPollAbstract.Terminate;
 begin
+end;
+
+
+{ TPollSocketAbstract }
+
+class function TPollSocketAbstract.FollowEpoll: boolean;
+begin
+  {$ifdef POLLSOCKETEPOLL}
+  result := true; // epoll API is thread-safe and has no size limit
+  {$else}
+  result := false; // select/poll API are not thread safe
+  {$endif POLLSOCKETEPOLL}
+end;
+
+constructor TPollSocketAbstract.Create(aOwner: TPollSockets);
+begin
+  fOwner := aOwner;
 end;
 
 
@@ -1976,12 +2134,18 @@ end;
 constructor TPollSockets.Create(aPollClass: TPollSocketClass);
 begin
   inherited Create;
-  InitializeCriticalSection(fPendingLock);
-  InitializeCriticalSection(fPollLock);
   if aPollClass = nil then
     fPollClass := PollSocketClass
   else
     fPollClass := aPollClass;
+  {$ifdef POLLSOCKETEPOLL}
+  // epoll has no size limit (so a single fPoll[0] can be assumed), and
+  // epoll_ctl() is thread-safe and let epoll_wait() work in the background
+  SetLength(fPoll, 1);
+  fPoll[0] := fPollClass.Create(self);
+  {$else}
+  InitializeCriticalSection(fPollLock);
+  {$endif POLLSOCKETEPOLL}
   {$ifdef OSPOSIX}
   SetFileOpenLimit(GetFileOpenLimit(true)); // set soft limit to hard value
   {$endif OSPOSIX}
@@ -2006,6 +2170,7 @@ begin
   end;
   for i := 0 to high(fPoll) do
     FreeAndNilSafe(fPoll[i]);
+  {$ifndef POLLSOCKETEPOLL}
   if fUnsubscribeShouldShutdownSocket and
      (fSubscription.UnsubscribeCount > 0) then
   begin
@@ -2015,40 +2180,50 @@ begin
     for i := 0 to fSubscription.UnsubscribeCount - 1 do
        fSubscription.Unsubscribe[i].ShutdownAndClose({rdwr=}false);
   end;
-  DeleteCriticalSection(fPendingLock);
   DeleteCriticalSection(fPollLock);
+  {$endif POLLSOCKETEPOLL}
   inherited Destroy;
 end;
 
 function TPollSockets.Subscribe(socket: TNetSocket; events: TPollSocketEvents;
   tag: TPollSocketTag): boolean;
+{$ifndef POLLSOCKETEPOLL}
 var
   n: PtrInt;
-  one: TPollSocketsSubscribe;
+  one: PPollSocketsSubscribe;
+{$endif POLLSOCKETEPOLL}
 begin
   result := false;
   if (self = nil) or
      (socket = nil) or
      (events = []) then
     exit;
-  // trick is to append the information to fSubscription.Subscribe[]
-  one.socket := socket;
-  one.tag := tag;
-  one.events := events;
-  fSubscriptionLock.Lock;
+  {$ifdef POLLSOCKETEPOLL}
+  // epoll_ctl() is thread-safe and let epoll_wait() work in the background
+  result := fPoll[0].Subscribe(socket, events, tag);
+  if result then
+    LockedInc32(@fCount);
+  {$else}
+  // fPoll[0].Subscribe() is not allowed when WaitForModified() is running
+  // -> trick is to asynch append the information to fSubscription.Subscribe[]
+  fSubscriptionSafe.Lock;
   try
     n := fSubscription.SubscribeCount;
     if n = length(fSubscription.Subscribe) then
       SetLength(fSubscription.Subscribe, n + 64);
-    fSubscription.Subscribe[n] := one;
+    one := @fSubscription.Subscribe[n];
+    one^.socket := socket;
+    one^.tag := tag;
+    one^.events := events;
     fSubscription.SubscribeCount := n + 1;
   finally
-    fSubscriptionLock.UnLock;
+    fSubscriptionSafe.UnLock;
   end;
   result := true;
+  {$endif POLLSOCKETEPOLL}
 end;
 
-function FindPending(res: PPollSocketResult; n: PtrInt;
+function FindPendingFromTag(res: PPollSocketResult; n: PtrInt;
   tag: TPollSocketTag): PPollSocketResult;
   {$ifdef HASINLINE} inline; {$endif}
 begin
@@ -2056,7 +2231,7 @@ begin
   begin
     result := res;
     repeat
-      if result^.tag = tag then
+      if result^.tag = tag then // fast O(n) search in L1 cache
         exit;
       inc(result);
       dec(n);
@@ -2068,50 +2243,79 @@ end;
 procedure TPollSockets.Unsubscribe(socket: TNetSocket; tag: TPollSocketTag);
 var
   fnd: PPollSocketResult;
+  ndx, n: PtrInt;
+const
+  FOUND: array[boolean] of string[10] = ('', 'events:=0 ');
 begin
-  mormot.core.os.EnterCriticalSection(fPendingLock);
-  try
-    if fPending.Count <> 0 then
-    begin
-      if Assigned(fOnLog) then
-        fOnLog(sllTrace, 'Unsubscribe(%) count=% pending #%/%',
-          [pointer(tag), fCount, fPendingIndex, fPending.Count], self);
-      fnd := FindPending(@fPending.Events[fPendingIndex],
-               fPending.Count - fPendingIndex, tag);
-      if fnd <> nil then
+  // first check if there is any pending notification about this socket
+  fnd := nil;
+  if fPending.Count <> 0 then
+  begin
+    fPendingSafe.Lock;
+    try
+      ndx := fPendingIndex;
+      n := fPending.Count;
+      if n <> 0 then
       begin
-        byte(fnd^.events) := 0; // GetOnePending() will just ignore it
-        if Assigned(fOnLog) then
-          fOnLog(sllTrace, 'Unsubscribed(%) events:=0 count=%',
-            [pointer(fnd^.tag), fPending.Count], self);
+        fnd := FindPendingFromTag(@fPending.Events[ndx], n - ndx, tag);
+        if fnd <> nil then
+          byte(fnd^.events) := 0; // GetOnePending() will ignore it
       end;
+      AddPtrUInt(fLastUnsubscribeTag, fLastUnsubscribeTagCount, tag);
+    finally
+      fPendingSafe.UnLock;
     end;
-    AddPtrUInt(fLastUnsubscribeTag, fLastUnsubscribeTagCount, tag);
-  finally
-    mormot.core.os.LeaveCriticalSection(fPendingLock);
+    if Assigned(fOnLog) and
+       (n <> 0) then // log outside fPendingSafe
+      fOnLog(sllTrace, 'Unsubscribe(%) count=% %pending #%/%',
+        [pointer(tag), fCount, FOUND[fnd <> nil], ndx, n], self);
   end;
-  fSubscriptionLock.Lock;
+  // actually unsubscribe from the sockets monitoring API
+  {$ifdef POLLSOCKETEPOLL}
+  // epoll_ctl() is thread-safe and let epoll_wait() work in the background
+  if fPoll[0].Unsubscribe(socket) then
+  begin
+    LockedDec32(@fCount);
+    if Assigned(fOnLog) then // log outside fPendingSafe
+      fOnLog(sllTrace, 'Unsubscribe(%) count=%', [pointer(socket), fCount], self);
+  end;
+  {$else}
+  // fPoll[0].UnSubscribe() is not allowed when WaitForModified() is running
+  // -> append to the unsubscription asynch list
+  fSubscriptionSafe.Lock;
   AddPtrUInt(TPtrUIntDynArray(fSubscription.Unsubscribe),
     fSubscription.UnsubscribeCount, PtrUInt(socket));
-  fSubscriptionLock.UnLock;
-end;
-
-procedure TPollSockets.NoMorePending;
-begin
-  fPending.Count := 0; // reuse shared Events[] memory
-  fPendingIndex := 0;
-  fLastUnsubscribeTagCount := 0;
+  fSubscriptionSafe.UnLock;
+  {$endif POLLSOCKETEPOLL}
 end;
 
 function TPollSockets.IsValidPending(tag: TPollSocketTag): boolean;
 begin
-  result := true;
+  result := true; // overriden e.g. in TPollAsyncReadSockets
+end;
+
+function TPollSockets.GetSubscribeCount: integer;
+begin
+  {$ifdef POLLSOCKETEPOLL}
+  result := 0; // epoll_ctl() is called directly
+  {$else}
+  result := fSubscription.SubscribeCount;
+  {$endif POLLSOCKETEPOLL}
+end;
+
+function TPollSockets.GetUnsubscribeCount: integer;
+begin
+  {$ifdef POLLSOCKETEPOLL}
+  result := 0;
+  {$else}
+  result := fSubscription.UnsubscribeCount;
+  {$endif POLLSOCKETEPOLL}
 end;
 
 function TPollSockets.GetOnePending(out notif: TPollSocketResult;
   const call: RawUtf8): boolean;
 var
-  ndx: PtrInt;
+  n, ndx: PtrInt;
 label
   ok;
 begin
@@ -2119,14 +2323,15 @@ begin
   if fTerminated or
      (fPending.Count <= 0) then
     exit;
-  mormot.core.os.EnterCriticalSection(fPendingLock);
+  fPendingSafe.Lock;
   {$ifdef HASFASTTRYFINALLY} // make a huge performance difference
   try
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
+    n := fPending.Count;
     ndx := fPendingIndex;
-    if ndx < fPending.Count then
+    if ndx < n then
     begin
       repeat
         // retrieve next notified event
@@ -2134,60 +2339,65 @@ begin
         // move forward
         inc(ndx);
         if (byte(notif.events) <> 0) and // Unsubscribe() may have reset to 0
-           IsValidPending(notif.tag) and
+           IsValidPending(notif.tag) and // e.g. TPollAsyncReadSockets
            ((fLastUnsubscribeTagCount = 0) or
             not PtrUIntScanExists(pointer(fLastUnsubscribeTag),
               fLastUnsubscribeTagCount, notif.tag)) then
         begin
-          // there is a not-void event to return
-          if Assigned(fOnLog) then
-            fOnLog(sllTrace, 'GetOnePending(%)=% % #%/%', [call,
-              pointer(notif.tag), byte(notif.events), ndx, fPending.Count], self);
+          // there is a non-void event to return
           result := true;
           fPendingIndex := ndx; // continue with next event
           // quick exit with one notified event
-          if ndx = fPending.Count then
-            break;
+          if ndx = n then
+            break; // reset fPending list
           goto ok;
         end;
-      until ndx >= fPending.Count;
-      {if Assigned(fOnLog) then
-        fOnLog(sllTrace, 'GetOnePending(%): reset after reached #%/% lastuns=%',
-          [call, ndx, fPending.Count, fLastUnsubscribeTagCount], self);}
-      fPending.Count := 0; // reuse shared Events[] memory
+      until ndx >= n;
+      fPending.Count := 0; // reuse shared fPending.Events[] memory
       fPendingIndex := 0;
       fLastUnsubscribeTagCount := 0;
 ok: end;
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
-    mormot.core.os.LeaveCriticalSection(fPendingLock);
+    fPendingSafe.UnLock;
   end;
+  if result and
+     Assigned(fOnLog) then // log outside fPendingSafe
+    fOnLog(sllTrace, 'GetOnePending(%)=% % #%/%', [call, pointer({%H-}notif.tag),
+      byte({%H-}notif.events), ndx, n], self);
 end;
 
 function MergePendingEvents(var res: TPollSocketResults; resindex: PtrInt;
-  new: PPollSocketResult; newcount: integer): integer;
+  new: PPollSocketResult; newcount: PtrInt): integer;
 var
-  n: PtrInt;
+  n, cap: PtrInt;
   exist: PPollSocketResult;
 begin
   result := 0; // returns number of new events to process
-  n := res.Count - resindex;
-  // here we know that new.Count > 0 and n > 0
+  n := res.Count;
+  // vacuum the results list (to let caller set fPendingIndex := 0)
   if resindex <> 0 then
+  begin
+    dec(n, resindex);
     MoveFast(res.Events[resindex], res.Events[0], n * SizeOf(res.Events[0]));
-  if n + newCount > length(res.Events) then
-    SetLength(res.Events, n + newCount + 16); // seldom needed in practice
+    res.Count := n;
+  end;
   // remove any duplicate: PollForPendingEvents() called before GetOnePending()
-  res.Count := n;
+  cap := length(res.Events);
   repeat
     // O(n*m) is faster than UnSubscribe/Subscribe because n and m are small
-    exist := FindPending(pointer(res.Events), n, new^.tag);
+    exist := FindPendingFromTag(pointer(res.Events), res.Count, new^.tag);
     if exist = nil then
     begin
       // new event to process
-      res.Events[res.Count] := new^;
-      inc(res.Count);
+      if n >= cap then
+      begin
+        cap := n + newCount + 16;
+        SetLength(res.Events, cap); // seldom needed
+      end;
+      res.Events[n] := new^;
+      inc(n);
       inc(result);
     end
     else
@@ -2196,22 +2406,27 @@ begin
     inc(new);
     dec(newCount);
   until newCount = 0;
+  res.Count := n;
 end;
 
 function TPollSockets.PollForPendingEvents(timeoutMS: integer): integer;
 var
-  u, s, p, last, lastcount, n: PtrInt;
+  last, lastcount, n: PtrInt;
+  start, stop: Int64;
+  {$ifndef POLLSOCKETEPOLL}
+  u, s, p: PtrInt;
   poll: TPollSocketAbstract;
   sock: TNetSocket;
-  // some local variables to avoid nested locks
   sub: TPollSocketsSubscription;
-  new: TPollSocketResults;
+  {$endif POLLSOCKETEPOLL}
+  new: TPollSocketResults; // local list for WaitForModified()
 begin
   // by design, this method is called from a single thread
   result := 0;
-  if fTerminated or
-     (fCount + fSubscription.SubscribeCount = 0) then
+  if fTerminated then
     exit;
+  if Assigned(fOnLog) then
+    QueryPerformanceMicroSeconds(start);
   LockedInc32(@fGettingOne);
   try
     // thread-safe get the pending (un)subscriptions
@@ -2219,27 +2434,61 @@ begin
     new.Count := 0;
     if fPending.Count = 0 then
     begin
-      mormot.core.os.EnterCriticalSection(fPendingLock);
+      fPendingSafe.Lock;
       if fPending.Count = 0 then
       begin
-        // reuse the main dynamic array
+        // reuse the main dynamic array of results
         pointer(new.Events) := pointer(fPending.Events); // inlined MoveAndZero
         pointer(fPending.Events) := nil;
       end;
-      mormot.core.os.LeaveCriticalSection(fPendingLock);
+      fPendingSafe.UnLock;
     end;
-    fSubscriptionLock.Lock;
+    {$ifdef POLLSOCKETEPOLL}
+    // epoll_wait() is thread-safe and let epoll_ctl() work in the background
+    {if Assigned(OnLog) then
+      OnLog(sllTrace, 'PollForPendingEvents: before WaitForModified(%) count=% pending=%',
+        [timeoutMS, fCount, fPending.Count], self);}
+    if fEpollGettingOne then
+      // epoll_wait() is not expected to be used from several threads
+      raise ENetSock.Create('%s.PollForPendingEvents should be called from a ' +
+        'single thread: please refactor your code', [ClassNameShort(self)^]);
+    fEpollGettingOne := true;
+    // if fCount=0 epoll_wait() still wait and allow background subscription
+    fPoll[0].WaitForModified(new, timeoutMS);
+    last := 0;
+    lastcount := fPoll[0].Count;
+    {$else}
+    // manual check of all fPoll[] for subscriptions or modifications
+    if fCount + fSubscription.SubscribeCount = 0 then
+      exit; // caller would loop
+    fSubscriptionSafe.Lock;
     sub.SubscribeCount := fSubscription.SubscribeCount;
     sub.UnsubscribeCount := fSubscription.UnsubscribeCount;
     if (sub.SubscribeCount <> 0) or
        (sub.UnsubscribeCount <> 0) then
       MoveAndZero(@fSubscription, @sub, SizeOf(fSubscription));
-    fSubscriptionLock.UnLock;
+    fSubscriptionSafe.UnLock;
     if Assigned(fOnLog) and
        ((sub.SubscribeCount <> 0) or
         (sub.UnsubscribeCount <> 0))then
       fOnLog(sllTrace, 'PollForPendingEvents sub=% unsub=%',
         [sub.SubscribeCount, sub.UnsubscribeCount], self);
+    // ensure subscribe + unsubscribe pairs are ignored
+    if not fUnsubscribeShouldShutdownSocket then
+      for u := 0 to sub.UnsubscribeCount - 1 do
+      begin
+        sock := sub.Unsubscribe[u];
+        for s := 0 to sub.SubscribeCount - 1 do
+          if sub.Subscribe[s].socket = sock then
+          begin
+            if Assigned(fOnLog) then
+              fOnLog(sllTrace, 'PollForPendingEvents sub+unsub sock=%',
+                [pointer(sock)], self);
+            sub.Unsubscribe[u] := nil; // mark both no op
+            sub.Subscribe[s].socket := nil;
+            break;
+          end;
+      end;
     // use fPoll[] to retrieve any pending notifications
     mormot.core.os.EnterCriticalSection(fPollLock);
     try
@@ -2247,17 +2496,6 @@ begin
       for u := 0 to sub.UnsubscribeCount - 1 do
       begin
         sock := sub.Unsubscribe[u];
-        if not fUnsubscribeShouldShutdownSocket then
-          for s := 0 to sub.SubscribeCount - 1 do
-            if sub.Subscribe[s].socket = sock then
-            begin
-              if Assigned(fOnLog) then
-                fOnLog(sllTrace, 'PollForPendingEvents sub+unsub sock=%',
-                  [pointer(sock)], self);
-              sock := nil; // Unsubscribe after/before Subscribe -> no op
-              sub.Subscribe[s].socket := nil;
-              break;
-            end;
         if sock <> nil then
           for p := 0 to length(fPoll) - 1 do
             if fPoll[p].Unsubscribe(sock) then
@@ -2290,7 +2528,7 @@ begin
             end;
           if poll = nil then
           begin
-            poll := fPollClass.Create; // need a new poll instance
+            poll := fPollClass.Create(self); // need a new poll instance
             SetLength(fPoll, n + 1);
             fPoll[n] := poll;
           end;
@@ -2340,53 +2578,63 @@ begin
       if last < 0 then
         exit;
       // WaitForModified() did return some events in new local list
-      result := new.Count;
       fPollIndex := last; // next call will continue from fPoll[fPollIndex+1]
-      if (result = 0) or
-         fTerminated then
-        exit;
       lastcount := fPoll[last].Count;
     finally
-      LeaveCriticalSection(fPollLock);
+      mormot.core.os.LeaveCriticalSection(fPollLock);
     end;
+    {$endif POLLSOCKETEPOLL}
     // append the new events to the main fPending list
-    EnterCriticalSection(fPendingLock);
+    result := new.Count;
+    if (result <= 0) or
+       fTerminated then
+      exit;
+    fPendingSafe.Lock;
     try
-      if (fPending.Count = 0) or
-         (fPendingIndex = fPending.Count) then
+      n := fPending.Count;
+      if (n <= 0) or
+         (fPendingIndex = n) then
         fPending := new // atomic list assignment (most common case)
       else
         result := MergePendingEvents(fPending, fPendingIndex,
           pointer(new.Events), new.Count); // avoid duplicates
       fPendingIndex := 0;
-      new.Events := nil;
-      if (result > 0) and
-         Assigned(fOnLog) then
-        fOnLog(sllTrace,
-          'PollForPendingEvents=% in fPoll[%] (subscribed=%) pending=%',
-            [result, last, lastcount, fPending.Count], self);
     finally
-      mormot.core.os.LeaveCriticalSection(fPendingLock);
+      fPendingSafe.UnLock;
+    end;
+    new.Events := nil;
+    //if result = 0 then {$i-} write('!'); {$i+}
+    if {(result > 0) and}
+       Assigned(fOnLog) then
+    begin
+      QueryPerformanceMicroSeconds(stop);
+      fOnLog(sllTrace,
+        'PollForPendingEvents=% in fPoll[%] (subscribed=%) pending=% %us',
+          [result, last, lastcount, fPending.Count, stop - start], self);
     end;
   finally
     LockedDec32(@fGettingOne);
+    {$ifdef POLLSOCKETEPOLL}
+    fEpollGettingOne := false;
+    {$endif POLLSOCKETEPOLL}
   end;
 end;
 
 procedure TPollSockets.AddOnePending(
-  aTag: TPollSocketTag; aEvents: TPollSocketEvents);
+  aTag: TPollSocketTag; aEvents: TPollSocketEvents; aNoSearch: boolean);
 var
   n: PtrInt;
 begin
-  mormot.core.os.EnterCriticalSection(fPendingLock);
+  fPendingSafe.Lock;
   try
     n := fPending.Count;
-    if (n = 0) or
-       (FindPending(@fPending.Events[fPendingIndex],
+    if aNoSearch or
+       (n = 0) or
+       (FindPendingFromTag(@fPending.Events[fPendingIndex],
           n - fPendingIndex, aTag) = nil) then
     begin
       if n >= length(fPending.Events) then
-        SetLength(fPending.Events, n + 32);
+        SetLength(fPending.Events, NextGrow(n));
       with fPending.Events[n] do
       begin
         tag := aTag;
@@ -2395,14 +2643,16 @@ begin
       fPending.Count := n + 1;
     end;
   finally
-    mormot.core.os.LeaveCriticalSection(fPendingLock);
+    fPendingSafe.UnLock;
   end;
 end;
 
 function TPollSockets.GetOne(timeoutMS: integer; const call: RawUtf8;
   out notif: TPollSocketResult): boolean;
+{$ifndef POLLSOCKETEPOLL}
 var
   start, tix, endtix: Int64;
+{$endif POLLSOCKETEPOLL}
 begin
   // first check if some pending events are available
   result := GetOnePending(notif, call);
@@ -2411,6 +2661,14 @@ begin
      (timeoutMS < 0) then
     exit;
   // here we need to ask the socket layer
+  {$ifdef POLLSOCKETEPOLL}
+  // epoll_wait() is thread-safe and let epoll_ctl() work in the background
+  PollForPendingEvents(timeoutMS); // inc(fGettingOne) +  blocking epoll_wait
+  result := GetOnePending(notif, call);
+  if Assigned(fOnGetOneIdle) then
+    fOnGetOneIdle(self, mormot.core.os.GetTickCount64);
+  {$else}
+  // non-blocking call of PollForPendingEvents()
   byte(notif.events) := 0;
   start := 0;
   endtix := 0;
@@ -2447,12 +2705,18 @@ begin
   finally
     LockedDec32(@fGettingOne);
   end;
+  {$endif POLLSOCKETEPOLL}
 end;
 
 procedure TPollSockets.Terminate;
+var
+  i: PtrInt;
 begin
-  if self <> nil then
-    fTerminated := true;
+  if self = nil then
+    exit;
+  fTerminated := true;
+  for i := 0 to high(fPoll) do
+    fPoll[i].Terminate;
 end;
 
 
@@ -2572,7 +2836,7 @@ var
 begin
   Clear;
   result := false;
-  aUri := TrimU(aUri);
+  TrimSelf(aUri);
   if aUri = '' then
     exit;
   P := pointer(aUri);
@@ -2743,6 +3007,8 @@ begin
   else
   {$endif OSPOSIX}
     OpenBind(aServer, aPort, {dobind=}false, aTLS, aLayer);
+  if aTLSContext <> nil then
+    aTLSContext^ := TLS; // copy back information to the caller TNetTlsContext
 end;
 
 constructor TCrtSocket.OpenUri(const aUri: RawUtf8; out aAddress: RawUtf8;
@@ -2905,8 +3171,12 @@ begin
     else
       // direct client connection
       retry := {$ifdef OSBSD} 10 {$else} 2 {$endif};
+    //if Assigned(OnLog) then
+    //  OnLog(sllTrace, 'Before NewSocket', [], self);
     res := NewSocket(fServer, fPort, aLayer, doBind,
       fTimeout, fTimeout, fTimeout, retry, fSock);
+    //if Assigned(OnLog) then
+    //  OnLog(sllTrace, 'After NewSocket=%', [ToText(res)^], self);
     if res <> nrOK then
       raise ENetSock.Create('%s %s.OpenBind(%s:%s)',
         [BINDMSG[doBind], ClassNameShort(self)^, fServer, fPort], res);
@@ -2929,7 +3199,7 @@ begin
     DoTlsHandshake;
   if Assigned(OnLog) then
     OnLog(sllTrace, '%(%:%) sock=% %', [BINDTXT[doBind], fServer, fPort,
-      fSock.Socket, TLS.CipherName], self);
+      pointer(fSock.Socket), TLS.CipherName], self);
 end;
 
 procedure TCrtSocket.AcceptRequest(aClientSock: TNetSocket; aClientAddr: PNetAddr);
@@ -3133,7 +3403,13 @@ begin
   end;
 end;
 
+{.$define SYNCRTDEBUGLOW2}
+
 procedure TCrtSocket.Close;
+{$ifdef SYNCRTDEBUGLOW2}
+var
+  start, stop: int64;
+{$endif SYNCRTDEBUGLOW2}
 begin
   fSndBufLen := 0; // always reset (e.g. in case of further Open)
   fSockInEofError := 0;
@@ -3151,11 +3427,18 @@ begin
   if not SockIsDefined then
     exit; // no opened connection, or Close already executed
   fSecure := nil; // perform the TLS shutdown round and release the TLS context
+  {$ifdef SYNCRTDEBUGLOW2}
+  QueryPerformanceMicroSeconds(start);
+  {$endif SYNCRTDEBUGLOW2}
   {$ifdef OSLINUX}
   if not fWasBind or
      (fPort <> '') then // no explicit shutdown necessary on Linux server side
   {$endif OSLINUX}
     fSock.ShutdownAndClose({rdwr=}fWasBind);
+  {$ifdef SYNCRTDEBUGLOW2}
+  QueryPerformanceMicroSeconds(stop);
+  if assigned(OnLog) then OnLog(sllTrace, 'ShutdownAndClose(%): %', [fWasBind, stop-start], self);
+  {$endif SYNCRTDEBUGLOW2}
   fSock := TNetSocket(-1);
   // don't reset fServer/fPort/fTls/fWasBind: caller may use them to reconnect
   // (see e.g. THttpClientSocket.Request)
@@ -3417,12 +3700,15 @@ begin
       [ClassNameShort(self)^, Length, read], NetLastError);
 end;
 
-function TCrtSocket.SockReceivePending(TimeOutMS: integer): TCrtSocketPending;
+function TCrtSocket.SockReceivePending(TimeOutMS: integer;
+  loerr: system.PInteger): TCrtSocketPending;
 var
   events: TNetEvents;
 begin
+  if loerr <> nil then
+    loerr^ := 0;
   if SockIsDefined then
-    events := fSock.WaitFor(TimeOutMS, [neRead])
+    events := fSock.WaitFor(TimeOutMS, [neRead], loerr)
   else
     events := [neError];
   if neError in events then
@@ -3564,12 +3850,12 @@ procedure TCrtSocket.SockRecvLn(out Line: RawUtf8; CROnly: boolean);
           end;
           exit;
         end
-        else if P = @tmp[1023] then
+        else if P = @tmp[high(tmp)] then
         begin
           // tmp[] buffer full? -> append to already read chars
           L := Length(Line);
-          Setlength(Line, L + 1024);
-          MoveFast(tmp, PByteArray(Line)[L], 1024);
+          Setlength(Line, L + SizeOf(tmp));
+          MoveFast(tmp, PByteArray(Line)[L], SizeOf(tmp));
           P := tmp;
         end
         else
@@ -3609,7 +3895,8 @@ begin
 end;
 
 procedure TCrtSocket.SockRecvLn;
-var c: AnsiChar;
+var
+  c: AnsiChar;
   Error: integer;
 begin
   if SockIn <> nil then
@@ -3686,7 +3973,8 @@ begin
   result := sockerrno;
 end;
 
-function TCrtSocket.AcceptIncoming(ResultClass: TCrtSocketClass): TCrtSocket;
+function TCrtSocket.AcceptIncoming(
+  ResultClass: TCrtSocketClass; Async: boolean): TCrtSocket;
 var
   client: TNetSocket;
   addr: TNetAddr;
@@ -3694,7 +3982,7 @@ begin
   result := nil;
   if not SockIsDefined then
     exit;
-  if fSock.Accept(client, addr) <> nrOK then
+  if fSock.Accept(client, addr, Async) <> nrOK then
     exit;
   if ResultClass = nil then
     ResultClass := TCrtSocket;
@@ -3745,6 +4033,6 @@ initialization
 
 finalization
   FinalizeUnit;
-  
+
 end.
 

@@ -657,9 +657,15 @@ asm
         jz      @z
         mov     qword ptr [p], rdx
         mov     p, rax
-        cmp     qword ptr [rax - _STRREFCNT], rdx
+        {$ifdef STRCNT32}
+        cmp     dword ptr [rax - _STRCNT], rdx
         jl      @z
-  lock  dec     qword ptr [rax - _STRREFCNT]
+  lock  dec     dword ptr [rax - _STRCNT]
+        {$else}
+        cmp     qword ptr [rax - _STRCNT], rdx
+        jl      @z
+  lock  dec     qword ptr [rax - _STRCNT]
+        {$endif STRCNT32}
         jbe     @free
 @z:     ret
 @free:  sub     p, _STRRECSIZE
@@ -670,9 +676,15 @@ procedure _ansistr_incr_ref(p: pointer); nostackframe; assembler;
 asm
         test    p, p
         jz      @z
-        cmp     qword ptr [p - _STRREFCNT], 0
+        {$ifdef STRCNT32}
+        cmp     dword ptr [p - _STRCNT], 0
         jl      @z
-   lock inc     qword ptr [p - _STRREFCNT]
+   lock inc     dword ptr [p - _STRCNT]
+        {$else}
+        cmp     qword ptr [p - _STRCNT], 0
+        jl      @z
+   lock inc     qword ptr [p - _STRCNT]
+        {$endif STRCNT32}
 @z:
 end;
 
@@ -683,17 +695,31 @@ asm
         jz      @eq
         test    s, s
         jz      @ns
-        cmp     qword ptr [s - _STRREFCNT], 0
+        {$ifdef STRCNT32}
+        cmp     dword ptr [s - _STRCNT], 0
         jl      @ns
-   lock inc     qword ptr [s - _STRREFCNT]
+   lock inc     dword ptr [s - _STRCNT]
 @ns:    mov     qword ptr [d], s
         test    rax, rax
         jnz     @z
 @eq:    ret
 @z:     mov     d, rax
-        cmp     qword ptr [rax - _STRREFCNT], 0
+        cmp     dword ptr [rax - _STRCNT], 0
         jl      @n
-   lock dec     qword ptr [rax - _STRREFCNT]
+   lock dec     dword ptr [rax - _STRCNT]
+        {$else}
+        cmp     qword ptr [s - _STRCNT], 0
+        jl      @ns
+   lock inc     qword ptr [s - _STRCNT]
+@ns:    mov     qword ptr [d], s
+        test    rax, rax
+        jnz     @z
+@eq:    ret
+@z:     mov     d, rax
+        cmp     qword ptr [rax - _STRCNT], 0
+        jl      @n
+   lock dec     qword ptr [rax - _STRCNT]
+        {$endif STRCNT32}
         ja      @n
 @free:  sub     d, _STRRECSIZE
         jmp     _Freemem
@@ -747,7 +773,7 @@ asm
         movzx   eax, byte ptr [s1 + rax]
         sub     rax, rdx
         ret
-@1:     inc     eax
+@1:     mov     al, 1
 end;
 
 function _ansistr_compare_equal(s1, s2: pointer): SizeInt; nostackframe; assembler;
@@ -780,16 +806,16 @@ asm
         jz      @1
         test    s1, s1
         jnz     @ok
-@1:     inc     eax // not zero is enough
+@1:     mov     al, 1 // not zero is enough
 end;
 
 procedure _dynarray_incr_ref(p: pointer); nostackframe; assembler;
 asm
         test    p, p
         jz      @z
-        cmp     qword ptr [p - _DAREFCNT], 0
+        cmp     qword ptr [p - _DACNT], 0
         jle     @z
-   lock inc     qword ptr [p - _DAREFCNT]
+   lock inc     qword ptr [p - _DACNT]
 @z:
 end;
 
@@ -813,7 +839,7 @@ asm
         mov     qword ptr [p], 0
         mov     p, rax
         sub     p, SizeOf(TDynArrayRec)
-        cmp     qword ptr [rax - _DAREFCNT], 0
+        cmp     qword ptr [rax - _DACNT], 0
         jle     @z
    lock dec     qword ptr [p]
         jbe     @free
@@ -824,9 +850,19 @@ end;
 
 {$ifdef FPC_HAS_CPSTRING} // optimized for systemcodepage=CP_UTF8
 
+procedure _setstring_ansistr_pansichar(out s: pointer; buf: PAnsiChar;
+  len: SizeInt; cp: cardinal);
+begin // the caller ensured s := ''
+  if cp <= CP_OEMCP then // TranslatePlaceholderCP logic
+    cp := DefaultSystemCodePage;
+  s := FastNewString(len, cp);
+  if buf <> nil then
+    MoveFast(buf^, s^, len);
+end;
+
 {$ifdef FPC_X64MM}
 
-procedure _ansistr_setlength_new(var s: RawByteString; len: PtrInt; cp: cardinal);
+procedure _ansistr_setlength_new(var s: pointer; len: PtrInt; cp: cardinal);
 var
   p, new: PAnsiChar;
   l: PtrInt;
@@ -834,7 +870,7 @@ begin
   if cp <= CP_OEMCP then // TranslatePlaceholderCP logic
     cp := DefaultSystemCodePage;
   new := FastNewString(len, cp);
-  p := pointer(s);
+  p := s;
   if p <> nil then
   begin
     l := PStrLen(p - _STRLEN)^ + 1;
@@ -853,7 +889,11 @@ asm
         jle     _ansistr_decr_ref
         test    rax, rax
         jz      _ansistr_setlength_new
-        cmp     qword ptr [rax - _STRREFCNT], 1
+        {$ifdef STRCNT32}
+        cmp     dword ptr [rax - _STRCNT], 1
+        {$else}
+        cmp     qword ptr [rax - _STRCNT], 1
+        {$endif STRCNT32}
         jne     _ansistr_setlength_new
         push    len
         push    s
@@ -1088,7 +1128,27 @@ begin
   a := a + a + a; // to generate "call fpc_ansistr_concat_multi" opcode
 end;
 
-procedure RedirectRtl(dummy, dest: PByteArray);
+procedure _fpc_setstring_ansistr(var s: RawByteString; buf: PAnsiChar;
+  len: SizeInt; cp: cardinal);
+begin // = call fpc_ansistr_decr_ref + call fpc_setstring_ansistr_pansichar
+  SetString(s, buf, len, cp);
+end;
+
+procedure RedirectRtlCall(dummy, dest: PByteArray; offset: PtrInt);
+begin
+  dummy := @dummy[offset]; // offset to ignore e.g. call fpc_ansistr_decr_ref
+  repeat
+    if dummy[0] = $e8 then
+    begin
+      // found "call fpc_setstring_ansistr_pansichar" opcode
+      RedirectCode(@dummy[PInteger(@dummy[1])^ + 5], dest);
+      exit;
+    end;
+    inc(PByte(dummy));
+  until PInt64(dummy)^ = 0;
+end;
+
+procedure RedirectRtlUtf8(dummy, dest: PByteArray);
 begin
   // POSIX only ABI: Windows is never natively UTF-8
   repeat

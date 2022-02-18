@@ -186,7 +186,7 @@ type
       FileExt: TFileName;
       ContentType: RawUtf8;
       Locker: IAutoLocker;
-      FileAgeLast: PtrUInt;
+      FileAgeLast: TUnixTime;
       FileAgeCheckTick: Int64;
       Flags: TMvcViewFlags;
     end;
@@ -196,7 +196,7 @@ type
     /// return the template file contents
     function GetTemplate(const aFileName: TFileName): RawUtf8; virtual;
     /// return the template file date and time
-    function GetTemplateAge(const aFileName: TFileName): PtrUInt; virtual;
+    function GetTemplateAge(const aFileName: TFileName): TUnixTime; virtual;
     /// overriden implementations should return the rendered content
     procedure Render(methodIndex: Integer; const Context: variant;
       var View: TMvcView); override;
@@ -433,6 +433,7 @@ type
     fMethodIndex: integer;
     fMethodReturnsAction: boolean;
     fInput: RawUtf8;
+    fExecuteCached: TInterfaceMethodExecuteCachedDynArray;
     procedure Renders(var outContext: variant; status: cardinal;
       forcesError: boolean); virtual; abstract;
     function Redirects(const action: TMvcAction): boolean; virtual;
@@ -441,6 +442,8 @@ type
   public
     /// initialize a rendering process for a given MVC Application/ViewModel
     constructor Create(aApplication: TMvcApplication); reintroduce;
+    /// finalize this rendering context
+    destructor Destroy; override;
     /// main execution method of the rendering process
     // - Input should have been set with the incoming execution context
     procedure ExecuteCommand(aMethodIndex: integer); virtual;
@@ -1303,9 +1306,9 @@ end;
 function TMvcViewsMustache.GetRenderer(methodIndex: integer;
   var view: TMvcView): TSynMustache;
 var
-  age: PtrUInt;
+  age: TUnixTime;
 begin
-  if cardinal(methodIndex) >= fFactory.MethodsCount then
+  if cardinal(methodIndex) >= cardinal(fFactory.MethodsCount) then
     raise EMvcException.CreateUtf8(
       '%.Render(methodIndex=%)', [self, methodIndex]);
   with fViews[methodIndex],
@@ -1368,12 +1371,11 @@ begin
   result := AnyTextFileToRawUtf8(ViewTemplateFolder + aFileName, true);
 end;
 
-{$WARN SYMBOL_DEPRECATED OFF} // we don't need TDateTime, just values to compare
-function TMvcViewsMustache.GetTemplateAge(const aFileName: TFileName): PtrUInt;
+function TMvcViewsMustache.GetTemplateAge(const aFileName: TFileName): TUnixTime;
 begin
-  result := FileAge(ViewTemplateFolder + aFileName);
+  // we don't need TDateTime, just values to compare
+  result := FileAgeToUnixTimeUtc(ViewTemplateFolder + aFileName);
 end;
-{$WARN SYMBOL_DEPRECATED ON}
 
 procedure TMvcViewsMustache.Render(methodIndex: Integer; const Context: variant;
   var View: TMvcView);
@@ -1575,6 +1577,13 @@ end;
 constructor TMvcRendererAbstract.Create(aApplication: TMvcApplication);
 begin
   fApplication := aApplication;
+  TInterfaceMethodExecuteCached.Prepare(aApplication.Factory, fExecuteCached);
+end;
+
+destructor TMvcRendererAbstract.Destroy;
+begin
+  inherited Destroy;
+  ObjArrayClear(fExecuteCached);
 end;
 
 procedure TMvcRendererAbstract.CommandError(const ErrorName: RawUtf8;
@@ -1595,14 +1604,13 @@ end;
 procedure TMvcRendererAbstract.ExecuteCommand(aMethodIndex: integer);
 var
   action: TMvcAction;
-  exec: TInterfaceMethodExecute;
+  exec: TInterfaceMethodExecuteCached;
   isAction: boolean;
   WR: TJsonWriter;
   m: PInterfaceMethod;
   methodOutput: RawUtf8;
   renderContext, info: variant;
   err: ShortString;
-  tmp: TTextWriterStackBuffer;
 begin
   action.ReturnedStatus := HTTP_SUCCESS;
   fMethodIndex := aMethodIndex;
@@ -1613,33 +1621,27 @@ begin
         try
           m := @fApplication.fFactory.Methods[fMethodIndex];
           isAction := m^.ArgsResultIsServiceCustomAnswer;
-          WR := TJsonWriter.CreateOwnedStream(tmp);
+          fExecuteCached[fMethodIndex].Acquire([], exec, WR);
           try
             WR.CustomOptions := WR.CustomOptions + [twoForceJsonExtended];
             WR.Add('{');
-            exec := TInterfaceMethodExecute.Create(m);
-            try
-              exec.Options := [optVariantCopiedByReference];
-              exec.ServiceCustomAnswerStatus := action.ReturnedStatus;
-              err := '';
-              if not exec.ExecuteJson([fApplication.fFactoryEntry],
-                  pointer(fInput), WR, @err, true) then
-              begin
-                if err = '' then
-                  err := 'execution error';
-                raise EMvcException.CreateUtf8('%.CommandRunMethod(I%): %',
-                  [self, m^.InterfaceDotMethodName, err])
-              end;
-              action.RedirectToMethodName := exec.ServiceCustomAnswerHead;
-              action.ReturnedStatus := exec.ServiceCustomAnswerStatus;
-            finally
-              exec.Free;
+            exec.ServiceCustomAnswerStatus := action.ReturnedStatus;
+            err := '';
+            if not exec.ExecuteJson([fApplication.fFactoryEntry],
+                pointer(fInput), WR, @err, true) then
+            begin
+              if err = '' then
+                err := 'execution error';
+              raise EMvcException.CreateUtf8('%.CommandRunMethod(I%): %',
+                [self, m^.InterfaceDotMethodName, err])
             end;
+            action.RedirectToMethodName := exec.ServiceCustomAnswerHead;
+            action.ReturnedStatus := exec.ServiceCustomAnswerStatus;
             if not isAction then
               WR.Add('}');
             WR.SetText(methodOutput);
           finally
-            WR.Free;
+            fExecuteCached[fMethodIndex].Release(exec);
           end;
           if isAction then
             // was a TMvcAction mapped in a TServiceCustomAnswer record
@@ -1654,7 +1656,7 @@ begin
             _Safe(renderContext)^.AddValue('main', info);
             if fMethodIndex = fApplication.fFactoryErrorIndex then
               _ObjAddProps([
-                'errorCode', action.ReturnedStatus,
+                'errorCode',            action.ReturnedStatus,
                 'originalErrorContext', JsonReformat(ToUtf8(renderContext))],
                 renderContext);
             Renders(renderContext, action.ReturnedStatus, false);
@@ -1711,6 +1713,7 @@ procedure TMvcRendererFromViews.Renders(var outContext: variant;
   status: cardinal; forcesError: boolean);
 var
   view: TMvcView;
+  head: RawUtf8;
 begin
   view.Flags := fRun.fViews.fViewFlags;
   if forcesError or
@@ -1723,9 +1726,9 @@ begin
     on E: Exception do
     begin
       _ObjAddProps([
-        'exceptionName', E.ClassName,
+        'exceptionName',    ClassNameShort(E)^,
         'exceptionMessage', E.Message,
-        'className', ClassName], outContext);
+        'className',        ClassNameShort(self)^], outContext);
       view.Content := TSynMustache.Parse(MUSTACHE_DEFAULTERROR).
         Render(outContext);
       view.ContentType := HTML_CONTENT_TYPE;
@@ -1736,6 +1739,9 @@ begin
     fRun.fViews.Render(fMethodIndex, outContext, view);
   fOutput.Content := view.Content;
   fOutput.Header := HEADER_CONTENT_TYPE + view.ContentType;
+  if _Safe(outContext)^.GetAsRawUtf8('CustomOutHttpHeader', head) and
+     (head <> '') then
+    fOutput.Header := fOutput.Header + #13#10 + head;
   fOutput.Status := status;
   fOutputFlags := view.Flags;
 end;
@@ -2320,9 +2326,9 @@ end;
 
 procedure TMvcApplication.GetMvcInfo(out info: variant);
 begin
-  info := _ObjFast(['name', fFactory.InterfaceTypeInfo^.RawName,
-                    'mORMot', SYNOPSE_FRAMEWORK_VERSION,
-                    'root', RestModel.Model.Root,
+  info := _ObjFast(['name',    fFactory.InterfaceTypeInfo^.RawName,
+                    'mORMot',  SYNOPSE_FRAMEWORK_VERSION,
+                    'root',    RestModel.Model.Root,
                     'methods', ContextFromMethods(fFactory)]);
 end;
 

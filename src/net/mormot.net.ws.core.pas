@@ -294,7 +294,7 @@ type
     procedure BeforeSendFrame(var frame: TWebSocketFrame); virtual;
     function FrameData(const frame: TWebSocketFrame; const Head: RawUtf8;
       HeadFound: PRawUtf8 = nil; PMax: PPByte = nil): pointer; virtual;
-    function FrameType(const frame: TWebSocketFrame): RawUtf8; virtual;
+    function FrameType(const frame: TWebSocketFrame): TShort31; virtual;
     function GetRemoteIP: RawUtf8;
     function GetEncrypted: boolean;
       {$ifdef HASINLINE}inline;{$endif}
@@ -437,7 +437,7 @@ type
       var contentType, content: RawByteString): boolean; override;
     function FrameData(const frame: TWebSocketFrame; const Head: RawUtf8;
       HeadFound: PRawUtf8 = nil; PMax: PPByte = nil): pointer; override;
-    function FrameType(const frame: TWebSocketFrame): RawUtf8; override;
+    function FrameType(const frame: TWebSocketFrame): TShort31; override;
   public
     /// initialize the WebSockets JSON protocol
     // - if aUri is '', any URI would potentially upgrade to this protocol; you can
@@ -475,7 +475,7 @@ type
     procedure BeforeSendFrame(var frame: TWebSocketFrame); override;
     function FrameData(const frame: TWebSocketFrame; const Head: RawUtf8;
       HeadFound: PRawUtf8 = nil; PMax: PPByte = nil): pointer; override;
-    function FrameType(const frame: TWebSocketFrame): RawUtf8; override;
+    function FrameType(const frame: TWebSocketFrame): TShort31; override;
     function SendFrames(Owner: TWebSocketProcess;
       var Frames: TWebSocketFrameDynArray;
       var FramesCount: integer): boolean; override;
@@ -1090,6 +1090,7 @@ end;
 
 constructor TWebSocketProtocol.Create(const aName, aUri: RawUtf8);
 begin
+  inherited Create; // may have been overriden
   fName := aName;
   fUri := aUri;
   fConnectionFlags := [hsrWebsockets];
@@ -1170,7 +1171,7 @@ begin
   result := nil; // no frame type by default
 end;
 
-function TWebSocketProtocol.FrameType(const frame: TWebSocketFrame): RawUtf8;
+function TWebSocketProtocol.FrameType(const frame: TWebSocketFrame): TShort31;
 begin
   result := '*'; // no frame URI by default
 end;
@@ -1333,6 +1334,8 @@ end;
 
 procedure TWebSocketFrameList.Push(
   const frame: TWebSocketFrame; currentSec: cardinal);
+var
+  n: PtrInt;
 begin
   if self = nil then
     exit;
@@ -1342,12 +1345,14 @@ begin
     currentSec := GetTickCount64 shr 10;
   Safe.Lock;
   try
-    if Count >= length(List) then
-      SetLength(List, NextGrow(Count));
-    List[Count] := frame;
+    n := Count;
+    if n >= length(List) then
+      SetLength(List, NextGrow(n));
+    List[n] := frame;
     if currentSec > 0 then
-      List[Count].tix := currentSec + fTimeoutSec;
-    inc(Count);
+      List[n].tix := currentSec + fTimeoutSec;
+    inc(n);
+    Count := n;
   finally
     Safe.UnLock;
   end;
@@ -1479,7 +1484,7 @@ begin
       Method := 'POST';
     // return the decoded WebSockets frame as a regular HTTP request
     Ctxt.Prepare(
-      URL, Method, InHeaders, InContent, InContentType, fRemoteIP, '', '');
+      URL, Method, InHeaders, InContent, InContentType, fRemoteIP);
     aNoAnswer := NoAnswer = '1';
   end;
 end;
@@ -1672,7 +1677,7 @@ begin
   result := true;
 end;
 
-function TWebSocketProtocolJson.FrameType(const frame: TWebSocketFrame): RawUtf8;
+function TWebSocketProtocolJson.FrameType(const frame: TWebSocketFrame): TShort31;
 var
   P, txt: PUtf8Char;
 begin
@@ -1686,7 +1691,7 @@ begin
     exit;
   txt := P;
   P := GotoEndOfJsonString(P);
-  FastSetString(result, txt, P - txt);
+  SetString(result, PAnsiChar(txt), P - txt);
 end;
 
 function TWebSocketProtocolJson.SendFrames(Owner: TWebSocketProcess;
@@ -1792,7 +1797,7 @@ begin
     inc(len, ToVarUInt32LengthWithData(it^.Len));
     inc(it);
   end;
-  SetString(frame.payload, nil, len);
+  FastSetRawByteString(frame.payload, nil, len);
   P := AppendRawUtf8ToBuffer(pointer(frame.payload), Head);
   P^ := FRAME_HEAD_SEP;
   inc(P);
@@ -1832,7 +1837,7 @@ begin
     result := nil;
 end;
 
-function TWebSocketProtocolBinary.FrameType(const frame: TWebSocketFrame): RawUtf8;
+function TWebSocketProtocolBinary.FrameType(const frame: TWebSocketFrame): TShort31;
 var
   i: PtrInt;
 begin
@@ -1844,7 +1849,7 @@ begin
   if i = 0 then
     result := '*'
   else
-    FastSetString(result, pointer(frame.payload), i - 1);
+    SetString(result, PAnsiChar(pointer(frame.payload)), i - 1);
 end;
 
 procedure TWebSocketProtocolBinary.BeforeSendFrame(var frame: TWebSocketFrame);
@@ -1923,7 +1928,7 @@ begin
   i := length(frame.payload) - (PAnsiChar(P) - pointer(frame.payload));
   if i < 0 then
     exit;
-  SetString(content, PAnsiChar(P), i);
+  FastSetRawByteString(content, P, i);
   result := true;
 end;
 
@@ -1958,11 +1963,11 @@ begin
     else
       raise EWebSockets.CreateUtf8('%.SendFrames[%]: Unexpected opcode=%',
         [self, i, ord(Frames[i].opcode)]);
-  SetString(jumboFrame.payload, nil, len);
+  FastSetRawByteString(jumboFrame.payload, nil, len);
   P := pointer(jumboFrame.payload);
   MoveFast(JUMBO_HEADER, P^, SizeOf(JUMBO_HEADER));
   inc(P, SizeOf(JUMBO_HEADER));
-  P := ToVarUInt32(FramesCount, P);
+  P := ToVarUInt32(FramesCount, P); // store max
   for i := 0 to FramesCount do
   begin
     len := length(Frames[i].payload);
@@ -1985,23 +1990,23 @@ const
 procedure TWebSocketProtocolBinary.ProcessIncomingFrames(
   Sender: TWebSocketProcess; P, PMax: PByte);
 var
-  n, i, j: integer;
+  max, i, j: integer;
   frame: TWebSocketFrame;
   tmp: ShortString;
 begin
-  P := FromVarUInt32Safe(P, PMax, cardinal(n));
+  P := FromVarUInt32Safe(P, PMax, cardinal(max));
   if P <> nil then
-    for i := 0 to n do
+    for i := 0 to max do
     begin
       frame.opcode := focBinary;
       frame.content := [];
       frame.tix := 0;
       FromVarString(P, PMax, frame.payload, CP_UTF8);
-      FormatShort('GetSubFrame(%/%)', [i + 1, n + 1], tmp);
+      FormatShort('GetSubFrame(%/%)', [i + 1, max + 1], tmp);
       Sender.Log(frame, tmp);
       if i = 0 then
         j := 0
-      else if i = n then
+      else if i = max then
         j := 1
       else
         j := 2;
@@ -2215,16 +2220,13 @@ begin
 end;
 
 function TWebSocketProtocolList.Add(aProtocol: TWebSocketProtocol): boolean;
-var
-  i: PtrInt;
 begin
   result := false;
   if aProtocol = nil then
     exit;
   fSafe.WriteLock;
   try
-    i := LockedFindIndex(aProtocol.Name, aProtocol.Uri);
-    if i < 0 then
+    if LockedFindIndex(aProtocol.Name, aProtocol.Uri) < 0 then
     begin
       ObjArrayAdd(fProtocols, aProtocol);
       result := true;
@@ -2406,7 +2408,7 @@ constructor TWebSocketProcess.Create(aProtocol: TWebSocketProtocol;
   aOwnerConnectionID: THttpServerConnectionID; aOwnerThread: TSynThread;
   aSettings: PWebSocketProcessSettings; const aProcessName: RawUtf8);
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   fProcessName := aProcessName;
   fProtocol := aProtocol;
   fOwnerConnectionID := aOwnerConnectionID;
@@ -2461,11 +2463,12 @@ var
   timeout: Int64;
   log: ISynLog;
 begin
-  log := WebSocketLog.Enter('Destroy %', [ToText(fState)^], self);
   if fState = wpsCreate then
     fProcessEnded := true
   else if not fConnectionCloseWasSent then
   begin
+    if log = nil then
+      log := WebSocketLog.Enter('Destroy %', [ToText(fState)^], self);
     if log <> nil then
       log.Log(sllTrace, 'Destroy: send focConnectionClose', self);
     Shutdown({waitforpong=}true);
@@ -2474,12 +2477,14 @@ begin
   if (fProcessCount > 0) or
      not fProcessEnded then
   begin
+    if log = nil then
+      log := WebSocketLog.Enter('Destroy %', [ToText(fState)^], self);
     if log <> nil then
       log.Log(sllDebug, 'Destroy: wait for fProcessCount=% fProcessEnded=%',
-          [fProcessCount, fProcessEnded], self);
+        [fProcessCount, fProcessEnded], self);
     timeout := GetTickCount64 + 5000;
     repeat
-      SleepHiRes(2);
+      SleepHiRes(1);
     until ((fProcessCount = 0) and fProcessEnded) or
           (GetTickCount64 > timeout);
     if log <> nil then
@@ -2570,7 +2575,8 @@ begin
       end;
     focPong:
       ; // nothing to do
-    focText, focBinary:
+    focText,
+    focBinary:
       if (not Assigned(fProtocol.fOnBeforeIncomingFrame)) or
          (not fProtocol.fOnBeforeIncomingFrame(self, request)) then
         fProtocol.ProcessIncomingFrame(self, request, '');
@@ -3051,7 +3057,7 @@ end;
 function TWebProcessInFrame.GetData: boolean;
 begin
   if length(data) <> integer(hdr.len32) then
-    SetString(data, nil, hdr.len32);
+    FastSetRawByteString(data, nil, hdr.len32);
   result := HasBytes(pointer(data), hdr.len32);
   if result then
   begin

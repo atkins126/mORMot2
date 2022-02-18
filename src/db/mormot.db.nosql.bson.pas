@@ -417,7 +417,8 @@ type
     function TryJsonToVariant(var Json: PUtf8Char; var Value: variant;
       EndOfObject: PUtf8Char): boolean; override;
     /// variant serialization will use modMongoStrict JSON-compatible mode
-    procedure ToJson(W: TJsonWriter; const Value: variant); override;
+    procedure ToJson(W: TJsonWriter; Value: PVarData); override;
+    /// variant serialization will use modMongoStrict JSON-compatible mode
     /// handle type conversion
     // - only types processed by now are string/OleStr/UnicodeString/date
     procedure Cast(var Dest: TVarData; const Source: TVarData); override;
@@ -524,8 +525,8 @@ type
   public
     /// the UTF-8 encoded name of this element
     Name: PUtf8Char;
-    /// the name length (in chars) of this element
-    NameLen: integer;
+    /// the name length (in chars) of this element - 16-bit encoded
+    NameLen: word;
     /// index of this element in the original sequence list
     // - is correct only when the element has been reset before the parsing
     // loop, e.g.:
@@ -607,6 +608,9 @@ type
     // this initialized TBsonElement
     procedure FromVariant(const aName: RawUtf8; const aValue: Variant;
       var aTemp: RawByteString);
+    /// fill a BSON Element structure from a TBsonVariantData value
+    procedure FromBsonVariant(aValue: PVarData);
+      {$ifdef HASINLINE} inline; {$endif}
     /// fill a BSON Element structure from a BSON document
     // - will check the document length then set Kind := betDoc and Data.DocList
     // - will return TRUE if the supplied doc has a valid length, FALSE otherwise
@@ -1613,7 +1617,7 @@ begin
     VType := BsonVariantType.VarType;
     VKind := betDecimal128;
     VBlob := nil;
-    SetString(RawByteString(VBlob), PAnsiChar(@Bits), SizeOf(TDecimal128));
+    FastSetRawByteString(RawByteString(VBlob), @Bits, SizeOf(TDecimal128));
   end;
 end;
 
@@ -2070,6 +2074,23 @@ end;
 
 { ************ TBsonVariantData / TBsonVariant Custom Variant Storage }
 
+// defined here for proper inlining
+procedure TBsonElement.FromBsonVariant(aValue: PVarData);
+begin
+  // here we know that aValue is a TBsonVariantData
+  Name := nil;
+  NameLen := 0;
+  Kind := PBsonVariantData(aValue)^.VKind;
+  if Kind = betObjectID then
+  begin
+    ElementBytes := SizeOf(TBsonObjectID);
+    Element := @PBsonVariantData(aValue)^.VObjectID;
+  end
+  else
+    FromBson(PBsonVariantData(aValue)^.VBlob);
+end;
+
+
 { TBsonVariant }
 
 constructor TBsonVariant.Create;
@@ -2078,12 +2099,11 @@ begin
   inherited Create;
 end;
 
-procedure TBsonVariant.ToJson(W: TJsonWriter; const Value: variant);
+procedure TBsonVariant.ToJson(W: TJsonWriter; Value: PVarData);
 var
   item: TBsonElement;
-  temp: RawByteString;
 begin
-  item.FromVariant('', Value, temp);
+  {%H-}item.FromBsonVariant(Value); // Value is a TBsonVariantData
   item.AddMongoJson(W, modMongoStrict);
 end;
 
@@ -2120,7 +2140,7 @@ begin
          (PInteger(VBlob)^ <> Length(RawByteString(VBlob)) - (SizeOf(integer) + 1)) then
         Blob := ''
       else
-        SetString(Blob, PAnsiChar(VBlob) + (SizeOf(integer) + 1), PInteger(VBlob)^);
+        FastSetRawByteString(Blob, PAnsiChar(VBlob) + (SizeOf(integer) + 1), PInteger(VBlob)^);
   end;
 end;
 
@@ -2307,8 +2327,7 @@ var
     if dec.FromText(P, L) = dsvError then
       exit;
     bsonvalue.VBlob := nil; // avoid GPF
-    SetString(RawByteString(bsonvalue.VBlob),
-      PAnsiChar(@dec), SizeOf(TDecimal128));
+    FastSetRawByteString(RawByteString(bsonvalue.VBlob), @dec, SizeOf(TDecimal128));
     Return(betDecimal128, P + L + 1, GotoEndOfObject);
   end;
 
@@ -2321,7 +2340,7 @@ var
     buf: PAnsiChar;
   begin
     bsonvalue.VBlob := nil; // avoid GPF
-    SetString(RawByteString(bsonvalue.VBlob), nil, RegLen + OptLen + 2);
+    FastSetRawByteString(RawByteString(bsonvalue.VBlob), nil, RegLen + OptLen + 2);
     buf := bsonvalue.VBlob;
     MoveFast(Reg^, buf^, RegLen);
     inc(buf, RegLen);
@@ -2726,7 +2745,7 @@ begin
     betDoc,
     betArray:
       if DocArrayConversion = asBsonVariant then
-        SetString(TBsonDocument(resBSON.VBlob), PAnsiChar(Element), ElementBytes)
+        FastSetRawByteString(TBsonDocument(resBSON.VBlob), Element, ElementBytes)
       else
       begin
         BsonItemsToDocVariant(Kind, Data.DocList, TDocVariantData(result), DocArrayConversion);
@@ -2738,7 +2757,7 @@ begin
     betJSScope,
     betTimestamp,
     betDecimal128:
-      SetString(RawByteString(resBSON.VBlob), PAnsiChar(Element), ElementBytes);
+      FastSetRawByteString(RawByteString(resBSON.VBlob), Element, ElementBytes);
     betObjectID:
       resBSON.VObjectID := PBsonObjectID(Element)^;
     betBoolean:
@@ -2787,7 +2806,7 @@ function TBsonElement.ToRawUtf8: RawUtf8;
   end;
 
 begin
-  case Kind of
+  case Kind of // direct conversion of most simple types
     betFloat:
       DoubleToStr(unaligned(PDouble(Element)^), result);
     betString:
@@ -2796,8 +2815,12 @@ begin
       Int32ToUtf8(PInteger(Element)^, result);
     betInt64:
       Int64ToUtf8(PInt64(Element)^, result);
+    betBoolean:
+      result := BOOL_UTF8[PBoolean(Element)^];
     betDecimal128:
       PDecimal128(Element)^.ToText(result);
+    betObjectID:
+      PBsonObjectID(Element)^.ToText(result);
   else
     ComplexType;
   end;
@@ -2975,7 +2998,7 @@ begin
     0..varDate,
     varBoolean..high(ELEMKIND):
       begin
-        // simple types
+        // simple types will be inlined in 64-bit InternalStorage
         Element := @Data.InternalStorage;
         Kind := ELEMKIND[vt];
         case Kind of
@@ -3035,18 +3058,21 @@ str:    Kind := betString;
         goto st2;
       end;
   else
-    if vt = cardinal(BsonVariantType.VarType) then
+    if vt = cardinal(BsonVariantType.VarType) then // inlined FromBsonVariant()
     begin
       Kind := vbson.VKind;
-      case Kind of
-        betObjectID:
-          FromBson(@vbson.VObjectID); // stored inlined
+      if Kind = betObjectID then
+      begin
+        ElementBytes := SizeOf(TBsonObjectID);
+        Element := @vbson.VObjectID;
+      end
       else
+      begin
         FromBson(vbson.VBlob); // complex type stored as a RawByteString
+        if ElementBytes < 0 then
+          raise EBsonException.CreateUtf8('TBsonElement.FromVariant(bson,%)',
+            [ToText(Kind)^]);
       end;
-      if ElementBytes < 0 then
-        raise EBsonException.CreateUtf8('TBsonElement.FromVariant(bson,%)',
-          [ToText(Kind)^]);
     end
     else if vt = cardinal(DocVariantVType) then
     begin
@@ -3543,7 +3569,7 @@ procedure TBsonWriter.BsonWriteVariant(const name: RawUtf8; const value: variant
           end;
       else
         begin
-          VariantSaveJson(value, twJsonEscape, temp);
+          _VariantSaveJson(value, twJsonEscape, temp);
           json := pointer(temp);
           BsonWriteFromJson(name, json, nil);
           if json = nil then

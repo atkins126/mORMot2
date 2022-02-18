@@ -514,6 +514,7 @@ function GetCsvItemString(P: PChar; Index: PtrUInt; Sep: Char = ','): string;
 
 /// return last CSV string in the supplied UTF-8 content
 function GetLastCsvItem(const Csv: RawUtf8; Sep: AnsiChar = ','): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// return the index of a Value in a CSV string
 // - start at Index=0 for first one
@@ -1354,6 +1355,10 @@ function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
 procedure AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
   const Value: RawUtf8); overload;
 
+/// add Value[] items to Values[], with an external count variable, for performance
+procedure AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
+  const Value: TRawUtf8DynArray); overload;
+
 /// true if both TRawUtf8DynArray are the same
 // - comparison is case-sensitive
 function RawUtf8DynArrayEquals(const A, B: TRawUtf8DynArray): boolean; overload;
@@ -1430,7 +1435,7 @@ function FastFindIndexedPUtf8Char(P: PPUtf8CharArray; R: PtrInt;
 
 /// add a RawUtf8 value in an alphaticaly sorted dynamic array of RawUtf8
 // - returns the index where the Value was added successfully in Values[]
-// - returns -1 if the specified Value was alredy present in Values[]
+// - returns -1 if the specified Value was already present in Values[]
 //  (we must avoid any duplicate for O(log(n)) binary search)
 // - if CoValues is set, its content will be moved to allow inserting a new
 // value at CoValues[result] position - a typical usage of CoValues is to store
@@ -1750,27 +1755,34 @@ function VariantToUtf8(const V: Variant; var Text: RawUtf8): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// save a variant value into a JSON content
-// - is properly implemented by mormot.core.json.pas: if this unit is not
-// included in the project, this function will raise an exception
-// - follows the TTextWriter.AddVariant() and VariantLoadJson() format
-// - is able to handle simple and custom variant types, for instance:
-// !  VariantSaveJson(1.5)='1.5'
-// !  VariantSaveJson('test')='"test"'
-// !  o := _Json('{ BSON: [ "test", 5.05, 1986 ] }');
-// !  VariantSaveJson(o)='{"BSON":["test",5.05,1986]}'
-// !  o := _Obj(['name','John','doc',_Obj(['one',1,'two',_Arr(['one',2])])]);
-// !  VariantSaveJson(o)='{"name":"John","doc":{"one":1,"two":["one",2]}}'
-// - note that before Delphi 2009, any varString value is expected to be
-// a RawUtf8 instance - which does make sense in the mORMot area
-procedure VariantSaveJson(const Value: variant; Escape: TTextWriterKind;
-  var result: RawUtf8); overload;
-
-/// save a variant value into a JSON content
-// - just a wrapper around the overloaded procedure
+// - just a wrapper around the _VariantSaveJson procedure redirection
 function VariantSaveJson(const Value: variant;
   Escape: TTextWriterKind = twJsonEscape): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// save a variant value into a JSON content
+// - just a wrapper around the _VariantSaveJson procedure redirection
+procedure VariantSaveJson(const Value: variant; Escape: TTextWriterKind;
+  var result: RawUtf8); overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 var
+  /// save a variant value into a JSON content
+  // - is implemented by mormot.core.json.pas and mormot.core.variants.pas:
+  // will raise an exception if none of these units is included in the project
+  // - follows the TTextWriter.AddVariant() and VariantLoadJson() format
+  // - is able to handle simple and custom variant types, for instance:
+  // !  VariantSaveJson(1.5)='1.5'
+  // !  VariantSaveJson('test')='"test"'
+  // !  o := _Json('{ BSON: [ "test", 5.05, 1986 ] }');
+  // !  VariantSaveJson(o)='{"BSON":["test",5.05,1986]}'
+  // !  o := _Obj(['name','John','doc',_Obj(['one',1,'two',_Arr(['one',2])])]);
+  // !  VariantSaveJson(o)='{"name":"John","doc":{"one":1,"two":["one",2]}}'
+  // - note that before Delphi 2009, any varString value is expected to be
+  // a RawUtf8 instance - which does make sense in the mORMot area
+  _VariantSaveJson: procedure(const Value: variant; Escape: TTextWriterKind;
+    var result: RawUtf8);
+
   /// unserialize a JSON content into a variant
   // - is properly implemented by mormot.core.json.pas: if this unit is not
   // included in the project, this function is nil
@@ -1780,7 +1792,7 @@ var
 
   /// write a TDateTime into strict ISO-8601 date and/or time text
   // - is implemented by DateTimeToIso8601TextVar from mormot.core.datetime.pas:
-  // if this unit is not included in the project, this function is nil
+  // if this unit is not included in the project, an ESynException is raised
   // - used by VariantToUtf8() for TDateTime conversion
   _VariantToUtf8DateTimeToIso8601: procedure(DT: TDateTime; FirstChar: AnsiChar;
     var result: RawUtf8; WithMS: boolean);
@@ -2246,6 +2258,7 @@ function ByteToHex(P: PAnsiChar; Value: byte): PAnsiChar;
 /// fast conversion from a pointer data into hexa chars, ready to be displayed
 // - use internally BinToHexDisplay()
 function PointerToHex(aPointer: Pointer): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// fast conversion from a pointer data into hexa chars, ready to be displayed
 // - use internally BinToHexDisplay()
@@ -2583,8 +2596,11 @@ begin
   i := 1;
   while (i <= l) and
         (S[i] <= ' ') do
-    Inc(i);
-  result := Copy(S, i, Maxint);
+    inc(i);
+  if i = 1 then
+    result := S
+  else
+    FastSetString(result, @PByteArray(S)[i - 1], l - i);
 end;
 
 function TrimRight(const S: RawUtf8): RawUtf8;
@@ -2594,7 +2610,7 @@ begin
   i := Length(S);
   while (i > 0) and
         (S[i] <= ' ') do
-    Dec(i);
+    dec(i);
   FastSetString(result, pointer(S), i);
 end;
 
@@ -2641,7 +2657,7 @@ begin
     exit; // nothing to trim
   Right := PStrLen(P - _STRLEN)^ - Right; // compute new length
   if Right > 0 then
-    if PRefCnt(P - _STRREFCNT)^ = 1 then
+    if PStrCnt(P - _STRCNT)^ = 1 then
     begin
       PStrLen(P - _STRLEN)^ := Right; // we can modify it in-place
       if Left <> 0 then
@@ -2661,14 +2677,14 @@ begin
   for i := length(Str) downto 1 do
     if Str[i] = SepChar then
     begin
-      result := copy(Str, i + 1, maxInt);
+      FastSetString(result, @PByteArray(Str)[i], length(Str) - i);
       if LeftStr <> nil then
-        LeftStr^ := copy(Str, 1, i - 1);
+        FastSetString(LeftStr^, pointer(Str), i - 1);
       exit;
     end;
   result := Str;
   if LeftStr <> nil then
-    LeftStr^ := '';
+    FastAssignNew(LeftStr^);
 end;
 
 function SplitRights(const Str, SepChar: RawUtf8): RawUtf8;
@@ -2688,7 +2704,7 @@ begin
         for j := 1 to sep do
           if c = SepChar[j] then
           begin
-            result := copy(Str, i + 1, maxInt);
+            FastSetString(result, @PByteArray(Str)[i], length(Str) - i);
             exit;
           end;
       end;
@@ -2699,14 +2715,12 @@ end;
 function Split(const Str, SepStr: RawUtf8; var LeftStr, RightStr: RawUtf8;
   ToUpperCase: boolean): boolean;
 var
-  i: integer;
-  tmp: RawUtf8; // may be called as Split(Str,SepStr,Str,RightStr)
+  i: PtrInt;
+  tmp: pointer; // may be called as Split(Str,SepStr,Str,RightStr)
 begin
-  {$ifdef FPC} // to use fast FPC SSE version
   if length(SepStr) = 1 then
-    i := PosExChar(SepStr[1], Str)
+    i := PosExChar(SepStr[1], Str) // may use SSE2 on i386/x86_64
   else
-  {$endif FPC}
     i := PosEx(SepStr, Str);
   if i = 0 then
   begin
@@ -2716,9 +2730,12 @@ begin
   end
   else
   begin
-    tmp := copy(Str, 1, i - 1);
-    RightStr := copy(Str, i + length(SepStr), maxInt);
-    LeftStr := tmp;
+    dec(i);
+    tmp := nil;
+    FastSetString(RawUtf8(tmp), pointer(Str), i);
+    inc(i, length(SepStr));
+    FastSetString(RightStr, @PByteArray(Str)[i], length(Str) - i);
+    FastAssignNew(LeftStr, tmp);
     result := true;
   end;
   if ToUpperCase then
@@ -2738,6 +2755,7 @@ function Split(const Str: RawUtf8; const SepStr: array of RawUtf8;
   const DestPtr: array of PRawUtf8): PtrInt;
 var
   s, i, j: PtrInt;
+  P: pointer;
 begin
   j := 1;
   result := 0;
@@ -2745,16 +2763,17 @@ begin
   if high(SepStr) >= 0 then
     while result <= high(DestPtr) do
     begin
+      P := @PByteArray(Str)[j - 1];
       i := PosEx(SepStr[s], Str, j);
       if i = 0 then
       begin
         if DestPtr[result] <> nil then
-          DestPtr[result]^ := copy(Str, j, MaxInt);
+          FastSetString(DestPtr[result]^, P, length(Str) - j);
         inc(result);
         break;
       end;
       if DestPtr[result] <> nil then
-        DestPtr[result]^ := copy(Str, j, i - j);
+        FastSetString(DestPtr[result]^, P, i - j);
       inc(result);
       if s < high(SepStr) then
         inc(s);
@@ -2762,7 +2781,7 @@ begin
     end;
   for i := result to high(DestPtr) do
     if DestPtr[i] <> nil then
-      DestPtr[i]^ := '';
+      FastAssignNew(DestPtr[i]^);
 end;
 
 function IsVoid(const text: RawUtf8): boolean;
@@ -2947,7 +2966,7 @@ begin
     i := ByteScanIndex(pointer(Source), n, ord(OldChar));
     if i >= 0 then
     begin
-      FastSetString(result, PAnsiChar(pointer(Source)), n);
+      FastSetString(result, pointer(Source), n);
       P := pointer(result);
       for j := i to n - 1 do
         if P[j] = OldChar then
@@ -3239,9 +3258,9 @@ begin
   else
   begin
     // unescape internal quotes
-    SetLength(Value, P - PBeg - internalquote);
+    pointer(Value) := FastNewString(P - PBeg - internalquote, CP_UTF8);
     P := PBeg;
-    PS := Pointer(Value);
+    PS := pointer(Value);
     repeat
       if P[0] = quote then
         if P[1] = quote then
@@ -3797,9 +3816,15 @@ begin
   else
   begin
     S := P;
+    {$ifdef CPUINTEL}
+    S := PosChar(S, Sep);
+    if S = nil then
+      S := P + StrLen(P);
+    {$else}
     while (S^ <> #0) and
           (S^ <> Sep) do
       inc(S);
+    {$endif CPUINTEL}
     FastSetString(result, P, S - P);
     if S^ <> #0 then
       P := S + 1
@@ -4399,16 +4424,8 @@ begin
 end;
 
 function GetLastCsvItem(const Csv: RawUtf8; Sep: AnsiChar): RawUtf8;
-var
-  i: integer;
 begin
-  for i := length(Csv) downto 1 do
-    if Csv[i] = Sep then
-    begin
-      result := copy(Csv, i + 1, maxInt);
-      exit;
-    end;
-  result := Csv;
+  result := SplitRight(Csv, Sep, nil);
 end;
 
 function GetCsvItemString(P: PChar; Index: PtrUInt; Sep: Char): string;
@@ -4432,7 +4449,7 @@ begin
   begin
     GetNextItem(Csv, Sep, s);
     if TrimValue then
-      s := TrimU(s);
+      TrimSelf(s);
     if CaseSensitive then
     begin
       if s = Value then
@@ -4462,14 +4479,15 @@ begin
        AddVoidItems then
       AddRawUtf8(List, n, s);
   end;
-  if n <> length(List) then
-    SetLength(List, n);
+  if List <> nil then
+    DynArrayFakeLength(List, n);
 end;
 
 procedure CsvToRawUtf8DynArray(const Csv, Sep, SepEnd: RawUtf8;
   var List: TRawUtf8DynArray);
 var
   offs, i, n: integer;
+  s: RawUtf8;
 begin
   n := length(List);
   offs := 1;
@@ -4480,16 +4498,17 @@ begin
     begin
       i := PosEx(SepEnd, Csv, offs);
       if i = 0 then
-        i := MaxInt
-      else
-        dec(i, offs);
-      AddRawUtf8(List, n, Copy(Csv, offs, i));
+        i := length(csv) + 1;
+      FastSetString(s, @PByteArray(Csv)[offs - 1], i - offs);
+      AddRawUtf8(List, n, s);
       break;
     end;
-    AddRawUtf8(List, n, Copy(Csv, offs, i - offs));
+    FastSetString(s, @PByteArray(Csv)[offs - 1], i - offs);
+    AddRawUtf8(List, n, s);
     offs := i + length(Sep);
   end;
-  SetLength(List, n);
+  if List <> nil then
+    DynArrayFakeLength(List, n);
 end;
 
 function AddPrefixToCsv(Csv: PUtf8Char; const Prefix: RawUtf8; Sep: AnsiChar): RawUtf8;
@@ -4608,7 +4627,8 @@ begin
   n := length(List);
   while Csv <> nil do
     AddInteger(List, n, GetNextItemInteger(Csv, Sep));
-  SetLength(List, n);
+  if List <> nil then
+    DynArrayFakeLength(List, n);
 end;
 
 procedure CsvToInt64DynArray(Csv: PUtf8Char; var List: TInt64DynArray;
@@ -4619,7 +4639,8 @@ begin
   n := length(List);
   while Csv <> nil do
     AddInt64(List, n, GetNextItemInt64(Csv, Sep));
-  SetLength(List, n);
+  if List <> nil then
+    DynArrayFakeLength(List, n);
 end;
 
 function CsvToInt64DynArray(Csv: PUtf8Char; Sep: AnsiChar): TInt64DynArray;
@@ -4629,7 +4650,8 @@ begin
   n := 0;
   while Csv <> nil do
     AddInt64(result, n, GetNextItemInt64(Csv, Sep));
-  SetLength(result, n);
+  if result <> nil then
+    DynArrayFakeLength(result, n);
 end;
 
 function IntegerDynArrayToCsv(Values: PIntegerArray; ValuesCount: integer;
@@ -6401,8 +6423,11 @@ begin
   result := fWriter.B - P + 1;
   L := result - fEchoStart;
   inc(P, fEchoStart);
-  while (L > 0) and (P[L - 1] in [#10, #13]) do // trim right CR/LF chars
+  while (L > 0) and
+        (P[L - 1] in [#10, #13]) do // trim right CR/LF chars
     dec(L);
+  if L = 0 then
+    exit;
   LI := length(fEchoBuf); // fast append to fEchoBuf
   SetLength(fEchoBuf, LI + L);
   MoveFast(P^, PByteArray(fEchoBuf)[LI], L);
@@ -6574,6 +6599,20 @@ begin
     SetLength(Values, NextGrow(capacity));
   Values[ValuesCount] := Value;
   inc(ValuesCount);
+end;
+
+procedure AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
+  const Value: TRawUtf8DynArray);
+var
+  n, o, i: PtrInt;
+begin
+  n := length(Value);
+  o := ValuesCount;
+  inc(ValuesCount, n);
+  if ValuesCount > Length(Values) then
+    SetLength(Values, NextGrow(ValuesCount));
+  for i := 0 to n - 1 do
+    Values[o + i] := Value[i];
 end;
 
 function RawUtf8DynArrayEquals(const A, B: TRawUtf8DynArray): boolean;
@@ -7002,7 +7041,7 @@ begin
   else
   begin
     dec(n);
-    if PRefCnt(PAnsiChar(pointer(Values)) - _DAREFCNT)^ > 1 then
+    if PDACnt(PAnsiChar(pointer(Values)) - _DACNT)^ > 1 then
       Values := copy(Values); // make unique
     Values[Index] := ''; // avoid GPF
     if n > Index then
@@ -7028,7 +7067,7 @@ begin
   begin
     dec(n);
     ValuesCount := n;
-    if PRefCnt(PAnsiChar(pointer(Values)) - _DAREFCNT)^ > 1 then
+    if PDACnt(PAnsiChar(pointer(Values)) - _DACNT)^ > 1 then
       Values := copy(Values); // make unique
     Values[Index] := ''; // avoid GPF
     dec(n, Index);
@@ -8740,7 +8779,7 @@ begin
     inc(d);
     c := s^;
   end;
-  if c='.' then
+  if c = '.' then
   begin
     PCardinal(d)^ := ord('0')+ord('.')shl 8; // '.5' -> '0.5'
     inc(d,2);
@@ -8901,9 +8940,6 @@ begin
         Curr64ToStr(VInt64, result);
       varDate:
         begin
-          if not Assigned(_VariantToUtf8DateTimeToIso8601) then
-            raise ESynException.Create('VariantToUtf8(varDate) unsupported:' +
-              ' please include mormot.core.json to your uses clause');
           _VariantToUtf8DateTimeToIso8601(VDate, 'T', result, {withms=}false);
           wasString := true;
         end;
@@ -8961,7 +8997,7 @@ begin
       else
       {$endif HASVARUSTRING}
         // not recognizable vt -> seralize as JSON to handle also custom types
-        VariantSaveJson(V, twJsonEscape, result);
+        _VariantSaveJson(V, twJsonEscape, result); // = mormot.core.variants.pas
     end;
 end;
 
@@ -8991,26 +9027,30 @@ begin
   VariantToUtf8(V, Text, result);
 end;
 
-procedure VariantSaveJson(const Value: variant; Escape: TTextWriterKind;
-  var result: RawUtf8);
-var
-  temp: TTextWriterStackBuffer;
-begin
-  // not very fast, but creates valid JSON
-  with DefaultJsonWriter.CreateOwnedStream(temp) do
-  try
-    AddVariant(Value, Escape); // may encounter TObjectVariant -> WriteObject
-    SetText(result);
-  finally
-    Free;
-  end;
-end;
-
 function VariantSaveJson(const Value: variant; Escape: TTextWriterKind): RawUtf8;
 begin
-  VariantSaveJson(Value, Escape, result);
+  _VariantSaveJson(Value, Escape, result);
 end;
 
+procedure VariantSaveJson(const Value: variant; Escape: TTextWriterKind;
+  var result: RawUtf8);
+begin
+  _VariantSaveJson(Value, Escape, result);
+end;
+
+procedure __VariantSaveJson(const Value: variant; Escape: TTextWriterKind;
+  var result: RawUtf8);
+begin
+  raise ESynException.Create('VariantSaveJson() unsupported:' +
+    ' please include mormot.core.variants to your uses clause');
+end;
+
+procedure __VariantToUtf8DateTimeToIso8601(DT: TDateTime; FirstChar: AnsiChar;
+  var result: RawUtf8; WithMS: boolean);
+begin
+  raise ESynException.Create('VariantToUtf8(varDate) unsupported:' +
+    ' please include mormot.core.datetime to your uses clause');
+end;
 
 
 { ************ Text Formatting functions }
@@ -10063,7 +10103,7 @@ begin
     L := 0
   else // hexadecimal should be in char pairs
     L := L shr 1;
-  SetLength(result, L);
+  pointer(result) := FastNewString(L, CP_RAWBYTESTRING);
   if not mormot.core.text.HexToBin(pointer(Hex), pointer(result), L) then
     result := '';
 end;
@@ -10209,8 +10249,7 @@ end;
 
 function PointerToHex(aPointer: Pointer): RawUtf8;
 begin
-  FastSetString(result, nil, SizeOf(aPointer) * 2);
-  BinToHexDisplay(@aPointer, pointer(result), SizeOf(aPointer));
+  PointerToHex(aPointer, result);
 end;
 
 function CardinalToHex(aCardinal: cardinal): RawUtf8;
@@ -10523,7 +10562,7 @@ begin
   tmp.Init(length(Oct));
   try
     L := OctToBin(pointer(Oct), tmp.buf);
-    SetString(result, PAnsiChar(tmp.buf), L);
+    FastSetRawByteString(result, tmp.buf, L);
   finally
     tmp.Done;
   end;
@@ -10863,7 +10902,7 @@ begin
   if (size = 0) or
      (size > maxInt) then
     exit;
-  SetLength(result, size);
+  pointer(result) := FastNewString(size, CP_RAWBYTESTRING);
   aStream.Read(pointer(result)^, size);
   aStream.Position := current;
 end;
@@ -10878,7 +10917,7 @@ begin
   size := aStream.Size - aPosition;
   if size <= 0 then
     exit; // nothing new
-  SetLength(result, size);
+  pointer(result) := FastNewString(size, CP_RAWBYTESTRING);
   current := aStream.Position;
   aStream.Position := aPosition;
   aStream.Read(pointer(result)^, size);
@@ -10986,6 +11025,8 @@ begin
     HTML_ESC[hfOutsideAttributes, c] := ord(c in [#0, '&', '<', '>']);
     HTML_ESC[hfWithinAttributes, c] := ord(c in [#0, '&', '"']);
   end;
+  _VariantToUtf8DateTimeToIso8601 := __VariantToUtf8DateTimeToIso8601;
+  _VariantSaveJson := __VariantSaveJson;
 end;
 
 

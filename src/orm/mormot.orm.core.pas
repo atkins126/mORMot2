@@ -2208,7 +2208,7 @@ type
     procedure GetJsonValues(W: TOrmWriter); overload;
     /// return the UTF-8 encoded JSON objects for the values of this TOrm
     // - the JSON buffer will be finalized if needed (e.g. non expanded mode),
-  	// and the supplied TOrmWriter instance will be freed by this method
+    // and the supplied TOrmWriter instance will be freed by this method
     // - layout and fields should have been set at TOrmWriter construction:
     // to append some content to an existing TOrmWriter, call the
     // AppendAsJsonObject() method
@@ -2249,7 +2249,8 @@ type
     // method will add the JSON object directly to any TOrmWriter
     // - by default, will append the simple fields, unless the Fields optional
     // parameter is customized to a non void value
-    procedure AppendAsJsonObject(W: TOrmWriter; Fields: TFieldBits);
+    procedure AppendAsJsonObject(W: TJsonWriter; Fields: TFieldBits;
+      WithID: boolean);
     /// will append all the FillPrepare() records as an expanded JSON array
     // - generates '[{rec1},{rec2},...]' using a loop similar to:
     // ! while FillOne do .. AppendJsonObject() ..
@@ -2258,7 +2259,7 @@ type
     // - by default, will append the simple fields, unless the Fields optional
     // parameter is customized to a non void value
     // - see also IRestOrm.AppendListAsJsonArray for a high-level wrapper method
-    procedure AppendFillAsJsonArray(const FieldName: RawUtf8; W: TOrmWriter;
+    procedure AppendFillAsJsonArray(const FieldName: RawUtf8; W: TJsonWriter;
       const Fields: TFieldBits = []);
     /// change TDocVariantData.Options for all variant published fields
     // - may be used to replace e.g. JSON_FAST_EXTENDED by JSON_FAST
@@ -2559,12 +2560,17 @@ type
     procedure FillFrom(const aDocVariant: variant); overload;
     /// fill a published property value of this object from a UTF-8 encoded value
     // - see TPropInfo about proper Delphi / UTF-8 type mapping/conversion
-    // - use this method to fill a BLOB property, i.e. a property defined with
-    // type RawBlob, since by default all BLOB properties are not
-    // set by the standard Retrieve() method (to save bandwidth)
+    // - the property is searched by PropName (trying first at PropIndex position)
     // - if FieldBits is defined, it will store the identified field index
-    procedure FillValue(PropName, Value: PUtf8Char; ValueLen: PtrInt;
-      wasString: boolean; FieldBits: PFieldBits = nil);
+    procedure FillValue(var PropIndex: PtrInt; PropName, Value: PUtf8Char;
+      PropLen, ValueLen: PtrInt; wasString: boolean; FieldBits: PFieldBits = nil);
+      {$ifdef HASINLINE} inline; {$endif}
+    /// fill a published property value of this object from the next UTF-8 JSON
+    // - just a wrapper around GetJsonFieldOrObjectOrArray() and FillValue()
+    // - the property is searched by PropName (trying first at PropIndex position)
+    // - if FieldBits is defined, it will store the identified field index
+    procedure FillValueJson(var PropIndex: PtrInt; PropName: PUtf8Char;
+      PropLen: PtrInt; var Json: PUtf8Char;  FieldBits: PFieldBits = nil);
 
     /// return true if all published properties values in Other are identical to
     // the published properties of this object
@@ -6570,6 +6576,38 @@ begin
   end;
 end;
 
+procedure TOrm.FillValue(var PropIndex: PtrInt; PropName, Value: PUtf8Char;
+  PropLen, ValueLen: PtrInt; wasString: boolean; FieldBits: PFieldBits);
+var
+  field: TOrmPropInfo;
+begin
+  if self <> nil then
+    if IsRowID(PropName) then
+      SetID(Value, fID)
+    else
+    begin
+      field := Orm.Fields.ByName(PropName, PropLen, PropIndex);
+      if field <> nil then
+      begin
+        field.SetValue(self, Value, ValueLen, wasString);
+        if FieldBits <> nil then
+          Include(FieldBits^, field.PropertyIndex);
+      end;
+    end;
+end;
+
+procedure TOrm.FillValueJson(var PropIndex: PtrInt; PropName: PUtf8Char;
+  PropLen: PtrInt; var Json: PUtf8Char;  FieldBits: PFieldBits);
+var
+  Value: PUtf8Char;
+  ValueLen: integer;
+  wasString: boolean;
+begin
+  Value := GetJsonFieldOrObjectOrArray(
+    Json, @wasString, nil, true, true, @ValueLen);
+  FillValue(PropIndex, PropName, Value, PropLen, ValueLen, wasString, FieldBits);
+end;
+
 procedure TOrm.FillFrom(const JsonRecord: RawUtf8; FieldBits: PFieldBits);
 var
   tmp: TSynTempBuffer; // work on a private copy
@@ -6585,27 +6623,26 @@ end;
 procedure TOrm.FillFrom(P: PUtf8Char; FieldBits: PFieldBits);
 var
   F: array[0..MAX_SQLFIELDS - 1] of PUtf8Char; // store field/property names
-  wasString: boolean;
-  i, n: PtrInt;
-  ValueLen: integer;
-  Prop, Value: PUtf8Char;
+  L: array[0..MAX_SQLFIELDS - 1] of integer;   // and lens
+  i, j, n: PtrInt;
 begin
   if FieldBits <> nil then
     FillZero(FieldBits^);
   if P = nil then
     exit;
-  while P^ <> '{' do  // go to start of object
+  while P^ <> '{' do  // go to start of object (handle both [{obj}] and {obj})
     if P^ = #0 then
       exit
     else
       inc(P);
   // set each property from values using efficient TOrmPropInfo.SetValue()
+  j := 0; // for optimistic in-order field name lookup in FillValue
   if Expect(P, FIELDCOUNT_PATTERN, 14) then
   begin
-    // NOT EXPANDED - optimized format with a JSON array of JSON values, fields first
+    // NOT EXPANDED - optimized format with an array of JSON values, names first
     //  {"fieldCount":2,"values":["f1","f2","1v1",1v2],"rowCount":1}
     n := GetNextItemCardinal(P, #0) - 1;
-    if cardinal(n) > high(F) then
+    if PtrUInt(n) > high(F) then
       exit;
     if Expect(P, ROWCOUNT_PATTERN, 12) then
       // just ignore "rowCount":.. here
@@ -6613,27 +6650,21 @@ begin
     if not Expect(P, VALUES_PATTERN, 11) then
       exit;
     for i := 0 to n do
-      F[i] := GetJsonField(P, P);
+      F[i] := GetJsonField(P, P, nil, nil, @L[i]); // parse names first
     for i := 0 to n do
-    begin
-      Value := GetJsonFieldOrObjectOrArray(
-        P, @wasString, nil, true, true, @ValueLen);
-      FillValue({%H-}F[i], Value, ValueLen, wasString, FieldBits);
-    end;
+      FillValueJson(j, {%H-}F[i], {%H-}L[i], P, FieldBits); // parse values
   end
   else if P^ = '{' then
   begin
-    // EXPANDED FORMAT - standard format with a JSON array of JSON objects
+    // EXPANDED FORMAT - standard format with (an array of) JSON objects
     //  [{"f1":"1v1","f2":1v2}]
     inc(P);
     repeat
-      Prop := GetJsonPropName(P);
-      if (Prop = nil) or
+      F[0] := GetJsonPropName(P, @L[0]); // parse name:
+      if (F[0] = nil) or
          (P = nil) then
         break;
-      Value := GetJsonFieldOrObjectOrArray(
-        P, @wasString, nil, true, true, @ValueLen);
-      FillValue(Prop, Value, ValueLen, wasString, FieldBits);
+      FillValueJson(j, F[0], L[0], P, FieldBits); // parse value
     until P = nil;
   end;
 end;
@@ -6644,7 +6675,7 @@ var
 begin
   if _Safe(aDocVariant)^.IsObject then
   begin
-    VariantSaveJson(aDocVariant, twJsonEscape, json);
+    DocVariantType.ToJson(@aDocVariant, json);
     FillFrom(pointer(json));
   end;
 end;
@@ -6767,29 +6798,6 @@ begin
   end;
   W.CancelLastComma;
   W.Add(']');
-end;
-
-procedure TOrm.FillValue(PropName, Value: PUtf8Char; ValueLen: PtrInt;
-  wasString: boolean; FieldBits: PFieldBits);
-var
-  field: TOrmPropInfo;
-begin
-  if self <> nil then
-    if IsRowID(PropName) then
-      SetID(Value, fID)
-    else
-    begin
-      field := Orm.Fields.ByName(PropName);
-      if field <> nil then
-      begin
-        if (ValueLen = 0) and
-           (Value <> nil) then
-          ValueLen := StrLen(Value);
-        field.SetValue(self, Value, ValueLen, wasString);
-        if FieldBits <> nil then
-          Include(FieldBits^, field.PropertyIndex);
-      end;
-    end;
 end;
 
 function TOrm.SetFieldSqlVars(const Values: TSqlVarDynArray): boolean;
@@ -6936,43 +6944,55 @@ begin
     W.Add('}');
 end;
 
-procedure TOrm.AppendAsJsonObject(W: TOrmWriter; Fields: TFieldBits);
+procedure TOrm.AppendAsJsonObject(W: TJsonWriter; Fields: TFieldBits;
+  WithID: boolean);
 var // Fields are not "const" since are modified if zero
   i: PtrInt;
   P: TOrmProperties;
-  Props: TOrmPropInfoList;
+  nfo: ^TOrmPropInfo;
 begin
   if self = nil then
   begin
     W.AddNull;
     exit;
   end;
-  W.AddShorter('{"ID":');
-  W.Add(fID);
+  if WithID then
+  begin
+    W.AddShorter('{"ID":');
+    W.Add(fID);
+    W.AddComma;
+  end
+  else
+    W.Add('{');
   P := Orm;
   if IsZero(Fields) then
     Fields := P.SimpleFieldsBits[ooSelect];
-  Props := P.Fields;
-  for i := 0 to Props.Count - 1 do
+  nfo := pointer(P.Fields.List);
+  for i := 0 to P.Fields.Count - 1 do
+  begin
     if byte(i) in Fields then
     begin
-      W.Add(',', '"');
-      W.AddNoJsonEscape(pointer(Props.List[i].Name), length(Props.List[i].Name));
+      W.Add('"');
+      W.AddNoJsonEscape(pointer(nfo^.Name), length(nfo^.Name));
       W.Add('"', ':');
-      Props.List[i].GetJsonValues(self, W);
+      nfo^.GetJsonValues(self, W);
+      W.AddComma;
     end;
+    inc(nfo);
+  end;
+  W.CancelLastComma;
   W.Add('}');
 end;
 
 procedure TOrm.AppendFillAsJsonArray(const FieldName: RawUtf8;
-  W: TOrmWriter; const Fields: TFieldBits);
+  W: TJsonWriter; const Fields: TFieldBits);
 begin
   if FieldName <> '' then
     W.AddFieldName(FieldName);
   W.Add('[');
   while FillOne do
   begin
-    AppendAsJsonObject(W, Fields);
+    AppendAsJsonObject(W, Fields, {withID=}true);
     W.AddComma;
   end;
   W.CancelLastComma;
@@ -7436,7 +7456,8 @@ begin
   for i := 0 to props.Count - 1 do
     if GetBitPtr(@Fields, i) then
     begin
-      val := GetJsonFieldOrObjectOrArray(Json, @wasstring, nil, true, true, @vallen);
+      val := GetJsonFieldOrObjectOrArray(
+        Json, @wasstring, nil, true, true, @vallen);
       props.List[i].SetValue(self, val, vallen, wasstring);
     end;
   result := Json <> nil;
@@ -7828,7 +7849,7 @@ begin
   if json = '' then
     exit;
   T := TOrmTableJson.CreateFromTables(ObjectsClass, sql, json,
-    {ownJSON=}PRefCnt(PAnsiChar(pointer(json)) - _STRREFCNT)^ = 1);
+    {ownJSON=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1);
   if (T = nil) or
      (T.fData = nil) then
   begin
@@ -7895,45 +7916,22 @@ end;
 
 class procedure TOrm.RttiJsonRead(var Context: TJsonParserContext; Instance: TObject);
 var
-  cur: POrmPropInfo;
-  f: TOrmPropInfo;
-  props: TOrmPropInfoList;
   name: PUtf8Char;
   namelen: integer;
+  i: PtrInt;
   orm: TOrm absolute Instance;
 begin
   // manually parse incoming JSON object using Orm.Fields.SetValue()
   if not Context.ParseObject then
     exit; // invalid or {} or null
-  props := OrmProps.Fields;
-  cur := pointer(props.List);
+  i := 0; // for optimistic property name lookup
   repeat
      name := GetJsonPropName(Context.Json, @namelen);
      if name = nil then
        Context.Valid := false;
      if not Context.ParseNextAny then // GetJsonFieldOrObjectOrArray()
        exit;
-     if IsRowID(name, namelen) then // handle both ID and RowID names
-       SetID(Context.Value, orm.fID)
-     else
-     begin
-       if (cur <> nil) and
-          IdemPropNameU(cur^.Name, name, namelen) then
-       begin
-         f := cur^; // optimistic O(1) property lookup
-         if f <> props.Last then
-           inc(cur)
-         else
-           cur := nil;
-       end
-       else
-       begin
-         f := props.ByName(name); // O(log(n)) binary search
-         cur := nil;
-       end;
-       if f <> nil then // just ignore unknown property names
-         f.SetValue(orm, Context.Value, Context.ValueLen, Context.WasString);
-     end;
+     orm.FillValue(i, name, Context.Value, namelen, Context.ValueLen, Context.WasString);
   until Context.EndOfObject = '}';
   Context.ParseEndOfObject;
 end;
@@ -8080,7 +8078,7 @@ begin
   result := '';
   if self = nil then
     exit;
-  P := Orm.Fields.ByName(pointer(PropName));
+  P := Orm.Fields.ByName(pointer(PropName)); // fast O(log(n)) binary search
   if P <> nil then
     P.GetValueVar(self, False, result, nil);
 end;
@@ -8091,7 +8089,7 @@ var
 begin
   if self = nil then
     exit;
-  P := Orm.Fields.ByName(pointer(PropName));
+  P := Orm.Fields.ByName(pointer(PropName)); // fast O(log(n)) binary search
   if P <> nil then
     P.SetValue(self, Value, ValueLen, false);
 end;
@@ -9187,9 +9185,8 @@ Copiabl:include(CopiableFieldsBits, i);
   begin
     fRecordManySourceProp := Fields.ByRawUtf8Name('Source') as TOrmPropInfoRttiInstance;
     if fRecordManySourceProp = nil then
-      raise EModelException.CreateUtf8('% expects a SOURCE field', [Table])
-    else
-      fRecordManyDestProp := Fields.ByRawUtf8Name('Dest') as TOrmPropInfoRttiInstance;
+      raise EModelException.CreateUtf8('% expects a SOURCE field', [Table]);
+    fRecordManyDestProp := Fields.ByRawUtf8Name('Dest') as TOrmPropInfoRttiInstance;
     if fRecordManyDestProp = nil then
       raise EModelException.CreateUtf8('% expects a DEST field', [Table]);
   end;
@@ -10276,7 +10273,7 @@ end;
 function TOrmModelProperties.GetProp(const PropName: RawUtf8): TOrmPropInfo;
 begin
   if self <> nil then
-    result := Props.Fields.ByName(pointer(PropName))
+    result := Props.Fields.ByName(pointer(PropName)) // O(log(n)) binary search
   else
     result := nil;
 end;

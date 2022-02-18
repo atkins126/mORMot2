@@ -1375,7 +1375,7 @@ end;
 
 constructor TSynMonitorSizeParent.Create(aTextNoSpace: boolean);
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   fTextNoSpace := aTextNoSpace;
 end;
 
@@ -1405,7 +1405,7 @@ end;
 
 constructor TSynMonitor.Create;
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   fTotalTime := TSynMonitorTime.Create;
   fLastTime := TSynMonitorOneTime.Create;
   fMinimalTime := TSynMonitorOneTime.Create;
@@ -1594,9 +1594,15 @@ begin
     exit;
   fSafe.Lock;
   another.fSafe.Lock;
+  {$ifdef HASFASTTRYFINALLY}
   try
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
     LockedSum(another);
+  {$ifdef HASFASTTRYFINALLY}
   finally
+  {$endif HASFASTTRYFINALLY}
     another.fSafe.UnLock;
     fSafe.UnLock;
   end;
@@ -2476,7 +2482,7 @@ var
   i: PtrInt;
   it, kt, ut: Int64;
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   fProcesses.Init(TypeInfo(TSystemUseProcessDynArray), fProcess);
   if not RetrieveSystemTimes(it, kt, ut) then
     exit; // no system monitoring API on Linux or oldest Windows
@@ -2677,7 +2683,7 @@ begin
   if (ProcessSystemUse = nil) and
      aCreateIfNone then
   begin
-    GlobalLock; // paranoid thread-safety
+    GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
     try
       if ProcessSystemUse = nil then
         ProcessSystemUse := RegisterGlobalShutdownRelease(
@@ -2711,7 +2717,7 @@ begin
         if aDestMemoryMB <> nil then
           mem := FormatUtf8('%% ', [mem, TwoDigits(WorkKB / 1024)]);
       end;
-  result := TrimU(result);
+  TrimSelf(result);
   if aDestMemoryMB <> nil then
     aDestMemoryMB^ := TrimU(mem);
 end;
@@ -2781,6 +2787,7 @@ end;
 
 constructor TSynMonitorMemory.Create(aTextNoSpace: boolean);
 begin
+  inherited Create; // may have been overriden
   FAllocatedUsed := TSynMonitorOneSize.Create(aTextNoSpace);
   FAllocatedReserved := TSynMonitorOneSize.Create(aTextNoSpace);
   FPhysicalMemoryFree := TSynMonitorOneSize.Create(aTextNoSpace);
@@ -2939,6 +2946,7 @@ end;
 
 constructor TSynMonitorDisk.Create;
 begin
+  inherited Create; // may have been overriden
   fAvailableSize := TSynMonitorOneSize.Create({nospace=}false);
   fFreeSize := TSynMonitorOneSize.Create({nospace=}false);
   fTotalSize := TSynMonitorOneSize.Create({nospace=}false);

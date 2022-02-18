@@ -76,7 +76,7 @@ type
     amUnlocked,
     amLocked,
     amBackgroundThread,
-    amBackgroundORMSharedThread,
+    amBackgroundOrmSharedThread,
     amMainThread);
 
   /// used to store the execution parameters for a TRest instance
@@ -91,6 +91,7 @@ type
     /// finalize the memory structure, and the associated background thread
     destructor Destroy; override;
   end;
+  PRestAcquireExecution = ^TRestAcquireExecution;
 
   /// define how a TRest class may execute its ORM and SOA operations
   TRestAcquireExecutions =
@@ -137,6 +138,7 @@ type
     fBackgroundBatch: TRestBatchLockedDynArray;
     fBackgroundInterning: array of TRawUtf8Interning;
     fBackgroundInterningMaxRefCount: integer;
+    fBackgroundInterningSafe: TLightLock;
     procedure SystemUseBackgroundExecute(Sender: TSynBackgroundTimer;
       Event: TWaitResult; const Msg: RawUtf8);
     // used by AsyncRedirect/AsyncBatch/AsyncInterning
@@ -467,6 +469,7 @@ type
     // - will redirect to fOrmInstance: TRestOrmParent corresponding methods
     procedure OnBeginCurrentThread(Sender: TThread); virtual;
     procedure OnEndCurrentThread(Sender: TThread); virtual;
+    procedure OnRestBackgroundTimerCreate; virtual;
   public
     /// initialize the class, and associate it to a specified database Model
     constructor Create(aModel: TOrmModel); virtual;
@@ -596,7 +599,7 @@ type
     // ! aServer.AcquireExecutionMode[execOrmGet] := am***;
     // ! aServer.AcquireExecutionMode[execOrmWrite] := am***;
     // here, safe blocking am*** modes are any mode but amUnlocked, i.e. either
-    // amLocked, amBackgroundThread, amBackgroundORMSharedThread or amMainThread
+    // amLocked, amBackgroundThread, amBackgroundOrmSharedThread or amMainThread
     property AcquireExecutionMode[Cmd: TRestServerUriContextCommand]: TRestServerAcquireMode
       read GetAcquireExecutionMode write SetAcquireExecutionMode;
     /// the time (in mili seconds) to try locking internal commands of this class
@@ -613,7 +616,7 @@ type
     // - amBackgroundThread will execute the write methods in a queue, in a
     // dedicated unique thread (which can be convenient, especially for
     // external database transaction process)
-    // - amBackgroundORMSharedThread will execute all ORM methods in a queue, in
+    // - amBackgroundOrmSharedThread will execute all ORM methods in a queue, in
     // a dedicated unique thread, shared for both execOrmWrite and execOrmGet,
     // but still dedicated for execSoaByMethod and execSoaByInterface
     // - a slower alternative to amBackgroundThread may be amMainThread
@@ -1352,7 +1355,6 @@ type
     // - may avoid OS API calls on server side, during a request process
     // - warning: do not use within loops for timeout, because it won't change
     function TickCount64: Int64;
-      {$ifdef HASINLINE}inline;{$endif}
     /// retrieve the "Authorization: Bearer <token>" value from incoming HTTP headers
     // - typically returns a JWT for statelesss self-contained authentication,
     // as expected by TJwtAbstract.Verify method
@@ -1389,7 +1391,7 @@ type
     procedure Returns(const result: RawUtf8; Status: integer = HTTP_SUCCESS;
       const CustomHeader: RawUtf8 = ''; Handle304NotModified: boolean = false;
       HandleErrorAsRegularResult: boolean = false; CacheControlMaxAge: integer = 0;
-      ServerHash: RawUtf8 = ''); overload;
+      const ServerHash: RawUtf8 = ''); overload;
     /// use this method to send back a JSON object to the caller
     // - this method will encode the supplied values e.g. as
     // ! JsonEncode(['name','John','year',1972]) = '{"name":"John","year":1972}'
@@ -1812,18 +1814,18 @@ type
   TInterfacedObjectMulti = class;
 
   /// thread-safe implementation of IMultiCallbackRedirect
-  TInterfacedObjectMultiList = class(TInterfacedObjectLocked, IMultiCallbackRedirect)
+  TInterfacedObjectMultiList = class(
+    TInterfacedObjectWithCustomCreate, IMultiCallbackRedirect)
   protected
     fDest: TInterfacedObjectMultiDestDynArray;
-    fDestCount: integer;
-    fDests: TDynArray;
+    fDests: TDynArrayLocked;
     fFakeCallback: TInterfacedObjectMulti;
     procedure Redirect(const aCallback: IInvokable;
       const aMethodsNames: array of RawUtf8; aSubscribe: boolean); overload;
     procedure Redirect(const aCallback: TInterfacedObject;
       const aMethodsNames: array of RawUtf8; aSubscribe: boolean); overload;
     procedure CallBackUnRegister;
-    function GetInstances(aMethod: integer; var aInstances: TPointerDynArray): integer;
+    function GetInstances(aMethod: integer; var aInstances: TPointerDynArray): PtrInt;
   public
     constructor Create; override;
     destructor Destroy; override;
@@ -1850,8 +1852,8 @@ type
 constructor TInterfacedObjectMultiList.Create;
 begin
   inherited Create;
-  fDests.InitSpecific(TypeInfo(TInterfacedObjectMultiDestDynArray), fDest,
-    ptInterface, @fDestCount);
+  fDests.DynArray.InitSpecific(TypeInfo(TInterfacedObjectMultiDestDynArray),
+    fDest, ptInterface, @fDests.Count);
 end;
 
 procedure TInterfacedObjectMultiList.Redirect(const aCallback: IInvokable;
@@ -1870,18 +1872,18 @@ begin
      ObjectFromInterface(aCallback)], self);
   fFakeCallback.Factory.CheckMethodIndexes(aMethodsNames, true, new.methods);
   new.instance := aCallback;
-  fSafe.Lock;
+  fDests.Safe.WriteLock;
   try
-    ndx := fDests.Find(aCallback);
+    ndx := fDests.DynArray.Find(aCallback);
     if aSubscribe then
       if ndx < 0 then
-        fDests.Add(new)
+        fDests.DynArray.Add(new)
       else
         fDest[ndx] := new
     else
-      fDests.Delete(ndx);
+      fDests.DynArray.Delete(ndx);
   finally
-    fSafe.UnLock;
+    fDests.Safe.WriteUnLock;
   end;
 end;
 
@@ -1903,11 +1905,11 @@ end;
 
 procedure TInterfacedObjectMultiList.CallBackUnRegister;
 begin
-  fSafe.Lock;
+  fDests.Safe.WriteLock;
   try
-    fDests.ClearSafe;
+    fDests.DynArray.ClearSafe;
   finally
-    fSafe.UnLock;
+    fDests.Safe.WriteUnLock;
   end;
   if fFakeCallback <> nil then
   begin
@@ -1923,18 +1925,18 @@ begin
 end;
 
 function TInterfacedObjectMultiList.GetInstances(aMethod: integer;
-  var aInstances: TPointerDynArray): integer;
+  var aInstances: TPointerDynArray): PtrInt;
 var
   i: integer;
   dest: ^TInterfacedObjectMultiDest;
-begin
+begin // caller made fDests.Safe lock
   result := 0;
   dec(aMethod, RESERVED_VTABLE_SLOTS);
   if aMethod < 0 then
     exit;
-  SetLength(aInstances, fDestCount);
+  SetLength(aInstances, fDests.Count);
   dest := pointer(fDest);
-  for i := 1 to fDestCount do
+  for i := 1 to fDests.Count do
   begin
     if aMethod in dest^.methods then
     begin
@@ -1943,7 +1945,7 @@ begin
     end;
     inc(dest);
   end;
-  if result <> fDestCount then
+  if result <> fDests.Count then
     SetLength(aInstances, result);
 end;
 
@@ -1987,38 +1989,51 @@ function TInterfacedObjectMulti.FakeInvoke(const aMethod: TInterfaceMethod;
   const aParams: RawUtf8; aResult, aErrorMsg: PRawUtf8;
   aFakeID: PInterfacedObjectFakeID; aServiceCustomAnswer: PServiceCustomAnswer): boolean;
 var
-  i: Ptrint;
+  i: PtrInt;
   exec: TInterfaceMethodExecute;
-  instances: TPointerDynArray;
+  instances, tobedeleted: TPointerDynArray;
 begin
   result := inherited FakeInvoke(
     aMethod, aParams, aResult, aErrorMsg, aFakeID, aServiceCustomAnswer);
   if not result or
-     (fList.fDestCount = 0) then
+     (fList.fDests.Count = 0) then
     exit;
-  fList.fSafe.Lock;
+  fList.fDests.Safe.ReadLock; // we need to protect instances[]
   try
     if fList.GetInstances(aMethod.ExecutionMethodIndex, instances) = 0 then
       exit;
-    exec := TInterfaceMethodExecute.Create(@aMethod);
+    exec := TInterfaceMethodExecute.Create(fFactory, @aMethod,
+      [optIgnoreException]); // to use exec.ExecutedInstancesFailed
     try
-      exec.Options := [optIgnoreException]; // use exec.ExecutedInstancesFailed
       result := exec.ExecuteJson(instances, pointer('[' + aParams + ']'), nil);
       if exec.ExecutedInstancesFailed <> nil then
-        for i := high(exec.ExecutedInstancesFailed) downto 0 do
+        for i := length(exec.ExecutedInstancesFailed) - 1 downto 0 do
           if exec.ExecutedInstancesFailed[i] <> '' then
-          try
-            fRest.InternalLog('%.FakeInvoke % failed due to % -> unsubscribe',
+          begin
+            fRest.InternalLog('%.FakeInvoke I% failed due to % -> unsubscribe %',
               [ClassType, aMethod.InterfaceDotMethodName,
-               exec.ExecutedInstancesFailed[i]], sllDebug);
-            fList.fDests.FindAndDelete(instances[i]);
-          except // ignore any exception when releasing the (unstable?) callback
+               exec.ExecutedInstancesFailed[i], instances[i]], sllDebug);
+            PtrArrayAdd(tobedeleted, instances[i]);
           end;
     finally
       exec.Free;
     end;
   finally
-    fList.fSafe.UnLock;
+    fList.fDests.Safe.ReadUnLock;
+  end;
+  if tobedeleted = nil then
+    exit;
+  fList.fDests.Safe.WriteLock;
+  try
+    for i := 0 to length(tobedeleted) - 1 do
+      try
+        fRest.InternalLog('%.FakeInvoke: I% delete unsafe %',
+          [ClassType, aMethod.InterfaceDotMethodName, tobedeleted[i]], sllDebug);
+        fList.fDests.DynArray.FindAndDelete(tobedeleted[i]);
+      except // ignore any exception when releasing the (unstable) callback
+      end;
+  finally
+    fList.fDests.Safe.WriteUnLock;
   end;
 end;
 
@@ -2150,7 +2165,7 @@ destructor TRest.Destroy;
 var
   cmd: TRestServerUriContextCommand;
 begin
-  InternalLog('TRest.Destroy %',[fModel.SafeRoot],sllInfo); // self->GPF
+  InternalLog('TRest.Destroy %', [fModel.SafeRoot], sllInfo); // self->GPF
   if fOrm <> nil then
     // abort any (unlikely) pending TRestBatch
     fOrm.AsyncBatchStop(nil);
@@ -2201,6 +2216,11 @@ begin
   // most will be done e.g. in TRestRunThreadsServer.EndCurrentThread
   if fLogFamily <> nil then
     fLogFamily.OnThreadEnded(Sender);
+end;
+
+procedure TRest.OnRestBackgroundTimerCreate;
+begin
+  // nothing to do by default
 end;
 
 procedure TRest.DefinitionTo(Definition: TSynConnectionDefinition);
@@ -2995,12 +3015,13 @@ type
       aResult, aErrorMsg: PRawUtf8; aFakeID: PInterfacedObjectFakeID;
       aServiceCustomAnswer: PServiceCustomAnswer): boolean; override;
   public
-    constructor Create(aTimer: TRestBackgroundTimer; aFactory:
-      TInterfaceFactory; const aDestinationInterface: IInvokable; out
-      aCallbackInterface; const aOnResult: TOnAsyncRedirectResult);
+    constructor Create(aTimer: TRestBackgroundTimer;
+      aFactory: TInterfaceFactory; const aDestinationInterface: IInvokable;
+      out aCallbackInterface; const aOnResult: TOnAsyncRedirectResult);
   end;
 
   TInterfacedObjectAsyncCall = packed record
+    Factory: TInterfaceFactory;
     Method: PInterfaceMethod;
     Instance: pointer; // weak IInvokable reference
     Params: RawUtf8;
@@ -3034,6 +3055,7 @@ begin
     aMethod, aParams, aResult, aErrorMsg, aFakeID, aServiceCustomAnswer);
   if not result then
     exit;
+  call.Factory := fFactory;
   call.Method := @aMethod;
   call.Instance := pointer(fDest);
   call.Params := aParams;
@@ -3369,16 +3391,16 @@ var
 begin
   if not RecordLoad(call, Msg, TypeInfo(TInterfacedObjectAsyncCall)) then
     exit; // invalid message (e.g. periodic execution)
-  log := fRest.fLogClass.Enter('AsyncBackgroundExecute % %',
+  log := fRest.fLogClass.Enter('AsyncBackgroundExecute I% %',
     [call.Method^.InterfaceDotMethodName, call.Params], self);
-  exec := TInterfaceMethodExecute.Create(call.Method);
+  exec := TInterfaceMethodExecute.Create(call.Factory, call.Method, []);
   try
     if Assigned(call.OnOutput) then
       o := @output
     else
       o := nil;
     if not exec.ExecuteJsonCallback(call.Instance, call.Params, o) then
-      fRest.InternalLog('%.AsyncBackgroundExecute %: ExecuteJsonCallback failed',
+      fRest.InternalLog('%.AsyncBackgroundExecute I%: ExecuteJsonCallback failed',
         [ClassType, call.Method^.InterfaceDotMethodName], sllWarning)
     else if o <> nil then
       call.OnOutput(call.Method^,
@@ -3430,13 +3452,18 @@ var
 begin
   timer.Start;
   claimed := 0;
-  for i := 0 to high(fBackgroundInterning) do
-    inc(claimed, fBackgroundInterning[i].Clean(fBackgroundInterningMaxRefCount));
-  if claimed = 0 then
-    exit; // nothing to collect
-  total := claimed;
-  for i := 0 to high(fBackgroundInterning) do
-    inc(total, fBackgroundInterning[i].Count);
+  fBackgroundInterningSafe.Lock;
+  try
+    for i := 0 to high(fBackgroundInterning) do
+      inc(claimed, fBackgroundInterning[i].Clean(fBackgroundInterningMaxRefCount));
+    if claimed = 0 then
+      exit; // nothing to collect
+    total := claimed;
+    for i := 0 to high(fBackgroundInterning) do
+      inc(total, fBackgroundInterning[i].Count);
+  finally
+    fBackgroundInterningSafe.UnLock;
+  end;
   fRest.InternalLog(
     '%.AsyncInterning: Clean(%) claimed %/% strings from % pools in %',
     [ClassType, fBackgroundInterningMaxRefCount, claimed, total,
@@ -3449,20 +3476,20 @@ begin
   if (self = nil) or
      (Interning = nil) then
     exit;
-  fTaskLock.Lock;
+  fBackgroundInterningSafe.Lock; // AsyncBackgroundInterning running (unlikely)
   try
     if (InterningMaxRefCount <= 0) or
        (PeriodMinutes <= 0) then
-      ObjArrayDelete(fBackgroundInterning, Interning)
-    else
     begin
-      fBackgroundInterningMaxRefCount := InterningMaxRefCount;
-      ObjArrayAddOnce(fBackgroundInterning, Interning);
-      Enable(AsyncBackgroundInterning, PeriodMinutes * 60);
+      ObjArrayDelete(fBackgroundInterning, Interning);
+      exit;
     end;
+    fBackgroundInterningMaxRefCount := InterningMaxRefCount;
+    ObjArrayAddOnce(fBackgroundInterning, Interning);
   finally
-    fTaskLock.UnLock;
+    fBackgroundInterningSafe.UnLock;
   end;
+  Enable(AsyncBackgroundInterning, PeriodMinutes * 60);
 end;
 
 
@@ -3581,13 +3608,11 @@ end;
 
 class function TAuthUser.ComputeHashedPassword(const aPasswordPlain,
   aHashSalt: RawUtf8; aHashRound: integer): RawUtf8;
-const
-  DEPRECATED_SALT = 'salt';
 var
   dig: TSha256Digest;
 begin
-  if aHashSalt = '' then
-    result := Sha256(DEPRECATED_SALT + aPasswordPlain)
+  if aHashSalt = '' then // use FormatUtf8() to circumvent FPC string issue
+    result := Sha256(FormatUtf8('salt%', [aPasswordPlain]))
   else
   begin
     Pbkdf2HmacSha256(aPasswordPlain, aHashSalt, aHashRound, dig);
@@ -3693,7 +3718,7 @@ end;
 
 const
   // sorted by occurence for in-order O(n) search via IdemPPChar()
-  METHODNAME: array[0..ord(high(TUriMethod))] of RawUtf8 = (
+  METHODNAME: array[TUriMethod] of RawUtf8 = (
     'GET',
     'POST',
     'PUT',
@@ -3732,8 +3757,8 @@ end;
 function MethodText(m: TUriMethod): RawUtf8;
 begin
   dec(m);
-  if cardinal(m) <= high(METHODNAME) then
-    result := METHODNAME[ord(m)]
+  if cardinal(m) < cardinal(ord(high(METHODNAME))) then
+    result := METHODNAME[m]
   else
     result := '';
 end;
@@ -3880,7 +3905,7 @@ procedure TRestUriContext.SetInCookie(CookieName, CookieValue: RawUtf8);
 var
   i, n: PtrInt;
 begin
-  CookieName := TrimU(CookieName);
+  TrimSelf(CookieName);
   if (self = nil) or
      (CookieName = '') then
     exit;
@@ -3903,7 +3928,7 @@ var
   i: PtrInt;
 begin
   result := '';
-  CookieName := TrimU(CookieName);
+  TrimSelf(CookieName);
   if (self = nil) or
      (CookieName = '') then
     exit;
@@ -3960,12 +3985,35 @@ begin
     result := fTix64;
 end;
 
+procedure SetCacheControl(var Head: RawUtf8; CacheControlMaxAge: integer);
+begin
+  Head := Head + #13#10 + 'Cache-Control: max-age=' +
+    UInt32ToUtf8(CacheControlMaxAge);
+end;
+
+procedure Process304NotModified(Call: PRestUriParams; const ServerHash: RawUtf8);
+var
+  server, client: RawUtf8;
+begin
+  FindNameValue(Call^.InHead, 'IF-NONE-MATCH: ', client);
+  server := ServerHash;
+  if server = '' then
+    server := crc32cUtf8ToHex(Call^.OutBody);
+  server := '"' + server + '"';
+  if client <> server then
+    Call^.OutHead := Call^.OutHead + #13#10 + 'ETag: ' + server
+  else
+  begin
+    // save bandwidth by returning "304 Not Modified"
+    Call^.OutBody := '';
+    Call^.OutStatus := HTTP_NOTMODIFIED;
+  end;
+end;
+
 procedure TRestUriContext.Returns(const Result: RawUtf8;
   Status: integer; const CustomHeader: RawUtf8;
   Handle304NotModified, HandleErrorAsRegularResult: boolean;
-  CacheControlMaxAge: integer; ServerHash: RawUtf8);
-var
-  clienthash: RawUtf8;
+  CacheControlMaxAge: integer; const ServerHash: RawUtf8);
 begin
   if HandleErrorAsRegularResult or
      StatusCodeIsSuccess(Status) then
@@ -3977,26 +4025,11 @@ begin
     else if fCall^.OutHead = '' then
       fCall^.OutHead := JSON_CONTENT_TYPE_HEADER_VAR;
     if CacheControlMaxAge > 0 then
-      fCall^.OutHead := fCall^.OutHead + #13#10 +
-        'Cache-Control: max-age=' + UInt32ToUtf8(CacheControlMaxAge);
+      SetCacheControl(fCall^.OutHead, CacheControlMaxAge);
     if Handle304NotModified and
        (Status = HTTP_SUCCESS) and
        (Length(Result) > 64) then
-    begin
-      FindNameValue(fCall^.InHead, 'IF-NONE-MATCH: ', clienthash);
-      if ServerHash = '' then
-        ServerHash := crc32cUtf8ToHex(Result);
-      ServerHash := '"' + ServerHash + '"';
-      if clienthash <> ServerHash then
-        fCall^.OutHead := fCall^.OutHead + #13#10 +
-          'ETag: ' + ServerHash
-      else
-      begin
-        // save bandwidth by returning "304 Not Modified"
-        fCall^.OutBody := '';
-        fCall^.OutStatus := HTTP_NOTMODIFIED;
-      end;
-    end;
+      Process304NotModified(fCall, ServerHash);
   end
   else
     Error(Result, Status);
@@ -4022,7 +4055,7 @@ procedure TRestUriContext.ReturnsJson(const Value: variant;
 var
   json: RawUtf8;
 begin
-  VariantSaveJson(Value, Escape, json);
+  _VariantSaveJson(Value, Escape, json);
   if MakeHumanReadable and
      (json <> '') and
      (json[1] in ['{', '[']) then
@@ -4358,7 +4391,7 @@ end;
 
 constructor TRestRunThreads.Create(aOwner: TRest);
 begin
-  inherited Create;
+  inherited Create; // initialize fSafe
   fOwner := aOwner;
 end;
 
@@ -4386,7 +4419,10 @@ begin
   fSafe.Lock;
   try
     if fBackgroundTimer = nil then
+    begin
       fBackgroundTimer := TRestBackgroundTimer.Create(fOwner);
+      fOwner.OnRestBackgroundTimerCreate;
+    end;
     result := fBackgroundTimer;
   finally
     fSafe.UnLock;

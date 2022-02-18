@@ -313,7 +313,7 @@ begin
     exit;
   tmp.opcode := frame.opcode;
   tmp.content := frame.content;
-  SetString(tmp.payload, PAnsiChar(Pointer(frame.payload)), length(frame.payload));
+  FastSetRawByteString(tmp.payload, Pointer(frame.payload), length(frame.payload));
   result := Sender.SendFrame(tmp)
 end;
 
@@ -364,7 +364,7 @@ begin
   fSocketClass := TWebSocketServerSocket;
   fProcessClass := TWebSocketProcessServer;
   // initialize protocols and connections
-  fCanNotifyCallback := true;
+  fCallbackSendDelay := @fSettings.SendDelay;
   fWebSocketConnections := TSynObjectListLocked.Create({owned=}false);
   fProtocols := TWebSocketProtocolList.Create;
   fSettings.SetDefaults;
@@ -546,7 +546,7 @@ begin
           // branchless O(log(n)) asm on x86_64
           (FastFindInt64Sorted(sorted.buf, ids, ws^.OwnerConnectionID) >= 0)) then
       begin
-        SetString(temp.payload, PAnsiChar(pointer(aFrame.payload)), len);
+        FastSetRawByteString(temp.payload, pointer(aFrame.payload), len);
         ws^.Outgoing.Push(temp, tix); // non blocking asynchronous sending
       end;
       inc(ws);

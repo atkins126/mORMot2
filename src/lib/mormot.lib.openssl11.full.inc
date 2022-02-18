@@ -4711,26 +4711,6 @@ const
   X509_EX_V_NETSCAPE_HACK = $8000;
   X509_EX_V_INIT = $0001;
   
-  X509_TRUST_DEFAULT = 0;
-  X509_TRUST_COMPAT = 1;
-  X509_TRUST_SSL_CLIENT = 2;
-  X509_TRUST_SSL_SERVER = 3;
-  X509_TRUST_EMAIL = 4;
-  X509_TRUST_OBJECT_SIGN = 5;
-  X509_TRUST_OCSP_SIGN = 6;
-  X509_TRUST_OCSP_REQUEST = 7;
-  X509_TRUST_TSA = 8;
-  X509_TRUST_MIN = 1;
-  X509_TRUST_MAX = 8;
-  X509_TRUST_DYNAMIC = 1 shl 0;
-  X509_TRUST_DYNAMIC_NAME = 1 shl 1;
-  X509_TRUST_NO_SS_COMPAT = 1 shl 2;
-  X509_TRUST_DO_SS_COMPAT = 1 shl 3;
-  X509_TRUST_OK_ANY_EKU = 1 shl 4;
-  X509_TRUST_TRUSTED = 1;
-  X509_TRUST_REJECTED = 2;
-  X509_TRUST_UNTRUSTED = 3;
-  
   X509_FLAG_COMPAT = 0;
   X509_FLAG_NO_HEADER = 1;
   X509_FLAG_NO_VERSION = 1 shl 1;
@@ -4746,108 +4726,13 @@ const
   X509_FLAG_NO_ATTRIBUTES = 1 shl 11;
   X509_FLAG_NO_IDS = 1 shl 12;
   
-  XN_FLAG_SEP_MASK = $f shl 16;
-  XN_FLAG_COMPAT = 0;
-  XN_FLAG_SEP_COMMA_PLUS = 1 shl 16;
-  XN_FLAG_SEP_CPLUS_SPC = 2 shl 16;
-  XN_FLAG_SEP_SPLUS_SPC = 3 shl 16;
-  XN_FLAG_SEP_MULTILINE = 4 shl 16;
-  XN_FLAG_DN_REV = 1 shl 20;
-  XN_FLAG_FN_MASK = $3 shl 21;
-  XN_FLAG_FN_SN = 0;
-  XN_FLAG_FN_LN = 1 shl 21;
-  XN_FLAG_FN_OID = 2 shl 21;
-  XN_FLAG_FN_NONE = 3 shl 21;
-  XN_FLAG_SPC_EQ = 1 shl 23;
-  XN_FLAG_DUMP_UNKNOWN_FIELDS = 1 shl 24;
-  XN_FLAG_FN_ALIGN = 1 shl 25;
-  XN_FLAG_RFC2253 = ASN1_STRFLGS_RFC2253 or XN_FLAG_SEP_COMMA_PLUS or XN_FLAG_DN_REV or XN_FLAG_FN_SN or XN_FLAG_DUMP_UNKNOWN_FIELDS;
-  XN_FLAG_ONELINE = ASN1_STRFLGS_RFC2253 or ASN1_STRFLGS_ESC_QUOTE or XN_FLAG_SEP_CPLUS_SPC or XN_FLAG_SPC_EQ or XN_FLAG_FN_SN;
-  XN_FLAG_MULTILINE = ASN1_STRFLGS_ESC_CTRL or ASN1_STRFLGS_ESC_MSB or XN_FLAG_SEP_MULTILINE or XN_FLAG_SPC_EQ or XN_FLAG_FN_LN or XN_FLAG_FN_ALIGN;
-  
   LH_LOAD_MULT = 256;
   //_LHASH = OPENSSL_LHASH;
   //LHASH_NODE = OPENSSL_LH_NODE;
   
   X509_LU_RETRY = -1;
   X509_LU_FAIL = 0;
-  X509_L_FILE_LOAD = 1;
-  X509_L_ADD_DIR = 2;
-  
-  X509_V_ERR_PATH_LENGTH_EXCEEDED = 25;
-  X509_V_ERR_INVALID_PURPOSE = 26;
-  X509_V_ERR_CERT_UNTRUSTED = 27;
-  X509_V_ERR_CERT_REJECTED = 28;
-  X509_V_ERR_SUBJECT_ISSUER_MISMATCH = 29;
-  X509_V_ERR_AKID_SKID_MISMATCH = 30;
-  X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH = 31;
-  X509_V_ERR_KEYUSAGE_NO_CERTSIGN = 32;
-  X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER = 33;
-  X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION = 34;
-  X509_V_ERR_KEYUSAGE_NO_CRL_SIGN = 35;
-  X509_V_ERR_UNHANDLED_CRITICAL_CRL_EXTENSION = 36;
-  X509_V_ERR_INVALID_NON_CA = 37;
-  X509_V_ERR_PROXY_PATH_LENGTH_EXCEEDED = 38;
-  X509_V_ERR_KEYUSAGE_NO_DIGITAL_SIGNATURE = 39;
-  X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED = 40;
-  X509_V_ERR_INVALID_EXTENSION = 41;
-  X509_V_ERR_INVALID_POLICY_EXTENSION = 42;
-  X509_V_ERR_NO_EXPLICIT_POLICY = 43;
-  X509_V_ERR_DIFFERENT_CRL_SCOPE = 44;
-  X509_V_ERR_UNSUPPORTED_EXTENSION_FEATURE = 45;
-  X509_V_ERR_UNNESTED_RESOURCE = 46;
-  X509_V_ERR_PERMITTED_VIOLATION = 47;
-  X509_V_ERR_EXCLUDED_VIOLATION = 48;
-  X509_V_ERR_SUBTREE_MINMAX = 49;
-  X509_V_ERR_APPLICATION_VERIFICATION = 50;
-  X509_V_ERR_UNSUPPORTED_CONSTRAINT_TYPE = 51;
-  X509_V_ERR_UNSUPPORTED_CONSTRAINT_SYNTAX = 52;
-  X509_V_ERR_UNSUPPORTED_NAME_SYNTAX = 53;
-  X509_V_ERR_CRL_PATH_VALIDATION_ERROR = 54;
-  X509_V_ERR_PATH_LOOP = 55;
-  X509_V_ERR_SUITE_B_INVALID_VERSION = 56;
-  X509_V_ERR_SUITE_B_INVALID_ALGORITHM = 57;
-  X509_V_ERR_SUITE_B_INVALID_CURVE = 58;
-  X509_V_ERR_SUITE_B_INVALID_SIGNATURE_ALGORITHM = 59;
-  X509_V_ERR_SUITE_B_LOS_NOT_ALLOWED = 60;
-  X509_V_ERR_SUITE_B_CANNOT_SIGN_P_384_WITH_P_256 = 61;
-  X509_V_ERR_HOSTNAME_MISMATCH = 62;
-  X509_V_ERR_EMAIL_MISMATCH = 63;
-  X509_V_ERR_IP_ADDRESS_MISMATCH = 64;
-  X509_V_ERR_DANE_NO_MATCH = 65;
-  X509_V_ERR_EE_KEY_TOO_SMALL = 66;
-  X509_V_ERR_CA_KEY_TOO_SMALL = 67;
-  X509_V_ERR_CA_MD_TOO_WEAK = 68;
-  X509_V_ERR_INVALID_CALL = 69;
-  X509_V_ERR_STORE_LOOKUP = 70;
-  X509_V_ERR_NO_VALID_SCTS = 71;
-  X509_V_ERR_PROXY_SUBJECT_NAME_VIOLATION = 72;
-  X509_V_ERR_OCSP_VERIFY_NEEDED = 73;
-  X509_V_ERR_OCSP_VERIFY_FAILED = 74;
-  X509_V_ERR_OCSP_CERT_UNKNOWN = 75;
-  X509_V_FLAG_CB_ISSUER_CHECK = $0;
-  X509_V_FLAG_USE_CHECK_TIME = $2;
-  X509_V_FLAG_CRL_CHECK = $4;
-  X509_V_FLAG_CRL_CHECK_ALL = $8;
-  X509_V_FLAG_IGNORE_CRITICAL = $10;
-  X509_V_FLAG_X509_STRICT = $20;
-  X509_V_FLAG_ALLOW_PROXY_CERTS = $40;
-  X509_V_FLAG_POLICY_CHECK = $80;
-  X509_V_FLAG_EXPLICIT_POLICY = $100;
-  X509_V_FLAG_INHIBIT_ANY = $200;
-  X509_V_FLAG_INHIBIT_MAP = $400;
-  X509_V_FLAG_NOTIFY_POLICY = $800;
-  X509_V_FLAG_EXTENDED_CRL_SUPPORT = $1000;
-  X509_V_FLAG_USE_DELTAS = $2000;
-  X509_V_FLAG_CHECK_SS_SIGNATURE = $4000;
-  X509_V_FLAG_TRUSTED_FIRST = $8000;
-  X509_V_FLAG_SUITEB_128_LOS_ONLY = $10000;
-  X509_V_FLAG_SUITEB_192_LOS = $20000;
-  X509_V_FLAG_SUITEB_128_LOS = $30000;
-  X509_V_FLAG_PARTIAL_CHAIN = $80000;
-  X509_V_FLAG_NO_ALT_CHAINS = $100000;
-  X509_V_FLAG_NO_CHECK_TIME = $200000;
-  
+
   X509_VP_FLAG_DEFAULT = $1;
   X509_VP_FLAG_OVERWRITE = $2;
   X509_VP_FLAG_RESET_FLAGS = $4;
@@ -5245,20 +5130,6 @@ const
   XKU_TIMESTAMP = $40;
   XKU_DVCS = $80;
   XKU_ANYEKU = $100;
-  
-  X509_PURPOSE_DYNAMIC = $1;
-  X509_PURPOSE_DYNAMIC_NAME = $2;
-  X509_PURPOSE_SSL_CLIENT = 1;
-  X509_PURPOSE_SSL_SERVER = 2;
-  X509_PURPOSE_NS_SSL_SERVER = 3;
-  X509_PURPOSE_SMIME_SIGN = 4;
-  X509_PURPOSE_SMIME_ENCRYPT = 5;
-  X509_PURPOSE_CRL_SIGN = 6;
-  X509_PURPOSE_ANY = 7;
-  X509_PURPOSE_OCSP_HELPER = 8;
-  X509_PURPOSE_TIMESTAMP_SIGN = 9;
-  X509_PURPOSE_MIN = 1;
-  X509_PURPOSE_MAX = 9;
   
   X509V3_ADD_OP_MASK = $f;
   X509V3_ADD_DEFAULT = 0;
@@ -9248,10 +9119,6 @@ type
   PPX509_REVOKED = ^PX509_REVOKED;
   PX509_LOOKUP = pointer;
   PPX509_LOOKUP = ^PX509_LOOKUP;
-  PX509_LOOKUP_METHOD = pointer;
-  PPX509_LOOKUP_METHOD = ^PX509_LOOKUP_METHOD;
-  PX509_VERIFY_PARAM = pointer;
-  PPX509_VERIFY_PARAM = ^PX509_VERIFY_PARAM;
   PX509_SIG_INFO = pointer;
   PPX509_SIG_INFO = ^PX509_SIG_INFO;
   PPKCS8_PRIV_KEY_INFO = pointer;
@@ -9937,7 +9804,6 @@ type
   sk_X509_VERIFY_PARAM_freefunc = procedure(a: PX509_VERIFY_PARAM); cdecl;
   sk_X509_VERIFY_PARAM_copyfunc = function(a: PX509_VERIFY_PARAM): PX509_VERIFY_PARAM_st; cdecl;
 
-  X509_STORE_CTX_verify_cb = function(p1: integer; p2: PX509_STORE_CTX): integer; cdecl;
   X509_STORE_CTX_verify_fn = function(p1: PX509_STORE_CTX): integer; cdecl;
   X509_STORE_CTX_get_issuer_fn = function(issuer: PPX509; ctx: PX509_STORE_CTX; x: PX509): integer; cdecl;
   X509_STORE_CTX_check_issued_fn = function(ctx: PX509_STORE_CTX; x: PX509; issuer: PX509): integer; cdecl;
@@ -11534,9 +11400,6 @@ function AES_wrap_key(key: PAES_KEY; iv: PByte; _out: PByte; _in: PByte; inlen: 
 
 function AES_unwrap_key(key: PAES_KEY; iv: PByte; _out: PByte; _in: PByte; inlen: cardinal): integer; cdecl;
   external LIB_CRYPTO name _PU + 'AES_unwrap_key';
-
-function OPENSSL_sk_value(p1: POPENSSL_STACK; p2: integer): pointer; cdecl;
-  external LIB_CRYPTO name _PU + 'OPENSSL_sk_value';
 
 function OPENSSL_sk_set(st: POPENSSL_STACK; i: integer; data: pointer): pointer; cdecl;
   external LIB_CRYPTO name _PU + 'OPENSSL_sk_set';
@@ -14570,9 +14433,6 @@ function EVP_aes_192_ocb(): PEVP_CIPHER; cdecl;
 function EVP_aes_256_ecb(): PEVP_CIPHER; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_aes_256_ecb';
 
-function EVP_aes_256_cbc(): PEVP_CIPHER; cdecl;
-  external LIB_CRYPTO name _PU + 'EVP_aes_256_cbc';
-
 function EVP_aes_256_cfb1(): PEVP_CIPHER; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_aes_256_cfb1';
 
@@ -16907,12 +16767,6 @@ function X509_OBJECT_get0_X509_CRL(a: PX509_OBJECT): PX509_CRL; cdecl;
 function X509_OBJECT_set1_X509_CRL(a: PX509_OBJECT; obj: PX509_CRL): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_OBJECT_set1_X509_CRL';
 
-function X509_STORE_new(): PX509_STORE; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_new';
-
-procedure X509_STORE_free(v: PX509_STORE); cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_free';
-
 function X509_STORE_lock(ctx: PX509_STORE): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_lock';
 
@@ -16943,20 +16797,11 @@ function X509_STORE_get1_crls(st: PX509_STORE_CTX; nm: PX509_NAME): Pstack_st_X5
 function X509_STORE_get1_crl(st: PX509_STORE_CTX; nm: PX509_NAME): Pstack_st_X509_CRL; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get1_crls';
 
-function X509_STORE_set_flags(ctx: PX509_STORE; flags: cardinal): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_set_flags';
-
 function X509_STORE_set_purpose(ctx: PX509_STORE; purpose: integer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_set_purpose';
 
 function X509_STORE_set_trust(ctx: PX509_STORE; trust: integer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_set_trust';
-
-function X509_STORE_set1_param(ctx: PX509_STORE; pm: PX509_VERIFY_PARAM): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_set1_param';
-
-function X509_STORE_get0_param(ctx: PX509_STORE): PX509_VERIFY_PARAM; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_get0_param';
 
 procedure X509_STORE_set_verify(ctx: PX509_STORE; verify: X509_STORE_CTX_verify_fn); cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_set_verify';
@@ -16966,9 +16811,6 @@ procedure X509_STORE_CTX_set_verify(ctx: PX509_STORE_CTX; verify: X509_STORE_CTX
 
 function X509_STORE_get_verify(ctx: PX509_STORE): X509_STORE_CTX_verify_fn; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_get_verify';
-
-procedure X509_STORE_set_verify_cb(ctx: PX509_STORE; verify_cb: X509_STORE_CTX_verify_cb); cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_set_verify_cb';
 
 function X509_STORE_get_verify_cb(ctx: PX509_STORE): X509_STORE_CTX_verify_cb; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_get_verify_cb';
@@ -17039,17 +16881,8 @@ function X509_STORE_set_ex_data(ctx: PX509_STORE; idx: integer; data: pointer): 
 function X509_STORE_get_ex_data(ctx: PX509_STORE; idx: integer): pointer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_get_ex_data';
 
-function X509_STORE_CTX_new(): PX509_STORE_CTX; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_new';
-
 function X509_STORE_CTX_get1_issuer(issuer: PPX509; ctx: PX509_STORE_CTX; x: PX509): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get1_issuer';
-
-procedure X509_STORE_CTX_free(ctx: PX509_STORE_CTX); cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_free';
-
-function X509_STORE_CTX_init(ctx: PX509_STORE_CTX; store: PX509_STORE; x509: PX509; chain: Pstack_st_X509): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_init';
 
 procedure X509_STORE_CTX_set0_trusted_stack(ctx: PX509_STORE_CTX; sk: Pstack_st_X509); cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set0_trusted_stack';
@@ -17074,9 +16907,6 @@ procedure X509_STORE_CTX_set0_untrusted(ctx: PX509_STORE_CTX; sk: Pstack_st_X509
 
 procedure X509_STORE_CTX_set_chain(ctx: PX509_STORE_CTX; sk: Pstack_st_X509); cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set0_untrusted';
-
-procedure X509_STORE_CTX_set_verify_cb(ctx: PX509_STORE_CTX; verify: X509_STORE_CTX_verify_cb); cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_verify_cb';
 
 function X509_STORE_CTX_get_verify_cb(ctx: PX509_STORE_CTX): X509_STORE_CTX_verify_cb; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get_verify_cb';
@@ -17113,15 +16943,6 @@ function X509_STORE_CTX_get_lookup_crls(ctx: PX509_STORE_CTX): X509_STORE_CTX_lo
 
 function X509_STORE_CTX_get_cleanup(ctx: PX509_STORE_CTX): X509_STORE_CTX_cleanup_fn; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get_cleanup';
-
-function X509_STORE_add_lookup(v: PX509_STORE; m: PX509_LOOKUP_METHOD): PX509_LOOKUP; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_add_lookup';
-
-function X509_LOOKUP_hash_dir(): PX509_LOOKUP_METHOD; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_LOOKUP_hash_dir';
-
-function X509_LOOKUP_file(): PX509_LOOKUP_METHOD; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_LOOKUP_file';
 
 function X509_LOOKUP_meth_new(name: PUtf8Char): PX509_LOOKUP_METHOD; cdecl;
   external LIB_CRYPTO name _PU + 'X509_LOOKUP_meth_new';
@@ -17183,12 +17004,6 @@ function X509_LOOKUP_meth_set_get_by_alias(method: PX509_LOOKUP_METHOD; fn: X509
 function X509_LOOKUP_meth_get_get_by_alias(method: PX509_LOOKUP_METHOD): X509_LOOKUP_get_by_alias_fn; cdecl;
   external LIB_CRYPTO name _PU + 'X509_LOOKUP_meth_get_get_by_alias';
 
-function X509_STORE_add_cert(ctx: PX509_STORE; x: PX509): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_add_cert';
-
-function X509_STORE_add_crl(ctx: PX509_STORE; x: PX509_CRL): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_add_crl';
-
 function X509_STORE_CTX_get_by_subject(vs: PX509_STORE_CTX; typ: X509_LOOKUP_TYPE; name: PX509_NAME; ret: PX509_OBJECT): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get_by_subject';
 
@@ -17197,18 +17012,6 @@ function X509_STORE_get_by_subject(vs: PX509_STORE_CTX; typ: X509_LOOKUP_TYPE; n
 
 function X509_STORE_CTX_get_obj_by_subject(vs: PX509_STORE_CTX; typ: X509_LOOKUP_TYPE; name: PX509_NAME): PX509_OBJECT; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get_obj_by_subject';
-
-function X509_LOOKUP_ctrl(ctx: PX509_LOOKUP; cmd: integer; argc: PUtf8Char; argl: integer; ret: PPUtf8Char): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_LOOKUP_ctrl';
-
-function X509_load_cert_file(ctx: PX509_LOOKUP; _file: PUtf8Char; typ: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_load_cert_file';
-
-function X509_load_crl_file(ctx: PX509_LOOKUP; _file: PUtf8Char; typ: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_load_crl_file';
-
-function X509_load_cert_crl_file(ctx: PX509_LOOKUP; _file: PUtf8Char; typ: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_load_cert_crl_file';
 
 function X509_LOOKUP_new(method: PX509_LOOKUP_METHOD): PX509_LOOKUP; cdecl;
   external LIB_CRYPTO name _PU + 'X509_LOOKUP_new';
@@ -17243,20 +17046,11 @@ function X509_LOOKUP_get_store(ctx: PX509_LOOKUP): PX509_STORE; cdecl;
 function X509_LOOKUP_shutdown(ctx: PX509_LOOKUP): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_LOOKUP_shutdown';
 
-function X509_STORE_load_locations(ctx: PX509_STORE; _file: PUtf8Char; dir: PUtf8Char): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_load_locations';
-
-function X509_STORE_set_default_paths(ctx: PX509_STORE): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_set_default_paths';
-
 function X509_STORE_CTX_set_ex_data(ctx: PX509_STORE_CTX; idx: integer; data: pointer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_ex_data';
 
 function X509_STORE_CTX_get_ex_data(ctx: PX509_STORE_CTX; idx: integer): pointer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get_ex_data';
-
-function X509_STORE_CTX_get_error(ctx: PX509_STORE_CTX): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get_error';
 
 procedure X509_STORE_CTX_set_error(ctx: PX509_STORE_CTX; s: integer); cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_error';
@@ -17288,29 +17082,17 @@ function X509_STORE_CTX_get_chain(ctx: PX509_STORE_CTX): Pstack_st_X509; cdecl;
 function X509_STORE_CTX_get1_chain(ctx: PX509_STORE_CTX): Pstack_st_X509; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get1_chain';
 
-procedure X509_STORE_CTX_set_cert(c: PX509_STORE_CTX; x: PX509); cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_cert';
-
 procedure X509_STORE_CTX_set0_verified_chain(c: PX509_STORE_CTX; sk: Pstack_st_X509); cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set0_verified_chain';
 
 procedure X509_STORE_CTX_set0_crls(c: PX509_STORE_CTX; sk: Pstack_st_X509_CRL); cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set0_crls';
 
-function X509_STORE_CTX_set_purpose(ctx: PX509_STORE_CTX; purpose: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_purpose';
-
-function X509_STORE_CTX_set_trust(ctx: PX509_STORE_CTX; trust: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_trust';
-
 function X509_STORE_CTX_purpose_inherit(ctx: PX509_STORE_CTX; def_purpose: integer; purpose: integer; trust: integer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_purpose_inherit';
 
 procedure X509_STORE_CTX_set_flags(ctx: PX509_STORE_CTX; flags: cardinal); cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_flags';
-
-procedure X509_STORE_CTX_set_time(ctx: PX509_STORE_CTX; flags: cardinal; t: time_t); cdecl;
-  external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_time';
 
 function X509_STORE_CTX_get0_policy_tree(ctx: PX509_STORE_CTX): PX509_POLICY_TREE; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_get0_policy_tree';
@@ -17825,12 +17607,6 @@ procedure X509_CRL_set_meth_data(crl: PX509_CRL; dat: pointer); cdecl;
 function X509_CRL_get_meth_data(crl: PX509_CRL): pointer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_CRL_get_meth_data';
 
-function X509_verify_cert_error_string(n: integer): PUtf8Char; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_verify_cert_error_string';
-
-function X509_verify(a: PX509; r: PEVP_PKEY): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_verify';
-
 function X509_REQ_verify(a: PX509_REQ; r: PEVP_PKEY): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_REQ_verify';
 
@@ -17866,9 +17642,6 @@ function X509_sign_ctx(x: PX509; ctx: PEVP_MD_CTX): integer; cdecl;
 
 function X509_http_nbio(rctx: POCSP_REQ_CTX; pcert: PPX509): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_http_nbio';
-
-function X509_REQ_sign(x: PX509_REQ; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_REQ_sign';
 
 function X509_REQ_sign_ctx(x: PX509_REQ; ctx: PEVP_MD_CTX): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_REQ_sign_ctx';
@@ -17984,9 +17757,6 @@ function i2d_PUBKEY_fp(fp: PPointer; pkey: PEVP_PKEY): integer; cdecl;
 function d2i_PUBKEY_fp(fp: PPointer; a: PPEVP_PKEY): PEVP_PKEY; cdecl;
   external LIB_CRYPTO name _PU + 'd2i_PUBKEY_fp';
 
-function d2i_X509_bio(bp: PBIO; x509: PPX509): PX509; cdecl;
-  external LIB_CRYPTO name _PU + 'd2i_X509_bio';
-
 function d2i_X509_CRL_bio(bp: PBIO; crl: PPX509_CRL): PX509_CRL; cdecl;
   external LIB_CRYPTO name _PU + 'd2i_X509_CRL_bio';
 
@@ -18055,18 +17825,6 @@ function i2d_PKCS8_PRIV_KEY_INFO_bio(bp: PBIO; p8inf: PPKCS8_PRIV_KEY_INFO): int
 
 function i2d_PKCS8PrivateKeyInfo_bio(bp: PBIO; key: PEVP_PKEY): integer; cdecl;
   external LIB_CRYPTO name _PU + 'i2d_PKCS8PrivateKeyInfo_bio';
-
-function i2d_PrivateKey_bio(bp: PBIO; pkey: PEVP_PKEY): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'i2d_PrivateKey_bio';
-
-function d2i_PrivateKey_bio(bp: PBIO; a: PPEVP_PKEY): PEVP_PKEY; cdecl;
-  external LIB_CRYPTO name _PU + 'd2i_PrivateKey_bio';
-
-function i2d_PUBKEY_bio(bp: PBIO; pkey: PEVP_PKEY): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'i2d_PUBKEY_bio';
-
-function d2i_PUBKEY_bio(bp: PBIO; a: PPEVP_PKEY): PEVP_PKEY; cdecl;
-  external LIB_CRYPTO name _PU + 'd2i_PUBKEY_bio';
 
 function X509_dup(x509: PX509): PX509; cdecl;
   external LIB_CRYPTO name _PU + 'X509_dup';
@@ -18617,9 +18375,6 @@ function X509_set1_notAfter(x: PX509; tm: PASN1_TIME): integer; cdecl;
 function X509_set_notAfter(x: PX509; tm: PASN1_TIME): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_set1_notAfter';
 
-function X509_up_ref(x: PX509): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_up_ref';
-
 function X509_get_signature_type(x: PX509): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_get_signature_type';
 
@@ -18833,9 +18588,6 @@ function X509_cmp(a: PX509; b: PX509): integer; cdecl;
 function X509_NAME_cmp(a: PX509_NAME; b: PX509_NAME): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_NAME_cmp';
 
-function X509_NAME_hash(x: PX509_NAME): cardinal; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_NAME_hash';
-
 function X509_NAME_hash_old(x: PX509_NAME): cardinal; cdecl;
   external LIB_CRYPTO name _PU + 'X509_NAME_hash_old';
 
@@ -18859,9 +18611,6 @@ function X509_REQ_print_fp(bp: PPointer; req: PX509_REQ): integer; cdecl;
 
 function X509_NAME_print(bp: PBIO; name: PX509_NAME; obase: integer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_NAME_print';
-
-function X509_NAME_print_ex(_out: PBIO; nm: PX509_NAME; indent: integer; flags: cardinal): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_NAME_print_ex';
 
 function X509_print_ex(bp: PBIO; x: PX509; nmflag: cardinal; cflag: cardinal): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_print_ex';
@@ -19126,9 +18875,6 @@ function EVP_PKEY_add1_attr_by_NID(key: PEVP_PKEY; nid: integer; typ: integer; b
 
 function EVP_PKEY_add1_attr_by_txt(key: PEVP_PKEY; attrname: PUtf8Char; typ: integer; bytes: PByte; len: integer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_PKEY_add1_attr_by_txt';
-
-function X509_verify_cert(ctx: PX509_STORE_CTX): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'X509_verify_cert';
 
 function X509_find_by_issuer_and_serial(sk: Pstack_st_X509; name: PX509_NAME; serial: PASN1_INTEGER): PX509; cdecl;
   external LIB_CRYPTO name _PU + 'X509_find_by_issuer_and_serial';
@@ -21265,14 +21011,8 @@ procedure PEM_dek_info(buf: PUtf8Char; typ: PUtf8Char; len: integer; str: PUtf8C
 function PEM_read_X509(fp: PPointer; x: PPX509; cb: Ppem_password_cb; u: pointer): PX509; cdecl;
   external LIB_CRYPTO name _PU + 'PEM_read_X509';
 
-function PEM_write_bio_X509(bp: PBIO; x: PX509): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'PEM_write_bio_X509';
-
 function PEM_write_X509(fp: PPointer; x: PX509): integer; cdecl;
   external LIB_CRYPTO name _PU + 'PEM_write_X509';
-
-function PEM_read_bio_X509_AUX(bp: PBIO; x: PPX509; cb: Ppem_password_cb; u: pointer): PX509; cdecl;
-  external LIB_CRYPTO name _PU + 'PEM_read_bio_X509_AUX';
 
 function PEM_read_X509_AUX(fp: PPointer; x: PPX509; cb: Ppem_password_cb; u: pointer): PX509; cdecl;
   external LIB_CRYPTO name _PU + 'PEM_read_X509_AUX';
@@ -21498,9 +21238,6 @@ function PEM_write_bio_PrivateKey_traditional(bp: PBIO; x: PEVP_PKEY; enc: PEVP_
 
 function PEM_write_bio_PKCS8PrivateKey_nid(bp: PBIO; x: PEVP_PKEY; nid: integer; kstr: PUtf8Char; klen: integer; cb: Ppem_password_cb; u: pointer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'PEM_write_bio_PKCS8PrivateKey_nid';
-
-function PEM_write_bio_PKCS8PrivateKey(p1: PBIO; p2: PEVP_PKEY; p3: PEVP_CIPHER; p4: PUtf8Char; p5: integer; p6: Ppem_password_cb; p7: pointer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'PEM_write_bio_PKCS8PrivateKey';
 
 function i2d_PKCS8PrivateKey_bio(bp: PBIO; x: PEVP_PKEY; enc: PEVP_CIPHER; kstr: PUtf8Char; klen: integer; cb: Ppem_password_cb; u: pointer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'i2d_PKCS8PrivateKey_bio';
@@ -24358,9 +24095,6 @@ function i2d_SSL_SESSION(_in: PSSL_SESSION; pp: PPByte): integer; cdecl;
 
 function d2i_SSL_SESSION(a: PPSSL_SESSION; pp: PPByte; length: integer): PSSL_SESSION; cdecl;
   external LIB_SSL name _PU + 'd2i_SSL_SESSION';
-
-function SSL_get_peer_cert_chain(s: PSSL): Pstack_st_X509; cdecl;
-  external LIB_SSL name _PU + 'SSL_get_peer_cert_chain';
 
 function SSL_CTX_get_verify_mode(ctx: PSSL_CTX): integer; cdecl;
   external LIB_SSL name _PU + 'SSL_CTX_get_verify_mode';

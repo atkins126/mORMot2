@@ -1466,8 +1466,9 @@ begin
 end;
 
 function fpsysctlhwint(hwid: cint): Int64;
-var mib: array[0..1] of cint;
-    len: cint;
+var
+  mib: array[0..1] of cint;
+  len: cint;
 begin
   result := 0;
   mib[0] := CTL_HW;
@@ -1477,8 +1478,9 @@ begin
 end;
 
 function fpsysctlhwstr(hwid: cint; var temp: ShortString): pointer;
-var mib: array[0..1] of cint;
-    len: cint;
+var
+  mib: array[0..1] of cint;
+  len: cint;
 begin
   mib[0] := CTL_HW;
   mib[1] := hwid;
@@ -1563,13 +1565,13 @@ var
   fn, status, tgid: RawUtf8;
 begin
   result := nil;
-  d := FpOpendir('/proc'); // faster alternative to FindFirst()
+  d := FpOpendir('/proc'); // (much) faster alternative to FindFirst()
   if d = nil then
     exit;
   n := 0;
   SetLength(result, 128);
   repeat
-    e := FpReaddir(d^);
+    e := FpReaddir(d^); // FPC RTL use getdents64 syscall on Linux and BSD :)
     if e = nil then
       break;
     if ((e.d_type = DT_UNKNOWN) or
@@ -1665,6 +1667,7 @@ begin
   DefaultHasher128(@e.h0, @si, SizeOf(si));
   // detailed CPU execution context and timing from Linux kernel
   DoHash128File(e.h0, '/proc/self/statm');
+  DoHash128File(e.h0, '/proc/self/stat');
   DoHash128File(e.h1, '/proc/stat');
   // read-only random UUID text like '6fd5a44b-35f4-4ad4-a9b9-6b9be13e1fe9'
   DoHash128File(e.h2, '/proc/sys/kernel/random/uuid');
@@ -1807,7 +1810,8 @@ begin
          (tot > 1 shl 20) then
       begin
   //writeln('fs=',fs,' mnt=',mnt,' typ=',typ, ' av=',av,' fr=',fr,' tot=',tot);
-        SetLength(result, n + 1);
+        if n = length(result) then
+          SetLength(result, NextGrow(n));
         result[n].name := fs;
         result[n].mounted := fn;
         result[n].size := tot;
@@ -1816,6 +1820,7 @@ begin
     end;
     p := GotoNextLine(p);
   until p = nil;
+  SetLength(result, n);
 end;
 
 {$ifdef OSBSDDARWIN}
@@ -1933,7 +1938,7 @@ end;
 
 {$else}
 
-// other platforms (Intel+Arm64) use plain Kernel call
+// other platforms (Intel+Arm64) use plain Kernel call and PtrInt jump
 function StubCallAllocMem(const Size, flProtect: DWORD): pointer;
 begin
   result := fpmmap(nil, STUB_SIZE,
@@ -2257,6 +2262,8 @@ function getpagesize: integer; cdecl; external clib;
 
 {$ifdef OSLINUX}
 
+function get_nprocs: integer;  cdecl; external clib;
+
 procedure SetLinuxDistrib(const release: RawUtf8);
 var
   distrib: TOperatingSystem;
@@ -2276,6 +2283,7 @@ end;
 
 function clock_gettime_c(clk_id: clockid_t; tp: ptimespec): cint;
 begin
+  // FPC only knows the regular clocks: convert to the *_FAST version
   case clk_id of
     // 1 ms resolution is good enough for milliseconds-based RTL functions
     CLOCK_REALTIME:
@@ -2345,7 +2353,7 @@ begin
     AddInteger(result, v, {nodup=}true);
 end;
 
-{$ifdef CPUARM3264} // POSIX libc is faster than the RTL or our pascal code
+{$ifdef CPUARM3264} // POSIX libc is faster than FPC RTL or our pascal code
 
 function libc_strlen(s: PAnsiChar): SizeInt;
   cdecl external clib name 'strlen';
@@ -2434,7 +2442,26 @@ procedure crc32blocksarm64(crc128, data128: PBlock128; count: integer); external
 
 {$endif CPUAARCH64}
 
-procedure InitializeUnit;
+function KB(Size: cardinal): shortstring;
+begin
+  if Size >= 1 shl 30 then
+  begin
+    str(Size shr 30, result);
+    result := result + 'GB';
+  end
+  else if Size >= 1 shl 20 then
+  begin
+    str(Size shr 20, result);
+    result := result + 'MB';
+  end
+  else
+  begin
+    str(Size shr 10, result);
+    result := result + 'KB';
+  end
+end;
+
+procedure InitializeSpecificUnit;
 var
   P: PAnsiChar;
   modname, beg: PUtf8Char;
@@ -2449,7 +2476,7 @@ var
   {$ifdef OSBSDDARWIN}
   temp: ShortString;
   {$else}
-  hw, cpuinfo: PUtf8Char;
+  hw, cache, cpuinfo: PUtf8Char;
   proccpuinfo, release, prod: RawUtf8;
   {$ifdef OSLINUX}
   prodver, dist: RawUtf8;
@@ -2476,12 +2503,23 @@ begin
   modname := fpsysctlhwstr(HW_MODEL, temp);
   with uts do
     OSVersionText := sysname + '-' + release + ' ' + version;
+  {$ifdef OSDARWIN}
+  CpuCache[1].LineSize := fpsysctlhwint(HW_CACHELINE);
+  CpuCache[1].Size := fpsysctlhwint(HW_L1DCACHESIZE);
+  CpuCache[2].LineSize := fpsysctlhwint(HW_CACHELINE);
+  CpuCache[2].Size := fpsysctlhwint(HW_L2CACHESIZE);
+  CpuCacheSize := CpuCache[2].Size;
+  if CpuCacheSize = 0 then
+    CpuCacheSize := CpuCache[1].Size;
+  if CpuCacheSize <> 0 then
+    CpuCacheText := 'L1=' + KB(CpuCache[1].Size) + ' L2=' + KB(CpuCache[2].Size);
+  {$endif OSDARWIN}
   {$else}
   {$ifdef OSANDROID}
   release := GetSystemProperty('ro.build.version.release');
-  prod := Trim(RawUtf8(GetSystemProperty('ro.product.brand') + ' ' +
-    GetSystemProperty('ro.product.name') + ' ' +
-    GetSystemProperty('ro.product.device')));
+  prod := TrimU(RawUtf8(GetSystemProperty('ro.product.brand') + ' ' +
+                        GetSystemProperty('ro.product.name') + ' ' +
+                        GetSystemProperty('ro.product.device')));
   {$else}
   prod := TrimU(TrimU(StringFromFile('/sys/class/dmi/id/sys_vendor', true)) +
     ' ' + StringFromFile('/sys/class/dmi/id/product_name', true));
@@ -2498,7 +2536,7 @@ begin
   if (release <> '') and
      (release[1] = '"') then
     release := copy(release, 2, length(release) - 2);
-  release := TrimU(release);
+  TrimSelf(release);
   if release = '' then
   begin
     FindNameValue(StringFromFile('/etc/lsb-release'), 'DISTRIB_DESCRIPTION=', release);
@@ -2542,6 +2580,7 @@ begin
   {$endif OSANDROID}
   BiosInfoText := prod;
   hw := nil;
+  cache := nil;
   SystemInfo.dwNumberOfProcessors := 0;
   proccpuinfo := StringFromFile('/proc/cpuinfo', true);
   cpuinfo := pointer(proccpuinfo);
@@ -2562,6 +2601,8 @@ begin
       CpuInfoFeatures := ParseLine(beg)
     else if IdemPChar(beg, 'HARDWARE') then
       hw := ParseLine(beg)
+    else if IdemPChar(beg, 'CACHE SIZE') then
+      cache := ParseLine(beg)
     {$ifdef CPUARM3264}
     else if IdemPChar(beg, 'CPU IMPLEMENTER') then
       ParseHex32Add(beg, aci)
@@ -2591,8 +2632,25 @@ begin
     else
       BiosInfoText := BiosInfoText + ' (' + prod + ')';
   end;
+  if cache <> nil then
+  begin
+    CpuCacheText := TrimU(cache);
+    CpuCacheSize := GetNextCardinal(cache);
+    while cache^ = ' ' do
+      inc(cache);
+    case upcase(cache^) of
+      'K':
+        CpuCacheSize := CpuCacheSize shl 10;
+      'M':
+        CpuCacheSize := CpuCacheSize shl 20;
+      'G':
+        CpuCacheSize := CpuCacheSize shl 30;
+    end;
+  end;
   SystemInfo.release := release;
   {$endif OSBSDDARWIN}
+  if CpuCacheSize <> 0 then
+    CpuInfoText := KB(CpuCacheSize) + ' cache';
   SystemInfo.uts.release := uts.Release;
   SystemInfo.uts.sysname := uts.Sysname;
   SystemInfo.uts.version := uts.Version;
@@ -2601,18 +2659,27 @@ begin
                     GetNextCardinal(P) shl 8 +
                     GetNextCardinal(P);
   OSVersion32.os := OS_KIND;
-  MoveSmall(@KernelRevision, @OSVersion32.utsrelease, SizeOf(OSVersion32.utsrelease));
+  MoveSmall(@KernelRevision, @OSVersion32.utsrelease, 3); // 24-bit version
   with SystemInfo.uts do
     OSVersionText := sysname + ' ' + release;
   if SystemInfo.release <> '' then
     OSVersionText := SystemInfo.release + ' - ' + OSVersionText;
   {$ifdef OSANDROID}
   OSVersionText := 'Android (' + OSVersionText + ')';
+  {$else}
+  {$ifdef OSLINUX}
+  if SystemInfo.dwNumberOfProcessors = 0 then // e.g. QEMU limited /proc/cpuinfo
+    SystemInfo.dwNumberOfProcessors := get_nprocs;
+  {$endif OSLINUX}
   {$endif OSANDROID}
-  if (SystemInfo.dwNumberOfProcessors > 0) and
-     (modname <> nil) then
-    CpuInfoText := Format('%d x %s (' + CPU_ARCH_TEXT + ')',
-      [SystemInfo.dwNumberOfProcessors, modname]);
+  if SystemInfo.dwNumberOfProcessors = 0 then
+    SystemInfo.dwNumberOfProcessors := 1;
+  if modname = nil then
+    CpuInfoText := Format('%d x generic ' + CPU_ARCH_TEXT + ' cpu %s',
+      [SystemInfo.dwNumberOfProcessors, CpuInfoText])
+  else
+    CpuInfoText := Format('%d x %s %s (' + CPU_ARCH_TEXT + ')',
+      [SystemInfo.dwNumberOfProcessors, modname, CpuInfoText]);
   if CpuInfoText = '' then
     CpuInfoText := CPU_ARCH_TEXT;
   // intialize supported APIs
@@ -2648,7 +2715,7 @@ begin
   {$ifdef OSPTHREADS}
   // mutex_lock() is blocking when dlopen run from a .so: cthreads uses both
   // both static and dynamic linking, which is really confusing to our code
-  // -> we don't open libpthread but we
+  // -> we don't open libpthread but we get its symbol
   pthread := dlopen('libpthread.so.0', RTLD_LAZY);
   if pthread <> nil then
     @pthread_setname_np := dlsym(pthread, 'pthread_setname_np');

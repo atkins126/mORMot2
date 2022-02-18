@@ -80,9 +80,16 @@
 
 {.$define NOPOINTEROFFSET}
 // disable TOrmTable offsets on 64-bit if your memory is huge or fragmented
+// note: FPCMM_MEDIUM32BIT may need this for data >256KB
 
 {.$define NOTORMTABLELEN}
-// disable TOrmTable internal fLen[] pre-computed table - may save some memory
+// disable TOrmTable internal fLen[] pre-computed table - slower but less memory
+
+{.$define NOSQLITE3STATIC}
+// disable static SQlite3 linking - to force use external dll/so library
+
+{.$define NOSQLITE3FPUSAVE}
+// disable SetFpuFlags() calls during SQlite3 engine - may enhance performance
 
 {.$define DEBUGSTORAGELOCK}
 // could be defined to force verbose log of StorageLock/StorageUnLock
@@ -92,6 +99,12 @@
 
 {.$define ONLYUSEHTTPSOCKET}
 // is defined on POSIX but may be enabled on Windows if socket+SChannel is enough
+
+{.$define OLDLIBC}
+// use only oldest libc API, e.g. accept() instead of accept4()
+
+{.$define OLDLINUXKERNEL}
+// use only oldest Linux syscalls - as in FPC RTL
 
 {.$define USE_OPENSSL}
 // is defined on POSIX (with late binding) but may be enabled on Windows too
@@ -194,12 +207,15 @@
     {$define ISFPC32}
     {$define ISFPC34}
     {$define FPC_PROVIDE_ATTR_TABLE} // introducing TTypeData.AttributeTable
+    {$define STRCNT32}               // 32-bit TAnsiRec.Ref even on 64-bit CPU
+    // see https://gitlab.com/freepascal.org/fpc/source/-/issues/38018
     {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
   {$endif VER3_4}
   {$if not defined(VER3_0) and not defined(VER3_2) and not defined(VER2)}
     {.$define FPC_PROVIDE_ATTR_TABLE} // to be defined since SVN 42356-42411
     // on compilation error in mormot.core.Rtti, undefine the above conditional
     // see https://lists.freepascal.org/pipermail/fpc-announce/2019-July/000612.html
+    {$define STRCNT32} // new trunk feature: 32-bit TAnsiRec.Ref even on 64-bit CPU
   {$ifend}
 
 
@@ -270,6 +286,7 @@
   // -- identify CPU Architectures
 
   {$ifdef CPU64}
+    // 64-bit Architecture
     {$define FPC_64}
     {$ifdef CPUX64}
       {$ASMMODE INTEL}         // as Delphi expects
@@ -289,6 +306,7 @@
       {$define CPUARM3264}
     {$endif CPUAARCH64}
   {$else}
+    // 32-bit Architecture
     {$define FPC_32}
     {$ifdef CPUX86}
       {$ASMMODE INTEL}         // as Delphi expects
@@ -306,6 +324,8 @@
     {$ifdef CPUARM}
       {$define CPUARM3264}
     {$endif CPUARM}
+    {$define STRCNT32}         // 32-bit TAnsiRec.Ref
+    {$define DACNT32}          // 32-bit TDynArrayRec.refCnt
   {$endif CPU64}
 
 
@@ -408,6 +428,8 @@
   {$define DELPHI_OR_FPC_OLDRTTI}
   {$define HASINTERFACERTTI}  // interface RTTI (not oldest FPC)
   {$define HASFASTTRYFINALLY} // Delphi Win32/Win64 uses efficient SEH
+  {$define STRCNT32}          // 32-bit TStrRec.refCnt even on 64-bit CPU
+  {$define DACNT32}           // 32-bit TDynArrayRec.refCnt even on 64-bit CPU
   {$warn UNSAFE_CODE OFF}     // Delphi for .Net does not exist any more!
   {$warn UNSAFE_TYPE OFF}
   {$warn UNSAFE_CAST OFF}
@@ -537,6 +559,8 @@
     {$if CompilerVersion >= 36.0} // = Delphi 11.1
       {$define ISDELPHI111}
     {$ifend}
+  {$else}
+     {$define ISDELPHI7}
   {$ifend CompilerVersion >= 17}
 
 {$endif FPC}

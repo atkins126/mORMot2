@@ -644,9 +644,9 @@ constructor TJwtAbstract.Create(const aAlgorithm: RawUtf8; aClaims: TJwtClaims;
   aIDIdentifier: TSynUniqueIdentifierProcess; aIDObfuscationKey: RawUtf8;
   aIDObfuscationKeyNewKdf: integer);
 begin
+  inherited Create; // may have been overriden
   if aAlgorithm = '' then
     raise EJwtException.CreateUtf8('%.Create(algo?)', [self]);
-  inherited Create;
   if high(aAudience) >= 0 then
   begin
     fAudience := TRawUtf8DynArrayFrom(aAudience);
@@ -1354,11 +1354,11 @@ var
 begin
   if not fCertificate.InheritsFrom(TEccCertificateSecret) or
      not TEccCertificateSecret(fCertificate).HasSecret then
-    raise EECCException.CreateUtf8('%.ComputeSignature expects % (%) to hold ' +
+    raise EEccException.CreateUtf8('%.ComputeSignature expects % (%) to hold ' +
       'a private key', [self, fCertificate, fCertificate.Serial]);
   sha.Full(pointer(headpayload), length(headpayload), hash);
   if not Ecc256r1Sign(TEccCertificateSecret(fCertificate).PrivateKey, hash, sign) then
-    raise EECCException.CreateUtf8('%.ComputeSignature: ecdsa_sign?', [self]);
+    raise EEccException.CreateUtf8('%.ComputeSignature: ecdsa_sign?', [self]);
   result := BinToBase64Uri(@sign, SizeOf(sign));
 end;
 

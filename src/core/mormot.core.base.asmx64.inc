@@ -395,9 +395,9 @@ end;
 
 function crc32cfast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 {$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        {$ifndef WIN64ABI}
+        {$ifdef SYSVABI}
         mov     r8d, len
-        {$endif WIN64ABI}
+        {$endif SYSVABI}
         mov     eax, crc
         xor     ecx, ecx
         test    buf, buf // buf=rdx/rsi len=r8
@@ -413,7 +413,7 @@ function crc32cfast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
         xor     cl, al
         shr     eax, 8
         xor     eax, dword ptr [rcx * 4 + r9]
-        inc     r8
+        add     r8, 1
         jnz     @sml
 @0:     not     eax
 @z:     ret
@@ -424,7 +424,7 @@ function crc32cfast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
         xor     cl, al
         shr     eax, 8
         xor     eax, dword ptr [rcx * 4 + r9]
-        inc     r8
+        add     r8, 1
         jnz     @head
         not     eax
         ret
@@ -467,17 +467,17 @@ function crc32cfast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
         xor     cl, al
         shr     eax, 8
         xor     eax, dword ptr [rcx * 4 + r9]
-        inc     r8
+        add     r8, 1
         jnz     @tail
 @e:     not     eax
 end;
 
 function StrInt32(P: PAnsiChar; val: PtrInt): PAnsiChar;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        {$ifndef WIN64ABI}
+        {$ifdef SYSVABI}
         mov     rcx, rdi
         mov     rdx, rsi
-        {$endif WIN64ABI}
+        {$endif SYSVABI}
         mov     r10, rdx
         sar     r10, 63         // r10=0 if val>=0 or -1 if val<0
         xor     rdx, r10
@@ -499,29 +499,29 @@ function StrInt32(P: PAnsiChar; val: PtrInt): PAnsiChar;
         imul    rdx, -200
         lea     rdx, [rdx + r8]
         movzx   rdx, word ptr [rdx + r9]
-        mov     [rcx], dx
+        mov     word ptr [rcx], dx
         cmp     rax, 10
         jae     @s
 @1:     or      al, '0'
         mov     byte ptr [rcx - 2], '-'
-        mov     [rcx - 1], al
+        mov     byte ptr [rcx - 1], al
         lea     rax, [rcx + r10 - 1]       // includes '-' if val<0
         ret
 @2:     movzx   eax, word ptr [r8 + rax * 2]
         mov     byte ptr [rcx - 1], '-'
-        mov     [rcx], ax
+        mov     word ptr [rcx], ax
         lea     rax, [rcx + r10]           // includes '-' if val<0
 end;
 
 function StrUInt32(P: PAnsiChar; val: PtrUInt): PAnsiChar;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        {$ifndef WIN64ABI}
+        {$ifdef SYSVABI}
         mov     rcx, rdi
         mov     rdx, rsi
         mov     rax, rsi
         {$else}
         mov     rax, rdx
-        {$endif WIN64ABI}
+        {$endif SYSVABI}
         cmp     rdx, 10
         jb      @1  // direct process of common val<10
         lea     r8, [rip + TwoDigitLookup]
@@ -537,16 +537,16 @@ function StrUInt32(P: PAnsiChar; val: PtrUInt): PAnsiChar;
         imul    rdx, -200
         add     rdx, r8
         movzx   rdx, word ptr [rdx + r9]
-        mov     [rcx], dx
+        mov     word ptr [rcx], dx
         cmp     rax, 10
         jae     @s
 @1:     sub     rcx, 1
         or      al, '0'
-        mov     [rcx], al
+        mov     byte ptr [rcx], al
 @0:     mov     rax, rcx
         ret
 @2:     movzx   eax, word ptr [r8 + rax * 2]
-        mov     [rcx], ax
+        mov     word ptr [rcx], ax
         mov     rax, rcx
 end;
 
@@ -568,9 +568,15 @@ asm
         test    rax, rax
         jz      @z
         lea     d, qword ptr [rax - _STRRECSIZE]
-        cmp     qword ptr [rax - _STRREFCNT], 0 // refcnt=-1 for const
+        {$ifdef STRCNT32}
+        cmp     dword ptr [rax - _STRCNT], 0 // refcnt=-1 for const
         jl      @z
-lock    dec     qword ptr [rax - _STRREFCNT]
+lock    dec     dword ptr [rax - _STRCNT]
+        {$else}
+        cmp     qword ptr [rax - _STRCNT], 0 // refcnt=-1 for const
+        jl      @z
+lock    dec     qword ptr [rax - _STRCNT]
+        {$endif STRCNT32}
         jbe     @free
 @z:     ret
 @free:  jmp     _Freemem
@@ -600,12 +606,19 @@ end;
 
 // brute force O(n) indexes fix after deletion (much faster than full ReHash)
 procedure DynArrayHashTableAdjust(P: PIntegerArray; deleted: integer; count: PtrInt);
+{$ifdef WIN64ABI}
+var
+  bak6, bak7, bak8: THash128;
+asm     // Windows x64 calling convention expects to preserve XMM6-XMM15
+        movups  dqword ptr [bak6], xmm6
+        movups  dqword ptr [bak7], xmm7
+        movups  dqword ptr [bak8], xmm8
+{$else}
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        {$ifdef SYSVABI}
         mov     r8, rdx
         mov     rcx, rdi
         mov     rdx, rsi
-        {$endif SYSVABI}
+{$endif WIN64ABI}
         xor     eax, eax    // reset eax high bits for setg al below
         movq    xmm0, rdx   // xmm0 = 128-bit of quad deleted
         pshufd  xmm0, xmm0, 0
@@ -684,18 +697,30 @@ procedure DynArrayHashTableAdjust(P: PIntegerArray; deleted: integer; count: Ptr
         sub     dword ptr [rcx + r8 * 4], eax
 @2:     test    r8, r8
         jnz     @1
+{$ifdef WIN64ABI}
+        movups  xmm6, dqword ptr [bak6]
+        movups  xmm7, dqword ptr [bak7]
+        movups  xmm8, dqword ptr [bak8]
+{$endif WIN64ABI}
 end;
 
 // DYNARRAYHASH_16BIT version for 16-bit HashTable[] - no AVX2 since count < 64K
 procedure DynArrayHashTableAdjust16(P: PWordArray; deleted: cardinal; count: PtrInt);
+{$ifdef WIN64ABI}
+var
+  bak6, bak7, bak8: THash128;
+asm     // Windows x64 calling convention expects to preserve XMM6-XMM15
+        movups  dqword ptr [bak6], xmm6
+        movups  dqword ptr [bak7], xmm7
+        movups  dqword ptr [bak8], xmm8
+{$else}
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        mov     eax, deleted
-        shl     eax, 16     // for pshufd (inline asm doesn't know about pshufw)
-        {$ifdef SYSVABI}
         mov     r8, rdx
         mov     rcx, rdi
         mov     rdx, rsi
-        {$endif SYSVABI}
+{$endif WIN64ABI}
+        mov     eax, deleted
+        shl     eax, 16     // for pshufd (inline asm doesn't know about pshufw)
         or      edx, eax               // edx = 32-bit of 2x 16-bit deleted
         movq    xmm0, rdx              // xmm0 = 128-bit of 8x deleted
         pshufd  xmm0, xmm0, 0
@@ -745,12 +770,18 @@ procedure DynArrayHashTableAdjust16(P: PWordArray; deleted: cardinal; count: Ptr
         sub     word ptr [rcx + r8 * 4], ax
 @2:     test    r8, r8
         jnz     @1
+{$ifdef WIN64ABI}
+        movups  xmm6, dqword ptr [bak6]
+        movups  xmm7, dqword ptr [bak7]
+        movups  xmm8, dqword ptr [bak8]
+{$endif WIN64ABI}
 end;
 
 {$ifdef ASMX64AVX} // AVX2 ASM not available on Delphi < 11
+
 // adapted from https://github.com/simdjson/simdjson - Apache License 2.0
 function IsValidUtf8Avx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
-  {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
         test    source, source
         jz      @ok
         test    sourcelen, sourcelen
@@ -769,14 +800,27 @@ function IsValidUtf8Avx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
         mov     rbp, rsp
         and     rsp, 0FFFFFFFFFFFFFFE0H // align stack at 32 bytes
         sub     rsp, 160
+        {$ifdef WIN64ABI}
+        movaps  dqword ptr [rsp + 00H], xmm6
+        movaps  dqword ptr [rsp + 10H], xmm7
+        movaps  dqword ptr [rsp + 20H], xmm8
+        movaps  dqword ptr [rsp + 30H], xmm9
+        movaps  dqword ptr [rsp + 40H], xmm10
+        movaps  dqword ptr [rsp + 50H], xmm11
+        movaps  dqword ptr [rsp + 60H], xmm12
+        movaps  dqword ptr [rsp + 70H], xmm13
+        movaps  dqword ptr [rsp + 80H], xmm14
+        movaps  dqword ptr [rsp + 90H], xmm15
+        sub     rsp, 100H
+        {$endif WIN64ABI}
         cmp     rdx, 64
         cmovnc  rcx, rdx
         sub     rcx, 64
         je      @small
         vpxor   xmm3, xmm3, xmm3
+        xor     esi, esi
         vmovdqa ymm7,  yword ptr [rip + @0f]
         vmovdqa ymm15, yword ptr [rip + @_6]
-        xor     esi, esi
         vmovdqa ymm14, yword ptr [rip + @_7]
         vmovdqa ymm13, yword ptr [rip + @_8]
         vmovdqa ymm5, ymm3
@@ -830,10 +874,23 @@ function IsValidUtf8Avx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
 @final: vptest  ymm5, ymm5
         sete    al
         vzeroupper
-        leave      // mov rsp,rbp + pop rbp
         {$ifdef WIN64ABI}
+        add     rsp, 100H
+        movaps  xmm6, dqword ptr [rsp + 00H]
+        movaps  xmm7, dqword ptr [rsp + 10H]
+        movaps  xmm8, dqword ptr [rsp + 20H]
+        movaps  xmm9, dqword ptr [rsp + 30H]
+        movaps  xmm10, dqword ptr [rsp + 40H]
+        movaps  xmm11, dqword ptr [rsp + 50H]
+        movaps  xmm12, dqword ptr [rsp + 60H]
+        movaps  xmm13, dqword ptr [rsp + 70H]
+        movaps  xmm14, dqword ptr [rsp + 80H]
+        movaps  xmm15, dqword ptr [rsp + 90H]
+        leave      // mov rsp,rbp + pop rbp
         pop     rdi
         pop     rsi
+        {$else}
+        leave
         {$endif WIN64ABI}
         ret
 @ok:    mov     al, 1
@@ -952,7 +1009,7 @@ function IsValidUtf8Avx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
 @20:    dq 2020202020202020H
         dq 2020202020202020H
-{$ifdef FPC} align 32 {$else} {.align 32 Delphi doesn't allow this :(}  {$endif}
+{$ifdef FPC} align 32 {$else} .align 32 {Delphi doesn't allow this :(} {$endif}
 @0f:    dq 0F0F0F0F0F0F0F0FH
         dq 0F0F0F0F0F0F0F0FH
         dq 0F0F0F0F0F0F0F0FH
@@ -986,6 +1043,329 @@ function IsValidUtf8Avx2(source: PUtf8Char; sourcelen: PtrInt): boolean;
         db 0FFH, 0FFH, 0FFH, 0FFH, 0FFH, 0FFH, 0FFH, 0FFH
         db 0FFH, 0FFH, 0FFH, 0FFH, 0FFH, 0EFH, 0DFH, 0BFH
 end;
+
+// inspired by https://github.com/aklomp/base64 - BSD-2-Clause License
+// - less unrolled, but (much) faster thanks to manually tuned asm
+
+procedure Base64EncodeAvx2(var b: PAnsiChar; var blen: PtrUInt;
+  var b64: PAnsiChar);
+{$ifdef WIN64ABI}
+var
+  bak6, bak7, bak8, bak9, bak10, bak11, bak12, bak13, bak14, bak15: THash128;
+asm     // Windows x64 calling convention expects to preserve XMM6-XMM15
+        movups  dqword ptr [bak6], xmm6
+        movups  dqword ptr [bak7], xmm7
+        movups  dqword ptr [bak8], xmm8
+        movups  dqword ptr [bak9], xmm9
+        movups  dqword ptr [bak10], xmm10
+        movups  dqword ptr [bak11], xmm11
+        movups  dqword ptr [bak12], xmm12
+        movups  dqword ptr [bak13], xmm13
+        movups  dqword ptr [bak14], xmm14
+        movups  dqword ptr [bak15], xmm15
+        push    rsi         // Win64 ABI doesn't consider rsi/rdi as volatile
+        push    rdi
+        mov     rsi, r8     // rsi = b64
+        mov     r8, rdx     // r8 = blen
+        mov     rdi, rcx    // rdi = b
+{$else}
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        mov     r8, rsi     // r8 = blen
+        mov     rsi, rdx    // rsi = b64   rdi = b
+{$endif WIN64ABI}
+        mov     rcx, qword ptr [r8]
+        cmp     rcx, 31
+        jbe     @done
+        lea     rdx, qword ptr [rcx - 4]
+        vmovdqa ymm0,  yword ptr [rip + @c9]
+        mov     r10, 0AAAAAAAAAAAAAAABH
+        vmovdqa ymm7,  yword ptr [rip + @c10]
+        mov     rax, rdx
+        vmovdqa ymm5,  yword ptr [rip + @c11]
+        vmovdqa ymm8,  yword ptr [rip + @c12]
+        mul     r10
+        vmovdqa ymm9,  yword ptr [rip + @c13]
+        vmovdqa ymm10, yword ptr [rip + @c14]
+        vmovdqa ymm6,  yword ptr [rip + @c16]
+        vmovdqa ymm4,  yword ptr [rip + @c15]
+        vmovdqa ymm11, yword ptr [rip + @c17]
+        shr     rdx, 4                  // rdx = rounds = (blen - 4) / 24
+        lea     rax, qword ptr [rdx + rdx * 2]
+        shl     rax, 3
+        sub     rcx, rax
+        mov     qword ptr [r8], rcx     // blen = rounds * 24
+        mov     rcx, qword ptr [rdi]    // rcx = [rdi] = b
+        mov     rax, qword ptr [rsi]    // rax = [rsi] = b64
+        // initial 24 bytes output process
+        vmovdqu xmm3, oword ptr [rcx]
+        vinserti128 ymm1, ymm3, oword ptr [rcx + 16], 1
+        vpermd  ymm1, ymm0, ymm1
+        vpshufb ymm1, ymm1, ymm7
+        vpand   ymm0, ymm5, ymm1
+        vpmulhuw ymm2, ymm0, ymm8
+        vpand   ymm0, ymm9, ymm1
+        vpmullw ymm0, ymm10, ymm0
+        vpor    ymm0, ymm0, ymm2
+        vpcmpgtb ymm2, ymm0, ymm6
+        vpsubusb ymm1, ymm0, ymm4
+        vpsubb  ymm1, ymm1, ymm2
+        vpshufb ymm1, ymm11, ymm1
+        vpaddb  ymm0, ymm1, ymm0
+        vmovdqu oword ptr [rax], xmm0
+        vextracti128 oword ptr [rax + 16], ymm0, 1
+        add     rax, 32
+        add     rcx, 20
+        sub     rdx, 1
+        je      @10
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+        // process 48 input bytes per loop iteration into 64 encoded bytes
+@9:     cmp     rdx, 1
+        je      @12
+        // whole loop logic is fully interlaced to unleash future CPU potential
+        vmovdqu xmm1, oword ptr [rcx]
+        vmovdqu xmm3, oword ptr [rcx + 24]
+        vinserti128 ymm1, ymm1, oword ptr [rcx + 16], 1
+        vinserti128 ymm3, ymm3, oword ptr [rcx + 24 + 16], 1
+        vpshufb ymm1, ymm1, ymm7
+        vpshufb ymm3, ymm3, ymm7
+        vpand   ymm0, ymm5, ymm1
+        vpand   ymm12, ymm5, ymm3
+        vpmulhuw ymm2, ymm0, ymm8
+        vpmulhuw ymm14, ymm12, ymm8
+        vpand   ymm0, ymm9, ymm1
+        vpand   ymm12, ymm9, ymm3
+        vpmullw ymm0, ymm10, ymm0
+        vpmullw ymm12, ymm10, ymm12
+        vpor    ymm0, ymm0, ymm2
+        vpor    ymm12, ymm12, ymm14
+        vpcmpgtb ymm2, ymm0, ymm6
+        vpcmpgtb ymm15, ymm12, ymm6
+        vpsubusb ymm1, ymm0, ymm4
+        vpsubusb ymm14, ymm12, ymm4
+        vpsubb  ymm1, ymm1, ymm2
+        vpsubb  ymm14, ymm14, ymm15
+        vpshufb ymm1, ymm11, ymm1
+        vpshufb ymm14, ymm11, ymm14
+        vpaddb  ymm0, ymm1, ymm0
+        vpaddb  ymm12, ymm14, ymm12
+        vmovdqu oword ptr [rax], xmm0
+        vextracti128 oword ptr [rax + 16], ymm0, 1
+        vmovdqu oword ptr [rax + 32], xmm12
+        vextracti128 oword ptr [rax + 48], ymm12, 1
+        add     rcx, 48
+        add     rax, 64
+        sub     rdx, 2
+        jne     @9
+@10:    add     rcx, 4
+        mov     qword ptr [rsi], rax
+        mov     qword ptr [rdi], rcx
+        vzeroupper
+        {$ifdef WIN64ABI}
+        jmp     @done
+        {$else}
+        ret
+        {$endif WIN64ABI}
+        // trailing 24 bytes
+@12:    vmovdqu xmm3, oword ptr [rcx]
+        vinserti128 ymm1, ymm3, oword ptr [rcx + 16], 1
+        vpshufb ymm1, ymm1, ymm7
+        vpand   ymm0, ymm5, ymm1
+        vpmulhuw ymm8, ymm0, ymm8
+        vpand   ymm0, ymm9, ymm1
+        vpmullw ymm0, ymm10, ymm0
+        vpor    ymm0, ymm0, ymm8
+        vpcmpgtb ymm6, ymm0, ymm6
+        vpsubusb ymm4, ymm0, ymm4
+        vpsubb  ymm4, ymm4, ymm6
+        vpshufb ymm11, ymm11, ymm4
+        vpaddb  ymm0, ymm11, ymm0
+        vmovdqu oword ptr [rax], xmm0
+        vextracti128 oword ptr [rax + 16], ymm0, 1
+        add     rcx, 24
+        add     rax, 32
+        jmp     @10
+{$ifdef FPC} align 32 {$else} .align 32 {Delphi doesn't allow this :(} {$endif}
+@c9:    dq 0000000000000000H
+        dq 0000000200000001H
+        dq 0000000400000003H
+        dq 0000000600000005H
+@c10:   dq 0809070805060405H
+        dq 0E0F0D0E0B0C0A0BH
+        dq 0405030401020001H
+        dq 0A0B090A07080607H
+@c11:   dq 0FC0FC000FC0FC00H
+        dq 0FC0FC000FC0FC00H
+        dq 0FC0FC000FC0FC00H
+        dq 0FC0FC000FC0FC00H
+@c12:   dq 0400004004000040H
+        dq 0400004004000040H
+        dq 0400004004000040H
+        dq 0400004004000040H
+@c13:   dq 003F03F0003F03F0H
+        dq 003F03F0003F03F0H
+        dq 003F03F0003F03F0H
+        dq 003F03F0003F03F0H
+@c14:   dq 0100001001000010H
+        dq 0100001001000010H
+        dq 0100001001000010H
+        dq 0100001001000010H
+@c15:   dq 3333333333333333H
+        dq 3333333333333333H
+        dq 3333333333333333H
+        dq 3333333333333333H
+@c16:   dq 1919191919191919H
+        dq 1919191919191919H
+        dq 1919191919191919H
+        dq 1919191919191919H
+@c17:   dq 0FCFCFCFCFCFC4741H
+        dq 0000F0EDFCFCFCFCH
+        dq 0FCFCFCFCFCFC4741H
+        dq 0000F0EDFCFCFCFCH
+@done:  {$ifdef WIN64ABI}
+        pop     rdi
+        pop     rsi
+        movups  xmm6, dqword ptr [bak6]
+        movups  xmm7, dqword ptr [bak7]
+        movups  xmm8, dqword ptr [bak8]
+        movups  xmm9, dqword ptr [bak9]
+        movups  xmm10, dqword ptr [bak10]
+        movups  xmm11, dqword ptr [bak11]
+        movups  xmm12, dqword ptr [bak12]
+        movups  xmm13, dqword ptr [bak13]
+        movups  xmm14, dqword ptr [bak14]
+        movups  xmm15, dqword ptr [bak15]
+        {$endif WIN64ABI}
+end;
+
+procedure Base64DecodeAvx2(var b64: PAnsiChar; var b64len: PtrInt;
+  var b: PAnsiChar);
+{$ifdef WIN64ABI}
+var
+  bak6, bak7, bak8, bak9, bak10, bak11, bak12: THash128;
+asm     // Windows x64 calling convention expects to preserve XMM6-XMM15
+        movups  dqword ptr [bak6], xmm6
+        movups  dqword ptr [bak7], xmm7
+        movups  dqword ptr [bak8], xmm8
+        movups  dqword ptr [bak9], xmm9
+        movups  dqword ptr [bak10], xmm10
+        movups  dqword ptr [bak11], xmm11
+        movups  dqword ptr [bak12], xmm12
+        push    rsi         // Win64 ABI doesn't consider rsi/rdi as volatile
+        push    rdi
+        mov     rsi, rdx
+        mov     rdx, r8
+        mov     rdi, rcx
+        {$else}
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        {$endif WIN64ABI}
+        // rcx/rdi=b64 rdx/rsi=b64len r8/rdx=b
+        // on decoding error, b64 will point to the faulty input
+        mov     r8, qword ptr [rsi]
+        cmp     r8, 44
+        jbe     @done
+        lea     r9, qword ptr [r8 - 0DH]
+        vmovdqa ymm1, yword ptr [rip + @c0]
+        vmovdqa ymm5, yword ptr [rip + @c1]
+        mov     rax, r9
+        and     r9, 0FFFFFFFFFFFFFFE0H
+        vmovdqa ymm4, yword ptr [rip + @c2]
+        vmovdqa ymm9, yword ptr [rip + @c3]
+        sub     r8, r9
+        shr     rax, 5                         // rax = rounds
+        vmovdqa ymm8, yword ptr [rip + @c4]
+        vmovdqa ymm3, yword ptr [rip + @c5]
+        mov     qword ptr [rsi], r8            // set final b64len
+        vmovdqa ymm2, yword ptr [rip + @c6]
+        vmovdqa ymm7, yword ptr [rip + @c7]
+        vmovdqa ymm6, yword ptr [rip + @c8]
+        mov     r8, qword ptr [rdi]            // r8 = [rdi] = b64
+        mov     r9, qword ptr [rdx]            // r9 = [rdx] = b
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+        // decode 32 bytes on input into 24 binary bytes per loop iteration
+@1:     vmovdqu xmm0, oword ptr [r8]
+        vinserti128 ymm10, ymm0, oword ptr [r8 + 16], 1
+        vpsrld  ymm0, ymm10, 4
+        vpand   ymm11, ymm1, ymm0
+        vpand   ymm0, ymm1, ymm10
+        vpshufb ymm12, ymm5, ymm11
+        vpshufb ymm0, ymm4, ymm0
+        vptest  ymm0, ymm12
+        jnz     @err
+        add     r8, 32
+        vpcmpeqb ymm0, ymm10, ymm9
+        vpaddb  ymm0, ymm0, ymm11
+        vpshufb ymm0, ymm8, ymm0
+        vpaddb  ymm0, ymm0, ymm10
+        vpmaddubsw ymm0, ymm0, ymm3
+        vpmaddwd ymm0, ymm0, ymm2
+        vpshufb ymm0, ymm0, ymm7
+        vpermd  ymm0, ymm6, ymm0
+        vmovdqu oword ptr [r9], xmm0
+        vextracti128 oword ptr [r9 + 16], ymm0, 1
+        add     r9, 24
+        sub     rax, 1
+        jne     @1
+        jmp     @8
+@err:   shl     rax, 5
+        add     qword ptr [rsi], rax // restore proper b64len on error
+@8:     mov     qword ptr [rdi], r8
+        mov     qword ptr [rdx], r9
+        vzeroupper
+        {$ifdef WIN64ABI}
+        jmp     @done
+        {$else}
+        ret
+        {$endif WIN64ABI}
+{$ifdef FPC} align 32 {$else} .align 32 {Delphi doesn't allow this :(} {$endif}
+@c0:    dq 2F2F2F2F2F2F2F2FH
+        dq 2F2F2F2F2F2F2F2FH
+        dq 2F2F2F2F2F2F2F2FH
+        dq 2F2F2F2F2F2F2F2FH
+@c1:    dq 0804080402011010H
+        dq 1010101010101010H
+        dq 0804080402011010H
+        dq 1010101010101010H
+@c2:    dq 1111111111111115H
+        dq 1A1B1B1B1A131111H
+        dq 1111111111111115H
+        dq 1A1B1B1B1A131111H
+@c3:    dq 2F2F2F2F2F2F2F2FH
+        dq 2F2F2F2F2F2F2F2FH
+        dq 2F2F2F2F2F2F2F2FH
+        dq 2F2F2F2F2F2F2F2FH
+@c4:    dq 0B9B9BFBF04131000H
+        dq 0000000000000000H
+        dq 0B9B9BFBF04131000H
+        dq 0000000000000000H
+@c5:    dq 0140014001400140H
+        dq 0140014001400140H
+        dq 0140014001400140H
+        dq 0140014001400140H
+@c6:    dq 0001100000011000H
+        dq 0001100000011000H
+        dq 0001100000011000H
+        dq 0001100000011000H
+@c7:    dq 090A040506000102H
+        dq 0FFFFFFFF0C0D0E08H
+        dq 090A040506000102H
+        dq 0FFFFFFFF0C0D0E08H
+@c8:    dq 0000000100000000H
+        dq 0000000400000002H
+        dq 0000000600000005H
+        dq 0FFFFFFFFFFFFFFFFH
+@done:  {$ifdef WIN64ABI}
+        pop     rdi
+        pop     rsi
+        movups  xmm6, dqword ptr [bak6]
+        movups  xmm7, dqword ptr [bak7]
+        movups  xmm8, dqword ptr [bak8]
+        movups  xmm9, dqword ptr [bak9]
+        movups  xmm10, dqword ptr [bak10]
+        movups  xmm11, dqword ptr [bak11]
+        movups  xmm12, dqword ptr [bak12]
+        {$endif WIN64ABI}
+end;
+
 {$endif ASMX64AVX}
 
 {$endif CPUX64ASM} // SSE2 asm is invalid prior to Delphi XE7 (to be refined)
@@ -1152,9 +1532,9 @@ function Hash32(Data: PCardinalArray; Len: integer): cardinal;
         add     r9d, eax
         add     Data, 16
         {$ifdef WIN64ABI}
-        dec     r8d
+        sub     r8d, 1
         {$else}
-        dec     esi
+        sub     esi, 1
         {$endif WIN64ABI}
         jnz     @by16
 @by4:   mov     dh, dl
@@ -1342,7 +1722,7 @@ procedure bswap64array(a, b: PQWordArray; n: PtrInt);
         mov     qword ptr [b], rax
         add     a, 8
         add     b, 8
-        dec     n
+        sub     n, 1
         jnz @1
 end;
 
@@ -1899,7 +2279,7 @@ procedure crcblockssse42(crc128, data128: PBlock128; count: integer);
         crc32   r10d, dword ptr [rax + 8]
         crc32   r11d, dword ptr [rax + 12]
         add     rax, 16
-        dec     ecx
+        sub     ecx, 1
         jnz     @s
         mov     dword ptr [rdx], r8d
         mov     dword ptr [rdx + 4], r9d
@@ -1919,7 +2299,7 @@ function crc32csse42(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
         jmp     @align
 @7:     crc32   eax, byte ptr [buf]
         add     buf, 1
-        dec     len
+        sub     len, 1
         jz      @0
 @align: test    buf, 7
         jnz     @7
@@ -1947,7 +2327,7 @@ function crc32csse42(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 @s:     db $F2,$48,$0F,$38,$F1,$02 // circumvent Delphi inline asm compiler bug
         {$endif FPC}
         add     buf, 8
-        dec     len
+        sub     len, 1
         jnz     @s
         jmp     @2
 end;
@@ -2190,7 +2570,7 @@ asm     // rcx=src, edx=size, r8=dest
 @27:    mov     rbx, qword ptr [r14 + rsi] // inline move by 8 bytes
         mov     qword ptr [r8 + rsi], rbx
         add     rsi, 8
-        dec     r12
+        sub     r12, 1
         jnz     @27
         mov     rbx, qword ptr [r14 + rsi] // 1..7 remaining bytes
         and     r15, 7
@@ -2198,14 +2578,14 @@ asm     // rcx=src, edx=size, r8=dest
 @28:    mov     byte ptr [r8 + rsi], bl
         shr     rbx, 8
         add     rsi, 1
-        dec     r15
+        sub     r15, 1
         jnz     @28
         jmp     @31
 {$ifdef FPC} align 8 {$else} .align 8 {$endif}
 @29:    mov     bl, byte ptr [r14 + rsi] // overlaping move
         mov     byte ptr [r8 + rsi], bl
         add     rsi, 1
-        dec     r12
+        sub     r12, 1
         jnz     @29
         cmp     rcx, r9
         jnz     @33
@@ -2274,24 +2654,35 @@ function InterlockedIncrement(var I: integer): integer;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
         mov     eax, 1
    lock xadd    dword ptr [I], eax // atomic eax=[I] + [I]:=[I]+eax
-        inc     eax
+        add     eax, 1
 end;
 
 function InterlockedDecrement(var I: integer): integer;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
         mov     eax, -1
    lock xadd    dword ptr [I], eax // atomic eax=[I] + [I]:=[I]+eax
-        dec     eax
+        sub     eax, 1
 end;
 
-function RefCntDecFree(var refcnt: TRefCnt): boolean;
-{$ifdef FPC}nostackframe; assembler; asm
-        lock dec qword ptr [refcnt]  // TRefCnt=SizeInt=Int64 for FPC_64
-{$else} asm .noframe
-        lock dec dword ptr [refcnt]  // TRefCnt=longint on Delphi Win64
-{$endif FPC}
+function StrCntDecFree(var refcnt: TStrCnt): boolean;
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        {$ifdef STRCNT32}
+   lock dec dword ptr [refcnt]  // TStrCnt=longint on Delphi Win64 and FPC>=3.4
+        {$else}
+   lock dec qword ptr [refcnt]  // on FPC<3.4
+        {$endif STRCNT32}
         setbe   al
 end; // don't check for ismultithread global since lock is cheaper on new CPUs
+
+function DACntDecFree(var refcnt: TDACnt): boolean;
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        {$ifdef DACNT32}
+   lock dec dword ptr [refcnt]  // TDACnt=longint on Delphi
+        {$else}
+   lock dec qword ptr [refcnt]
+        {$endif DACNT32}
+        setbe   al
+end;
 
 function LockedExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt): boolean;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
@@ -2300,9 +2691,14 @@ function LockedExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt): boolean;
         setz    al
 end;
 
-procedure LockedInc(var Target: PtrUInt; Increment: PtrUInt);
+procedure LockedAdd(var Target: PtrUInt; Increment: PtrUInt);
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
    lock add     qword ptr [Target], Increment
+end;
+
+procedure LockedAdd32(var Target: cardinal; Increment: cardinal);
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+   lock add     dword ptr [Target], Increment
 end;
 
 procedure LockedDec(var Target: PtrUInt; Decrement: PtrUInt);

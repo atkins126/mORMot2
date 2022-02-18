@@ -8,6 +8,7 @@ unit mormot.core.threads;
 
    High-Level Multi-Threading features shared by all framework units
     - Thread-Safe TSynQueue and TPendingTaskList
+    - Thread-Safe ILockedDocVariant Storage
     - Background Thread Processing
     - Parallel Execution in a Thread Pool
     - Server Process Oriented Thread Pool
@@ -29,6 +30,8 @@ uses
   mormot.core.rtti,
   mormot.core.buffers,
   mormot.core.data,
+  mormot.core.variants,
+  mormot.core.json,
   mormot.core.perf;
 
 const
@@ -66,6 +69,7 @@ type
     fCount, fFirst, fLast: integer;
     fWaitPopFlags: set of (wpfDestroying);
     fWaitPopCounter: integer;
+    function GetCount: integer;
     procedure InternalPop(aValue: pointer);
     procedure InternalGrow;
     function InternalDestroying(incPopCounter: integer): boolean;
@@ -78,8 +82,7 @@ type
     // - aTypeInfo should be a dynamic array TypeInfo() RTTI pointer, which
     // would store the values within this TSynQueue instance
     // - a name can optionally be assigned to this instance
-    constructor Create(aTypeInfo: PRttiInfo;
-      const aName: RawUtf8 = ''); reintroduce; virtual;
+    constructor Create(aTypeInfo: PRttiInfo; const aName: RawUtf8 = ''); reintroduce; virtual;
     /// finalize the storage
     // - would release all internal stored values, and call WaitPopFinalize
     destructor Destroy; override;
@@ -137,16 +140,20 @@ type
     // - this method is thread-safe, and will make a copy of the queue data
     procedure Save(out aDynArrayValues; aDynArray: PDynArray = nil); overload;
     /// returns how many items are currently stored in this queue
-    // - this method is thread-safe
+    // - this method is not thread-safe, so the returned value should be
+    // either indicative, or you should use explicit Safe lock/unlock
+    // - if you want to check that the queue is not void, call Pending
     function Count: integer;
     /// returns how much slots is currently reserved in memory
     // - the queue has an optimized auto-sizing algorithm, you can use this
     // method to return its current capacity
-    // - this method is thread-safe
+    // - this method is not thread-safe, so returned value is indicative only
     function Capacity: integer;
     /// returns true if there are some items currently pending in the queue
-    // - slightly faster than checking Count=0, and much faster than Pop or Peek
+    // - faster than checking Count=0, and much faster than Pop or Peek
+    // - this method is not thread-safe, so returned value is indicative only
     function Pending: boolean;
+      {$ifdef HASINLINE}inline;{$endif}
   end;
 
 
@@ -168,16 +175,15 @@ type
   // delay, using a post/peek like algorithm
   // - execution delays are not expected to be accurate, but are best guess,
   // according to each NextPendingTask call, and GetTimestamp resolution
-  TPendingTaskList = class(TSynLocked)
+  TPendingTaskList = class
   protected
-    fCount: integer;
     fTask: TPendingTaskListItemDynArray;
-    fTasks: TDynArray;
+    fTasks: TDynArrayLocked;
     function GetCount: integer;
     function GetTimestamp: Int64; virtual; // returns GetTickCount64 by default
   public
     /// initialize the list memory and resources
-    constructor Create; override;
+    constructor Create; reintroduce;
     /// append a task, specifying a delay in milliseconds from current time
     procedure AddTask(aMilliSecondsDelayFromNow: integer;
       const aTask: RawByteString); virtual;
@@ -212,6 +218,173 @@ type
     property Task: TPendingTaskListItemDynArray
       read fTask;
   end;
+
+
+{ ************ Thread-Safe ILockedDocVariant Storage }
+
+type
+  /// ref-counted interface for thread-safe access to a TDocVariant document
+  // - is implemented e.g. by TLockedDocVariant, for IoC/DI resolution
+  // - fast and safe storage of any JSON-like object, as property/value pairs,
+  // or a JSON-like array, as values
+  ILockedDocVariant = interface
+    ['{CADC2C20-3F5D-4539-9D23-275E833A86F3}']
+    function GetValue(const Name: RawUtf8): Variant;
+    procedure SetValue(const Name: RawUtf8; const Value: Variant);
+    /// check and return a given property by name
+    // - returns TRUE and fill Value with the value associated with the supplied
+    // Name, using an internal lock for thread-safety
+    // - returns FALSE if the Name was not found, releasing the internal lock:
+    // use ExistsOrLock() if you want to add the missing value
+    function Exists(const Name: RawUtf8; out Value: Variant): boolean;
+    /// check and return a given property by name
+    // - returns TRUE and fill Value with the value associated with the supplied
+    // Name, using an internal lock for thread-safety
+    // - returns FALSE and set the internal lock if Name does not exist:
+    // caller should then release the lock via ReplaceAndUnlock()
+    function ExistsOrLock(const Name: RawUtf8; out Value: Variant): boolean;
+    /// set a value by property name, and set a local copy
+    // - could be used as such, for implementing a thread-safe cache:
+    // ! if not cache.ExistsOrLock('prop',local) then
+    // !   cache.ReplaceAndUnlock('prop',newValue,local);
+    // - call of this method should have been precedeed by ExistsOrLock()
+    // returning false, i.e. be executed on a locked instance
+    procedure ReplaceAndUnlock(const Name: RawUtf8; const Value: Variant;
+      out LocalValue: Variant);
+    /// add an existing property value to the given TDocVariant document object
+    // - returns TRUE and add the Name/Value pair to Obj if Name is existing,
+    // using an internal lock for thread-safety
+    // - returns FALSE if Name is not existing in the stored document, and
+    // lock the internal storage: caller should eventually release the lock
+    // via AddNewPropAndUnlock()
+    // - could be used as such, for implementing a thread-safe cache:
+    // ! if not cache.AddExistingPropOrLock('Articles',Scope) then
+    // !   cache.AddNewPropAndUnlock('Articles',GetArticlesFromDB,Scope);
+    // here GetArticlesFromDB would occur inside the main lock
+    function AddExistingPropOrLock(const Name: RawUtf8;
+      var Obj: variant): boolean;
+    /// add a property value to the given TDocVariant document object and
+    // to the internal stored document, then release a previous lock
+    // - call of this method should have been precedeed by AddExistingPropOrLock()
+    // returning false, i.e. be executed on a locked instance
+    procedure AddNewPropAndUnlock(const Name: RawUtf8; const Value: variant;
+      var Obj: variant);
+    /// add an existing property value to the given TDocVariant document object
+    // - returns TRUE and add the Name/Value pair to Obj if Name is existing
+    // - returns FALSE if Name is not existing in the stored document
+    // - this method would use a lock during the Name lookup, but would always
+    // release the lock, even if returning FALSE (see AddExistingPropOrLock)
+    function AddExistingProp(const Name: RawUtf8; var Obj: variant): boolean;
+    /// add a property value to the given TDocVariant document object
+    // - this method would not expect the resource to be locked when called,
+    // as with AddNewPropAndUnlock
+    // - will use the internal lock for thread-safety
+    // - if the Name is already existing, would update/change the existing value
+    // - could be used as such, for implementing a thread-safe cache:
+    // ! if not cache.AddExistingProp('Articles',Scope) then
+    // !   cache.AddNewProp('Articles',GetArticlesFromDB,Scope);
+    // here GetArticlesFromDB would occur outside the main lock
+    procedure AddNewProp(const Name: RawUtf8; const Value: variant;
+      var Obj: variant);
+    /// append a value to the internal TDocVariant document array
+    // - you should not use this method in conjunction with other document-based
+    // alternatives, like Exists/AddExistingPropOrLock or AddExistingProp
+    procedure AddItem(const Value: variant);
+    /// makes a thread-safe copy of the internal TDocVariant document object or array
+    function Copy: variant;
+    /// delete all stored properties
+    procedure Clear;
+    /// save the stored values as UTF-8 encoded JSON Object
+    function ToJson(HumanReadable: boolean = false): RawUtf8;
+    /// low-level access to the associated thread-safe mutex
+    function Lock: TAutoLocker;
+    /// the document fields would be safely accessed via this property
+    // - this is the main entry point of this storage
+    // - will raise an EDocVariant exception if Name does not exist at reading
+    // - implementation class would make a thread-safe copy of the variant value
+    property Value[const Name: RawUtf8]: Variant
+      read GetValue write SetValue; default;
+  end;
+
+  /// allows thread-safe access to a TDocVariant document
+  // - this class inherits from TInterfacedObjectWithCustomCreate so you
+  // could define one published property of a mormot.core.interfaces.pas
+  // TInjectableObject as ILockedDocVariant so that this class may be
+  // automatically injected
+  TLockedDocVariant = class(TInterfacedObjectWithCustomCreate, ILockedDocVariant)
+  protected
+    fValue: TDocVariantData;
+    fLock: TAutoLocker;
+    function GetValue(const Name: RawUtf8): Variant;
+    procedure SetValue(const Name: RawUtf8; const Value: Variant);
+  public
+    /// initialize the thread-safe document with a fast TDocVariant
+    // - i.e. call Create(true) aka Create(JSON_FAST)
+    // - will be the TInterfacedObjectWithCustomCreate default constructor,
+    // called e.g. during IoC/DI resolution
+    constructor Create; overload; override;
+    /// initialize the thread-safe document storage from a given template
+    constructor Create(options: TDocVariantModel); reintroduce; overload;
+    /// initialize the thread-safe document storage with the corresponding options
+    constructor Create(options: TDocVariantOptions); reintroduce; overload;
+    /// finalize the storage
+    destructor Destroy; override;
+    /// check and return a given property by name
+    function Exists(const Name: RawUtf8;
+      out Value: Variant): boolean;
+    /// check and return a given property by name
+    // - returns TRUE and return the value of the existing Name
+    // - if not found, returns FALSE and expects Lock.Leave or ReplaceAndUnlock()
+    // to be eventually called
+    function ExistsOrLock(const Name: RawUtf8;
+      out Value: Variant): boolean;
+    /// set a value by property name, and set a local copy
+    procedure ReplaceAndUnlock(const Name: RawUtf8; const Value: Variant;
+      out LocalValue: Variant);
+    /// add an existing property value to the given TDocVariant document object
+    // - returns TRUE and add the Name/Value pair to Obj if Name is existing
+    // - returns FALSE if Name is not existing in the stored document, and
+    // expects Lock.Leave or AddNewPropAndUnlock() to be eventually caled
+    function AddExistingPropOrLock(const Name: RawUtf8;
+      var Obj: variant): boolean;
+    /// add a property value to the given TDocVariant document object and
+    // to the internal stored document
+    procedure AddNewPropAndUnlock(const Name: RawUtf8; const Value: variant;
+      var Obj: variant);
+    /// add an existing property value to the given TDocVariant document object
+    // - returns TRUE and add the Name/Value pair to Obj if Name is existing
+    // - returns FALSE if Name is not existing in the stored document
+    // - this method would use a lock during the Name lookup, but would always
+    // release the lock, even if returning FALSE (see AddExistingPropOrLock)
+    function AddExistingProp(const Name: RawUtf8;
+      var Obj: variant): boolean;
+    /// add a property value to the given TDocVariant document object
+    // - this method would not expect the resource to be locked when called,
+    // as with AddNewPropAndUnlock
+    // - will use the internal lock for thread-safety
+    // - if the Name is already existing, would update/change the existing value
+    procedure AddNewProp(const Name: RawUtf8; const Value: variant;
+      var Obj: variant);
+    /// append a value to the internal TDocVariant document array
+    procedure AddItem(const Value: variant);
+    /// makes a thread-safe copy of the internal TDocVariant document object or array
+    function Copy: variant;
+    /// delete all stored properties
+    procedure Clear;
+    /// save the stored value as UTF-8 encoded JSON Object
+    // - implemented as just a wrapper around VariantSaveJson()
+    function ToJson(HumanReadable: boolean = false): RawUtf8;
+    /// low-level access to the associated thread-safe mutex
+    function Lock: TAutoLocker;
+    /// the document fields would be safely accessed via this property
+    // - will raise an EDocVariant exception if Name does not exist
+    // - result variant is returned as a copy, not as varByRef, since a copy
+    // will definitively be more thread safe
+    property Value[const Name: RawUtf8]: variant
+      read GetValue write SetValue; default;
+  end;
+
+
 
 
 { ************ Background Thread Processing }
@@ -521,7 +694,8 @@ type
     OnProcess: TOnSynBackgroundTimerProcess;
     Secs: cardinal;
     NextTix: Int64;
-    FIFO: TRawUtf8DynArray;
+    Msg: TRawUtf8DynArray;
+    MsgSafe: TLightLock;
   end;
 
   /// stores TSynBackgroundTimer internal registration list
@@ -538,9 +712,9 @@ type
   TSynBackgroundTimer = class(TSynBackgroundThreadProcess)
   protected
     fTask: TSynBackgroundTimerTaskDynArray;
-    fTasks: TDynArray;
-    fTaskCount: integer;
-    fTaskLock: TSynLocker;
+    fTasks: TDynArrayLocked;
+    fProcessing: boolean;
+    fProcessingCounter: integer;
     procedure EverySecond(Sender: TSynBackgroundThreadProcess;
       Event: TWaitResult);
     function Find(const aProcess: TMethod): PtrInt;
@@ -599,16 +773,17 @@ type
     /// execute a task without waiting for the next aOnProcessSecs occurence
     // - aOnProcess should not have been registered by a previous call to Enable() method
     function ExecuteOnce(const aOnProcess: TOnSynBackgroundTimerProcess): boolean;
-    /// returns true if there is currenly one task processed
-    function Processing: boolean;
     /// wait until no background task is processed
     procedure WaitUntilNotProcessing(timeoutsecs: integer = 10);
     /// low-level access to the internal task list
     property Task: TSynBackgroundTimerTaskDynArray
       read fTask;
-    /// low-level access to the internal task mutex
-    property TaskLock: TSynLocker
-      read fTaskLock;
+    /// low-level access to the internal task list wrapper and safe
+    property Tasks: TDynArrayLocked
+      read fTasks;
+    /// returns TRUE if there is currenly some tasks processed
+    property Processing: boolean
+      read fProcessing;
   end;
 
 
@@ -991,6 +1166,9 @@ const
   THREADPOOL_MAXTHREADS = 256;
 
 
+
+
+
 implementation
 
 
@@ -1025,30 +1203,29 @@ begin
   end;
 end;
 
+function TSynQueue.GetCount: integer;
+var
+  f, l: integer;
+begin
+  f := fFirst;
+  l := fLast;
+  if f < 0 then
+    result := 0
+  else if f <= l then
+    result := l - f + 1
+  else
+    result := fCount - f + l + 1;
+end;
+
 function TSynQueue.Count: integer;
 begin
   if self = nil then
     result := 0
   else
-  begin
-    fSafe.ReadOnlyLock;
-    {$ifdef HASFASTTRYFINALLY}
-    try
-    {$else}
-    begin
-    {$endif HASFASTTRYFINALLY}
-      if fFirst < 0 then
-        result := 0
-      else if fFirst <= fLast then
-        result := fLast - fFirst + 1
-      else
-        result := fCount - fFirst + fLast + 1;
-    {$ifdef HASFASTTRYFINALLY}
-    finally
-    {$endif HASFASTTRYFINALLY}
-      fSafe.ReadOnlyUnLock;
-    end;
-  end;
+    repeat
+      result := GetCount;
+      ReadBarrier;
+    until GetCount = result; // RCU algorithm to avoid aberations
 end;
 
 function TSynQueue.Capacity: integer;
@@ -1056,14 +1233,7 @@ begin
   if self = nil then
     result := 0
   else
-  begin
-    fSafe.ReadOnlyLock;
-    try
-      result := fValues.Capacity;
-    finally
-      fSafe.ReadOnlyUnLock;
-    end;
-  end;
+    result := fValues.Capacity;
 end;
 
 function TSynQueue.Pending: boolean;
@@ -1128,14 +1298,20 @@ end;
 
 function TSynQueue.Peek(out aValue): boolean;
 begin
-  fSafe.ReadOnlyLock;
-  try
-    result := fFirst >= 0;
-    if result then
-      fValues.ItemCopyAt(fFirst, @aValue);
-  finally
-    fSafe.ReadOnlyUnLock;
-  end;
+  if (self <> nil) and
+     (fFirst >= 0) then
+  begin
+    fSafe.ReadOnlyLock;
+    try
+      result := fFirst >= 0;
+      if result then
+        fValues.ItemCopyAt(fFirst, @aValue);
+    finally
+      fSafe.ReadOnlyUnLock;
+    end;
+  end
+  else
+    result := false;
 end;
 
 procedure TSynQueue.InternalPop(aValue: pointer);
@@ -1159,22 +1335,30 @@ end;
 
 function TSynQueue.Pop(out aValue): boolean;
 begin
-  fSafe.ReadWriteLock;
-  try
-    result := fFirst >= 0;
-    if result then
-      InternalPop(@aValue);
-  finally
-    fSafe.ReadWriteUnLock;
-  end;
+  if (self <> nil) and
+     (fFirst >= 0) then
+  begin
+    fSafe.ReadWriteLock;
+    try
+      result := fFirst >= 0;
+      if result then
+        InternalPop(@aValue);
+    finally
+      fSafe.ReadWriteUnLock;
+    end;
+  end
+  else
+    result := false;
 end;
 
 function TSynQueue.PopEquals(aAnother: pointer; aCompare: TDynArraySortCompare;
   out aValue): boolean;
 begin
   result := false;
-  if (not Assigned(aCompare)) or
-     (not Assigned(aAnother)) then
+  if (self = nil) or
+     (not Assigned(aCompare)) or
+     (not Assigned(aAnother)) or
+     (fFirst < 0) then
     exit;
   fSafe.ReadWriteLock;
   try
@@ -1402,8 +1586,8 @@ end;
 constructor TPendingTaskList.Create;
 begin
   inherited Create;
-  fTasks.InitSpecific(TypeInfo(TPendingTaskListItemDynArray), fTask, ptInt64,
-    @fCount); // sorted by Timestamp
+  fTasks.DynArray.InitSpecific(TypeInfo(TPendingTaskListItemDynArray), fTask,
+    ptInt64, @fTasks.Count); // sorted by Timestamp
 end;
 
 function TPendingTaskList.GetTimestamp: Int64;
@@ -1419,13 +1603,13 @@ var
 begin
   item.Timestamp := GetTimestamp + aMilliSecondsDelayFromNow;
   item.Task := aTask;
-  fSafe.Lock;
+  fTasks.Safe.WriteLock;
   try
-    if fTasks.FastLocateSorted(item, ndx) then
+    if fTasks.DynArray.FastLocateSorted(item, ndx) then
       inc(ndx); // always insert just after any existing timestamp
-    fTasks.FastAddSorted(ndx, item);
+    fTasks.DynArray.FastAddSorted(ndx, item);
   finally
-    fSafe.UnLock;
+    fTasks.Safe.WriteUnLock;
   end;
 end;
 
@@ -1439,18 +1623,18 @@ begin
   if length(aTasks) <> length(aMilliSecondsDelays) then
     exit;
   item.Timestamp := GetTimestamp;
-  fSafe.Lock;
+  fTasks.Safe.WriteLock;
   try
-    for i := 0 to High(aTasks) do
+    for i := 0 to high(aTasks) do
     begin
       inc(item.Timestamp, aMilliSecondsDelays[i]); // delays between tasks
       item.Task := aTasks[i];
-      if fTasks.FastLocateSorted(item, ndx) then
+      if fTasks.DynArray.FastLocateSorted(item, ndx) then
         inc(ndx); // always insert just after any existing timestamp
-      fTasks.FastAddSorted(ndx, item);
+      fTasks.DynArray.FastAddSorted(ndx, item);
     end;
   finally
-    fSafe.UnLock;
+    fTasks.Safe.WriteUnLock;
   end;
 end;
 
@@ -1459,14 +1643,7 @@ begin
   if self = nil then
     result := 0
   else
-  begin
-    fSafe.Lock;
-    try
-      result := fCount;
-    finally
-      fSafe.UnLock;
-    end;
-  end;
+    result := fTasks.Count;
 end;
 
 function TPendingTaskList.NextPendingTask: RawByteString;
@@ -1475,34 +1652,248 @@ var
 begin
   result := '';
   if (self = nil) or
-     (fCount = 0) then
+     (fTasks.Count = 0) then
     exit;
   tix := GetTimestamp;
-  fSafe.Lock;
+  fTasks.Safe.WriteLock;
   try
-    if fCount > 0 then
+    if fTasks.Count > 0 then
       if tix >= fTask[0].Timestamp then
       begin
         result := fTask[0].Task;
-        fTasks.FastDeleteSorted(0);
+        fTasks.DynArray.FastDeleteSorted(0);
       end;
   finally
-    fSafe.UnLock;
+    fTasks.Safe.WriteUnLock;
   end;
 end;
 
 procedure TPendingTaskList.Clear;
 begin
   if (self = nil) or
-     (fCount = 0) then
+     (fTasks.Count = 0) then
     exit;
-  fSafe.Lock;
+  fTasks.Safe.WriteLock;
   try
-    fTasks.Clear;
+    fTasks.DynArray.Clear;
   finally
-    fSafe.UnLock;
+    fTasks.Safe.WriteUnLock;
   end;
 end;
+
+
+{ ************ Thread-Safe ILockedDocVariant Storage }
+
+{ TLockedDocVariant }
+
+constructor TLockedDocVariant.Create;
+begin
+  Create(JSON_FAST);
+end;
+
+constructor TLockedDocVariant.Create(options: TDocVariantModel);
+begin
+  Create(JSON_[options]);
+end;
+
+constructor TLockedDocVariant.Create(options: TDocVariantOptions);
+begin
+  fLock := TAutoLocker.Create;
+  fValue.Init(options);
+end;
+
+destructor TLockedDocVariant.Destroy;
+begin
+  inherited;
+  fLock.Free;
+end;
+
+function TLockedDocVariant.Exists(const Name: RawUtf8;
+  out Value: Variant): boolean;
+var
+  i: PtrInt;
+begin
+  fLock.Enter;
+  try
+    i := fValue.GetValueIndex(Name);
+    if i < 0 then
+      result := false
+    else
+    begin
+      Value := fValue.Values[i];
+      result := true;
+    end;
+  finally
+    fLock.Leave;
+  end;
+end;
+
+function TLockedDocVariant.ExistsOrLock(const Name: RawUtf8;
+  out Value: Variant): boolean;
+var
+  i: PtrInt;
+begin
+  result := true;
+  fLock.Enter;
+  try
+    i := fValue.GetValueIndex(Name);
+    if i < 0 then
+      result := false
+    else
+      Value := fValue.Values[i];
+  finally
+    if result then
+      fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.ReplaceAndUnlock(
+  const Name: RawUtf8; const Value: Variant; out LocalValue: Variant);
+begin
+  // caller made fLock.Enter
+  try
+    SetValue(Name, Value);
+    LocalValue := Value;
+  finally
+    fLock.Leave;
+  end;
+end;
+
+function TLockedDocVariant.AddExistingPropOrLock(const Name: RawUtf8;
+  var Obj: variant): boolean;
+var
+  i: PtrInt;
+begin
+  result := true;
+  fLock.Enter;
+  try
+    i := fValue.GetValueIndex(Name);
+    if i < 0 then
+      result := false
+    else
+      _ObjAddProps([Name, fValue.Values[i]], Obj);
+  finally
+    if result then
+      fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.AddNewPropAndUnlock(const Name: RawUtf8;
+  const Value: variant; var Obj: variant);
+begin
+  // caller made fLock.Enter
+  try
+    SetValue(Name, Value);
+    _ObjAddProps([Name, Value], Obj);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+function TLockedDocVariant.AddExistingProp(const Name: RawUtf8;
+  var Obj: variant): boolean;
+var
+  i: PtrInt;
+begin
+  result := true;
+  fLock.Enter;
+  try
+    i := fValue.GetValueIndex(Name);
+    if i < 0 then
+      result := false
+    else
+      _ObjAddProps([Name, fValue.Values[i]], Obj);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.AddNewProp(const Name: RawUtf8;
+  const Value: variant; var Obj: variant);
+begin
+  fLock.Enter;
+  try
+    SetValue(Name, Value);
+    _ObjAddProps([Name, Value], Obj);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+function TLockedDocVariant.GetValue(const Name: RawUtf8): Variant;
+begin
+  fLock.Enter;
+  try
+    fValue.RetrieveValueOrRaiseException(pointer(Name), length(Name),
+      dvoNameCaseSensitive in fValue.Options, result, false);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.SetValue(const Name: RawUtf8;
+  const Value: Variant);
+begin
+  fLock.Enter;
+  try
+    fValue.AddOrUpdateValue(Name, Value);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.AddItem(const Value: variant);
+begin
+  fLock.Enter;
+  try
+    fValue.AddItem(Value);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+function TLockedDocVariant.Copy: variant;
+begin
+  VarClear(result);
+  fLock.Enter;
+  try
+    TDocVariantData(result).InitCopy(variant(fValue), JSON_FAST);
+  finally
+    fLock.Leave;
+  end;
+end;
+
+procedure TLockedDocVariant.Clear;
+begin
+  fLock.Enter;
+  try
+    fValue.Reset;
+  finally
+    fLock.Leave;
+  end;
+end;
+
+function TLockedDocVariant.ToJson(HumanReadable: boolean): RawUtf8;
+var
+  tmp: RawUtf8;
+begin
+  fLock.Enter;
+  try
+    DocVariantType.ToJson(@fValue, tmp);
+  finally
+    fLock.Leave;
+  end;
+  if HumanReadable then
+    JsonBufferReformat(pointer(tmp), result)
+  else
+    result := tmp;
+end;
+
+function TLockedDocVariant.Lock: TAutoLocker;
+begin
+  result := fLock;
+end;
+
 
 
 { ************ Background Thread Processing }
@@ -1685,8 +2076,8 @@ begin
   end;
 end;
 
-function TSynBackgroundThreadMethodAbstract.AcquireThread:
-  TSynBackgroundThreadProcessStep;
+function TSynBackgroundThreadMethodAbstract.
+  AcquireThread: TSynBackgroundThreadProcessStep;
 begin
   result := fPendingProcessFlag;
   if result <> flagIdle then
@@ -1925,9 +2316,8 @@ constructor TSynBackgroundTimer.Create(const aThreadName: RawUtf8;
   const aOnBeforeExecute: TOnNotifyThread;
   const aOnAfterExecute: TOnNotifyThread; aStats: TSynMonitorClass);
 begin
-  fTasks.Init(TypeInfo(TSynBackgroundTimerTaskDynArray), fTask, @fTaskCount);
-  fTaskLock.Init;
-  fTaskLock.LockedBool[0] := false;
+  fTasks.DynArray.Init(TypeInfo(TSynBackgroundTimerTaskDynArray),
+    fTask, @fTasks.Count);
   inherited Create(aThreadName, EverySecond, 1000, aOnBeforeExecute, aOnAfterExecute, aStats);
 end;
 
@@ -1937,7 +2327,6 @@ begin
      (ProcessSystemUse.Timer = self) then
     ProcessSystemUse.Timer := nil; // allows processing by another background timer
   inherited Destroy;
-  fTaskLock.Done;
 end;
 
 const
@@ -1956,25 +2345,25 @@ begin
     exit;
   tix := mormot.core.os.GetTickCount64;
   n := 0;
-  fTaskLock.Lock;
+  LockedInc32(@fProcessingCounter);
   try
-    fTaskLock.Padding[0].VBoolean := true; // = fTaskLock.LockedBool[0]
+    fTasks.Safe.WriteLock;
     try
       i := 0;
-      while i < fTaskCount do
+      while i < fTasks.Count do
       begin
         t := @fTask[i];
         if tix >= t^.NextTix then
         begin
-          if {%H-}todo = nil then
-            SetLength(todo, fTaskCount - n);
+          if n = 0 then
+            SetLength(todo, fTasks.Count - n);
           MoveFast(t^, todo[n], SizeOf(t^)); // no COW needed
-          pointer(t^.FIFO) := nil; // now owned by todo[n].FIFO
+          pointer(t^.Msg) := nil; // now owned by todo[n].Msg
           inc(n);
           if integer(t^.Secs) = -1 then
           begin
             // from ExecuteOnce()
-            fTasks.Delete(i);
+            fTasks.DynArray.Delete(i);
             continue; // don't inc(i)
           end
           else
@@ -1984,14 +2373,14 @@ begin
         inc(i);
       end;
     finally
-      fTaskLock.UnLock;
+      fTasks.Safe.WriteUnLock;
     end;
     for i := 0 to n - 1 do
       with todo[i] do
-        if FIFO <> nil then
-          for f := 0 to length(FIFO) - 1 do
+        if Msg <> nil then
+          for f := 0 to length(Msg) - 1 do
           try
-            OnProcess(self, Event, FIFO[f]);
+            OnProcess(self, Event, Msg[f]);
           except
           end
         else
@@ -2000,7 +2389,7 @@ begin
         except
         end;
   finally
-    fTaskLock.Padding[0].VBoolean := false; // LockedBool[0] not needed
+    fProcessing := InterlockedDecrement(fProcessingCounter) <> 0;
   end;
 end;
 
@@ -2009,7 +2398,7 @@ var
   m: ^TSynBackgroundTimerTask;
 begin
   // caller should have made fTaskLock.Lock;
-  result := fTaskCount - 1;
+  result := fTasks.Count - 1;
   if result >= 0 then
   begin
     m := @fTask[result];
@@ -2043,27 +2432,22 @@ begin
   task.Secs := aOnProcessSecs;
   task.NextTix :=
     mormot.core.os.GetTickCount64 + (aOnProcessSecs * 1000 - TIXPRECISION);
-  fTaskLock.Lock;
+  task.MsgSafe.Init; // required since task is on stack
+  fTasks.Safe.WriteLock;
   try
     found := Find(TMethod(aOnProcess));
     if found >= 0 then
       fTask[found] := task
     else
-      fTasks.Add(task);
+      fTasks.DynArray.Add(task);
   finally
-    fTaskLock.UnLock;
+    fTasks.Safe.WriteUnLock;
   end;
-end;
-
-function TSynBackgroundTimer.Processing: boolean;
-begin
-  result := fTaskLock.Padding[0].VBoolean; // = fTaskLock.LockedBool[0]
 end;
 
 procedure TSynBackgroundTimer.WaitUntilNotProcessing(timeoutsecs: integer);
 begin
-  SleepHiRes(timeoutsecs, PBoolean(@fTaskLock.Padding[0].VBoolean)^,
-    {terminatedvalue=}false);
+  SleepHiRes(timeoutsecs, fProcessing, {terminatedvalue=}false);
 end;
 
 function TSynBackgroundTimer.ExecuteNow(
@@ -2111,7 +2495,7 @@ begin
      Terminated or
      (not Assigned(aOnProcess)) then
     exit;
-  fTaskLock.Lock;
+  fTasks.Safe.ReadLock;
   try
     found := Find(TMethod(aOnProcess));
     if found >= 0 then
@@ -2121,14 +2505,18 @@ begin
         if aExecuteNow then
           NextTix := 0;
         if aMsg <> #0 then
-          AddRawUtf8(FIFO, aMsg);
+        begin
+          MsgSafe.Lock;
+          AddRawUtf8(Msg, aMsg);
+          MsgSafe.UnLock;
+        end;
       end;
       if aExecuteNow then
         ProcessEvent.SetEvent;
       result := true;
     end;
   finally
-    fTaskLock.UnLock;
+    fTasks.Safe.ReadUnLock;
   end;
 end;
 
@@ -2142,14 +2530,18 @@ begin
      Terminated or
      (not Assigned(aOnProcess)) then
     exit;
-  fTaskLock.Lock;
+  fTasks.Safe.ReadLock;
   try
     found := Find(TMethod(aOnProcess));
     if found >= 0 then
       with fTask[found] do
-        result := DeleteRawUtf8(FIFO, FindRawUtf8(FIFO, aMsg));
+      begin
+        MsgSafe.Lock;
+        result := DeleteRawUtf8(Msg, FindRawUtf8(Msg, aMsg));
+        MsgSafe.UnLock;
+      end;
   finally
-    fTaskLock.UnLock;
+    fTasks.Safe.ReadUnLock;
   end;
 end;
 
@@ -2163,16 +2555,16 @@ begin
      Terminated or
      (not Assigned(aOnProcess)) then
     exit;
-  fTaskLock.Lock;
+  fTasks.Safe.WriteLock;
   try
     found := Find(TMethod(aOnProcess));
     if found >= 0 then
     begin
-      fTasks.Delete(found);
+      fTasks.DynArray.Delete(found);
       result := true;
     end;
   finally
-    fTaskLock.UnLock;
+    fTasks.Safe.WriteUnLock;
   end;
 end;
 
@@ -2292,7 +2684,7 @@ end;
 
 constructor TBlockingProcessPool.Create(aClass: TBlockingProcessPoolItemClass);
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   if aClass = nil then
     fClass := TBlockingProcessPoolItem
   else
@@ -2419,7 +2811,7 @@ constructor TSynParallelProcess.Create(ThreadPoolCount: integer;
 var
   i: PtrInt;
 begin
-  inherited Create;
+  inherited Create; // initialize fSafe
   if ThreadPoolCount < 0 then
     raise ESynThread.CreateUtf8('%.Create(%,%)',
       [Self, ThreadPoolCount, ThreadName]);

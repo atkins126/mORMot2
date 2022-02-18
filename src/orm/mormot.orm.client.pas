@@ -605,7 +605,7 @@ begin
       Value.InternalState := state;
       original := Value.GetJsonValues(
         IsNotAjaxJson(pointer(resp)), true, ooSelect);
-      resp := TrimU(resp);
+      TrimSelf(resp);
       if (resp <> '') and
          (resp[1] = '[') then // '[{....}]' -> '{...}'
         TrimChars(resp, 1, 1);
@@ -957,7 +957,7 @@ begin
        (json <> '') then
     begin
       result := TOrmTableJson.CreateFromTables(Tables, SQL, json,
-        {ownjson=}PRefCnt(PAnsiChar(pointer(json)) - _STRREFCNT)^ = 1);
+        {ownjson=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1);
       result.InternalState := state;
     end
     else
@@ -1004,7 +1004,7 @@ begin
   if json = '' then
     exit;
   result := TOrmTableJson.CreateFromTables(Tables, sql, json,
-    {ownjson=}PRefCnt(PAnsiChar(pointer(json)) - _STRREFCNT)^ = 1);
+    {ownjson=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1);
   result.InternalState := state;
 end;
 

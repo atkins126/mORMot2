@@ -264,7 +264,6 @@ type
     procedure IntSubtractVariantVoid(Ctxt: TOnInterfaceStubExecuteParamsVariant);
     /// release used instances (e.g. http server) and memory
     procedure CleanUp; override;
-  public
   published
     /// test the SetWeak/SetWeakZero weak interface functions
     procedure WeakInterfaces;
@@ -1005,7 +1004,7 @@ begin
         end;
       ObjArrayClear(peoples);
       {$ifndef CPUAARCH64} // FPC doesn't follow the AARCH64 ABI -> fixme
-      {$ifndef HASNOSTATICRTTI}
+      {$ifndef HASNOSTATICRTTI} // need RTTI for static records
       Nav.MaxRows := c;
       Nav.Row0 := c * 2;
       Nav.RowCount := c * 3;
@@ -1133,7 +1132,7 @@ procedure TTestServiceOrientedArchitecture.ClientTest(aRouting:
 var
   Inst: TTestServiceInstances;
   O: TObject;
-  sign: RawUtf8;
+  sign, sign2: RawUtf8;
   stat: TSynMonitorInputOutput;
 begin
  // exit;
@@ -1153,9 +1152,10 @@ begin
   fClient.ServicesRouting := aRouting.ClientRouting;
   (fClient.Server.Services as TServiceContainerServer).PublishSignature := true;
   sign := fClient.Services['Calculator'].RetrieveSignature;
-  Check(sign = fClient.Server.Services['Calculator'].RetrieveSignature);
+  sign2 := fClient.Server.Services['Calculator'].RetrieveSignature;
+  CheckEqual(sign, sign2, 'sign');
   (fClient.Server.Services as TServiceContainerServer).PublishSignature := false;
-  Check(fClient.Services['Calculator'].RetrieveSignature = '');
+  CheckEqual(fClient.Services['Calculator'].RetrieveSignature, '');
   // once registered, can be accessed by its GUID or URI
   if CheckFailed(
        fClient.Services.Info(TypeInfo(ICalculator)).Get(Inst.I)) or
@@ -1279,7 +1279,7 @@ procedure TTestServiceOrientedArchitecture.ServiceInitialization;
     uriencoded := '?' + UrlEncode(Params);
     if fClient.Server.ServicesRouting = TRestServerRoutingRest then
     begin
-      SetString(data, PAnsiChar(pointer(Params)), length(Params)); // =UniqueString
+      FastSetString(data, pointer(Params), length(Params)); // =UniqueString
       CheckEqual(fClient.URI(
         'root/calculator.' + Method, 'POST', @resp, nil, @data),
         ExpectedResult);
@@ -1298,12 +1298,12 @@ procedure TTestServiceOrientedArchitecture.ServiceInitialization;
           'root/Calculator.' + Method + '/1234?' + ParamsURI, 'GET', @data),
           ExpectedResult);
         CheckEqual(data, resp, 'alternative URI-encoded scheme with ClientDrivenID');
-        SetString(data, PAnsiChar(pointer(Params)), length(Params)); // =UniqueString
+        FastSetString(data, pointer(Params), length(Params)); // =UniqueString
         CheckEqual(fClient.URI(
           'root/calculator/' + Method, 'POST', @data, nil, @data),
           ExpectedResult);
         CheckEqual(data, resp, 'interface/method routing');
-        SetString(data, PAnsiChar(pointer(Params)), length(Params)); // =UniqueString
+        FastSetString(data, pointer(Params), length(Params)); // =UniqueString
         CheckEqual(fClient.URI(
           'root/calculator/' + Method + '/123', 'POST', @data, nil, @Params),
           ExpectedResult);
@@ -1317,7 +1317,7 @@ procedure TTestServiceOrientedArchitecture.ServiceInitialization;
            ExpectedResult);
         CheckEqual(data, resp,
           'alternative "param1=value1&param2=value2" URI-encoded scheme');
-        SetString(data, PAnsiChar(pointer(ParamsObj)), length(ParamsObj)); // =UniqueString
+        FastSetString(data, pointer(ParamsObj), length(ParamsObj)); // =UniqueString
         CheckEqual(fClient.URI(
           'root/calculator/' + Method, 'POST', @data, nil, @data),
           ExpectedResult);
@@ -1927,8 +1927,8 @@ end;
 
 procedure TTestServiceOrientedArchitecture.ClientSideRESTBackgroundThread;
 begin
-  ClientTest(TRestServerRoutingRest, false, true, [optExecInPerInterfaceThread,
-    optFreeInPerInterfaceThread]);
+  ClientTest(TRestServerRoutingRest, false, true,
+    [optExecInPerInterfaceThread, optFreeInPerInterfaceThread]);
   fClient.Server.ServicesRouting := TRestServerRoutingJsonRpc; // back to previous
 end;
 

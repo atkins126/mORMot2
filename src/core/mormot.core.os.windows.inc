@@ -31,8 +31,8 @@ var
   len: PtrInt;
 begin
   // identical to FPC RTL, which converts to UnicodeString before Wide API call 
-  U := SynUnicode(FileName); // let the RTL + WinAPI do the conversion
-  len := length(U) * 2 + 2;  // include trailing #0
+  U := SynUnicode(FileName); // let the RTL + OS do the conversion
+  len := length(U) * 2 + 2;  // +2 to include trailing #0
   if len > SizeOf(Temp) then
     Temp[0] := #0 // avoid buffer overflow (will be rejected by Windows anyway)
   else
@@ -1076,6 +1076,8 @@ function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
 var n: cardinal;
 begin
   result := nil;
+  if not Assigned(EnumProcesses) then
+    exit;
   n := 2048;
   repeat
     SetLength(result, n);
@@ -1103,7 +1105,7 @@ begin
   if Len <= 0 then
     exit;
   tmp.Init(Len * 3);
-  Len := UnicodeToUtf8(tmp.Buf, Len * 3, P, Len); // use RTL function
+  Len := UnicodeToUtf8(tmp.Buf, Len * 3, P, Len); // RTL function is good enough
   if Len > 0 then
     dec(Len); // UnicodeToUtf8() result includes the null terminator
   FastSetString(res, tmp.buf, Len);
@@ -1142,9 +1144,9 @@ begin
         if QueryFullProcessImageNameW(h, 0, name, @len) then
           Win32PWideCharToUtf8(name, len, result);
       end
-      else
-        if GetModuleFileNameExW(h, 0, name, high(name)) <> 0 then
-          Win32PWideCharToUtf8(name, StrLenW(name), result);
+      else if Assigned(GetModuleFileNameExW) and
+              (GetModuleFileNameExW(h, 0, name, high(name)) <> 0) then
+        Win32PWideCharToUtf8(name, StrLenW(name), result);
     finally
       CloseHandle(h);
     end;
@@ -1213,10 +1215,12 @@ var
 begin
   QueryPerformanceCounter(h.Lo); // e.h3 xored with raw timestamps
   e.i[6] := e.i[6] xor h.Lo;
-  GetProcessTimes(GetCurrentProcess, ft.p, ft.e, ft.krn, ft.usr);
+  if Assigned(GetProcessTimes) then
+    GetProcessTimes(GetCurrentProcess, ft.p, ft.e, ft.krn, ft.usr);
   DefaultHasher128(@e.h0, @ft, SizeOf(ft));
   mem.cb := SizeOf(mem);
-  GetProcessMemoryInfo(GetCurrentProcess, mem, SizeOf(mem));
+  if Assigned(GetProcessMemoryInfo) then
+    GetProcessMemoryInfo(GetCurrentProcess, mem, SizeOf(mem));
   DefaultHasher128(@e.h1, @mem, SizeOf(mem));
   if Assigned(GetSystemTimes) then
     GetSystemTimes(ft.usr, ft.p, ft.e);
@@ -1596,23 +1600,24 @@ begin
     result := 0;
 end;
 
-function Utf8ToConsole(const S: RawUtf8): RawByteString;
+procedure Utf8ToConsoleDoConv(const Utf8: RawUtf8; var Console: RawByteString);
 var
   utf16: SynUnicode;
   tmp: TSynTempBuffer;
-  i: integer;
 begin
-  for i := 1 to length(S) do
-    if S[i] > #127 then
-    begin
-      utf16 := Utf8Decode(S);
-      tmp.Init(length(utf16) * 3);
-      CharToOemBuffW(pointer(utf16), tmp.buf, tmp.len);
-      SetString(result, PAnsiChar(tmp.buf), StrLen(tmp.buf));
-      tmp.Done;
-      exit;
-    end;
-  result := S; // no conversion needed if text is plain ASCII-7 content
+  utf16 := Utf8Decode(Utf8);
+  tmp.Init(length(utf16) * 3);
+  CharToOemBuffW(pointer(utf16), tmp.buf, length(utf16) + 1); // +1 = ending #0
+  FastSetRawByteString(Console, tmp.buf, StrLen(tmp.buf));
+  tmp.Done;
+end;
+
+function Utf8ToConsole(const S: RawUtf8): RawByteString;
+begin
+  if IsAnsiCompatible(S) then
+    result := S // no conversion needed
+  else
+    Utf8ToConsoleDoConv(S, result);
 end;
 
 procedure FormatU(const fmt: string; const args: array of const; var result: RawUtf8);
@@ -1852,7 +1857,7 @@ begin
         Win32PWideCharToUtf8(tmp.buf, StrLenW(tmp.buf), result);
     end;
     if andtrim then
-      result := TrimU(result);
+      TrimSelf(result);
   end;
   tmp.Done;
 end;
@@ -2408,7 +2413,6 @@ type
     cbData: DWORD;
     pbData: PAnsiChar;
   end;
-
   PDATA_BLOB = ^DATA_BLOB;
   {$ifdef FPC}
   {$packrecords DEFAULT}
@@ -2453,7 +2457,7 @@ begin
       src, nil, e, nil, nil, CRYPTPROTECT_UI_FORBIDDEN, dst);
   if ok then
   begin
-    SetString(result, dst.pbData, dst.cbData);
+    FastSetRawByteString(result, dst.pbData, dst.cbData);
     LocalFree(HLOCAL(dst.pbData));
   end
   else
@@ -3277,23 +3281,47 @@ const
   SM_SERVERR2 = 89;
   PROCESSOR_ARCHITECTURE_AMD64 = 9;
 
+type
+  TSystemLogicalProcessorRelation = (
+    RelationProcessorCore,
+    RelationNumaNode,
+    RelationCache,
+    RelationProcessorPackage,
+    RelationGroup);
+  TSystemLogicalProcessorCache = (
+    CacheUnified,
+    CacheInstruction,
+    CacheData,
+    CacheTrace);
+
+  {$ifdef CPU64}
+  {$A8}
+  {$else}
+  {$A4}
+  {$endif CPU64}
+  TSystemLogicalProcessorInformation = record
+    ProcessorMask: PtrUInt;
+    case Relationship: TSystemLogicalProcessorRelation of
+      RelationProcessorCore: (
+        ProcessorCoreFlags: BYTE);
+      RelationNumaNode: (
+        NumaNodeNumber: DWORD);
+      RelationCache: (
+        Cache: record
+          Level: BYTE;
+          Associativity: BYTE;
+          LineSize: WORD;
+          Size: DWORD;
+          CacheType: TSystemLogicalProcessorCache;
+        end);
+      RelationGroup: (Reserved: array [0..1] of QWord);
+  end;
+  {$A+}
+
 {$ifndef UNICODE}
 function GetVersionEx(var lpVersionInformation: TOSVersionInfoEx): BOOL;
   stdcall; external kernel32 name 'GetVersionExA';
 {$endif UNICODE}
-
-procedure TrimDualSpaces(var s: RawUtf8);
-var
-  i: integer;
-begin
-  repeat
-    i := PosEx('  ', s);
-    if i = 0 then
-      break;
-    delete(s, i, 1); // dual space -> single space
-  until false;
-  s := TrimU(s);
-end;
 
 function GetLocalTimeOffset: Integer; // not defined in oldest Delphi
 var
@@ -3311,17 +3339,41 @@ begin
    end;
 end;
 
-procedure InitializeUnit;
+function KB(Size: cardinal): shortstring;
+begin
+  if Size >= 1 shl 30 then
+  begin
+    str(Size shr 30, result);
+    result := result + 'GB';
+  end
+  else if Size >= 1 shl 20 then
+  begin
+    str(Size shr 20, result);
+    result := result + 'MB';
+  end
+  else
+  begin
+    str(Size shr 10, result);
+    result := result + 'KB';
+  end
+end;
+
+procedure InitializeSpecificUnit;
 var
   h: THandle;
   IsWow64Process: function(Handle: THandle; var Res: BOOL): BOOL; stdcall;
   GetNativeSystemInfo: procedure(var SystemInfo: TSystemInfo); stdcall;
+  GetLogicalProcessorInformation: function(
+   var Info: TSystemLogicalProcessorInformation; Len: PDWORD): BOOL; stdcall;
   wine_get_version: function: PAnsiChar; stdcall;
   Res: BOOL;
   P: pointer;
   Vers: TWindowsVersion;
   cpu, manuf, prod, prodver: RawUtf8;
   reg: TWinRegistry;
+  proc: array of TSystemLogicalProcessorInformation;
+  i: integer;
+  siz: DWORD;
 begin
   {$ifndef FPC} // FPC_X86 already redirect to FastCode RTL Move()
   {$ifdef ASMX86}
@@ -3335,6 +3387,7 @@ begin
     ConsoleWrite('WARNING: Old not SSE2 CPU detected -> ' +
       'please recompile with HASNOSSE2', ccLightRed);
     // note: FillCharFast is handled by mormot.core.base via ERMSB
+    // and Byte/Word/IntegerScanIndex() are likely to GPF at runtime
   end;
   {$endif HASNOSSE2}
   {$endif ASMX86}
@@ -3368,6 +3421,7 @@ begin
   @GetSystemTimes := GetProcAddress(h, 'GetSystemTimes');
   @GetProcessTimes := GetProcAddress(h, 'GetProcessTimes');
   @QueryFullProcessImageNameW := GetProcAddress(h, 'QueryFullProcessImageNameW');
+  @GetLogicalProcessorInformation := GetProcAddress(h, 'GetLogicalProcessorInformation');
   h := Windows.LoadLibrary('Psapi.dll');
   if h >= 32 then
   begin
@@ -3433,20 +3487,19 @@ begin
   begin
     if OSVersionInfo.wProductType <> VER_NT_WORKSTATION then
     begin
-      // Server edition
+      // Server edition - see https://shorturl.at/aryAY for build numbers
       inc(Vers, 2); // e.g. wEight -> wServer2012
       if Vers = wServer2016 then
+        // we identify only LTSC server versions
         if OSVersionInfo.dwBuildNumber >= 17763 then
-          if OSVersionInfo.dwBuildNumber >= 20285 then
-            // https://shorturl.at/asCQ2
+          if OSVersionInfo.dwBuildNumber >= 20285 then // released as 20348
             Vers := wServer2022_64
           else
-            // https://stackoverflow.com/q/53393150
             Vers := wServer2019_64;
     end
     else if (Vers = wTen) and
             (OSVersionInfo.dwBuildNumber >= 22000) then
-      // waiting for an official mean of Windows 11 identification
+      // Windows 11 has always 22000.### build https://shorturl.at/fntPS
       Vers := wEleven;
     if (SystemInfo.wProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64) and
        (Vers < wServer2019_64) then
@@ -3516,13 +3569,50 @@ begin
     BiosInfoText := BiosInfoText + ' ' + prodver;
   if {%H-}cpu = '' then
     cpu := RawUtf8(GetEnvironmentVariable('PROCESSOR_IDENTIFIER'));
-  cpu := TrimU(cpu);
+  if Assigned(GetLogicalProcessorInformation) then
+  begin
+    SetLength(proc, 512);
+    siz := SizeOf(proc[0]) * 512;
+    if GetLogicalProcessorInformation(Proc[0], @siz) then
+      for i := 0 to (siz div SizeOf(proc[0])) - 1 do
+        with Proc[i] do
+          case Relationship of
+            RelationCache:
+              if Cache.CacheType in [CacheUnified, CacheData] then
+                if (Cache.Level >= low(CpuCache)) and
+                   (Cache.Level <= high(CpuCache)) then
+                  with CpuCache[Cache.Level] do
+                    if (Count = 0) or
+                       (Cache.CacheType <> CacheUnified) then
+                    begin
+                      inc(Count);
+                      Size := Cache.Size;
+                      LineSize := Cache.LineSize;
+                    end;
+          end;
+    for i := high(CpuCache) downto low(CpuCache) do
+    begin
+      CpuCacheSize := CpuCache[i].Size;
+      if CpuCacheSize <> 0 then // append the biggest level Cache size
+      begin
+        cpu := RawUtf8(format('%s %s cache', [cpu, KB(CpuCacheSize)]));
+        break;
+      end;
+    end;
+    for i := low(CpuCache) to high(CpuCache) do
+      with CpuCache[i] do
+        if Count <> 0 then       
+          if Count = 1 then
+            CpuCacheText := RawUtf8(
+              format('%s L%d=%s ', [CpuCacheText, i, KB(Size)]))
+          else
+            CpuCacheText := RawUtf8(
+              format('%s L%d=%d*%s ', [CpuCacheText, i, Count, KB(Size)]));
+    TrimSelf(CpuCacheText);
+  end;
   FormatU('%d x %s (' + CPU_ARCH_TEXT + ')',
     [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
-  TrimDualSpaces(OSVersionText);
-  TrimDualSpaces(OSVersionInfoEx);
-  TrimDualSpaces(BiosInfoText);
-  TrimDualSpaces(CpuInfoText);
+  // writeln(CpuInfoText); writeln(CpuCacheText);
 end;
 
 procedure FinalizeSpecificUnit;

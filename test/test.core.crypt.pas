@@ -492,6 +492,9 @@ begin
     for i := 1 to 1000 do
     begin
       data := RandomString(i);
+      {$ifdef FPC}
+      SetCodePage(data, CP_RAWBYTESTRING, {convert=}false);
+      {$endif FPC}
       encrypted := instance.Cypher(secret, data);
       Check((i < 16) or
             (encrypted <> data));
@@ -1319,11 +1322,15 @@ procedure TTestCoreCrypto._Base64;
 const
   Value64: RawUtf8 = 'SGVsbG8gL2Mn6XRhaXQg5+Ar';
 var
-  tmp: RawByteString;
+  tmp, tmp2: RawByteString;
   b64: RawUtf8;
+  msg: string;
   Value: WinAnsiString;
-  i, L: Integer;
+  P: PUtf8Char;
+  k: TPemKind;
+  i, j, L, n: Integer;
   i64: Qword;
+  enc, dec: TPrecisionTimer;
 begin
   Value := 'Hello /c''0tait 67+';
   Value[10] := #$E9;
@@ -1373,12 +1380,48 @@ begin
     if tmp <> '' then
     begin
       Check(not IsPem(b64));
-      b64 := DerToPem(pointer(tmp), length(tmp), TPemKind(i and 2));
+      b64 := DerToPem(pointer(tmp), length(tmp), TPemKind(i and 7));
       Check(IsPem(b64));
-      CheckUtf8(PemToDer(b64) = tmp, b64)
+      CheckUtf8(PemToDer(b64) = tmp, b64);
+      P := pointer(b64);
+      CheckEqual(NextPem(P, @k), b64);
+      Check(P <> nil);
+      Check(k = TPemKind(i and 7));
+      CheckEqual(NextPem(P, @k), '');
     end;
     tmp := tmp + AnsiChar(Random32(255));
   end;
+  enc.Init;
+  dec.Init;
+  tmp := RandomString(1 shl 20);
+  b64 := '';
+  SetLength(b64, BinToBase64Length(length(tmp)));
+  SetLength(tmp2, length(tmp));
+  L := 0;
+  n := 50;
+  {$ifdef ASMX64AVX}
+  if cfAVX2 in CpuFeatures then
+  begin
+    n := n * 10;
+    msg := ' avx2';
+  end;
+  {$endif ASMX64AVX}
+  for i := 0 to 20 do
+  begin
+    enc.Resume;
+    for j := 1 to n do
+      Base64Encode(pointer(b64), pointer(tmp), 1 shl i);
+    enc.Pause;
+    dec.Resume;
+    for j := 1 to n do
+      Base64Decode(pointer(b64), pointer(tmp2), BinToBase64Length(1 shl i) shr 2);
+    dec.Pause;
+    Check(CompareMem(pointer(tmp), pointer(tmp2), 1 shl i));
+    inc(L, 1 shl i);
+  end;
+  i64 := Int64(L) * n; // may overflow 32-bit L with AVX
+  NotifyTestSpeed('encoding' + msg, 0, i64, @enc);
+  NotifyTestSpeed('decoding' + msg, 0, i64, @dec);
 end;
 
 const
@@ -1684,7 +1727,7 @@ begin
               one.iv := iv.b;
               if aead then
                 TAesAbstractAead(one).Mac := mac;
-              Check(one.DecryptPkcs7(s3) = s2, IntToStr(len));
+              CheckEqual(one.DecryptPkcs7(s3), s2, UInt32ToUtf8(len));
               if aead then
                 Check(one.MacDecryptCheckTag(Tags[k, m, i]))
               else if gcm then
@@ -1949,10 +1992,10 @@ var
 begin
   for keysize := 0 to 10 do
   begin
-    CompressShaAesSetKey(RandomString(keysize));
+    CompressShaAesSetKey(RandomUtf8(keysize));
     for i := 0 to 50 do
     begin
-      s1 := RandomString(i * 3);
+      s1 := RandomUtf8(i * 3);
       s2 := s1;
       Check(CompressShaAes(s1, true) = 'synshaaes');
       Check(CompressShaAes(s1, false) = 'synshaaes');
@@ -2007,6 +2050,8 @@ var
   en, de: ICryptCipher;
   crt: TCryptCertAlgo;
   c1, c2, c3: ICryptCert;
+  str: TCryptStoreAlgo;
+  st1, st2, st3: ICryptStore;
   alg: TCryptAlgos;
 begin
   // validate AesAlgoNameEncode / TAesMode
@@ -2163,14 +2208,14 @@ begin
     end;
     Check(c1.GetSerial <> '');
     Check(c1.HasPrivateSecret);
-    check(c1.GetNotBefore < NowUtc);
+    check(c1.GetNotBefore <= NowUtc);
     check(c1.GetNotAfter > NowUtc);
     c2 := crt.New;
     Check(not c2.IsEqual(c1));
-    check(c2.FromBinary(c1.ToBinary));
+    check(c2.Load(c1.Save));
     Check(not c2.HasPrivateSecret, 'nopwd=pubonly');
     Check(c1.IsEqual(c2));
-    CheckEqual(c1.GetSerial, c1.GetSerial);
+    CheckEqual(c2.GetSerial, c1.GetSerial);
     CheckEqual(c2.GetSubject, c1.GetSubject);
     CheckEqual(c2.GetIssuerName, c1.GetIssuerName);
     CheckEqual(c2.GetIssuerSerial, c1.GetIssuerSerial);
@@ -2181,11 +2226,11 @@ begin
     c3 := crt.New;
     Check(not c3.IsEqual(c1));
     Check(not c3.IsEqual(c2));
-    check(c3.FromBinary(c1.ToBinary('pwd'), 'pwd'));
+    check(c3.Load(c1.Save('pwd'), 'pwd'));
     Check(c3.HasPrivateSecret, 'pwd=priv');
     Check(c3.IsEqual(c1));
     Check(c3.IsEqual(c2));
-    CheckEqual(c1.GetSerial, c1.GetSerial);
+    CheckEqual(c3.GetSerial, c1.GetSerial);
     CheckEqual(c3.GetSubject, c1.GetSubject);
     CheckEqual(c3.GetIssuerName, c1.GetIssuerName);
     CheckEqual(c3.GetIssuerSerial, c1.GetIssuerSerial);
@@ -2193,6 +2238,78 @@ begin
     CheckSame(c3.GetNotBefore, c1.GetNotBefore);
     CheckEqual(word(c3.GetUsage), word(c1.GetUsage));
     CheckEqual(c3.GetPeerInfo, c1.GetPeerInfo);
+  end;
+  // validate Store High-Level Algorithms Factory
+  r := RandomAnsi7(100);
+  alg := TCryptStoreAlgo.Instances;
+  for a := 0 to high(alg) do
+  begin
+    str := alg[a] as TCryptStoreAlgo;
+    st1 := str.New;
+    CheckEqual(st1.Count, 0);
+    // set c1 as self-signed root certificate (in v1 format)
+    c1 := st1.CertAlgo.Generate([cuCA]);
+    Check(st1.IsValid(c1) = cvUnknownAuthority);
+    Check(st1.Add(c1));
+    CheckEqual(st1.Count, 1);
+    Check(st1.IsValid(c1) = cvValidSelfSigned);
+    Check(c1.HasPrivateSecret, 'priv1');
+    CheckEqual(c1.Sign(pointer(r), length(r)), '');
+    // set c2 as itermediate CA, signed by c1 root CA
+    c2 := nil;
+    Check(not st1.Add(c2), 'no priv');
+    CheckEqual(st1.Count, 1);
+    c2 := st1.CertAlgo.New;
+    Check(c2.Instance.ClassType = c1.Instance.ClassType);
+    c2.Generate([cuCA], '', c1);
+    Check(c2.GetUsage = [cuCA]);
+    Check(cuCA in c2.GetUsage);
+    Check(not (cuDigitalSignature in c2.GetUsage));
+    Check(c2.HasPrivateSecret, 'priv2');
+    Check(st1.IsValid(c2) = cvValidSigned, 'c2');
+    Check(st1.Add(c2));
+    CheckEqual(st1.Count, 2);
+    Check(st1.IsValid(c2) = cvValidSigned, 'c2');
+    CheckEqual(c2.Sign(pointer(r), length(r)), '', 'no cuDigitalSignature');
+    // set c3 as signing authority
+    c3 := st1.CertAlgo.New;
+    c3.Generate([cuDigitalSignature], '', c2);
+    Check(c3.Instance.ClassType = c1.Instance.ClassType);
+    CheckEqual(c3.Instance.CryptAlgo.AlgoName, c2.Instance.CryptAlgo.AlgoName);
+    Check(c3.HasPrivateSecret, 'priv3');
+    Check(st1.IsValid(c3) = cvValidSigned, 'c3');
+    Check(st1.Add(c3));
+    // sign
+    s := c3.Sign(pointer(r), length(r));
+    Check(s <> '', 'sign');
+    Check(st1.Verify(s, pointer(r), length(r)) = cvValidSigned, 's1');
+    // persist the Store
+    st2 := str.NewFrom(st1.ToBinary);
+    CheckEqual(st2.Count, 3);
+    Check(st2 <> nil);
+    Check(st2.IsValid(c1) = cvValidSelfSigned, '2c1');
+    Check(st2.IsValid(c2) = cvValidSigned, '2c2');
+    Check(st2.IsValid(c3) = cvValidSigned, '2c3');
+    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2a');
+    dec(r[1]);
+    Check(st2.Verify(s, pointer(r), length(r)) = cvInvalidSignature, 's2b');
+    inc(r[1]);
+    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2c');
+    // validate CRL
+    Check(st2.Revoke(c3.GetSerial, 0, crrWithdrawn));
+    Check(st2.Verify(s, pointer(r), length(r)) = cvRevoked, 's2d');
+    Check(st2.Revoke(c3.GetSerial, 0, crrNotRevoked));
+    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2e');
+    // ensure new certs are not recognized by previous stores
+    if st3 <> nil then
+    begin
+      CheckEqual(st3.Count, 3);
+      Check(st3.IsValid(c1) = cvUnknownAuthority, '3c1');
+      Check(st3.IsValid(c2) = cvUnknownAuthority, '3c2');
+      Check(st3.IsValid(c3) = cvUnknownAuthority, '3c3');
+      Check(st3.Verify(s, pointer(r), length(r)) = cvUnknownAuthority, 's3');
+    end;
+    st3 := st2;
   end;
 end;
 
@@ -2219,8 +2336,8 @@ begin
   for i := 0 to high(cook) do
     CheckEqual(gen.Validate(cook[i]), cookid[i], 'gen1');
   for i := 0 to high(cook) shr 4 do
-    CheckEqual(gen.Validate(ParseTrailingJwt('/uri/' + cook[i] + '  ',
-      {nodot=}true)), cookid[i], 'gen2');
+    CheckEqual(gen.Validate(ParseTrailingJwt(
+      '/uri/' + cook[i] + '  ', {nodot=}true)), cookid[i], 'gen2');
   bak := gen.Save;
   gen.Init;
   for i := 0 to high(cook) do

@@ -388,6 +388,15 @@ type
     /// optional Authorization: Bearer header value
     property AuthBearer: RawUtf8
       read fAuthBearer write fAuthBearer;
+    /// contain the body data retrieved from the server - from inherited Http
+    property Content: RawByteString
+      read Http.Content;
+    /// contain the body data length retrieved from the server - from inherited Http
+    property ContentLength: Int64
+      read Http.ContentLength;
+    /// contain the response headers retrieved from the server - from inherited Http
+    property Headers: RawUtf8
+      read Http.Headers;
     /// optional authorization callback
     // - is triggered by Request() on HTTP_UNAUTHORIZED (401) status
     // - see e.g. THttpClientSocket.AuthorizeSspi class method for SSPI auth
@@ -1367,6 +1376,7 @@ end;
 
 var
   _PROXYSET: boolean; // retrieve environment variables only once
+  _PROXYSAFE: TLightLock;
   _PROXY: array[{https:}boolean] of RawUtf8;
 
 function GetProxyForUri(const uri: RawUtf8; fromSystem: boolean): RawUtf8;
@@ -1377,13 +1387,13 @@ var
 begin
   if not _PROXYSET then
   begin
-    GlobalLock;
+    _PROXYSAFE.Lock;
     StringToUtf8(GetEnvironmentVariable('HTTP_PROXY'),  _PROXY[false]);
     StringToUtf8(GetEnvironmentVariable('HTTPS_PROXY'), _PROXY[true]);
     if _PROXY[true] = '' then
       _PROXY[true] := _PROXY[false];
     _PROXYSET := true;
-    GlobalUnLock;
+    _PROXYSAFE.UnLock;
   end;
   result := _PROXY[IdemPChar(pointer(uri), 'HTTPS://')];
   {$ifdef USEWININET}
@@ -1440,6 +1450,8 @@ procedure THttpClientSocket.RequestInternal(
     begin
       // recreate the connection and try again
       Close;
+      //if Assigned(OnLog) then
+      //   OnLog(sllTrace, 'DoRetry after close', [], self);
       try
         OpenBind(fServer, fPort, {bind=}false, TLS.Enabled);
         HttpStateReset;
@@ -1455,6 +1467,7 @@ procedure THttpClientSocket.RequestInternal(
 var
   P: PUtf8Char;
   pending: TCrtSocketPending;
+  loerr: integer;
   dat: RawByteString;
   timer: TPrecisionTimer;
 begin
@@ -1468,8 +1481,10 @@ begin
     CreateSockIn; // use SockIn by default if not already initialized: 2x faster
   Http.Content := '';
   if (hfConnectionClose in Http.HeaderFlags) or
-     (SockReceivePending(0) = cspSocketError) then
-    DoRetry(HTTP_NOTFOUND, 'connection closed/broken (keepalive or maxrequest)', [])
+     not SockIsDefined then
+    DoRetry(HTTP_NOTFOUND, 'connection closed (keepalive or maxrequest)', [])
+  else if SockReceivePending(0, @loerr) = cspSocketError then
+    DoRetry(HTTP_NOTFOUND, 'connection broken (socketerror=%)', [loerr])
   else
     try
       try
@@ -1482,7 +1497,10 @@ begin
         else
           SockSend('Connection: Close');
         dat := ctxt.Data; // local var copy for Data to be compressed in-place
-        CompressDataAndWriteHeaders(ctxt.DataType, dat, ctxt.InStream);
+        if (dat <> '') or
+           ((ctxt.method <> 'GET') and // no message body len/type for GET/HEAD
+            (ctxt.method <> 'HEAD')) then
+          CompressDataAndWriteHeaders(ctxt.DataType, dat, ctxt.InStream);
         if ctxt.header <> '' then
           SockSend(ctxt.header);
         if Http.CompressAcceptEncoding <> '' then
@@ -1802,7 +1820,7 @@ begin
     urlfile := 'index';
   if result = '' then
     result := GetSystemPath(spTempFolder) + Utf8ToString(urlfile);
-  params.Hash := TrimU(params.Hash);
+  TrimSelf(params.Hash);
   if params.HashFromServer and
      Assigned(params.Hasher) and
      (params.Hash = '') then
@@ -2452,7 +2470,8 @@ procedure TWinHttp.InternalSendRequest(const aMethod: RawUtf8;
     Bytes, Current, Max, BytesWritten: cardinal;
   begin
     if Assigned(fOnUpload) and
-       (IdemPropNameU(aMethod, 'POST') or IdemPropNameU(aMethod, 'PUT')) then
+       (IdemPropNameU(aMethod, 'POST') or
+        IdemPropNameU(aMethod, 'PUT')) then
     begin
       result := WinHttpApi.SendRequest(
         fRequest, nil, 0, nil, 0, L, 0);
@@ -3190,7 +3209,7 @@ end;
 constructor THttpRequestCached.Create(const aUri: RawUtf8; aKeepAliveSeconds,
   aTimeOutSeconds: integer; const aToken: RawUtf8; aOnlyUseClientSocket: boolean);
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   fKeepAlive := aKeepAliveSeconds * 1000;
   if aTimeOutSeconds > 0 then // 0 means no cache
     fCache := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray),
@@ -3420,7 +3439,7 @@ begin
     Expect('250');
     repeat
       GetNextItem(P, ',', rec);
-      rec := TrimU(rec);
+      TrimSelf(rec);
       if rec = '' then
         continue;
       if PosExChar('<', rec) = 0 then

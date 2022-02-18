@@ -1210,7 +1210,7 @@ var
   P: PUtf8Char;
   binary, zendframeworkJson, discogsJson: RawByteString;
   V: array[0..4] of TValuePUtf8Char;
-  i, a, err: integer;
+  i, a, n, err: integer;
   r: Double;
   Parser: TRttiCustom;
   JR, JR2: TTestCustomJsonRecord;
@@ -2138,6 +2138,23 @@ begin
     U := RandomUtf8(i);
     J := JsonEncode(['a', a, 'r', r, 'u', U]);
     check(IsValidJson(J));
+    P := nil;
+    Check(GetNextJsonToken(P) = jtNone);
+    P := pointer(J);
+    n := -1;
+    Check(GetNextJsonToken(P, false, @n) = jtObjectStart);
+    CheckEqual(n, 3);
+    Check(P <> nil);
+    Check(GetNextJsonToken(P, false, @n) = jtNone);
+    Check(P = nil);
+    CheckEqual(n, 0);
+    P := pointer(J);
+    Check(GetNextJsonToken(P, true, @n) = jtObjectStart);
+    CheckEqual(n, 3);
+    Check(P <> nil);
+    Check(GetNextJsonToken(P, true, @n) = jtNone);
+    Check(P = nil);
+    CheckEqual(n, 0);
     check(JsonObjectPropCount(@J[2]) = 3);
     check(JsonObjectPropCount(@J[2], PUtf8Char(pointer(J)) + length(J)) = 3);
     JsonDecode(J, ['U', 'R', 'A', 'FOO'], @V);
@@ -2349,6 +2366,20 @@ begin
   Check((P <> nil) and
         (P^ = '1'));
   P := GotoNextJsonItem(P, 1, @EndOfObject);
+  Check(P <> nil);
+  Check(EndOfObject = '}');
+  U := '"filters":[{"name":"name1","value":"value1","comparetype":">"},' +
+    '{"name":"name2","value":"value2","comparetype":"="}], "Limit":100}';
+  P := UniqueRawUtf8(U);
+  Check(GetJsonPropName(P) = 'filters');
+  Check((P <> nil) and
+        (P^ = '['));
+  P := GotoNextJsonItem(P, EndOfObject);
+  Check(EndOfObject = ',');
+  Check(GetJsonPropName(P) = 'Limit');
+  Check((P <> nil) and
+        (P^ = '1'));
+  P := GotoNextJsonItem(P, EndOfObject);
   Check(P <> nil);
   Check(EndOfObject = '}');
   for strict := false to true do
@@ -3705,7 +3736,7 @@ var
   b: PByte;
   elem, item: TBsonElement;
   iter: TBsonIterator;
-  name, u, u2, u3, json: RawUtf8;
+  name, u, u1, u2, u3, json: RawUtf8;
   arr: TRawUtf8DynArray;
   st: string;
   timer: TPrecisionTimer;
@@ -3936,7 +3967,8 @@ begin
     modMongoStrict) = BSONAWESOME);
   Check(VariantSaveJson(o) = u);
   Check(VariantSaveJson('test') = '"test"');
-  Check(VariantSaveJson(1.5) = '1.5');
+  u1 := VariantSaveJson(1.12345);
+  CheckEqual(u1, '1.12345');
   Check(VariantSaveJson(_Json('{BSON:["awesome",5.05,1986]}')) = BSONAWESOME);
   Check(VariantSaveJson(_JsonFast('{ BSON : ["awesome", 5.05, 1986] }')) = BSONAWESOME);
   Check(VariantSaveJson(_JsonFast('{ ''BSON'' : ["awesome", 5.05, 1986] } ')) = BSONAWESOME);
@@ -4379,7 +4411,25 @@ var
   lTable: TOrmTableJson;
   lRefreshed: Boolean;
 begin
-  Doc.Init;
+  for ndx := 1 to 10 do
+  begin
+    Doc.InitFast;
+    Doc.I['sc'] := 1;
+    Doc.I['sd'] := 2;
+    Doc.I['hh'] := 3;
+    Doc.I['dnh'] := 4;
+    dv := Doc.A_['col'];
+    for i := 1 to 9 do
+      dv^.AddItem(_ObjFast(['a','a','b',i]));
+    j := dv^.ToJson;
+    CheckEqual(j, '[{"a":"a","b":1},' +
+      '{"a":"a","b":2},{"a":"a","b":3},{"a":"a","b":4},{"a":"a","b":5},' +
+      '{"a":"a","b":6},{"a":"a","b":7},{"a":"a","b":8},{"a":"a","b":9}]');
+    s := Doc.ToJson;
+    CheckEqual(s , '{"sc":1,"sd":2,"hh":3,"dnh":4,"col":' + j + '}');
+    Doc.Clear;
+    Doc.Init;
+  end;
   Check(Doc.Kind = dvUndefined);
   Check(not Doc.IsObject);
   Check(not Doc.IsArray);
@@ -5674,7 +5724,7 @@ end;
 
 function By1(pattern: byte; n: integer): RawUtf8;
 begin
-  SetString(result, nil, n);
+  FastSetString(result, nil, n);
   FillCharFast(pointer(result)^, n, pattern);
 end;
 
@@ -5682,7 +5732,7 @@ function By4(pattern, n: integer): RawUtf8;
 var
   i: PtrInt;
 begin
-  SetString(result, nil, n * 4);
+  FastSetString(result, nil, n * 4);
   for i := 0 to n - 1 do
     PIntegerArray(result)[i] := pattern;
 end;
@@ -5721,7 +5771,7 @@ begin
   begin
     s := RawUtf8OfChar(' ', 20);
     t := RandomTextParagraph(i, '.', s);
-    SetString(s, PAnsiChar(pointer(t)), length(t)); // =UniqueString
+    FastSetRawByteString(s, pointer(t), length(t)); // =UniqueString
     Check(CompressSynLZ(s, true) = 'synlz');
     Check(CompressSynLZ(s, false) = 'synlz');
     Check(s = t);

@@ -38,8 +38,13 @@ type
 
   /// allows to tune TSynTest process
   // - tcoLogEachCheck will log as sllCustom4 each non void Check() message
+  // - tcoLogInSubFolder will log within a '[executable]\logs\' sub-folder
+  // - tcoLogVerboseRotate will force the log files to rotate - could be set if
+  // you expect test logs to be huge, bigger than what LogView supports
   TSynTestOption = (
-    tcoLogEachCheck);
+    tcoLogEachCheck,
+    tcoLogInSubFolder,
+    tcoLogVerboseRotate);
 
   /// set of options to tune TSynTest process
   TSynTestOptions = set of TSynTestOption;
@@ -188,7 +193,6 @@ type
     /// used by the published methods to run test assertion against UTF-8 strings
     // - if a<>b, will fail and include '#<>#' text before the supplied msg
     function CheckEqual(const a, b: RawUtf8; const msg: RawUtf8 = ''): boolean; overload;
-      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// used by the published methods to run test assertion against pointers/classes
     // - if a<>b, will fail and include '#<>#' text before the supplied msg
     function CheckEqual(a, b: pointer; const msg: RawUtf8 = ''): boolean; overload;
@@ -200,7 +204,6 @@ type
     /// used by the published methods to run test assertion against UTF-8 strings
     // - if a=b, will fail and include '#=#' text before the supplied msg
     function CheckNotEqual(const a, b: RawUtf8; const msg: RawUtf8 = ''): boolean; overload;
-      {$ifdef HASINLINE}inline;{$endif}
     /// used by the published methods to run test assertion against pointers/classes
     // - if a=b, will fail and include '#=#' text before the supplied msg
     function CheckNotEqual(a, b: pointer; const msg: RawUtf8 = ''): boolean; overload;
@@ -239,7 +242,7 @@ type
     procedure CheckHash(const data: RawByteString; expectedhash32: cardinal;
       const msg: RawUtf8 = '');
     /// create a temporary string random content, WinAnsi (code page 1252) content
-    class function RandomString(CharCount: integer): RawByteString;
+    class function RandomString(CharCount: integer): WinAnsiString;
     /// create a temporary UTF-8 string random content, using WinAnsi
     // (code page 1252) content
     class function RandomUtf8(CharCount: integer): RawUtf8;
@@ -268,16 +271,19 @@ type
     // - OnlyLog will compute and append the info to the log, but not on console
     // - warning: this method is thread-safe only if a local Timer is specified
     function NotifyTestSpeed(const ItemName: string; ItemCount: integer;
-      SizeInBytes: cardinal = 0; Timer: PPrecisionTimer = nil;
+      SizeInBytes: QWord = 0; Timer: PPrecisionTimer = nil;
       OnlyLog: boolean = false): TSynMonitorOneMicroSec; overload;
     /// will add to the console a formatted message with a speed estimation
     function NotifyTestSpeed(
       const ItemNameFmt: RawUtf8; const ItemNameArgs: array of const;
-      ItemCount: integer; SizeInBytes: cardinal = 0; Timer: PPrecisionTimer = nil;
+      ItemCount: integer; SizeInBytes: QWord = 0; Timer: PPrecisionTimer = nil;
       OnlyLog: boolean = false): TSynMonitorOneMicroSec; overload;
     /// append some text to the current console
     // - OnlyLog will compute and append the info to the log, but not on the console
-    procedure AddConsole(const msg: string; OnlyLog: boolean = false);
+    procedure AddConsole(const msg: string; OnlyLog: boolean = false); overload;
+    /// append some text to the current console
+    procedure AddConsole(const Fmt: RawUtf8; const Args: array of const;
+      OnlyLog: boolean = false); overload;
     /// the test suit which owns this test case
     property Owner: TSynTests
       read fOwner;
@@ -500,7 +506,7 @@ var
   methods: TPublishedMethodInfoDynArray;
   i: integer;
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   if Ident <> '' then
     fIdent := Ident
   else
@@ -682,7 +688,8 @@ end;
 
 function TSynTestCase.CheckEqual(const a, b: RawUtf8; const msg: RawUtf8): boolean;
 begin
-  result := a = b;
+  result := (length(a) = length(b)) and
+            CompareMem(pointer(a), pointer(b), length(a));
   CheckUtf8(result, EQUAL_MSG, [a, b, msg]);
 end;
 
@@ -700,7 +707,8 @@ end;
 
 function TSynTestCase.CheckNotEqual(const a, b: RawUtf8; const msg: RawUtf8): boolean;
 begin
-  result := a <> b;
+  result := (length(a) <> length(b)) or
+            not CompareMem(pointer(a), pointer(b), length(a));
   CheckUtf8(result, NOTEQUAL_MSG, [a, b, msg]);
 end;
 
@@ -778,14 +786,14 @@ begin
     [CardinalToHexShort(crc), CardinalToHexShort(expectedhash32), msg]);
 end;
 
-class function TSynTestCase.RandomString(CharCount: integer): RawByteString;
+class function TSynTestCase.RandomString(CharCount: integer): WinAnsiString;
 var
   i: PtrInt;
   R: PByteArray;
   tmp: TSynTempBuffer;
 begin
   R := tmp.InitRandom(CharCount);
-  SetString(result, nil, CharCount);
+  FastSetStringCP(result, nil, CharCount, CODEPAGE_US);
   for i := 0 to CharCount - 1 do
     PByteArray(result)[i] := 32 + R[i] and 127;
   tmp.Done;
@@ -798,7 +806,7 @@ var
   tmp: TSynTempBuffer;
 begin
   R := tmp.InitRandom(CharCount);
-  SetString(result, nil, CharCount);
+  FastSetString(RawUtf8(result), nil, CharCount);
   for i := 0 to CharCount - 1 do
     PByteArray(result)[i] := 32 + R[i] mod 94;
   tmp.Done;
@@ -811,7 +819,7 @@ var
   tmp: TSynTempBuffer;
 begin
   R := tmp.InitRandom(count);
-  SetString(result, nil, count);
+  FastSetString(RawUtf8(result), nil, count);
   for i := 0 to count - 1 do
     PByteArray(result)[i] := ord(chars64[PtrInt(R[i]) and 63]);
   tmp.Done;
@@ -835,7 +843,7 @@ end;
 
 class function TSynTestCase.RandomUtf8(CharCount: integer): RawUtf8;
 begin
-  result := WinAnsiToUtf8(WinAnsiString(RandomString(CharCount)));
+  result := WinAnsiToUtf8(RandomString(CharCount));
 end;
 
 class function TSynTestCase.RandomUnicode(CharCount: integer): SynUnicode;
@@ -968,8 +976,17 @@ begin
   end;
 end;
 
+procedure TSynTestCase.AddConsole(
+  const Fmt: RawUtf8; const Args: array of const; OnlyLog: boolean);
+var
+  msg: string;
+begin
+  FormatString(Fmt, Args, msg);
+  AddConsole(msg, OnlyLog);
+end;
+
 function TSynTestCase.NotifyTestSpeed(const ItemName: string; ItemCount: integer;
-  SizeInBytes: cardinal; Timer: PPrecisionTimer;
+  SizeInBytes: QWord; Timer: PPrecisionTimer;
   OnlyLog: boolean): TSynMonitorOneMicroSec;
 var
   Temp: TPrecisionTimer;
@@ -998,7 +1015,7 @@ begin
 end;
 
 function TSynTestCase.NotifyTestSpeed(const ItemNameFmt: RawUtf8;
-  const ItemNameArgs: array of const; ItemCount: integer; SizeInBytes: cardinal;
+  const ItemNameArgs: array of const; ItemCount: integer; SizeInBytes: QWord;
   Timer: PPrecisionTimer; OnlyLog: boolean): TSynMonitorOneMicroSec;
 var
   str: string;
@@ -1201,6 +1218,11 @@ begin
             Color(ccLightGreen)
           else
             Color(ccLightRed);
+          if C.fRunConsole <> '' then
+          begin
+            TextLn(['   ', C.fRunConsole]);
+            C.fRunConsole := '';
+          end;
           Text(['  Total failed: ', IntToThousandString(C.AssertionsFailed),
             ' / ', IntToThousandString(C.Assertions), '  - ', C.Ident]);
           if C.AssertionsFailed = 0 then
@@ -1342,14 +1364,16 @@ begin
   with TSynLogTestLog.Family do
   begin
     Level := withLogs;
-    PerThreadLog := ptIdentifiedInOnFile;
+    PerThreadLog := ptIdentifiedInOneFile;
     HighResolutionTimestamp := true;
-    if Level = LOG_VERBOSE then
+    if (tcoLogVerboseRotate in options) and
+       (Level = LOG_VERBOSE) then
     begin
       RotateFileCount := 10;
       RotateFileSizeKB := 100*1024; // rotate verbose logs by 100MB files
     end;
-    //DestinationPath := Executable.ProgramFilePath + 'logs'; // should exist
+    if tcoLogInSubFolder in options then
+      DestinationPath := EnsureDirectoryExists(Executable.ProgramFilePath + 'logs');
   end;
   // testing is performed by some dedicated classes defined in the caller units
   tests := Create(CustomIdent);

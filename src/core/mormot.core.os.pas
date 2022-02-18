@@ -30,7 +30,7 @@ interface
 
 uses
   {$ifdef OSWINDOWS}
-  Windows, // needed here e.g. for redefinition of standard types
+  Windows, // needed here e.g. for redefinition/redirection of standard types
   Messages,
   {$endif OSWINDOWS}
   classes,
@@ -578,11 +578,27 @@ var
   OSVersionShort: RawUtf8;
 
   /// some textual information about the current CPU
-  // - contains e.g. '4 x Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz (x64)'
+  // - contains e.g. '4 x Intel(R) Core(TM) i5-7300U CPU @ 2.60GHz 3MB cache'
   CpuInfoText: RawUtf8;
+  /// the on-chip cache size, in bytes, as returned by the OS
+  // - retrieved from /proc/cpuinfo "cache size" entry (L3 cache) on Linux or
+  // CpuCache[3/4].Size (from GetLogicalProcessorInformation) on Windows
+  CpuCacheSize: cardinal;
+  /// the available cache information as returned by the OS
+  // - e.g. 'L1=2*32KB  L2=256KB  L3=3MB' on Windows or '3072 KB' on Linux
+  CpuCacheText: RawUtf8;
   /// some textual information about the current computer hardware, from BIOS
   // - contains e.g. 'LENOVO 20HES23B0U ThinkPad T470'
   BiosInfoText: RawUtf8;
+
+  /// Level 1 to 4 CPU caches as returned by GetLogicalProcessorInformation
+  // - yes, Intel introduced a Level 4 cache (eDRAM) with some Haswell/Iris CPUs
+  // - this information is not retrieved on all Linux / POSIX systems yet
+  // - only Unified or Data caches are include (not Instruction or Trace)
+  // - note: some CPU - like the Apple M1 - have 128 bytes of LineSize
+  CpuCache: array[1..4] of record
+    Count, Size, LineSize: cardinal;
+  end;
 
   {$ifdef OSLINUXANDROID}
   /// contains the Flags: or Features: value of Linux /proc/cpuinfo
@@ -711,11 +727,24 @@ const
   {$ifdef FPC}
     'Free Pascal'
     {$ifdef VER2_6_4} + ' 2.6.4'{$endif}
-    {$ifdef VER3_0}   + ' 3.0'  {$ifdef VER3_0_4} + '.4' {$else}
-    {$ifdef VER3_0_2} + '.2'    {$endif} {$endif} {$endif}
-    {$ifdef VER3_1}   + ' 3.1'  {$ifdef VER3_1_1} + '.1' {$endif} {$endif}
-    {$ifdef VER3_2}   + ' 3.2'  {$endif}
-    {$ifdef VER3_3}   + ' 3.3'  {$ifdef VER3_3_1} + '.1' {$endif} {$endif}
+    {$ifdef VER3_0}   + ' 3.0'
+      {$ifdef VER3_0_4}   + '.4' {$else}
+        {$ifdef VER3_0_2} + '.2' {$endif}
+      {$endif VER3_0_4}
+    {$endif VER3_0}
+    {$ifdef VER3_1}   + ' 3.1'
+       {$ifdef VER3_1_1} + '.1' {$endif}
+    {$endif VER3_1}
+    {$ifdef VER3_2}   + ' 3.2'
+      {$ifdef VER3_2_4}     + '.4' {$else}
+        {$ifdef VER3_2_3}   + '.3' {$else}
+          {$ifdef VER3_2_2} + '.2' {$endif}
+        {$endif VER3_2_3}
+      {$endif VER3_2_4}
+    {$endif VER3_2}
+    {$ifdef VER3_3}   + ' 3.3'
+       {$ifdef VER3_3_1} + '.1' {$endif}
+    {$endif VER3_3}
     {$ifdef VER3_4}   + ' 3.4'  {$endif}
   {$else}
     'Delphi'
@@ -1569,7 +1598,7 @@ type
   // - about systemd: see https://www.freedesktop.org/wiki/Software/systemd
   // and http://0pointer.de/blog/projects/socket-activation.html - to get headers
   // on debian: `sudo apt install libsystemd-dev && cd /usr/include/systemd`
-  TSystemD = packed object
+  TSystemD = record
   private
     systemd: pointer;
     tested: boolean;
@@ -2618,7 +2647,7 @@ type
     procedure ReadLock;
       {$ifdef HASINLINE} inline; {$endif}
     /// try to enter a non-upgradable multiple reads lock
-    // - if returned true, caller should eventually call ReadUnLock()
+    // - if returned true, caller should eventually call ReadUnLock
     // - read locks maintain a thread-safe counter, so are reentrant and non blocking
     // - warning: nested WriteLock call after a ReadLock would deadlock
     function TryReadLock: boolean;
@@ -2631,7 +2660,7 @@ type
     // would deadlock
     procedure WriteLock;
     /// try to enter a non-rentrant non-upgradable exclusive write lock
-    // - if returned true, caller should eventually call UnLock()
+    // - if returned true, caller should eventually call WriteUnLock
     // - warning: nested TryWriteLock call after a ReadLock or another WriteLock
     // would deadlock
     function TryWriteLock: boolean;
@@ -2732,10 +2761,10 @@ type
     procedure WriteUnlock;
       {$ifdef FPC_OR_DELPHIXE4} inline; {$endif} // circumvent weird Delphi bug
     /// a high-level wrapper over ReadOnlyLock/ReadWriteLock/WriteLock methods
-    procedure Lock(context: TRWLockContext (*{$ifndef PUREMORMOT2} = cWrite {$endif}*));
+    procedure Lock(context: TRWLockContext {$ifndef PUREMORMOT2} = cWrite {$endif});
       {$ifdef HASINLINE} inline; {$endif}
     /// a high-level wrapper over ReadOnlyUnLock/ReadWriteUnLock/WriteUnLock methods
-    procedure UnLock(context: TRWLockContext (*{$ifndef PUREMORMOT2} = cWrite {$endif}*));
+    procedure UnLock(context: TRWLockContext {$ifndef PUREMORMOT2} = cWrite {$endif});
       {$ifdef HASINLINE} inline; {$endif}
   end;
   PRWLock = ^TRWLock;
@@ -3087,7 +3116,7 @@ function SleepDelay(elapsed: PtrInt): PtrInt;
 function SleepStepTime(var start, tix: Int64; endtix: PInt64 = nil): PtrInt;
 
 /// similar to Windows SwitchToThread API call, to be truly cross-platform
-// - call fpnanosleep(10) on POSIX systems
+// - call fpnanosleep(10) on POSIX systems, or the homonymous API on Windows
 procedure SwitchToThread;
   {$ifdef OSWINDOWS} stdcall; {$endif}
 
@@ -3149,7 +3178,9 @@ function GetCurrentThreadInfo: ShortString;
 // ! end;
 // - you should better not use such a giant-lock, but an instance-dedicated
 // critical section/TSynLocker or TRWLock - these functions are just here to be
-// convenient, for non time-critical process (e.g. singleton initialization)
+// convenient, for non time-critical process (e.g. singleton initialization
+// of external libraries, or before RegisterGlobalShutdownRelease() which will
+// use it anyway)
 procedure GlobalLock;
 
 /// release the giant lock for thread-safe shared process
@@ -3887,13 +3918,17 @@ end;
 function IsInvalidHttpHeader(head: PUtf8Char; headlen: PtrInt): boolean;
 var
   i: PtrInt;
+  c: cardinal;
 begin
   result := true;
   for i := 0 to headlen - 3 do
-    if (PInteger(head + i)^ = $0a0d0a0d) or
-       (PWord(head + i)^ = $0d0d) or
-       (PWord(head + i)^ = $0a0a) then
+  begin
+    c := PCardinal(head + i)^;
+    if (c = $0a0d0a0d) or
+       (Word(c) = $0d0d) or
+       (Word(c) = $0a0a) then
       exit;
+  end;
   result := false;
 end;
 
@@ -4154,13 +4189,13 @@ end;
 
 function Unicode_CodePage: integer;
 begin
-{$ifdef FPC}
+  {$ifdef FPC}
   // = GetSystemCodePage on POSIX, Lazarus may override to UTF-8 on Windows
   result := DefaultSystemCodePage;
-{$else}
+  {$else}
   // Delphi always uses the main Windows System Code Page
   result := GetACP;
-{$endif FPC}
+  {$endif FPC}
 end;
 
 function Unicode_CompareString(PW1, PW2: PWideChar; L1, L2: PtrInt;
@@ -4193,7 +4228,7 @@ begin
     until false;
   end
   else
-    // use ICU or cwstring/RTL for accurate conversion
+    // use WinAPI, ICU or cwstring/RTL for accurate conversion
     res[0] := AnsiChar(
       Unicode_WideToAnsi(W, PAnsiChar(@res[1]), LW, 255, CodePage));
 end;
@@ -4256,7 +4291,7 @@ begin
   result := (FileName <> '') and
             (FileName[1] <> '/') and
             (PosEx('..', FileName) = 0) and
-            (PosEx(':', FileName) = 0) and
+            (PosExChar(':', FileName) = 0) and
             (PosEx('\\', FileName) = 0);
 end;
 
@@ -4312,7 +4347,7 @@ begin
   result := '';
   if FileName = '' then
     exit;
-  F := FileOpenSequentialRead(FileName);
+  F := FileOpenSequentialRead(FileName); // = plain fpOpen() on POSIX
   if ValidHandle(F) then
   begin
     if HasNoSize then
@@ -4872,8 +4907,8 @@ end;
 function TFakeStubBuffer.Reserve(size: cardinal): pointer;
 begin
   result := @Stub[StubUsed];
-  while size and 7 <> 0 do
-    inc(size); // ensure the returned buffers are 8 bytes aligned
+  while size and 15 <> 0 do
+    inc(size); // ensure the returned buffers are 16 bytes aligned
   inc(StubUsed, size);
 end;
 
@@ -4920,12 +4955,10 @@ end;
 {$endif UNIX}
 
 {$ifndef PUREMORMOT2}
-
 function GetDelphiCompilerVersion: RawUtf8;
 begin
   result := COMPILER_VERSION;
 end;
-
 {$endif PUREMORMOT2}
 
 function ConsoleReadBody: RawByteString;
@@ -5371,6 +5404,8 @@ begin
   result := terminated = terminatedvalue;
 end;
 
+// as reference, take a look at Linus insight
+// from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
 {$ifdef CPUINTEL}
 procedure DoPause; {$ifdef FPC} assembler; nostackframe; {$endif}
 asm
@@ -5386,9 +5421,9 @@ const
   {$endif CPUINTEL}
 
 function DoSpin(spin: PtrUInt): PtrUInt;
-  {$ifdef HASINLINE} inline; {$endif}
+  {$ifdef CPUINTEL} {$ifdef HASINLINE} inline; {$endif} {$endif}
 begin
-  {$ifdef CPUINTEL}
+  {$ifdef CPUINTEL} // on ARM/AARCH64, the not-inlined function call makes delay
   DoPause;
   {$endif CPUINTEL}
   dec(spin);
@@ -5405,7 +5440,8 @@ var
   spin: PtrUInt;
 begin
   spin := SPIN_COUNT;
-  while not LockedExc(Target, NewValue, Comperand) do
+  while (Target <> Comperand) or
+        not LockedExc(Target, NewValue, Comperand) do
     spin := DoSpin(spin);
 end;
 
@@ -5452,7 +5488,8 @@ begin
   spin := SPIN_COUNT;
   repeat
     spin := DoSpin(spin);
-  until LockedExc(Flags, 1, 0);
+  until (Flags = 0) and // when spinning, first check without atomicity
+        LockedExc(Flags, 1, 0);
 end;
 
 procedure TLightLock.Lock;
@@ -5469,7 +5506,11 @@ end;
 
 procedure TLightLock.UnLock;
 begin
-  Flags := 0;
+  {$ifdef CPUINTEL}
+  Flags := 0; // non reentrant locks need no additional thread safety
+  {$else}
+  LockedDec(Flags, 1); // ARM can be weak-ordered - see shorturl.at/kuJ12
+  {$endif CPUINTEL}
 end;
 
 
@@ -5488,7 +5529,8 @@ begin
   repeat
     spin := DoSpin(spin);
     f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
-  until LockedExc(Flags, f + 2, f);
+  until (Flags = f) and
+        LockedExc(Flags, f + 2, f);
 end;
 
 procedure TRWLightLock.ReadLock;
@@ -5523,7 +5565,8 @@ begin
   // acquire the WR flag bit
   repeat
     f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
-    if LockedExc(Flags, f + 1, f) then
+    if (Flags = f) and
+       LockedExc(Flags, f + 1, f) then
       exit;
     spin := DoSpin(spin);
   until false;
@@ -5563,9 +5606,9 @@ end;
 
 procedure TRWLock.ReadOnlyLock;
 asm     // since we may call SwitchToThread we need to have a stackframe
-        {$ifndef WIN64ABI}
+        {$ifdef SYSVABI}
         mov     rcx, rdi      // rcx = self
-        {$endif WIN64ABI}
+        {$endif SYSVABI}
 @retry: mov     r8d, SPIN_COUNT
 @spin:  mov     rax, qword ptr [rcx + TRWLock.Flags]
         and     rax, not 1
@@ -5625,7 +5668,8 @@ begin
   repeat
     spin := DoSpin(spin);
     f := Flags and not 1; // retry ReadOnlyLock
-  until LockedExc(Flags, f + 4, f);
+  until (Flags = f) and
+        LockedExc(Flags, f + 4, f);
 end;
 
 {$endif ASMX86}
@@ -5652,7 +5696,8 @@ begin
   spin := SPIN_COUNT;
   repeat
     f := Flags and not 3; // bit 0=WriteLock, 1=ReadWriteLock, >1=ReadOnlyLock
-    if LockedExc(Flags, f + 2, f) then
+    if (Flags = f) and
+       LockedExc(Flags, f + 2, f) then
       break;
     spin := DoSpin(spin);
   until false;
@@ -5687,7 +5732,8 @@ begin
   // acquire the WR flag bit
   repeat
     f := Flags and not 1; // bit 0=WriteLock, 1=ReadWriteLock, >1=ReadOnlyLock
-    if LockedExc(Flags, f + 1, f) then
+    if (Flags = f) and
+       LockedExc(Flags, f + 1, f) then
       if (Flags and 2 = 2) and
          (LastReadWriteLockThread <> tid) then
         // there is a pending ReadWriteLock but not on this thread
@@ -5774,7 +5820,7 @@ var
 begin
   for i := 0 to PaddingUsedCount - 1 do
     if not (integer(Padding[i].VType) in VTYPE_SIMPLE) then
-      VarClear(variant(Padding[i]));
+      VarClearProc(Padding[i]);
   DeleteCriticalSection(fSection);
   fInitialized := false;
 end;
@@ -6373,6 +6419,44 @@ begin
   until false;
 end;
 
+procedure TrimDualSpaces(var s: RawUtf8);
+var
+  f, i: integer;
+begin
+  f := 1;
+  repeat
+    i := PosEx('  ', s, f);
+    if i = 0 then
+      break;
+    delete(s, i, 1); // dual space -> single space
+    f := i;
+  until false;
+  TrimSelf(s);
+end;
+
+procedure InitializeUnit;
+begin
+  {$ifdef ISFPC27}
+  SetMultiByteConversionCodePage(CP_UTF8);
+  SetMultiByteRTLFileSystemCodePage(CP_UTF8);
+  {$endif ISFPC27}
+  InitializeCriticalSection(GlobalCriticalSection);
+  InitializeSpecificUnit; // in mormot.core.os.posix/windows.inc files
+  TrimDualSpaces(OSVersionText);
+  TrimDualSpaces(OSVersionInfoEx);
+  TrimDualSpaces(BiosInfoText);
+  TrimDualSpaces(CpuInfoText);
+  OSVersionShort := ToTextOS(OSVersionInt32);
+  SetExecutableVersion(0, 0, 0, 0);
+  JSON_CONTENT_TYPE_VAR := JSON_CONTENT_TYPE;
+  JSON_CONTENT_TYPE_HEADER_VAR := JSON_CONTENT_TYPE_HEADER;
+  NULL_STR_VAR := 'null';
+  BOOL_UTF8[false] := 'false';
+  BOOL_UTF8[true] := 'true';
+  // minimal stubs which will be properly implemented in mormot.core.log.pas
+  GetExecutableLocation := _GetExecutableLocation;
+  SetThreadName := _SetThreadName;
+end;
 
 procedure FinalizeUnit;
 var
@@ -6391,22 +6475,7 @@ begin
 end;
 
 initialization
-  {$ifdef ISFPC27}
-  SetMultiByteConversionCodePage(CP_UTF8);
-  SetMultiByteRTLFileSystemCodePage(CP_UTF8);
-  {$endif ISFPC27}
-  InitializeCriticalSection(GlobalCriticalSection);
-  InitializeUnit; // in mormot.core.os.posix/windows.inc files
-  OSVersionShort := ToTextOS(OSVersionInt32);
-  SetExecutableVersion(0, 0, 0, 0);
-  JSON_CONTENT_TYPE_VAR := JSON_CONTENT_TYPE;
-  JSON_CONTENT_TYPE_HEADER_VAR := JSON_CONTENT_TYPE_HEADER;
-  NULL_STR_VAR := 'null';
-  BOOL_UTF8[false] := 'false';
-  BOOL_UTF8[true] := 'true';
-  // minimal stubs which will be properly implemented in mormot.core.log.pas
-  GetExecutableLocation := _GetExecutableLocation;
-  SetThreadName := _SetThreadName;
+  InitializeUnit;
 
 finalization
   FinalizeUnit;

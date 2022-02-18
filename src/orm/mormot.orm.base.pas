@@ -80,7 +80,8 @@ type
   EOrmException = class(ESynException);
 
   /// used to store bit set for all available Tables in a Database Model
-  TOrmTableBits = set of 0..MAX_TABLES - 1;
+  // - with default MAX_TABLES=256, consumes 32 bytes
+  TOrmTableBits = set of 0 .. MAX_TABLES - 1;
 
   /// a reference to another record in any table in the database Model
   // - stored as a 64-bit signed integer (just like the TID type)
@@ -1932,6 +1933,12 @@ type
     // - returns nil if not found
     function ByName(aName: PUtf8Char): TOrmPropInfo; overload;
       {$ifdef HASINLINE}inline;{$endif}
+    /// find an item in the list at aDefaultIndex position, and
+    // using O(log(n)) binary search as fallback
+    // - returns nil if not found, or the property info and set aDefaultIndex
+    // to the next item
+    function ByName(aName: PUtf8Char; aNameLen: PtrInt;
+      var aDefaultIndex: PtrInt): TOrmPropInfo; overload;
     /// find an item in the list using O(log(n)) binary search
     // - returns -1 if not found
     function IndexByName(const aName: RawUtf8): integer; overload;
@@ -2036,9 +2043,11 @@ type
   POrmTableFieldType = ^TOrmTableFieldType;
 
   {$ifdef NOPOINTEROFFSET}
+  TOrmTableData = PUtf8Char;
   TOrmTableDataArray = PPUtf8CharArray;
   TOrmTableJsonDataArray = TPUtf8CharDynArray;
   {$else} // reduce memory consumption by half on 64-bit CPUs
+  TOrmTableData = integer;
   TOrmTableDataArray = PIntegerArray; // 0 = nil, or offset in fDataStart[]
   TOrmTableJsonDataArray = TIntegerDynArray;
   {$endif NOPOINTEROFFSET}
@@ -2103,9 +2112,9 @@ type
     /// free associated memory and owned records
     destructor Destroy; override;
     /// copy basic reading parameters of a TOrmTable into this instance
-    // - only work for basic Get() or Results[] access
+    // - work for basic Get() or Results[] access, and distinct Step() cursor
     // - the Results[] remain in the source TOrmTable: source TOrmTable has to
-    // remain available (i.e. not destroyed) before this TOrmTable
+    // remain available (i.e. not destroyed before this copy TOrmTable)
     procedure AssignRead(source: TOrmTableAbstract); virtual;
 
     /// read-only access to the ID of a particular row
@@ -2697,13 +2706,18 @@ type
     function IntGet(var Dest: TVarData; const Instance: TVarData;
       Name: PAnsiChar; NameLen: PtrInt; NoException: boolean): boolean; override;
   public
-    /// customization of variant into JSON serialization
-    procedure ToJson(W: TJsonWriter; const Value: variant); override;
+    /// Table Row variant into JSON serialization
+    procedure ToJson(W: TJsonWriter; Value: PVarData); override;
     /// handle type conversion to string
     procedure Cast(var Dest: TVarData; const Source: TVarData); override;
     /// handle type conversion to string
     procedure CastTo(var Dest: TVarData; const Source: TVarData;
       const AVarType: TVarType); override;
+    /// return the number of TOrmTable rows to browse
+    function IterateCount(const V: TVarData): integer; override;
+    /// allow to loop over the mapped TOrmTable rows
+    procedure Iterate(var Dest: TVarData; const V: TVarData;
+      Index: integer); override;
   end;
 
 
@@ -2754,7 +2768,8 @@ type
 
   /// for TRestCache, stores a table values
   TRestCacheEntryValue = packed record
-    /// corresponding ID
+    /// corresponding TOrm ID
+    // - stored in increasing order for efficient O(log(n)) binary search
     ID: TID;
     /// GetTickCount64 shr 9 timestamp when this cached value was stored
     // - resulting time period has therefore a resolution of 512 ms, and
@@ -2813,8 +2828,7 @@ type
     /// add the supplied ID to the Value[] array
     procedure SetCache(aID: TID); overload;
     /// update/refresh the cached JSON serialization of a given ID
-    procedure SetJson(aID: TID; const aJson: RawUtf8;
-      aTag: cardinal = 0); overload;
+    procedure SetJson(aID: TID; const aJson: RawUtf8; aTag: cardinal = 0); overload;
     /// retrieve a JSON serialization of a given ID from cache
     function RetrieveJson(aID: TID; var aJson: RawUtf8;
       aTag: PCardinal = nil): boolean; overload;
@@ -4074,25 +4088,34 @@ end;
 
 function TOrmPropInfo.SetFieldSqlVar(Instance: TObject;
   const aValue: TSqlVar): boolean;
+var
+  tmp: RawUtf8;
 begin
+  result := true;
   case aValue.VType of
     ftInt64:
-      SetValueVar(Instance, Int64ToUtf8(aValue.VInt64), false);
+      Int64ToUtf8(aValue.VInt64, tmp);
     ftCurrency:
-      SetValueVar(Instance, Curr64ToStr(aValue.VInt64), false);
+      Curr64ToStr(aValue.VInt64, tmp);
     ftDouble:
-      SetValueVar(Instance, DoubleToStr(aValue.VDouble), false);
+      DoubleToStr(aValue.VDouble, tmp);
     ftDate:
-      SetValueVar(Instance, DateTimeToIso8601Text(aValue.VDateTime, 'T',
-        svoDateWithMS in aValue.Options), true);
+      DateTimeToIso8601TextVar(
+        aValue.VDateTime, 'T', tmp, svoDateWithMS in aValue.Options);
     ftBlob:
-      SetValueVar(Instance, RawBlobToBlob(aValue.VBlob, aValue.VBlobLen), true);
+      tmp := RawBlobToBlob(aValue.VBlob, aValue.VBlobLen);
     ftUtf8:
-      SetValue(Instance, aValue.VText, StrLen(aValue.VText), true);
+      begin
+        SetValue(Instance, aValue.VText, StrLen(aValue.VText), true);
+        exit;
+      end
   else
-    SetValue(Instance, nil, 0, false);
+    begin
+      SetValue(Instance, nil, 0, false);
+      exit;
+    end;
   end;
-  result := true;
+  SetValueVar(Instance, tmp, aValue.VType in [ftDate, ftBlob, ftUtf8]);
 end;
 
 const
@@ -4217,7 +4240,7 @@ class procedure TOrmPropInfoRtti.RegisterTypeInfo(aTypeInfo: PRttiInfo);
 begin
   if OrmPropInfoRegistration = nil then
   begin
-    GlobalLock;
+    GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
     try
       if OrmPropInfoRegistration = nil then
         OrmPropInfoRegistration := RegisterGlobalShutdownRelease(
@@ -5666,13 +5689,13 @@ end;
 function TOrmPropInfoRttiRawUtf8.SetFieldSqlVar(Instance: TObject;
   const aValue: TSqlVar): boolean;
 var
-  tmp: RawByteString;
+  tmp: RawUtf8;
 begin
   case aValue.VType of
     ftNull:
       ; // leave tmp=''
     ftUtf8:
-      SetString(tmp, PAnsiChar(aValue.VText), StrLen(aValue.VText));
+      FastSetString(tmp, aValue.VText, StrLen(aValue.VText));
   else
     begin
       result := inherited SetFieldSqlVar(Instance, aValue);
@@ -5852,7 +5875,7 @@ var
   tmp: pointer;
 begin
   GetValuePointer(Instance, tmp);
-  W.WrBase64(tmp, length(RawByteString(tmp)), true);
+  W.WrBase64(tmp, length(RawByteString(tmp)), {withmagic=}true);
   if fGetterIsFieldPropOffset = 0 then
     FastAssignNew(tmp);
 end;
@@ -5914,7 +5937,7 @@ begin
   case aValue.VType of
     ftBlob:
       begin
-        SetString(tmp, PAnsiChar(aValue.VBlob), aValue.VBlobLen);
+        FastSetRawByteString(tmp, aValue.VBlob, aValue.VBlobLen);
         fPropInfo.SetLongStrProp(Instance, tmp);
         result := true;
       end;
@@ -6303,8 +6326,8 @@ var
   json: RawUtf8;
   da: TDynArray;
 begin
+  _VariantSaveJson(Source, twJsonEscape, json);
   GetDynArray(Instance, da);
-  VariantSaveJson(Source, twJsonEscape, json);
   da.LoadFromJson(pointer(json));
 end;
 
@@ -6847,11 +6870,8 @@ begin
 end;
 
 procedure TOrmPropInfoRecordFixedSize.GetVariant(Instance: TObject; var Dest: Variant);
-var
-  tmp: RawByteString;
 begin
-  SetString(tmp, PAnsiChar(GetFieldAddr(Instance)), fRecordSize);
-  Dest := tmp;
+  RawByteStringToVariant(GetFieldAddr(Instance), fRecordSize, Dest);
 end;
 
 procedure TOrmPropInfoRecordFixedSize.SetVariant(Instance: TObject;
@@ -6916,7 +6936,7 @@ end;
 procedure TOrmPropInfoRecordFixedSize.GetFieldSqlVar(Instance: TObject;
   var aValue: TSqlVar; var temp: RawByteString);
 begin
-  SetString(temp, PAnsiChar(GetFieldAddr(Instance)), fRecordSize);
+  FastSetRawByteString(temp, GetFieldAddr(Instance), fRecordSize);
   aValue.Options := [];
   aValue.VType := ftBlob;
   aValue.VBlob := pointer(temp);
@@ -7244,6 +7264,31 @@ begin
     result := nil
   else
     result := fList[i];
+end;
+
+function TOrmPropInfoList.ByName(aName: PUtf8Char; aNameLen: PtrInt;
+  var aDefaultIndex: PtrInt): TOrmPropInfo;
+var
+  i: PtrInt;
+begin
+  i := aDefaultIndex;
+  if PtrUInt(i) < PtrUInt(fCount) then
+  begin
+    result := fList[i];
+    if IdemPropNameU(result.Name, aName, aNameLen) then
+    begin
+      inc(aDefaultIndex); // is likely to be in proper order
+      exit;
+    end;
+  end;
+  i := IndexByName(aName); // fast O(log(n)) binary search
+  if i < 0 then
+    result := nil
+  else
+  begin
+    result := fList[i];
+    aDefaultIndex := i + 1; // may be back in order (e.g. no blob select)
+  end;
 end;
 
 function TOrmPropInfoList.IndexByName(aName: PUtf8Char): PtrInt;
@@ -7712,7 +7757,11 @@ begin
        (PtrInt(PtrUInt(Value)) < -MaxInt) then
       raise EOrmTable.CreateUtf8('%.Results[%] overflow: all PUtf8Char ' +
         'should be in a [-2GB..+2GB] 32-bit range (%) - consider forcing ' +
-        'NOPOINTEROFFSET conditional for your project', [self, Offset, Value]);
+        'NOPOINTEROFFSET conditional for your project'
+        // FPCMM_MEDIUM32BIT may be incompatible with TOrmTable for data >256KB
+        // so may require NOPOINTEROFFSET conditional, so is not set by default
+        {$ifdef FPCMM_MEDIUM32BIT} + ' or disable FPCMM_MEDIUM32BIT' {$endif},
+        [self, Offset, Value]);
   end;
   fData[Offset] := PtrInt(Value);
   {$endif NOPOINTEROFFSET}
@@ -8818,8 +8867,8 @@ procedure TOrmTableAbstract.GetMSRowSetValues(Dest: TStream; RowFirst, RowLast: 
 const
   FIELDTYPE_TOXML: array[TSqlDBFieldType] of RawUtf8 = (
     '', '', ' dt:type="i8"', ' dt:type="float"',
-    ' dt:type="number" rs:dbtype="currency"',
-    ' dt:type="dateTime"', ' dt:type="string"', ' dt:type="bin.hex"');
+    ' dt:type="number" rs:dbtype="currency"', ' dt:type="dateTime"',
+    ' dt:type="string"', ' dt:type="bin.hex"');
 var
   W: TTextWriter;
   f, r: PtrInt;
@@ -9168,7 +9217,7 @@ begin
 end;
 
 {$ifdef CPUX86}
-procedure ExchgData(P1, P2: PPointer; FieldCount: PtrUInt);
+procedure ExchgData(P1, P2: TOrmTableDataArray; FieldCount: PtrUInt);
 {$ifdef FPC} nostackframe; assembler; {$endif}
 asm     // eax=P1 edx=P2 ecx=FieldCount
         push    esi
@@ -9185,9 +9234,9 @@ asm     // eax=P1 edx=P2 ecx=FieldCount
         pop     esi
 end;
 {$else}
-procedure ExchgData(P1, P2: PIntegerArray; FieldCount: PtrUInt); inline;
+procedure ExchgData(P1, P2: TOrmTableDataArray; FieldCount: PtrUInt); inline;
 var
-  p: integer; // Data[] = 32-bit pointer or 32-bit offset
+  p: TOrmTableData; // Data[] = 32/64-bit pointer or 32-bit offset
 begin
   repeat
     dec(FieldCount);
@@ -9248,8 +9297,8 @@ begin
               CurrentRow := i
             else if CurrentRow = i then
               CurrentRow := j;
-            ExchgData(pointer(@Data[OI - Params.FieldIndex]),
-                      pointer(@Data[OJ - Params.FieldIndex]), Params.FieldCount);
+            ExchgData(@Data[OI - Params.FieldIndex],
+                      @Data[OJ - Params.FieldIndex], Params.FieldCount);
           end;
           if P = I then
             SetPivot(OJ)
@@ -9439,8 +9488,8 @@ begin
         if i <= j then
         begin
           if i <> j then // swap elements (PUtf8Char or offset)
-            ExchgData(pointer(@Data[i * FieldCount]),
-                      pointer(@Data[j * FieldCount]), FieldCount);
+            ExchgData(@Data[i * FieldCount],
+                      @Data[j * FieldCount], FieldCount);
           if p = i then
             p := j
           else if p = j then
@@ -9519,6 +9568,8 @@ begin
 end;
 
 function TOrmTableAbstract.Step(SeekFirst: boolean; RowVariant: PVariant): boolean;
+var
+  v: POrmTableRowVariantData absolute RowVariant;
 begin
   result := false;
   if (self = nil) or
@@ -9535,13 +9586,13 @@ begin
     exit;
   if OrmTableRowVariantType = nil then
     OrmTableRowVariantType := SynRegisterCustomVariantType(TOrmTableRowVariant);
-  if (PVarData(RowVariant)^.VType = OrmTableRowVariantType.VarType) and
-     (POrmTableRowVariantData(RowVariant)^.VTable = self) and
-     (POrmTableRowVariantData(RowVariant)^.VRow < 0) then
+  if (v^.VType = OrmTableRowVariantType.VarType) and
+     (v^.VTable = self) and
+     (v^.VRow < 0) then
     exit; // already initialized -> quick exit
   VarClearAndSetType(RowVariant^, OrmTableRowVariantType.VarType);
-  POrmTableRowVariantData(RowVariant)^.VTable := self;
-  POrmTableRowVariantData(RowVariant)^.VRow := -1; // follow fStepRow
+  v^.VTable := self;
+  v^.VRow := -1; // follow fStepRow
 end;
 
 function TOrmTableAbstract.FieldBuffer(
@@ -9981,20 +10032,29 @@ var
   r, f: integer;
   rv: TOrmTableRowVariantData absolute Instance;
 begin
+  result := false;
   if rv.VTable = nil then
-    raise EOrmTable.CreateUtf8('Invalid %.% call', [self, Name]);
+    if NoException then
+      exit
+    else
+      raise EOrmTable.CreateUtf8('Invalid %.% call', [self, Name]);
   r := rv.VRow;
   if r < 0 then
   begin
     r := rv.VTable.fStepRow;
     if (r = 0) or
        (r > rv.VTable.fRowCount) then
-      raise EOrmTable.CreateUtf8('%.%: no previous Step', [self, Name]);
+       if NoException then
+         exit
+       else
+        raise EOrmTable.CreateUtf8('%.%: no previous Step', [self, Name]);
   end;
   f := rv.VTable.FieldIndex(PUtf8Char(Name));
-  result := f >= 0;
   if f >= 0 then
+  begin
     rv.VTable.GetVariant(r, f, PVariant(@Dest)^);
+    result := true;
+  end;
 end;
 
 procedure TOrmTableRowVariant.Cast(var Dest: TVarData; const Source: TVarData);
@@ -10031,16 +10091,30 @@ begin
   end;
 end;
 
-procedure TOrmTableRowVariant.ToJson(W: TJsonWriter; const Value: variant);
+procedure TOrmTableRowVariant.ToJson(W: TJsonWriter; Value: PVarData);
 var
   r: PtrInt;
   tmp: variant; // write row via a TDocVariant
 begin
-  r := TOrmTableRowVariantData(Value).VRow;
+  r := POrmTableRowVariantData(Value)^.VRow;
   if r < 0 then
-    r := TOrmTableRowVariantData(Value).VTable.fStepRow;
-  TOrmTableRowVariantData(Value).VTable.ToDocVariant(r, tmp);
+    r := POrmTableRowVariantData(Value)^.VTable.fStepRow;
+  POrmTableRowVariantData(Value)^.VTable.ToDocVariant(r, tmp);
   W.AddVariant(tmp, twJsonEscape);
+end;
+
+function TOrmTableRowVariant.IterateCount(const V: TVarData): integer;
+begin
+  result := TOrmTableRowVariantData(V).VTable.fRowCount;
+end;
+
+procedure TOrmTableRowVariant.Iterate(var Dest: TVarData;
+  const V: TVarData; Index: integer);
+begin
+  if cardinal(Index) < cardinal(TOrmTableRowVariantData(V).VTable.fRowCount) then
+    Dest := V
+  else
+    TRttiVarData(Dest).VType := varEmpty;
 end;
 
 
@@ -10314,14 +10388,15 @@ begin
   end;
 end;
 
-procedure TRestCacheEntry.SetJson(aID: TID; const aJson: RawUtf8; aTag: cardinal);
+procedure TRestCacheEntry.SetJson(aID: TID; const aJson: RawUtf8;
+  aTag: cardinal);
 var
   Rec: TRestCacheEntryValue;
   i: integer; // FastLocateSorted() required integer
 begin
   Rec.ID := aID;
   Rec.Json := aJson;
-  Rec.Timestamp512 := GetTickCount64 shr 9;
+  Rec.Timestamp512 := GetTickCount64 shr 9; // 512ms resolution
   Rec.Tag := aTag;
   Mutex.Lock;
   try

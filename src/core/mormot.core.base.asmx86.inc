@@ -33,7 +33,7 @@ var
 const
   // non-temporal writes should bypass the cache when the size is bigger than
   // half the size of the largest level cache - we assume low 1MB cache here
-  NONTEMPORALSIZE = 512 * 1024;
+  NONTEMPORALSIZE = 1 shl 20;
 
 // fast SSE2 version - force define HASNOSSE2 when run any very old CPU
 // - using FPU fld/fst may trigger unexpected exceptions, as reported by Agner
@@ -56,9 +56,11 @@ asm
 @32up:
 {$ifndef HASNOSSE2}
         {$ifdef WITH_ERMS}
+        cmp     edx, NONTEMPORALSIZE
+        jae     @noerms // movntdq was reported to be faster than ERMSB
         cmp     edx, ERMSB_MIN_SIZE
         ja      @ermsb
-        {$endif WITH_ERMS}
+@noerms:{$endif WITH_ERMS}
         sub     edx, 16
         movd    xmm0, ecx
         mov     ecx, eax
@@ -217,9 +219,11 @@ asm
 {$else}
 @lrgfwd:// large forward move
         {$ifdef WITH_ERMS}
+        cmp     ecx, NONTEMPORALSIZE
+        jae     @noermf // movntdq was reported to be faster than ERMSB
         cmp     ecx, ERMSB_MIN_SIZE
         ja      @ermsf
-        {$endif WITH_ERMS}
+@noermf:{$endif WITH_ERMS}
         push    edx
         movups  xmm2, dqword ptr [eax]       // first 16
         lea     eax, [eax + ecx - 16]
@@ -2331,10 +2335,17 @@ asm
         rdtsc
 end;
 
-function RefCntDecFree(var refcnt: TRefCnt): boolean;
+function StrCntDecFree(var refcnt: TStrCnt): boolean;
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
-   lock dec dword ptr [refcnt]  // TRefCnt=longint on Delphi and FPC 32-bit
+   lock dec dword ptr [refcnt]  // =longint on Delphi and FPC 32-bit
+        setbe   al
+end; // don't check for ismultithread global since lock is cheaper on new CPUs
+
+function DACntDecFree(var refcnt: TDACnt): boolean;
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+   lock dec dword ptr [refcnt]  // =longint on Delphi and FPC 32-bit
         setbe   al
 end; // don't check for ismultithread global since lock is cheaper on new CPUs
 
@@ -2346,7 +2357,13 @@ asm
         setz    al
 end;
 
-procedure LockedInc(var Target: PtrUInt; Increment: PtrUInt);
+procedure LockedAdd(var Target: PtrUInt; Increment: PtrUInt);
+{$ifdef FPC}nostackframe; assembler;{$endif}
+asm
+   lock add     dword ptr [Target], Increment
+end;
+
+procedure LockedAdd32(var Target: cardinal; Increment: cardinal);
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
    lock add     dword ptr [Target], Increment

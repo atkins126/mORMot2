@@ -221,6 +221,8 @@ type
     ContentType: RawUtf8;
     /// same as HeaderGetValue('ACCEPT-ENCODING'), but retrieved during ParseHeader
     AcceptEncoding: RawUtf8;
+    /// same as HeaderGetValue('HOST'), but retrieved during ParseHeader
+    Host: RawUtf8;
     /// same as HeaderGetValue('USER-AGENT'), but retrieved during ParseHeader
     UserAgent: RawUtf8;
     /// same as HeaderGetValue('UPGRADE'), but retrieved during ParseHeader
@@ -301,6 +303,7 @@ type
     /// should be done when the HTTP Server state machine is done
     // - will check and process hfContentStreamNeedFree flag
     procedure ProcessDone;
+      {$ifdef HASINLINE} inline; {$endif}
   end;
 
 const
@@ -467,6 +470,7 @@ type
   TOnHttpServerSendFile = function(Context: THttpServerRequestAbstract;
     const LocalFileName: TFileName): boolean of object;
 
+  {$M+}
   /// abstract generic input/output structure used for HTTP server requests
   // - URL/Method/InHeaders/InContent properties are input parameters
   // - OutContent/OutContentType/OutCustomHeader are output parameters
@@ -480,6 +484,7 @@ type
     fInHeaders,
     fInContentType,
     fAuthenticatedUser,
+    fHost,
     fAuthBearer,
     fUserAgent,
     fOutContentType,
@@ -497,11 +502,19 @@ type
     // - will set input parameters URL/Method/InHeaders/InContent/InContentType
     // - will reset output parameters
     procedure Prepare(const aUrl, aMethod, aInHeaders: RawUtf8;
-      const aInContent: RawByteString;
-      const aInContentType, aRemoteIP, aAuthBearer, aUserAgent: RawUtf8);
+      const aInContent: RawByteString; const aInContentType, aRemoteIP: RawUtf8); overload;
       {$ifdef HASINLINE} inline; {$endif}
+    procedure Prepare(const aHttp: THttpRequestContext; const aRemoteIP: RawUtf8); overload;
     /// append some lines to the InHeaders input parameter
     procedure AddInHeader(AppendedHeader: RawUtf8);
+    /// input parameter containing the caller message body
+    // - e.g. some GET/POST/PUT JSON data can be specified here
+    property InContent: RawByteString
+      read fInContent;
+    /// output parameter to be set to the response message body
+    property OutContent: RawByteString
+      read fOutContent write fOutContent;
+  published
     /// input parameter containing the caller URI
     property Url: RawUtf8
       read fUrl;
@@ -511,19 +524,12 @@ type
     /// input parameter containing the caller message headers
     property InHeaders: RawUtf8
       read fInHeaders;
-    /// input parameter containing the caller message body
-    // - e.g. some GET/POST/PUT JSON data can be specified here
-    property InContent: RawByteString
-      read fInContent;
     // input parameter defining the caller message body content type
     property InContentType: RawUtf8
       read fInContentType;
     /// output HTTP response status
     property RespStatus: integer
       read fRespStatus write fRespStatus;
-    /// output parameter to be set to the response message body
-    property OutContent: RawByteString
-      read fOutContent write fOutContent;
     /// output parameter to define the reponse message body content type
     // - if OutContentType is STATICFILE_CONTENT_TYPE (i.e. '!STATICFILE'),
     // then OutContent is the UTF-8 file name of a file to be sent to the
@@ -541,6 +547,9 @@ type
     /// the client remote IP, as specified to Prepare()
     property RemoteIP: RawUtf8
       read fRemoteIP write fRemoteIP;
+    /// the "Host" HTTP header token, as specified to Prepare()
+    property Host: RawUtf8
+      read fHost write fHost;
     /// the "Bearer" HTTP header token, as specified to Prepare()
     property AuthBearer: RawUtf8
       read fAuthBearer write fAuthBearer;
@@ -576,7 +585,7 @@ type
     property AuthenticatedUser: RawUtf8
       read fAuthenticatedUser;
   end;
-
+  {$M-}
 
 
 implementation
@@ -933,7 +942,7 @@ begin
 end;
 
 const
-  PARSEDHEADERS: array[0..10] of PAnsiChar = (
+  PARSEDHEADERS: array[0..11] of PAnsiChar = (
     'CONTENT-',                    // 0
     'TRANSFER-ENCODING: CHUNKED',  // 1
     'CONNECTION: ',                // 2
@@ -944,6 +953,7 @@ const
     'EXPECT: 100',                 // 7
     HEADER_BEARER_UPPER,           // 8
     'USER-AGENT:',                 // 9
+    'HOST:',                       // 10
     nil);
   PARSEDHEADERS2: array[0..3] of PAnsiChar = (
     'LENGTH:',    // 0
@@ -1081,6 +1091,13 @@ begin
         // 'USER-AGENT:'
         inc(P, 11);
         GetTrimmed(P, UserAgent);
+      end;
+    10:
+      begin
+        // 'HOST:'
+        inc(P, 5);
+        GetTrimmed(P, Host);
+        HeadersUnFiltered := true; // may still be needed by some code
       end
   else
     // unrecognized name should be stored in Headers
@@ -1124,8 +1141,8 @@ begin
   if not IdemPChar(P, 'HTTP/1.') then
     exit;
   if not (hfConnectionClose in HeaderFlags) then
-    if not (hfConnectionKeepAlive in HeaderFlags) or
-       (P[7] <> '1')then
+    if not (hfConnectionKeepAlive in HeaderFlags) and
+       (P[7] <> '1') then
       include(HeaderFlags, hfConnectionClose);
   ParseHeaderFinalize;
   result := true;
@@ -1754,14 +1771,15 @@ end;
 
 procedure THttpServerRequestAbstract.Prepare(
   const aUrl, aMethod, aInHeaders: RawUtf8; const aInContent: RawByteString;
-  const aInContentType, aRemoteIP, aAuthBearer, aUserAgent: RawUtf8);
+  const aInContentType, aRemoteIP: RawUtf8);
 begin
   fUrl := aUrl;
   fMethod := aMethod;
   fRemoteIP := aRemoteIP;
   fInHeaders := aInHeaders;
-  fAuthBearer := aAuthBearer;
-  fUserAgent := aUserAgent;
+  fHost := '';
+  fAuthBearer := '';
+  fUserAgent := '';
   fInContent := aInContent;
   fInContentType := aInContentType;
   fOutContent := '';
@@ -1769,9 +1787,26 @@ begin
   fOutCustomHeaders := '';
 end;
 
+procedure THttpServerRequestAbstract.Prepare(const aHttp: THttpRequestContext;
+  const aRemoteIP: RawUtf8);
+begin
+  fUrl := aHttp.CommandUri;
+  fMethod := aHttp.CommandMethod;
+  fRemoteIP := aRemoteIP;
+  fInHeaders := aHttp.Headers;
+  fHost := aHttp.Host;
+  fAuthBearer := aHttp.BearerToken;
+  fUserAgent := aHttp.UserAgent;
+  fInContent := aHttp.Content;
+  fInContentType := aHttp.ContentType;
+  fOutContent := '';
+  fOutContentType := '';
+  fOutCustomHeaders := '';
+end;
+
 procedure THttpServerRequestAbstract.AddInHeader(AppendedHeader: RawUtf8);
 begin
-  AppendedHeader := TrimU(AppendedHeader);
+  TrimSelf(AppendedHeader);
   if AppendedHeader <> '' then
     if fInHeaders = '' then
       fInHeaders := AppendedHeader

@@ -118,11 +118,17 @@ type
   // - default secNone will use plain HTTP connection
   // - secSSL will use HTTPS secure connection
   // - secSynShaAes will use our proprietary SHA-256 / AES-256-CTR encryption
-  // identified as 'synshaaes' as ACCEPT-ENCODING: header parameter
+  // identified as 'synshaaes' as ACCEPT-ENCODING: header parameter - but since
+  // encodings are optional in HTTP, it is not possible to rely on it for securing
+  // the line which may be plain, so this is marked as deprecated - use HTTPS or
+  // encrypted WebSockets instead
   TRestHttpServerSecurity = (
     secNone,
-    secSSL,
-    secSynShaAes);
+    secSSL
+    {$ifndef PUREMORMOT2} ,
+    secSynShaAes
+    {$endif PUREMORMOT2}
+    );
 
 
 const
@@ -259,9 +265,7 @@ type
     // to be initialized to handle incoming connections (default is 32, which
     // may be sufficient for most cases, maximum is 256)
     // - the aHttpServerSecurity can be set to secSSL to initialize a HTTPS
-    // instance (after proper certificate installation as explained in the SAD
-    // pdf), or to secSynShaAes if you want our proprietary SHA-256 /
-    // AES-256-CTR encryption identified as "ACCEPT-ENCODING: synshaaes"
+    // instance (after proper certificate installation as explained in the SAD pdf)
     // - optional aAdditionalUrl parameter can be used e.g. to registry an URI
     // to server static file content, by overriding TRestHttpServer.Request
     // - for THttpApiServer, you can specify an optional name for the HTTP queue
@@ -283,9 +287,7 @@ type
     // for http.sys, the public address could be used for TRestServer.SetPublicUri()
     // - aDomainName is the Urlprefix to be used for HttpAddUrl API call
     // - the aHttpServerSecurity can be set to secSSL to initialize a HTTPS
-    // instance (after proper certificate installation as explained in the SAD
-    // pdf), or to secSynShaAes if you want our proprietary SHA-256 /
-    // AES-256-CTR encryption identified as "ACCEPT-ENCODING: synshaaes"
+    // instance (after proper certificate installation as explained in the SAD pdf)
     // - optional aAdditionalUrl parameter can be used e.g. to registry an URI
     // to server static file content, by overriding TRestHttpServer.Request
     // - for THttpApiServer, you can specify an optional name for the HTTP queue
@@ -328,9 +330,7 @@ type
     // default HTTP_DEFAULT_ACCESS_RIGHTS access right setting - but you shall
     // better rely on the authentication feature included in the framework
     // - the aHttpServerSecurity can be set to secSSL to initialize a HTTPS
-    // instance (after proper certificate installation as explained in the SAD
-    // pdf), or to secSynShaAes if you want our proprietary SHA-256 /
-    // AES-256-CTR encryption identified as "ACCEPT-ENCODING: synshaaes"
+    // instance (after proper certificate installation as explained in the SAD pdf)
     // - return true on success, false on error (e.g. duplicated Root value)
     function AddServer(aServer: TRestServer;
       aRestAccessRights: POrmAccessRights = nil;
@@ -393,11 +393,6 @@ type
       const aWebSocketsEncryptionKey: RawUtf8; aWebSocketsAjax: boolean = false;
       aWebSocketsBinaryOptions: TWebSocketProtocolBinaryOptions =
         [pboSynLzCompress]): PWebSocketProcessSettings; overload;
-    /// the associated running HTTP server instance
-    // - either THttpApiServer (available only under Windows), THttpServer,
-    // TWebSocketServerRest or TWebSocketAsyncServerRest (on any system)
-    property HttpServer: THttpServerGeneric
-      read fHttpServer;
     /// the TCP/IP (address and) port on which this server is listening to
     // - may contain the public server address to bind to: e.g. '1.2.3.4:1234'
     // - see PublicAddress and PublicPort properties if you want to get the
@@ -414,12 +409,6 @@ type
     // - equals e.g. '1234' if Port = '1.2.3.4:1234'
     property PublicPort: RawUtf8
       read fPublicPort;
-    /// the Urlprefix used for internal HttpAddUrl API call
-    property DomainName: RawUtf8
-      read fDomainName;
-    /// read-only access to the number of registered internal servers
-    property DBServerCount: integer
-      read GetDBServerCount;
     /// read-only access to all internal servers
     property DBServer[Index: integer]: TRestServer
       read GetDBServer;
@@ -431,14 +420,26 @@ type
     // - note that the same REST server may appear several times in this HTTP
     // server instance, e.g. with diverse security options
     function DBServerFind(aServer: TRestServer): integer;
-    /// allow to customize this TRestHttpServer process
-    property Options: TRestHttpServerOptions
-      read fOptions;
     /// low-level interception of all incoming requests
     // - this callback is called BEFORE any registered TRestServer.Uri() methods
     // so allow any kind of custom routing or process
     property OnCustomRequest: TOnRestHttpServerRequest
       read fOnCustomRequest write fOnCustomRequest;
+  published
+    /// the associated running HTTP server instance
+    // - either THttpApiServer (available only under Windows), THttpServer,
+    // TWebSocketServerRest or TWebSocketAsyncServerRest (on any system)
+    property HttpServer: THttpServerGeneric
+      read fHttpServer;
+    /// the Urlprefix used for internal HttpAddUrl API call
+    property DomainName: RawUtf8
+      read fDomainName;
+    /// read-only access to the number of registered internal servers
+    property DBServerCount: integer
+      read GetDBServerCount;
+    /// allow to customize this TRestHttpServer process
+    property Options: TRestHttpServerOptions
+      read fOptions;
     /// enable cross-origin resource sharing (CORS) for proper AJAX process
     // - see @https://developer.mozilla.org/en-US/docs/HTTP/Access_control_CORS
     // - can be set e.g. to '*' to allow requests from any site/domain; or
@@ -659,6 +660,7 @@ var
   ErrMsg: RawUtf8;
   log: ISynLog;
 begin
+  inherited Create; // may have been overriden
   if high(aServers) < 0 then
     fLog := TSynLog
   else
@@ -704,7 +706,7 @@ begin
         end;
     if ErrMsg <> '' then
       raise ERestHttpServer.CreateUtf8('%.Create(% ): %', [self, fDBServerNames, ErrMsg]);
-    fDBServerNames := TrimU(fDBServerNames);
+    TrimSelf(fDBServerNames);
     // associate before HTTP server is started, for TRestServer.BeginCurrentThread
     SetLength(fDBServers, length(aServers));
     for i := 0 to high(aServers) do
@@ -753,7 +755,7 @@ begin
   end;
   // setup the newly created server instance
   fHttpServer.OnRequest := Request;
-  {$ifndef PUREMORMOT2}
+  {$ifndef PUREMORMOT2} // deprecated since unsafe
   if aSecurity = secSynShaAes then
     fHttpServer.RegisterCompress(CompressShaAes, 0); // CompressMinSize=0
   {$endif PUREMORMOT2}
@@ -1000,7 +1002,7 @@ begin
     call.LowLevelUserAgent := Ctxt.UserAgent;
     if fHosts.Count > 0 then
     begin
-      FindNameValue(Ctxt.InHeaders, 'HOST: ', hostroot);
+      hostroot := Ctxt.Host;
       i := PosExChar(':', hostroot);
       if i > 0 then
         SetLength(hostroot, i - 1); // trim any port
@@ -1114,12 +1116,13 @@ begin
           call.OutHead := 'Location: ' + copy(loc, hostlen + 1, maxInt);
       end
       else if (serv <> nil) and
-              ExistsIniName(P, 'SET-COOKIE:') then
+              ExistsIniName(pointer(call.OutHead), 'SET-COOKIE:') then
         // cookie Path=/hostroot... -> /...
         call.OutHead := StringReplaceAll(call.OutHead,
           '; Path=/' + serv.Model.Root, '; Path=/')
     end;
-    Ctxt.OutCustomHeaders := TrimU(call.OutHead);
+    TrimSelf(call.OutHead);
+    Ctxt.OutCustomHeaders := call.OutHead;
     if call.OutInternalState <> 0 then
       Ctxt.OutCustomHeaders := FormatUtf8('%'#13#10'Server-InternalState: %',
         [Ctxt.OutCustomHeaders, call.OutInternalState]);
@@ -1246,7 +1249,7 @@ begin
       try
         FormatUtf8('%/%/%',
           [aSender.Model.Root, aInterfaceDotMethodName, aFakeCallID], url);
-        ctxt.Prepare(url, 'POST', '', '[' + aParams + ']', '', '', '', '');
+        ctxt.Prepare(url, 'POST', '', '[' + aParams + ']', '', '');
         // fHttpServer.Callback() raises EHttpServer but for bidir servers
         status := fHttpServer.Callback(ctxt, aResult = nil);
         if status = HTTP_SUCCESS then

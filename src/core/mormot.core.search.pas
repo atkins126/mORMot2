@@ -70,7 +70,7 @@ type
 /// search for matching file names
 // - just a wrapper around FindFirst/FindNext
 // - you may specify several masks in Mask, e.g. as '*.jpg;*.jpeg'
-function FindFiles(const Directory,Mask: TFileName;
+function FindFiles(const Directory, Mask: TFileName;
   const IgnoreFileName: TFileName = ''; SortByName: boolean = false;
   IncludesDir: boolean = true; SubFolder: boolean = false): TFindFilesDynArray;
 
@@ -78,7 +78,7 @@ function FindFiles(const Directory,Mask: TFileName;
 function FindFilesDynArrayToFileNames(const Files: TFindFilesDynArray): TFileNameDynArray;
 
 /// ensure all files in Dest folder(s) do match the one in Reference
-// - won't copy all files from Reference folders, but only update files already
+// - won't copy all files from Reference folders, but will update files already
 // existing in Dest, which did change since last synchronization
 // - will also process recursively nested folders if SubFolder is true
 // - will use file content instead of file date check if ByContent is true
@@ -831,11 +831,11 @@ type
     function Init(ArrayTypeInfo: PRttiInfo;
       const Source: RawByteString): boolean; overload;
     /// iterate over the current stored item
-    // - Elem should point to a variable of the exact item type stored in this
+    // - Item should point to a variable of the exact item type stored in this
     // dynamic array
-    // - returns true if Elem was filled with one value, or false if all
+    // - returns true if Item was filled with one value, or false if all
     // items were read, and Position contains the end of the binary buffer
-    function Step(Elem: pointer): boolean;
+    function Step(Item: pointer): boolean;
     /// extract the first field value of the current stored item
     // - this function won't increase the internal Current pointer
     // - returns true if Field was filled with one value, or false if all
@@ -1515,7 +1515,7 @@ begin
       dir := IncludeTrailingPathDelimiter(Directory);
     SearchFolder('');
     if SortByName and
-       (da.Count > 0) then
+       (da.Count > 1) then
       da.Sort(SortDynArrayFileName);
   end;
   da.Capacity := count; // trim result[]
@@ -2476,7 +2476,7 @@ var
   m: PSBNDMQ2Mask absolute result;
   c: PCardinal;
 begin
-  SetString(result, nil, SizeOf(m^));
+  FastSetRawByteString(result, nil, SizeOf(m^));
   FillCharFast(m^, SizeOf(m^), 0);
   for i := 0 to length(Pattern) - 1 do
   begin
@@ -2847,7 +2847,7 @@ end;
 
 constructor TMatchs.Create(const aPatterns: TRawUtf8DynArray; CaseInsensitive: boolean);
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   Subscribe(aPatterns, CaseInsensitive);
 end;
 
@@ -3234,7 +3234,7 @@ end;
 
 constructor TExprNode.Create(nodeType: TExprNodeType);
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   fNodeType := nodeType;
 end;
 
@@ -3256,7 +3256,7 @@ end;
 
 constructor TParserAbstract.Create;
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   Initialize;
 end;
 
@@ -3631,6 +3631,7 @@ constructor TSynBloomFilter.Create(aSize: integer; aFalsePositivePercent: double
 const
   LN2 = 0.69314718056;
 begin
+  inherited Create; // may have been overriden
   if aSize < 0 then
     fSize := 1000
   else
@@ -3653,6 +3654,7 @@ end;
 
 constructor TSynBloomFilter.Create(const aSaved: RawByteString; aMagic: cardinal);
 begin
+  inherited Create; // may have been overriden
   if not LoadFrom(aSaved, aMagic) then
     raise ESynException.CreateUtf8('%.Create with invalid aSaved content', [self]);
 end;
@@ -3868,7 +3870,7 @@ begin
   try
     fKnownRevision := fRevision;
     fSnapshotInsertCount := 0;
-    SetString(fKnownStore, PAnsiChar(pointer(fStore)), length(fStore));
+    FastSetRawByteString(fKnownStore, pointer(fStore), length(fStore));
     if fSnapShotAfterMinutes = 0 then
       fSnapshotTimestamp := 0
     else
@@ -3908,7 +3910,7 @@ begin
     head.crc := crc32c(0, @head, SizeOf(head) - SizeOf(head.crc));
     if head.kind = bdUpToDate then
     begin
-      SetString(result, PAnsiChar(@head), SizeOf(head));
+      FastSetRawByteString(result, @head, SizeOf(head));
       exit;
     end;
     if head.size + 100 <= SizeOf(temp) then
@@ -4069,7 +4071,7 @@ var
 begin
   PEnd := PAnsiChar(P) + Len - 4;
   DestLen := FromVarUInt32(P);
-  SetString(Dest, nil, DestLen); // FPC uses var
+  FastSetRawByteString(Dest, nil, DestLen); // FPC uses var
   D := pointer(Dest);
   DEnd := D + DestLen;
   crc := 0;
@@ -4628,7 +4630,7 @@ var
   DeltaLen: integer;
 begin
   DeltaLen := DeltaCompress(New, Old, NewSize, OldSize, Delta, Level, BufSize);
-  SetString(result, Delta, DeltaLen);
+  FastSetRawByteString(result, Delta, DeltaLen);
   Freemem(Delta);
 end;
 
@@ -4850,15 +4852,15 @@ begin
   result := Init(ArrayTypeInfo, pointer(Source), length(Source));
 end;
 
-function TDynArrayLoadFrom.Step(Elem: pointer): boolean;
+function TDynArrayLoadFrom.Step(Item: pointer): boolean;
 begin
   if (Current < Count) and
      not Reader.EOF then
   begin
     if Assigned(ArrayLoad) then
-      ArrayLoad(Elem, Reader, ArrayRtti.Cache.ItemInfo)
+      ArrayLoad(Item, Reader, ArrayRtti.Cache.ItemInfo)
     else
-      Reader.Copy(Elem, ArrayRtti.Cache.ItemSize);
+      Reader.Copy(Item, ArrayRtti.Cache.ItemSize);
     inc(Current);
     result := true;
   end
@@ -5125,7 +5127,7 @@ end;
 
 procedure TSynFilterTrim.Process(aFieldIndex: integer; var value: RawUtf8);
 begin
-  value := TrimU(value);
+  TrimSelf(value);
 end;
 
 
@@ -5537,7 +5539,7 @@ class function TSynTimeZone.Default: TSynTimeZone;
 begin
   if SharedSynTimeZone = nil then
   begin
-    GlobalLock;
+    GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
     try
       if SharedSynTimeZone = nil then
         SharedSynTimeZone :=

@@ -26,7 +26,7 @@ interface
 {$ifdef CPU64}
   {$undef USENEXUSDB} // official NexusDB is not yet 64 bit ready :(
   {$undef USEJET}     // MS Access / JET is not available under Win64
-{$endif}
+{$endif CPU64}
 
 {$ifndef OSWINDOWS}
   {$undef USENEXUSDB}
@@ -66,14 +66,14 @@ uses
   {$ifdef OSWINDOWS}
   mormot.db.sql.oledb,
   mormot.db.rad,
-  {$endif}
+  {$endif OSWINDOWS}
   mormot.db.sql.odbc,
   {$ifdef USENEXUSDB}
   mormot.db.rad.nexusdb,
-  {$endif}
+  {$endif USENEXUSDB}
   {$ifdef USEBDE}
   mormot.db.rad.bde,
-  {$endif}
+  {$endif USEBDE}
   {$ifdef USEUNIDAC}
   mormot.db.rad.unidac,
   SQLiteUniProvider,
@@ -83,13 +83,13 @@ uses
   SQLServerUniProvider,
   PostgreSQLUniProvider,
   MySqlUniProvider,
-  {$endif}
+  {$endif USEUNIDAC}
   {$ifdef USEZEOS}
   mormot.db.sql.zeos,
-  {$endif}
+  {$endif USEZEOS}
   {$ifdef USEIBX}
   mormot.db.sql.ibx,
-  {$endif}
+  {$endif USEIBX}
   {$ifdef USEFIREDAC}
   mormot.db.rad.firedac,
   {$ifdef ISDELPHIXE5}
@@ -110,11 +110,14 @@ uses
   uADPhysPG,
   uADPhysDB2,
   uADPhysMySQL,
-  {$endif}
-  {$endif}
+  {$endif ISDELPHIXE5}
+  {$endif USEFIREDAC}
+  {$ifdef USELOCALPOSTGRESQL}
+  mormot.db.sql.postgres,
+  {$endif USELOCALPOSTGRESQL}
   {$ifdef USEMONGODB}
   mormot.db.nosql.mongodb,
-  {$endif}
+  {$endif USEMONGODB}
   mormot.db.core;
 
 type
@@ -174,7 +177,7 @@ type
       read fReadOneByNameTime;
     property ReadOneByNameRate: integer
       read fReadOneByNameRate;
-    {$endif}
+    {$endif UNIK}
     property ReadAllVirtualTime: RawUtf8
       read fReadAllVirtualTime;
     property ReadAllVirtualRate: integer
@@ -328,7 +331,7 @@ type
     procedure _SynDBPostgres;
     {$ifdef USEZEOS}
     procedure ZeosPostgres;
-    {$endif}
+    {$endif USEZEOS}
   end;
   {$endif USELOCALPOSTGRESQL}
 
@@ -340,10 +343,10 @@ type
   published
     {$ifdef USEIBX}
     procedure IbxFirebird;
-    {$endif}
+    {$endif USEIBX}
     {$ifdef USEZEOS}
     procedure ZeosFirebird;
-    {$endif}
+    {$endif USEZEOS}
   end;
 
   {$endif USEFIREBIRDEMB}
@@ -363,15 +366,15 @@ const
   cFIREBIRDEMBEDDEDDLL = 'C:\Firebird\Firebird3_64\fbclient.dll';
   {$else}
   cFIREBIRDEMBEDDEDDLL = 'C:\Firebird\firebird3_32\fbclient.dll';
-  {$endif}
+  {$endif CPU64}
   {$ifdef USEZEOS}
   cFirebirdServerZeos = '';  // 'localhost:3033'
   cFirebirdDBFileZeos = 'r:\perftestZeos.fdb';
-  {$endif}
+  {$endif USEZEOS}
   {$ifdef USEIBX}
   cFirebirdServerIbx = '';  // 'localhost/3033'
   cFirebirdDBFileIbx = 'r:\perftestIbx.fdb';
-  {$endif}
+  {$endif USEIBX}
   cUserName = 'SYSDBA';
   cPassword = 'masterkey';
 
@@ -759,18 +762,18 @@ begin
 end;
 
 procedure TTestDatabaseExternalAbstract.ClientCreate;
-var
-  lTables: TRawUtf8DynArray;
 begin
-  if (Props <> nil) and (dbDropTable in Flags) then
+  if (Props <> nil) and
+     (dbDropTable in Flags) then
   begin
-    // drop only if table exist
-    Props.GetTableNames(lTables);
-    if FindPropName(lTables, 'SAMPLERECORD') >= 0 then
-    begin
-      Props.ClearConnectionPool;
-      Props.ThreadSafeConnection.Disconnect;
+    // clean the connection pool (slower, but validate its logic)
+    Props.ClearConnectionPool;
+    Props.ThreadSafeConnection.Disconnect;
+    // drop this table
+    try
       Props.ExecuteNoResult('drop table SAMPLERECORD', []);
+    except
+      // ignore any exception if table does not exist yet (e.g. at first run)
     end;
   end;
   inherited ClientCreate;
@@ -909,7 +912,7 @@ begin
     TSQLDBZEOSConnectionProperties.URI(dPostgreSQL, 'localhost', 'libpq.so.5', false),
     'postgres', 'postgres', 'docker'));
 end;
-{$endif}
+{$endif USEZEOS}
 
 {$endif USELOCALPOSTGRESQL}
 
@@ -1141,7 +1144,7 @@ begin
     ['By one',
      {$ifdef UNIK}
      'By name',
-     {$endif}
+     {$endif UNIK}
      'All Virtual',
      'All Direct']);
   // Reading per-Engine Values and Chart
@@ -1152,8 +1155,8 @@ begin
   {$endif UNIK}
   for i := 0 to Stats.Count - 1 do
     with Stat[i] do
-      SetValues(Rows[i + 1], Engine, [ReadOneByOneRate, {$ifdef UNIK}
-        ReadOneByNameRate, {$endif}
+      SetValues(Rows[i + 1], Engine, [ReadOneByOneRate, 
+       {$ifdef UNIK} ReadOneByNameRate, {$endif}
         ReadAllVirtualRate, ReadAllDirectRate]);
   Table;
   PicEnd(Eng1);
@@ -1166,7 +1169,7 @@ begin
   for i := 0 to Stats.Count - 1 do
     txt := txt + Int32ToUtf8(Stat[i].ReadOneByNameRate) + ',';
   txt[length(txt)] := '|';
-  {$endif}
+  {$endif UNIK}
   for i := 0 to Stats.Count - 1 do
     txt := txt + Int32ToUtf8(Stat[i].ReadAllVirtualRate) + ',';
   txt[length(txt)] := '|';
@@ -1198,10 +1201,10 @@ begin
   AddCase(TTestSqliteRemote);
   {$ifdef USELOCALPOSTGRESQL}
   AddCase(TTestPostgresql);
-  {$endif}
+  {$endif USELOCALPOSTGRESQL}
   {$ifdef USEFIREBIRDEMB}
   AddCase(TTestFirebird);
-  {$endif}
+  {$endif USEFIREBIRDEMB}
 end;
 
 end.

@@ -1105,7 +1105,7 @@ function IdemPCharArray(p: PUtf8Char; const upArray: array of PAnsiChar): intege
 // - chars are compared as 7-bit Ansi only (no accentuated characters)
 // - warning: this function expects up^ items to have AT LEAST TWO CHARS
 // (it will use a fast 16-bit comparison of initial 2 bytes)
-function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): PtrInt;
+function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): integer;
 
 /// returns the index of a matching beginning of p^ in upArray two characters
 // - returns -1 if no item matched
@@ -2611,12 +2611,18 @@ begin
 end;
 
 function NewEngine(aCodePage: cardinal): TSynAnsiConvert;
+var
+  i: PtrInt;
 begin
-  GlobalLock;
+  SynAnsiConvertListLock.WriteLock;
   try
-    result := GetEngine(aCodePage); // avoid any (unlikely) race condition
-    if result <> nil then
+    i := WordScanIndex(pointer(SynAnsiConvertListCodePage),
+      SynAnsiConvertListCount, aCodePage);
+    if i >= 0 then
+    begin
+      result := SynAnsiConvertList[i]; // avoid any (unlikely) race condition
       exit;
+    end;
     if aCodePage = CP_UTF8 then
       result := TSynAnsiUtf8.Create(CP_UTF8)
     else if aCodePage = CP_UTF16 then
@@ -2626,12 +2632,10 @@ begin
     else
       result := TSynAnsiConvert.Create(aCodePage);
     RegisterGlobalShutdownRelease(result);
-    SynAnsiConvertListLock.WriteLock;
     ObjArrayAdd(SynAnsiConvertList, result);
     AddWord(SynAnsiConvertListCodePage, SynAnsiConvertListCount, aCodePage);
-    SynAnsiConvertListLock.WriteUnLock;
   finally
-    GlobalUnLock;
+    SynAnsiConvertListLock.WriteUnLock;
   end;
 end;
 
@@ -3874,6 +3878,9 @@ end;
 function Ansi7ToString(const Text: RawByteString): string;
 begin
   result := Text; // if we are SURE this text is 7-bit Ansi -> direct assign
+  {$ifdef FPC} // if Text is CP_RAWBYTESTRING then FPC won't handle it properly
+  SetCodePage(RawByteString(result), DefaultSystemCodePage, false);
+  {$endif FPC}
 end;
 
 function Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt): string;
@@ -4390,7 +4397,7 @@ begin
   result := -1;
 end;
 
-function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): PtrInt;
+function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): integer;
 var
   w: word;
   u: PAnsiChar;

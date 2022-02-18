@@ -6,7 +6,7 @@ unit mormot.db.raw.sqlite3.static;
 {
   *****************************************************************************
 
-    Statically linked SQLite3 3.37.0 engine with optional AES encryption
+    Statically linked SQLite3 3.37.2 engine with optional AES encryption
     - TSqlite3LibraryStatic Implementation
     - Encryption-Related Functions
 
@@ -98,8 +98,8 @@ type
 // - the OldPassWord must be correct, otherwise the resulting file will be corrupted
 // - any password can be '' to mark no encryption as input or output
 // - the password may be a JSON-serialized TSynSignerParams object, or will use
-// AES-OFB-128 (or AES-CTR-128 if ForceSQLite3AESCTR is set) after SHAKE_128 with
-// rounds=1000 and a fixed salt on plain password text
+// AES-CTR-128 (or AES-OFB-128 if ForceSQLite3AESCTR is false) after SHAKE_128
+// with rounds=1000 and a fixed salt on plain password text
 // - please note that this encryption is compatible only with SQlite3 files made
 // with SynSQLiteStatic.pas unit (not external/official/wxsqlite3 dll)
 // - implementation is NOT compatible with the official SQLite Encryption Extension
@@ -135,8 +135,9 @@ var
   ForceSQLite3LegacyAes: boolean;
 
   /// global flag to use AES-CTR instead of AES-OFB encryption
-  // - on x86_64 our optimized asm is 2.5GB/s instead of 770MB/s
-  ForceSQLite3AesCtr: boolean;
+  // - on x86_64 our optimized asm is 2.5GB/s for CTR instead of 770MB/s for OFB
+  // - enabled in PUREMORMOT2 mode, since performance is better on x86_64 (or OpenSSL)
+  ForceSQLite3AesCtr: boolean {$ifdef PUREMORMOT2} = true {$endif};
 
 
 
@@ -1003,7 +1004,7 @@ function sqlite3_trace_v2(DB: TSqlite3DB; Mask: integer; Callback: TSqlTraceCall
 
 const
   // error message if statically linked sqlite3.o(bj) does not match this value
-  EXPECTED_SQLITE3_VERSION = '3.37.0';
+  EXPECTED_SQLITE3_VERSION = '3.37.2';
 
   // where to download the latest available static binaries, including SQLite3
   EXPECTED_STATIC_DOWNLOAD = 'https://synopse.info/files/mormot2static.7z';
@@ -1201,6 +1202,7 @@ end;
 
 procedure TSqlite3LibraryStatic.BeforeInitialization;
 begin
+  inherited BeforeInitialization; // set SQLITE_CONFIG_MULTITHREAD
   {$ifdef FPC}
   ForceToUseSharedMemoryManager;
   {$else}
@@ -1217,6 +1219,7 @@ procedure TSqlite3LibraryStatic.AfterInitialization;
 var
   error: RawUtf8;
 begin
+  inherited AfterInitialization; // do nothing by default
   if (EXPECTED_SQLITE3_VERSION <> '') and
      not IdemPChar(pointer(fVersionText), EXPECTED_SQLITE3_VERSION) then
   begin
@@ -1224,7 +1227,7 @@ begin
       'Linked version is % whereas the current/expected is ' + EXPECTED_SQLITE3_VERSION +
       '.' + CRLF + CRLF + 'Please download latest SQLite3 ' + EXPECTED_SQLITE3_VERSION +
       ' revision from'+ CRLF + EXPECTED_STATIC_DOWNLOAD,
-      [Executable.ProgramName, fVersionText], error);
+      [Executable.ProgramFileName, fVersionText], error);
     // SQLite3Log.Add.Log() would do nothing: we are in .exe initialization
     DisplayFatalError(' WARNING: deprecated SQLite3 engine', error);
   end;

@@ -271,6 +271,7 @@ function _numbits256(const V: THash256Rec): integer;
 const
   /// hide all AES Context complex code
   AES_CONTEXT_SIZE = 276 + SizeOf(pointer)
+    {$ifdef WIN64ABI}  + SizeOf(THash128) {$endif}
     {$ifdef USEAESNI32} + SizeOf(pointer) {$endif};
 
   /// power of two for a standard AES block size during cypher/uncypher
@@ -2713,6 +2714,9 @@ type
     buf: TAesBlock;
     // main AES function to process one 16-bytes block
     DoBlock: TAesContextDoBlock;
+    {$ifdef WIN64ABI}
+    xmm7bak: THash128; // used to preserve the xmm7 register in Win64 asm
+    {$endif WIN64ABI}
     {$ifdef USEAESNI32}
     AesNi32: pointer; // xmm7 AES-NI encoding
     {$endif USEAESNI32}
@@ -3570,7 +3574,7 @@ end;
 function _numbits256(const V: THash256Rec): integer;
 begin
   result := BsrQWord(V.Q[3]) + 1; // use fast BSR intrinsic (returns 255 if 0)
-  if byte(result) = 0 then
+  if byte(result) = 0 then        // byte(255 + 1) = 0
   begin
     result := BsrQWord(V.Q[2]) + 1;
     if byte(result) = 0 then
@@ -4929,7 +4933,7 @@ var
 begin
   inlen := length(Input);
   outlen := EncryptPkcs7Length(inlen, IVAtBeginning);
-  SetString(result, nil, outlen + TrailerLen);
+  FastSetRawByteString(result, nil, outlen + TrailerLen);
   EncryptPkcs7Buffer(pointer(Input), pointer(result), inlen, outlen, IVAtBeginning);
 end;
 
@@ -5023,7 +5027,7 @@ begin
   if not DecryptPkcs7Len(InputLen, ivsize, Input,
       IVAtBeginning, RaiseESynCryptoOnError) then
     exit;
-  SetString(result, nil, InputLen);
+  FastSetRawByteString(result, nil, InputLen);
   P := pointer(result);
   Decrypt(@PByteArray(Input)^[ivsize], P, InputLen);
   padding := ord(P[InputLen - 1]); // result[1..len]
@@ -6590,7 +6594,7 @@ end;
 
 function TAesPrngAbstract.FillRandom(Len: integer): RawByteString;
 begin
-  SetString(result, nil, Len);
+  FastSetRawByteString(result, nil, Len);
   FillRandom(pointer(result), Len);
 end;
 
@@ -6810,7 +6814,7 @@ begin
   result := MainAesPrng;
   if result <> nil then
     exit;
-  GlobalLock;
+  GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
   try
     if MainAesPrng = nil then
       MainAesPrng := RegisterGlobalShutdownRelease(TAesPrng.Create);
@@ -7058,7 +7062,7 @@ begin
   result := MainAesPrngSystem;
   if result = nil then
   begin
-    GlobalLock;
+    GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
     try
       if MainAesPrngSystem = nil then
         MainAesPrngSystem := RegisterGlobalShutdownRelease(TSystemPrng.Create);
@@ -7142,13 +7146,13 @@ begin
   // CryptProtectDataEntropy used as salt
   __hmac.Init(@CryptProtectDataEntropy, 32);
   // CryptProtectDataEntropy derivated for current user -> fn + k256 
-  SetString(appsec, PAnsiChar(@CryptProtectDataEntropy), 32);
+  FastSetRawByteString(appsec, @CryptProtectDataEntropy, 32);
   Pbkdf2HmacSha256(appsec, Executable.User, 100, k256);
   FillZero(appsec);
   appsec := Base64Uri(@k256, 15); // =BinToBase64Uri()
   fn := FormatString({$ifdef OSWINDOWS}'%_%'{$else}'%.syn-%'{$endif},
     [GetSystemPath(spUserData), appsec]);  // .* files are hidden under Linux
-  SetString(appsec, PAnsiChar(@k256[15]), 17); // use remaining bytes as key
+  FastSetRawByteString(appsec, @k256[15], 17); // use remaining bytes as key
   Sha256Weak(appsec, k256); // just a way to reduce to 256-bit
   try
     // extract private user key from local hidden file 
@@ -8192,7 +8196,7 @@ var
   len: integer;
 begin
   len := length(Source);
-  SetString(result, nil, len);
+  FastSetRawByteString(result, nil, len);
   Cypher(pointer(Key), pointer(Source), pointer(result), length(Key), len);
 end;
 
@@ -8219,7 +8223,7 @@ var
   len: integer;
 begin
   len := length(Source);
-  SetString(result, nil, len);
+  FastSetRawByteString(result, nil, len);
   Cypher(pointer(Source), pointer(result), len);
 end;
 
@@ -8708,20 +8712,23 @@ procedure Pbkdf2HmacSha256(const password, salt: RawByteString; count: integer;
 var
   i: integer;
   tmp: TSha256Digest;
-  mac: THmacSha256;
-  first: THmacSha256;
+  mac, first: THmacSha256; // re-use SHA context for best performance
 begin
+  first.Init(pointer(password), length(password));
+  mac := first;
   if salt = '' then
-    HmacSha256(password, saltdefault + #0#0#0#1, result)
+    mac.Update(saltdefault)
   else
-    HmacSha256(password, salt + #0#0#0#1, result);
+    mac.Update(salt); 
+  PInteger(@tmp)^ := $01000000;
+  mac.Update(@tmp, 4);
+  mac.Done(result);
   if count < 2 then
     exit;
   tmp := result;
-  first.Init(pointer(password), length(password));
   for i := 2 to count do
   begin
-    mac := first; // re-use the very same SHA context for best performance
+    mac := first;
     mac.sha.Update(@tmp, SizeOf(tmp));
     mac.Done(tmp, true);
     XorMemoryPtrInt(@result, @tmp, SizeOf(result) shr POINTERSHR);
@@ -8735,24 +8742,25 @@ procedure Pbkdf2HmacSha256(const password, salt: RawByteString; count: integer;
   var result: THash256DynArray; const saltdefault: RawByteString);
 var
   n, i: integer;
-  iter: RawByteString;
   tmp: TSha256Digest;
-  mac: THmacSha256;
-  first: THmacSha256;
+  mac, first: THmacSha256; // re-use SHA context for best performance
 begin
   first.Init(pointer(password), length(password));
-  SetLength(iter, SizeOf(integer));
   for n := 0 to high(result) do
   begin
-    PInteger(iter)^ := bswap32(n + 1); // U1 = PRF(Password, Salt || INT_32_BE(i))
+    // U1 = PRF(Password, Salt || INT_32_BE(i))
+    mac := first;
     if salt = '' then
-      HmacSha256(password, saltdefault + iter, result[n])
+      mac.Update(saltdefault)
     else
-      HmacSha256(password, salt + iter, result[n]);
-    tmp := result[n];
+      mac.Update(salt);
+    PInteger(@tmp)^ := bswap32(n + 1);
+    mac.Update(@tmp, 4);
+    mac.Done(tmp);
+    result[n] := tmp;
     for i := 2 to count do
     begin
-      mac := first; // re-use the very same SHA context for best performance
+      mac := first;
       mac.sha.Update(@tmp, SizeOf(tmp));
       mac.Done(tmp, true);
       XorMemoryPtrInt(@result[n], @tmp, SizeOf(result[n]) shr POINTERSHR);
@@ -8768,14 +8776,17 @@ procedure Pbkdf2HmacSha384(const password, salt: RawByteString; count: integer;
 var
   i: integer;
   tmp: TSha384Digest;
-  mac: THmacSha384;
-  first: THmacSha384;
+  mac, first: THmacSha384; // re-use SHA context for best performance
 begin
-  HmacSha384(password, salt + #0#0#0#1, result);
+  first.Init(pointer(password), length(password));
+  mac := first;
+  mac.Update(pointer(salt), length(salt));
+  PInteger(@tmp)^ := $01000000;
+  mac.Update(@tmp, 4);
+  mac.Done(result); // HmacSha384(password, salt + #0#0#0#1, result);
   if count < 2 then
     exit;
   tmp := result;
-  first.Init(pointer(password), length(password));
   for i := 2 to count do
   begin
     mac := first; // re-use the very same SHA context for best performance
@@ -8793,14 +8804,17 @@ procedure Pbkdf2HmacSha512(const password, salt: RawByteString; count: integer;
 var
   i: integer;
   tmp: TSha512Digest;
-  mac: THmacSha512;
-  first: THmacSha512;
+  mac, first: THmacSha512; // re-use SHA context for best performance
 begin
-  HmacSha512(password, salt + #0#0#0#1, result);
+  first.Init(pointer(password), length(password));
+  mac := first;
+  mac.Update(pointer(salt), length(salt));
+  PInteger(@tmp)^ := $01000000;
+  mac.Update(@tmp, 4);
+  mac.Done(result); // HmacSha512(password, salt + #0#0#0#1, result);
   if count < 2 then
     exit;
   tmp := result;
-  first.Init(pointer(password), length(password));
   for i := 2 to count do
   begin
     mac := first; // re-use the very same SHA context for best performance
@@ -8818,8 +8832,7 @@ procedure Pbkdf2Sha3(algo: TSha3Algo; const password, salt: RawByteString;
 var
   i: integer;
   tmp: RawByteString;
-  mac: TSha3;
-  first: TSha3;
+  mac, first: TSha3; // re-use SHA context for best performance
 begin
   if resultbytes <= 0 then
     resultbytes := SHA3_DEF_LEN[algo] shr 3;
@@ -9924,7 +9937,7 @@ type
 function AES(const Key; KeySize: cardinal; const s: RawByteString;
   Encrypt: boolean): RawByteString;
 begin
-  SetString(result, nil, length(s));
+  FastSetRawByteString(result, nil, length(s));
   if s <> '' then
     AES(Key, KeySize, pointer(s), pointer(result), length(s), Encrypt);
 end;
@@ -10356,7 +10369,7 @@ end;
 function AESSHA256(const s, Password: RawByteString;
   Encrypt: boolean): RawByteString;
 begin
-  SetString(result, nil, length(s));
+  FastSetRawByteString(result, nil, length(s));
   AESSHA256(pointer(s), pointer(result), length(s), Password, Encrypt);
 end;
 
@@ -10407,6 +10420,7 @@ var
   rk: TKeyArray;
   bi, bo: TAesBlock;
   shablock: array[0..63] of byte;
+  i: PtrInt;
 {$endif USEARMCRYPTO}
 begin
   ComputeAesStaticTables;
@@ -10479,6 +10493,17 @@ begin
       // ARMv8 SHA HW opcodes seem not available
       exclude(CpuFeatures, ahcSha2);
     end;
+  i := PosEx('x generic', CpuInfoText);
+  if i <> 0 then
+  begin // some VM/QEMU software don't actually return a proper CPU name
+    inc(i, 9);
+    if ahcCRC32 in CpuFeatures then
+      insert(' crc', CpuInfoText, i);
+    if ahcSha2 in CpuFeatures then
+      insert(' sha', CpuInfoText, i);
+    if ahcAes in CpuFeatures then
+      insert(' aes', CpuInfoText, i);
+  end;
   {$endif USEARMCRYPTO}
   assert(SizeOf(TMd5Buf) = SizeOf(TMd5Digest));
   assert(SizeOf(TAes) = AES_CONTEXT_SIZE);

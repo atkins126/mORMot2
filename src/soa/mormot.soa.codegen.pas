@@ -556,7 +556,6 @@ const
     wString,   // imvString
     wRawUtf8,  // imvRawByteString
     wRawUtf8,  // imvWideString
-    wRawUtf8,  // imvBinary
     wRecord,   // imvRecord
     wVariant,  // imvVariant
     wObject,   // imvObject
@@ -1227,7 +1226,7 @@ begin
     'time',          NowToString,
     'year',          CurrentYear,
     'mORMotVersion', SYNOPSE_FRAMEWORK_VERSION,
-    'Executable', VarStringOrNull(StringToUtf8(Executable.Version.DetailedOrVoid)),
+    'Executable',    VarStringOrNull(StringToUtf8(Executable.Version.DetailedOrVoid)),
     'exeInfo',       Executable.Version.VersionInfo,
     'exeName',       Executable.ProgramName,
     'hasorm',        fORM.Count > 0,
@@ -2069,7 +2068,7 @@ var
   desc: RawByteString;
   n, s, i: PtrInt;
 begin
-  inherited Create;
+  inherited Create; // may have been overriden
   fExe := {$ifdef OSPOSIX} './' + {$endif} Executable.ProgramName;
   n := length(aServices);
   SetLength(fServices, n);

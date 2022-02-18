@@ -677,12 +677,14 @@ type
       rkLString: ( // from TypeInfo() on older Delphi with no CP RTTI
         CodePage: cardinal; // RawBlob=CP_RAWBYTESTRING not CP_RAWBLOB
         Engine: TSynAnsiConvert);
-      rkEnumeration, rkSet: (
+      rkEnumeration,
+      rkSet: (
         EnumMin,
         EnumMax:  cardinal;
         EnumInfo: PRttiEnumType;
         EnumList: PShortString);
-      rkDynArray, rkArray: (
+      rkDynArray,
+      rkArray: (
         ItemInfo: PRttiInfo;
         ItemSize: integer;
         ItemCount: integer; // rkArray only
@@ -1572,6 +1574,12 @@ procedure FastFinalizeArray(Value: PPointer; ElemTypeInfo: PRttiInfo;
 // - same as RTTI_FINALIZE[rkRecord]()
 function FastRecordClear(Value: pointer; Info: PRttiInfo): PtrInt;
 
+/// efficient finalization of successive record items from a (dynamic) array
+procedure RecordClearSeveral(v: PAnsiChar; info: PRttiInfo; n: integer);
+
+/// efficient finalization of successive RawUtf8 items from a (dynamic) array
+procedure StringClearSeveral(v: PPointer; n: PtrInt);
+
 /// low-level finalization of a dynamic array of RawUtf8
 // - faster than RTL Finalize() or setting nil
 procedure RawUtf8DynArrayClear(var Value: TRawUtf8DynArray);
@@ -1919,8 +1927,7 @@ function TypeInfoToStandardParserType(Info: PRttiInfo;
 /// recognize most simple types and return their known dynamic array RTTI
 // - returns nil if we don't know any dynamic array for this type
 // - ExpectExactElemInfo=true ensure that result's ArrayRtti.Info = ElemInfo
-// - mainly used by IList<T> and IKeyValue<T> to guess the dynamic array
-// associated with the T item type
+// - currently not called: IList<T> and IKeyValue<T> just use TypeInfo(T)
 function TypeInfoToDynArrayTypeInfo(ElemInfo: PRttiInfo;
   ExpectExactElemInfo: boolean; ParserType: PRttiParserType = nil): PRttiInfo;
 
@@ -1982,6 +1989,7 @@ type
   // - rcfIsManaged is set if a value of this type expects finalization
   // - rcfObjArray is for T*ObjArray dynamic arrays
   // - rcfBinary is for hexadecimal serialization of integers
+  // - rcfJsonString when is to be serialized as text (ptStringTypes or rcfBinary)
   // - rcfWithoutRtti is set if was created purely by text, and uses fake RTTI
   // - rcfSpi identifies types containing Sensitive Personal Information
   // (e.g. a bank card number or a plain password) which should be hidden
@@ -2005,6 +2013,7 @@ type
     rcfIsManaged,
     rcfObjArray,
     rcfBinary,
+    rcfJsonString,
     rcfWithoutRtti,
     rcfSpi,
     rcfHookWrite,
@@ -2116,6 +2125,8 @@ type
     /// locate a property/field by name
     function Find(const PropName: RawUtf8): PRttiCustomProp; overload;
       {$ifdef HASINLINE}inline;{$endif}
+    /// locate a property/field index by name
+    function FindIndex(PropName: PUtf8Char; PropNameLen: PtrInt): PtrInt;
     /// customize a property/field name
     // - New is expected to be only plain pascal identifier, i.e.
     // A-Z a-z 0-9 and _ characters, up to 63 in length
@@ -2183,6 +2194,7 @@ type
   /// internal function handler for filling a value with some randomness
   TRttiCustomRandom = procedure(Data: pointer; Rtti: TRttiCustom);
 
+  /// used internally by our RTTI text definition
   TRttiCustomFromTextExpectedEnd = (
     eeNothing,
     eeSquare,
@@ -2281,7 +2293,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// return TRUE if the Value is 0 / nil / '' / null
     function ValueIsVoid(Data: PAnsiChar): boolean;
-      {$ifdef HASINLINE}inline;{$endif}
+     // {$ifdef HASINLINE}inline;{$endif}
     /// compare two stored values of this type
     // - not implemented in this class (raise an ERttiException)
     // but in TRttiJson, so that it will use mormot.core.data comparison
@@ -2290,7 +2302,9 @@ type
     /// fill a variant with a stored value of this type
     // - not implemented in this class (raise an ERttiException)
     // but in TRttiJson, so that it will use mormot.core.variants process
-    function ValueToVariant(Data: pointer; out Dest: TVarData): PtrInt; virtual;
+    // - complex objects are converted into a TDocVariant, after JSON serialization
+    function ValueToVariant(Data: pointer; out Dest: TVarData;
+      Options: pointer{PDocVariantOptions} = nil): PtrInt; virtual;
     /// fill a value from random - including strings and nested types
     procedure ValueRandom(Data: pointer);
       {$ifdef HASINLINE}inline;{$endif}
@@ -2415,6 +2429,7 @@ type
   PRttiCustomListPair = ^TRttiCustomListPair;
 
   /// efficient PRttiInfo/TRttiCustom pairs for TRttiCustomList hash table
+  // - as stored in TRttiCustomListHashTable[TRttiKind] = one per TRttiKind
   TRttiCustomListPairs = record
     /// efficient PerHash[].Pairs thread-safety during Find/AddToPairs
     Safe: TRWLightLock;
@@ -2429,8 +2444,8 @@ type
   // - a per-Kind and per-Name hash table of PRttiInfo/TRttiCustom pairs
   // - avoid link to mormot.core.data hash table, with a fast access
   // - consume e.g. around 50KB of memory for all mormot2tests types
-  TRttiCustomListHashTable = array[succ(low(TRttiKind)) .. high(TRttiKind)] of
-    TRttiCustomListPairs;
+  TRttiCustomListHashTable =
+    array[succ(low(TRttiKind)) .. high(TRttiKind)] of TRttiCustomListPairs;
 
   /// maintain a thread-safe list of PRttiInfo/TRttiCustom/TRttiJson registration
   TRttiCustomList = class
@@ -2481,6 +2496,7 @@ type
     function Find(const Name: ShortString; Kinds: TRttiKinds = []): TRttiCustom;
        overload; {$ifdef HASINLINE}inline;{$endif}
     /// manual search of any matching TRttiCustom.ArrayRtti type
+    // - currently not called: IList<T> and IKeyValue<T> just use TypeInfo(T)
     function FindByArrayRtti(ElemInfo: PRttiInfo): TRttiCustom;
     /// register a given RTTI TypeInfo()
     // - returns a new (or existing if it was already registered) TRttiCustom
@@ -2661,6 +2677,7 @@ type
   {$M+}
   /// abstract parent class with published properties and a virtual constructor
   // - is the parent of both TSynPersistent and TOrm classes
+  // - will ensure the class type is registered to the Rtti global list
   // - also features some protected virtual methods for custom RTTI/JSON process
   TObjectWithCustomCreate = class(TObject)
   protected
@@ -2712,8 +2729,21 @@ type
     /// virtual constructor called at instance creation
     // - is declared as virtual so that inherited classes may have a root
     // constructor to override
-    // - will be recognized by our RTTI serialization/initialization process
-    constructor Create; virtual; abstract;
+    // - is recognized by our RTTI serialization/initialization process
+    constructor Create; virtual;
+    /// optimized initialization code
+    // - will also register the class type to the Rtti global list
+    // - somewhat faster than the regular RTL implementation
+    // - warning: this optimized version won't initialize the vmtIntfTable
+    // for this class hierarchy: as a result, you would NOT be able to
+    // implement an interface with a TSynPersistent descendent (but you should
+    // not need to, but inherit from TInterfacedObject)
+    // - warning: under FPC, it won't initialize fields management operators
+    class function NewInstance: TObject; override;
+    /// very efficiently retrieve the TRttiCustom associated with this class
+    // - since Create did register it, just return the first vmtAutoTable slot
+    class function RttiCustom: TRttiCustom;
+      {$ifdef HASINLINE}inline;{$endif}
   end;
   {$M-}
 
@@ -2732,9 +2762,6 @@ type
     /// will register the "ID":... field value for proper JSON serialization
     class procedure RttiCustomSetParser(Rtti: TRttiCustom); override;
   public
-    /// this constructor initializes the instance
-    // - will register the class type to the Rtti global list
-    constructor Create; overload; override;
     /// this constructor initializes the instance with a given ID
     constructor CreateWithID(aID: TID);
     /// this property gives direct access to the class instance ID
@@ -5177,7 +5204,7 @@ begin
             (r.Cache.CodePage = CP_UTF8);
 end;
 
-procedure _RecordClearSeveral(v: PAnsiChar; info: PRttiInfo; n: integer);
+procedure RecordClearSeveral(v: PAnsiChar; info: PRttiInfo; n: integer);
 var
   fields: TRttiRecordManagedFields;
   f: PRttiRecordField;
@@ -5207,7 +5234,7 @@ begin
   end;
 end;
 
-procedure _StringClearSeveral(v: PPointer; n: PtrInt);
+procedure StringClearSeveral(v: PPointer; n: PtrInt);
 var
   p: PStrRec;
 begin
@@ -5218,7 +5245,7 @@ begin
       v^ := nil;
       dec(p);
       if (p^.refCnt >= 0) and
-         RefCntDecFree(p^.refCnt) then
+         StrCntDecFree(p^.refCnt) then
         {$ifdef FPC_X64MM}
         _Freemem(p); // works for both rkLString + rkUString
         {$else}
@@ -5235,14 +5262,14 @@ procedure FastFinalizeArray(Value: PPointer; ElemTypeInfo: PRttiInfo;
 var
   fin: TRttiFinalizer;
 begin
-  //  caller ensured ElemTypeInfo<>nil and Count>0
+  // caller ensured ElemTypeInfo<>nil and Count>0
   case ElemTypeInfo^.Kind of
     {$ifdef FPC}
     rkObject,
     {$endif FPC}
     rkRecord:
       // retrieve ElemTypeInfo.RecordManagedFields once
-      _RecordClearSeveral(pointer(Value), ElemTypeInfo, Count);
+      RecordClearSeveral(pointer(Value), ElemTypeInfo, Count);
     {$ifdef FPC}
     rkLStringOld,
     {$endif FPC}
@@ -5251,7 +5278,7 @@ begin
     {$endif HASVARUSTRING}
     rkLString:
       // optimized loop for AnsiString / UnicodeString (PStrRec header)
-      _StringClearSeveral(pointer(Value), Count);
+      StringClearSeveral(pointer(Value), Count);
     rkVariant:
       // from mormot.core.variants - supporting custom variants
       // or at least from mormot.core.base calling inlined VarClear()
@@ -5280,7 +5307,7 @@ begin
     begin
       dec(p);
       if (p^.refCnt >= 0) and
-         RefCntDecFree(p^.refCnt) then
+         DACntDecFree(p^.refCnt) then
       begin
         if ElemInfo <> nil then
           FastFinalizeArray(Value^, ElemInfo, p^.length);
@@ -5462,7 +5489,7 @@ begin
   dec(p);
   if (p^.refCnt < 0) or
      ((p^.refCnt > 1) and
-      not RefCntDecFree(p^.refCnt)) then
+      not DACntDecFree(p^.refCnt)) then
   begin
     n := p^.length;
     Info := Info^.DynArrayItemType(elemsize);
@@ -5487,7 +5514,7 @@ begin
     V^ := nil;
     dec(p);
     if (p^.refCnt >= 0) and
-       RefCntDecFree(p^.refCnt) then
+       StrCntDecFree(p^.refCnt) then
       Freemem(p);
   end;
   result := SizeOf(V^);
@@ -5530,7 +5557,7 @@ begin
   begin
     dec(p);
     if (p^.refCnt >= 0) and
-       RefCntDecFree(p^.refCnt) then
+       DACntDecFree(p^.refCnt) then
     begin
       Info := Info^.DynArrayItemType;
       if Info <> nil then
@@ -5950,7 +5977,7 @@ begin
         begin
           dec(da);
           if (da^.refCnt >= 0) and
-             RefCntDecFree(da^.refCnt) then
+             DACntDecFree(da^.refCnt) then
           begin
             Info := Info^.DynArrayItemType(siz);
             v := PPointer(Value)^;
@@ -6757,6 +6784,22 @@ begin
   result := nil;
 end;
 
+function TRttiCustomProps.FindIndex(PropName: PUtf8Char; PropNameLen: PtrInt): PtrInt;
+var
+  p: PRttiCustomProp;
+begin
+  if PropNameLen <> 0 then
+  begin
+    p := pointer(List);
+    for result := 0 to Count - 1 do
+      if p^.NameMatch(PropName, PropNameLen) then
+        exit
+      else
+        inc(p);
+  end;
+  result := -1;
+end;
+
 function TRttiCustomProps.Find(const PropName: RawUtf8): PRttiCustomProp;
 begin
   result := Find(pointer(PropName), length(PropName));
@@ -7371,6 +7414,8 @@ begin
   if (fArrayRtti <> nil) and
      (rcfIsManaged in fArrayRtti.Flags) then
     include(fFlags, rcfArrayItemManaged);
+  if aParser in ptStringTypes then
+    include(fFlags, rcfJsonString);
   fClassNewInstance := @_New_NotImplemented;
   result := self;
 end;
@@ -7429,11 +7474,18 @@ begin
       begin
         result := false;
         s := fCache.Size;
-        repeat
-          dec(s);
-          if Data[s] <> #0 then
-            exit;
-        until s = 0;
+        if s >= 4 then
+          repeat
+            dec(s, 4);
+            if PInteger(Data + s)^ <> 0 then
+              exit;
+          until s < 4;
+        if s > 0 then
+          repeat
+            if Data[s - 1] <> #0 then
+              exit;
+            dec(s);
+          until s = 0;
         result := true;
       end;
   end;
@@ -7447,7 +7499,7 @@ begin
 end;
 
 function TRttiCustom.{%H-}ValueToVariant(Data: pointer;
-  out Dest: TVarData): PtrInt;
+  out Dest: TVarData; Options: pointer): PtrInt;
 begin
   raise ERttiException.CreateUtf8('%.ValueToVariant not implemented -> ' +
     'please include mormot.core.json unit to register TRttiJson', [self]);
@@ -7517,12 +7569,14 @@ begin
     begin
       BinarySize := 0;
       exclude(fFlags, rcfBinary);
+      if not (Kind in rkStringTypes) then
+        exclude(fFlags, rcfJsonString);
     end
     else
     begin
       if BinarySize = 0 then
         BinarySize := fCache.Size;
-      include(fFlags, rcfBinary);
+      fFlags := fFlags + [rcfBinary, rcfJsonString];
     end;
     fBinarySize := BinarySize;
     SetParserType(Parser, ParserComplex); // notify format change (e.g. for json)
@@ -8561,6 +8615,28 @@ end;
 
 { TObjectWithCustomCreate }
 
+constructor TObjectWithCustomCreate.Create;
+begin // do nothing by default but may be overriden
+end;
+
+class function TObjectWithCustomCreate.RttiCustom: TRttiCustom;
+begin
+  // inlined Rtti.Find(ClassType): we know it is the first slot
+  result := PPointer(PAnsiChar(self) + vmtAutoTable)^;
+  // assert(result.InheritsFrom(TRttiCustom));
+end;
+
+class function TObjectWithCustomCreate.NewInstance: TObject;
+begin
+  // register the class to the RTTI cache
+  if PPointer(PAnsiChar(self) + vmtAutoTable)^ = nil then
+    Rtti.DoRegister(self); // ensure TRttiCustom is set
+  // bypass vmtIntfTable and vmt^.vInitTable (FPC management operators)
+  GetMem(pointer(result), InstanceSize); // InstanceSize is inlined
+  FillCharFast(pointer(result)^, InstanceSize, 0);
+  PPointer(result)^ := pointer(self); // store VMT
+end; // no benefit of rewriting FreeInstance/CleanupInstance
+
 class procedure TObjectWithCustomCreate.RttiCustomSetParser(Rtti: TRttiCustom);
 begin
   // do nothing by default
@@ -8602,12 +8678,6 @@ end;
 
 
 { TObjectWithID }
-
-constructor TObjectWithID.Create;
-begin
-  if PPointer(PPAnsiChar(self)^ + vmtAutoTable)^ = nil then
-    Rtti.DoRegister(PClass(self)^); // ensure TRttiCustom is set
-end;
 
 constructor TObjectWithID.CreateWithID(aID: TID);
 begin
@@ -8792,12 +8862,13 @@ begin
     PtrUInt(@_dynarray_decr_ref_free));
   RedirectCode(@fpc_dynarray_decr_ref, @fpc_dynarray_clear);
   {$ifdef FPC_HAS_CPSTRING}
+  RedirectRtlCall(@_fpc_setstring_ansistr, @_setstring_ansistr_pansichar, $2d);
   // Delphi/Windows is never natively UTF-8, but FPC+Lazarus may be :)
   if DefaultSystemCodePage = CP_UTF8 then
   begin
     // dedicated UTF-8 concatenation RTL function replacements
-    RedirectRtl(@_fpc_ansistr_concat, @_ansistr_concat_utf8);
-    RedirectRtl(@_fpc_ansistr_concat_multi, @_ansistr_concat_multi_utf8);
+    RedirectRtlUtf8(@_fpc_ansistr_concat, @_ansistr_concat_utf8);
+    RedirectRtlUtf8(@_fpc_ansistr_concat_multi, @_ansistr_concat_multi_utf8);
   end;
   {$ifdef FPC_X64MM}
   RedirectCode(@fpc_ansistr_setlength, @_ansistr_setlength);

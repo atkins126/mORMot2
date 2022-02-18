@@ -1475,7 +1475,7 @@ begin
   end;
 end;
 
-{$ifdef CPU64}
+{$ifdef CPUX64}
 function IsRowID(FieldName: PUtf8Char): boolean;
 var
   f: Int64;
@@ -1501,20 +1501,18 @@ begin
   else
     result := false;
 end;
-{$endif CPU64}
+{$endif CPUX64}
 
 function IsRowID(FieldName: PUtf8Char; FieldLen: integer): boolean;
 begin
-  case FieldLen of
-    2:
-      result := PWord(FieldName)^ and $dfdf = ord('I') + ord('D') shl 8;
-    5:
-      result := (PInteger(FieldName)^ and $dfdfdfdf =
-                 ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
-                (ord(FieldName[4]) and $df = ord('D'));
+  if FieldLen = 2 then
+    result := PWord(FieldName)^ and $dfdf = ord('I') + ord('D') shl 8
+  else if FieldLen = 5 then
+    result := (PInteger(FieldName)^ and $dfdfdfdf =
+               ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
+              (ord(FieldName[4]) and $df = ord('D'))
   else
     result := false;
-  end;
 end;
 
 function IsRowIDShort(const FieldName: ShortString): boolean;
@@ -2718,7 +2716,7 @@ var
       repeat
         inc(P);
       until P^ in [#0..' ', ';', ')', ','];
-      SetString(Where.Value, B, P - B);
+      FastSetString(Where.Value, B, P - B);
       VariantLoadJson(Where.ValueVariant, Where.Value);
       Where.ValueInteger := GetInteger(pointer(Where.Value), err);
     end;
@@ -2735,7 +2733,7 @@ var
       until not (P^ in [#1..' ', ')']);
       while P[-1] = ' ' do
         dec(P); // trim right space
-      SetString(Where.ParenthesisAfter, B, P - B);
+      FastSetString(Where.ParenthesisAfter, B, P - B);
       P := GotoNextNotSpace(P);
     end;
     result := true;
@@ -2750,7 +2748,7 @@ var
     result := false;
     if Where.ValueSqlLen <= 2 then
       exit;
-    SetString(tmp, PAnsiChar(Where.ValueSql) + 1, Where.ValueSqlLen - 2);
+    FastSetString(tmp, Where.ValueSql + 1, Where.ValueSqlLen - 2);
     P := pointer(tmp); // parse again the IN (...,...,... ) expression
     n := 0;
     try
@@ -2879,7 +2877,7 @@ var
                 else
                   inc(P);
               inc(P);
-              SetString(Where.Value, PAnsiChar(B), P - B);
+              FastSetString(Where.Value, B, P - B);
               Where.ValueSql := B;
               Where.ValueSqlLen := P - B;
               result := GetWhereValues(Where);
@@ -2963,7 +2961,7 @@ begin
         until not (P^ in [#1..' ', '(']);
         while P[-1] = ' ' do
           dec(P); // trim right space
-        SetString(whereBefore, B, P - B);
+        FastSetString(whereBefore, B, P - B);
         B := P;
       end;
       ndx := GetPropIndex;
