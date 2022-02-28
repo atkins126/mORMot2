@@ -304,6 +304,19 @@ const
   SN_X9_62_id_ecPublicKey = 'id-ecPublicKey';
   NID_X9_62_id_ecPublicKey = 408;
 
+  SN_crl_number = 'crlNumber';
+  LN_crl_number = 'X509v3 CRL Number';
+  NID_crl_number = 88;
+  SN_crl_reason = 'CRLReason';
+  LN_crl_reason = 'X509v3 CRL Reason Code';
+  NID_crl_reason = 141;
+  SN_invalidity_date = 'invalidityDate';
+  LN_invalidity_date = 'Invalidity Date';
+  NID_invalidity_date = 142;
+  SN_delta_crl = 'deltaCRL';
+  LN_delta_crl = 'X509v3 Delta CRL Indicator';
+  NID_delta_crl = 140;
+
   EVP_PKEY_RSA = NID_rsaEncryption;
   EVP_PKEY_DSA = NID_dsa;
   EVP_PKEY_RSA_PSS = NID_rsassaPss;
@@ -699,6 +712,19 @@ const
   X509_PURPOSE_MIN = 1;
   X509_PURPOSE_MAX = 9;
 
+  CRLDP_ALL_REASONS = $807f;
+  CRL_REASON_NONE = -1;
+  CRL_REASON_UNSPECIFIED = 0;
+  CRL_REASON_KEY_COMPROMISE = 1;
+  CRL_REASON_CA_COMPROMISE = 2;
+  CRL_REASON_AFFILIATION_CHANGED = 3;
+  CRL_REASON_SUPERSEDED = 4;
+  CRL_REASON_CESSATION_OF_OPERATION = 5;
+  CRL_REASON_CERTIFICATE_HOLD = 6;
+  CRL_REASON_REMOVE_FROM_CRL = 8;
+  CRL_REASON_PRIVILEGE_WITHDRAWN = 9;
+  CRL_REASON_AA_COMPROMISE = 10;
+
   // X509_STORE_CTX_set_trust() flags
   X509_TRUST_DEFAULT = 0;
   X509_TRUST_COMPAT = 1;
@@ -849,11 +875,13 @@ type
   PSSL_CIPHER = ^SSL_CIPHER;
   PPSSL_CIPHER = ^PSSL_CIPHER;
 
+  POPENSSL_STACK = ^OPENSSL_STACK;
+  PPOPENSSL_STACK = ^POPENSSL_STACK;
+
   PX509 = ^X509;
   PPX509 = ^PX509;
   PX509DynArray = array of PX509;
-  Pstack_st_X509 = pointer;
-  PX509_LOOKUP = pointer;
+  Pstack_st_X509 = POPENSSL_STACK;
 
   SSL = object
   public
@@ -956,8 +984,27 @@ type
   PBIO_METHOD = type pointer;
   PPBIO_METHOD = ^PBIO_METHOD;
 
-  POPENSSL_STACK = type pointer;
-  PPOPENSSL_STACK = ^POPENSSL_STACK;
+  OPENSSL_sk_compfunc = function(p1: pointer; p2: pointer): integer; cdecl;
+  OPENSSL_sk_freefunc = procedure(p1: pointer); cdecl;
+
+  OPENSSL_STACK = object
+  private
+    function GetItem(index: PtrInt): pointer;
+      {$ifdef HASINLINE} inline; {$endif}
+  public
+    function Count: integer;
+    function Add(one: pointer): integer;
+    function Find(one: pointer): integer;
+    function Extract(index: integer): pointer;
+    /// low-level method needing an explicit result typecast e.g. to PX509DynArray
+    function ToDynArray: TPointerDynArray;
+    /// note: instances should be released explicitely before or call e.g. FreeX509
+    procedure Free;
+    /// make PX509().Free to all items, then free the stack
+    procedure FreeX509;
+    property Items[index: PtrInt]: pointer
+      read GetItem; default;
+  end;
 
   PBIGNUM = type pointer;
   PPBIGNUM = ^PBIGNUM;
@@ -1005,6 +1052,7 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     procedure ToUtf8(out result: RawUtf8; flags: cardinal = ASN1_STRFLGS_RFC2253);
     procedure ToHex(out result: RawUtf8);
+    function Equals(const another: asn1_string_st): boolean;
   end;
 
   ASN1_INTEGER = asn1_string_st;
@@ -1099,26 +1147,29 @@ type
   X509_REQ = object
   public
     function GetName: PX509_NAME;
+    function ToBinary: RawByteString;
+    function ToPem: RawUtf8;
+    // return the size of the signature in bytes for success and zero for failure
+    function Sign(pkey: PEVP_PKEY; md: PEVP_MD): integer;
     procedure Free;
       {$ifdef HASINLINE} inline; {$endif}
   end;
   PX509_REQ = ^X509_REQ;
   PPX509_REQ = ^PX509_REQ;
 
-  PX509_CRL = type pointer;
-  PPX509_CRL = ^PX509_CRL;
-
   PX509_CERT_AUX = type pointer;
   PPX509_CERT_AUX = ^PX509_CERT_AUX;
 
+  PX509_LOOKUP = pointer;
+  PPX509_LOOKUP = ^PX509_LOOKUP;
   PX509_LOOKUP_METHOD = pointer;
   PPX509_LOOKUP_METHOD = ^PX509_LOOKUP_METHOD;
 
   PX509_VERIFY_PARAM = pointer;
   PPX509_VERIFY_PARAM = ^PX509_VERIFY_PARAM;
 
-  Pstack_st_CONF_VALUE = type pointer;
-  Plhash_st_CONF_VALUE = type pointer;
+  Pstack_st_CONF_VALUE = POPENSSL_STACK;
+  Plhash_st_CONF_VALUE = POPENSSL_STACK;
 
   X509V3_CONF_METHOD = record
     get_string: function(db: pointer; section: PUtf8Char; value: PUtf8Char): PUtf8Char; cdecl;
@@ -1132,14 +1183,95 @@ type
   public
     procedure ToUtf8(out result: RawUtf8; flags: cardinal = XN_FLAG_RFC2253);
     procedure AddEntry(const Name, Value: RawUtf8);
-    procedure AddEntries(
-      const Country, State, Locality, Organization, OrgUnit, CommonName: RawUtf8);
+    procedure AddEntries(const Country, State, Locality,
+      Organization, OrgUnit, CommonName: RawUtf8);
     // as used for X509_STORE.SetLocations() CAFolder 'Hash.N' names
     function Hash: cardinal;
   end;
 
   PPX509_NAME = ^PX509_NAME;
-  PPX509_LOOKUP = ^PX509_LOOKUP;
+
+  PX509_CRL = ^X509_CRL;
+  PPX509_CRL = ^PX509_CRL;
+  PX509_CRLDynArray = array of PX509_CRL;
+  PX509_REVOKED = ^X509_REVOKED;
+  PPX509_REVOKED = ^PX509_REVOKED;
+  PX509_CRL_METHOD = pointer;
+  PPX509_CRL_METHOD = ^PX509_CRL_METHOD;
+
+  Pstack_st_X509_REVOKED = POPENSSL_STACK;
+  PPstack_st_X509_REVOKED = ^Pstack_st_X509_REVOKED;
+  Pstack_st_X509_EXTENSION = POPENSSL_STACK;
+  PPstack_st_X509_EXTENSION = ^Pstack_st_X509_EXTENSION;
+
+  X509_EXTENSION = object
+  public
+    procedure ToUtf8(out result: RawUtf8; flags: cardinal = X509V3_EXT_DEFAULT);
+    procedure Free;
+      {$ifdef HASINLINE} inline; {$endif}
+  end;
+  PX509_EXTENSION = ^X509_EXTENSION;
+  PPX509_EXTENSION = ^PX509_EXTENSION;
+  PX509_EXTENSIONS = type pointer;
+  PPX509_EXTENSIONS = ^PX509_EXTENSIONS;
+
+  TX509_Extension = object
+  public
+    /// the low-level X509 extension instance
+    // - use ext.ToUtf8() to return its human-readable text value
+    ext: PX509_EXTENSION;
+    // if this extension was marked as critical
+    critical: boolean;
+    /// the NID of this extension
+    // - use OBJ_nid2ln() or OBJ_nid2sn() to get its long or short name
+    nid: integer;
+    /// the value of this extension
+    // - you can use value.ToUtf8() or value.ToHex()
+    value: PASN1_STRING;
+    /// set ext and compute critical/nid/value associated fields
+    procedure SetExtension(x: PX509_EXTENSION);
+  end;
+  TX509_Extensions = array of TX509_Extension;
+
+  X509_REVOKED = object
+  public
+    function SerialNumber: RawUtf8;
+    function RevocationDate: TDateTime;
+    function Reason: integer;
+    function SetReason(value: integer): boolean;
+    procedure Free;
+      {$ifdef HASINLINE} inline; {$endif}
+  end;
+
+  X509_CRL = object
+  public
+    function Version: integer;
+    function LastUpdate: TDateTime;
+    function NextUpdate: TDateTime;
+    function IssuerName: RawUtf8;
+    function Revoked: Pstack_st_X509_REVOKED;
+      {$ifdef HASINLINE} inline; {$endif}
+    // returns the reason, CRL_REASON_NONE=-1 if none found - can check >= 0
+    function IsRevoked(const serialnumber: RawUtf8): integer; overload;
+    function IsRevoked(serial: PASN1_INTEGER): integer; overload;
+    function AddFrom(another: PX509_CRL): integer;
+    function AddFromPem(const Pem: RawUtf8): integer;
+    function AddRevokedSerial(serial: PASN1_INTEGER; ca: PX509;
+      reason: integer = 0; nextUpdateDays: integer = 30): boolean;
+    function AddRevokedCertificate(x, ca: PX509;
+      nextUpdateDays: integer = 30): boolean;
+    function Extensions: Pstack_st_X509_EXTENSION;
+    function GetExtensions: TX509_Extensions;
+    function Extension(nid: integer): PX509_EXTENSION;
+    function ToBinary: RawByteString;
+    function ToPem: RawUtf8;
+    // return the size of the signature in bytes for success and zero for failure
+    function Sign(pkey: PEVP_PKEY; md: PEVP_MD): integer;
+    /// increment the X509 reference count to avoid premature release
+    function Acquire: integer;
+    procedure Free;
+      {$ifdef HASINLINE} inline; {$endif}
+  end;
 
   PX509_PUBKEY = type pointer;
   PPX509_PUBKEY = ^PX509_PUBKEY;
@@ -1154,11 +1286,25 @@ type
 
   X509_STORE = object
   public
+    function CertificateCount: integer;
+    function CrlCount: integer;
+    function Certificates: PX509DynArray;
+    function Crls: PX509_CRLDynArray;
+    // caller should make result.Free once done (to decrease refcount)
+    function BySerial(const serial: RawUtf8): PX509;
+    // returns the revocation reason
+    function IsRevoked(const serial: RawUtf8): integer; overload;
+    function IsRevoked(serial: PASN1_INTEGER): integer; overload;
     function SetDefaultPaths: boolean;
+    // will increase the certificate refcount
     function AddCertificate(x: PX509): boolean;
-    function AddFromBinary(const Der: RawByteString): boolean;
-    /// returns the number of added certificates
-    function AddFromPem(const Pem: RawUtf8): integer;
+    function AddCrl(c: PX509_CRL): boolean;
+    // try binary DER serialization of X509 Certificate or CRL
+    function AddFromBinary(const Der: RawByteString): RawUtf8;
+    /// returns the number of added certificates or CRLs
+    function AddCertificateFromPem(const Pem: RawUtf8;
+      Serials: PRawUtf8DynArray = nil): integer;
+    function AddCrlFromPem(const Pem: RawUtf8): integer;
     // - CAFile format is concatenated PEM certificates and CRLs
     // - CAFolder expects the certificates to be stored as hash.N (or hash.rN for
     // CRLs), with hash.N being X509_NAME.Hash SHA1 first four bytes - see
@@ -1183,7 +1329,8 @@ type
 
   PX509_OBJECT = type pointer;
   PPX509_OBJECT = ^PX509_OBJECT;
-
+  Pstack_st_X509_OBJECT = POPENSSL_STACK;
+  PPstack_st_X509_OBJECT = ^Pstack_st_X509_OBJECT;
 
   X509_algor_st = record
     algorithm: PASN1_OBJECT;
@@ -1195,32 +1342,6 @@ type
   PPX509_ALGOR = ^PX509_ALGOR;
 
   PX509_VAL = type pointer;
-
-  X509_EXTENSION = object
-  public
-    procedure ToUtf8(out result: RawUtf8; flags: cardinal = X509V3_EXT_DEFAULT);
-    procedure Free;
-      {$ifdef HASINLINE} inline; {$endif}
-  end;
-  PX509_EXTENSION = ^X509_EXTENSION;
-  PPX509_EXTENSION = ^PX509_EXTENSION;
-  PX509_EXTENSIONS = type pointer;
-  PPX509_EXTENSIONS = ^PX509_EXTENSIONS;
-
-  TX509_Extension = record
-    /// the low-level X509 extension instance
-    // - use ext.ToUtf8() to return its human-readable text value
-    ext: PX509_EXTENSION;
-    // if this extension was marked as critical
-    critical: boolean;
-    /// the NID of this extension
-    // - use OBJ_nid2ln() or OBJ_nid2sn() to get its long or short name
-    nid: integer;
-    /// the value of this extension
-    // - you can use value.ToUtf8() or value.ToHex()
-    value: PASN1_STRING;
-  end;
-  TX509_Extensions = array of TX509_Extension;
 
   /// X509v3 Key and Extended Key Usage Flags
   // - kuCA match NID_basic_constraints containing 'CA:TRUE'
@@ -1253,6 +1374,10 @@ type
   /// wrapper to the PX509 abstract pointer
   X509 = object
   public
+    function GetSerial: PASN1_INTEGER;
+      {$ifdef HASINLINE} inline; {$endif}
+    function GetName: PX509_NAME;
+      {$ifdef HASINLINE} inline; {$endif}
     /// the Certificate Genuine Serial Number
     // - e.g. '04:f9:25:39:39:f8:ce:79:1a:a4:0e:b3:fa:72:e3:bc:9e:d6'
     function SerialNumber: RawUtf8;
@@ -1325,6 +1450,10 @@ type
     function ToPem: RawUtf8;
     /// increment the X509 reference count to avoid premature release
     function Acquire: integer;
+    /// sign this Certificate with the supplied private key and algorithm
+    // - you can use EVP_sha256 e.g. for md parameter
+    // - return the size of the signature in bytes for success and zero for failure
+    function Sign(pkey: PEVP_PKEY; md: PEVP_MD): integer;
     /// release this X509 Certificate instance
     // - in practice, decrement the X509 reference count and free it once 0
     procedure Free;
@@ -1498,8 +1627,13 @@ function X509_set_subject_name(x: PX509; name: PX509_NAME): integer; cdecl;
 function X509_set_pubkey(x: PX509; pkey: PEVP_PKEY): integer; cdecl;
 function X509_sign(x: PX509; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
 function X509_REQ_new(): PX509_REQ; cdecl;
+function X509_REQ_set_version(x: PX509_REQ; version: integer): integer; cdecl;
 procedure X509_REQ_free(a: PX509_REQ); cdecl;
 function X509_REQ_sign(x: PX509_REQ; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
+function X509_REQ_verify(a: PX509_REQ; r: PEVP_PKEY): integer; cdecl;
+function d2i_X509_REQ_bio(bp: PBIO; req: PPX509_REQ): PX509_REQ; cdecl;
+function i2d_X509_REQ_bio(bp: PBIO; req: PX509_REQ): integer; cdecl;
+function PEM_write_bio_X509_REQ(bp: PBIO; x: PX509_REQ): integer; cdecl;
 function X509_REQ_get_subject_name(req: PX509_REQ): PX509_NAME; cdecl;
 function X509_REQ_get_pubkey(req: PX509_REQ): PEVP_PKEY; cdecl;
 function X509_REQ_set_pubkey(x: PX509_REQ; pkey: PEVP_PKEY): integer; cdecl;
@@ -1527,9 +1661,12 @@ function X509_check_private_key(x509: PX509; pkey: PEVP_PKEY): integer; cdecl;
 function X509_get_ext_count(x: PX509): integer; cdecl;
 function X509_get_ext(x: PX509; loc: integer): PX509_EXTENSION; cdecl;
 function X509_get_ext_by_NID(x: PX509; nid: integer; lastpos: integer): integer; cdecl;
-function X509_EXTENSION_get_object(ex: PX509_EXTENSION): PASN1_OBJECT; cdecl;
-function X509_EXTENSION_get_data(ne: PX509_EXTENSION): PASN1_OCTET_STRING; cdecl;
-function X509_EXTENSION_get_critical(ex: PX509_EXTENSION): integer; cdecl;
+function X509_EXTENSION_get_object(ex: PX509_EXTENSION): PASN1_OBJECT;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
+function X509_EXTENSION_get_data(ne: PX509_EXTENSION): PASN1_OCTET_STRING;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
+function X509_EXTENSION_get_critical(ex: PX509_EXTENSION): integer;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
 function X509_get_version(x: PX509): integer; cdecl;
 function X509_get0_notBefore(x: PX509): PASN1_TIME; cdecl;
 function X509_get0_notAfter(x: PX509): PASN1_TIME; cdecl;
@@ -1540,6 +1677,39 @@ function X509V3_EXT_print(_out: PBIO; ext: PX509_EXTENSION; flag: cardinal; inde
 function i2d_X509_bio(bp: PBIO; x509: PX509): integer; cdecl;
 function d2i_X509_bio(bp: PBIO; x509: PPX509): PX509; cdecl;
 function PEM_read_bio_X509_AUX(bp: PBIO; x: PPX509; cb: Ppem_password_cb; u: pointer): PX509; cdecl;
+function X509_CRL_new(): PX509_CRL; cdecl;
+procedure X509_CRL_free(a: PX509_CRL); cdecl;
+function X509_CRL_verify(a: PX509_CRL; r: PEVP_PKEY): integer; cdecl;
+function X509_CRL_sign(x: PX509_CRL; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
+function X509_CRL_dup(crl: PX509_CRL): PX509_CRL; cdecl;
+function X509_CRL_up_ref(crl: PX509_CRL): integer; cdecl;
+function X509_CRL_set_version(x: PX509_CRL; version: integer): integer; cdecl;
+function X509_CRL_set_issuer_name(x: PX509_CRL; name: PX509_NAME): integer; cdecl;
+function X509_CRL_set_lastUpdate(x: PX509_CRL; tm: PASN1_TIME): integer; cdecl;
+function X509_CRL_set_nextUpdate(x: PX509_CRL; tm: PASN1_TIME): integer; cdecl;
+function X509_CRL_get_issuer(crl: PX509_CRL): PX509_NAME; cdecl;
+function X509_CRL_get_version(crl: PX509_CRL): integer; cdecl;
+function X509_CRL_get_lastUpdate(crl: PX509_CRL): PASN1_TIME; cdecl;
+function X509_CRL_get_nextUpdate(crl: PX509_CRL): PASN1_TIME; cdecl;
+function d2i_X509_CRL_bio(bp: PBIO; crl: PPX509_CRL): PX509_CRL; cdecl;
+function i2d_X509_CRL_bio(bp: PBIO; crl: PX509_CRL): integer; cdecl;
+function PEM_write_bio_X509_CRL(bp: PBIO; x: PX509_CRL): integer; cdecl;
+function PEM_read_bio_X509_CRL(bp: PBIO; x: PPX509_CRL; cb: Ppem_password_cb; u: pointer): PX509_CRL; cdecl;
+function X509_CRL_add1_ext_i2d(x: PX509_CRL; nid: integer; value: pointer; crit: integer; flags: cardinal): integer; cdecl;
+function X509_CRL_get_ext_d2i(x: PX509_CRL; nid: integer; crit: PInteger; idx: PInteger): pointer; cdecl;
+function X509_CRL_add0_revoked(crl: PX509_CRL; rev: PX509_REVOKED): integer; cdecl;
+function X509_CRL_delete_ext(x: PX509_CRL; loc: integer): PX509_EXTENSION; cdecl;
+function X509_CRL_get_REVOKED(crl: PX509_CRL): Pstack_st_X509_REVOKED; cdecl;
+function X509_CRL_get0_extensions(crl: PX509_CRL): Pstack_st_X509_EXTENSION; cdecl;
+function X509_CRL_sort(crl: PX509_CRL): integer; cdecl;
+function X509_REVOKED_new(): PX509_REVOKED; cdecl;
+procedure X509_REVOKED_free(a: PX509_REVOKED); cdecl;
+function X509_REVOKED_set_serialNumber(x: PX509_REVOKED; serial: PASN1_INTEGER): integer; cdecl;
+function X509_REVOKED_set_revocationDate(r: PX509_REVOKED; tm: PASN1_TIME): integer; cdecl;
+function X509_REVOKED_get0_serialNumber(x: PX509_REVOKED): PASN1_INTEGER; cdecl;
+function X509_REVOKED_get0_revocationDate(x: PX509_REVOKED): PASN1_TIME; cdecl;
+function X509_REVOKED_get_ext_d2i(x: PX509_REVOKED; nid: integer; crit: PInteger; idx: PInteger): pointer; cdecl;
+function X509_REVOKED_add1_ext_i2d(x: PX509_REVOKED; nid: integer; value: pointer; crit: integer; flags: cardinal): integer; cdecl;
 function X509_STORE_new(): PX509_STORE; cdecl;
 function X509_STORE_load_locations(ctx: PX509_STORE; _file: PUtf8Char; dir: PUtf8Char): integer; cdecl;
 function X509_STORE_set_default_paths(ctx: PX509_STORE): integer; cdecl;
@@ -1550,6 +1720,14 @@ function X509_STORE_set_flags(ctx: PX509_STORE; flags: cardinal): integer; cdecl
 function X509_STORE_set1_param(ctx: PX509_STORE; pm: PX509_VERIFY_PARAM): integer; cdecl;
 function X509_STORE_get0_param(ctx: PX509_STORE): PX509_VERIFY_PARAM; cdecl;
 procedure X509_STORE_set_verify_cb(ctx: PX509_STORE; verify_cb: X509_STORE_CTX_verify_cb); cdecl;
+function X509_STORE_lock(ctx: PX509_STORE): integer; cdecl;
+function X509_STORE_unlock(ctx: PX509_STORE): integer; cdecl;
+function X509_STORE_up_ref(v: PX509_STORE): integer; cdecl;
+function X509_STORE_get0_objects(v: PX509_STORE): Pstack_st_X509_OBJECT; cdecl;
+function X509_OBJECT_get0_X509(a: PX509_OBJECT): PX509;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
+function X509_OBJECT_get0_X509_CRL(a: PX509_OBJECT): PX509_CRL;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
 function X509_LOOKUP_hash_dir(): PX509_LOOKUP_METHOD; cdecl;
 function X509_LOOKUP_file(): PX509_LOOKUP_METHOD; cdecl;
 function X509_LOOKUP_ctrl(ctx: PX509_LOOKUP; cmd: integer; argc: PUtf8Char;
@@ -1571,10 +1749,19 @@ function X509_STORE_CTX_set_purpose(ctx: PX509_STORE_CTX; purpose: integer): int
 function X509_STORE_CTX_set_trust(ctx: PX509_STORE_CTX; trust: integer): integer; cdecl;
 function X509_LOOKUP_load_file(ctx: PX509_LOOKUP; name: PUtf8Char; typ: integer): integer;
 function X509_LOOKUP_add_dir(ctx: PX509_LOOKUP; name: PUtf8Char; typ: integer): integer;
+function ASN1_TIME_new(): PASN1_TIME; cdecl;
+procedure ASN1_TIME_free(a: PASN1_TIME); cdecl;
 function ASN1_TIME_set(s: PASN1_TIME; t: time_t): PASN1_TIME; cdecl;
 function ASN1_TIME_set_string_X509(s: PASN1_TIME; str: PUtf8Char): integer; cdecl;
 function ASN1_TIME_to_tm(s: PASN1_TIME; tm: Ptm): integer; cdecl;
 function ASN1_TIME_normalize(s: PASN1_TIME): integer; cdecl;
+function OPENSSL_sk_new(cmp: OPENSSL_sk_compfunc): POPENSSL_STACK; cdecl;
+procedure OPENSSL_sk_free(p1: POPENSSL_STACK); cdecl;
+procedure OPENSSL_sk_pop_free(st: POPENSSL_STACK; func: OPENSSL_sk_freefunc); cdecl;
+function OPENSSL_sk_delete(st: POPENSSL_STACK; loc: integer): pointer; cdecl;
+function OPENSSL_sk_find(st: POPENSSL_STACK; data: pointer): integer; cdecl;
+function OPENSSL_sk_push(st: POPENSSL_STACK; data: pointer): integer;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
 function OPENSSL_sk_pop(st: POPENSSL_STACK): pointer; cdecl;
 function OPENSSL_sk_num(p1: POPENSSL_STACK): integer;
   {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
@@ -1583,7 +1770,8 @@ function OPENSSL_sk_value(p1: POPENSSL_STACK; p2: integer): pointer;
 function ASN1_BIT_STRING_get_bit(a: PASN1_BIT_STRING; n: integer): integer; cdecl;
 function OBJ_nid2ln(n: integer): PUtf8Char; cdecl;
 function OBJ_nid2sn(n: integer): PUtf8Char; cdecl;
-function OBJ_obj2nid(o: PASN1_OBJECT): integer; cdecl;
+function OBJ_obj2nid(o: PASN1_OBJECT): integer;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
 function ASN1_STRING_data(x: PASN1_STRING): PByte;
    {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
 function ASN1_STRING_length(x: PASN1_STRING): integer;
@@ -1633,7 +1821,8 @@ function HMAC_Init_ex(ctx: PHMAC_CTX; key: pointer; len: integer; md: PEVP_MD;
   impl: PENGINE): integer; cdecl;
 function HMAC_Update(ctx: PHMAC_CTX; data: PByte; len: PtrUInt): integer; cdecl;
 function HMAC_Final(ctx: PHMAC_CTX; md: PByte; len: PCardinal): integer; cdecl;
-function EVP_sha256: PEVP_MD; cdecl;
+function EVP_sha256: PEVP_MD;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
 function EC_GROUP_new_by_curve_name(nid: integer): PEC_GROUP; cdecl;
 function EC_KEY_new(): PEC_KEY; cdecl;
 function EC_KEY_set_group(key: PEC_KEY; group: PEC_GROUP): integer; cdecl;
@@ -1641,6 +1830,10 @@ function BN_bin2bn(s: pointer; len: integer; ret: PBIGNUM): PBIGNUM; cdecl;
 function BN_to_ASN1_INTEGER(bn: PBIGNUM; ai: PASN1_INTEGER): PASN1_INTEGER; cdecl;
 function ASN1_INTEGER_new(): PASN1_INTEGER; cdecl;
 procedure ASN1_INTEGER_free(a: PASN1_INTEGER); cdecl;
+function ASN1_ENUMERATED_set(a: PASN1_ENUMERATED; v: integer): integer; cdecl;
+function ASN1_ENUMERATED_get(a: PASN1_ENUMERATED): integer; cdecl;
+function ASN1_ENUMERATED_new(): PASN1_ENUMERATED; cdecl;
+procedure ASN1_ENUMERATED_free(a: PASN1_ENUMERATED); cdecl;
 function EC_POINT_bn2point(p1: PEC_GROUP; p2: PBIGNUM; p3: PEC_POINT; p4: PBN_CTX): PEC_POINT; cdecl;
 function EC_KEY_set_public_key(key: PEC_KEY; pub: PEC_POINT): integer; cdecl;
 function ECDSA_verify(typ: integer; dgst: PByte; dgstlen: integer;
@@ -1730,9 +1923,6 @@ function TmToDateTime(const t: tm): TDateTime;
 function DTLSv1_get_timeout(s: PSSL; timeval: PTimeVal): time_t;
 procedure DTLSv1_handle_timeout(s: PSSL);
 
-/// low-level method needing an explicit result typecast e.g. to PX509DynArray
-function OpenSSLStackToDynArray(stack: pointer): TPointerDynArray;
-
 /// load a private key from a binary buffer, optionally with a password
 // - caller should make result.Free once done with the result
 function LoadPrivateKey(PrivateKey: pointer; PrivateKeyLen: integer;
@@ -1750,7 +1940,7 @@ function PX509DynArrayToPem(const X509: PX509DynArray): RawUtf8;
 function PX509DynArrayToText(const X509: PX509DynArray): RawUtf8;
 
 /// finalize a dynamic array of X509 instances
-procedure PX509DynArrayFree(const X509: PX509DynArray);
+procedure PX509DynArrayFree(var X509: PX509DynArray);
 
 /// create a new X509 Certificate Instance
 // - with a random serial number
@@ -1774,6 +1964,31 @@ function NewCertificateStore: PX509_STORE;
 /// create a new X509 Certificates Store Context
 function NewCertificateStoreCtx(store: PX509_STORE; x509: PX509;
   chain: Pstack_st_X509; callback: X509_STORE_CTX_verify_cb): PX509_STORE_CTX;
+
+/// create a new X509 Certificate CRL Instance
+// - then use X509_CRL.AddRevokedCertificate/AddRevokedSerial to tune the content
+// - caller should make result.Free once done with the result
+function NewCertificateCrl: PX509_CRL;
+
+/// unserialize a new X509 Certificate CRL Instance
+// - from DER binary as serialized by X509_CRL.ToBinary
+function LoadCertificateCrl(const Der: RawByteString): PX509_CRL;
+
+/// unserialize a new X509 Certificate CRL Instance
+// - from PEM as serialized by X509_CRL.ToPem
+function LoadCertificateCrlFromPem(const Pem: RawUtf8): PX509_CRL;
+
+/// create a new X509 Certificate Request Instance
+// - caller should make result.Free once done with the result
+function NewCertificateRequest: PX509_REQ;
+
+/// unserialize a new X509 Certificate Request Instance
+// - from DER binary as serialized by X509_REQ.ToBinary
+// - use LoadCertificateRequest(PemToDer()) to load a PEM certificate CRL
+function LoadCertificateRequest(const Der: RawByteString): PX509_REQ;
+
+/// create a new OpenSSL pointer Stack storage instance
+function NewOpenSslStack: POPENSSL_STACK;
 
 
 { ************** TLS / HTTPS Encryption Layer using OpenSSL for TCrtSocket }
@@ -2190,8 +2405,13 @@ type
     X509_set_pubkey: function(x: PX509; pkey: PEVP_PKEY): integer; cdecl;
     X509_sign: function(x: PX509; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
     X509_REQ_new: function(): PX509_REQ; cdecl;
+    X509_REQ_set_version: function(x: PX509_REQ; version: integer): integer; cdecl;
     X509_REQ_free: procedure(a: PX509_REQ); cdecl;
     X509_REQ_sign: function(x: PX509_REQ; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
+    X509_REQ_verify: function(a: PX509_REQ; r: PEVP_PKEY): integer; cdecl;
+    d2i_X509_REQ_bio: function(bp: PBIO; req: PPX509_REQ): PX509_REQ; cdecl;
+    i2d_X509_REQ_bio: function(bp: PBIO; req: PX509_REQ): integer; cdecl;
+    PEM_write_bio_X509_REQ: function(bp: PBIO; x: PX509_REQ): integer; cdecl;
     X509_REQ_get_subject_name: function(req: PX509_REQ): PX509_NAME; cdecl;
     X509_REQ_get_pubkey: function(req: PX509_REQ): PEVP_PKEY; cdecl;
     X509_REQ_set_pubkey: function(x: PX509_REQ; pkey: PEVP_PKEY): integer; cdecl;
@@ -2229,6 +2449,39 @@ type
     i2d_X509_bio: function(bp: PBIO; x509: PX509): integer; cdecl;
     d2i_X509_bio: function(bp: PBIO; x509: PPX509): PX509; cdecl;
     PEM_read_bio_X509_AUX: function(bp: PBIO; x: PPX509; cb: Ppem_password_cb; u: pointer): PX509; cdecl;
+    X509_CRL_new: function(): PX509_CRL; cdecl;
+    X509_CRL_free: procedure(a: PX509_CRL); cdecl;
+    X509_CRL_verify: function(a: PX509_CRL; r: PEVP_PKEY): integer; cdecl;
+    X509_CRL_sign: function(x: PX509_CRL; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
+    X509_CRL_dup: function(crl: PX509_CRL): PX509_CRL; cdecl;
+    X509_CRL_up_ref: function(crl: PX509_CRL): integer; cdecl;
+    X509_CRL_set_version: function(x: PX509_CRL; version: integer): integer; cdecl;
+    X509_CRL_set_issuer_name: function(x: PX509_CRL; name: PX509_NAME): integer; cdecl;
+    X509_CRL_set_lastUpdate: function(x: PX509_CRL; tm: PASN1_TIME): integer; cdecl;
+    X509_CRL_set_nextUpdate: function(x: PX509_CRL; tm: PASN1_TIME): integer; cdecl;
+    X509_CRL_get_issuer: function(crl: PX509_CRL): PX509_NAME; cdecl;
+    X509_CRL_get_version: function(crl: PX509_CRL): integer; cdecl;
+    X509_CRL_get_lastUpdate: function(crl: PX509_CRL): PASN1_TIME; cdecl;
+    X509_CRL_get_nextUpdate: function(crl: PX509_CRL): PASN1_TIME; cdecl;
+    d2i_X509_CRL_bio: function(bp: PBIO; crl: PPX509_CRL): PX509_CRL; cdecl;
+    i2d_X509_CRL_bio: function(bp: PBIO; crl: PX509_CRL): integer; cdecl;
+    PEM_write_bio_X509_CRL: function(bp: PBIO; x: PX509_CRL): integer; cdecl;
+    PEM_read_bio_X509_CRL: function(bp: PBIO; x: PPX509_CRL; cb: Ppem_password_cb; u: pointer): PX509_CRL; cdecl;
+    X509_CRL_add1_ext_i2d: function(x: PX509_CRL; nid: integer; value: pointer; crit: integer; flags: cardinal): integer; cdecl;
+    X509_CRL_get_ext_d2i: function(x: PX509_CRL; nid: integer; crit: PInteger; idx: PInteger): pointer; cdecl;
+    X509_CRL_add0_revoked: function(crl: PX509_CRL; rev: PX509_REVOKED): integer; cdecl;
+    X509_CRL_delete_ext: function(x: PX509_CRL; loc: integer): PX509_EXTENSION; cdecl;
+    X509_CRL_get_REVOKED: function(crl: PX509_CRL): Pstack_st_X509_REVOKED; cdecl;
+    X509_CRL_get0_extensions: function(crl: PX509_CRL): Pstack_st_X509_EXTENSION; cdecl;
+    X509_CRL_sort: function(crl: PX509_CRL): integer; cdecl;
+    X509_REVOKED_new: function(): PX509_REVOKED; cdecl;
+    X509_REVOKED_free: procedure(a: PX509_REVOKED); cdecl;
+    X509_REVOKED_set_serialNumber: function(x: PX509_REVOKED; serial: PASN1_INTEGER): integer; cdecl;
+    X509_REVOKED_set_revocationDate: function(r: PX509_REVOKED; tm: PASN1_TIME): integer; cdecl;
+    X509_REVOKED_get0_serialNumber: function(x: PX509_REVOKED): PASN1_INTEGER; cdecl;
+    X509_REVOKED_get0_revocationDate: function(x: PX509_REVOKED): PASN1_TIME; cdecl;
+    X509_REVOKED_get_ext_d2i: function(x: PX509_REVOKED; nid: integer; crit: PInteger; idx: PInteger): pointer; cdecl;
+    X509_REVOKED_add1_ext_i2d: function(x: PX509_REVOKED; nid: integer; value: pointer; crit: integer; flags: cardinal): integer; cdecl;
     X509_STORE_new: function(): PX509_STORE; cdecl;
     X509_STORE_load_locations: function(ctx: PX509_STORE; _file: PUtf8Char; dir: PUtf8Char): integer; cdecl;
     X509_STORE_set_default_paths: function(ctx: PX509_STORE): integer; cdecl;
@@ -2239,6 +2492,12 @@ type
     X509_STORE_set1_param: function(ctx: PX509_STORE; pm: PX509_VERIFY_PARAM): integer; cdecl;
     X509_STORE_get0_param: function(ctx: PX509_STORE): PX509_VERIFY_PARAM; cdecl;
     X509_STORE_set_verify_cb: procedure(ctx: PX509_STORE; verify_cb: X509_STORE_CTX_verify_cb); cdecl;
+    X509_STORE_lock: function(ctx: PX509_STORE): integer; cdecl;
+    X509_STORE_unlock: function(ctx: PX509_STORE): integer; cdecl;
+    X509_STORE_up_ref: function(v: PX509_STORE): integer; cdecl;
+    X509_STORE_get0_objects: function(v: PX509_STORE): Pstack_st_X509_OBJECT; cdecl;
+    X509_OBJECT_get0_X509: function(a: PX509_OBJECT): PX509; cdecl;
+    X509_OBJECT_get0_X509_CRL: function(a: PX509_OBJECT): PX509_CRL; cdecl;
     X509_LOOKUP_hash_dir: function(): PX509_LOOKUP_METHOD; cdecl;
     X509_LOOKUP_file: function(): PX509_LOOKUP_METHOD; cdecl;
     X509_LOOKUP_ctrl: function(ctx: PX509_LOOKUP; cmd: integer; argc: PUtf8Char; argl: integer; ret: PPUtf8Char): integer; cdecl;
@@ -2256,10 +2515,18 @@ type
     X509_STORE_CTX_set_time: procedure(ctx: PX509_STORE_CTX; flags: cardinal; t: time_t); cdecl;
     X509_STORE_CTX_set_purpose: function(ctx: PX509_STORE_CTX; purpose: integer): integer; cdecl;
     X509_STORE_CTX_set_trust: function(ctx: PX509_STORE_CTX; trust: integer): integer; cdecl;
+    ASN1_TIME_new: function(): PASN1_TIME; cdecl;
+    ASN1_TIME_free: procedure(a: PASN1_TIME); cdecl;
     ASN1_TIME_set: function(s: PASN1_TIME; t: time_t): PASN1_TIME; cdecl;
     ASN1_TIME_set_string_X509: function(s: PASN1_TIME; str: PUtf8Char): integer; cdecl;
     ASN1_TIME_to_tm: function(s: PASN1_TIME; tm: Ptm): integer; cdecl;
     ASN1_TIME_normalize: function(s: PASN1_TIME): integer; cdecl;
+    OPENSSL_sk_new: function(cmp: OPENSSL_sk_compfunc): POPENSSL_STACK; cdecl;
+    OPENSSL_sk_free: procedure(p1: POPENSSL_STACK); cdecl;
+    OPENSSL_sk_pop_free: procedure(st: POPENSSL_STACK; func: OPENSSL_sk_freefunc); cdecl;
+    OPENSSL_sk_delete: function(st: POPENSSL_STACK; loc: integer): pointer; cdecl;
+    OPENSSL_sk_find: function(st: POPENSSL_STACK; data: pointer): integer; cdecl;
+    OPENSSL_sk_push: function(st: POPENSSL_STACK; data: pointer): integer; cdecl;
     OPENSSL_sk_pop: function(st: POPENSSL_STACK): pointer; cdecl;
     OPENSSL_sk_num: function(p1: POPENSSL_STACK): integer; cdecl;
     OPENSSL_sk_value: function(p1: POPENSSL_STACK; p2: integer): pointer; cdecl;
@@ -2313,6 +2580,10 @@ type
     BN_to_ASN1_INTEGER: function(bn: PBIGNUM; ai: PASN1_INTEGER): PASN1_INTEGER; cdecl;
     ASN1_INTEGER_new: function(): PASN1_INTEGER; cdecl;
     ASN1_INTEGER_free: procedure(a: PASN1_INTEGER); cdecl;
+    ASN1_ENUMERATED_set: function(a: PASN1_ENUMERATED; v: integer): integer; cdecl;
+    ASN1_ENUMERATED_get: function(a: PASN1_ENUMERATED): integer; cdecl;
+    ASN1_ENUMERATED_new: function(): PASN1_ENUMERATED; cdecl;
+    ASN1_ENUMERATED_free: procedure(a: PASN1_ENUMERATED); cdecl;
     EC_POINT_bn2point: function(p1: PEC_GROUP; p2: PBIGNUM; p3: PEC_POINT; p4: PBN_CTX): PEC_POINT; cdecl;
     EC_KEY_set_public_key: function(key: PEC_KEY; pub: PEC_POINT): integer; cdecl;
     ECDSA_verify: function(typ: integer; dgst: PByte; dgstlen: integer; sig: PByte; siglen: integer; eckey: PEC_KEY): integer; cdecl;
@@ -2352,7 +2623,7 @@ type
   end;
 
 const
-  LIBCRYPTO_ENTRIES: array[0..202] of RawUtf8 = (
+  LIBCRYPTO_ENTRIES: array[0..258] of RawUtf8 = (
     'CRYPTO_malloc',
     'CRYPTO_set_mem_functions',
     'CRYPTO_free',
@@ -2397,8 +2668,13 @@ const
     'X509_set_pubkey',
     'X509_sign',
     'X509_REQ_new',
+    'X509_REQ_set_version',
     'X509_REQ_free',
     'X509_REQ_sign',
+    'X509_REQ_verify',
+    'd2i_X509_REQ_bio',
+    'i2d_X509_REQ_bio',
+    'PEM_write_bio_X509_REQ',
     'X509_REQ_get_subject_name',
     'X509_REQ_get_pubkey',
     'X509_REQ_set_pubkey',
@@ -2436,6 +2712,39 @@ const
     'i2d_X509_bio',
     'd2i_X509_bio',
     'PEM_read_bio_X509_AUX',
+    'X509_CRL_new',
+    'X509_CRL_free',
+    'X509_CRL_verify',
+    'X509_CRL_sign',
+    'X509_CRL_dup',
+    'X509_CRL_up_ref',
+    'X509_CRL_set_version',
+    'X509_CRL_set_issuer_name',
+    'X509_CRL_set1_lastUpdate',
+    'X509_CRL_set1_nextUpdate',
+    'X509_CRL_get_issuer',
+    'X509_CRL_get_version',
+    'X509_CRL_get_lastUpdate',
+    'X509_CRL_get_nextUpdate',
+    'd2i_X509_CRL_bio',
+    'i2d_X509_CRL_bio',
+    'PEM_write_bio_X509_CRL',
+    'PEM_read_bio_X509_CRL',
+    'X509_CRL_add1_ext_i2d',
+    'X509_CRL_get_ext_d2i',
+    'X509_CRL_add0_revoked',
+    'X509_CRL_delete_ext',
+    'X509_CRL_get_REVOKED',
+    'X509_CRL_get0_extensions',
+    'X509_CRL_sort',
+    'X509_REVOKED_new',
+    'X509_REVOKED_free',
+    'X509_REVOKED_set_serialNumber',
+    'X509_REVOKED_set_revocationDate',
+    'X509_REVOKED_get0_serialNumber',
+    'X509_REVOKED_get0_revocationDate',
+    'X509_REVOKED_get_ext_d2i',
+    'X509_REVOKED_add1_ext_i2d',
     'X509_STORE_new',
     'X509_STORE_load_locations',
     'X509_STORE_set_default_paths',
@@ -2446,6 +2755,12 @@ const
     'X509_STORE_set1_param',
     'X509_STORE_get0_param',
     'X509_STORE_set_verify_cb',
+    'X509_STORE_lock',
+    'X509_STORE_unlock',
+    'X509_STORE_up_ref',
+    'X509_STORE_get0_objects',
+    'X509_OBJECT_get0_X509',
+    'X509_OBJECT_get0_X509_CRL',
     'X509_LOOKUP_hash_dir',
     'X509_LOOKUP_file',
     'X509_LOOKUP_ctrl',
@@ -2463,10 +2778,18 @@ const
     'X509_STORE_CTX_set_time',
     'X509_STORE_CTX_set_purpose',
     'X509_STORE_CTX_set_trust',
+    'ASN1_TIME_new',
+    'ASN1_TIME_free',
     'ASN1_TIME_set',
     'ASN1_TIME_set_string_X509',
     'ASN1_TIME_to_tm',
     'ASN1_TIME_normalize',
+    'OPENSSL_sk_new',
+    'OPENSSL_sk_free',
+    'OPENSSL_sk_pop_free',
+    'OPENSSL_sk_delete',
+    'OPENSSL_sk_find',
+    'OPENSSL_sk_push',
     'OPENSSL_sk_pop',
     'OPENSSL_sk_num',
     'OPENSSL_sk_value',
@@ -2520,6 +2843,10 @@ const
     'BN_to_ASN1_INTEGER',
     'ASN1_INTEGER_new',
     'ASN1_INTEGER_free',
+    'ASN1_ENUMERATED_set',
+    'ASN1_ENUMERATED_get',
+    'ASN1_ENUMERATED_new',
+    'ASN1_ENUMERATED_free',
     'EC_POINT_bn2point',
     'EC_KEY_set_public_key',
     'ECDSA_verify',
@@ -2786,6 +3113,11 @@ begin
   result := libcrypto.X509_REQ_new();
 end;
 
+function X509_REQ_set_version(x: PX509_REQ; version: integer): integer;
+begin
+  result := libcrypto.X509_REQ_set_version(x, version);
+end;
+
 procedure X509_REQ_free(a: PX509_REQ);
 begin
   libcrypto.X509_REQ_free(a);
@@ -2794,6 +3126,26 @@ end;
 function X509_REQ_sign(x: PX509_REQ; pkey: PEVP_PKEY; md: PEVP_MD): integer;
 begin
   result := libcrypto.X509_REQ_sign(x, pkey, md);
+end;
+
+function X509_REQ_verify(a: PX509_REQ; r: PEVP_PKEY): integer;
+begin
+  result := libcrypto.X509_REQ_verify(a, r);
+end;
+
+function d2i_X509_REQ_bio(bp: PBIO; req: PPX509_REQ): PX509_REQ;
+begin
+  result := libcrypto.d2i_X509_REQ_bio(bp, req);
+end;
+
+function i2d_X509_REQ_bio(bp: PBIO; req: PX509_REQ): integer;
+begin
+  result := libcrypto.i2d_X509_REQ_bio(bp, req);
+end;
+
+function PEM_write_bio_X509_REQ(bp: PBIO; x: PX509_REQ): integer;
+begin
+  result := libcrypto.PEM_write_bio_X509_REQ(bp, x);
 end;
 
 function X509_REQ_get_subject_name(req: PX509_REQ): PX509_NAME;
@@ -2987,6 +3339,175 @@ begin
   result := libcrypto.PEM_read_bio_X509_AUX(bp, x, cb, u);
 end;
 
+function X509_CRL_new(): PX509_CRL;
+begin
+  result := libcrypto.X509_CRL_new();
+end;
+
+procedure X509_CRL_free(a: PX509_CRL);
+begin
+  libcrypto.X509_CRL_free(a);
+end;
+
+function X509_CRL_verify(a: PX509_CRL; r: PEVP_PKEY): integer;
+begin
+  result := libcrypto.X509_CRL_verify(a, r);
+end;
+
+function X509_CRL_sign(x: PX509_CRL; pkey: PEVP_PKEY; md: PEVP_MD): integer;
+begin
+  result := libcrypto.X509_CRL_sign(x, pkey, md);
+end;
+
+function X509_CRL_dup(crl: PX509_CRL): PX509_CRL;
+begin
+  result := libcrypto.X509_CRL_dup(crl);
+end;
+
+function X509_CRL_up_ref(crl: PX509_CRL): integer;
+begin
+  result := libcrypto.X509_CRL_up_ref(crl);
+end;
+
+function X509_CRL_set_version(x: PX509_CRL; version: integer): integer;
+begin
+  result := libcrypto.X509_CRL_set_version(x, version);
+end;
+
+function X509_CRL_set_issuer_name(x: PX509_CRL; name: PX509_NAME): integer;
+begin
+  result := libcrypto.X509_CRL_set_issuer_name(x, name);
+end;
+
+function X509_CRL_set_lastUpdate(x: PX509_CRL; tm: PASN1_TIME): integer;
+begin
+  result := libcrypto.X509_CRL_set_lastUpdate(x, tm);
+end;
+
+function X509_CRL_set_nextUpdate(x: PX509_CRL; tm: PASN1_TIME): integer;
+begin
+  result := libcrypto.X509_CRL_set_nextUpdate(x, tm);
+end;
+
+function X509_CRL_get_issuer(crl: PX509_CRL): PX509_NAME;
+begin
+  result := libcrypto.X509_CRL_get_issuer(crl);
+end;
+
+function X509_CRL_get_version(crl: PX509_CRL): integer;
+begin
+  result := libcrypto.X509_CRL_get_version(crl);
+end;
+
+function X509_CRL_get_lastUpdate(crl: PX509_CRL): PASN1_TIME;
+begin
+  result := libcrypto.X509_CRL_get_lastUpdate(crl);
+end;
+
+function X509_CRL_get_nextUpdate(crl: PX509_CRL): PASN1_TIME;
+begin
+  result := libcrypto.X509_CRL_get_nextUpdate(crl);
+end;
+
+function d2i_X509_CRL_bio(bp: PBIO; crl: PPX509_CRL): PX509_CRL;
+begin
+  result := libcrypto.d2i_X509_CRL_bio(bp, crl);
+end;
+
+function i2d_X509_CRL_bio(bp: PBIO; crl: PX509_CRL): integer;
+begin
+  result := libcrypto.i2d_X509_CRL_bio(bp, crl);
+end;
+
+function PEM_write_bio_X509_CRL(bp: PBIO; x: PX509_CRL): integer;
+begin
+  result := libcrypto.PEM_write_bio_X509_CRL(bp, x);
+end;
+
+function PEM_read_bio_X509_CRL(bp: PBIO; x: PPX509_CRL; cb: Ppem_password_cb; u: pointer): PX509_CRL;
+begin
+  result := libcrypto.PEM_read_bio_X509_CRL(bp, x, cb, u);
+end;
+
+function X509_CRL_add1_ext_i2d(x: PX509_CRL; nid: integer; value: pointer;
+  crit: integer; flags: cardinal): integer;
+begin
+  result := libcrypto.X509_CRL_add1_ext_i2d(x, nid, value, crit, flags);
+end;
+
+function X509_CRL_get_ext_d2i(x: PX509_CRL; nid: integer; crit: PInteger;
+  idx: PInteger): pointer;
+begin
+  result := libcrypto.X509_CRL_get_ext_d2i(x, nid, crit, idx);
+end;
+
+function X509_CRL_add0_revoked(crl: PX509_CRL; rev: PX509_REVOKED): integer;
+begin
+  result := libcrypto.X509_CRL_add0_revoked(crl, rev);
+end;
+
+function X509_CRL_delete_ext(x: PX509_CRL; loc: integer): PX509_EXTENSION;
+begin
+  result := libcrypto.X509_CRL_delete_ext(x, loc);
+end;
+
+function X509_CRL_get_REVOKED(crl: PX509_CRL): Pstack_st_X509_REVOKED;
+begin
+  result := libcrypto.X509_CRL_get_REVOKED(crl);
+end;
+
+function X509_CRL_get0_extensions(crl: PX509_CRL): Pstack_st_X509_EXTENSION;
+begin
+  result := libcrypto.X509_CRL_get0_extensions(crl);
+end;
+
+function X509_CRL_sort(crl: PX509_CRL): integer;
+begin
+  result := libcrypto.X509_CRL_sort(crl);
+end;
+
+function X509_REVOKED_new(): PX509_REVOKED;
+begin
+  result := libcrypto.X509_REVOKED_new();
+end;
+
+procedure X509_REVOKED_free(a: PX509_REVOKED);
+begin
+  libcrypto.X509_REVOKED_free(a);
+end;
+
+function X509_REVOKED_set_serialNumber(x: PX509_REVOKED; serial: PASN1_INTEGER): integer;
+begin
+  result := libcrypto.X509_REVOKED_set_serialNumber(x, serial);
+end;
+
+function X509_REVOKED_set_revocationDate(r: PX509_REVOKED; tm: PASN1_TIME): integer;
+begin
+  result := libcrypto.X509_REVOKED_set_revocationDate(r, tm);
+end;
+
+function X509_REVOKED_get0_serialNumber(x: PX509_REVOKED): PASN1_INTEGER;
+begin
+  result := libcrypto.X509_REVOKED_get0_serialNumber(x);
+end;
+
+function X509_REVOKED_get0_revocationDate(x: PX509_REVOKED): PASN1_TIME;
+begin
+  result := libcrypto.X509_REVOKED_get0_revocationDate(x);
+end;
+
+function X509_REVOKED_get_ext_d2i(x: PX509_REVOKED; nid: integer; crit: PInteger;
+  idx: PInteger): pointer;
+begin
+  result := libcrypto.X509_REVOKED_get_ext_d2i(x, nid, crit, idx);
+end;
+
+function X509_REVOKED_add1_ext_i2d(x: PX509_REVOKED; nid: integer; value: pointer;
+  crit: integer; flags: cardinal): integer;
+begin
+  result := libcrypto.X509_REVOKED_add1_ext_i2d(x, nid, value, crit, flags);
+end;
+
 function X509_STORE_new(): PX509_STORE;
 begin
   result := libcrypto.X509_STORE_new();
@@ -3035,6 +3556,36 @@ end;
 procedure X509_STORE_set_verify_cb(ctx: PX509_STORE; verify_cb: X509_STORE_CTX_verify_cb);
 begin
   libcrypto.X509_STORE_set_verify_cb(ctx, verify_cb);
+end;
+
+function X509_STORE_lock(ctx: PX509_STORE): integer;
+begin
+  result := libcrypto.X509_STORE_lock(ctx);
+end;
+
+function X509_STORE_unlock(ctx: PX509_STORE): integer;
+begin
+  result := libcrypto.X509_STORE_unlock(ctx);
+end;
+
+function X509_STORE_up_ref(v: PX509_STORE): integer;
+begin
+  result := libcrypto.X509_STORE_up_ref(v);
+end;
+
+function X509_STORE_get0_objects(v: PX509_STORE): Pstack_st_X509_OBJECT;
+begin
+  result := libcrypto.X509_STORE_get0_objects(v);
+end;
+
+function X509_OBJECT_get0_X509(a: PX509_OBJECT): PX509;
+begin
+  result := libcrypto.X509_OBJECT_get0_X509(a);
+end;
+
+function X509_OBJECT_get0_X509_CRL(a: PX509_OBJECT): PX509_CRL;
+begin
+  result := libcrypto.X509_OBJECT_get0_X509_CRL(a);
 end;
 
 function X509_LOOKUP_hash_dir(): PX509_LOOKUP_METHOD;
@@ -3135,6 +3686,16 @@ begin
   result := libcrypto.X509_LOOKUP_ctrl(ctx, X509_L_ADD_DIR, name, typ, nil);
 end;
 
+function ASN1_TIME_new(): PASN1_TIME;
+begin
+  result := libcrypto.ASN1_TIME_new();
+end;
+
+procedure ASN1_TIME_free(a: PASN1_TIME);
+begin
+  libcrypto.ASN1_TIME_free(a);
+end;
+
 function ASN1_TIME_set(s: PASN1_TIME; t: time_t): PASN1_TIME;
 begin
   result := libcrypto.ASN1_TIME_set(s, t);
@@ -3153,6 +3714,36 @@ end;
 function ASN1_TIME_normalize(s: PASN1_TIME): integer;
 begin
   result := libcrypto.ASN1_TIME_normalize(s);
+end;
+
+function OPENSSL_sk_new(cmp: OPENSSL_sk_compfunc): POPENSSL_STACK;
+begin
+  result := libcrypto.OPENSSL_sk_new(cmp);
+end;
+
+procedure OPENSSL_sk_free(p1: POPENSSL_STACK);
+begin
+  libcrypto.OPENSSL_sk_free(p1);
+end;
+
+procedure OPENSSL_sk_pop_free(st: POPENSSL_STACK; func: OPENSSL_sk_freefunc);
+begin
+  libcrypto.OPENSSL_sk_pop_free(st, func);
+end;
+
+function OPENSSL_sk_delete(st: POPENSSL_STACK; loc: integer): pointer;
+begin
+  result := libcrypto.OPENSSL_sk_delete(st, loc);
+end;
+
+function OPENSSL_sk_find(st: POPENSSL_STACK; data: pointer): integer;
+begin
+  result := libcrypto.OPENSSL_sk_find(st, data);
+end;
+
+function OPENSSL_sk_push(st: POPENSSL_STACK; data: pointer): integer;
+begin
+  result := libcrypto.OPENSSL_sk_push(st, data);
 end;
 
 function OPENSSL_sk_pop(st: POPENSSL_STACK): pointer;
@@ -3427,6 +4018,26 @@ end;
 procedure ASN1_INTEGER_free(a: PASN1_INTEGER);
 begin
   libcrypto.ASN1_INTEGER_free(a);
+end;
+
+function ASN1_ENUMERATED_set(a: PASN1_ENUMERATED; v: integer): integer;
+begin
+  result := libcrypto.ASN1_ENUMERATED_set(a, v);
+end;
+
+function ASN1_ENUMERATED_get(a: PASN1_ENUMERATED): integer;
+begin
+  result := libcrypto.ASN1_ENUMERATED_get(a);
+end;
+
+function ASN1_ENUMERATED_new(): PASN1_ENUMERATED;
+begin
+  result := libcrypto.ASN1_ENUMERATED_new();
+end;
+
+procedure ASN1_ENUMERATED_free(a: PASN1_ENUMERATED);
+begin
+  libcrypto.ASN1_ENUMERATED_free(a);
 end;
 
 function EC_POINT_bn2point(p1: PEC_GROUP; p2: PBIGNUM; p3: PEC_POINT;
@@ -4037,11 +4648,26 @@ function X509_sign(x: PX509; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
 function X509_REQ_new(): PX509_REQ; cdecl;
   external LIB_CRYPTO name _PU + 'X509_REQ_new';
 
+function X509_REQ_set_version(x: PX509_REQ; version: integer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REQ_set_version';
+
 procedure X509_REQ_free(a: PX509_REQ); cdecl;
   external LIB_CRYPTO name _PU + 'X509_REQ_free';
 
 function X509_REQ_sign(x: PX509_REQ; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_REQ_sign';
+
+function X509_REQ_verify(a: PX509_REQ; r: PEVP_PKEY): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REQ_verify';
+
+function d2i_X509_REQ_bio(bp: PBIO; req: PPX509_REQ): PX509_REQ; cdecl;
+  external LIB_CRYPTO name _PU + 'd2i_X509_REQ_bio';
+
+function i2d_X509_REQ_bio(bp: PBIO; req: PX509_REQ): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'i2d_X509_REQ_bio';
+
+function PEM_write_bio_X509_REQ(bp: PBIO; x: PX509_REQ): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'PEM_write_bio_X509_REQ';
 
 function X509_REQ_get_subject_name(req: PX509_REQ): PX509_NAME; cdecl;
   external LIB_CRYPTO name _PU + 'X509_REQ_get_subject_name';
@@ -4160,6 +4786,105 @@ function d2i_X509_bio(bp: PBIO; x509: PPX509): PX509; cdecl;
 function PEM_read_bio_X509_AUX(bp: PBIO; x: PPX509; cb: Ppem_password_cb; u: pointer): PX509; cdecl;
   external LIB_CRYPTO name _PU + 'PEM_read_bio_X509_AUX';
 
+function X509_CRL_new(): PX509_CRL; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_new';
+
+procedure X509_CRL_free(a: PX509_CRL); cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_free';
+
+function X509_CRL_verify(a: PX509_CRL; r: PEVP_PKEY): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_verify';
+
+function X509_CRL_sign(x: PX509_CRL; pkey: PEVP_PKEY; md: PEVP_MD): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_sign';
+
+function X509_CRL_dup(crl: PX509_CRL): PX509_CRL; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_dup';
+
+function X509_CRL_up_ref(crl: PX509_CRL): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_up_ref';
+
+function X509_CRL_set_version(x: PX509_CRL; version: integer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_set_version';
+
+function X509_CRL_set_issuer_name(x: PX509_CRL; name: PX509_NAME): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_set_issuer_name';
+
+function X509_CRL_set_lastUpdate(x: PX509_CRL; tm: PASN1_TIME): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_set1_lastUpdate';
+
+function X509_CRL_set_nextUpdate(x: PX509_CRL; tm: PASN1_TIME): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_set1_nextUpdate';
+
+function X509_CRL_get_issuer(crl: PX509_CRL): PX509_NAME; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_get_issuer';
+
+function X509_CRL_get_version(crl: PX509_CRL): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_get_version';
+
+function X509_CRL_get_lastUpdate(crl: PX509_CRL): PASN1_TIME; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_get_lastUpdate';
+
+function X509_CRL_get_nextUpdate(crl: PX509_CRL): PASN1_TIME; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_get_nextUpdate';
+
+function d2i_X509_CRL_bio(bp: PBIO; crl: PPX509_CRL): PX509_CRL; cdecl;
+  external LIB_CRYPTO name _PU + 'd2i_X509_CRL_bio';
+
+function i2d_X509_CRL_bio(bp: PBIO; crl: PX509_CRL): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'i2d_X509_CRL_bio';
+
+function PEM_write_bio_X509_CRL(bp: PBIO; x: PX509_CRL): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'PEM_write_bio_X509_CRL';
+
+function PEM_read_bio_X509_CRL(bp: PBIO; x: PPX509_CRL; cb: Ppem_password_cb; u: pointer): PX509_CRL; cdecl;
+  external LIB_CRYPTO name _PU + 'PEM_read_bio_X509_CRL';
+
+function X509_CRL_add1_ext_i2d(x: PX509_CRL; nid: integer; value: pointer; crit: integer; flags: cardinal): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_add1_ext_i2d';
+
+function X509_CRL_get_ext_d2i(x: PX509_CRL; nid: integer; crit: PInteger; idx: PInteger): pointer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_get_ext_d2i';
+
+function X509_CRL_add0_revoked(crl: PX509_CRL; rev: PX509_REVOKED): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_add0_revoked';
+
+function X509_CRL_delete_ext(x: PX509_CRL; loc: integer): PX509_EXTENSION; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_delete_ext';
+
+function X509_CRL_get_REVOKED(crl: PX509_CRL): Pstack_st_X509_REVOKED; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_get_REVOKED';
+
+function X509_CRL_get0_extensions(crl: PX509_CRL): Pstack_st_X509_EXTENSION; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_get0_extensions';
+
+function X509_CRL_sort(crl: PX509_CRL): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_CRL_sort';
+
+function X509_REVOKED_new(): PX509_REVOKED; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REVOKED_new';
+
+procedure X509_REVOKED_free(a: PX509_REVOKED); cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REVOKED_free';
+
+function X509_REVOKED_set_serialNumber(x: PX509_REVOKED; serial: PASN1_INTEGER): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REVOKED_set_serialNumber';
+
+function X509_REVOKED_set_revocationDate(r: PX509_REVOKED; tm: PASN1_TIME): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REVOKED_set_revocationDate';
+
+function X509_REVOKED_get0_serialNumber(x: PX509_REVOKED): PASN1_INTEGER; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REVOKED_get0_serialNumber';
+
+function X509_REVOKED_get0_revocationDate(x: PX509_REVOKED): PASN1_TIME; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REVOKED_get0_revocationDate';
+
+function X509_REVOKED_get_ext_d2i(x: PX509_REVOKED; nid: integer; crit: PInteger; idx: PInteger): pointer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REVOKED_get_ext_d2i';
+
+function X509_REVOKED_add1_ext_i2d(x: PX509_REVOKED; nid: integer; value: pointer; crit: integer; flags: cardinal): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_REVOKED_add1_ext_i2d';
+
 function X509_STORE_new(): PX509_STORE; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_new';
 
@@ -4189,6 +4914,24 @@ function X509_STORE_get0_param(ctx: PX509_STORE): PX509_VERIFY_PARAM; cdecl;
 
 procedure X509_STORE_set_verify_cb(ctx: PX509_STORE; verify_cb: X509_STORE_CTX_verify_cb); cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_set_verify_cb';
+
+function X509_STORE_lock(ctx: PX509_STORE): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_STORE_lock';
+
+function X509_STORE_unlock(ctx: PX509_STORE): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_STORE_unlock';
+
+function X509_STORE_up_ref(v: PX509_STORE): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_STORE_up_ref';
+
+function X509_STORE_get0_objects(v: PX509_STORE): Pstack_st_X509_OBJECT; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_STORE_get0_objects';
+
+function X509_OBJECT_get0_X509(a: PX509_OBJECT): PX509; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_OBJECT_get0_X509';
+
+function X509_OBJECT_get0_X509_CRL(a: PX509_OBJECT): PX509_CRL; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_OBJECT_get0_X509_CRL';
 
 function X509_LOOKUP_hash_dir(): PX509_LOOKUP_METHOD; cdecl;
   external LIB_CRYPTO name _PU + 'X509_LOOKUP_hash_dir';
@@ -4241,6 +4984,12 @@ function X509_STORE_CTX_set_purpose(ctx: PX509_STORE_CTX; purpose: integer): int
 function X509_STORE_CTX_set_trust(ctx: PX509_STORE_CTX; trust: integer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_STORE_CTX_set_trust';
 
+function ASN1_TIME_new(): PASN1_TIME; cdecl;
+  external LIB_CRYPTO name _PU + 'ASN1_TIME_new';
+
+procedure ASN1_TIME_free(a: PASN1_TIME); cdecl;
+  external LIB_CRYPTO name _PU + 'ASN1_TIME_free';
+
 function ASN1_TIME_set(s: PASN1_TIME; t: time_t): PASN1_TIME; cdecl;
   external LIB_CRYPTO name _PU + 'ASN1_TIME_set';
 
@@ -4252,6 +5001,24 @@ function ASN1_TIME_to_tm(s: PASN1_TIME; tm: Ptm): integer; cdecl;
 
 function ASN1_TIME_normalize(s: PASN1_TIME): integer; cdecl;
   external LIB_CRYPTO name _PU + 'ASN1_TIME_normalize';
+
+function OPENSSL_sk_new(cmp: OPENSSL_sk_compfunc): POPENSSL_STACK; cdecl;
+  external LIB_CRYPTO name _PU + 'OPENSSL_sk_new';
+
+procedure OPENSSL_sk_pop_free(st: POPENSSL_STACK; func: OPENSSL_sk_freefunc); cdecl;
+      external LIB_CRYPTO name _PU +
+
+procedure OPENSSL_sk_free(p1: POPENSSL_STACK); cdecl;
+  external LIB_CRYPTO name _PU + 'OPENSSL_sk_free';
+
+function OPENSSL_sk_delete(st: POPENSSL_STACK; loc: integer): pointer; cdecl;
+  external LIB_CRYPTO name _PU + 'OPENSSL_sk_delete';
+
+function OPENSSL_sk_find(st: POPENSSL_STACK; data: pointer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'OPENSSL_sk_find';
+
+function OPENSSL_sk_push(st: POPENSSL_STACK; data: pointer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'OPENSSL_sk_push';
 
 function OPENSSL_sk_pop(st: POPENSSL_STACK): pointer; cdecl;
   external LIB_CRYPTO name _PU + 'OPENSSL_sk_pop';
@@ -4419,6 +5186,18 @@ function ASN1_INTEGER_new(): PASN1_INTEGER; cdecl;
 
 procedure ASN1_INTEGER_free(a: PASN1_INTEGER); cdecl;
   external LIB_CRYPTO name _PU + 'ASN1_INTEGER_free';
+
+function ASN1_ENUMERATED_set(a: PASN1_ENUMERATED; v: integer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'ASN1_ENUMERATED_set';
+
+function ASN1_ENUMERATED_get(a: PASN1_ENUMERATED): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'ASN1_ENUMERATED_get';
+
+function ASN1_ENUMERATED_new(): PASN1_ENUMERATED; cdecl;
+  external LIB_CRYPTO name _PU + 'ASN1_ENUMERATED_new';
+
+procedure ASN1_ENUMERATED_free(a: PASN1_ENUMERATED); cdecl;
+  external LIB_CRYPTO name _PU + 'ASN1_ENUMERATED_free';
 
 function EC_POINT_bn2point(p1: PEC_GROUP; p2: PBIGNUM; p3: PEC_POINT;
   p4: PBN_CTX): PEC_POINT; cdecl;
@@ -4681,18 +5460,61 @@ begin
             EncodeTime(t.tm_hour, t.tm_min, t.tm_sec, 0);
 end;
 
-function OpenSSLStackToDynArray(stack: pointer): TPointerDynArray;
+function NewOpenSslStack: POPENSSL_STACK;
+begin
+  result := OPENSSL_sk_new(nil);
+end;
+
+
+{ OPENSSL_STACK }
+
+function OPENSSL_STACK.Count: integer;
+begin
+  if @self = nil then
+    result := 0 // OPENSSL_sk_num(nil) would return -1
+  else
+    result := OPENSSL_sk_num(@self);
+end;
+
+function OPENSSL_STACK.Add(one: pointer): integer;
+begin
+  result := OPENSSL_sk_push(@self, one);
+end;
+
+function OPENSSL_STACK.Find(one: pointer): integer;
+begin
+  result := OPENSSL_sk_find(@self, one);
+end;
+
+function OPENSSL_STACK.Extract(index: integer): pointer;
+begin
+  result := OPENSSL_sk_delete(@self, index);
+end;
+
+function OPENSSL_STACK.GetItem(index: PtrInt): pointer;
+begin
+  result := OPENSSL_sk_value(@self, index);
+end;
+
+function OPENSSL_STACK.ToDynArray: TPointerDynArray;
 var
   i: PtrInt;
 begin
-  if stack = nil then
-    result := nil // OPENSSL_sk_num(nil) would return -1
-  else
-  begin
-    SetLength(result, OPENSSL_sk_num(stack));
-    for i := 0 to length(result) - 1 do
-      result[i] := OPENSSL_sk_value(stack, i);
-  end;
+  SetLength(result, Count);
+  for i := 0 to length(result) - 1 do
+    result[i] := OPENSSL_sk_value(@self, i);
+end;
+
+procedure OPENSSL_STACK.Free;
+begin
+  if @self <> nil then
+    OPENSSL_sk_free(@self);
+end;
+
+procedure OPENSSL_STACK.FreeX509;
+begin
+  if @self <> nil then
+    OPENSSL_sk_pop_free(@self, @X509_free);
 end;
 
 
@@ -4716,7 +5538,8 @@ begin
         inc(s);
       if cipher[s] >= ' ' then
       begin
-        cipher[d] := cipher[s];
+        if s <> d then
+          cipher[d] := cipher[s];
         inc(d);
       end;
       inc(s);
@@ -4754,7 +5577,7 @@ end;
 
 function SSL.PeerCertificates: PX509DynArray;
 begin
- result := PX509DynArray(OpenSSLStackToDynArray(PeerChain));
+  result := PX509DynArray(PeerChain.ToDynArray);
 end;
 
 function SSL.PeerCertificatesAsPEM: RawUtf8;
@@ -4794,30 +5617,47 @@ end;
 
 { EVP_PKEY }
 
-function EVP_PKEY.PrivateToBinary: RawByteString;
+type
+  TBioSave = function(bio: PBIO; instance: pointer): integer; cdecl;
+  TBioLoad = function(bio: PBIO; instance: pointer): pointer; cdecl;
+
+function BioSave(instance: pointer; sav: TBioSave;
+  codepage: integer = CP_RAWBYTESTRING): RawByteString;
 var
   bio: PBIO;
 begin
   result := '';
-  if @self = nil then
+  if instance = nil then
     exit;
   bio := BIO_new(BIO_s_mem);
-  if i2d_PrivateKey_bio(bio, @self) = OPENSSLSUCCESS then
-    bio.ToString(result);
+  if sav(bio, instance) = OPENSSLSUCCESS then
+    bio.ToString(result, codepage);
   bio.Free;
 end;
 
-function EVP_PKEY.PublicToBinary: RawByteString;
+function BioLoad(const mem: RawByteString; load: TBioLoad): pointer;
 var
   bio: PBIO;
 begin
-  result := '';
-  if @self = nil then
-    exit;
-  bio := BIO_new(BIO_s_mem);
-  if i2d_PUBKEY_bio(bio, @self) = OPENSSLSUCCESS then
-    bio.ToString(result);
-  bio.Free;
+  EOpenSsl.CheckAvailable(nil, 'BioLoad');
+  if mem = '' then
+    result := nil
+  else
+  begin
+    bio := BIO_new_mem_buf(pointer(mem), length(mem));
+    result := load(bio, nil);
+    bio.Free;
+  end;
+end;
+
+function EVP_PKEY.PrivateToBinary: RawByteString;
+begin
+  result := BioSave(@self, @i2d_PrivateKey_bio);
+end;
+
+function EVP_PKEY.PublicToBinary: RawByteString;
+begin
+  result := BioSave(@self, @i2d_PUBKEY_bio);
 end;
 
 function EVP_PKEY.PrivateKeyToPem(const PassWord: RawUtf8): RawUtf8;
@@ -4840,16 +5680,8 @@ begin
 end;
 
 function EVP_PKEY.PublicKeyToPem: RawUtf8;
-var
-  bio: PBIO;
 begin
-  result := '';
-  if @self = nil then
-    exit;
-  bio := BIO_new(BIO_s_mem);
-  if PEM_write_bio_PUBKEY(bio, @self) = OPENSSLSUCCESS then
-    result := bio.ToUtf8;
-  bio.Free;
+  result := BioSave(@self, @PEM_write_bio_PUBKEY, CP_UTF8);
 end;
 
 procedure EVP_PKEY.ToPem(out PrivateKey, PublicKey: RawUtf8);
@@ -4865,7 +5697,7 @@ var
   ctx: PEVP_MD_CTX;
   s: PtrUInt;
 begin
-  // we don't check "if @self = nil" because may be called withou EVP_PKEY
+  // we don't check "if @self = nil" because may be called without EVP_PKEY
   result := ''; // on error
   ctx := EVP_MD_CTX_new;
   try
@@ -5029,6 +5861,24 @@ begin
     result := X509_REQ_get_subject_name(@self);
 end;
 
+function X509_REQ.ToBinary: RawByteString;
+begin
+  result := BioSave(@self, @i2d_X509_REQ_bio);
+end;
+
+function X509_REQ.ToPem: RawUtf8;
+begin
+  result := BioSave(@self, @PEM_write_bio_X509_REQ, CP_UTF8);
+end;
+
+function X509_REQ.Sign(pkey: PEVP_PKEY; md: PEVP_MD): integer;
+begin
+  if @self = nil then
+    result := 0
+  else
+    result := X509_REQ_sign(@self, pkey, md);
+end;
+
 procedure X509_REQ.Free;
 begin
   if @self <> nil then
@@ -5078,6 +5928,288 @@ begin
 end;
 
 
+{ X509_REVOKED }
+
+function X509_REVOKED.SerialNumber: RawUtf8;
+begin
+  if @self = nil then
+    result := ''
+  else
+    X509_REVOKED_get0_serialNumber(@self).ToHex(result);
+end;
+
+function X509_REVOKED.RevocationDate: TDateTime;
+begin
+  if @self = nil then
+    result := 0
+  else
+    result := X509_REVOKED_get0_revocationDate(@self).ToDateTime;
+end;
+
+function X509_REVOKED.Reason: integer;
+var
+  crit: integer;
+  enum: pointer;
+begin
+  result := CRL_REASON_UNSPECIFIED; // = 0
+  if @self = nil then
+    exit;
+  crit := 0;
+  enum := X509_REVOKED_get_ext_d2i(@self, NID_crl_reason, @crit, nil);
+  if enum = nil then
+    if crit <> -1 then
+      exit
+    else
+      result := CRL_REASON_NONE // = -1
+  else
+  begin
+    result := ASN1_ENUMERATED_get(enum);
+    ASN1_ENUMERATED_free(enum);
+  end;
+end;
+
+function X509_REVOKED.SetReason(value: integer): boolean;
+var
+  enum: PASN1_ENUMERATED;
+begin
+  result := false;
+  if @self = nil then
+    exit;
+  enum := ASN1_ENUMERATED_new();
+  result := (ASN1_ENUMERATED_set(enum, value) = OPENSSLSUCCESS) and
+    (X509_REVOKED_add1_ext_i2d(@self, NID_crl_reason, enum, 0, 0) = OPENSSLSUCCESS);
+  ASN1_ENUMERATED_free(enum);
+end;
+
+procedure X509_REVOKED.Free;
+begin
+  if @self <> nil then
+    X509_REVOKED_free(@self);
+end;
+
+
+{ X509_CRL }
+
+function X509_CRL.Version: integer;
+begin
+  if @self = nil then
+    result := 0
+  else
+    result := X509_CRL_get_version(@self);
+end;
+
+function X509_CRL.LastUpdate: TDateTime;
+begin
+  if @self = nil then
+    result := 0
+  else
+    result := X509_CRL_get_lastUpdate(@self).ToDateTime;
+end;
+
+function X509_CRL.NextUpdate: TDateTime;
+begin
+  if @self = nil then
+    result := 0
+  else
+    result := X509_CRL_get_nextUpdate(@self).ToDateTime;
+end;
+
+function X509_CRL.IssuerName: RawUtf8;
+begin
+  if @self = nil then
+    result := ''
+  else
+    X509_CRL_get_issuer(@self).ToUtf8(result);
+end;
+
+function X509_CRL.Revoked: Pstack_st_X509_REVOKED;
+begin
+  if @self = nil then
+    result := nil
+  else
+    result := X509_CRL_get_REVOKED(@self);
+end;
+
+function X509_CRL.IsRevoked(const serialnumber: RawUtf8): integer;
+var
+  rev: Pstack_st_X509_REVOKED;
+  r: PX509_REVOKED;
+  i: PtrInt;
+begin
+  rev := Revoked;
+  for i := 0 to rev^.Count - 1 do
+  begin
+    r := rev.GetItem(i);
+    if r.SerialNumber = serialnumber then
+    begin
+      result := r.Reason;
+      if (result >= 0) and
+         (result <> CRL_REASON_REMOVE_FROM_CRL) then
+        exit;
+    end;
+  end;
+  result := CRL_REASON_NONE; // = -1 if not revoked
+end;
+
+function X509_CRL.IsRevoked(serial: PASN1_INTEGER): integer;
+var
+  rev: Pstack_st_X509_REVOKED;
+  r: PX509_REVOKED;
+  i: PtrInt;
+begin
+  if serial.Len <> 0 then
+  begin
+    rev := Revoked;
+    for i := 0 to rev^.Count - 1 do
+    begin
+      r := rev.GetItem(i);
+      if X509_REVOKED_get0_serialNumber(r).Equals(serial^) then
+      begin
+        result := r.Reason;
+        if (result >= 0) and
+           (result <> CRL_REASON_REMOVE_FROM_CRL) then
+          exit;
+      end;
+    end;
+  end;
+  result := CRL_REASON_NONE; // = -1 if not revoked
+end;
+
+function X509_CRL.AddFrom(another: PX509_CRL): integer;
+var
+  rev: Pstack_st_X509_REVOKED;
+  i: PtrInt;
+begin
+  result := 0;
+  if (@self = nil) or
+     (another = nil) then
+    exit;
+  rev := Revoked;
+  if rev^.Count = 0 then
+    exit;
+  for i := 0 to rev^.Count - 1 do
+    if X509_CRL_add0_revoked(@self, rev.GetItem(i)) = OPENSSLSUCCESS then
+      inc(result);
+  if result <> 0 then
+    X509_CRL_sort(@self);
+end;
+
+function X509_CRL.AddFromPem(const Pem: RawUtf8): integer;
+var
+  crl: PX509_CRL;
+begin
+  crl := LoadCertificateCrlFromPem(Pem);
+  result := AddFrom(crl);
+  crl.Free;
+end;
+
+function X509_CRL.AddRevokedSerial(serial: PASN1_INTEGER; ca: PX509;
+  reason: integer; nextUpdateDays: integer): boolean;
+var
+  rev: PX509_REVOKED;
+  tm: PASN1_TIME;
+begin
+  result := false;
+  if (@self = nil) or
+     (serial = nil) or
+     (IsRevoked(serial) >= 0) or
+     ((ca <> nil) and
+      (not ca.IsCA)) then
+    exit;
+  rev := X509_REVOKED_new();
+  X509_REVOKED_set_serialNumber(rev, serial);
+  tm := ASN1_TIME_new(); // now
+  X509_REVOKED_set_revocationDate(rev, tm);
+  X509_CRL_set_lastUpdate(@self, tm);
+  X509_gmtime_adj(tm, SecsPerDay * nextUpdateDays);
+  X509_CRL_set_nextUpdate(@self, tm);
+  ASN1_TIME_free(tm);
+  if reason = 0 then
+    reason := CRL_REASON_SUPERSEDED;
+  rev.SetReason(reason);
+  if X509_CRL_add0_revoked(@self, rev) = OPENSSLSUCCESS then
+  begin
+    X509_CRL_sort(@self);
+    if ca <> nil then
+      X509_CRL_set_issuer_name(@self, ca.GetName);
+    result := true;
+  end
+  else
+    rev^.Free;
+end;
+
+function X509_CRL.AddRevokedCertificate(x, ca: PX509; nextUpdateDays: integer): boolean;
+begin
+  result := (x <> nil) and
+            AddRevokedSerial(X509_get_serialNumber(x), ca, nextUpdateDays);
+end;
+
+function X509_CRL.Extensions: Pstack_st_X509_EXTENSION;
+begin
+  if @self = nil then
+    result := nil
+  else
+    result := X509_CRL_get0_extensions(@self);
+end;
+
+function X509_CRL.GetExtensions: TX509_Extensions;
+var
+  i: PtrInt;
+  ext: Pstack_st_X509_EXTENSION;
+begin
+  ext := Extensions;
+  SetLength(result, ext.Count);
+  for i := 0 to length(result) - 1 do
+    result[i].SetExtension(ext.GetItem(i));
+end;
+
+function X509_CRL.Extension(nid: integer): PX509_EXTENSION;
+var
+  i: PtrInt;
+  ext: Pstack_st_X509_EXTENSION;
+begin
+  ext := Extensions;
+  for i := 0 to ext.Count - 1 do
+  begin
+    result := ext.GetItem(i);
+    if OBJ_obj2nid(X509_EXTENSION_get_object(result)) = nid then
+      exit;
+  end;
+  result := nil;
+end;
+
+function X509_CRL.ToBinary: RawByteString;
+begin
+  result := BioSave(@self, @i2d_X509_CRL_bio);
+end;
+
+function X509_CRL.ToPem: RawUtf8;
+begin
+  result := BioSave(@self, @PEM_write_bio_X509_CRL, CP_UTF8);
+end;
+
+function X509_CRL.Sign(pkey: PEVP_PKEY; md: PEVP_MD): integer;
+begin
+  if @self = nil then
+    result := 0
+  else
+    result := X509_CRL_sign(@self, pkey, md);
+end;
+
+function X509_CRL.Acquire: integer;
+begin
+  if @self = nil then
+    result := -1
+  else
+    result := X509_CRL_up_ref(@self);
+end;
+
+procedure X509_CRL.Free;
+begin
+  if @self <> nil then
+    X509_CRL_free(@self);
+end;
+
 
 { X509_STORE_CTX }
 
@@ -5109,6 +6241,122 @@ end;
 
 { X509_STORE }
 
+function CountObjects(store: PX509_STORE; crl: boolean): integer;
+var
+  i: integer; // no PtrInt here for integer C API parameters
+  p: pointer;
+  obj: Pstack_st_X509_OBJECT;
+begin
+  result := 0;
+  if store = nil then
+    exit;
+  X509_STORE_lock(store);
+  obj := X509_STORE_get0_objects(store);
+  for i := 0 to obj^.Count - 1 do
+  begin
+    p := obj^.GetItem(i);
+    if crl then
+      p := X509_OBJECT_get0_X509_CRL(p)
+    else
+      p := X509_OBJECT_get0_X509(p);
+    inc(result, ord(p <> nil));
+  end;
+  X509_STORE_unlock(store);
+end;
+
+function GetObjects(store: PX509_STORE; crl: boolean): TPointerDynArray;
+var
+  i, n: integer; // no PtrInt here for integer C API parameters
+  p: pointer;
+  obj: Pstack_st_X509_OBJECT;
+begin
+  result := nil;
+  if store = nil then
+    exit;
+  n := 0;
+  X509_STORE_lock(store);
+  obj := X509_STORE_get0_objects(store);
+  for i := 0 to obj^.Count - 1 do
+  begin
+    p := obj^.GetItem(i);
+    if crl then
+      p := X509_OBJECT_get0_X509_CRL(p)
+    else
+      p := X509_OBJECT_get0_X509(p);
+    if p <> nil then
+      PtrArrayAdd(result, p, n); // store by reference with no Acquire
+  end;
+  X509_STORE_unlock(store);
+  if n <> 0 then
+    DynArrayFakeLength(result, n);
+end;
+
+function X509_STORE.CertificateCount: integer;
+begin
+  result := CountObjects(@self, {crl=}false);
+end;
+
+function X509_STORE.CrlCount: integer;
+begin
+  result := CountObjects(@self, {crl=}true);
+end;
+
+function X509_STORE.Certificates: PX509DynArray;
+begin
+  result := PX509DynArray(GetObjects(@self, {crl=}false));
+end;
+
+function X509_STORE.Crls: PX509_CRLDynArray;
+begin
+  result := PX509_CRLDynArray(GetObjects(@self, {crl=}true));
+end;
+
+function X509_STORE.BySerial(const serial: RawUtf8): PX509;
+var
+  i: PtrInt;
+  c: PX509DynArray;
+begin
+  c := Certificates;
+  for i := 0 to length(c) - 1 do
+    if c[i].SerialNumber = serial then
+    begin
+      result := c[i];
+      result.Acquire;
+      exit;
+    end;
+  result := nil;
+end;
+
+function X509_STORE.IsRevoked(const serial: RawUtf8): integer;
+var
+  i: PtrInt;
+  c: PX509_CRLDynArray;
+begin
+  c := Crls;
+  for i := 0 to length(c) - 1 do
+  begin
+    result := c[i].IsRevoked(serial);
+    if result >= 0 then
+      exit;
+  end;
+  result := CRL_REASON_NONE; // -1 if not revoked
+end;
+
+function X509_STORE.IsRevoked(serial: PASN1_INTEGER): integer;
+var
+  i: PtrInt;
+  c: PX509_CRLDynArray;
+begin
+  c := Crls;
+  for i := 0 to length(c) - 1 do
+  begin
+    result := c[i].IsRevoked(serial);
+    if result >= 0 then
+      exit;
+  end;
+  result := CRL_REASON_NONE; // -1 if not revoked
+end;
+
 function X509_STORE.SetDefaultPaths: boolean;
 begin
   result := (@self <> nil) and
@@ -5122,35 +6370,83 @@ begin
             (X509_STORE_add_cert(@self, x) = OPENSSLSUCCESS);
 end;
 
-function X509_STORE.AddFromBinary(const Der: RawByteString): boolean;
+function X509_STORE.AddCrl(c: PX509_CRL): boolean;
+begin
+  result := (@self <> nil) and
+            (c <> nil) and
+            (X509_STORE_add_crl(@self, c) = OPENSSLSUCCESS);
+end;
+
+function X509_STORE.AddFromBinary(const Der: RawByteString): RawUtf8;
 var
   x: PX509;
+  c: PX509_CRL;
 begin
-  result := false;
+  result := '';
   if (@self = nil) or
      (Der = '') then
     exit;
   x := LoadCertificate(Der);
-  if x = nil then
-    exit;
-  result := X509_STORE_add_cert(@self, x) = OPENSSLSUCCESS;
-  x.Free;
+  if x <> nil then
+  begin
+    if AddCertificate(x) then
+      result := x.SerialNumber;
+    x.Free;
+  end
+  else
+  begin
+    c := LoadCertificateCrl(Der);
+    if c <> nil then
+    begin
+      AddCrl(c);
+      c.Free;
+    end;
+  end;
 end;
 
-function X509_STORE.AddFromPem(const Pem: RawUtf8): integer;
+procedure AddSerial(var Serials: TRawUtf8DynArray; x: PX509);
+var
+  n: PtrInt;
+begin
+  n := length(Serials);
+  SetLength(Serials, n + 1);
+  Serials[n] := x^.SerialNumber;
+end;
+
+function X509_STORE.AddCertificateFromPem(const Pem: RawUtf8;
+  Serials: PRawUtf8DynArray): integer;
 var
   x: PX509DynArray;
   i: PtrInt;
 begin
   result := 0;
-  if (@self = nil) or
-     (Pem = '') then
+  if @self = nil then
     exit;
   x := LoadCertificates(Pem);
   for i := 0 to length(x) - 1 do
     if AddCertificate(x[i]) then
+    begin
       inc(result);
-  PX509DynArrayFree(x);
+      if Serials <> nil then
+        AddSerial(Serials^, x[i]);
+    end
+    else
+      x[i].Free;
+end;
+
+function X509_STORE.AddCrlFromPem(const Pem: RawUtf8): integer;
+var
+  c: PX509_CRL;
+begin
+  result := 0;
+  if @self = nil then
+    exit;
+  c := LoadCertificateCrlFromPem(Pem);
+  if c <> nil then
+    if AddCrl(c) then
+      inc(result)
+    else
+      c.Free;
 end;
 
 function X509_STORE.SetLocations(const CAFile, CAFolder: RawUtf8): boolean;
@@ -5201,12 +6497,18 @@ end;
 
 function asn1_string_st.Data: pointer;
 begin
-  result := ASN1_STRING_data(@self);
+  if @self = nil then
+    result := nil
+  else
+    result := ASN1_STRING_data(@self);
 end;
 
 function asn1_string_st.Len: integer;
 begin
-  result := ASN1_STRING_length(@self);
+  if @self = nil then
+    result := 0
+  else
+    result := ASN1_STRING_length(@self);
 end;
 
 procedure asn1_string_st.ToUtf8(out result: RawUtf8; flags: cardinal);
@@ -5224,6 +6526,15 @@ procedure asn1_string_st.ToHex(out result: RawUtf8);
 begin
   if @self <> nil then
     result := MacToText(Data, Len);
+end;
+
+function asn1_string_st.Equals(const another: asn1_string_st): boolean;
+var
+  n: integer;
+begin
+  n := Len;
+  result := (n = another.Len) and
+            CompareMem(Data, another.Data, n);
 end;
 
 
@@ -5261,22 +6572,43 @@ begin
 end;
 
 
+{ TX509_Extension }
+
+procedure TX509_Extension.SetExtension(x: PX509_EXTENSION);
+begin
+  ext := x;
+  nid := OBJ_obj2nid(X509_EXTENSION_get_object(x));
+  value := X509_EXTENSION_get_data(x);
+  critical := X509_EXTENSION_get_critical(x) <> 0;
+end;
+
+
 { X509 }
+
+function X509.GetSerial: PASN1_INTEGER;
+begin
+  if @self = nil then
+    result := nil
+  else
+    result := X509_get_serialNumber(@self);
+end;
+
+function X509.GetName: PX509_NAME;
+begin
+  if @self = nil then
+    result := nil
+  else
+    result := X509_get_subject_name(@self);
+end;
 
 function X509.SerialNumber: RawUtf8;
 begin
-  if @self = nil then
-    result := ''
-  else
-    X509_get_serialNumber(@self).ToHex(result);
+  GetSerial.ToHex(result);
 end;
 
 function X509.SubjectName: RawUtf8;
 begin
-  if @self = nil then
-    result := ''
-  else
-    X509_get_subject_name(@self).ToUtf8(result);
+  GetName.ToUtf8(result);
 end;
 
 function X509.IssuerName: RawUtf8;
@@ -5288,23 +6620,13 @@ begin
 end;
 
 function X509.PeerInfo: RawUtf8;
-var
-  bio: PBIO;
 begin
-  if @self = nil then
-    result := ''
-  else
-  begin
-    bio := BIO_new(BIO_s_mem);
-    X509_print(bio, @self);
-    result := bio.ToUtf8AndFree;
-  end;
+  result := BioSave(@self, @X509_print, CP_UTF8);
 end;
 
 function X509.GetExtensions: TX509_Extensions;
 var
   i, n: integer;
-  e: ^TX509_Extension;
 begin
   result := nil;
   if @self = nil then
@@ -5313,15 +6635,8 @@ begin
   if n <= 0 then
     exit;
   SetLength(result, n);
-  e := pointer(result);
   for i := 0 to n - 1 do
-  begin
-    e^.ext := X509_get_ext(@self, i);
-    e^.nid := OBJ_obj2nid(X509_EXTENSION_get_object(e^.ext));
-    e^.value := X509_EXTENSION_get_data(e^.ext);
-    e^.critical := X509_EXTENSION_get_critical(e^.ext) <> 0;
-    inc(e);
-  end;
+    result[i].SetExtension(X509_get_ext(@self, i));
 end;
 
 function X509.Extension(nid: integer): PX509_EXTENSION;
@@ -5595,29 +6910,13 @@ begin
 end;
 
 function X509.ToBinary: RawByteString;
-var
-  bio: PBIO;
 begin
-  result := '';
-  if @self = nil then
-    exit;
-  bio := BIO_new(BIO_s_mem);
-  if i2d_X509_bio(bio, @self) = OPENSSLSUCCESS then
-    bio.ToString(result);
-  bio.Free;
+  result := BioSave(@self, @i2d_X509_bio);
 end;
 
 function X509.ToPem: RawUtf8;
-var
-  bio: PBIO;
 begin
-  result := '';
-  if @self = nil then
-    exit;
-  bio := BIO_new(BIO_s_mem);
-  if PEM_write_bio_X509(bio, @self) = OPENSSLSUCCESS then
-    result := bio.ToUtf8;
-  bio.Free;
+  result := BioSave(@self, @PEM_write_bio_X509, CP_UTF8);
 end;
 
 function X509.Acquire: integer;
@@ -5628,12 +6927,23 @@ begin
     result := X509_up_ref(@self);
 end;
 
+function X509.Sign(pkey: PEVP_PKEY; md: PEVP_MD): integer;
+begin
+  if @self = nil then
+    result := 0
+  else
+    result := X509_sign(@self, pkey, md);
+end;
+
 procedure X509.Free;
 begin
   if @self <> nil then
     X509_free(@self);
 end;
 
+
+const
+  X509v3 = 2;
 
 function NewCertificate: PX509;
 var
@@ -5645,7 +6955,7 @@ begin
   EOpenSsl.CheckAvailable(nil, 'NewCertificate');
   result := nil;
   x := X509_new();
-  if X509_set_version(x, 2) = OPENSSLSUCCESS then // X509v3
+  if X509_set_version(x, X509v3) = OPENSSLSUCCESS then
   begin
     RAND_bytes(@rnd, 20);     // random serial from OpenSSL PRNG
     rnd[0] := rnd[0] and $7f; // ensure > 0
@@ -5661,17 +6971,8 @@ begin
 end;
 
 function LoadCertificate(const Der: RawByteString): PX509;
-var
-  bio: PBIO;
 begin
-  if Der = '' then
-    result := nil
-  else
-  begin
-    bio := BIO_new_mem_buf(pointer(Der), length(Der));
-    result := d2i_X509_bio(bio, nil);
-    bio.Free;
-  end;
+  result := BioLoad(Der, @d2i_X509_bio);
 end;
 
 function LoadCertificates(const Pem: RawUtf8): PX509DynArray;
@@ -5691,7 +6992,8 @@ begin
       break;
     PtrArrayAdd(result, x, n);
   until false;
-  SetLength(result, n);
+  if n <> 0 then
+    DynArrayFakeLength(result, n);
   bio.Free;
 end;
 
@@ -5715,6 +7017,42 @@ begin
   end;
   if Assigned(callback) then
     X509_STORE_CTX_set_verify_cb(result, callback);
+end;
+
+function NewCertificateCrl: PX509_CRL;
+begin
+  EOpenSsl.CheckAvailable(nil, 'NewCertificateCrl');
+  result := X509_CRL_new();
+  X509_CRL_set_version(result, X509v3);
+end;
+
+function LoadCertificateCrl(const Der: RawByteString): PX509_CRL;
+begin
+  result := BioLoad(Der, @d2i_X509_CRL_bio);
+end;
+
+function LoadCertificateCrlFromPem(const Pem: RawUtf8): PX509_CRL;
+var
+  bio: PBIO;
+begin
+  result := nil;
+  if Pem = '' then
+    exit;
+  bio := BIO_new_mem_buf(pointer(Pem), length(Pem));
+  result := PEM_read_bio_X509_CRL(bio, nil, nil, nil);
+  bio.Free;
+end;
+
+function NewCertificateRequest: PX509_REQ;
+begin
+  EOpenSsl.CheckAvailable(nil, 'NewCertificateRequest');
+  result := X509_REQ_new();
+  X509_REQ_set_version(result, X509v3);
+end;
+
+function LoadCertificateRequest(const Der: RawByteString): PX509_REQ;
+begin
+  result := BioLoad(Der, @d2i_X509_REQ_bio);
 end;
 
 function PX509DynArrayToPem(const X509: PX509DynArray): RawUtf8;
@@ -5744,12 +7082,13 @@ begin
     result := result +  X509[i].PeerInfo + '---------'#13#10;
 end;
 
-procedure PX509DynArrayFree(const X509: PX509DynArray);
+procedure PX509DynArrayFree(var X509: PX509DynArray);
 var
   i: PtrInt;
 begin
   for i := 0 to length(X509) - 1 do
     X509[i].Free;
+  X509 := nil;
 end;
 
 

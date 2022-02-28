@@ -5190,12 +5190,13 @@ type
     function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason; override;
     function Add(const cert: ICryptCert): boolean; override;
     function AddFromBuffer(const Content: RawByteString): TRawUtf8DynArray; override;
-    function Revoke(const Serial: RawUtf8; RevocationDate: TDateTime;
+    function Revoke(const Cert: ICryptCert; RevocationDate: TDateTime;
       Reason: TCryptCertRevocationReason): boolean; override;
     function IsValid(const cert: ICryptCert): TCryptCertValidity; override;
     function Verify(const Signature: RawUtf8;
       Data: pointer; Len: integer): TCryptCertValidity; override;
     function Count: integer; override;
+    function CrlCount: integer; override;
     function CertAlgo: TCryptCertAlgo; override;
   end;
 
@@ -5262,10 +5263,11 @@ begin
   result := fEcc.AddFromBuffer(Content);
 end;
 
-function TCryptStoreInternal.Revoke(const Serial: RawUtf8;
+function TCryptStoreInternal.Revoke(const Cert: ICryptCert;
   RevocationDate: TDateTime; Reason: TCryptCertRevocationReason): boolean;
 begin
-  result := fEcc.Revoke(Serial, RevocationDate, Reason);
+  result := (Cert <> nil) and
+            fEcc.Revoke(Cert.GetSerial, RevocationDate, Reason);
 end;
 
 function TCryptStoreInternal.IsValid(const cert: ICryptCert): TCryptCertValidity;
@@ -5286,6 +5288,11 @@ end;
 function TCryptStoreInternal.Count: integer;
 begin
   result := length(fEcc.fItems);
+end;
+
+function TCryptStoreInternal.CrlCount: integer;
+begin
+  result := length(fEcc.fCrl);
 end;
 
 var

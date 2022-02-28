@@ -1365,9 +1365,13 @@ type
     /// search for a certificate from its (hexadecimal) identifier
     function GetBySerial(const Serial: RawUtf8): ICryptCert;
     /// quickly check if a given certificate ID is part of the CRL
+    // - returns crrNotRevoked if the serial is not known as part of the CRL
+    // - returns the reason why this certificate has been revoked otherwise
+    function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason; overload;
+    /// quickly check if a given certificate is part of the CRL
     // - returns crrNotRevoked is the serial is not known as part of the CRL
     // - returns the reason why this certificate has been revoked otherwise
-    function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason;
+    function IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason; overload;
     /// register a certificate in the internal certificate chain
     // - returns false e.g. if the certificate was not valid, or its
     // serial was already part of the internal list
@@ -1387,7 +1391,9 @@ type
     function AddFromFolder(const Folder: TFileName;
       const Mask: TFileName = FILES_ALL; Recursive: boolean = false): TRawUtf8DynArray;
     /// add a new Serial number to the internal Certificate Revocation List
-    function Revoke(const Serial: RawUtf8; RevocationDate: TDateTime;
+    // - on some engines (our internal ECC, but not OpenSSL), Reason=crrNotRevoked
+    // could be used to unregister a certificate revocation
+    function Revoke(const Cert: ICryptCert; RevocationDate: TDateTime;
       Reason: TCryptCertRevocationReason): boolean;
     /// check if the certificate is valid, against known certificates chain
     // - will check internal properties of the certificate (e.g. validity dates),
@@ -1403,6 +1409,8 @@ type
       Data: pointer; Len: integer): TCryptCertValidity;
     /// how many certificates are currently stored
     function Count: integer;
+    /// how many CRLs are currently stored
+    function CrlCount: integer;
     /// call e.g. CertAlgo.New to prepare a new ICryptCert to add to this store
     function CertAlgo: TCryptCertAlgo;
   end;
@@ -1414,18 +1422,21 @@ type
     function FromBinary(const Binary: RawByteString): boolean; virtual; abstract;
     function ToBinary: RawByteString; virtual; abstract;
     function GetBySerial(const Serial: RawUtf8): ICryptCert; virtual; abstract;
-    function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason; virtual; abstract;
+    function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason;
+      overload; virtual; abstract;
+    function IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason; overload; virtual;
     function Add(const cert: ICryptCert): boolean; virtual; abstract;
     function AddFromBuffer(const Content: RawByteString): TRawUtf8DynArray; virtual; abstract;
     function AddFromFile(const FileName: TFileName): TRawUtf8DynArray; virtual;
     function AddFromFolder(const Folder, Mask: TFileName;
        Recursive: boolean): TRawUtf8DynArray; virtual;
-    function Revoke(const Serial: RawUtf8; RevocationDate: TDateTime;
+    function Revoke(const Cert: ICryptCert; RevocationDate: TDateTime;
       Reason: TCryptCertRevocationReason): boolean; virtual; abstract;
     function IsValid(const cert: ICryptCert): TCryptCertValidity; virtual; abstract;
     function Verify(const Signature: RawUtf8;
       Data: pointer; Len: integer): TCryptCertValidity; virtual; abstract;
     function Count: integer; virtual; abstract;
+    function CrlCount: integer; virtual; abstract;
     function CertAlgo: TCryptCertAlgo; virtual; abstract;
   end;
 
@@ -1570,6 +1581,7 @@ type
   TPemKind = (
     pemUnspecified,
     pemCertificate,
+    pemCrl,
     pemPrivateKey,
     pemPublicKey,
     pemRsaPrivateKey,
@@ -1588,6 +1600,7 @@ const
   PEM_BEGIN: array[TPemKind] of RawUtf8 = (
     '-----BEGIN PRIVACY-ENHANCED MESSAGE-----'#13#10,
     '-----BEGIN CERTIFICATE-----'#13#10,
+    '-----BEGIN X509 CRL-----'#13#10,
     '-----BEGIN PRIVATE KEY-----'#13#10,
     '-----BEGIN PUBLIC KEY-----'#13#10,
     '-----BEGIN RSA PRIVATE KEY-----'#13#10,
@@ -1604,6 +1617,7 @@ const
   PEM_END: array[TPemKind] of RawUtf8 = (
     '-----END PRIVACY-ENHANCED MESSAGE-----'#13#10,
     '-----END CERTIFICATE-----'#13#10,
+    '-----END X509 CRL-----'#13#10,
     '-----END PRIVATE KEY-----'#13#10,
     '-----END PUBLIC KEY-----'#13#10,
     '-----END RSA PRIVATE KEY-----'#13#10,
@@ -4161,6 +4175,14 @@ end;
 
 
 { TCryptStore }
+
+function TCryptStore.IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason;
+begin
+  if Assigned(cert) then
+    result := IsRevoked(cert.GetSerial)
+  else
+    result := crrNotRevoked;
+end;
 
 function TCryptStore.AddFromFile(const FileName: TFileName): TRawUtf8DynArray;
 var
