@@ -162,7 +162,8 @@ type
     constructor Create(const varObjPairs: array of pointer); reintroduce; overload;
     /// protect one local TObject variable instance life time
     // - for instance, instead of writing:
-    // !var myVar: TMyClass;
+    // !var
+    // !  myVar: TMyClass;
     // !begin
     // !  myVar := TMyClass.Create;
     // !  try
@@ -172,7 +173,8 @@ type
     // !  end;
     // !end;
     // - you may write:
-    // !var myVar: TMyClass;
+    // !var
+    // !  myVar: TMyClass;
     // !begin
     // !  TAutoFree.One(myVar,TMyClass.Create);
     // !  ... use myVar
@@ -188,7 +190,8 @@ type
     /// protect several local TObject variable instances life time
     // - specified as localVariable/objectInstance pairs
     // - you may write:
-    // !var var1,var2: TMyClass;
+    // !var
+    // !  var1, var2: TMyClass;
     // !begin
     // !  TAutoFree.Several([
     // !    @var1,TMyClass.Create,
@@ -206,8 +209,9 @@ type
     class function Several(const varObjPairs: array of pointer): IAutoFree;
     /// protect another TObject variable to an existing IAutoFree instance life time
     // - you may write:
-    // !var var1,var2: TMyClass;
-    // !    auto: IAutoFree;
+    // !var
+    // !  var1, var2: TMyClass;
+    // !  auto: IAutoFree;
     // !begin
     // !  auto := TAutoFree.One(var1,TMyClass.Create);,
     // !  .... do something
@@ -253,7 +257,8 @@ type
     // !end; // local hidden IUnknown will release the lock for the method
     // - warning: under FPC, you should assign its result to a local variable -
     // see bug http://bugs.freepascal.org/view.php?id=26602
-    // !var LockFPC: IUnknown;
+    // !var
+    // !  LockFPC: IUnknown;
     // !begin
     // !  ... // unsafe code
     // !  LockFPC := fSharedAutoLocker.ProtectMethod;
@@ -300,7 +305,8 @@ type
     // !end; // local hidden IUnknown will release the lock for the method
     // - warning: under FPC, you should assign its result to a local variable -
     // see bug http://bugs.freepascal.org/view.php?id=26602
-    // !var LockFPC: IUnknown;
+    // !var
+    // !  LockFPC: IUnknown;
     // !begin
     // !  ... // unsafe code
     // !  LockFPC := fSharedAutoLocker.ProtectMethod;
@@ -582,7 +588,7 @@ type
     /// the light single Read / exclusive Write lock associated to this list
     // - could be used to protect shared resources within the internal process,
     // for index-oriented methods like Delete/Items/Count...
-    // - use Safe lock methods with a try ... finally block
+    // - use Safe lock methods within a try ... finally block
     property Safe: TRWLock
       read fSafe;
   end;
@@ -1233,16 +1239,18 @@ type
     // - if aCountPointer is set, its content will be set to 0, whatever the
     // array length is, or the current aCountPointer^ value is
     // - a sample usage may be:
-    // !var DA: TDynArray;
-    // !    A: TIntegerDynArray;
+    // !var
+    // !  DA: TDynArray;
+    // !  A: TIntegerDynArray;
     // !begin
     // !  DA.Init(TypeInfo(TIntegerDynArray),A);
     // ! (...)
     // - a sample usage may be (using a count variable):
-    // !var DA: TDynArray;
-    // !    A: TIntegerDynArray;
-    // !    ACount: integer;
-    // !    i: integer;
+    // !var
+    // !  DA: TDynArray;
+    // !  A: TIntegerDynArray;
+    // !  ACount: integer;
+    // !  i: integer;
     // !begin
     // !  DA.Init(TypeInfo(TIntegerDynArray),A,@ACount);
     // !  for i := 1 to 100000 do
@@ -2193,7 +2201,8 @@ type
 // - if aCountPointer is set, its content will be set to 0, whatever the
 // array length is, or the current aCountPointer^ value is
 // - a typical usage could be:
-// !var IntArray: TIntegerDynArray;
+// !var
+// !  IntArray: TIntegerDynArray;
 // !begin
 // !  with DynArray(TypeInfo(TIntegerDynArray),IntArray) do
 // !  begin

@@ -87,25 +87,9 @@ type
     {$endif USEWININET}
   end;
 
-  /// abstract class to implement a server thread
-  // - do not use this class, but rather the THttpServer, THttpApiServer
-  // or TWebSocketServer (as defined in mormot.net.websock)
-  TServerGeneric = class(TSynThread)
-  protected
-    fProcessName: RawUtf8;
-    fOnHttpThreadStart: TOnNotifyThread;
-    procedure SetOnTerminate(const Event: TOnNotifyThread); virtual;
-    procedure NotifyThreadStart(Sender: TSynThread);
-  public
-    /// initialize the server instance, in non suspended state
-    constructor Create(CreateSuspended: boolean;
-      const OnStart, OnStop: TOnNotifyThread;
-      const ProcessName: RawUtf8); reintroduce; virtual;
-  end;
-
   /// abstract parent class to implement a HTTP server
   // - do not use it, but rather THttpServer/THttpAsyncServer or THttpApiServer
-  THttpServerGeneric = class(TServerGeneric)
+  THttpServerGeneric = class(TNotifiedThread)
   protected
     fShutdownInProgress: boolean;
     /// optional event handlers for process interception
@@ -224,7 +208,7 @@ type
     /// event handler called after each working Thread is just initiated
     // - called in the thread context at first place in THttpServerGeneric.Execute
     property OnHttpThreadStart: TOnNotifyThread
-      read fOnHttpThreadStart write fOnHttpThreadStart;
+      read fOnThreadStart write fOnThreadStart;
     /// event handler called when a working Thread is terminating
     // - called in the corresponding thread context
     // - the TThread.OnTerminate event will be called within a Synchronize()
@@ -1351,35 +1335,6 @@ end;
 {$endif USEWININET}
 
 
-{ TServerGeneric }
-
-constructor TServerGeneric.Create(CreateSuspended: boolean;
-  const OnStart, OnStop: TOnNotifyThread; const ProcessName: RawUtf8);
-begin
-  fProcessName := ProcessName;
-  fOnHttpThreadStart := OnStart;
-  SetOnTerminate(OnStop);
-  inherited Create(CreateSuspended);
-end;
-
-procedure TServerGeneric.NotifyThreadStart(Sender: TSynThread);
-begin
-  if Sender = nil then
-    raise EHttpServer.CreateUtf8('%.NotifyThreadStart(nil)', [self]);
-  if Assigned(fOnHttpThreadStart) and
-     (not Assigned(Sender.StartNotified)) then
-  begin
-    fOnHttpThreadStart(Sender);
-    Sender.StartNotified := self;
-  end;
-end;
-
-procedure TServerGeneric.SetOnTerminate(const Event: TOnNotifyThread);
-begin
-  fOnThreadTerminate := Event;
-end;
-
-
 { THttpServerGeneric }
 
 constructor THttpServerGeneric.Create(CreateSuspended: boolean;
@@ -1555,7 +1510,7 @@ begin
   fSockPort := aPort;
   SetServerKeepAliveTimeOut(KeepAliveTimeOut); // 30 seconds by default
   // event handlers set before inherited Create to be visible in childs
-  fOnHttpThreadStart := OnStart;
+  fOnThreadStart := OnStart;
   SetOnTerminate(OnStop);
   fProcessName := ProcessName; // TSynThreadPoolTHttpServer needs it now
   fHeadersUnFiltered := aHeadersUnFiltered;
@@ -2678,7 +2633,7 @@ begin
   SetRemoteIPHeader(From.RemoteIPHeader);
   SetRemoteConnIDHeader(From.RemoteConnIDHeader);
   fLoggingServiceName := From.fLoggingServiceName;
-  inherited Create(false, From.fOnHttpThreadStart, From.fOnThreadTerminate, From.ProcessName);
+  inherited Create(false, From.fOnThreadStart, From.fOnThreadTerminate, From.ProcessName);
 end;
 
 procedure THttpApiServer.DestroyMainThread;

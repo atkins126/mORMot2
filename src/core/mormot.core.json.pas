@@ -440,7 +440,9 @@ function JsonObjectAsJsonArrays(Json: PUtf8Char;
 // - may be used to prepare configuration files before loading;
 // for example we store server configuration in file config.json and
 // put some comments in this file then code for loading is:
-// !var cfg: RawUtf8;
+// !var
+// !  cfg: RawUtf8;
+// ! ...
 // !  cfg := StringFromFile(ExtractFilePath(paramstr(0))+'Config.json');
 // !  RemoveCommentsFromJson(@cfg[1]);
 // !  pLastChar := JsonToObject(sc,pointer(cfg),configValid);
@@ -9647,7 +9649,7 @@ begin
     // prepare efficient ClassNewInstance() and recognize most parents
     C := fValueClass;
     repeat
-      if C = TObjectList then
+      if C = TObjectList then // any branch taken will break below
       begin
         fClassNewInstance := @_New_ObjectList;
         fJsonSave := @_JS_TObjectList;
@@ -9664,7 +9666,7 @@ begin
         // - is used e.g. by TOrm or TObjectWithID
         n := Props.Count;
         TCCHookClass(fValueClass).RttiCustomSetParser(self);
-        if n > Props.Count then
+        if n <> Props.Count then
           fFlags := fFlags + fProps.AdjustAfterAdded; // added a prop
       end
       else if C = TSynObjectList then

@@ -1072,6 +1072,40 @@ begin
     inc(P);
 end;
 
+const
+  PAGE_GUARD = $0100;
+  PAGE_VALID = $00e6; // PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or
+      // PAGE_EXECUTE_READ or PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY
+
+var
+  LastMemInfo: TMemoryBasicInformation; // simple cache
+
+function SeemsRealPointer(p: pointer): boolean;
+var
+  meminfo: TMemoryBasicInformation;
+begin
+  result := false;
+  if PtrUInt(p) <= 65535 then
+    exit;
+  if (LastMemInfo.State <> 0) and
+     (PtrUInt(p) - PtrUInt(LastMemInfo.BaseAddress) <=
+       PtrUInt(LastMemInfo.RegionSize)) then
+    result := true // reuse last memory region information if we can
+  else
+  begin
+    // VirtualQuery API is slow but better than raising an exception
+    // see https://stackoverflow.com/a/37547837/458259
+    FillChar(meminfo, SizeOf(meminfo), 0);
+    result := (VirtualQuery(p, meminfo, SizeOf(meminfo)) = SizeOf(meminfo)) and
+              (meminfo.RegionSize >= SizeOf(pointer)) and
+              (meminfo.State = MEM_COMMIT) and
+              (meminfo.Protect and PAGE_VALID <> 0) and
+              (meminfo.Protect and PAGE_GUARD = 0);
+    if result then
+      LastMemInfo := meminfo;
+  end;
+end;
+
 function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
 var n: cardinal;
 begin
@@ -3079,17 +3113,19 @@ end;
     and subsequent arguments are any strings passed to the service by the process
     that called the StartService function to start the service.  }
     
-procedure ServiceProc(ArgCount: cardinal; Args: PPChar); stdcall;
+procedure ServiceProc(ArgCount: integer; Args: PPChar); stdcall;
 var
   i: PtrInt;
 begin
-  if not Assigned(ServiceSingle) then
+  dec(ArgCount); // first argument is the service name to be ignored
+  if (ArgCount < 0) or
+     not Assigned(ServiceSingle) then
     exit;
-  SetLength(ServiceSingle.fArgsList, ArgCount - 1);
-  for i := 0 to ArgCount - 2 do
+  SetLength(ServiceSingle.fArgsList, ArgCount);
+  for i := 0 to ArgCount - 1 do
   begin
-    Inc(Args);
-    ServiceSingle.fArgsList[i] := Args^;
+    inc(Args);
+    ServiceSingle.fArgsList[i] := Args^; // convert to string
   end;
   ServiceSingle.fStatusHandle := RegisterServiceCtrlHandler(
     pointer(ServiceSingle.fSName), @ServiceSingle.ControlHandler);
@@ -3384,8 +3420,7 @@ begin
     RedirectCode(@MoveFast, @System.Move);
     RedirectCode(@SynLZcompress1, @SynLZcompress1Pas);
     RedirectCode(@SynLZdecompress1, @SynLZdecompress1Pas);
-    ConsoleWrite('WARNING: Old not SSE2 CPU detected -> ' +
-      'please recompile with HASNOSSE2', ccLightRed);
+    ConsoleWrite('WARNING: too old CPU - recompile with HASNOSSE2', ccLightRed);
     // note: FillCharFast is handled by mormot.core.base via ERMSB
     // and Byte/Word/IntegerScanIndex() are likely to GPF at runtime
   end;

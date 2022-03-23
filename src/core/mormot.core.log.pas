@@ -133,6 +133,8 @@ type
     /// compute the relative memory address from its absolute (pointer) value
     function AbsoluteToOffset(aAddressAbsolute: PtrUInt): integer;
       {$ifdef HASINLINE}inline;{$endif}
+    /// check if this memory address is part of the code segments
+    function IsCode(aAddressAbsolute: PtrUInt): boolean;
     /// retrieve a symbol according to a relative code address
     // - use fast O(log n) binary search
     function FindSymbol(aAddressOffset: integer): PtrInt;
@@ -551,9 +553,12 @@ type
     ptNoThreadProcess);
 
   /// how stack trace shall be computed during logging
+  // - stOnlyAPI is the first (and default) value, since manual stack makes
+  // unexpected detections, and was reported as very slow on Windows 11
+  // - on FPC, these values are ignored, because RTL CaptureBacktrace() is used 
   TSynLogStackTraceUse = (
-    stManualAndAPI,
     stOnlyAPI,
+    stManualAndAPI,
     stOnlyManual);
 
   /// how file existing shall be handled during logging
@@ -892,20 +897,13 @@ type
       read fRotateFileAtHour write fRotateFileAtHour;
     /// the recursive depth of stack trace symbol to write
     // - used only if exceptions are handled, or by sllStackTrace level
-    // - default value is 30, maximum is 255
-    // - if stOnlyAPI is defined as StackTraceUse under Windows XP, maximum
-    // value may be around 60, due to RtlCaptureStackBackTrace() API limitations
+    // - default value is 30, maximum is 255 (but API may never reach so high)
     property StackTraceLevel: byte
       read fStackTraceLevel write fStackTraceLevel;
     /// how the stack trace shall use only the Windows API
-    // - the class will use low-level RtlCaptureStackBackTrace() API to retrieve
-    // the call stack: in some cases, it is not able to retrieve it, therefore
-    // a manual walk of the stack can be processed - since this manual call can
-    // trigger some unexpected access violations or return wrong positions,
-    // you can disable this optional manual walk by setting it to stOnlyAPI
-    // - default is stManualAndAPI, i.e. use RtlCaptureStackBackTrace() API and
-    // perform a manual stack walk if the API returned no address (or <3); but
-    // within the IDE, it will use stOnlyAPI, to ensure no annoyning AV occurs
+    // - default is stOnlyAPI, i.e. use RtlCaptureStackBackTrace() API with
+    // no manual stack walk (which tends to report wrong calls)
+    // - on FPC, this property is ignored in favor of RTL CaptureBacktrace() 
     property StackTraceUse: TSynLogStackTraceUse
       read fStackTraceUse write fStackTraceUse;
     /// how existing log file shall be handled
@@ -1889,14 +1887,20 @@ var
   ExeInstanceDebugFile: TDebugFile;
 
 function GetInstanceDebugFile: TDebugFile;
-  {$ifdef FPC} inline; {$endif}
+var
+  new: TDebugFile;
 begin
   result := ExeInstanceDebugFile;
-  if result = nil then
-  begin
-    result := TDebugFile.Create;
-    ExeInstanceDebugFile := result;
-  end;
+  if result <> nil then
+    exit;
+  new := TDebugFile.Create;
+  EnterCriticalSection(GlobalThreadLock);
+  if ExeInstanceDebugFile = nil then
+    ExeInstanceDebugFile := new
+  else
+    new.Free;
+  result := ExeInstanceDebugFile;
+  LeaveCriticalSection(GlobalThreadLock);
 end;
 
 
@@ -2486,8 +2490,8 @@ begin
           if debugtoconsole then
             writeln('-------------- ', files[prevfile]);
           u := debug.fUnits.NewPtr;
-          u^.Symbol.Name := StringToAnsi7(GetFileNameWithoutExt(Ansi7ToString(
-            files[prevfile])));
+          u^.Symbol.Name := StringToAnsi7(GetFileNameWithoutExt(
+            Ansi7ToString(files[prevfile])));
           if (prevfile <= high(filesdir)) and
              ({%H-}filesdir[prevfile] > 0) then
             u^.FileName := dirs[filesdir[prevfile] - 1];
@@ -2731,6 +2735,7 @@ end;
 procedure TDebugFile.GenerateFromMapOrDbg(aDebugToConsole: boolean);
 var
   P, PEnd: PUtf8Char;
+  sections: TDebugUnitDynArray;
 
   procedure NextLine;
   begin
@@ -2752,7 +2757,7 @@ var
       inc(P);
     result := false;
     if (P + 10 < PEnd) and
-       (PInteger(P)^ =
+       (PInteger(P)^ = // 0001:## = function, 0002:## = const, 0005:##=pdata..
          ord('0') + ord('0') shl 8 + ord('0') shl 16 + ord('1') shl 24) and
        (P[4] = ':') then
     begin
@@ -2765,7 +2770,7 @@ var
             (P^ = ' ') do
         inc(P);
       if P < PEnd then
-        result := true;
+        result := true; // and P points to symbol name
     end;
   end;
 
@@ -2774,8 +2779,6 @@ var
     Beg: PAnsiChar;
     U: TDebugUnit;
   begin
-    // we just need the unit names now for ReadSymbols to detect and trim them
-    // final Unit[] will be filled in ReadLines with potential nested files
     NextLine;
     NextLine;
     while (P < PEnd) and
@@ -2784,6 +2787,8 @@ var
     while (P + 10 < PEnd) and
           (P^ >= ' ') do
     begin
+      // we just need the unit names now for ReadSymbols to detect and trim them
+      // final Unit[] will be filled in ReadLines with potential nested files
       if GetCode(U.Symbol.Start) and
          HexDisplayToBin(PAnsiChar(P), @U.Symbol.Stop, 4) then
       begin
@@ -2866,6 +2871,8 @@ var
       end;
       NextLine;
     end;
+    sections := fUnit;
+    SetLength(sections, fUnitsCount);
     fUnits.Clear; // ReadLines will repopulate all units :)
   end;
 
@@ -2930,7 +2937,7 @@ var
   end;
 
 var
-  i: PtrInt;
+  i, j: PtrInt;
   mapcontent: RawUtf8;
 begin
   fSymbols.Capacity := 8000;
@@ -2953,6 +2960,21 @@ begin
       if (Symbol.Start = 0) and
          (Symbol.Stop = 0) then
         fUnits.Delete(i); // occurs with Delphi 2010 :(
+  for i := 0 to fUnitsCount - 1 do
+    with fUnit[i] do
+      if Symbol.Stop = 0 then
+      begin
+        if i < fUnitsCount - 1 then
+          Symbol.Stop := fUnit[i + 1].Symbol.Start - 1;
+        for j := 0 to length(sections) - 1 do
+          if sections[j].Symbol.Name = Symbol.Name then
+          begin
+            if (Symbol.Stop = 0) or
+               (sections[j].Symbol.Stop < Symbol.Stop) then
+              Symbol.Stop := sections[j].Symbol.Stop;
+            break;
+          end;
+      end;
   for i := 0 to fSymbolsCount - 2 do
     fSymbol[i].Stop := fSymbol[i + 1].Start - 1;
   if fSymbolsCount > 0 then
@@ -3077,6 +3099,11 @@ begin
     // supplied e.g. 'exec.map', 'exec.dbg' or even plain 'exec'/'exec.exe'
     fDebugFile := aExeName;
   MabFile := ChangeFileExt(fDebugFile, '.mab');
+  if not FileExists(MabFile) then
+    if not IsDirectoryWritable(ExtractFilePath(MabFile)) then
+      // read/only exe folder -> store .mab in local non roaming user folder
+      MabFile := IncludeTrailingPathDelimiter(GetSystemPath(spUserData)) +
+                   ExtractFileName(Mabfile);
   EnterCriticalSection(GlobalThreadLock);
   try
     MapAge := FileAgeToUnixTimeUtc(fDebugFile);
@@ -3089,14 +3116,16 @@ begin
       fSymbols.Capacity := fSymbolsCount; // only consume the needed memory
       fUnits.Capacity := fUnitsCount;
       for i := 0 to fUnitsCount - 2 do
-        fUnit[i].Symbol.Stop := fUnit[i + 1].Symbol.Start - 1;
+        if fUnit[i].Symbol.Stop = 0 then
+          fUnit[i].Symbol.Stop := fUnit[i + 1].Symbol.Start - 1;
       if fUnitsCount <> 0 then // wild guess of the last unit end of code
         with fUnit[fUnitsCount - 1] do
-          if Addr <> nil then
-            // units may overlap with .inc -> use Addr[]
-            Symbol.Stop := Addr[high(Addr)] + 64
-          else
-            Symbol.Stop := Symbol.Start;
+          if Symbol.Stop = 0 then
+            if Addr <> nil then
+              // units may overlap with .inc -> use Addr[]
+              Symbol.Stop := Addr[high(Addr)] + 64
+            else
+              Symbol.Stop := Symbol.Start;
     end;
     // search for a .mab file matching the running .exe/.dll name
     if (fSymbolsCount = 0) and
@@ -3286,7 +3315,7 @@ var
   L, R: PtrInt;
   s: PDebugSymbol;
 begin
-  R := high(fSymbol);
+  R := length(fSymbol) - 1;
   L := 0;
   if (R >= 0) and
      (aAddressOffset >= fSymbol[0].Start) and
@@ -3309,7 +3338,7 @@ var
   L, R: PtrInt;
   s: PDebugSymbol;
 begin
-  R := high(fUnit);
+  R := length(fUnit) - 1;
   L := 0;
   if (R >= 0) and
      (aAddressOffset >= fUnit[0].Symbol.Start) and
@@ -3339,7 +3368,9 @@ begin
   begin
     u := @fUnit[result];
     // unit found -> search line number
-    max := high(u^.Addr);
+    if u^.Addr = nil then
+      exit;
+    max := DynArrayNotNilHigh(u^.Addr);
     L := 0;
     R := max;
     if R >= 0 then
@@ -3361,10 +3392,26 @@ end;
 
 function TDebugFile.AbsoluteToOffset(aAddressAbsolute: PtrUInt): integer;
 begin
-  if self = nil then
+  if (self = nil) or
+     (aAddressAbsolute = 0) then
     result := 0
   else
     result := PtrInt(aAddressAbsolute) - PtrInt(fCodeOffset);
+end;
+
+function TDebugFile.IsCode(aAddressAbsolute: PtrUInt): boolean;
+var
+  offset: integer;
+begin
+  offset := AbsoluteToOffset(aAddressAbsolute);
+  result := (offset <> 0) and
+            HasDebugInfo and
+            (((fUnit <> nil) and
+              (offset >= fUnit[0].Symbol.Start) and
+              (offset <= fUnit[DynArrayNotNilHigh(fUnit)].Symbol.Stop)) or
+             ((fSymbol <> nil) and
+              (offset >= fSymbol[0].Start) and
+              (offset <= fSymbol[DynArrayNotNilHigh(fSymbol)].Stop)));
 end;
 
 class function TDebugFile.Log(W: TTextWriter; aAddressAbsolute: PtrUInt;
@@ -3387,7 +3434,9 @@ begin
   if (W = nil) or
      (aAddressAbsolute = 0) then
     exit;
-  debug := GetInstanceDebugFile;
+  debug := ExeInstanceDebugFile;
+  if debug = nil then
+    debug := GetInstanceDebugFile;
   if (debug <> nil) and
      debug.HasDebugInfo then
   begin
@@ -3741,10 +3790,6 @@ begin
   fStackTraceLevel := 30;
   fWithUnitName := true;
   fWithInstancePointer := true;
-  {$ifndef FPC}
-  if DebugHook <> 0 then // never let stManualAndAPI trigger AV within the IDE
-    fStackTraceUse := stOnlyAPI;
-  {$endif FPC}
   fExceptionIgnore := TList.Create;
   fLevelStackTrace := [sllStackTrace, sllException, sllExceptionOS,
                        sllError, sllFail, sllLastError, sllDDDError];
@@ -4229,9 +4274,10 @@ begin
     // efficient TThreadID hash on all architectures
     hash := 0;
     repeat
-      hash := hash xor (id and (MAXLOGTHREAD - 1));
+      hash := hash xor id;
       id := id shr (MAXLOGTHREADBITS - 1); // -1 for less collisions under Linux
     until id = 0; // on Windows, a single loop iteration is enough
+    hash := hash and (MAXLOGTHREAD - 1);
     fThreadLastHash := hash;
     fThreadIndex := fThreadHash[hash];
     // fast O(1) loookup of the associated thread context
@@ -4306,9 +4352,10 @@ begin
       // not empty slot
       hash := 0; // efficient TThreadID hash on all architectures
       repeat
-        hash := hash xor (id and (MAXLOGTHREAD - 1));
+        hash := hash xor id;
         id := id shr (MAXLOGTHREADBITS - 1); // -1 for less collisions on Linux
       until id = 0;
+      hash := hash and (MAXLOGTHREAD - 1);
       secondpass := false;
       repeat
         if fThreadHash[hash] = 0 then
@@ -5548,7 +5595,7 @@ begin
         if (i = 0) or
            (frames[i] <> frames[i - 1]) then
           if TDebugFile.Log(fWriter, PtrUInt(frames[i]),
-               {notcode=}false, {symbol=}false) then
+               {notcode=}false, {assymbol=}false) then
           begin
             dec(depth);
             if depth = 0 then
@@ -5567,73 +5614,69 @@ procedure TSynLog.AddStackTrace(Level: TSynLogInfo; Stack: PPtrUInt);
 
   procedure AddStackManual(Stack: PPtrUInt);
   begin
+    // not implemented yet
   end;
 
 {$else}
 
-  procedure AddStackManual(Stack: PPtrUInt);
+  procedure AddStackManual(Stack: PPtrUInt); 
 
-    function check2(xret: PtrUInt): boolean;
+    function CheckAsmX86(xret: PtrUInt): boolean; // naive detection
     var
       i: PtrUInt;
     begin
       result := true;
-      for i := 2 to 7 do
-        if PWord(xret - i)^ and $38FF = $10FF then
-          exit;
-      result := false;
-    end;
-
-    function IsBadReadPtr(addr: pointer; len: integer): boolean;
-    begin
       try
-        asm
-            mov     eax, addr
-            mov     ecx, len
-    @s:     mov     dl, [eax]
-            inc     eax
-            dec     ecx
-            jnz     @S
-    @e: end;
-        result := false; // if we reached here, everything is ok
+        if PByte(xret - 5)^ = $E8 then
+          exit;
+        for i := 2 to 7 do
+          if PWord(xret - i)^ and $38FF = $10FF then
+            exit;
       except
-        result := true;
+        // ignore any GPF
       end;
+      result := false;
     end;
 
   var
     st, max_stack, min_stack, depth: PtrUInt;
+    debug: TDebugFile;
   begin
-    depth := fFamily.StackTraceLevel;
-    if depth = 0 then
-      exit;
     asm
         mov     min_stack, ebp
-    end;
-    if Stack = nil then // if no Stack pointer set, retrieve current one
-      Stack := pointer(min_stack);
-    asm
         mov     eax, fs:[4]
         mov     max_stack, eax
-      // mov eax,fs:[18h]; mov ecx,dword ptr [eax+4]; mov max_stack,ecx
     end;
-    if PtrUInt(Stack) >= min_stack then
+    if Stack = nil then // if no Stack pointer set, retrieve current one
+      Stack := pointer(min_stack)
+    else if PtrUInt(Stack) < min_stack then
+      exit;
+    debug := GetInstanceDebugFile;
+    if (debug <> nil) and
+       not debug.HasDebugInfo then
+      // slow SeemsRealPointer/VirtualQuery validation if no .map info
+      debug := nil;
+    fWriter.Add(' ');
+    depth := fFamily.StackTraceLevel;
     try
-      fWriter.Add(' ');
       while PtrUInt(Stack) < max_stack do
       begin
         st := Stack^;
-        if ((st > max_stack) or
-           (st < min_stack)) and
-           not IsBadReadPtr(pointer(st - 8), 12) and
-           ((PByte(st - 5)^ = $E8) or check2(st)) then
+        inc(Stack);
+        if ((st >= min_stack) and  // on-stack pointer is no code
+            (st <= max_stack)) or
+           ((debug <> nil) and // faster than SeemsRealPointer/VirtualQuery
+            not debug.IsCode(st)) or
+           ((debug = nil) and
+            not SeemsRealPointer(pointer(st - 8))) then
+          continue;
+        if CheckAsmX86(st) then
           if TDebugFile.Log(fWriter, st, false) then
           begin
             dec(depth);
             if depth = 0 then
               break;
           end;
-        inc(Stack);
       end;
     except
       // just ignore any access violation here
@@ -5645,16 +5688,23 @@ procedure TSynLog.AddStackTrace(Level: TSynLogInfo; Stack: PPtrUInt);
 var
   n, i, logged: integer;
   BackTrace: array[byte] of PtrUInt;
+  {$ifndef NOEXCEPTIONINTERCEPT}
+  nointercept: PBoolean;
+  nointerceptbackup: boolean; // paranoid precaution
+  {$endif NOEXCEPTIONINTERCEPT}
 begin
   if fFamily.StackTraceLevel <= 0 then
     exit;
-  {$ifdef OSWINDOWS}
-  if fFamily.StackTraceUse = stOnlyManual then
-    AddStackManual(stack)
-  else
-  begin
-    try
-      logged := 0;
+  {$ifndef NOEXCEPTIONINTERCEPT}
+  nointercept := @ExceptionIgnorePerThread;
+  nointerceptbackup := nointercept^;
+  nointercept^ := true;
+  {$endif NOEXCEPTIONINTERCEPT}
+  try
+    {$ifdef OSWINDOWS}
+    logged := 0;
+    if fFamily.StackTraceUse <> stOnlyManual then
+    begin
       n := RtlCaptureStackBackTrace(2, fFamily.StackTraceLevel, @BackTrace, nil);
       if n <> 0 then
       begin
@@ -5663,14 +5713,17 @@ begin
           if TDebugFile.Log(fWriter, BackTrace[i], false) then
             inc(logged);
       end;
-      if (logged < 2) and
-         (fFamily.StackTraceUse <> stOnlyAPI) then
-        AddStackManual(stack);
-    except
-      // just ignore any access violation here 
     end;
+    if (logged < 2) and
+       (fFamily.StackTraceUse <> stOnlyAPI) then
+      AddStackManual(stack);
+    {$endif OSWINDOWS}
+  except
+    // just ignore any access violation here
   end;
-  {$endif OSWINDOWS}
+  {$ifndef NOEXCEPTIONINTERCEPT}
+  nointercept^ := nointerceptbackup;
+  {$endif NOEXCEPTIONINTERCEPT}
 end;
 
 {$endif FPC}
@@ -5850,7 +5903,7 @@ end;
 procedure GetLastExceptions(out result: TSynLogExceptionInfoDynArray;
   Depth: integer);
 var
-  infos: TSynLogExceptionInfos; // use thread-safe local copy
+  infos: TSynLogExceptionInfos; // use thread-safe local copy of static array
   index, last, n, i: PtrInt;
 begin
   if GlobalLastExceptionIndex < 0 then
@@ -5946,13 +5999,13 @@ begin
     'WebSocket',       'WS',
     'Asynch',          'A',
     'Async',           'A',
-    'Parallel',        'Par',
+    'Parallel',        'Prl',
     'Timer',           'Tmr',
     'Thread',          'Thd',
     'Database',        'DB',
     'Backup',          'Bak',
-    'Server',          'Svr',
-    'Client',          'Clt',
+    'Server',          'Srv',
+    'Client',          'Cli',
     'synopse',         'syn',
     'memory',          'mem',
     '  ',              ' '
@@ -7396,7 +7449,7 @@ begin
   for i := 1 to length(text) do
     if ord(text[i]) in [33..126] then
     begin
-      // only printable ASCII chars
+      // only non-space printable ASCII chars
       P^ := text[i];
       inc(P);
     end;

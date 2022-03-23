@@ -32,6 +32,7 @@ uses
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
+  mormot.core.log,
   mormot.core.perf;
 
 const
@@ -1016,6 +1017,44 @@ type
     property Terminated;
   end;
 
+  /// abstract class to implement a thread with start/stop notifications
+  // - e.g. a server thread
+  // - do not use this class, but rather the THttpServer, THttpApiServer
+  // or TWebSocketServer (as defined in mormot.net.websock)
+  TNotifiedThread = class(TSynThread)
+  protected
+    fProcessName: RawUtf8;
+    fOnThreadStart: TOnNotifyThread;
+    procedure SetOnTerminate(const Event: TOnNotifyThread); virtual;
+    procedure NotifyThreadStart(Sender: TSynThread);
+  public
+    /// initialize the server instance, in non suspended state
+    constructor Create(CreateSuspended: boolean;
+      const OnStart, OnStop: TOnNotifyThread;
+      const ProcessName: RawUtf8); reintroduce; virtual;
+  end;
+
+  /// abstract class to implement a thread with logging notifications
+  TLoggedThread = class(TSynThread)
+  protected
+    fProcessName: RawUtf8;
+    fLogClass: TSynLogClass;
+    fLog: TSynLog; // the logging instance within the DoExecute thread context
+    fProcessing: boolean;
+    procedure Execute; override;
+    // inherited classes should override this method with proper process
+    procedure DoExecute; virtual; abstract;
+  public
+    /// initialize the server instance, in non suspended state
+    constructor Create(CreateSuspended: boolean; Logger: TSynLogClass;
+      const ProcessName: RawUtf8); reintroduce; virtual;
+    /// notify the thread to be terminated, and wait for DoExecute to finish
+    procedure TerminateAndWaitFinished(TimeOutMs: integer = 5000); virtual;
+    /// the associated logging class
+    property LogClass: TSynLogClass
+      read fLogClass;
+  end;
+
   TSynThreadPool = class;
 
   /// defines the work threads used by TSynThreadPool
@@ -1170,7 +1209,6 @@ const
 
 
 implementation
-
 
 { ************ Thread-Safe TSynQueue and TPendingTaskList }
 
@@ -2972,6 +3010,86 @@ begin
   Resume;
 end;
 {$endif HASTTHREADSTART}
+
+
+
+{ TNotifiedThread }
+
+constructor TNotifiedThread.Create(CreateSuspended: boolean;
+  const OnStart, OnStop: TOnNotifyThread; const ProcessName: RawUtf8);
+begin
+  fProcessName := ProcessName;
+  fOnThreadStart := OnStart;
+  SetOnTerminate(OnStop);
+  inherited Create(CreateSuspended);
+end;
+
+procedure TNotifiedThread.NotifyThreadStart(Sender: TSynThread);
+begin
+  if Sender = nil then
+    raise ESynThread.CreateUtf8('%.NotifyThreadStart(nil)', [self]);
+  if Assigned(fOnThreadStart) and
+     (not Assigned(Sender.StartNotified)) then
+  begin
+    fOnThreadStart(Sender);
+    Sender.StartNotified := self;
+  end;
+end;
+
+procedure TNotifiedThread.SetOnTerminate(const Event: TOnNotifyThread);
+begin
+  fOnThreadTerminate := Event;
+end;
+
+
+{ TLoggedThread }
+
+constructor TLoggedThread.Create(CreateSuspended: boolean;
+  Logger: TSynLogClass; const ProcessName: RawUtf8);
+begin
+  if Logger = nil then
+    Logger := TSynLog;
+  fLogClass := Logger;
+  fProcessName := ProcessName;
+  inherited Create(CreateSuspended);
+end;
+
+procedure TLoggedThread.Execute;
+var
+  ilog: ISynLog;
+begin
+  try
+    SetCurrentThreadName(fProcessName);
+    if fLogClass <> nil then
+    begin
+      ilog := fLogClass.Enter('Execute %', [fProcessName], self);
+      fLog := ilog.Instance;
+    end;
+    fProcessing := true;
+    DoExecute;
+  except
+    // ignore any exception during processing method
+  end;
+  fProcessing := false;
+  if fLog <> nil then
+  begin
+    ilog := nil; // leave Enter() above
+    fLog.NotifyThreadEnded;
+    fLog := nil;
+  end;
+end;
+
+procedure TLoggedThread.TerminateAndWaitFinished(TimeOutMs: integer);
+begin
+  if not fProcessing then
+    exit;
+  Terminate;
+  if TimeOutMs < 0 then
+    TimeOutMs := 10; // avoid integer -> cardinal sign overflow
+  SleepHiRes(TimeOutMs, fProcessing, {terminated=}false);
+end;
+
+
 
 
 { TSynThreadPool }

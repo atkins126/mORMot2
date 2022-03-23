@@ -2183,12 +2183,10 @@ type
   end;
 
   /// TStream allowing to read from some nested TStream instances
-  TNestedStreamReader = class(TStreamWithPosition)
+  TNestedStreamReader = class(TStreamWithPositionAndSize)
   protected
-    fSize: Int64;
     fNested: array of TNestedStream;
     fContentRead: ^TNestedStream;
-    function GetSize: Int64; override;
   public
     /// overriden method to call Flush on rewind, i.e. if position is set to 0
     function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
@@ -2206,6 +2204,33 @@ type
     // - is also called when you execute Seek(0, soBeginning)
     procedure Flush; virtual;
     /// will read up to Count bytes from the internal nested TStream
+    function Read(var Buffer; Count: Longint): Longint; override;
+    /// this TStream is read-only: calling this method will raise an exception
+    function Write(const Buffer; Count: Longint): Longint; override;
+  end;
+
+  /// TStream with an internal memory buffer
+  // - can be beneficial e.g. reading from a file by small chunks
+  TBufferedStreamReader = class(TStreamWithPositionAndSize)
+  protected
+    fBuffer: RawByteString;
+    fSource: TStream;
+    fBufferPos: PAnsiChar;
+    fBufferLeft: integer;
+    fOwnStream: TStream;
+  public
+    /// initialize the source TStream and the internal buffer
+    // - will also rewind the aSource position to its beginning
+    constructor Create(aSource: TStream;
+      aBufSize: integer = 65536); reintroduce; overload;
+    /// initialize a source file and the internal buffer
+    constructor Create(const aSourceFileName: TFileName;
+      aBufSize: integer = 65536); reintroduce; overload;
+    /// finalize this instance and its buffer
+    destructor Destroy; override;
+    /// overriden method to flush buffer on rewind
+    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
+    /// will read up to Count bytes from the internal buffer or source TStream
     function Read(var Buffer; Count: Longint): Longint; override;
     /// this TStream is read-only: calling this method will raise an exception
     function Write(const Buffer; Count: Longint): Longint; override;
@@ -6200,7 +6225,7 @@ begin
   if result = 0 then
     exit;
   blen := result * 3;
-  Base64EncodeAvx2(sp, blen, rp); // handle >32 bytes of data using AVX2
+  Base64EncodeAvx2(sp, blen, rp); // handle >=32 bytes of data using AVX2
   Base64EncodeLoop(rp, sp, blen, @b64enc); // good inlining code generation
 end;
 
@@ -6288,7 +6313,7 @@ end;
 
 function BinToBase64Line(sp: PAnsiChar; len: PtrUInt; const Prefix, Suffix: RawUtf8): RawUtf8;
 const
-  PERLINE = (64 * 3) div 4;
+  PERLINE = (64 * 3) div 4; // = 48 bytes for 64 chars per line
 var
   p: PAnsiChar;
   outlen, last: PtrUInt;
@@ -6306,7 +6331,7 @@ begin
   begin
     Base64EncodeMain(p, sp, PERLINE); // may use AVX2 on FPC x86_64
     inc(sp, PERLINE);
-    PWord(p + 64)^ := $0a0d;
+    PWord(p + 64)^ := $0a0d; // on all systems for safety
     inc(p, 66);
     dec(len, PERLINE);
   end;
@@ -9370,11 +9395,6 @@ begin
     fNested[i].Stream.Free;
 end;
 
-function TNestedStreamReader.GetSize: Int64;
-begin
-  result := fSize; // Flush should have been called
-end;
-
 function TNestedStreamReader.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
 begin
   if (Offset = 0) and
@@ -9487,6 +9507,89 @@ function TNestedStreamReader.{%H-}Write(const Buffer; Count: Longint): Longint;
 begin
   raise EStreamError.Create('Unexpected TNestedStreamReader.Write');
 end;
+
+
+{ TBufferedStreamReader }
+
+constructor TBufferedStreamReader.Create(aSource: TStream; aBufSize: integer);
+begin
+  SetLength(fBuffer, aBufSize);
+  fSource := aSource;
+  fSize := fSource.Size; // get it once
+  fSource.Seek(0, soBeginning);
+end;
+
+constructor TBufferedStreamReader.Create(const aSourceFileName: TFileName;
+  aBufSize: integer);
+begin
+  Create(TFileStream.Create(aSourceFileName, fmOpenRead or fmShareDenyNone));
+  fOwnStream := fSource;
+end;
+
+destructor TBufferedStreamReader.Destroy;
+begin
+  inherited Destroy;
+  fOwnStream.Free;
+end;
+
+function TBufferedStreamReader.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+var
+  prev: Int64;
+begin
+  prev := fPosition;
+  result := inherited Seek(Offset, Origin);
+  if prev <> result then
+  begin
+    fSource.Seek(result, soBeginning);
+    fBufferLeft := 0; // deprecate buffer content
+  end;
+end;
+
+function TBufferedStreamReader.Read(var Buffer; Count: Longint): Longint;
+var
+  dest: PAnsiChar;
+  avail: integer;
+begin
+  result := 0;
+  if Count <= 0 then
+    exit;
+  if fPosition + Count > fSize then
+    Count := fSize - fPosition;
+  dest := @Buffer;
+  while Count <> 0 do
+  begin
+    avail := fBufferLeft;
+    if avail > Count then
+      avail := Count;
+    if avail <> 0 then
+    begin
+      MoveFast(fBufferPos^, dest^, avail);
+      inc(fBufferPos, avail);
+      dec(fBufferLeft, avail);
+      inc(result, avail);
+      dec(Count, avail);
+      if Count = 0 then
+        break;
+      inc(dest, avail);
+    end;
+    if Count > length(fBuffer) then
+    begin // big requests would read directly from stream
+      inc(result, fSource.Read(dest^, Count));
+      break;
+    end;
+    fBufferPos := pointer(fBuffer); // fill buffer and retry
+    fBufferLeft := fSource.Read(fBufferPos^, length(fBuffer));
+    if fBufferLeft <= 0 then
+      break;
+  end;
+  inc(fPosition, result);
+end;
+
+function TBufferedStreamReader.Write(const Buffer; Count: Longint): Longint;
+begin
+  raise EStreamError.Create('Unexpected TBufferedStreamReader.Write');
+end;
+
 
 
 function HashFile(const FileName: TFileName; Hasher: THasher): cardinal;

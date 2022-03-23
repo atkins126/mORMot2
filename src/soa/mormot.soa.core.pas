@@ -234,7 +234,8 @@ type
   // only: the client only needs the ICalculator interface
   // - then TRestServer and TRestClientUri will both have access to the
   // service, via their Services property, e.g. as:
-  // !var I: ICalculator;
+  // !var
+  // !  I: ICalculator;
   // !...
   // ! if Services.Info(ICalculator).Get(I) then
   // !   result := I.Add(10,20);
@@ -636,7 +637,10 @@ type
       IncludePseudoMethods: boolean; out bits: TServiceContainerInterfaceMethodBits);
     function GetMethodName(ListInterfaceMethodIndex: integer): RawUtf8;
     procedure CheckInterface(const aInterfaces: array of PRttiInfo);
-    function AddServiceInternal(aService: TServiceFactory): PtrInt;
+    procedure ClearServiceList; virtual;
+    function AddServiceInternal(aService: TServiceFactory): PtrInt; virtual;
+    function AddServiceMethodInternal(const aInterfaceDotMethodName: RawUtf8;
+      aService: TServiceFactory; var aMethodIndex: integer): PServiceContainerInterfaceMethod; virtual;
     function TryResolve(aInterface: PRttiInfo; out Obj): boolean; override;
     /// retrieve a service provider from its URI
     function GetService(const aUri: RawUtf8): TServiceFactory;
@@ -746,6 +750,27 @@ type
     // - you can specify some method names, or all methods redirection if []
     procedure Redirect(const aCallback: TInterfacedObject;
       const aMethodsNames: array of RawUtf8; aSubscribe: boolean = true); overload;
+  end;
+
+  /// service definition with a method which will be called when a callback
+  // interface instance is released on the client side
+  // - may be used to implement safe publish/subscribe mechanism using
+  // interface callbacks, e.g. over WebSockets
+  IServiceWithCallbackReleased = interface(IInvokable)
+    ['{8D518FCB-62C3-42EB-9AE7-96ED322140F7}']
+    /// will be called when a callback is released on the client side
+    // - this method matches the TInterfaceFactory.MethodIndexCallbackReleased
+    // signature, so that it will be called with the interface instance by
+    // TServiceContainerServer.FakeCallbackRelease
+    // - you may use it as such - see sample Project31ChatServer.dpr:
+    // ! procedure TChatService.CallbackReleased(const callback: IInvokable;
+    // !   const interfaceName: RawUtf8);
+    // ! begin  // unsubscribe from fConnected: array of IChatCallback
+    // !   if interfaceName = 'IChatCallback' then
+    // !     InterfaceArrayDelete(fConnected, callback);
+    // ! end;
+    procedure CallbackReleased(const callback: IInvokable;
+      const interfaceName: RawUtf8);
   end;
 
   /// a callback interface used to notify a TOrm modification in real time
@@ -1296,10 +1321,17 @@ end;
 constructor TServiceContainer.Create(aOwner: TInterfaceResolver);
 begin
   fOwner := aOwner;
+  ClearServiceList;
+end;
+
+procedure TServiceContainer.ClearServiceList;
+begin
+  fInterface := nil;
+  fInterfaceMethod := nil;
   fInterfaces.InitSpecific(TypeInfo(TServiceContainerInterfaces),
-    fInterface, ptRawUtf8, nil, {caseinsensitive=}true);
+    fInterface, ptRawUtf8, nil, {caseinsensitive=}not fExpectMangledUri);
   fInterfaceMethods.InitSpecific(TypeInfo(TServiceContainerInterfaceMethods),
-    fInterfaceMethod, ptRawUtf8, nil, {caseinsensitive=}true);
+    fInterfaceMethod, ptRawUtf8, nil, {caseinsensitive=}not fExpectMangledUri);
 end;
 
 destructor TServiceContainer.Destroy;
@@ -1319,43 +1351,40 @@ begin
     result := length(fInterface);
 end;
 
+function TServiceContainer.AddServiceMethodInternal(
+  const aInterfaceDotMethodName: RawUtf8; aService: TServiceFactory;
+  var aMethodIndex: integer): PServiceContainerInterfaceMethod;
+begin
+  result := fInterfaceMethods.AddUniqueName(aInterfaceDotMethodName);
+  result^.InterfaceService := aService;
+  result^.InterfaceMethodIndex := aMethodIndex;
+  inc(aMethodIndex);
+end;
+
 function TServiceContainer.AddServiceInternal(aService: TServiceFactory): PtrInt;
 var
-  MethodIndex: integer;
-
-  procedure AddOne(const aInterfaceDotMethodName: RawUtf8);
-  var
-    p: PServiceContainerInterfaceMethod;
-  begin
-    p := fInterfaceMethods.AddUniqueName(aInterfaceDotMethodName);
-    p^.InterfaceService := aService;
-    p^.InterfaceMethodIndex := MethodIndex;
-    inc(MethodIndex);
-  end;
-
-var
-  aUri: RawUtf8;
-  internal: TServiceInternalMethod;
+  ndx: integer;
+  im: TServiceInternalMethod;
   m: PtrInt;
+  uri: RawUtf8;
 begin
   if (self = nil) or
      (aService = nil) then
-    raise EServiceException.CreateUtf8(
-      '%.AddServiceInternal(%)', [self, aService]);
-  // add TServiceFactory to the internal list
+    raise EServiceException.CreateUtf8('%.AddServiceInternal(%)', [self, aService]);
+  // add TServiceFactory to the im list
   if ExpectMangledUri then
-    aUri := aService.fInterfaceMangledUri
+    uri := aService.fInterfaceMangledUri
   else
-    aUri := aService.fInterfaceUri;
-  PServiceContainerInterface(fInterfaces.AddUniqueName(aUri, @result))^.
+    uri := aService.fInterfaceUri;
+  PServiceContainerInterface(fInterfaces.AddUniqueName(uri, @result))^.
     Service := aService;
   // add associated methods - first SERVICE_PSEUDO_METHOD[], then from interface
-  aUri := aUri + '.';
-  MethodIndex := 0;
-  for internal := Low(internal) to High(internal) do
-    AddOne(aUri + SERVICE_PSEUDO_METHOD[internal]);
+  uri := uri + '.';
+  ndx := 0;
+  for im := Low(im) to High(im) do
+    AddServiceMethodInternal(uri + SERVICE_PSEUDO_METHOD[im], aService, ndx);
   for m := 0 to aService.fInterface.MethodsCount - 1 do
-    AddOne(aUri + aService.fInterface.Methods[m].Uri);
+    AddServiceMethodInternal(uri + aService.fInterface.Methods[m].Uri, aService, ndx);
 end;
 
 procedure TServiceContainer.CheckInterface(const aInterfaces: array of PRttiInfo);
@@ -1388,12 +1417,7 @@ begin
     exit;
   fExpectMangledUri := Mangled;
   toregisteragain := fInterface; // same services, but other URIs
-  fInterface := nil;
-  fInterfaces.InitSpecific(TypeInfo(TServiceContainerInterfaces),
-    fInterface, ptRawUtf8, nil, {caseinsensitive=}not Mangled);
-  fInterfaceMethod := nil;
-  fInterfaceMethods.InitSpecific(TypeInfo(TServiceContainerInterfaceMethods),
-    fInterfaceMethod, ptRawUtf8, nil, {caseinsens=}not Mangled);
+  ClearServiceList;
   for i := 0 to high(toregisteragain) do
     AddServiceInternal(toregisteragain[i].Service);
 end;

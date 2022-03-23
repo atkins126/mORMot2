@@ -327,27 +327,6 @@ type
       const callback: IServiceRecordVersionCallback): boolean;
   end;
 
-  /// service definition with a method which will be called when a callback
-  // interface instance is released on the client side
-  // - may be used to implement safe publish/subscribe mechanism using
-  // interface callbacks, e.g. over WebSockets
-  IServiceWithCallbackReleased = interface(IInvokable)
-    ['{8D518FCB-62C3-42EB-9AE7-96ED322140F7}']
-    /// will be called when a callback is released on the client side
-    // - this method matches the TInterfaceFactory.MethodIndexCallbackReleased
-    // signature, so that it will be called with the interface instance by
-    // TServiceContainerServer.FakeCallbackRelease
-    // - you may use it as such - see sample Project31ChatServer.dpr:
-    // ! procedure TChatService.CallbackReleased(const callback: IInvokable;
-    // !   const interfaceName: RawUtf8);
-    // ! begin  // unsubscribe from fConnected: array of IChatCallback
-    // !   if interfaceName='IChatCallback' then
-    // !     InterfaceArrayDelete(fConnected,callback);
-    // ! end;
-    procedure CallbackReleased(const callback: IInvokable;
-      const interfaceName: RawUtf8);
-  end;
-
   /// event signature triggerred when a callback instance is released
   // - used by TServiceContainerServer.OnCallbackReleasedOnClientSide
   // and TServiceContainerServer.OnCallbackReleasedOnServerSide event properties
@@ -378,8 +357,16 @@ type
     fOnCallbackReleasedOnClientSide: TOnCallbackReleased;
     fOnCallbackReleasedOnServerSide: TOnCallbackReleased;
     fCallbackOptions: TServiceCallbackOptions;
+    fCallbacks: array of record
+      Service: TInterfaceFactory;
+      Arg: PInterfaceMethodArgument;
+    end;
     fRecordVersionCallback: array of IServiceRecordVersionCallbackDynArray;
+    fCallbackNamesSorted: TRawUtf8DynArray;
     fSessionTimeout: cardinal;
+    procedure ClearServiceList; override;
+    function AddServiceInternal(aService: TServiceFactory): PtrInt; override;
+    // here aFakeInstance are TInterfacedObjectFakeServer instances (not owned)
     procedure FakeCallbackAdd(aFakeInstance: TObject);
     procedure FakeCallbackRemove(aFakeInstance: TObject);
     function GetFakeCallbacksCount: integer;
@@ -1601,7 +1588,7 @@ destructor TInterfacedObjectFakeServer.Destroy;
 begin
   if fServer <> nil then
   begin
-    // may be called asynchronously AFTER server is down
+    // may be called asynchronously AFTER server is down (fServer=nil)
     fServer.InternalLog('%(%:%).Destroy I%',
       [ClassType, pointer(self), fFakeID, fService.InterfaceUri]);
     if fServer.Services <> nil then
@@ -1677,7 +1664,7 @@ begin
   if fFakeCallbacks <> nil then
   begin
     for i := 0 to fFakeCallbacks.Count - 1 do
-      // prevent GPF in Destroy
+      // prevent GPF in TInterfacedObjectFakeServer.Destroy
       TInterfacedObjectFakeServer(fFakeCallbacks.List[i]).fServer := nil;
     FreeAndNil(fFakeCallbacks); // do not own objects
   end;
@@ -1763,6 +1750,30 @@ begin
       OnCloseSession(aSessionID));
 end;
 
+procedure TServiceContainerServer.ClearServiceList;
+begin
+  inherited ClearServiceList;
+  fCallbackNamesSorted := nil;
+end;
+
+function TServiceContainerServer.AddServiceInternal(
+  aService: TServiceFactory): PtrInt;
+var
+  i, n: PtrInt;
+  c: TInterfaceFactoryArgumentDynArray;
+begin
+  result := inherited AddServiceInternal(aService);
+  c := aService.InterfaceFactory.ArgUsed[imvInterface];
+  if c = nil then
+    exit;
+  n := length(fCallbackNamesSorted);
+  SetLength(fCallbackNamesSorted, n + length(c));
+  for i := 0 to length(c) - 1 do
+    fCallbackNamesSorted[i + n] := aService.InterfaceFactory.
+      Methods[c[i].MethodIndex].Args[c[i].ArgIndex].ArgRtti.Name;
+  QuickSortRawUtf8(pointer(fCallbackNamesSorted), 0, length(fCallbackNamesSorted) - 1);
+end;
+
 procedure TServiceContainerServer.FakeCallbackAdd(aFakeInstance: TObject);
 begin
   if self = nil then
@@ -1825,16 +1836,16 @@ begin
     result := 0;
 end;
 
-function FakeCallbackFind(list: PPointer; n: integer; conn: TRestConnectionID;
-  id: TInterfacedObjectFakeID): TInterfacedObjectFakeServer;
+function FakeCallbackFind(list: PPointer; n: integer; id: TInterfacedObjectFakeID;
+  conn: TRestConnectionID): TInterfacedObjectFakeServer;
 begin
   if n <> 0 then
     repeat
       result := list^;
       inc(list);
-      if (result.fLowLevelConnectionID = conn) and
-         (result.FakeID = id) then
-          exit;
+      if (result.FakeID = id) and
+         (result.fLowLevelConnectionID = conn) then
+        exit;
       dec(n);
     until n = 0;
   result := nil;
@@ -1861,17 +1872,19 @@ begin
   fakeID := Values[0].Value.ToCardinal;
   if (fakeID = 0) or
      (connectionID = 0) or
-     (Values[0].Name.Text = nil) then
+     (Values[0].Name.Text = nil) or
+     (FastFindPUtf8CharSorted(pointer(fCallbackNamesSorted),
+       length(fCallbackNamesSorted) - 1, Values[0].Name.Text) < 0) then
     exit;
   withLog := not Values[0].Name.Idem('ISynLogCallback');
   if withLog then
     // avoid stack overflow ;)
     fRestServer.InternalLog('%.FakeCallbackRelease(%,"%") remote call',
       [ClassType, fakeID, Values[0].Name.Text], sllDebug);
-  fFakeCallbacks.Safe.ReadOnlyLock;
+  fFakeCallbacks.Safe.WriteLock; // may include a nested WriteLock (reentrant)  
   try
     fake := FakeCallbackFind(
-      pointer(fFakeCallbacks.List), fFakeCallbacks.Count, connectionID, fakeID);
+      pointer(fFakeCallbacks.List), fFakeCallbacks.Count, fakeID, connectionID);
     if fake <> nil then
     begin
       fake.fReleasedOnClientSide := true;
@@ -1903,7 +1916,7 @@ begin
         Ctxt.Success;
     end;
   finally
-    fFakeCallbacks.Safe.ReadOnlyUnLock;
+    fFakeCallbacks.Safe.WriteUnLock;
   end;
 end;
 

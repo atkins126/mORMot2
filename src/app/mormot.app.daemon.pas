@@ -38,16 +38,17 @@ uses
 type
   /// abstract parent containing information able to initialize a TSynDaemon class
   // - will handle persistence as JSON local files
-  // - you may consider using TDDDAppSettingsAbstract from dddInfraSettings
-  TSynDaemonSettings  = class(TSynJsonFileSettings)
+  // - by default in this abstract parent class, no property is published to let
+  // inherited classes define the values customizable from JSON serialization
+  TSynDaemonAbstractSettings  = class(TSynJsonFileSettings)
   protected
     fServiceName: string;
     fServiceDisplayName: string;
-    fLog: TSynLogInfos;
-    fLogPath: TFileName;
-    fLogRotateFileCount: integer;
-    fLogClass: TSynLogClass;
     fServiceDependencies: string;
+    fLog: TSynLogInfos;
+    fLogRotateFileCount: integer;
+    fLogPath: TFileName;
+    fLogClass: TSynLogClass;
   public
     /// initialize and set the default settings
     constructor Create; override;
@@ -58,7 +59,7 @@ type
     procedure SetLog(aLogClass: TSynLogClass);
     /// returns user-friendly description of the service, including version
     // information and company copyright (if available)
-    function ServiceDescription: string;
+    function ServiceDescription: string; virtual;
     /// read-only access to the TSynLog class, if SetLog() has been called
     property LogClass: TSynLogClass
       read fLogClass;
@@ -68,7 +69,6 @@ type
     // - several depending services may be set by appending #0 between names
     property ServiceDependencies: string
       read fServiceDependencies write fServiceDependencies;
-  published
     /// the service name, as used internally by Windows or the TSynDaemon class
     // - default is the executable name
     property ServiceName: string
@@ -83,13 +83,35 @@ type
     /// allow to customize where the logs should be written
     property LogPath: TFileName
       read fLogPath write fLogPath;
-    /// how many files will be rotated (default is 2)
+    /// how many files will be rotated
+    // - default is 2
     property LogRotateFileCount: integer
       read fLogRotateFileCount write fLogRotateFileCount;
   end;
+
+  /// abstract parent containing information able to initialize a TSynDaemon class
+  // - by default, will publish the main properties to that RTTI will handle
+  // properly persistence of those fields in the JSON local settings file
+  TSynDaemonSettings  = class(TSynDaemonAbstractSettings)
+  published
+    /// the service name, as used internally by Windows or the TSynDaemon class
+    // - default is the executable name
+    property ServiceName;
+    /// the service name, as displayed by Windows or at the console level
+    // - default is the executable name
+    property ServiceDisplayName;
+    /// if not void, will enable the logs (default is LOG_STACKTRACE)
+    property Log: TSynLogInfos
+      read fLog write fLog;
+    /// allow to customize where the logs should be written
+    property LogPath: TFileName
+      read fLogPath write fLogPath;
+    /// how many files will be rotated (default is 2)
+    property LogRotateFileCount;
+  end;
   
   /// meta-class of TSynDaemon settings information
-  TSynDaemonSettingsClass = class of TSynDaemonSettings;
+  TSynDaemonSettingsClass = class of TSynDaemonAbstractSettings;
 
 
 
@@ -106,7 +128,7 @@ type
   protected
     fConsoleMode: boolean;
     fWorkFolderName: TFileName;
-    fSettings: TSynDaemonSettings;
+    fSettings: TSynDaemonAbstractSettings;
     function CustomCommandLineSyntax: string; virtual;
     {$ifdef OSWINDOWS}
     procedure DoStart(Sender: TService);
@@ -137,7 +159,7 @@ type
       read fConsoleMode;
     /// the settings associated with this daemon
     // - will be allocated in Create constructor, and released in Destroy
-    property Settings: TSynDaemonSettings
+    property Settings: TSynDaemonAbstractSettings
       read fSettings;
   end;
 
@@ -148,9 +170,9 @@ implementation
 
 { ************ Parent Daemon Settings Class }
 
-{ TSynDaemonSettings }
+{ TSynDaemonAbstractSettings }
 
-constructor TSynDaemonSettings.Create;
+constructor TSynDaemonAbstractSettings.Create;
 begin
   inherited Create;
   fLog := LOG_STACKTRACE + [sllNewRun];
@@ -159,7 +181,7 @@ begin
   fServiceDisplayName := fServiceName;
 end;
 
-function TSynDaemonSettings.ServiceDescription: string;
+function TSynDaemonAbstractSettings.ServiceDescription: string;
 var
   versionnumber: string;
 begin
@@ -174,7 +196,7 @@ begin
   end;
 end;
 
-procedure TSynDaemonSettings.SetLog(aLogClass: TSynLogClass);
+procedure TSynDaemonAbstractSettings.SetLog(aLogClass: TSynLogClass);
 begin
   if (self <> nil) and
      (Log <> []) and

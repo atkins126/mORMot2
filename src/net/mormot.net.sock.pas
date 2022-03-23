@@ -92,8 +92,8 @@ type
     /// raise ENetSock if res is not nrOK or nrRetry
     class procedure Check(res: TNetResult; const Context: ShortString);
     /// call NetLastError and raise ENetSock if not nrOK nor nrRetry
-    class procedure CheckLastError(const Context: ShortString; ForceRaise: boolean = false;
-      AnotherNonFatal: integer = 0);
+    class procedure CheckLastError(const Context: ShortString;
+      ForceRaise: boolean = false; AnotherNonFatal: integer = 0);
   published
     property LastError: TNetResult
       read fLastError default nrOk;
@@ -128,10 +128,16 @@ type
 
 
 const
+  NO_ERROR = 0;
+
   /// the socket protocol layers over the IP protocol
   nlIP = [nlTcp, nlUdp];
 
 type
+  /// end-user code should use this TNetSocket type to hold a socket reference
+  // - then methods allow cross-platform access to the connection
+  TNetSocket = ^TNetSocketWrap;
+
   /// internal mapping of an address, in any supported socket layer
   TNetAddr = object
   private
@@ -144,20 +150,21 @@ type
     function IPShort(withport: boolean = false): ShortString; overload;
       {$ifdef HASINLINE}inline;{$endif}
     procedure IPShort(out result: ShortString; withport: boolean = false); overload;
+    function IPWithPort: RawUtf8;
     function Port: TNetPort;
     function SetPort(p: TNetPort): TNetResult;
     function Size: integer;
+      {$ifdef FPC}inline;{$endif}
+    function IsEqualAfter64(const another: TNetAddr): boolean;
+      {$ifdef FPC}inline;{$endif}
+    function IsEqual(const another: TNetAddr): boolean;
+    function NewSocket(layer: TNetLayer): TNetSocket;
   end;
 
   /// pointer to a socket address mapping
   PNetAddr = ^TNetAddr;
 
   TNetAddrDynArray = array of TNetAddr;
-
-type
-  /// end-user code should use this TNetSocket type to hold a socket reference
-  // - then methods allow cross-platform access to the connection
-  TNetSocket = ^TNetSocketWrap;
 
   TNetSocketDynArray = array of TNetSocket;
   PNetSocketDynArray = ^TNetSocketDynArray;
@@ -190,7 +197,7 @@ type
     function MakeBlocking: TNetResult;
     function Send(Buf: pointer; var len: integer): TNetResult;
     function Recv(Buf: pointer; var len: integer): TNetResult;
-    function SendTo(Buf: pointer; len: integer; out addr: TNetAddr): TNetResult;
+    function SendTo(Buf: pointer; len: integer; const addr: TNetAddr): TNetResult;
     function RecvFrom(Buf: pointer; len: integer; out addr: TNetAddr): integer;
     function WaitFor(ms: integer; scope: TNetEvents; loerr: system.PInteger = nil): TNetEvents;
     function RecvPending(out pending: integer): TNetResult;
@@ -223,6 +230,12 @@ type
     procedure SetTimeOut(aSeconds: integer);
   end;
 
+/// internal low-level function retrieving the latest socket error information
+function NetLastError(AnotherNonFatal: integer = NO_ERROR;
+  Error: system.PInteger = nil): TNetResult;
+
+/// internal low-level function retrieving the latest socket error message
+function NetLastErrorMsg(AnotherNonFatal: integer = NO_ERROR): ShortString;
 
 /// create a new Socket connected or bound to a given ip:port
 function NewSocket(const address, port: RawUtf8; layer: TNetLayer;
@@ -1151,8 +1164,7 @@ const
     'Refused',
     'Connect Timeout');
 
-function NetLastError(AnotherNonFatal: integer = NO_ERROR;
-  Error: PInteger = nil): TNetResult;
+function NetLastError(AnotherNonFatal: integer; Error: system.PInteger): TNetResult;
 var
   err: integer;
 begin
@@ -1181,7 +1193,7 @@ begin
     result := nrRetry;
 end;
 
-function NetLastErrorMsg(AnotherNonFatal: integer = NO_ERROR): ShortString;
+function NetLastErrorMsg(AnotherNonFatal: integer): ShortString;
 var
   nr: TNetResult;
   err: integer;
@@ -1253,8 +1265,8 @@ begin
     AF_UNIX:
       result := nfUnix;
     {$endif OSPOSIX}
-    else
-      result := nfUnknown;
+  else
+    result := nfUnknown;
   end;
 end;
 
@@ -1322,6 +1334,14 @@ begin
   end;
 end;
 
+function TNetAddr.IPWithPort: RawUtf8;
+var
+  tmp: shortstring;
+begin
+  IPShort(tmp, {withport=}true);
+  ShortStringToAnsi7String(tmp, result);
+end;
+
 function TNetAddr.Port: TNetPort;
 begin
   with PSockAddr(@Addr)^ do
@@ -1354,6 +1374,38 @@ begin
   else
     result := SizeOf(Addr);
   end;
+end;
+
+function TNetAddr.IsEqualAfter64(const another: TNetAddr): boolean;
+var
+  fam: cardinal;
+begin
+  fam := PSockAddr(@Addr)^.sa_family;
+  if fam = AF_INET then
+      result := true // SizeOf(sockaddr_in) = SizeOf(Int64) = 8
+  else if fam = AF_INET6 then
+    result := CompareMemFixed(@Addr[8], @another.Addr[8], SizeOf(sockaddr_in6) - 8)
+  else
+    result := false;
+end;
+
+function TNetAddr.IsEqual(const another: TNetAddr): boolean;
+begin
+  if PInt64(@Addr)^ = PInt64(@another)^ then
+    result := IsEqualAfter64(another)
+  else
+    result := false;
+end;
+
+function TNetAddr.NewSocket(layer: TNetLayer): TNetSocket;
+var
+  s: TSocket;
+begin
+  s := socket(PSockAddr(@Addr)^.sa_family, _ST[layer], _IP[layer]);
+  if s < 0 then
+    result := nil
+  else
+    result := TNetSocket(s);
 end;
 
 
@@ -1391,7 +1443,7 @@ function GetReachableNetAddr(const address, port: array of RawUtf8;
   timeoutms, neededcount: integer; sockets: PNetSocketDynArray): TNetAddrDynArray;
 var
   i, n: PtrInt;
-  s: TSocket;
+  s: TNetSocket;
   sock: TNetSocketDynArray;
   addr: TNetAddrDynArray;
   res: TNetResult;
@@ -1414,14 +1466,14 @@ begin
     res := addr[n].SetFrom(address[i], port[i], nlTcp); // bypass DNS cache here
     if res <> nrOK then
       continue;
-    s := socket(PSockAddr(@addr[n])^.sa_family, _ST[nlTcp], _IP[nlTcp]);
-    if (s < 0) or
-       (TNetSocket(s).MakeAsync <> nrOk) then
+    s := addr[n].NewSocket(nlTcp);
+    if (s = nil) or
+       (s.MakeAsync <> nrOk) then
       continue;
-    connect(s, @addr[n], addr[n].Size); // non-blocking connect() once
-    if TNetSocket(s).MakeBlocking <> nrOk then
+    connect(s.Socket, @addr[n], addr[n].Size); // non-blocking connect() once
+    if s.MakeBlocking <> nrOk then
       continue;
-    sock[n] := TNetSocket(s);
+    sock[n] := s;
     inc(n);
   end;
   if n = 0 then
@@ -1467,7 +1519,7 @@ function NewSocket(const address, port: RawUtf8; layer: TNetLayer;
   out netsocket: TNetSocket; netaddr: PNetAddr): TNetResult;
 var
   addr: TNetAddr;
-  sock: TSocket;
+  sock: TNetSocket;
   fromcache, tobecached: boolean;
   connectendtix: Int64;
 begin
@@ -1483,8 +1535,8 @@ begin
   if result <> nrOK then
     exit;
   // create the raw Socket instance
-  sock := socket(PSockAddr(@addr)^.sa_family, _ST[layer], _IP[layer]);
-  if sock = -1 then
+  sock := addr.NewSocket(layer);
+  if sock = nil then
   begin
     result := NetLastError(WSAEADDRNOTAVAIL);
     if fromcache then
@@ -1496,8 +1548,8 @@ begin
   {$ifdef OSWINDOWS}
   if not dobind then
   begin // on Windows, default buffers are of 8KB :(
-    TNetSocket(sock).SetRecvBufferSize(65536);
-    TNetSocket(sock).SetSendBufferSize(65536);
+    sock.SetRecvBufferSize(65536);
+    sock.SetSendBufferSize(65536);
   end; // to be done before the actual connect() for proper TCP negotiation
   {$endif OSWINDOWS}
   // open non-blocking Client connection if a timeout was specified
@@ -1509,12 +1561,12 @@ begin
       connectendtix := 0
     else
       connectendtix := mormot.core.os.GetTickCount64 + connecttimeout;
-    TNetSocket(sock).MakeAsync;
-    connect(sock, @addr, addr.Size); // non-blocking connect() once
-    TNetSocket(sock).MakeBlocking;
+    sock.MakeAsync;
+    connect(sock.Socket, @addr, addr.Size); // non-blocking connect() once
+    sock.MakeBlocking;
     result := nrConnectTimeout;
     repeat
-      if TNetSocket(sock).WaitFor(1, [neWrite]) = [neWrite] then
+      if sock.WaitFor(1, [neWrite]) = [neWrite] then
       begin
         result := nrOK;
         break;
@@ -1528,16 +1580,17 @@ begin
     if dobind then
     begin
       // bound Socket should remain open for 5 seconds after a closesocket()
-      TNetSocket(sock).SetLinger(5);
+      if layer <> nlUdp then
+        sock.SetLinger(5);
       // Server-side binding/listening of the socket to the address:port
-      if (bind(sock, @addr, addr.Size) <> NO_ERROR) or
+      if (bind(sock.Socket, @addr, addr.Size) <> NO_ERROR) or
          ((layer <> nlUdp) and
-          (listen(sock, DefaultListenBacklog) <> NO_ERROR)) then
+          (listen(sock.Socket, DefaultListenBacklog) <> NO_ERROR)) then
         result := NetLastError(WSAEADDRNOTAVAIL);
     end
     else
       // open blocking Client connection (use system-defined timeout)
-      if connect(sock, @addr, addr.Size) <> NO_ERROR then
+      if connect(sock.Socket, @addr, addr.Size) <> NO_ERROR then
         result := NetLastError(WSAEADDRNOTAVAIL);
     if (result = nrOK) or
        (retry <= 0) then
@@ -1548,7 +1601,7 @@ begin
   if result <> nrOK then
   begin
     // this address:port seems invalid or already bound
-    closesocket(sock);
+    closesocket(sock.Socket);
     if fromcache then
       // ensure the cache won't contain this faulty address any more
       NewSocketAddressCache.Flush(address);
@@ -1559,7 +1612,7 @@ begin
     if tobecached then
       // update cache once we are sure the host actually exists
       NewSocketAddressCache.Add(address, addr);
-    netsocket := TNetSocket(sock);
+    netsocket := sock;
     netsocket.SetupConnection(layer, sendtimeout, recvtimeout);
     if netaddr <> nil then
       MoveFast(addr, netaddr^, addr.Size);
@@ -1571,11 +1624,16 @@ end;
 
 procedure TNetSocketWrap.SetOpt(prot, name: integer;
   value: pointer; valuelen: integer);
+var
+  err: TNetResult;
+  low: integer;
 begin
   if @self = nil then
     raise ENetSock.Create('SetOptions(%d,%d) with no socket', [prot, name]);
-  if setsockopt(TSocket(@self), prot, name, value, valuelen) <> NO_ERROR then
-    raise ENetSock.Create('SetOptions(%d,%d)', [prot, name], NetLastError);
+  if setsockopt(TSocket(@self), prot, name, value, valuelen) = NO_ERROR then
+    exit;
+  err := NetLastError(NO_ERROR, @low);
+  raise ENetSock.Create('SetOptions(%d,%d) sockerr=%d', [prot, name, low], err);
 end;
 
 function TNetSocketWrap.GetOptInt(prot, name: integer): integer;
@@ -1732,7 +1790,6 @@ begin
     result := nrNoSocket
   else
   begin
-//    len := fprecv(TSocket(@self), Buf, len, 0);
     len := mormot.net.sock.recv(TSocket(@self), Buf, len, 0);
     // man recv: Upon successful completion, recv() shall return the length of
     // the message in bytes. If no messages are available to be received and the
@@ -1750,7 +1807,7 @@ begin
 end;
 
 function TNetSocketWrap.SendTo(Buf: pointer; len: integer;
-  out addr: TNetAddr): TNetResult;
+  const addr: TNetAddr): TNetResult;
 begin
   if @self = nil then
     result := nrNoSocket

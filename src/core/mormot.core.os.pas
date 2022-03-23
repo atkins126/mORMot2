@@ -269,7 +269,7 @@ var
 
 type
   /// Exception types raised by this mormot.core.os unit
-  EOSException = class(Exception);
+  EOSException = class(ExceptionWithProps);
 
   /// the recognized operating systems
   // - it will also recognize most Linux distributions
@@ -1936,12 +1936,12 @@ type
     /// the OS-level exception code
     // - could be $0EEDFAE0 of $0EEDFADE for Delphi-generated exceptions
     ECode: DWord;
+    /// = FPC's RaiseProc() FrameCount if EStack is Frame: PCodePointer
+    EStackCount: integer;
     /// the address where the exception occured
     EAddr: PtrUInt;
     /// the optional stack trace
     EStack: PPtrUInt;
-    /// = FPC's RaiseProc() FrameCount if EStack is Frame: PCodePointer
-    EStackCount: integer;
     /// timestamp of this exception, as number of seconds since UNIX Epoch
     // - UnixTimeUtc is faster than NowUtc or GetSystemTime
     // - use UnixTimeToDateTime() to convert it into a regular TDateTime
@@ -1974,11 +1974,20 @@ procedure QueryPerformanceMicroSeconds(out Value: Int64);
 function ValidHandle(Handle: THandle): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// check for unsafe '..' '/xxx' 'c:xxx' or '\\' patterns in a filename
+/// check for unsafe '..' '/xxx' 'c:xxx' '~/xxx' or '\\' patterns in a filename
 function SafeFileName(const FileName: TFileName): boolean;
 
-/// check for unsafe '..' '/xxx' 'c:xxx' or '\\' patterns in a filename
+/// check for unsafe '..' '/xxx' 'c:xxx' '~/xxx' or '\\' patterns in a filename
 function SafeFileNameU(const FileName: RawUtf8): boolean;
+
+const
+  /// the path delimiter character to be changed into PathDelim on current OS
+  InvertedPathDelim = {$ifdef OSWINDOWS} '/' {$else} '\' {$endif};
+
+/// ensure all \ / path delimiters are normalized into the current OS expectation
+// - i.e. normalize file name to use '\' on Windows, or '/' on POSIX
+// - see MakePath() from mormot.core.text.pas to concatenate path items
+function NormalizeFileName(const FileName: TFileName): TFileName;
 
 /// get a file date and time, from its name
 // - returns 0 if file doesn't exist
@@ -2384,6 +2393,11 @@ function ReserveExecutableMemory(size: cardinal): pointer;
 // buffer, so its size should be < 4KB
 // - do nothing on Windows and Linux, but may be needed on OpenBSD
 procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
+
+/// check if the supplied pointer is actually pointing to some memory page
+// - will call slow but safe VirtualQuery API on Windows, or try a fpaccess()
+// syscall on POSIX systems (validated on Linux only)
+function SeemsRealPointer(p: pointer): boolean;
 
 /// return the PIDs of all running processes
 // - under Windows, is a wrapper around EnumProcesses() PsAPI call
@@ -2908,7 +2922,8 @@ type
     // !end; // local hidden IUnknown will release the lock for the method
     // - warning: under FPC, you should assign its result to a local variable -
     // see bug http://bugs.freepascal.org/view.php?id=26602
-    // !var LockFPC: IUnknown;
+    // !var
+    // !  LockFPC: IUnknown;
     // !begin
     // !  ... // unsafe code
     // !  LockFPC := Safe.ProtectMethod;
@@ -3287,7 +3302,7 @@ type
   SERVICE_STATUS_HANDLE = cardinal;
   TServiceTableEntry = record
     lpServiceName: PChar;
-    lpServiceProc: procedure(ArgCount: cardinal; Args: PPChar); stdcall;
+    lpServiceProc: procedure(ArgCount: integer; Args: PPChar); stdcall;
   end;
   PServiceTableEntry = ^TServiceTableEntry;
 
@@ -4283,6 +4298,7 @@ begin
             (FileName[1] <> '/') and
             (PosExString('..', FileName) = 0) and
             (PosExString(':', FileName) = 0) and
+            (PosExString('~', FileName) = 0) and
             (PosExString('\\', FileName) = 0);
 end;
 
@@ -4292,7 +4308,13 @@ begin
             (FileName[1] <> '/') and
             (PosEx('..', FileName) = 0) and
             (PosExChar(':', FileName) = 0) and
+            (PosExChar('~', FileName) = 0) and
             (PosEx('\\', FileName) = 0);
+end;
+
+function NormalizeFileName(const FileName: TFileName): TFileName;
+begin
+  result := StringReplace(FileName, InvertedPathDelim, PathDelim, [rfReplaceAll]);
 end;
 
 procedure DisplayError(const fmt: string; const args: array of const);
@@ -6452,7 +6474,7 @@ begin
   JSON_CONTENT_TYPE_HEADER_VAR := JSON_CONTENT_TYPE_HEADER;
   NULL_STR_VAR := 'null';
   BOOL_UTF8[false] := 'false';
-  BOOL_UTF8[true] := 'true';
+  BOOL_UTF8[true]  := 'true';
   // minimal stubs which will be properly implemented in mormot.core.log.pas
   GetExecutableLocation := _GetExecutableLocation;
   SetThreadName := _SetThreadName;

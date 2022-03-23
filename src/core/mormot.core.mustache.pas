@@ -183,6 +183,7 @@ type
     end;
     fTempGetValueFromContextHelper: TVariantDynArray;
     fReuse: TLightLock;
+    fPathDelim: AnsiChar;
     procedure PushContext(aDoc: TVarData);
     procedure PopContext; override;
     procedure AppendValue(const ValueName: RawUtf8; UnEscape: boolean);
@@ -204,6 +205,10 @@ type
       SectionMaxCount: integer; const aDocument: variant; OwnWriter: boolean);
     /// allow to reuse this Mustache template rendering context
     procedure CancelAll;
+    /// the path delimited for getting a value
+    // - equals '.' by default
+    property PathDelim: AnsiChar
+      read fPathDelim write fPathDelim;
   end;
 
   /// maintain a list of {{mustache}} partials
@@ -385,9 +390,10 @@ type
     // - you can specify a list of partials via TSynMustachePartials.CreateOwned,
     // a list of Expression Helpers, or a custom {{"English text}} callback
     // - can be used e.g. via a TDocVariant:
-    // !var mustache := TSynMustache;
-    // !    doc: variant;
-    // !    html: RawUtf8;
+    // !var
+    // !  mustache := TSynMustache;
+    // !  doc: variant;
+    // !  html: RawUtf8;
     // !begin
     // !  mustache := TSynMustache.Parse(
     // !    'Hello {{name}}'#13#10'You have just won {{value}} dollars!');
@@ -508,6 +514,7 @@ constructor TSynMustacheContextVariant.Create(Owner: TSynMustache;
   OwnWriter: boolean);
 begin
   fOwnWriter := OwnWriter;
+  fPathDelim := '.';
   inherited Create(Owner, WR);
   SetLength(fContext, SectionMaxCount + 4);
   PushContext(TVarData(aDocument)); // weak copy
@@ -675,7 +682,7 @@ begin
         if ListCount < 0 then
         begin
           // single item context
-          DocumentType.Lookup(Value, Document, pointer(ValueName));
+          DocumentType.Lookup(Value, Document, pointer(ValueName), fPathDelim);
           if Value.VType >= varNull then
             exit;
         end
@@ -693,7 +700,7 @@ begin
                 (ListCurrentDocumentType <> nil) then
         begin
           ListCurrentDocumentType.Lookup(
-            Value, ListCurrentDocument, pointer(ValueName));
+            Value, ListCurrentDocument, pointer(ValueName), fPathDelim);
           if Value.VType >= varNull then
             exit;
         end;
@@ -850,7 +857,7 @@ end;
 class function TSynMustachePartials.CreateOwned(
   const Partials: variant): TSynMustachePartials;
 var
-  p: PtrInt;
+  ndx: PtrInt;
 begin
   result := nil;
   with _Safe(Partials)^ do
@@ -859,8 +866,8 @@ begin
     begin
       result := TSynMustachePartials.Create;
       result.fOwned := true;
-      for p := 0 to Count - 1 do
-        result.Add(names[p], VariantToUtf8(Values[p]));
+      for ndx := 0 to Count - 1 do
+        result.Add(names[ndx], VariantToUtf8(Values[ndx]));
     end;
 end;
 
