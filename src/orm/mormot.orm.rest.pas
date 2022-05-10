@@ -618,7 +618,7 @@ procedure TRestOrm.ReleaseJsonWriter(WR: TJsonWriter);
 begin
   if WR = fTempJsonWriter then
   begin
-    WR.CancelAll;
+    WR.CancelAllAsNew;
     fTempJsonWriterLock.UnLock;
   end
   else
@@ -2105,8 +2105,8 @@ begin
   blob := Table.OrmProps.BlobFieldPropFromRawUtf8(BlobFieldName);
   if blob = nil then
     exit;
-  result := EngineRetrieveBlob(fModel.GetTableIndexExisting(Table), aID,
-    blob, BlobData);
+  result := EngineRetrieveBlob(
+    fModel.GetTableIndexExisting(Table), aID, blob, BlobData);
 end;
 
 function TRestOrm.RetrieveBlob(Table: TOrmClass; aID: TID;
@@ -2323,7 +2323,7 @@ begin
   result := BatchSend(Batch, dummyRes);
 end;
 
-function TRestOrm.{%H-}BatchSend(Table: TOrmClass; var Data: RawUtf8;
+function TRestOrm.BatchSend(Table: TOrmClass; var Data: RawUtf8;
   var Results: TIDDynArray; ExpectedResultsCount: integer): integer;
 begin
   result := EngineBatchSend(Table, Data, Results, ExpectedResultsCount);

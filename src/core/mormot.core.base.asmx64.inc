@@ -584,14 +584,18 @@ end;
 
 {$endif FPC}
 
-{ some numbers, with CITIES_MAX=200000, deleting 1/128 entries
+{
+  Some numbers, with CITIES_MAX=200000, deleting 1/128 entries
   first column (3..23) is the max number of indexes[] chunk to rehash
+  #abc is the number of slots in the hash table
+  adjust=abc abcMB/s match DynArrayHashTableAdjust() time fixing the indexes
+  hash=abc is the time needed to hash input (not impacted by ajust algorithm)
   -> TDynArray.Delete move() takes more time than the HashTable update :)
   1. naive loop
     for i := 0 to HashTableSize-1 do
       if HashTable[i]>aArrayIndex then
         dec(HashTable[i]);
-    3 #257  adjust=7.95ms 191.7MB hash=8us
+    3 #257  adjust=7.95ms 191.7MB/s hash=8us
     23 #195075  adjust=4.27s 548.6MB/s hash=2.47ms
   2. branchless pure pascal code is about 10x faster!
     3 #257  adjust=670us 2.2GB hash=8us
@@ -1914,7 +1918,7 @@ function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
         imul    eax, $01010101
         and     rcx, -16
         movd    xmm1, eax
-        movaps  xmm0, [rcx]
+        movaps  xmm0, [rcx]      // check first aligned 16 bytes
         add     rcx, 16
         pshufd  xmm1, xmm1, 0
         sub     rcx, r8
@@ -1927,7 +1931,7 @@ function ByteScanIndex(P: PByteArray; Count: PtrInt; Value: byte): PtrInt;
         cmp     rdx, rcx
         jbe     @no
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@by16:  movaps  xmm0, [r8 + rcx]
+@by16:  movaps  xmm0, [r8 + rcx]  // next 16 bytes
         add     rcx, 16
         pcmpeqb xmm0, xmm1
         pmovmskb eax, xmm0
@@ -1963,7 +1967,7 @@ function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
         movd    xmm1, eax
         and     rcx, -16
         punpcklwd xmm1, xmm1
-        movaps  xmm0, [rcx]
+        movaps  xmm0, [rcx]      // check first aligned 16 bytes
         add     rcx, 16
         pshufd  xmm1, xmm1, 0
         sub     rcx, r8
@@ -1978,7 +1982,7 @@ function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
         cmp     rdx, rcx
         jbe     @no
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@by16:  movaps  xmm0, [r8 + rcx * 2]
+@by16:  movaps  xmm0, [r8 + rcx * 2]  // next 16 bytes
         add     rcx, 8
         pcmpeqw xmm0, xmm1
         pmovmskb eax, xmm0
@@ -2029,7 +2033,7 @@ function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): Pt
         jnz     @unal
         // eax=Value, rcx=P rdx=Count
         and     rcx, -16
-        movaps  xmm0, [rcx]
+        movaps  xmm0, [rcx]      // check first aligned 16 bytes
         add     rcx, 16
         pshufd  xmm1, xmm1, 0
         sub     rcx, r8
@@ -2044,7 +2048,7 @@ function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): Pt
         cmp     rdx, rcx
         jbe     @no
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@by16:  movaps  xmm0, [r8 + rcx * 4]
+@by16:  movaps  xmm0, [r8 + rcx * 4]  // next 16 bytes
         add     rcx, 4
         pcmpeqd xmm0, xmm1
         pmovmskb eax, xmm0

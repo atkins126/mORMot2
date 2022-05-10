@@ -613,7 +613,7 @@ type
   // - twoFlushToStreamNoAutoResize would forbid FlushToStream to resize the
   // internal memory buffer when it appears undersized - FlushFinal will set it
   // before calling a last FlushToStream
-  // - by default, custom serializers defined via RegisterCustomJsonSerializer()
+  // - by default, custom serializers set via TRttiJson.RegisterCustomSerializer()
   // would let AddRecordJson() and AddDynArrayJson() write enumerates and sets
   // as integer numbers, unless twoEnumSetsAsTextInRecord or
   // twoEnumSetsAsBooleanInRecord (exclusively) are set - for Mustache data
@@ -794,6 +794,8 @@ type
     function GetTextLength: PtrUInt;
     procedure SetStream(aStream: TStream);
     procedure SetBuffer(aBuf: pointer; aBufSize: integer);
+    procedure InternalSetBuffer(aBuf: PUtf8Char; aBufSize: integer);
+      {$ifdef FPC} inline; {$endif}
   public
     /// direct access to the low-level current position in the buffer
     // - you should not use this field directly
@@ -813,22 +815,19 @@ type
     // - will use an external buffer (which may be allocated on stack)
     constructor Create(aStream: TStream; aBuf: pointer; aBufSize: integer); overload;
     /// the data will be written to an internal TRawByteStringStream
-    // - TRawByteStringStream.DataString method will be used by TTextWriter.Text
-    // to retrieve directly the content without any data move nor allocation
     // - default internal buffer size if 4096 (enough for most JSON objects)
     // - consider using a stack-allocated buffer and the overloaded method
     constructor CreateOwnedStream(aBufSize: integer = 4096); overload;
     /// the data will be written to an internal TRawByteStringStream
     // - will use an external buffer (which may be allocated on stack)
-    // - TRawByteStringStream.DataString method will be used by TTextWriter.Text
-    // to retrieve directly the content without any data move nor allocation
     constructor CreateOwnedStream(aBuf: pointer; aBufSize: integer); overload;
     /// the data will be written to an internal TRawByteStringStream
     // - will use the stack-allocated TTextWriterStackBuffer if possible
-    // - TRawByteStringStream.DataString method will be used by TTextWriter.Text
-    // to retrieve directly the content without any data move nor allocation
     constructor CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer;
-      aBufSize: integer = SizeOf(TTextWriterStackBuffer)); overload;
+      aBufSize: integer); overload;
+    /// the data will be written to an internal TRawByteStringStream
+    // - will use the stack-allocated TTextWriterStackBuffer
+    constructor CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer); overload;
     /// the data will be written to an external file
     // - you should call explicitly FlushFinal or FlushToStream to write
     // any pending data to the file
@@ -1183,6 +1182,8 @@ type
     // - note that this does not clear the Stream content itself, just
     // move back its writing position to its initial place
     procedure CancelAll;
+    /// same as CancelAll, and also reset the CustomOptions
+    procedure CancelAllAsNew;
 
     /// count of added bytes to the stream
     // - see PendingBytes for the number of bytes currently in the memory buffer
@@ -1246,7 +1247,7 @@ function HtmlEscapeString(const text: string;
 
 
 const
-  /// JSON serialization options focusing of sets support
+  /// TTextWriter JSON serialization options focusing of sets support
   // - as used e.g. by TJsonWriter.AddRecordJson/AddDynArrayJson and
   // TDynArray.SaveJson methods, and SaveJson/RecordSaveJson functions
   // - to be used as TEXTWRITEROPTIONS_TEXTSET[EnumSetsAsText]
@@ -1254,12 +1255,24 @@ const
     [twoFullSetsAsStar],
     [twoFullSetsAsStar, twoEnumSetsAsTextInRecord]);
 
+  /// TTextWriter JSON serialization options which should be preserved
+  // - used e.g. by TTextWriter.CancelAllAsNew to reset its CustomOptions
+  TEXTWRITEROPTIONS_RESET = [twoStreamIsOwned, twoBufferIsExternal];
+
 type
+  TEchoWriter = class;
+
   /// callback used to echo each line of TEchoWriter class
   // - should return TRUE on success, FALSE if the log was not echoed: but
   // TSynLog will continue logging, even if this event returned FALSE
-  TOnTextWriterEcho = function(Sender: TTextWriter; Level: TSynLogInfo;
+  TOnTextWriterEcho = function(Sender: TEchoWriter; Level: TSynLogInfo;
     const Text: RawUtf8): boolean of object;
+
+  TEchoWriterBack = record
+    Level: TSynLogInfoDynArray;
+    Text: TRawUtf8DynArray;
+    Count: PtrInt;
+  end;
 
   /// add optional echoing of the lines to TTextWriter
   // - as used e.g. by TSynLog writer for log optional redirection
@@ -1271,6 +1284,9 @@ type
     fEchoStart: PtrInt;
     fEchoBuf: RawUtf8;
     fEchos: array of TOnTextWriterEcho;
+    fBack: TEchoWriterBack;
+    fBackSafe: TLightLock;
+    fEchoPendingExecuteBackground: boolean;
     function EchoFlush: PtrInt;
     function GetEndOfLineCRLF: boolean;
       {$ifdef HASINLINE}inline;{$endif}
@@ -1287,7 +1303,8 @@ type
     /// mark an end of line, ready to be "echoed" to registered listeners
     // - append a LF (#10) char or CR+LF (#13#10) chars to the buffer, depending
     // on the EndOfLineCRLF property value (default is LF, to minimize storage)
-    // - any callback registered via EchoAdd() will monitor this line
+    // - any callback registered via EchoAdd() will monitor this line in the
+    // current thread, or calling EchoPendingExecute from a background thread
     // - used e.g. by TSynLog for console output, as stated by Level parameter
     procedure AddEndOfLine(aLevel: TSynLogInfo = sllNone);
     /// add a callback to echo each line written by this class
@@ -1298,6 +1315,9 @@ type
     procedure EchoRemove(const aEcho: TOnTextWriterEcho);
     /// reset the internal buffer used for echoing content
     procedure EchoReset;
+    /// run all pending EchoPendingExecuteBackground notifications
+    // - should be executed from a background thread
+    procedure EchoPendingExecute;
     /// the associated TTextWriter instance
     property Writer: TTextWriter
       read fWriter;
@@ -1308,6 +1328,9 @@ type
     // - is just a wrapper around twoEndOfLineCRLF item in CustomOptions
     property EndOfLineCRLF: boolean
       read GetEndOfLineCRLF write SetEndOfLineCRLF;
+    /// if EchoPendingExecute is about to be executed in the background
+    property EchoPendingExecuteBackground: boolean
+      read fEchoPendingExecuteBackground write fEchoPendingExecuteBackground;
   end;
 
 
@@ -1336,16 +1359,6 @@ function FindRawUtf8(const Values: TRawUtf8DynArray; const Value: RawUtf8;
 // - CaseSensitive=false will use StrICmp() for A..Z / a..z equivalence
 function FindRawUtf8(const Values: array of RawUtf8; const Value: RawUtf8;
   CaseSensitive: boolean = true): integer; overload;
-
-/// return the index of Value in Values[], -1 if not found
-// - here name search would use fast IdemPropNameU() function
-function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer; overload;
-
-/// return the index of Value in Values[] using IdemPropNameU(), -1 if not found
-// - typical use with a dynamic array is like:
-// ! index := FindPropName(pointer(aDynArray),aValue,length(aDynArray));
-function FindPropName(Values: PRawUtf8;
-  const Value: RawUtf8; ValuesCount: integer): integer; overload;
 
 /// true if Value was added successfully in Values[]
 function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
@@ -1840,7 +1853,7 @@ type
 // - note that, due to a Delphi compiler limitation, cardinal values should be
 // type-casted to Int64() (otherwise the integer mapped value will be converted)
 // - any supplied TObject instance will be written as their class name
-function VarRecToTempUtf8(const V: TVarRec; var Res: TTempUtf8): integer;
+function VarRecToTempUtf8(const V: TVarRec; var Res: TTempUtf8): PtrInt;
 
 /// convert an open array (const Args: array of const) argument to an UTF-8
 // encoded text, returning FALSE if the argument was not a string value
@@ -1926,6 +1939,11 @@ procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
 
 /// fast Format() function replacement, for UTF-8 content stored in variant
 function FormatVariant(const Format: RawUtf8; const Args: array of const): variant;
+
+/// append some text to a RawUtf8, ensuring previous text is separated with CRLF
+// - could be used e.g. to update HTTP headers
+procedure AppendLine(var Text: RawUtf8; const Args: array of const;
+  const Separator: shortstring = #13#10);
 
 /// append some path parts into a single file name with proper path delimiters
 // - set EndWithDelim=true if you want to create e.g. full a folder name
@@ -2198,6 +2216,11 @@ procedure BinToHex(Bin, Hex: PAnsiChar; BinBytes: PtrInt); overload;
 
 /// fast conversion from hexa chars into binary data
 function HexToBin(const Hex: RawUtf8): RawByteString; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// fast conversion from hexa chars into binary data
+function HexToBin(Hex: PAnsiChar; HexLen: PtrInt;
+  var Bin: RawByteString): boolean; overload;
 
 /// fast conversion from binary data into hexa chars
 function BinToHex(const Bin: RawByteString): RawUtf8; overload;
@@ -2247,7 +2270,12 @@ function BinToHexDisplayLower(Bin: PAnsiChar; BinBytes: PtrInt): RawUtf8; overlo
 function BinToHexDisplayLowerShort(Bin: PAnsiChar; BinBytes: PtrInt): ShortString;
 
 /// fast conversion from up to 64-bit of binary data into lowercase hexa chars
-function BinToHexDisplayLowerShort16(Bin: Int64; BinBytes: PtrInt): TShort16;
+function BinToHexDisplayLowerShort16(Bin: Int64; BinBytes: PtrInt): TShort16; overload;
+
+/// fast conversion from up to 64-bit of binary data into lowercase hexa chars
+// - warning: here binary size is in bits (typically 1..64), not bytes
+procedure BinToHexDisplayLowerShort16(Bin: Int64; BinBits: PtrInt;
+  var Result: TShort16); overload;
 
 /// fast conversion from binary data into hexa lowercase chars, ready to be
 // used as a convenient TFileName prefix
@@ -3819,7 +3847,7 @@ begin
   begin
     S := P;
     {$ifdef CPUINTEL}
-    S := PosChar(S, Sep);
+    S := PosChar(S, Sep); // SSE2 asm on i386 and x86_64
     if S = nil then
       S := P + StrLen(P);
     {$else}
@@ -4814,6 +4842,19 @@ end;
 
 { TTextWriter }
 
+var
+  DefaultTextWriterTrimEnum: boolean; // see TTextWriter.SetDefaultEnumTrim()
+
+procedure TTextWriter.InternalSetBuffer(aBuf: PUtf8Char; aBufSize: integer);
+begin
+  fTempBuf := aBuf;
+  fTempBufSize := aBufSize;
+  B := aBuf - 1; // Add() methods will append at B+1
+  BEnd := aBuf + (aBufSize - 16); // -16 to avoid buffer overwrite/overread
+  if DefaultTextWriterTrimEnum then
+    Include(fCustomOptions, twoTrimLeftEnumSets);
+end;
+
 constructor TTextWriter.Create(aStream: TStream; aBufSize: integer);
 begin
   SetStream(aStream);
@@ -4828,38 +4869,41 @@ begin
   SetBuffer(aBuf, aBufSize);
 end;
 
-constructor TTextWriter.CreateOwnedFileStream(
-  const aFileName: TFileName; aBufSize: integer);
-begin
-  DeleteFile(aFileName);
-  Create(TFileStream.Create(aFileName, fmCreate or fmShareDenyWrite), aBufSize);
-  Include(fCustomOptions, twoStreamIsOwned);
-end;
-
 constructor TTextWriter.CreateOwnedStream(aBuf: pointer; aBufSize: integer);
 begin
-  SetStream(TRawByteStringStream.Create);
+  fStream := TRawByteStringStream.Create; // inlined SetStream()
+  fCustomOptions := [twoStreamIsOwned];
   SetBuffer(aBuf, aBufSize);
-  Include(fCustomOptions, twoStreamIsOwned);
 end;
 
 constructor TTextWriter.CreateOwnedStream(aBufSize: integer);
 begin
-  Create(TRawByteStringStream.Create, aBufSize);
-  Include(fCustomOptions, twoStreamIsOwned);
+  CreateOwnedStream(nil, aBufSize);
 end;
 
 constructor TTextWriter.CreateOwnedStream(
   var aStackBuf: TTextWriterStackBuffer; aBufSize: integer);
 begin
   if aBufSize > SizeOf(aStackBuf) then // too small -> allocate on heap
-    CreateOwnedStream(aBufSize)
+    CreateOwnedStream(nil, aBufSize)
   else
-  begin
-    SetStream(TRawByteStringStream.Create);
-    SetBuffer(@aStackBuf, SizeOf(aStackBuf));
-    Include(fCustomOptions, twoStreamIsOwned);
-  end;
+    CreateOwnedStream(aStackBuf);
+end;
+
+constructor TTextWriter.CreateOwnedStream(var aStackBuf: TTextWriterStackBuffer);
+begin
+  fStream := TRawByteStringStream.Create; // inlined SetStream()
+  fCustomOptions := [twoStreamIsOwned, twoBufferIsExternal]; // SetBuffer()
+  InternalSetBuffer(@aStackBuf, SizeOf(aStackBuf));
+end;
+
+constructor TTextWriter.CreateOwnedFileStream(
+  const aFileName: TFileName; aBufSize: integer);
+begin
+  DeleteFile(aFileName);
+  fStream := TFileStream.Create(aFileName, fmCreate or fmShareDenyWrite);
+  fCustomOptions := [twoStreamIsOwned];
+  SetBuffer(nil, aBufSize);
 end;
 
 destructor TTextWriter.Destroy;
@@ -5020,9 +5064,6 @@ begin
     result := PtrUInt(B - fTempBuf + 1) + fTotalFileSize - fInitialStreamPosition;
 end;
 
-var
-  DefaultTextWriterTrimEnum: boolean;
-  
 class procedure TTextWriter.SetDefaultEnumTrim(aShouldTrimEnumsAsText: boolean);
 begin
   DefaultTextWriterTrimEnum := aShouldTrimEnumsAsText;
@@ -5033,17 +5074,10 @@ begin
   if aBufSize <= 16 then
     raise ESynException.CreateUtf8('%.SetBuffer(size=%)', [self, aBufSize]);
   if aBuf = nil then
-    GetMem(fTempBuf, aBufSize)
+    GetMem(aBuf, aBufSize)
   else
-  begin
-    fTempBuf := aBuf;
     Include(fCustomOptions, twoBufferIsExternal);
-  end;
-  fTempBufSize := aBufSize;
-  B := fTempBuf - 1; // Add() methods will append at B+1
-  BEnd := fTempBuf + (fTempBufSize - 16); // -16 to avoid buffer overwrite/overread
-  if DefaultTextWriterTrimEnum then
-    Include(fCustomOptions, twoTrimLeftEnumSets);
+  InternalSetBuffer(aBuf, aBufSize);
 end;
 
 procedure TTextWriter.SetStream(aStream: TStream);
@@ -5159,6 +5193,12 @@ begin
   if fTotalFileSize <> 0 then
     fTotalFileSize := fStream.Seek(fInitialStreamPosition, soBeginning);
   B := fTempBuf - 1;
+end;
+
+procedure TTextWriter.CancelAllAsNew;
+begin
+  CancelAll;
+  fCustomOptions := fCustomOptions * TEXTWRITEROPTIONS_RESET;
 end;
 
 procedure TTextWriter.CancelLastChar(aCharToCancel: AnsiChar);
@@ -6374,7 +6414,7 @@ end;
 
 procedure TEchoWriter.AddEndOfLine(aLevel: TSynLogInfo);
 var
-  i: PtrInt;
+  e, n: PtrInt;
 begin
   if twoEndOfLineCRLF in fWriter.CustomOptions then
     fWriter.AddCR
@@ -6383,14 +6423,52 @@ begin
   if fEchos <> nil then
   begin
     fEchoStart := EchoFlush;
-    for i := length(fEchos) - 1 downto 0 do // for MultiEventRemove() below
-    try
-      fEchos[i](fWriter, aLevel, fEchoBuf);
-    except // remove callback in case of exception during echoing in user code
-      MultiEventRemove(fEchos, i);
-    end;
+    if fEchoPendingExecuteBackground then
+    begin
+      fBackSafe.Lock;
+      n := fBack.Count;
+      if length(fBack.Level) = n then
+      begin
+        n := NextGrow(fBack.Count);
+        SetLength(fBack.Level, n);
+        SetLength(fBack.Text, n);
+        n := fBack.Count;
+      end;
+      fBack.Level[n] := aLevel;
+      fBack.Text[n] := fEchoBuf;
+      fBackSafe.UnLock;
+    end
+    else
+      for e := length(fEchos) - 1 downto 0 do // for MultiEventRemove() below
+        try
+          fEchos[e](self, aLevel, fEchoBuf);
+        except // remove callback in case of exception during echoing
+          MultiEventRemove(fEchos, e);
+        end;
     fEchoBuf := '';
   end;
+end;
+
+procedure TEchoWriter.EchoPendingExecute;
+var
+  todo: TEchoWriterBack; // thread-safe per reference copy
+  i, e: PtrInt;
+begin
+  if fBack.Count = 0 then
+    exit;
+  fBackSafe.Lock;
+  MoveFast(fBack, todo, SizeOf(fBack)); // copy without refcount
+  FillCharFast(fBack, SizeOf(fBack), 0);
+  fBackSafe.UnLock;
+  for i := 0 to todo.Count - 1 do
+    for e := length(fEchos) - 1 downto 0 do // for MultiEventRemove() below
+      try
+        fEchos[e](self, todo.Level[i], todo.Text[i]);
+      except // remove callback in case of exception during echoing in user code
+        MultiEventRemove(fEchos, e);
+        if fEchos = nil then
+          break;
+      end;
 end;
 
 procedure TEchoWriter.FlushToStream(Text: PUtf8Char; Len: PtrInt);
@@ -6525,36 +6603,6 @@ begin
       else
         inc(Values);
   result := -1;
-end;
-
-function FindPropName(Values: PRawUtf8; const Value: RawUtf8; ValuesCount: integer): integer;
-var
-  ValueLen: TStrLen;
-begin
-  dec(ValuesCount);
-  ValueLen := length(Value);
-  if ValueLen = 0 then
-    for result := 0 to ValuesCount do
-      if Values^ = '' then
-        exit
-      else
-        inc(Values)
-  else
-    for result := 0 to ValuesCount do
-      if (PtrUInt(Values^) <> 0) and
-         (PStrLen(PtrUInt(Values^) - _STRLEN)^ = ValueLen) and
-         IdemPropNameUSameLenNotNull(pointer(Values^), pointer(Value), ValueLen) then
-        exit
-      else
-        inc(Values);
-  result := -1;
-end;
-
-function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer;
-begin
-  result := high(Names);
-  if result >= 0 then
-    result := FindPropName(@Names[0], Name, result + 1);
 end;
 
 function FindRawUtf8(const Values: TRawUtf8DynArray; const Value: RawUtf8;
@@ -9124,7 +9172,7 @@ begin
   result := true;
 end;
 
-function VarRecToTempUtf8(const V: TVarRec; var Res: TTempUtf8): integer;
+function VarRecToTempUtf8(const V: TVarRec; var Res: TTempUtf8): PtrInt;
 var
   i: PtrInt;
   v64: Int64;
@@ -9435,6 +9483,8 @@ type
     procedure Parse(const Format: RawUtf8; const Args: array of const);
     procedure DoDelim(const Part: array of const; EndWithDelim: boolean;
       Delim: AnsiChar);
+    procedure DoAppendLine(var Text: RawUtf8; Arg: PVarRec; ArgCount: integer;
+      const Separator: shortstring);
     procedure Write(Dest: PUtf8Char);
     procedure WriteUtf8(var result: RawUtf8);
     procedure WriteString(var result: string);
@@ -9527,6 +9577,36 @@ begin
     inc(c);
   end;
   last := c;
+end;
+
+procedure TFormatUtf8.DoAppendLine(var Text: RawUtf8;
+  Arg: PVarRec; ArgCount: integer; const Separator: shortstring);
+var
+  c: PTempUtf8;
+begin
+  if ArgCount <= 0 then
+    exit;
+  argN := length(Text);
+  L := argN;
+  c := @blocks;
+  if (Text <> '') and
+     (Separator[0] <> #0) then
+  begin
+    c^.Len := ord(Separator[0]);
+    inc(L, c^.Len);
+    c^.Text := @Separator[1];
+    c^.TempRawUtf8 := nil;
+    inc(c);
+  end;
+  repeat
+    inc(L, VarRecToTempUtf8(Arg^, c^));
+    inc(Arg);
+    inc(c);
+    dec(ArgCount)
+  until ArgCount = 0;
+  last := c;
+  SetLength(Text, L);
+  Write(PUtf8Char(@PByteArray(Text)[argN]));
 end;
 
 procedure TFormatUtf8.Write(Dest: PUtf8Char);
@@ -9707,6 +9787,14 @@ end;
 function FormatString(const Format: RawUtf8; const Args: array of const): string;
 begin
   FormatString(Format, Args, result);
+end;
+
+procedure AppendLine(var Text: RawUtf8; const Args: array of const;
+  const Separator: shortstring);
+var
+  f: TFormatUtf8;
+begin
+  {%H-}f.DoAppendLine(Text, @Args[0], length(Args), Separator);
 end;
 
 function MakePath(const Part: array of const; EndWithDelim: boolean;
@@ -10095,19 +10183,25 @@ begin
   mormot.core.text.BinToHex(Bin, pointer(result), BinBytes);
 end;
 
-function HexToBin(const Hex: RawUtf8): RawByteString;
-var
-  L: integer;
+function HexToBin(Hex: PAnsiChar; HexLen: PtrInt;
+  var Bin: RawByteString): boolean;
 begin
-  result := '';
-  L := length(Hex);
-  if L and 1 <> 0 then
-    L := 0
-  else // hexadecimal should be in char pairs
-    L := L shr 1;
-  pointer(result) := FastNewString(L, CP_RAWBYTESTRING);
-  if not mormot.core.text.HexToBin(pointer(Hex), pointer(result), L) then
-    result := '';
+  Bin := '';
+  if HexLen and 1 <> 0 then
+  begin
+    result := false;
+    exit; // hexadecimal should be in char pairs
+  end;
+  HexLen := HexLen shr 1;
+  pointer(Bin) := FastNewString(HexLen, CP_RAWBYTESTRING);
+  result := mormot.core.text.HexToBin(Hex, pointer(Bin), HexLen);
+  if not result then
+    Bin := '';
+end;
+
+function HexToBin(const Hex: RawUtf8): RawByteString;
+begin
+  HexToBin(pointer(Hex), length(Hex), result);
 end;
 
 function ByteToHex(P: PAnsiChar; Value: byte): PAnsiChar;
@@ -10217,12 +10311,19 @@ begin
   BinToHexDisplayLower(Bin, @result[1], BinBytes);
 end;
 
-function BinToHexDisplayLowerShort16(Bin: Int64; BinBytes: PtrInt): TShort16;
+function {%H-}BinToHexDisplayLowerShort16(Bin: Int64; BinBytes: PtrInt): TShort16;
 begin
   if BinBytes > 8 then
     BinBytes := 8;
   result[0] := AnsiChar(BinBytes * 2);
   BinToHexDisplayLower(@Bin, @result[1], BinBytes);
+end;
+
+procedure BinToHexDisplayLowerShort16(Bin: Int64; BinBits: PtrInt;
+  var Result: TShort16);
+begin
+  Result[0] := AnsiChar(BitsToBytes(BinBits) * 2);
+  BinToHexDisplayLower(@Bin, @Result[1], ord(Result[0]) shr 1);
 end;
 
 {$ifdef UNICODE}

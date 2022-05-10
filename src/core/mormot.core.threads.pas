@@ -1063,7 +1063,7 @@ type
     fOwner: TSynThreadPool;
     fThreadNumber: integer;
     {$ifndef USE_WINIOCP}
-    fProcessingContext: pointer;
+    fProcessingContext: pointer; // protected by fOwner.fSafe.Lock
     fEvent: TEvent;
     {$endif USE_WINIOCP}
     procedure NotifyThreadStart(Sender: TSynThread);
@@ -1863,7 +1863,7 @@ begin
   fLock.Enter;
   try
     fValue.RetrieveValueOrRaiseException(pointer(Name), length(Name),
-      dvoNameCaseSensitive in fValue.Options, result, false);
+      fValue.IsCaseSensitive, result, false);
   finally
     fLock.Leave;
   end;
@@ -2293,7 +2293,7 @@ constructor TSynBackgroundThreadProcess.Create(const aThreadName: RawUtf8;
   aStats: TSynMonitorClass; CreateSuspended: boolean);
 begin
   if not Assigned(aOnProcess) then
-    raise ESynException.CreateUtf8('%.Create(aOnProcess=nil)', [self]);
+    raise ESynThread.CreateUtf8('%.Create(aOnProcess=nil)', [self]);
   if aStats <> nil then
     fStats := aStats.Create(aThreadName);
   fOnProcess := aOnProcess;

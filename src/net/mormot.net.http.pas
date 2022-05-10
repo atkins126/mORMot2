@@ -488,7 +488,8 @@ type
     fAuthBearer,
     fUserAgent,
     fOutContentType,
-    fOutCustomHeaders: RawUtf8;
+    fOutCustomHeaders,
+    fRespReason: RawUtf8;
     fInContent,
     fOutContent: RawByteString;
     fRequestID: integer;
@@ -498,15 +499,19 @@ type
     fRespStatus: integer;
     fConnectionThread: TSynThread;
   public
-    /// prepare an incoming request
+    /// prepare an incoming request from explicit values
     // - will set input parameters URL/Method/InHeaders/InContent/InContentType
     // - will reset output parameters
     procedure Prepare(const aUrl, aMethod, aInHeaders: RawUtf8;
       const aInContent: RawByteString; const aInContentType, aRemoteIP: RawUtf8); overload;
       {$ifdef HASINLINE} inline; {$endif}
+    /// prepare an incoming request from a parsed THttpRequestContext
     procedure Prepare(const aHttp: THttpRequestContext; const aRemoteIP: RawUtf8); overload;
     /// append some lines to the InHeaders input parameter
     procedure AddInHeader(AppendedHeader: RawUtf8);
+    /// append some values to the OutCustomHeaders output parameter
+    // - will maintain CRLF between lines, but not on the last line
+    procedure AddOutHeader(const Values: array of const);
     /// input parameter containing the caller message body
     // - e.g. some GET/POST/PUT JSON data can be specified here
     property InContent: RawByteString
@@ -927,7 +932,6 @@ begin
   State := hrsNoStateMachine;
   HeaderFlags := [];
   Options := [];
-  Command := '';
   Headers := '';
   ContentType := '';
   Upgrade := '';
@@ -1137,7 +1141,7 @@ begin
   if P = nil then
     exit;
   GetNextItem(P, ' ', CommandMethod); // GET
-  GetNextItem(P, ' ', CommandUri);    // /path
+  GetNextItem(P, ' ', CommandUri);    // /path/to/resource
   if not IdemPChar(P, 'HTTP/1.') then
     exit;
   if not (hfConnectionClose in HeaderFlags) then
@@ -1680,9 +1684,10 @@ begin
       SetLength(Http.Content, Http.ContentLength); // not chuncked: direct read
       SockInRead(pointer(Http.Content), Http.ContentLength);
     end
-  else if (Http.ContentLength < 0) and // -1 means no Content-Length header
-          IdemPChar(pointer(Http.Command), 'HTTP/1.0 200') then
+  else if Http.ContentLength < 0 then // -1 means no Content-Length header
   begin
+    // no Content-Length neither chunk -> read until the connection is closed
+    // also for HTTP/1.1: https://www.rfc-editor.org/rfc/rfc7230#section-3.3.3
     if Assigned(OnLog) then
       OnLog(sllTrace, 'GetBody deprecated loop', [], self);
     // body = either Content-Length or Transfer-Encoding (HTTP/1.1 RFC2616 4.3)
@@ -1704,7 +1709,8 @@ begin
     exit;
   end;
   // optionaly uncompress content
-  Http.UncompressData;
+  if Http.CompressContentEncoding >= 0 then
+    Http.UncompressData;
   if Assigned(OnLog) then
     OnLog(sllTrace, 'GetBody len=%', [Http.ContentLength], self);
   {$ifdef SYNCRTDEBUGLOW}
@@ -1812,6 +1818,11 @@ begin
       fInHeaders := AppendedHeader
     else
       fInHeaders := fInHeaders + #13#10 + AppendedHeader;
+end;
+
+procedure THttpServerRequestAbstract.AddOutHeader(const Values: array of const);
+begin
+  AppendLine(fOutCustomHeaders, Values);
 end;
 
 

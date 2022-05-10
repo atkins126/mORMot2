@@ -272,7 +272,7 @@ implementation
 
 function TOrmPeople.DataAsHex(aClient: TRestClientUri): RawUtf8;
 begin
-  Result := aClient.CallBackGetResult('DataAsHex', [], RecordClass, fID);
+  result := aClient.CallBackGetResult('DataAsHex', [], RecordClass, fID);
 end;
 
 class function TOrmPeople.Sum(aClient: TRestClientUri; a, b: double;
@@ -282,7 +282,7 @@ var
 const
   METHOD: array[boolean] of RawUtf8 = ('sum', 'sum2');
 begin
-  Result := GetExtended(pointer(
+  result := GetExtended(pointer(
     aClient.CallBackGetResult(METHOD[Method2], ['a', a, 'b', b])), err);
 end;
 
@@ -1710,7 +1710,7 @@ begin
     '"BUILDYEAR":2011},{"MAJOR":1,"MINOR":2,"RELEASE":3,"BUILD":4,'));
   CheckHash(U, $74523E0F, 'hash32i');
   {$else}
-  Check(U = '[' + JSON_BASE64_MAGIC_UTF8 + BinToBase64(Test) + '"]');
+  CheckEqual(U, '[' + JSON_BASE64_MAGIC_UTF8 + BinToBase64(Test) + '"]');
   {$endif HASEXTRECORDRTTI}
   AFP.Clear;
   Check(AFP.LoadFrom(pointer(Test)) - pointer(Test) = length(Test));
@@ -4226,9 +4226,9 @@ var
   Source, Dest: PAnsiChar;
 begin
   L := Length(S);
-  SetLength(Result, L);
+  SetLength(result, L);
   Source := Pointer(S);
-  Dest := Pointer(Result);
+  Dest := Pointer(result);
   while L <> 0 do
   begin
     Ch := Source^;
@@ -4294,8 +4294,9 @@ procedure TTestCoreBase._UTF8;
       ($61, $41, $62, $42, $e0, $c0, $fd, $dd, $14b, $14a, $371, $370,
        $3F3, $37F, $451, $401, $435, $415, $442, $422, $4e1, $4e0, $2d00, $10a0);
   var
-    i: PtrInt;
+    i, j: PtrInt;
     up, lo, up2: array[0..10] of AnsiChar;
+    src, dst: array[byte] of AnsiChar;
   begin
     CheckEqual('A', UpperCaseReference('a'));
     CheckEqual('ABC', UpperCaseReference('aBc'));
@@ -4314,6 +4315,15 @@ procedure TTestCoreBase._UTF8;
       CheckEqual(Utf8ICompReference(@lo, @up), 0, 'CaseFoldingComp');
       CheckEqual(Utf8ILCompReference(@lo, @up, StrLen(@lo), StrLen(@up)), 0,
         'CaseFoldingLComp');
+    end;
+    FillCharFast(src, SizeOf(src), ord('a'));
+    for i := 0 to 200 do
+    begin
+      FillCharFast(dst, SizeOf(dst), 0);
+      UpperCopy255Buf(@dst, @src, i)^ := #0;
+      Check(StrLen(@dst) = i);
+      for j := 0 to i - 1 do
+        Check(dst[j] = 'A');
     end;
   end;
 
@@ -4504,6 +4514,15 @@ begin
   Check(MakeCsv([1, 2, 3]) = '1,2,3');
   Check(MakeCsv([1, '2', 3], true) = '1,2,3,');
   Check(MakeCsv([1, '2 ,', 3]) = '1,2 ,3');
+  U := '';
+  AppendLine(U, []);
+  CheckEqual(U, '');
+  AppendLine(U, ['a', 1]);
+  CheckEqual(U, 'a1');
+  AppendLine(U, [2, 3, 4, 5]);
+  CheckEqual(U, 'a1'#13#10'2345');
+  AppendLine(U, ['bcdef']);
+  CheckEqual(U, 'a1'#13#10'2345'#13#10'bcdef');
   U := QuotedStr('', '"');
   CheckEqual(U, '""');
   U := QuotedStr('abc', '"');
@@ -4780,8 +4799,11 @@ begin
   PB := ToVarString(U, PB);
   check(PAnsiChar(PB) - pointer(res) = length(U) + 1);
   PB := pointer(res);
-  res := FromVarString(PB);
-  check(res = U);
+  U2 := FromVarString(PB);
+  check(U2 = U);
+  PB := pointer(res);
+  FromVarString(PB, U2);
+  check(U2 = U);
   Check(UnQuoteSqlStringVar('"one two"', U) <> nil);
   Check(U = 'one two');
   Check(UnQuoteSqlStringVar('one two', U) <> nil);
@@ -5203,7 +5225,7 @@ begin
   end;
   // validate NowUtc / TimeZoneLocalBias
   dt := NowUtc;
-  CheckSame(LocalTimeToUniversal(Now(), TimeZoneLocalBias) - dt, 0, 0.01,
+  CheckSame(LocalTimeToUniversal(Now(), TimeZoneLocalBias), dt, 0.01,
     'NowUtc should not shift nor truncate time in respect to RTL Now');
   sleep(200);
   Check(not SameValue(dt, NowUtc),
@@ -5674,9 +5696,13 @@ const
     'application/zip', 'image/gif');
 var
   i, j, n: integer;
+  fa: TFileAge;
+  fdt: TDateTime;
+  fs: Int64;
+  fu: TUnixMSTime;
   fn: array[0..10] of TFileName;
   mp, mp2: TMultiPartDynArray;
-  mpc, mpct: RawUtf8;
+  s, mpc, mpct: RawUtf8;
   st: THttpMultiPartStream;
   rfc2388: boolean;
 
@@ -5741,8 +5767,30 @@ begin
     for i := 0 to high(fn) do
     begin
       fn[i] := WorkDir + 'mp' + IntToStr(i);
-      FileFromString(StringToUtf8(MIMES[i * 2 + 1]), fn[i]);
+      StringToUtf8(MIMES[i * 2 + 1], s);
+      FileFromString(s, fn[i]);
       Check(MultiPartFormDataAddFile(fn[i], mp));
+      fa := sysutils.FileAge(fn[i]);
+      fdt := sysutils.FileDateToDateTime(fa);
+      CheckSame(fdt, mormot.core.os.FileDateToDateTime(fa), DOUBLE_SAME, 'FileDateToDateTime');
+      {$ifdef HASNEWFILEAGE}
+      Check(FileAge(fn[i], fdt), 'FileAge');
+      {$endif HASNEWFILEAGE}
+      CheckSame(fdt, mormot.core.os.FileAgeToDateTime(fn[i]), 0.01, 'fdt');
+      // FPC FileAge() is wrong and truncates 1-2 seconds on Windows -> 0.01
+      Check(FileInfo(fn[i], fs, fu), 'FileInfo');
+      CheckEqual(fs, length(s), 'FileInfo Size');
+      CheckEqual(FileAgeToUnixTimeUtc(fn[i]), fu div 1000, 'FileAgeToUnixTimeUtc');
+      // writeln('now=',DateTimeToIso8601Text(Now));
+      // writeln('utc=',DateTimeToIso8601Text(NowUtc));
+      // writeln('fdt=',DateTimeToIso8601Text(fdt));
+      // writeln('osl=',DateTimeToIso8601Text(mormot.core.os.FileAgeToDateTime(fn[i])));
+      // writeln('osu=',UnixTimeToString(FileAgeToUnixTimeUtc(fn[i])));
+      //  now=2022-04-28T13:54:06
+      //  utc=2022-04-28T11:54:06
+      //  fdt=2022-04-28T13:54:08 -> 2 seconds error from FPC RTL FileAge()
+      //  osl=2022-04-28T13:54:06
+      //  osu=2022-04-28T11:54:06
     end;
     Check(MultiPartFormDataEncode(mp, mpct, mpc, rfc2388));
     DecodeAndTest;

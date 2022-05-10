@@ -65,7 +65,8 @@ type
   // - jrcJwtID provides a unique identifier for the JWT, to prevent any replay;
   // TJwtAbstract.Compute will set an obfuscated TSynUniqueIdentifierGenerator
   // hexadecimal value stored as "jti" payload field
-  // - jrcData is set when TJwtContent.data has been filled
+  // - jrcData does not reflect any RFC 7519 registered claim, it is set when
+  // TJwtContent.data TDocVariant has been filled with some non-standard fields
   TJwtClaim = (
     jrcIssuer,
     jrcSubject,
@@ -538,14 +539,14 @@ type
   // under x86) you may enable CacheTimeoutSeconds
   // - will use the OpenSSL library if available - about 5 times faster than
   // our pascal/asm code - here are some numbers on x86_64:
-  //  TJwtES256 pascal:   100 ES256 in 33.57ms i.e. 2.9K/s, aver. 335us
-  //  TJwtES256 OpenSSL:  100 ES256 in 6.90ms i.e. 14.1K/s, aver. 69us
-  // - pre-compute the public key so is even faster than TJwtES256Osl:
-  //    TJwtES256Osl:     100 ES256 in 9.56ms i.e. 10.2K/s, aver. 95us
+  // $ TJwtES256 pascal:  100 ES256 in 33.57ms i.e. 2.9K/s, aver. 335us
+  // $ TJwtES256 OpenSSL: 100 ES256 in 6.90ms i.e. 14.1K/s, aver. 69us
+  // - our direct OpenSSL access is even slightly faster than TJwtES256Osl:
+  // $ TJwtES256Osl:      100 ES256 in 8.64ms i.e. 11.3K/s, aver. 86us
   TJwtES256 = class(TJwtAbstract)
   protected
     fCertificate: TEccCertificate;
-    fVerify: TEcc256r1VerifyAbstract; // faster pre-computed public key
+    fVerify: TEcc256r1VerifyAbstract; // includes pre-computed public key
     fOwnCertificate: boolean;
     function ComputeSignature(const headpayload: RawUtf8): RawUtf8; override;
     procedure CheckSignature(const headpayload: RawUtf8; const signature: RawByteString;
@@ -865,11 +866,10 @@ const
 procedure TJwtAbstract.Parse(const Token: RawUtf8; var JWT: TJwtContent;
   out headpayload: RawUtf8; out signature: RawByteString; excluded: TJwtClaims);
 var
-  payloadend, j, toklen, c, cap, headerlen, Nlen, VLen, a: integer;
+  payloadend, j, toklen, c, cap, headerlen, Nlen, a: integer;
   P: PUtf8Char;
-  N, V: PUtf8Char;
-  wasString: boolean;
-  EndOfObject: AnsiChar;
+  N: PUtf8Char;
+  info: TGetJsonField;
   claim: TJwtClaim;
   requiredclaims: TJwtClaims;
   value: variant;
@@ -946,22 +946,24 @@ begin
         exit; // invalid input
     end;
     requiredclaims := fClaims - excluded;
+    info.Json := P;
     if cap > 0 then
       repeat
-        N := GetJsonPropName(P, @Nlen);
+        N := GetJsonPropName(info.Json, @Nlen);
         if N = nil then
           exit;
-        V := GetJsonFieldOrObjectOrArray(
-          P, @wasString, @EndOfObject, true, true, @Vlen);
-        if V = nil then
-          exit;
-        if Nlen = 3 then
+        info.GetJsonFieldOrObjectOrArray;
+        if info.Json = nil then
+          exit; // error in parsed input
+        if (Nlen = 3) and
+           (info.Value <> nil) then
         begin
+          // check for the standard JWT claims
           c := PInteger(N)^;
           for claim := low(JWT.reg) to high(JWT.reg) do
             if PInteger(JWT_CLAIMS_TEXT[claim])^ = c then
             begin
-              if V^ = #0 then
+              if info.Value^ = #0 then
                 exit;
               include(JWT.claims, claim);
               if not (claim in fClaims) and
@@ -970,7 +972,7 @@ begin
                 JWT.result := jwtUnexpectedClaim;
                 exit;
               end;
-              FastSetString(JWT.reg[claim], V, VLen);
+              FastSetString(JWT.reg[claim], info.Value, info.ValueLen);
               if claim in requiredclaims then
                 case claim of
                   jrcJwtID:
@@ -984,7 +986,7 @@ begin
                   jrcAudience:
                     if JWT.reg[jrcAudience][1] = '[' then
                     begin
-                      aud.InitJson(JWT.reg[jrcAudience], JSON_FAST);
+                      aud.InitJsonInPlace(info.Value, JSON_FAST);
                       if aud.Count = 0 then
                         exit;
                       for j := 0 to aud.Count - 1 do
@@ -1024,12 +1026,12 @@ begin
         if jrcData in excluded then
           continue; // caller didn't want to fill JWT.data
         include(JWT.claims, jrcData);
-        GetVariantFromJsonField(V, wasString, value, @JSON_[mFast],
-          joDoubleInData in fOptions, VLen);
+        GetVariantFromJsonField(info.Value, info.WasString, value,
+          @JSON_[mFast], joDoubleInData in fOptions, info.ValueLen);
         if JWT.data.Count = 0 then
           JWT.data.Capacity := cap;
         JWT.data.AddValue(N, Nlen, value)
-      until EndOfObject = '}';
+      until info.EndOfObject = '}';
     if requiredclaims - JWT.claims <> [] then
       JWT.result := jwtMissingClaim
     else

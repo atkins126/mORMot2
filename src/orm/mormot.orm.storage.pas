@@ -785,7 +785,7 @@ type
     // - consider using the overlaoded PUtf8Char/len method if you don't need this copy
     procedure LoadFromJson(const aJson: RawUtf8); overload;
     /// load the values from JSON data
-    procedure LoadFromJson(JsonBuffer: PUtf8Char; JsonBufferLen: integer); overload;
+    procedure LoadFromJson(JsonBuffer: PUtf8Char; JsonBufferLen: PtrInt); overload;
     /// save the values into JSON data
     function SaveToJson(Expand: boolean): RawUtf8; overload;
     /// save the values into JSON data
@@ -1791,8 +1791,8 @@ end;
 function TRestStorage.RecordCanBeUpdated(Table: TOrmClass; ID: TID;
   Action: TOrmEvent; ErrorMsg: PRawUtf8 = nil): boolean;
 begin
-  result := (Owner = nil) or
-            Owner.RecordCanBeUpdated(Table, ID, Action, ErrorMsg);
+  result := (fOwner = nil) or
+            fOwner.RecordCanBeUpdated(Table, ID, Action, ErrorMsg);
 end;
 
 function TRestStorage.RefreshedAndModified: boolean;
@@ -1815,8 +1815,8 @@ begin
   {$endif DEBUGSTORAGELOCK}
   if WillModifyContent and
      fStorageLockShouldIncreaseOwnerInternalState and
-     (Owner <> nil) then
-    inc(Owner.InternalState);
+     (fOwner <> nil) then
+    inc(fOwner.InternalState);
 end;
 
 procedure TRestStorage.StorageUnLock;
@@ -1846,10 +1846,10 @@ procedure TRestStorage.RecordVersionFieldHandle(Occasion: TOrmOccasion;
 begin
   if fStoredClassRecordProps.RecordVersionField = nil then
     exit;
-  if Owner = nil then
+  if fOwner = nil then
     raise ERestStorage.CreateUtf8('Owner=nil for %.%: TRecordVersion',
       [fStoredClass, fStoredClassRecordProps.RecordVersionField.Name]);
-  Owner.Owner.RecordVersionHandle(Occasion, fStoredClassProps.TableIndex,
+  fOwner.Owner.RecordVersionHandle(Occasion, fStoredClassProps.TableIndex,
     Decoder, fStoredClassRecordProps.RecordVersionField);
 end;
 
@@ -1911,16 +1911,20 @@ begin
 end;
 
 function BatchExtractSimpleID(var Sent: PUtf8Char): TID;
+var
+  info: TGetJsonField;
 begin
   if Sent^ = '[' then
     inc(Sent);
-  result := GetInt64(GetJsonField(Sent, Sent));
-  if Sent = nil then
+  info.Json := Sent;
+  info.GetJsonField;
+  if info.Json = nil then
   begin
     result := 0; // clearly invalid input
     exit;
   end;
-  dec(Sent);
+  result := GetInt64(info.Value);
+  Sent := info.Json - 1;
   Sent^ := '['; // ignore the first field (stored in fBatch.ID)
 end;
 
@@ -1943,8 +1947,7 @@ begin
   if Encoding in [encPutHexID, encPostHexID] then
   begin
     id := BatchExtractSimpleID(Sent);
-    if (Sent = nil) or
-       (id <= 0) then
+    if id <= 0 then
       exit; // invalid input
   end
   else
@@ -1955,17 +1958,19 @@ begin
     if rec.FillFromArray(Fields, Sent) then
     begin
       rec.IDValue := id;
-      StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'InternalBatchDirect' {$endif});
-      try
-        if Encoding = encPutHexID then
-          if UpdateOne(rec, Fields, '') then // no SentData
-            result := HTTP_SUCCESS
-          else
-            result := HTTP_NOTFOUND
+      if Encoding = encPutHexID then
+        if UpdateOne(rec, Fields, '') then // no SentData
+          result := HTTP_SUCCESS
         else
+          result := HTTP_NOTFOUND
+      else
+      begin
+        StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'InternalBatchDirect' {$endif});
+        try
           result := AddOne(rec, id > 0, ''); // no SentData
-      finally
-        StorageUnLock;
+        finally
+          StorageUnLock;
+        end;
       end;
     end;
   finally
@@ -1991,12 +1996,7 @@ begin
   try
     rec.FillFrom(SentData, @fields);
     rec.IDValue := ID;
-    StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'EngineUpdate'{$endif});
-    try
-      result := UpdateOne(rec, fields, SentData);
-    finally
-      StorageUnLock;
-    end;
+    result := UpdateOne(rec, fields, SentData);
   finally
     rec.Free;
   end;
@@ -2018,12 +2018,7 @@ begin
     rec.SetFieldSqlVars(Values);
     rec.IDValue := ID;
     GetJsonValue(rec, {withID=}false, fStoredClassRecordProps.CopiableFieldsBits, json);
-    StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'UpdateOne' {$endif});
-    try
-      result := UpdateOne(rec, fStoredClassRecordProps.CopiableFieldsBits, json);
-    finally
-      StorageUnLock;
-    end;
+    result := UpdateOne(rec, fStoredClassRecordProps.CopiableFieldsBits, json);
   finally
     rec.Free;
   end;
@@ -2192,8 +2187,8 @@ begin
     raise ERestStorage.CreateUtf8('%.AddOne % failed', [self, Rec]); // paranoid
   result := Rec.IDValue; // success
   fModified := true;
-  if (Owner <> nil) then
-    Owner.InternalUpdateEvent(
+  if (fOwner <> nil) then
+    fOwner.InternalUpdateEvent(
       oeAdd, fStoredClassProps.TableIndex, result, SentData, nil, Rec);
 end;
 
@@ -2300,9 +2295,9 @@ begin
     rec := fValue[aIndex];
     if rec.IDValue = fMaxID then
       fMaxID := 0; // recompute
-    if Owner <> nil then
+    if fOwner <> nil then
       // notify BEFORE deletion
-      Owner.InternalUpdateEvent(oeDelete, fStoredClassProps.TableIndex,
+      fOwner.InternalUpdateEvent(oeDelete, fStoredClassProps.TableIndex,
         rec.IDValue, '', nil, nil);
     for f := 0 to length(fUnique) - 1 do
       if fUnique[f].Hasher.FindBeforeDelete(@rec) < aIndex then
@@ -2558,83 +2553,82 @@ begin
   end;
   // full scan optimized search for a specified value
   found := 0;
-  if P.InheritsFrom(TOrmPropInfoRttiInt32) and
-     (TOrmPropInfoRttiInt32(P).PropRtti.Kind in
-        [rkInteger, rkEnumeration, rkSet]) then
-  begin
-    // search 8/16/32-bit properties
-    v := GetInt64(pointer(WhereValue), err); // 64-bit for cardinal
-    if err <> 0 then
-      exit;
-    vp := pointer(fValue);
-    nfo := TOrmPropInfoRtti(P).PropInfo;
-    offs := TOrmPropInfoRtti(P).GetterIsFieldPropOffset;
-    if offs <> 0 then
-    begin
-      // plain field with no getter
-      ot := TOrmPropInfoRtti(P).PropRtti.Cache.RttiOrd;
-      if ot in [roSLong, roULong] then
+  case P.PropInfoClass of
+    picInt32:
       begin
-        // handle very common 32-bit integer field
-        for i := 0 to fCount - 1 do
-          if (PCardinal(vp^ + offs)^ = cardinal(v)) and
-             FoundOneAndReachedLimit then
-            break
+        // search 8/16/32-bit properties
+        if not GetInt64Bool(pointer(WhereValue), v) then // 64-bit for cardinal
+          exit;
+        vp := pointer(fValue);
+        nfo := TOrmPropInfoRtti(P).PropInfo;
+        offs := TOrmPropInfoRtti(P).GetterIsFieldPropOffset;
+        if offs <> 0 then
+        begin
+          // plain field with no getter
+          ot := TOrmPropInfoRtti(P).PropRtti.Cache.RttiOrd;
+          if ot in [roSLong, roULong] then
+          begin
+            // handle very common 32-bit integer field
+            for i := 0 to fCount - 1 do
+              if (PCardinal(vp^ + offs)^ = cardinal(v)) and
+                 FoundOneAndReachedLimit then
+                break
+              else
+                inc(vp);
+          end
           else
-            inc(vp);
-      end
-      else
-        // inlined GetOrdProp() for 8-bit or 16-bit values
-        for i := 0 to fCount - 1 do
-          if (FromRttiOrd(ot, pointer(vp^ + offs)) = v) and
-             FoundOneAndReachedLimit then
-            break
-          else
-            inc(vp);
-    end
-    else
-      // has getter -> use GetOrdProp()
-      for i := 0 to fCount - 1 do
-        if (nfo^.GetOrdProp(pointer(vp^)) = v) and
-           FoundOneAndReachedLimit then
-          break
+            // inlined GetOrdProp() for 8-bit or 16-bit values
+            for i := 0 to fCount - 1 do
+              if (FromRttiOrd(ot, pointer(vp^ + offs)) = v) and
+                 FoundOneAndReachedLimit then
+                break
+              else
+                inc(vp);
+        end
         else
-          inc(vp);
-  end
-  else if P.InheritsFrom(TOrmPropInfoRttiInt64) then
-  begin
-    // search 64-bit integer property
-    v := GetInt64(pointer(WhereValue), err);
-    if err <> 0 then
-      exit;
-    nfo := TOrmPropInfoRtti(P).PropInfo;
-    offs := TOrmPropInfoRtti(P).GetterIsFieldPropOffset;
-    if offs <> 0 then
+          // has getter -> use GetOrdProp()
+          for i := 0 to fCount - 1 do
+            if (nfo^.GetOrdProp(pointer(vp^)) = v) and
+               FoundOneAndReachedLimit then
+              break
+            else
+              inc(vp);
+      end;
+    picInt64:
+      begin
+        // search 64-bit integer property
+        v := GetInt64(pointer(WhereValue), err);
+        if err <> 0 then
+          exit;
+        nfo := TOrmPropInfoRtti(P).PropInfo;
+        offs := TOrmPropInfoRtti(P).GetterIsFieldPropOffset;
+        if offs <> 0 then
+        begin
+          // plain field with no getter
+          vp := pointer(fValue);
+          for i := 0 to fCount - 1 do
+            if (PInt64(vp^ + offs)^ = v) and
+               FoundOneAndReachedLimit then
+              break
+            else
+              inc(vp);
+        end
+        else
+          // search using the getter method
+          for i := 0 to fCount - 1 do
+            if (nfo^.GetInt64Prop(fValue[i]) = v) and
+               FoundOneAndReachedLimit then
+              break;
+      end;
+  else
     begin
-      // plain field with no getter
-      vp := pointer(fValue);
+      // generic search using fast CompareValue() overridden method
+      P.SetValueVar(fSearchRec, WhereValue, false); // private copy for comparison
       for i := 0 to fCount - 1 do
-        if (PInt64(vp^ + offs)^ = v) and
-           FoundOneAndReachedLimit then
-          break
-        else
-          inc(vp);
-    end
-    else
-      // search using the getter method
-      for i := 0 to fCount - 1 do
-        if (nfo^.GetInt64Prop(fValue[i]) = v) and
+        if (P.CompareValue(fValue[i], fSearchRec, CaseInsensitive) = 0) and
            FoundOneAndReachedLimit then
           break;
-  end
-  else
-  begin
-    // generic search using fast CompareValue() overridden method
-    P.SetValueVar(fSearchRec, WhereValue, false); // private copy for comparison
-    for i := 0 to fCount - 1 do
-      if (P.CompareValue(fValue[i], fSearchRec, CaseInsensitive) = 0) and
-         FoundOneAndReachedLimit then
-        break;
+    end;
   end;
   result := found;
 end;
@@ -2762,25 +2756,27 @@ begin
   // search WHERE WhereField=WhereValue (WhereField=RTTIfield+1)
   dec(WhereField);
   P := fStoredClassRecordProps.Fields.List[WhereField];
-  if P.InheritsFrom(TOrmPropInfoRttiInt32) then
-  begin
-    for i := 0 to fCount - 1 do
-    begin
-      v := TOrmPropInfoRttiInt32(P).GetValueInt32(fValue[i]);
-      if v > max then
-        max := v;
-    end;
-    result := true;
-  end
-  else if P.InheritsFrom(TOrmPropInfoRttiInt64) then
-  begin
-    for i := 0 to fCount - 1 do
-    begin
-      v := TOrmPropInfoRttiInt64(P).GetValueInt64(fValue[i]);
-      if v > max then
-        max := v;
-    end;
-    result := true;
+  case P.PropInfoClass of
+    picInt32:
+      begin
+        for i := 0 to fCount - 1 do
+        begin
+          v := TOrmPropInfoRttiInt32(P).GetValueInt32(fValue[i]);
+          if v > max then
+            max := v;
+        end;
+        result := true;
+      end;
+    picInt64:
+      begin
+        for i := 0 to fCount - 1 do
+        begin
+          v := TOrmPropInfoRttiInt64(P).GetValueInt64(fValue[i]);
+          if v > max then
+            max := v;
+        end;
+        result := true;
+      end;
   end;
 end;
 
@@ -2805,8 +2801,7 @@ end;
 function TRestStorageInMemory.GetJsonValues(Stream: TStream; Expand: boolean;
   Stmt: TSelectStatement): PtrInt;
 var
-  ndx, KnownRowsCount: PtrInt;
-  j: PtrInt;
+  ndx, KnownRowsCount, j: PtrInt;
   id: Int64;
   W: TOrmWriter;
   IsNull: boolean;
@@ -2997,7 +2992,8 @@ begin
         // this is the main execution block, for regular SELECT statements
         MS := TRawByteStringStream.Create;
         try
-          ForceAjax := ForceAjax or not Owner.Owner.NoAjaxJson;
+          if fOwner <> nil then
+            ForceAjax := ForceAjax or not fOwner.Owner.NoAjaxJson;
           StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'GetJsonValues' {$endif});
           try
             // save rows as JSON, with appropriate search according to Where.*
@@ -3158,7 +3154,7 @@ begin
 end;
 
 procedure TRestStorageInMemory.LoadFromJson(
-  JsonBuffer: PUtf8Char; JsonBufferLen: integer);
+  JsonBuffer: PUtf8Char; JsonBufferLen: PtrInt);
 var
   T: TOrmTableJson;
   timer: TPrecisionTimer;
@@ -3614,11 +3610,11 @@ begin
     begin
       rec := match.List[i];
       P.SetValueVar(rec, SetValueString, SetValueWasString);
-      if Owner <> nil then
+      if fOwner <> nil then
       begin
         if {%H-}SetValueJson = '' then
           JsonEncodeNameSQLValue(P.Name, SetValue, SetValueJson);
-        Owner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
+        fOwner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
           rec.IDValue, SetValueJson, nil, nil);
       end;
     end;
@@ -3670,8 +3666,8 @@ begin
       fValue[i].FillFrom(SentData);
     fModified := true;
     result := true;
-    if Owner <> nil then
-      Owner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
+    if fOwner <> nil then
+      fOwner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
         ID, SentData, nil, nil);
   finally
     StorageUnLock;
@@ -3706,8 +3702,8 @@ begin
         nfo.List[f].CopyValue(Rec, dest);
     fModified := true;
     result := true;
-    if Owner <> nil then
-      Owner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
+    if fOwner <> nil then
+      fOwner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
         Rec.IDValue, SentData, nil, nil);
   finally
     StorageUnLock;
@@ -3748,8 +3744,8 @@ begin
         exit;
     fModified := true;
     result := true;
-    if Owner <> nil then
-      Owner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
+    if fOwner <> nil then
+      fOwner.InternalUpdateEvent(oeUpdate, fStoredClassProps.TableIndex,
         ID, '', nil, fValue[i]);
   finally
     StorageUnLock;
@@ -3822,10 +3818,10 @@ begin
       exit;
     // set blob value directly from RTTI property description
     BlobField.SetLongStrProp(fValue[i], BlobData);
-    if Owner <> nil then
+    if fOwner <> nil then
     begin
       fStoredClassRecordProps.FieldBitsFromBlobField(BlobField, AffectedField);
-      Owner.InternalUpdateEvent(oeUpdateBlob, fStoredClassProps.TableIndex,
+      fOwner.InternalUpdateEvent(oeUpdateBlob, fStoredClassProps.TableIndex,
         aID, '', @AffectedField, nil);
     end;
     fModified := true;
@@ -3854,8 +3850,8 @@ begin
           exit;
         for f := 0 to high(BlobFields) do
           BlobFields[f].CopyValue(Value, fValue[i]);
-        if Owner <> nil then
-          Owner.InternalUpdateEvent(oeUpdateBlob, fStoredClassProps.TableIndex,
+        if fOwner <> nil then
+          fOwner.InternalUpdateEvent(oeUpdateBlob, fStoredClassProps.TableIndex,
             Value.IDValue, '', @fStoredClassRecordProps.FieldBits[oftBlob], nil);
         fModified := true;
         result := true;
@@ -4106,8 +4102,8 @@ procedure TRestStorageInMemoryExternal.StorageLock(WillModifyContent: boolean
 begin
   inherited StorageLock(WillModifyContent {$ifdef DEBUGSTORAGELOCK}, msg {$endif});
   if WillModifyContent and
-     (Owner <> nil) then
-    Owner.FlushInternalDBCache;
+     (fOwner <> nil) then
+    fOwner.FlushInternalDBCache;
 end;
 
 

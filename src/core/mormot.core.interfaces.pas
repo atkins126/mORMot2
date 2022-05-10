@@ -215,7 +215,7 @@ type
   // callback parameter
   // - implementation should set the Obj local variable to an instance of
   // a fake class implementing the aParamInfo interface
-  TOnInterfaceMethodExecuteCallback = procedure(var Par: PUtf8Char;
+  TOnInterfaceMethodExecuteCallback = procedure(var Ctxt: TJsonParserContext;
     ParamInterfaceInfo: TRttiJson; out Obj) of object;
 
   /// how TInterfaceMethod.TInterfaceMethod method will return the generated document
@@ -2263,9 +2263,12 @@ type
   TInterfaceMethodExecuteRaw = class;
 
   /// possible service provider method options, e.g. about logging or execution
-  // - see TServiceMethodOptions for a description of each available option
+  // - see TInterfaceMethodOptions for a description of each available option
   TInterfaceMethodOption = (
+    optExecGlobalLocked,
+    optFreeGlobalLocked,
     optExecLockedPerInterface,
+    optFreeLockedPerInterface,
     optExecInPerInterfaceThread,
     optFreeInPerInterfaceThread,
     optFreeDelayed,
@@ -2283,8 +2286,10 @@ type
 
   /// set of per-method execution options for an interface-based service provider
   // - by default, method executions are concurrent, for better server
-  // responsiveness; if you set optExecLockedPerInterface, all methods of
-  // a given interface will be executed with a critical section
+  // responsiveness; if you set optExecLockedPerInterface/optFreeLockedPerInterface,
+  // all methods of a given interface will be executed within a critical section;
+  // if you set optExecGlobalLocked/optFreeGlobalLocked, execution is done within
+  // a critical section global to all interfaces
   // - optExecInMainThread will force the method to be called within
   // a RunningThread.Synchronize() call - it can be used e.g. if your
   // implementation rely heavily on COM servers - by default, service methods
@@ -2292,7 +2297,8 @@ type
   // instances (e.g. TSqlite3HttpServer or TRestServerNamedPipeResponse),
   // for better response time and CPU use (this is the technical reason why
   // service implementation methods have to handle multi-threading safety
-  // carefully, e.g. by using TRTLCriticalSection mutex on purpose)
+  // carefully, e.g. by using TRTLCriticalSection mutex on purpose) - warning:
+  // a Windows Service has no 'main thread' concept, so should not use it
   // - optFreeInMainThread will force the _Release/Destroy method to be run
   // in the main thread: setting this option for any method will affect the
   // whole service class - is not set by default, for performance reasons
@@ -2531,6 +2537,28 @@ procedure BackgroundExecuteInstanceRelease(instance: TObject;
 /// low-level internal function returning the TServiceRunningContext threadvar
 // - mormot.rest.server.pas' ServiceRunningContext function redirects to this
 function PerThreadRunningContextAddress: pointer;
+
+const
+  /// the TInterfaceMethodOptions which are related to custom thread execution
+  INTERFACEMETHOD_THREADOPTIONS = [
+    optExecGlobalLocked,
+    optFreeGlobalLocked,
+    optExecLockedPerInterface,
+    optFreeLockedPerInterface,
+    optExecInPerInterfaceThread,
+    optFreeInPerInterfaceThread,
+    optExecInMainThread,
+    optFreeInMainThread];
+
+  /// the related TInterfaceMethodOptions, grouped per thread mode
+  INTERFACEMETHOD_PERTHREADOPTIONS: array[0..3] of TInterfaceMethodOptions = (
+    [optExecGlobalLocked, optFreeGlobalLocked],
+    [optExecLockedPerInterface, optFreeLockedPerInterface],
+    [optExecInPerInterfaceThread, optFreeInPerInterfaceThread],
+    [optExecInMainThread, optFreeInMainThread]);
+
+/// return the interface execution options set as text
+function ToText(opt: TInterfaceMethodOptions): shortstring; overload;
 
 
 { ************ SetWeak and SetWeakZero Weak Interface Reference }
@@ -3337,10 +3365,11 @@ begin
   if fParamsSafe.TryLock then
   begin
     W := fParams; // reuse a per-callback TJsonWriter instance
-    W.CancelAll;
+    W.CancelAllAsNew;
   end
-  else
-    W := TJsonWriter.CreateOwnedStream(8192); // paranoid thread-safety call
+  else 
+    // paranoid thread-safety call with its own temp buffer (seldom called)
+    W := TJsonWriter.CreateOwnedStream(8192);
   try
     if ifoJsonAsExtended in fOptions then
       W.CustomOptions := W.CustomOptions + [twoForceJsonExtended]
@@ -3818,7 +3847,7 @@ begin
             rkFloat:
               ErrorMsg := ' - use double/currency instead';
           else
-            FormatUtf8(' (%)', [ToText(ArgRtti.Info^.Kind)], ErrorMsg);
+            FormatUtf8(' (%)', [ToText(ArgRtti.Info^.Kind)^], ErrorMsg);
           end;
         imvObject:
           if ArgRtti.ValueRtlClass = vcList then
@@ -5439,6 +5468,7 @@ procedure TInterfaceStubRules.AddRule(Sender: TInterfaceStub;
   aExpectedPassCountOperator: TInterfaceStubRuleOperator; aValue: cardinal);
 var
   n, ndx: integer;
+  r: PInterfaceStubRule;
 begin
   ndx := FindRuleIndex(aParams);
   n := length(Rules);
@@ -5449,33 +5479,31 @@ begin
   if (aParams = '') and
      (aKind <> isUndefined) then
     DefaultRule := n;
-  with Rules[n] do
-  begin
-    Params := aParams;
-    case aKind of
-      isUndefined:
-        ; // do not overwrite Values for weak rules like ExpectsCount/ExpectsTrace
-      isReturns:
-        Values := '[' + aValues + ']';
-      isFails:
-        Values := ToText(Sender.ClassType) + ' returned error: ' + aValues;
-    else
-      Values := aValues;
-    end;
-    if aKind = isUndefined then
-      if aExpectedPassCountOperator = ioTraceMatch then
-        ExpectedTraceHash := aValue
-      else
-      begin
-        ExpectedPassCountOperator := aExpectedPassCountOperator;
-        ExpectedPassCount := aValue;
-      end
+  r := @Rules[n];
+  r^.Params := aParams;
+  case aKind of
+    isUndefined:
+      ; // do not overwrite Values for weak rules like ExpectsCount/ExpectsTrace
+    isReturns:
+      r^.Values := '[' + aValues + ']';
+    isFails:
+      FormatUtf8('% returned error: %', [Sender, aValues], r^.Values);
+  else
+    r^.Values := aValues;
+  end;
+  if aKind = isUndefined then
+    if aExpectedPassCountOperator = ioTraceMatch then
+      r^.ExpectedTraceHash := aValue
     else
     begin
-      Kind := aKind;
-      Execute := TMethod(aEvent);
-      ExceptionClass := aExceptionClass;
-    end;
+      r^.ExpectedPassCountOperator := aExpectedPassCountOperator;
+      r^.ExpectedPassCount := aValue;
+    end
+  else
+  begin
+    r^.Kind := aKind;
+    r^.Execute := TMethod(aEvent);
+    r^.ExceptionClass := aExceptionClass;
   end;
 end;
 
@@ -5568,17 +5596,16 @@ constructor TOnInterfaceStubExecuteParamsVariant.Create(aSender: TInterfaceStub;
   aMethod: PInterfaceMethod; const aParams, aEventParams: RawUtf8);
 var
   i: PtrInt;
-  P: PUtf8Char;
+  info: TGetJsonField;
   tmp: TSynTempBuffer;
 begin
   inherited;
   SetLength(fInput, fMethod^.ArgsInputValuesCount);
   tmp.Init(aParams);
   try
-    P := tmp.buf;
+    info.Json := tmp.buf;
     for i := 0 to fMethod^.ArgsInputValuesCount - 1 do
-      GetJsonToAnyVariant(
-        fInput[i], P, nil, @aSender.fInterface.DocVariantOptions, false);
+      JsonToAnyVariant(fInput[i], info, @aSender.fInterface.DocVariantOptions, false);
   finally
     tmp.Done;
   end;
@@ -6210,7 +6237,7 @@ begin
                 end;
               end;
             isRaises:
-              raise ExceptionClass.Create(Utf8ToString(r^.Values));
+              raise r^.ExceptionClass.Create(Utf8ToString(r^.Values));
             isReturns:
               begin
                 result := true;
@@ -6498,6 +6525,11 @@ begin
   result := @PerThreadRunningContext;
 end;
 
+function ToText(opt: TInterfaceMethodOptions): shortstring;
+begin
+  GetSetNameShort(TypeInfo(TInterfaceMethodOptions), opt, result);
+end;
+
 type
   TBackgroundLauncherAction = (
     doCallMethod,
@@ -6518,7 +6550,7 @@ type
 
 procedure BackgroundExecuteProc(Call: pointer); forward;
 
-procedure BackGroundExecute(var synch: TBackgroundLauncher;
+procedure BackgroundExecute(var synch: TBackgroundLauncher;
   backgroundThread: TSynBackgroundThreadMethod);
 var
   event: TThreadMethod;
@@ -6530,6 +6562,13 @@ begin
     if GetCurrentThreadID = MainThreadID then
       event
     else
+    {$ifdef OSWINDOWS}
+    if Assigned(ServiceSingle) then
+       raise ESynThread.CreateUtf8('BackgroundExecute(%,backgroundThread=nil)' +
+         'is not compatible with a Windows Service which has no main thread',
+         [GetEnumName(TypeInfo(TBackgroundLauncherAction), ord(synch.Action))^])
+    else
+    {$endif OSWINDOWS}
       TThread.Synchronize(synch.Context^.RunningThread, event)
   else
     backgroundThread.RunAndWait(event);
@@ -6542,7 +6581,7 @@ var
 begin
   synch.Action := doCallMethod;
   synch.CallMethodArgs := args;
-  BackGroundExecute(synch, backgroundThread);
+  BackgroundExecute(synch, backgroundThread);
 end;
 
 procedure BackgroundExecuteThreadMethod(const method: TThreadMethod;
@@ -6552,7 +6591,7 @@ var
 begin
   synch.Action := doThreadMethod;
   synch.ThreadMethod := method;
-  BackGroundExecute(synch, backgroundThread);
+  BackgroundExecute(synch, backgroundThread);
 end;
 
 procedure BackgroundExecuteInstanceRelease(instance: TObject;
@@ -6562,7 +6601,7 @@ var
 begin
   synch.Action := doInstanceRelease;
   synch.Instance := instance as TInterfacedObject;
-  BackGroundExecute(synch, backgroundThread);
+  BackgroundExecute(synch, backgroundThread);
 end;
 
 
@@ -7302,7 +7341,7 @@ begin
     if output <> nil then
     begin
       WR := TempTextWriter;
-      WR.CancelAll;
+      WR.CancelAll; // not CancelAllAsNew to keep twoForceJsonExtended
     end
     else if fMethod^.ArgsOutputValuesCount > 0 then
       exit
@@ -7444,11 +7483,11 @@ begin
             if Assigned(OnCallback) then
               // retrieve TRestServerUriContext.ExecuteCallback fake interface
               // via TServiceContainerServer.GetFakeCallback
-              OnCallback(ctxt.Json, arg^.ArgRtti, PInterface(fValues[a])^)
+              OnCallback(ctxt, arg^.ArgRtti, PInterface(fValues[a])^)
             else
               raise EInterfaceFactory.CreateUtf8('OnCallback=nil for %(%: %)',
                 [fMethod^.InterfaceDotMethodName, arg^.ParamName^,
-                 arg^.ArgTypeName^])
+                 arg^.ArgTypeName^]) // paranoid (already checked before)
           else if not arg^.SetFromJson(ctxt, fMethod, fValues[a], Error) then
             exit;
         end;
@@ -7534,7 +7573,7 @@ begin
     // reuse this shared instance between calls
     SetOptions(opt);
     exec := self;
-    fCachedWR.CancelAll;
+    fCachedWR.CancelAllAsNew;
     WR := fCachedWR;
   end
   else

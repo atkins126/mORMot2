@@ -73,8 +73,10 @@ type
 
   /// abstract execution context for the TSynEnumerator<T> record
   TSynEnumeratorState = record
-    {$ifdef NOSIZEOFT} ItemSize, {$endif}
     Current, After: PtrUInt; // 2-3 pointers on stack
+    {$ifdef NOSIZEOFT}
+    ItemSize: PtrUInt;
+    {$endif NOSIZEOFT}
   end;
 
   /// efficient mean to iterate over a generic collection of a specific type
@@ -144,7 +146,7 @@ type
     // defined and then any duplicate is ignored and existing index is returned
     // - you may pre-allocate the array with a previous set of Capacity property
     // - a faster alternative is to set the Count then assign values with Items[]
-    function Add(const value: T): PtrInt;
+    function Add(const value: T; wasadded: PBoolean = nil): PtrInt;
     /// insert a new value to the collection
     // - raise ESynList if loCreateUniqueIndex is set: use Remove() then Add()
     procedure Insert(ndx: PtrInt; const value: T);
@@ -240,7 +242,8 @@ type
     // - could be used to quickly lookup all items of the array, using Count:
     // ! var pi: PInteger; ...
     // !   pi := list.First;        // fastest method
-    // !   for i := 1 to list.Count do begin
+    // !   for i := 1 to list.Count do
+    // !   begin
     // !     writeln(pi^);
     // !     inc(pi);
     // !   end;
@@ -300,7 +303,7 @@ type
     fSafe: TRWLock;
     function DoPop(var dest; opt: TListPop): boolean;
     function DoRemove(const value): boolean;
-    function DoAdd(const value): PtrInt;
+    function DoAdd(const value; wasadded: PBoolean): PtrInt;
     function DoAddSorted(const value; wasadded: PBoolean): integer;
     procedure DoInsert(ndx: PtrInt; const value);
     function DoFind(const value; customcompare: TDynArraySortCompare): PtrInt;
@@ -380,7 +383,7 @@ type
     procedure SetItem(ndx: PtrInt; const value: T);
   public
     /// IList<T> method to append a new value to the collection
-    function Add(const value: T): PtrInt;
+    function Add(const value: T; wasadded: PBoolean = nil): PtrInt;
     /// IList<T> method to insert a new value to the collection
     procedure Insert(ndx: PtrInt; const value: T);
     /// IList<T> method to get and remove the last item stored in the collection
@@ -767,7 +770,8 @@ end;
 
 function TSynEnumerator<T>.DoGetCurrent: T;
 begin
-  result := PT(fState.Current)^; // faster than fDynArray^.ItemCopy()
+  result := {%H-}PT(fState.Current)^;
+  // faster than fDynArray^.ItemCopy() - at least for simple types
 end;
 
 
@@ -847,7 +851,7 @@ begin
             fDynArray.Delete(ndx);
 end;
 
-function TIListParent.DoAdd(const value): PtrInt;
+function TIListParent.DoAdd(const value; wasadded: PBoolean): PtrInt;
 var
   added: boolean;
   v: PAnsiChar;
@@ -858,9 +862,13 @@ begin
   if h <> nil then
   begin
     result := h^.FindBeforeAdd(@value, added, h^.HashOne(@value));
+    if wasadded <> nil then
+      wasadded^ := added;
     if not added then
       exit; // already existing -> just return previous value index
-  end;
+  end
+  else if wasadded <> nil then
+    wasadded^ := true;
   v := fValue;
   n := fCount;
   if (v = nil) or
@@ -1029,12 +1037,16 @@ begin
   state.Current := PtrUInt(fValue);
   if state.Current = 0 then
   begin
-    {$ifdef NOSIZEOFT} state.ItemSize := 0; {$endif}
     state.After := 0; // ensure MoveNext=false
+    {$ifdef NOSIZEOFT}
+    state.ItemSize := 0;
+    {$endif NOSIZEOFT}
     exit;
   end;
   s := fDynArray.Info.Cache.ItemSize;
-  {$ifdef NOSIZEOFT} state.ItemSize := s; {$endif}
+  {$ifdef NOSIZEOFT}
+  state.ItemSize := s;
+  {$endif NOSIZEOFT}
   state.After := state.Current + s * PtrUInt(fCount);
   dec(state.Current, s);
 end;
@@ -1054,8 +1066,10 @@ begin
   if (state.Current = 0) or
      (Offset >= fCount) then
   begin
-    {$ifdef NOSIZEOFT} state.ItemSize := 0; {$endif}
     state.After := 0;  // ensure MoveNext=false
+    {$ifdef NOSIZEOFT}
+    state.ItemSize := 0;
+    {$endif NOSIZEOFT}
     exit;
   end;
   if Limit = 0 then
@@ -1064,7 +1078,9 @@ begin
   if Limit > PtrInt(s) then
     Limit := s;
   s := fDynArray.Info.Cache.ItemSize;
-  {$ifdef NOSIZEOFT} state.ItemSize := s; {$endif}
+  {$ifdef NOSIZEOFT}
+  state.ItemSize := s;
+  {$endif NOSIZEOFT}
   inc(state.Current, s * PtrUInt(Offset));
   state.After := state.Current + s * PtrUInt(Limit);
   dec(state.Current, s);
@@ -1098,9 +1114,9 @@ begin
   NewEnumerator(result.fState, Offset, Limit);
 end;
 
-function TIList<T>.Add(const value: T): PtrInt;
+function TIList<T>.Add(const value: T; wasadded: PBoolean): PtrInt;
 begin
-  result := DoAdd(value);
+  result := DoAdd(value, wasadded);
 end;
 
 procedure TIList<T>.Insert(ndx: PtrInt; const value: T);

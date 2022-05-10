@@ -7,7 +7,6 @@ unit mormot.net.ws.server;
   *****************************************************************************
 
     WebSockets Bidirectional Server
-    - TWebSocketProtocolChat Simple Protocol
     - TWebSocketProcessServer Processing Class
     - TWebSocketServerRest Bidirectional REST Server
 
@@ -40,50 +39,6 @@ uses
   mormot.net.client,
   mormot.net.server,
   mormot.net.ws.core;
-
-
-{ ******************** TWebSocketProtocolChat Simple Protocol }
-
-type
-  /// callback event triggered by TWebSocketProtocolChat for any incoming message
-  // - a first call with frame.opcode=focContinuation will take place when
-  // the connection will be upgraded to WebSockets
-  // - then any incoming focText/focBinary events will trigger this callback
-  // - eventually, a focConnectionClose will notify the connection ending
-  TOnWebSocketProtocolChatIncomingFrame = procedure(
-    Sender: TWebCrtSocketProcess;
-    const Frame: TWebSocketFrame) of object;
-
-  /// simple chatting protocol, allowing to receive and send WebSocket frames
-  // - you can use this protocol to implement simple asynchronous communication
-  // with events expecting no answers, e.g. with AJAX applications
-  // - see TWebSocketProtocolRest for bi-directional events expecting answers
-  TWebSocketProtocolChat = class(TWebSocketProtocol)
-  protected
-    fOnIncomingFrame: TOnWebSocketProtocolChatIncomingFrame;
-    procedure ProcessIncomingFrame(Sender: TWebSocketProcess;
-      var request: TWebSocketFrame; const info: RawUtf8); override;
-  public
-    /// initialize the chat protocol with an incoming frame callback
-    constructor Create(const aName, aUri: RawUtf8;
-       const aOnIncomingFrame: TOnWebSocketProtocolChatIncomingFrame); overload;
-    /// compute a new instance of the WebSockets protocol, with same parameters
-    function Clone(const aClientUri: RawUtf8): TWebSocketProtocol; override;
-    /// on the server side, allows to send a message over the wire to a
-    // specified client connection
-    // - a temporary copy of the Frame content will be made for safety
-    function SendFrame(Sender: TWebCrtSocketProcess;
-       const Frame: TWebSocketFrame): boolean;
-    /// on the server side, allows to send a JSON message over the wire to a
-    // specified client connection
-    // - the supplied JSON content is supplied as "var", since it may be
-    // modified during execution, e.g. XORed for frame masking
-    function SendFrameJson(Sender: TWebCrtSocketProcess;
-       var Json: RawUtf8): boolean;
-    /// you can assign an event to this property to be notified of incoming messages
-    property OnIncomingFrame: TOnWebSocketProtocolChatIncomingFrame
-      read fOnIncomingFrame write fOnIncomingFrame;
-  end;
 
 
 
@@ -169,8 +124,7 @@ type
     constructor Create(const aPort: RawUtf8;
       const OnStart, OnStop: TOnNotifyThread; const ProcessName: RawUtf8;
       ServerThreadPoolCount: integer = 2; KeepAliveTimeOut: integer = 30000;
-      HeadersUnFiltered: boolean = false; CreateSuspended: boolean = false;
-      aLogVerbose: boolean = false); override;
+      ProcessOptions: THttpServerOptions = []); override;
     /// close the server
     destructor Destroy; override;
     /// will send a given frame to all connected clients
@@ -267,74 +221,6 @@ type
 implementation
 
 
-{ ******************** TWebSocketProtocolChat Simple Protocol }
-
-{ TWebSocketProtocolChat }
-
-constructor TWebSocketProtocolChat.Create(const aName, aUri: RawUtf8;
-  const aOnIncomingFrame: TOnWebSocketProtocolChatIncomingFrame);
-begin
-  inherited Create(aName, aUri);
-  fOnIncomingFrame := aOnIncomingFrame;
-end;
-
-function TWebSocketProtocolChat.Clone(const aClientUri: RawUtf8): TWebSocketProtocol;
-begin
-  result := TWebSocketProtocolChat.Create(fName, fUri);
-  if fEncryption <> nil then
-    TWebSocketProtocolChat(result).fEncryption := fEncryption.Clone;
-  TWebSocketProtocolChat(result).OnIncomingFrame := OnIncomingFrame;
-end;
-
-procedure TWebSocketProtocolChat.ProcessIncomingFrame(Sender: TWebSocketProcess;
-  var request: TWebSocketFrame; const info: RawUtf8);
-begin
-  if Assigned(OnInComingFrame) then
-  try
-    if Sender.InheritsFrom(TWebCrtSocketProcess) then
-      OnIncomingFrame(TWebCrtSocketProcess(Sender), request)
-    else
-      OnIncomingFrame(nil, request);
-  except
-    // ignore any exception in the callback
-  end;
-end;
-
-function TWebSocketProtocolChat.SendFrame(Sender: TWebCrtSocketProcess;
-  const frame: TWebSocketFrame): boolean;
-var
-  tmp: TWebSocketFrame; // SendFrame() may change frame content (e.g. mask)
-begin
-  result := false;
-  if (self = nil) or
-     (Sender = nil) or
-     (Sender.State <> wpsRun) or
-     not (frame.opcode in [focText, focBinary])  then
-    exit;
-  tmp.opcode := frame.opcode;
-  tmp.content := frame.content;
-  FastSetRawByteString(tmp.payload, Pointer(frame.payload), length(frame.payload));
-  result := Sender.SendFrame(tmp)
-end;
-
-function TWebSocketProtocolChat.SendFrameJson(Sender: TWebCrtSocketProcess;
-  var Json: RawUtf8): boolean;
-var
-  frame: TWebSocketFrame;
-begin
-  result := false;
-  if (self = nil) or
-     (Sender = nil) or
-     (Sender.State <> wpsRun) then
-    exit;
-  frame.opcode := focText;
-  frame.content := [];
-  frame.tix := 0;
-  frame.payload := Json;
-  result := Sender.SendFrame(frame)
-end;
-
-
 { ******************** TWebSocketProcessServer Processing Class }
 
 { TWebSocketProcessServer }
@@ -358,7 +244,7 @@ end;
 constructor TWebSocketServer.Create(const aPort: RawUtf8;
   const OnStart, OnStop: TOnNotifyThread; const ProcessName: RawUtf8;
   ServerThreadPoolCount, KeepAliveTimeOut: integer;
-  HeadersUnFiltered, CreateSuspended, aLogVerbose: boolean);
+  ProcessOptions: THttpServerOptions);
 begin
   // override with custom processing classes
   fSocketClass := TWebSocketServerSocket;
@@ -369,13 +255,13 @@ begin
   fProtocols := TWebSocketProtocolList.Create;
   fSettings.SetDefaults;
   fSettings.HeartbeatDelay := 20000;
-  if aLogVerbose then
+  if hsoLogVerbose in ProcessOptions then
     fSettings.SetFullLog;
   if ServerThreadPoolCount > 4 then
     ServerThreadPoolCount := 4; // don't loose threads for nothing
   // start the server
   inherited Create(aPort, OnStart, OnStop, ProcessName, ServerThreadPoolCount,
-    KeepAliveTimeOut, HeadersUnFiltered, CreateSuspended);
+    KeepAliveTimeOut, ProcessOptions);
 end;
 
 function TWebSocketServer.WebSocketProcessUpgrade(

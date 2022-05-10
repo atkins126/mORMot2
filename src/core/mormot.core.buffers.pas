@@ -145,10 +145,14 @@ function GotoNextVarString(Source: PByte): pointer;
 
 /// retrieve a variable-length UTF-8 encoded text buffer in a newly allocation RawUtf8
 function FromVarString(var Source: PByte): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// safe retrieve a variable-length UTF-8 encoded text buffer in a newly allocation RawUtf8
 // - supplied SourceMax value will avoid any potential buffer overflow
 function FromVarString(var Source: PByte; SourceMax: PByte): RawUtf8; overload;
+
+/// retrieve a variable-length UTF-8 encoded text buffer in a newly allocation RawUtf8
+procedure FromVarString(var Source: PByte; var Value: RawUtf8); overload;
 
 /// retrieve a variable-length text buffer
 // - this overloaded function will set the supplied code page to the AnsiString
@@ -1677,11 +1681,11 @@ function IsContentCompressed(Content: Pointer; Len: PtrInt): boolean;
 /// fast guess of the size, in pixels, of a JPEG memory buffer
 // - will only scan for basic JPEG structure, up to the StartOfFrame (SOF) chunk
 // - returns TRUE if the buffer is likely to be a JPEG picture, and set the
-// Height + Width variable with its dimensions - but there may be false positive
-// recognition, and no waranty that the memory buffer holds a valid JPEG picture
+// Height + Width + Bits variable with its dimensions - but there may be false
+// positive recognition, and no waranty that the memory buffer is a valid JPEG
 // - returns FALSE if the buffer does not have any expected SOI/SOF markers
 function GetJpegSize(jpeg: PAnsiChar; len: PtrInt;
-  out Height, Width: integer): boolean; overload;
+  out Height, Width, Bits: integer): boolean; overload;
 
 
 { ************* Text Memory Buffers and Files }
@@ -3175,11 +3179,16 @@ begin
 end;
 
 function FromVarString(var Source: PByte): RawUtf8;
+begin
+  FromVarString(Source, result);
+end;
+
+procedure FromVarString(var Source: PByte; var Value: RawUtf8);
 var
   len: PtrUInt;
 begin
   len := FromVarUInt32(Source);
-  FastSetStringCP(result, Source, len, CP_UTF8);
+  FastSetString(Value, Source, len);
   inc(Source, len);
 end;
 
@@ -3191,7 +3200,7 @@ begin
   if (Source = nil) or
       (PAnsiChar(Source) + len > PAnsiChar(SourceMax)) then
     len := 0;
-  FastSetStringCP(result, Source, len, CP_UTF8);
+  FastSetString(result, Source, len);
   inc(Source, len);
 end;
 
@@ -4435,7 +4444,8 @@ end;
 procedure TBufferWriter.WriteRawUtf8Array(Values: PPtrUIntArray;
   ValuesCount: integer);
 var
-  n, i: integer;
+  n: integer;
+  i: PtrInt;
   fixedsize, len: PtrUInt;
   P, PEnd: PByte;
   PBeg: PAnsiChar;
@@ -8181,7 +8191,7 @@ const
 function GetMimeContentTypeFromExt(const FileName: TFileName; FileExt: PRawUtf8): TMimeType;
 var
   ext: RawUtf8;
-  i: integer;
+  i: PtrInt;
 begin
   result := mtUnknown;
   if FileName <> '' then
@@ -8307,7 +8317,8 @@ begin
   end;
 end;
 
-function GetJpegSize(jpeg: PAnsiChar; len: PtrInt; out Height, Width: integer): boolean;
+function GetJpegSize(jpeg: PAnsiChar; len: PtrInt;
+  out Height, Width, Bits: integer): boolean;
 var
   je: PAnsiChar;
 begin
@@ -8329,6 +8340,7 @@ begin
         begin
           Height := swap(PWord(jpeg + 4)^);
           Width := swap(PWord(jpeg + 6)^);
+          Bits := PByte(jpeg + 8)^ * 8;
           result := (Height > 0) and
                     (Height < 20000) and
                     (Width > 0) and
@@ -9503,9 +9515,9 @@ begin
   fContentRead := pointer(s);
 end;
 
-function TNestedStreamReader.{%H-}Write(const Buffer; Count: Longint): Longint;
+function TNestedStreamReader.Write(const Buffer; Count: Longint): Longint;
 begin
-  raise EStreamError.Create('Unexpected TNestedStreamReader.Write');
+  result := RaiseStreamError(self, 'Write');
 end;
 
 
@@ -9587,7 +9599,7 @@ end;
 
 function TBufferedStreamReader.Write(const Buffer; Count: Longint): Longint;
 begin
-  raise EStreamError.Create('Unexpected TBufferedStreamReader.Write');
+  result := RaiseStreamError(self, 'Write');
 end;
 
 

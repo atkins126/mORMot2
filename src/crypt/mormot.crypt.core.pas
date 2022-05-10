@@ -22,13 +22,13 @@ unit mormot.crypt.core;
 
   *****************************************************************************
 
-   Original Copyright Notices of some Open Source implementations:
+   Original Copyright Notices of some Open Source implementations, included
+   with (deep) refactoring (other routines are our own coding):
    - aes_pascal, keccak_pascal: (c) Wolfgang Ehrhardt under zlib license
    - KeccakPermutationKernel MMX/i386: (c) Eric Grange
    - MD5_386.asm: (c) Maxim Masiutin - Ritlabs, SRL
    - sha512-x86: (c) Project Nayuki under MIT license
    - sha512-x64sse4, sha256-sse4, crc32c64: (c) Intel Corporation w/ OS licence
-   Maybe with (deep) refactoring. Other routines are our own coding.
 
    Legal Notice: as stated by our LICENSE.md terms, make sure that you comply
    to any restriction about the use of cryptographic software in your country.
@@ -54,43 +54,45 @@ type
   ESynCrypto = class(ESynException);
 
 {$ifdef ASMX64}
-  {$ifdef HASAESNI}  // compiler supports asm with aesenc/aesdec opcodes
+  {$ifdef HASAESNI}          // compiler supports asm with aesenc/aesdec opcodes
     {$define USEAESNI}
     {$define USEAESNI64}
-    {$ifdef CPUX64ASM} // oldest Delphi x86_64 SSE asm is buggy
-      {$define USECLMUL}  // pclmulqdq opcodes
-      {$define USEGCMAVX} // 8x interleaved aesni + pclmulqdq asm for AES-GCM
+    {$ifdef CPUX64ASM}       // Delphi x86_64 SSE asm is buggy before XE7
+      {$define USECLMUL}     // pclmulqdq opcodes
+      {$define USEGCMAVX}    // 8x interleaved aesni + pclmulqdq asm for AES-GCM
       {$define USEAESNIHASH} // aesni+sse4.1 32-64-128 aeshash
     {$endif CPUX64ASM}
   {$endif HASAESNI}
   {$ifdef OSWINDOWS}
-    {$define CRC32C_X64} // external crc32_iscsi_01 for win64/lin64
-    {$define SHA512_X64} // external sha512_sse4 for win64/lin64
+    {$define CRC32C_X64}     // external crc32_iscsi_01 for win64/lin64
+    {$define SHA512_X64}     // external sha512_sse4 for win64/lin64
   {$endif OSWINDOWS}
   {$ifdef OSLINUX}
-    {$define CRC32C_X64} // external crc32_iscsi_01.o for win64/lin64
-    {$define SHA512_X64} // external sha512_sse4.o for win64/lin64
+    {$define CRC32C_X64}     // external crc32_iscsi_01.o for win64/lin64
+    {$define SHA512_X64}     // external sha512_sse4.o for win64/lin64
   {$endif OSLINUX}
 {$endif ASMX64}
 
 {$ifdef ASMX86}
   {$define USEAESNI}
   {$define USEAESNI32}
-  {$ifdef HASAESNI}    // compiler supports asm with aesenc/aesdec opcodes
-    {$define USECLMUL} // pclmulqdq opcodes
-    {$define USEAESNIHASH} // aesni+sse4.1 32-64-128 aeshash
+  {$ifdef HASAESNI}          // compiler supports asm with aesenc/aesdec opcodes
+    {$define USECLMUL}       // pclmulqdq opcodes
+    {$define USEAESNIHASH}   // aesni+sse4.1 32-64-128 aeshash
   {$endif HASAESNI}
   {$ifdef OSWINDOWS}
-    {$define SHA512_X86} // external sha512-x86.o for win32/lin32
+    {$define SHA512_X86}     // external sha512-x86.o for win32/lin32
   {$endif OSWINDOWS}
   {$ifdef OSLINUX}
-    {$define SHA512_X86} // external sha512-x86.o for win32/lin32
+    {$define SHA512_X86}     // external sha512-x86.o for win32/lin32
   {$endif OSLINUX}
 {$endif ASMX86}
 
 {$ifdef CPUAARCH64}
   {$ifdef OSLINUXANDROID}
     {$define USEARMCRYPTO}
+    // AARCH64 armv8.o / sha256armv8.o are only validated on Linux yet
+    // (it should work on other POSIX ABI, but was reported to fail)
   {$endif OSLINUXANDROID}
 {$endif CPUAARCH64}
 
@@ -354,6 +356,7 @@ type
     // - this method is thread-safe, and is optimized for AES-NI on x86_64
     procedure DoBlocksCtr(iv: PAesBlock; src, dst: pointer;
       blockcount: PtrUInt);
+      {$ifdef FPC}inline;{$endif}
     /// TRUE if the context was initialized via EncryptInit/DecryptInit
     function Initialized: boolean;
       {$ifdef FPC}inline;{$endif}
@@ -710,7 +713,8 @@ type
       read fIV write fIV;
     /// low-level flag indicating you can call Encrypt/Decrypt several times
     // - i.e. the IV and AEAD MAC are updated after each Encrypt/Decrypt call
-    // - is disabled for external libraries like OpenSSL
+    // - is enabled for our internal classes, and also for OpenSSL, but may be
+    // disabled for some libraries or APIs (e.g. Windows CryptoApi classes)
     // - if you call EncryptPkcs7/DecryptPkcs7 you don't have to care about it
     property IVUpdated: boolean
       read fIVUpdated;
@@ -1402,7 +1406,7 @@ type
     /// computes a random ASCII password
     // - will contain uppercase/lower letters, digits and $.:()?%!-+*/@#
     // excluding ;,= to allow direct use in CSV content
-    function RandomPassword(Len: integer): RawUtf8;
+    function RandomPassword(Len: integer): SpiUtf8;
     /// would force the internal generator to re-seed its private key
     // - avoid potential attacks on backward or forward security
     // - would be called by FillRandom() methods, according to SeedAfterBytes
@@ -2400,8 +2404,9 @@ procedure Pbkdf2Sha3(algo: TSha3Algo; const password, salt: RawByteString;
 
 /// encryption/decryption of any data using iterated SHA-3 hashing key derivation
 // - specified algo is expected to be SHAKE_128 or SHAKE_256
-// - expected the supplied data buffer to be small - for bigger content,
-// consider using TAes Cypher after 256-bit  Pbkdf2Sha3 key derivation
+// - expected the supplied data buffer to be small, because the whole buffer
+// will be hashed in XOF mode count time, so it would be slow - for big content,
+// consider using an AES Cypher after 256-bit Pbkdf2Sha3 key derivation
 procedure Pbkdf2Sha3Crypt(algo: TSha3Algo; const password, salt: RawByteString;
   count: integer; var data: RawByteString);
 
@@ -2575,7 +2580,7 @@ type
     Dest: TStream;
     Buf: TAesBlock; // very small buffer for remainging 0..15 bytes
     BufCount: integer; // number of pending bytes (0..15) in Buf
-    AES: TAes;
+    Aes: TAes;
     NoCrypt: boolean; // if KeySize=0
   public
     /// initialize the AES encryption stream for an output stream (e.g.
@@ -2591,7 +2596,7 @@ type
     /// read some data is not allowed -> this method will raise an exception on call
     function Seek(Offset: Longint; Origin: Word): Longint; override;
     /// write pending data
-    // - should always be called before closeing the outStream (some data may
+    // - should always be called before closing the outStream (some data may
     // still be in the internal buffers)
     procedure Finish;
   end;
@@ -2700,7 +2705,7 @@ const
 type
   TKeyArray = packed array[0..AesMaxRounds] of TAesBlock;
 
-  TAesContextDoBlock = procedure(const ctxt, Source, Dest);
+  TAesContextDoBlock = procedure(const Ctxt, Source, Dest);
 
   /// low-level content of TAes.Context (AES_CONTEXT_SIZE bytes)
   // - is defined privately in the implementation section
@@ -3949,9 +3954,7 @@ var
 
 {$ifdef CPUAARCH64}
 
-{$L ..\..\static\aarch64-linux\armv8.o} // we can reuse Linux code on any POSIX
-{$L ..\..\static\aarch64-linux\sha256armv8.o}
-
+// aes/gcm code is already included in armv8.o from mormot.core.os:
 procedure aesencryptarm128(rk, bi, bo: pointer); external;
 procedure aesencryptarm192(rk, bi, bo: pointer); external;
 procedure aesencryptarm256(rk, bi, bo: pointer); external;
@@ -3960,6 +3963,8 @@ procedure aesdecryptarm128(rk, bi, bo: pointer); external;
 procedure aesdecryptarm192(rk, bi, bo: pointer); external;
 procedure aesdecryptarm256(rk, bi, bo: pointer); external;
 procedure gf_mul_h_arm(a, b: pointer); external;
+
+{$L ..\..\static\aarch64-linux\sha256armv8.o}
 procedure sha256_block_data_order(ctx, bi: pointer; count: PtrInt); external;
 
 {$endif CPUAARCH64}
@@ -4995,8 +5000,13 @@ end;
 
 function TAesAbstract.DecryptPkcs7Len(var InputLen, ivsize: integer;
   Input: pointer; IVAtBeginning, RaiseESynCryptoOnError: boolean): boolean;
+var
+  needed: integer;
 begin
-  if (InputLen < SizeOf(TAesBlock)) or
+  needed := SizeOf(TAesBlock);
+  if IVAtBeginning then
+    inc(needed, SizeOf(TAesBlock));
+  if (InputLen < needed) or
      (InputLen and AesBlockMod <> 0) then
     if RaiseESynCryptoOnError then
       raise ESynCrypto.CreateUtf8('%.DecryptPkcs7: Invalid InputLen=%',
@@ -5031,7 +5041,8 @@ begin
   P := pointer(result);
   Decrypt(@PByteArray(Input)^[ivsize], P, InputLen);
   padding := ord(P[InputLen - 1]); // result[1..len]
-  if padding > SizeOf(TAesBlock) then
+  if (padding = 0) or
+     (padding > SizeOf(TAesBlock)) then
     if RaiseESynCryptoOnError then
       raise ESynCrypto.CreateUtf8('%.DecryptPkcs7: Invalid Input', [self])
     else
@@ -6396,15 +6407,17 @@ procedure AesAlgoNameEncode(Mode: TAesMode; KeyBits: integer;
   out Result: TShort16);
 begin
   case KeyBits of
-    128, 192, 256:
-    begin
-      Result[0] := #11;
-      PCardinal(@Result[1])^ :=
-        ord('a') + ord('e') shl 8 + ord('s') shl 16 + ord('-') shl 24;
-      PCardinal(@Result[5])^ := PCardinal(SmallUInt32Utf8[KeyBits])^;
-      Result[8] := '-'; // SmallUInt32Utf8 put a #0 there
-      PCardinal(@Result[9])^ := PCardinalArray(AESMODESTXT4LOWER)[ord(Mode)];
-    end
+    128,
+    192,
+    256:
+      begin
+        Result[0] := #11;
+        PCardinal(@Result[1])^ :=
+          ord('a') + ord('e') shl 8 + ord('s') shl 16 + ord('-') shl 24;
+        PCardinal(@Result[5])^ := PCardinal(SmallUInt32Utf8[KeyBits])^;
+        Result[8] := '-'; // SmallUInt32Utf8 put a #0 there
+        PCardinal(@Result[9])^ := PCardinalArray(AESMODESTXT4LOWER)[ord(Mode)];
+      end
   else
     PCardinal(@Result)^ := 0;
   end;
@@ -6661,7 +6674,7 @@ begin
   result := 38000 + Int64(Random32) / (maxInt shr 12);
 end;
 
-function TAesPrngAbstract.RandomPassword(Len: integer): RawUtf8;
+function TAesPrngAbstract.RandomPassword(Len: integer): SpiUtf8;
 const
   CHARS: array[0..127] of AnsiChar =
     'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' +
@@ -7987,7 +8000,7 @@ end;
 
 procedure TSha3Context.PadAndSwitchToSqueezingPhase;
 var
-  i: integer;
+  i: PtrInt;
 begin
   // note: the bits are numbered from 0=LSB to 7=MSB
   if BitsInQueue + 1 = Rate then
@@ -10241,14 +10254,14 @@ begin
   if KeySize = 0 then
     NoCrypt := true
   else
-    AES.EncryptInit(Key, KeySize);
+    Aes.EncryptInit(Key, KeySize);
   Dest := outStream;
 end;
 
 destructor TAesWriteStream.Destroy;
 begin
   Finish;
-  AES.Done;
+  Aes.Done;
   inherited;
 end;
 
@@ -10257,7 +10270,7 @@ begin
   if BufCount = 0 then
     exit;
   if (BufCount >= SizeOf(TAesBlock)) or
-     not AES.Initialized or NoCrypt then
+     not Aes.Initialized or NoCrypt then
     raise ESynCrypto.CreateUtf8('Unexpected %.Finish', [self]);
   XorOffset(@buf, DestSize, BufCount);
   Dest.WriteBuffer(buf, BufCount);
@@ -10285,7 +10298,7 @@ begin
   Adler := Adler32Asm(Adler, @Buffer, Count);
   if not NoCrypt then
     // KeySize=0 -> save as-is
-    if not AES.Initialized then
+    if not Aes.Initialized then
       // if error in KeySize -> default fast XorOffset()
       XorOffset(@B, DestSize, Count)
     else
@@ -10299,14 +10312,14 @@ begin
         inc(BufCount, Len);
         if BufCount < SizeOf(TAesBlock) then
           exit;
-        AES.Encrypt(buf);
+        Aes.Encrypt(buf);
         Dest.WriteBuffer(buf, SizeOf(TAesBlock));
         inc(DestSize, SizeOf(TAesBlock));
         dec(Count, Len);
-        AES.DoBlocks(@B[Len], @B[Len], cardinal(Count) shr AesBlockShift, true);
+        Aes.DoBlocks(@B[Len], @B[Len], cardinal(Count) shr AesBlockShift, true);
       end
       else
-        AES.DoBlocks(@B, @B, cardinal(Count) shr AesBlockShift, true);
+        Aes.DoBlocks(@B, @B, cardinal(Count) shr AesBlockShift, true);
       BufCount := cardinal(Count) and AesBlockMod;
       if BufCount <> 0 then
       begin

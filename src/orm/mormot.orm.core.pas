@@ -1480,6 +1480,25 @@ type
     /// used by tests to set as false and force using SQlite3 virtual tables for
     // TOrmVirtualTableJson static tables (module JSON or BINARY)
     procedure SetStaticVirtualTableDirect(direct: boolean);
+    /// call this method when the internal DB content is known to be invalid
+    // - by default, all REST/CRUD requests and direct SQL statements are
+    // scanned and identified as potentially able to change the internal SQL/JSON
+    // cache used at SQLite3 database level; but some implementation (e.g.
+    // TRestStorageExternal classes defined in mormot.orm.sql) could flush
+    // the database content without proper notification
+    procedure FlushInternalDBCache;
+    /// this method is called internally after any successfull deletion to
+    // ensure relational database coherency
+    // - reset all matching TRecordReference properties in the database Model,
+    // for database coherency, into 0
+    // - delete all records containing a matched TRecordReferenceToBeDeleted
+    // property value in the database Model (e.g. TOrmHistory)
+    // - reset all matching TOrm properties in the database Model,
+    // for database coherency, into 0
+    // - important notice: we don't use FOREIGN KEY constraints in this framework,
+    // and handle all integrity check within this method (it's therefore less
+    // error-prone, and more cross-database engine compatible)
+    function AfterDeleteForceCoherency(aTableIndex: integer; aID: TID): boolean;
     /// create an external static redirection for a specific class
     // - call it just after Create, before IRestOrmServer.CreateMissingTables;
     // warning: if you don't call this method before CreateMissingTable method
@@ -1499,6 +1518,9 @@ type
     // - returns a newly created TRestStorageRemote instance
     function RemoteDataCreate(aClass: TOrmClass;
       aRemoteRest: TRestOrmParent): TRestOrmParent; 
+    /// fast get the associated TRestStorageRemote from its index, if any
+    // - returns nil if aTableIndex is invalid or is not assigned to a TRestStorageRemote
+    function GetRemoteTable(TableIndex: integer): TRestOrmParent;
   end;
 
 
@@ -2790,7 +2812,7 @@ type
     constructor CreateFromTables(const Tables: array of TOrmClass;
       const aSql: RawUtf8);
     /// read-only access to a particular field value, as VCL text
-    // - Client is used to display TRecordReference via the associated TOrmModel
+    // - Model is used to display TRecordReference from the associated TOrmModel
     // - returns the Field Type
     // - return generic string Text, i.e. UnicodeString for Delphi 2009+, ready
     // to be displayed to the VCL, for oftEnumerate, oftTimeLog,
@@ -2806,13 +2828,13 @@ type
     // date/time format as expected by FormatDateTime() for all date time kind
     // of fields (as oftDateTime, oftDateTimeMS, oftTimeLog, oftModTime,
     // oftCreateTime, oftUnixTime, oftUnixMSTime)
-    function ExpandAsString(Row, Field: PtrInt; const Client: IRestOrm;
+    function ExpandAsString(Row, Field: PtrInt; Model: TOrmModel;
       out Text: string; const CustomFormat: string = ''): TOrmFieldType;
     /// read-only access to a particular field value, as VCL text
     // - this method is just a wrapper around ExpandAsString method, returning
     // the content as a SynUnicode string type (i.e. UnicodeString since Delphi
     // 2009, and WideString for non Unicode versions of Delphi)
-    function ExpandAsSynUnicode(Row, Field: PtrInt; const Client: IRestOrm;
+    function ExpandAsSynUnicode(Row, Field: PtrInt; Model: TOrmModel;
       out Text: SynUnicode): TOrmFieldType;
     /// get the record class (i.e. the table) associated to a field
     // - is nil if this table has no QueryTables property
@@ -2859,6 +2881,7 @@ type
       UnicodeComparison: boolean = false): PtrInt; overload;
     /// retrieve QueryTables[0], if existing
     function QueryRecordType: TOrmClass;
+      {$ifdef HASINLINE}inline;{$endif}
     /// create and own a new TOrm instance for a specific Table
     // - a void TOrm instance is created, ready to be filled
     // - use the specified TOrm class or create one instance
@@ -2927,7 +2950,7 @@ type
     // AJAX-ready array of objects)
     // - the conversion into PPUtf8CharArray is made inplace and is very fast
     // (no additional memory buffer is allocated)
-    function ParseAndConvert(Buffer: PUtf8Char; BufferLen: integer): boolean;
+    function ParseAndConvert(Buffer: PUtf8Char; BufferLen: PtrInt): boolean;
     /// will check then set (if needed) internal fPrivateCopy[Hash] values
     // - returns TRUE if fPrivateCopy content changed (then fPrivateCopyHash
     // will be updated using crc32c hash if aUpdateHash is set)
@@ -2943,7 +2966,7 @@ type
     // use instead the overloaded Create constructor expecting a const
     // aJson: RawUtf8 parameter to allocate and hold a private copy of the data
     constructor Create(const aSql: RawUtf8;
-      JsonBuffer: PUtf8Char; JsonBufferLen: integer); reintroduce; overload;
+      JsonBuffer: PUtf8Char; JsonBufferLen: PtrInt); reintroduce; overload;
     /// create the result table from a JSON-formated Data message
     // - the JSON data is parsed and formatted in-place, after having been
     // copied in the protected fPrivateCopy variable
@@ -2955,7 +2978,7 @@ type
     // - please note that the supplied JSON buffer content will be changed
     constructor CreateFromTables(const Tables: array of TOrmClass;
       const aSql: RawUtf8;
-      JsonBuffer: PUtf8Char; JsonBufferLen: integer); reintroduce; overload;
+      JsonBuffer: PUtf8Char; JsonBufferLen: PtrInt); reintroduce; overload;
     /// create the result table from a JSON-formated Data message
     // - you can specify a set of TOrm classes which will be used to
     // retrieve the column exact type information
@@ -2967,7 +2990,7 @@ type
     // - you can set the expected column types matching the results column layout
     // - the JSON data is parsed and formatted in-place
     constructor CreateWithColumnTypes(const ColumnTypes: array of TOrmFieldType;
-      const aSql: RawUtf8; JsonBuffer: PUtf8Char; JsonBufferLen: integer);
+      const aSql: RawUtf8; JsonBuffer: PUtf8Char; JsonBufferLen: PtrInt);
       reintroduce; overload;
     /// initialize the result table from a JSON-formated Data message
     // - you can set the expected column types matching the results column layout
@@ -4004,7 +4027,7 @@ type
     // - the returned enumerates allow to check if the match was exact (e.g.
     // 'root/sub' matches exactly Root='root'), or with character case
     // approximation (e.g. 'Root/sub' approximates Root='root')
-    function UriMatch(const Uri: RawUtf8): TRestModelMatch;
+    function UriMatch(const Uri: RawUtf8; CheckCase: boolean): TRestModelMatch;
     /// returns the URI corresponding to a given table, i.e. 'root/table'
     function GetUri(aTable: TOrmClass): RawUtf8;
     /// return the 'root/table/ID' URI
@@ -5257,6 +5280,7 @@ function TOrmTable.InitOneFieldType(field: PtrInt; out size: integer;
 var
   prop: TOrmPropInfo;
 begin
+  // caller did already reset size/info fields as expected
   if Assigned(fQueryColumnTypes) then
     result := fQueryColumnTypes[field]
   else if Assigned(fQueryTables) then
@@ -5574,7 +5598,7 @@ begin
     // slowest but always accurate Unicode comparison
     UpperUnicode := Utf8DecodeToRawUnicodeUI(RawUtf8(Search), @UpperUnicodeLen);
     while PtrUInt(result) <= PtrUInt(fRowCount) do
-      if FindUnicode(pointer(Utf8DecodeToRawUnicode(GetResults(o), 0)),
+      if FindUnicode(pointer(Utf8DecodeToRawUnicodeUI(GetResults(o))),
           pointer(UpperUnicode), UpperUnicodeLen) then
         exit
       else
@@ -5621,7 +5645,7 @@ begin
   end;
 end;
 
-function TOrmTable.ExpandAsString(Row, Field: PtrInt; const Client: IRestOrm;
+function TOrmTable.ExpandAsString(Row, Field: PtrInt; Model: TOrmModel;
   out Text: string; const CustomFormat: string): TOrmFieldType;
 var
   info: POrmTableFieldType;
@@ -5735,11 +5759,11 @@ dt:     if Value <> 0 then
               result := oftUtf8Text; // will display INTEGER field as number }
             oftRecord:
               if (Value <> 0) and
-                 (Client <> nil) then // 'TableName ID'
+                 (Model<> nil) then // 'TableName ID'
                 {$ifdef UNICODE}
-                Text := Ansi7ToString(Ref.Text(Client.Model))
+                Text := Ansi7ToString(Ref.Text(Model))
                 {$else}
-                Text := Ref.Text(Client.Model)
+                Text := Ref.Text(Model)
                 {$endif UNICODE}
               else
                 result := oftUtf8Text; // display ID number if no table model
@@ -5752,11 +5776,11 @@ dt:     if Value <> 0 then
 end;
 
 function TOrmTable.ExpandAsSynUnicode(Row, Field: PtrInt;
-  const Client: IRestOrm; out Text: SynUnicode): TOrmFieldType;
+  Model: TOrmModel; out Text: SynUnicode): TOrmFieldType;
 var
   s: string;
 begin
-  result := ExpandAsString(Row, Field, Client, s);
+  result := ExpandAsString(Row, Field, Model, s);
   StringToSynUnicode(s, Text);
 end;
 
@@ -5765,7 +5789,7 @@ end;
 { TOrmTableJson }
 
 constructor TOrmTableJson.Create(const aSql: RawUtf8; JsonBuffer: PUtf8Char;
-  JsonBufferLen: integer);
+  JsonBufferLen: PtrInt);
 begin // don't raise exception on error parsing
   inherited Create(aSql);
   ParseAndConvert(JsonBuffer, JsonBufferLen);
@@ -5782,7 +5806,7 @@ end;
 
 constructor TOrmTableJson.CreateFromTables(
   const Tables: array of TOrmClass; const aSql: RawUtf8;
-  JsonBuffer: PUtf8Char; JsonBufferLen: integer);
+  JsonBuffer: PUtf8Char; JsonBufferLen: PtrInt);
 begin
   // don't raise exception on error parsing
   inherited CreateFromTables(Tables, aSql);
@@ -5804,7 +5828,7 @@ end;
 
 constructor TOrmTableJson.CreateWithColumnTypes(
   const ColumnTypes: array of TOrmFieldType; const aSql: RawUtf8;
-  JsonBuffer: PUtf8Char; JsonBufferLen: integer);
+  JsonBuffer: PUtf8Char; JsonBufferLen: PtrInt);
 begin
   // don't raise exception on error parsing
   inherited CreateWithColumnTypes(ColumnTypes, aSql);
@@ -5841,13 +5865,11 @@ begin
   FastSetString(fPrivateCopy, pointer(aJson), aLen);
 end;
 
-function TOrmTableJson.ParseAndConvert(Buffer: PUtf8Char; BufferLen: integer): boolean;
+function TOrmTableJson.ParseAndConvert(Buffer: PUtf8Char; BufferLen: PtrInt): boolean;
 var
   i, max, resmax, f: PtrInt;
-  EndOfObject: AnsiChar;
-  P, V: PUtf8Char;
-  VLen: integer;
-  wasString: boolean;
+  P: PUtf8Char;
+  info: TGetJsonField;
 begin
   result := false; // error on parsing
   fFieldIndexID := -1;
@@ -5858,8 +5880,8 @@ begin
   {$ifndef NOPOINTEROFFSET}
   fDataStart := Buffer; // before first value, to ensure offset=0 means nil
   {$endif NOPOINTEROFFSET}
-  P := GotoNextNotSpace(Buffer);
-  if IsNotExpandedBuffer(P, Buffer + BufferLen, fFieldCount, fRowCount) then
+  info.Json := GotoNextNotSpace(Buffer);
+  if IsNotExpandedBuffer(info.Json, Buffer + BufferLen, fFieldCount, fRowCount) then
   begin
     // A. Not Expanded (more optimized) format as array of values
     // {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
@@ -5881,26 +5903,25 @@ begin
     dec(max);
     for i := 0 to fFieldCount - 1 do
     begin
-      V := GetJsonField(P, P, @wasString, nil, @VLen);
-      SetResults(i, V, VLen);
-      if not wasString then
+      info.GetJsonField;
+      SetResults(i, info.Value, info.ValueLen);
+      if not info.WasString then
         exit; // should start with field names
       if (fFieldIndexID < 0) and
-         IsRowID(V) then
+         IsRowID(info.Value) then
         fFieldIndexID := i;
     end;
     f := 0;
     for i := fFieldCount to max do
     begin
       // get a field value
-      V := GetJsonFieldOrObjectOrArray(P, @wasString, nil,
-        {handleobjarra=}true, {normalizebool=}false, @VLen);
-      SetResults(i, V, VLen);
-      if (P = nil) and
+      info.GetJsonFieldOrObjectOrArray({handleobjarr=}true, {normbool=}false);
+      SetResults(i, info.Value, info.ValueLen);
+      if (info.Json = nil) and
          (i <> max) then
         // failure (GetRowCountNotExpanded should have detected it)
         exit;
-      if wasString then
+      if info.WasString then
         Include(fFieldParsedAsString, f); // mark column was "string"
       inc(f);
       if f = fFieldCount then
@@ -5912,7 +5933,7 @@ begin
     // B. Expanded format as array of objects (each with field names)
     // [{"f1":"1v1","f2":1v2},{"f2":"2v1","f2":2v2}...]
     // 1. get fields count from first row
-    P := GotoFieldCountExpanded(P);
+    P := GotoFieldCountExpanded(info.Json);
     if P = nil then
       exit;
     if P^ = ']' then
@@ -5935,6 +5956,7 @@ begin
     {$endif NOTORMTABLELEN}
     fData := pointer(fJsonData); // needed for SetResults() below
     fRowCount := 0;
+    info.Json := P;
     repeat
       // let fJsonResults[] point to unescaped+zeroified JSON values
       for f := 0 to fFieldCount - 1 do
@@ -5942,21 +5964,21 @@ begin
         if fRowCount = 0 then
         begin
           // get field name from 1st Row
-          V := GetJsonPropName(P, @VLen);
+          info.Value := GetJsonPropName(info.Json, @info.ValueLen);
           if (fFieldIndexID < 0) and
-             IsRowID(V) then
+             IsRowID(info.Value) then
             fFieldIndexID := f;
-          SetResults(f, V, VLen);
+          SetResults(f, info.Value, info.ValueLen);
           if P = nil then
             break;
         end
         else
         begin
           // warning: next field names are not checked, and should be correct
-          P := GotoEndJsonItemString(P);
+          P := GotoEndJsonItemString(info.Json);
           if P = nil then
             break;
-          inc(P); // ignore jcEndOfJsonFieldOr0
+          info.Json := P + 1; // ignore jcEndOfJsonFieldOr0
         end;
         if max >= resmax then
         begin // check space inside loop for GPF security
@@ -5967,18 +5989,17 @@ begin
           {$endif NOTORMTABLELEN}
           fData := pointer(fJsonData);
         end;
-        V := GetJsonFieldOrObjectOrArray(P, @wasString, @EndOfObject,
-          {handleobjectarray=}true, {normbool=}false, @VLen);
-        SetResults(max, V, VLen);
-        if P = nil then
+        info.GetJsonFieldOrObjectOrArray({objarray=}true, {normbool=}false);
+        SetResults(max, info.Value, info.ValueLen);
+        if info.Json = nil then
         begin
           // unexpected end
           fFieldCount := 0;
           break;
         end;
-        if wasString then // mark column was "string"
+        if info.WasString then // mark column was "string"
           Include(fFieldParsedAsString, f);
-        if (EndOfObject = '}') and
+        if (info.EndOfObject = '}') and
            (f < fFieldCount - 1) then
         begin
           // allow some missing fields in the input object
@@ -5987,9 +6008,9 @@ begin
         end;
         inc(max);
       end;
-      if P = nil then
-        break; // unexpected end
-      if {%H-}EndOfObject <> '}' then
+      P := info.Json;
+      if (info.EndOfObject <> '}') or
+         (P = nil) then
         // data field layout is not consistent: should never happen
         break;
       inc(fRowCount);
@@ -6001,7 +6022,7 @@ begin
           inc(P);
       if P^ = ']' then
         break;
-      inc(P); // jmp '}'
+      info.Json := P + 1; // jmp '}'
     until false;
     if max <> (fRowCount + 1) * fFieldCount then
     begin
@@ -6617,15 +6638,15 @@ begin
 end;
 
 procedure TOrm.FillValueJson(var PropIndex: PtrInt; PropName: PUtf8Char;
-  PropLen: PtrInt; var Json: PUtf8Char;  FieldBits: PFieldBits);
+  PropLen: PtrInt; var Json: PUtf8Char; FieldBits: PFieldBits);
 var
-  Value: PUtf8Char;
-  ValueLen: integer;
-  wasString: boolean;
+  info: TGetJsonField;
 begin
-  Value := GetJsonFieldOrObjectOrArray(
-    Json, @wasString, nil, true, true, @ValueLen);
-  FillValue(PropIndex, PropName, Value, PropLen, ValueLen, wasString, FieldBits);
+  info.Json := Json;
+  info.GetJsonFieldOrObjectOrArray;
+  Json := info.Json;
+  FillValue(PropIndex, PropName, info.Value, PropLen, info.ValueLen,
+    info.WasString, FieldBits);
 end;
 
 procedure TOrm.FillFrom(const JsonRecord: RawUtf8; FieldBits: PFieldBits);
@@ -6642,50 +6663,62 @@ end;
 
 procedure TOrm.FillFrom(P: PUtf8Char; FieldBits: PFieldBits);
 var
+  info: TGetJsonField;
+  i, j, n: PtrInt;
   F: array[0..MAX_SQLFIELDS - 1] of PUtf8Char; // store field/property names
   L: array[0..MAX_SQLFIELDS - 1] of integer;   // and lens
-  i, j, n: PtrInt;
 begin
   if FieldBits <> nil then
     FillZero(FieldBits^);
-  if P = nil then
+  info.Json := P;
+  if info.Json = nil then
     exit;
-  while P^ <> '{' do  // go to start of object (handle both [{obj}] and {obj})
-    if P^ = #0 then
+  while info.Json^ <> '{' do  // go to start of object (handle both [{obj}] and {obj})
+    if info.Json^ = #0 then
       exit
     else
-      inc(P);
+      inc(info.Json);
   // set each property from values using efficient TOrmPropInfo.SetValue()
   j := 0; // for optimistic in-order field name lookup in FillValue
-  if Expect(P, FIELDCOUNT_PATTERN, 14) then
+  if Expect(info.Json, FIELDCOUNT_PATTERN, 14) then
   begin
     // NOT EXPANDED - optimized format with an array of JSON values, names first
     //  {"fieldCount":2,"values":["f1","f2","1v1",1v2],"rowCount":1}
-    n := GetNextItemCardinal(P, #0) - 1;
+    n := GetNextItemCardinal(info.Json, #0) - 1;
     if PtrUInt(n) > high(F) then
       exit;
-    if Expect(P, ROWCOUNT_PATTERN, 12) then
+    if Expect(info.Json, ROWCOUNT_PATTERN, 12) then
       // just ignore "rowCount":.. here
-      GetNextItemCardinal(P, #0);
-    if not Expect(P, VALUES_PATTERN, 11) then
+      GetNextItemCardinal(info.Json, #0);
+    if not Expect(info.Json, VALUES_PATTERN, 11) then
       exit;
     for i := 0 to n do
-      F[i] := GetJsonField(P, P, nil, nil, @L[i]); // parse names first
+    begin
+      info.GetJsonField; // parse names first
+      F[i] := info.Value;
+      L[i] := info.ValueLen;
+    end;
     for i := 0 to n do
-      FillValueJson(j, {%H-}F[i], {%H-}L[i], P, FieldBits); // parse values
+    begin
+      info.GetJsonFieldOrObjectOrArray;
+      FillValue(j, F[i], info.Value, {%H-}L[i], info.ValueLen,
+        info.WasString, FieldBits); // parse values
+    end;
   end
-  else if P^ = '{' then
+  else if info.Json^ = '{' then
   begin
     // EXPANDED FORMAT - standard format with (an array of) JSON objects
     //  [{"f1":"1v1","f2":1v2}]
-    inc(P);
+    inc(info.Json);
     repeat
-      F[0] := GetJsonPropName(P, @L[0]); // parse name:
+      F[0] := GetJsonPropName(info.Json, @L[0]); // parse name:
       if (F[0] = nil) or
-         (P = nil) then
+         (info.Json = nil) then
         break;
-      FillValueJson(j, F[0], L[0], P, FieldBits); // parse value
-    until P = nil;
+      info.GetJsonFieldOrObjectOrArray;
+      FillValue(j, F[0], info.Value, L[0], info.ValueLen,
+        info.WasString, FieldBits); // parse value
+    until info.Json = nil;
   end;
 end;
 
@@ -7462,25 +7495,22 @@ end;
 function TOrm.FillFromArray(const Fields: TFieldBits; Json: PUtf8Char): boolean;
 var
   i: PtrInt;
-  val: PUtf8Char;
-  vallen: integer;
-  wasstring: boolean;
+  info: TGetJsonField;
   props: TOrmPropInfoList;
 begin
   result := false;
   Json := GotoNextNotSpace(Json);
   if Json^ <> '[' then
     exit;
-  inc(Json);
+  info.Json := Json + 1;
   props := Orm.Fields;
   for i := 0 to props.Count - 1 do
     if GetBitPtr(@Fields, i) then
     begin
-      val := GetJsonFieldOrObjectOrArray(
-        Json, @wasstring, nil, true, true, @vallen);
-      props.List[i].SetValue(self, val, vallen, wasstring);
+      info.GetJsonFieldOrObjectOrArray;
+      props.List[i].SetValue(self, info.Value, info.ValueLen, info.WasString);
     end;
-  result := Json <> nil;
+  result := info.Json <> nil;
 end;
 
 constructor TOrm.CreateAndFillPrepare(const aClient: IRestOrm;
@@ -7947,10 +7977,13 @@ begin
   i := 0; // for optimistic property name lookup
   repeat
      name := GetJsonPropName(Context.Json, @namelen);
-     if name = nil then
+     Context.GetJsonFieldOrObjectOrArray;
+     if (name = nil) or
+        (Context.Json = nil) then
+     begin
        Context.Valid := false;
-     if not Context.ParseNextAny then // GetJsonFieldOrObjectOrArray()
        exit;
+     end;
      orm.FillValue(i, name, Context.Value, namelen, Context.ValueLen, Context.WasString);
   until Context.EndOfObject = '}';
   Context.ParseEndOfObject;
@@ -9770,7 +9803,7 @@ begin
   result := GetUriID(aTable, aID) + '/' + aMethodName;
 end;
 
-function TOrmModel.UriMatch(const Uri: RawUtf8): TRestModelMatch;
+function TOrmModel.UriMatch(const Uri: RawUtf8; CheckCase: boolean): TRestModelMatch;
 var
   UriLen: PtrInt;
 begin
@@ -9783,7 +9816,8 @@ begin
   begin
     UriLen := length(fRoot);
     if Uri[UriLen + 1] in [#0, '/', '?'] then
-      if CompareMemFixed(pointer(Uri), pointer(fRoot), UriLen) then
+      if CheckCase and
+         CompareMemFixed(pointer(Uri), pointer(fRoot), UriLen) then
         result := rmMatchExact
       else
         result := rmMatchWithCaseChange;

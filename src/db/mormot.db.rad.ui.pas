@@ -1,7 +1,7 @@
 /// Virtual TDataset Component Compatible With VCL/LCL/FMX UI
 // - this unit is a part of the Open Source Synopse mORMot framework 2,
 // licensed under a MPL/GPL/LGPL three license - see LICENSE.md
-unit mormot.ui.rad;
+unit mormot.db.rad.ui;
 
 {
   *****************************************************************************
@@ -383,7 +383,8 @@ var
   len: integer;
 begin
   data := GetRowFieldData(Field, RowIndex, len, false);
-  if data = nil then // should point to Blob or Utf8 data
+  if (data = nil) or
+     (len <= 0) then // should point to Blob or Utf8 data
     result := nil
   else
     case Field.DataType of

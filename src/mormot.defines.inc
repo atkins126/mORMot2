@@ -57,9 +57,6 @@
   {.$define HASNOSSE2} // force x87 code on very very old CPU
 {$endif CPUX86}
 
-{.$define NOXPOWEREDNAME}
-// define this to avoid sending "X-Powered-By: Synopse mORMot" HTTP header
-
 {.$define NOSYNDBZEOS}
 // make mormot.db.sql.zeos.pas a "void" unit - defined for FPC/Lazarus packages only
 
@@ -144,6 +141,7 @@
   {$PACKSET 1}
   {$PACKENUM 1}
   {$CODEPAGE UTF8} // otherwise unexpected behavior occurs in most cases
+  {$OBJECTCHECKS OFF} // as expected e.g. when hooking classes
 
   {$define HASINLINE}
   {$define HASINLINEWINAPI} // Delphi has troubles inlining Windows API calls
@@ -368,7 +366,8 @@
   {$endif ISFPC27}
 
   {$if defined(FPC_USE_WIN32_SEH) or defined(FPC_USE_WIN64_SEH)}
-    {$define HASFASTTRYFINALLY}
+    {.$define HASFASTTRYFINALLY}
+    // FPC SEH is not fully efficient and generate some additional code/calls
   {$ifend}
 
 {$else FPC}
@@ -427,7 +426,7 @@
 
   {$define DELPHI_OR_FPC_OLDRTTI}
   {$define HASINTERFACERTTI}  // interface RTTI (not oldest FPC)
-  {$define HASFASTTRYFINALLY} // Delphi Win32/Win64 uses efficient SEH
+  {$define HASFASTTRYFINALLY} // Delphi Win32/Win64 efficiently uses SEH
   {$define STRCNT32}          // 32-bit TStrRec.refCnt even on 64-bit CPU
   {$define DACNT32}           // 32-bit TDynArrayRec.refCnt even on 64-bit CPU
   {$warn UNSAFE_CODE OFF}     // Delphi for .Net does not exist any more!
@@ -490,9 +489,10 @@
       {$define ORMGENERICS}
     {$ifend}
     {$if CompilerVersion >= 23.0} // = Delphi XE2
-      // Delphi XE2 has some cross-platform features
-      // e.g. {$ifdef ISDELPHIXE2}VCL.Graphics{$else}Graphics{$endif}
       {$define ISDELPHIXE2}
+      // Delphi XE2 has some cross-platform features
+      // e.g. {$ifdef NEEDVCLPREFIX}VCL.Graphics{$else}Graphics{$endif}
+      {$define NEEDVCLPREFIX}
       {$define HASVARUSTRARG}
       {$define HASTTHREADTERMINATESET} // introduced TThread.TerminateSet
     {$ifend}
@@ -550,14 +550,14 @@
     {$if CompilerVersion >= 34.0} // = Delphi 10.4
       {$define ISDELPHI104}
     {$ifend}
-    {$if CompilerVersion >= 35.0} // = Delphi 11 Alexandria
+    {$if CompilerVersion >= 35.0} // = Delphi 11.x Alexandria
       {$define ISDELPHI11}
       {$ifdef CPU64}
         {.$define ASMX64AVX}      // initial AVX/AVX2/AVX512 support - but broken
       {$endif CPU64}
     {$ifend}
-    {$if CompilerVersion >= 36.0} // = Delphi 11.1
-      {$define ISDELPHI111}
+    {$if CompilerVersion >= 36.0} // = Delphi 12
+      {$define ISDELPHI12}
     {$ifend}
   {$else}
      {$define ISDELPHI7}
@@ -661,6 +661,14 @@
       {$define LIBQUICKJSSTATIC}
     {$endif CPUX64}
   {$endif OSWINDOWS}
+  {$ifdef CPUARM3264}
+    {$ifdef OSDARWIN}               // unsupported arch (e.g. Aarch64-Darwin)
+      {$define OSDARWINARM}
+      {$define LIZARD_EXTERNALONLY}
+      {$define NOLIBCSTATIC}
+      {$define NOSQLITE3STATIC}
+    {$endif OSDWARWIN}
+  {$endif CPUARM3264}
 {$else}
   {$define LIZARD_EXTERNALONLY}     // no static .obj for Delphi Win32/Win64 yet
   {$ifdef CPUX86}
@@ -674,8 +682,8 @@
       // other Win32/Win64 Delphi platforms "should work" (tm) as expected
       {$define NOSQLITE3STATIC}
     {$ifend}
-    {$define LIBQUICKJSSTATIC}      // seems fine BUT on Delphi 10.4 Win64
-    {$if CompilerVersion = 34.0}    // = Delphi 10.4
+    {$define LIBQUICKJSSTATIC}      // seems fine BUT on Delphi 10.4+ Win64
+    {$if CompilerVersion >= 34.0}    // = Delphi 10.4 and later
       {$undef LIBQUICKJSSTATIC}
     {$ifend}
   {$endif}
@@ -690,8 +698,10 @@
   {.$define USE_OPENSSL}
 {$else}
   {$ifndef OSANDROID}
-    // try OpenSSL on POSIX systems where likely to be unique and maintained
-    {$define USE_OPENSSL}
+    {$ifndef OSDARWINARM}
+      // try OpenSSL on POSIX systems where likely to be unique and maintained
+      {$define USE_OPENSSL}
+    {$endif OSDARWINARM}
   {$endif OSANDROID}
 {$endif OSWINDOWS}
 {$ifdef FORCE_OPENSSL}

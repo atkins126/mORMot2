@@ -23,6 +23,7 @@ interface
 uses
   sysutils,
   mormot.core.base,
+  mormot.core.os,
   mormot.core.unicode,
   mormot.core.text;
 
@@ -247,7 +248,7 @@ function TimeToIso8601PChar(Time: TDateTime; P: PUtf8Char; Expanded: boolean;
 function VariantToDateTime(const V: Variant; var Value: TDateTime): boolean;
 
 /// decode most used TimeZone text values (CEST, GMT, +0200, -0800...)
-// - on match, returns true and the time zone offset in respect to UTC
+// - on match, returns true and the time zone minutes offset in respect to UTC
 // - if P is not a time zone, returns false and leave Zone to its supplied value
 // - will recognize only the most used text values using a fixed table (RFC 822
 // with some extensions like -0000 as current system timezone) - using
@@ -435,8 +436,9 @@ type
     /// convert the stored date and time to its text in HTTP-like format
     // - i.e. "Tue, 15 Nov 1994 12:45:26 GMT" to be used as a value of
     // "Date", "Expires" or "Last-Modified" HTTP header
-    // - handle UTC/GMT time zone by default
-    procedure ToHttpDate(out text: RawUtf8; const tz: RawUtf8 = 'GMT');
+    // - handle UTC/GMT time zone by default, and allow a 'Date: ' prefix
+    procedure ToHttpDate(out text: RawUtf8; const tz: RawUtf8 = 'GMT';
+      const prefix: RawUtf8 = '');
     /// convert the stored date and time into its Iso-8601 text, with no Milliseconds
     procedure ToIsoDateTime(out text: RawUtf8; const FirstTimeChar: AnsiChar = 'T');
     /// convert the stored date into its Iso-8601 text with no time part
@@ -448,6 +450,10 @@ type
     /// copy Year/Month/DayOfWeek/Day fields to a TSynDate
     procedure ToSynDate(out date: TSynDate);
       {$ifdef HASINLINE}inline;{$endif}
+    /// convert the stored time into a timestamped local file name
+    // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits,
+    // expecting a date > 1999 (a current date would be fine)
+    procedure ToFileShort(out result: TShort16);
     /// fill the DayOfWeek field from the stored Year/Month/Day
     // - by default, most methods will just store 0 in the DayOfWeek field
     // - sunday is DayOfWeek 1, saturday is 7
@@ -507,6 +513,15 @@ function HttpDateToDateTime(const httpdate: RawUtf8; var datetime: TDateTime;
 function HttpDateToDateTime(const httpdate: RawUtf8;
   tolocaltime: boolean = false): TDateTime; overload;
 
+var
+  /// contains the current UTC timestamp as the full 'Date' HTTP header
+  // - e.g. 'Date: Tue, 15 Nov 1994 12:45:26 GMT'#13#10
+  HttpDateNowUtcCache: RawUtf8;
+
+/// refresh HttpDateNowUtcCache if needed
+// - won't overwrite the current value when called more than once per second
+procedure SetHttpDateNowUtcCache(tix: Int64 = 0);
+
 /// convert some TDateTime to a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
@@ -517,6 +532,10 @@ function DateTimeToFileShort(const DateTime: TDateTime): TShort16; overload;
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
 // a date > 1999 (a current date would be fine)
 procedure DateTimeToFileShort(const DateTime: TDateTime; out result: TShort16); overload;
+
+/// get the current time a small text layout, perfect e.g. for naming a file
+// - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits
+function NowToFileShort(localtime: boolean = false): TShort16;
 
 /// retrieve the current Time (whithout Date), in the ISO 8601 layout
 // - useful for direct on screen logging e.g.
@@ -670,8 +689,9 @@ type
     procedure From(Y, M, D, HH, MM, SS: cardinal); overload;
      /// fill Value from specified TDateTime
     procedure From(DateTime: TDateTime; DateOnly: boolean = false); overload;
-    /// fill Value from specified File Date
-    procedure From(FileDate: integer); overload;
+    /// fill Value from specified low-level system-specific FileAge() integer
+    // - i.e. 32-bit Windows bitmask local time, or 64-bit Unix UTC time
+    procedure FromFileDate(const FileDate: TFileAge);
     /// fill Value from Iso-8601 encoded text
     procedure From(P: PUtf8Char; L: integer); overload;
     /// fill Value from Iso-8601 encoded text
@@ -820,9 +840,6 @@ type
 
 
 implementation
-
-uses
-  mormot.core.os;
 
 
 { ************ ISO-8601 Compatible Date/Time Text Encoding }
@@ -2019,18 +2036,20 @@ begin
   result := 21;
 end;
 
-procedure TSynSystemTime.ToHttpDate(out text: RawUtf8; const tz: RawUtf8);
+procedure TSynSystemTime.ToHttpDate(out text: RawUtf8; const tz, prefix: RawUtf8);
 begin
   if DayOfWeek = 0 then
     PSynDate(@self)^.ComputeDayOfWeek; // first 4 fields do match
-  FormatUtf8('%, % % % %:%:% %', [
+  FormatUtf8('%%, % % % %:%:% %', [
+    prefix,
     HTML_WEEK_DAYS[DayOfWeek],
     UInt2DigitsToShortFast(Day),
     HTML_MONTH_NAMES[Month],
     UInt4DigitsToShort(Year),
     UInt2DigitsToShortFast(Hour),
     UInt2DigitsToShortFast(Minute),
-    UInt2DigitsToShortFast(Second), tz], text);
+    UInt2DigitsToShortFast(Second),
+    tz], text);
 end;
 
 procedure TSynSystemTime.ToIsoDateTime(out text: RawUtf8;
@@ -2086,6 +2105,38 @@ end;
 procedure TSynSystemTime.ToSynDate(out date: TSynDate);
 begin
   date := PSynDate(@self)^; // first 4 fields do match
+end;
+
+procedure TSynSystemTime.ToFileShort(out result: TShort16);
+var
+  {$ifdef CPUX86NOTPIC}
+  tab: TWordArray absolute TwoDigitLookupW;
+  {$else}
+  tab: PWordArray;
+  {$endif CPUX86NOTPIC}
+begin
+  if IsZero then
+  begin
+    PWord(@result[0])^ := 1 + ord('0') shl 8;
+    exit;
+  end;
+  if Year > 1999 then
+    if Year < 2100 then
+      dec(Year, 2000)
+    else
+      Year := 99
+  else
+    Year := 0;
+  {$ifndef CPUX86NOTPIC}
+  tab := @TwoDigitLookupW;
+  {$endif CPUX86NOTPIC}
+  result[0] := #12;
+  PWord(@result[1])^  := tab[Year];
+  PWord(@result[3])^  := tab[Month];
+  PWord(@result[5])^  := tab[Day];
+  PWord(@result[7])^  := tab[Hour];
+  PWord(@result[9])^  := tab[Minute];
+  PWord(@result[11])^ := tab[Second];
 end;
 
 procedure TSynSystemTime.ComputeDayOfWeek;
@@ -2266,6 +2317,24 @@ begin
     result := 0;
 end;
 
+var
+  _HttpDateNowUtcTix: cardinal; // = GetTickCount64 div 1024 (every second)
+
+procedure SetHttpDateNowUtcCache(tix: Int64);
+var
+  T: TSynSystemTime;
+  c: cardinal;
+begin
+  if tix = 0 then
+    tix := GetTickCount64;
+  c := tix shr 10;
+  if c = _HttpDateNowUtcTix then
+    exit;
+  T.FromNowUtc;
+  T.ToHttpDate(HttpDateNowUtcCache, 'GMT'#13#10, 'Date: ');
+  _HttpDateNowUtcTix := c; // should be the last assignment
+end;
+
 function TimeToString: RawUtf8;
 var
   I: TTimeLogBits;
@@ -2283,37 +2352,24 @@ end;
 procedure DateTimeToFileShort(const DateTime: TDateTime; out result: TShort16);
 var
   T: TSynSystemTime;
-  {$ifdef CPUX86NOTPIC}
-  tab: TWordArray absolute TwoDigitLookupW;
-  {$else}
-  tab: PWordArray;
-  {$endif CPUX86NOTPIC}
 begin
   // use 'YYMMDDHHMMSS' format
   if DateTime <= 0 then
-  begin
-    PWord(@result[0])^ := 1 + ord('0') shl 8;
-    exit;
-  end;
-  T.FromDate(DateTime);
-  if T.Year > 1999 then
-    if T.Year < 2100 then
-      dec(T.Year, 2000)
-    else
-      T.Year := 99
+    PWord(@result[0])^ := 1 + ord('0') shl 8
   else
-    T.Year := 0;
-  T.FromTime(DateTime);
-  {$ifndef CPUX86NOTPIC}
-  tab := @TwoDigitLookupW;
-  {$endif CPUX86NOTPIC}
-  result[0] := #12;
-  PWord(@result[1])^  := tab[T.Year];
-  PWord(@result[3])^  := tab[T.Month];
-  PWord(@result[5])^  := tab[T.Day];
-  PWord(@result[7])^  := tab[T.Hour];
-  PWord(@result[9])^  := tab[T.Minute];
-  PWord(@result[11])^ := tab[T.Second];
+  begin
+    T.FromDate(DateTime);
+    T.FromTime(DateTime);
+    T.ToFileShort(result);
+  end;
+end;
+
+function NowToFileShort(localtime: boolean): TShort16;
+var
+  T: TSynSystemTime;
+begin
+  T.FromNow(localtime);
+  T.ToFileShort(result);
 end;
 
 
@@ -2442,15 +2498,14 @@ begin
   Value := Iso8601ToTimeLogPUtf8Char(pointer(S), length(S));
 end;
 
-procedure TTimeLogBits.From(FileDate: integer);
+procedure TTimeLogBits.FromFileDate(const FileDate: TFileAge);
 begin
-  {$ifdef OSWINDOWS}
+  {$ifdef OSWINDOWS} // already local time
   with PLongRec(@FileDate)^ do
     From(Hi shr 9 + 1980, Hi shr 5 and 15, Hi and 31, Lo shr 11,
       Lo shr 5 and 63, Lo and 31 shl 1);
   {$else}
-  // FileDate depends on the running OS -> use FPC RTL
-  From(FileDateToDateTime(FileDate));
+  From(mormot.core.os.FileDateToDateTime(FileDate)); // convert UTC to local
   {$endif OSWINDOWS}
 end;
 

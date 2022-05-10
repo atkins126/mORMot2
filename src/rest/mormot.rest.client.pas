@@ -95,7 +95,7 @@ type
   // hash available on all platforms, for enhanced security, by calling e.g.
   // ! (aServer.AuthenticationRegister(TRestClientAuthenticationDefault) as
   // !   TRestServerAuthenticationDefault).Algorithm := suaMD5;
-  // - suaSHA1, suaSHA256 and suaSHA512 will be the slowest, to provide
+  // - suaSHA1, suaSHA256, suaSHA512 and suaSHA3 will be the slowest, to provide
   // additional level of trust, depending on your requirements: note that
   // since the hash is reduced to 32-bit resolution, those may not provide
   // higher security than suaMD5
@@ -107,7 +107,8 @@ type
     suaMD5,
     suaSHA1,
     suaSHA256,
-    suaSHA512);
+    suaSHA512,
+    suaSHA3);
 
   /// function prototype for TRestClientAuthenticationSignedUri and
   // TRestServerAuthenticationSignedUri computation of the session_signature
@@ -188,6 +189,8 @@ type
     class function ComputeSignatureSha256(privatesalt: cardinal;
       timestamp, url: PAnsiChar; urllen: integer): cardinal;
     class function ComputeSignatureSha512(privatesalt: cardinal;
+      timestamp, url: PAnsiChar; urllen: integer): cardinal;
+    class function ComputeSignatureSha3(privatesalt: cardinal;
       timestamp, url: PAnsiChar; urllen: integer): cardinal;
   public
     /// retrieve the method to compute the session_signature=.... value
@@ -810,7 +813,7 @@ type
     // of high activity
     // - map TOnTextWriterEcho signature, so that you will be able to set e.g.:
     // ! TSqlLog.Family.EchoCustom := aClient.ServerRemoteLog;
-    function ServerRemoteLog(Sender: TTextWriter; Level: TSynLogInfo;
+    function ServerRemoteLog(Sender: TEchoWriter; Level: TSynLogInfo;
       const Text: RawUtf8): boolean; overload; virtual;
     /// internal method able to emulate a call to TSynLog.Add.Log()
     // - will compute timestamp and event text, than call the overloaded
@@ -1196,7 +1199,7 @@ begin
   end
   else
   begin
-    values[0].ToUtf8(result);
+    result := values[0].ToUtf8; // not ToUtf8(result) to please Delphi 2007
     Base64ToBin(PAnsiChar(values[1].Text), values[1].Len, Sender.fSession.Data);
     values[2].ToUtf8(Sender.fSession.Server);
     values[3].ToUtf8(Sender.fSession.Version);
@@ -1270,9 +1273,9 @@ begin
   aClientNonce := CardinalToHexLower(OSVersionInt32) + '_' +
                   BinToHexLower(@rnd, SizeOf(rnd)); // 160-bit nonce
   result := ClientGetSessionKey(Sender, User, [
-    'username', User.LogonName,
-    'password', Sha256(Sender.fModel.Root + aServerNonce + aClientNonce +
-                       User.LogonName + User.PasswordHashHexa),
+    'username',   User.LogonName,
+    'password',   Sha256(Sender.fModel.Root + aServerNonce + aClientNonce +
+                         User.LogonName + User.PasswordHashHexa),
     'clientnonce', aClientNonce]);
 end;
 
@@ -1381,6 +1384,24 @@ begin
     result := result xor digest.c[i];
 end;
 
+class function TRestClientAuthenticationSignedUri.ComputeSignatureSha3(
+  privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
+var
+  digest: THash256Rec;
+  Sha3: TSha3;
+  i: PtrInt;
+begin
+  Sha3.Init(SHA3_256);
+  Sha3.Update(@privatesalt, 4);
+  Sha3.Update(timestamp, 8);
+  Sha3.Update(url, urllen);
+  Sha3.Final(@digest.b);
+  result := digest.c[0];
+  for i := 1 to high(digest.c) do
+    // we may have used the first 32-bit of the digest, but cascaded xor is fine
+    result := result xor digest.c[i];
+end;
+
 class function TRestClientAuthenticationSignedUri.GetComputeSignature(
   algo: TRestAuthenticationSignedUriAlgo): TOnRestAuthenticationSignedUriComputeSignature;
 begin
@@ -1396,6 +1417,8 @@ begin
       result := ComputeSignatureSha1;
     suaSHA256:
       result := ComputeSignatureSha256;
+    suaSHA3:
+      result := ComputeSignatureSha3;
     suaSHA512:
       result := ComputeSignatureSha512;
   else
@@ -2707,7 +2730,7 @@ begin
   end;
 end;
 
-function TRestClientUri.ServerRemoteLog(Sender: TTextWriter;
+function TRestClientUri.ServerRemoteLog(Sender: TEchoWriter;
   Level: TSynLogInfo; const Text: RawUtf8): boolean;
 begin
   if fRemoteLogThread = nil then

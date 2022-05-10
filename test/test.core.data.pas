@@ -329,7 +329,7 @@ procedure TTestCoreProcess.Variants;
 var
   v: Variant;
   vd: TVarData absolute v;
-  json: PUtf8Char;
+  info: TGetJsonField;
   t: pointer;
   dt: TDateTime;
   ni: TNullableInteger;
@@ -482,8 +482,8 @@ begin
   Check(ni = 10);
   Check(nt = 'toto');
   {$endif FPC}
-  json := nil;
-  GetJsonToAnyVariant(v, json, nil, nil, false);
+  info.Json := nil;
+  JsonToAnyVariant(v, info, nil, false);
   Check(vd.VType = varEmpty);
   v := VariantLoadJson('');
   Check(vd.VType = varEmpty);
@@ -1139,6 +1139,14 @@ type
       read FSomeField write FSomeField;
   end;
 
+  TDtoObject2 = class(TDtoObject)
+  private
+    fLevel: TSynLogInfo;
+  published
+    property Level: TSynLogInfo
+      read fLevel;
+  end;
+
   TObjectWithVariant = class(TSynPersistent)
   protected
     fValue: variant;
@@ -1207,6 +1215,7 @@ const
 procedure TTestCoreProcess.EncodeDecodeJSON;
 var
   J, J2, U, U2: RawUtf8;
+  info: TGetJsonField;
   P: PUtf8Char;
   binary, zendframeworkJson, discogsJson: RawByteString;
   V: array[0..4] of TValuePUtf8Char;
@@ -1217,7 +1226,7 @@ var
   JA, JA2: TTestCustomJsonArray;
   JAS: TTestCustomJsonArraySimple;
   JAV: TTestCustomJsonArrayVariant;
-  GDtoObject, G2: TDtoObject;
+  GDtoObject, G2, G3: TDtoObject;
   owv: TObjectWithVariant;
   Trans: TTestCustomJson2;
   Disco, Disco2: TTestCustomDiscogs;
@@ -1253,14 +1262,14 @@ var
   var
     CA: TCollTstDynArray;
     i: integer;
-    tmp: RawByteString;
+    tmp: RawUtf8;
     pu: PUtf8Char;
   begin
     CA := TCollTstDynArray.Create;
     try
       CA.Str := TStringList.Create;
-      tmp := J;
-      Check(JsonToObject(CA, UniqueRawUtf8(RawUtf8(tmp)), Valid)^ = #0);
+      FastSetString(tmp, pointer(J), length(J));
+      Check(JsonToObject(CA, pointer(tmp), Valid)^ = #0);
       Check(Valid);
       Check(CA.One.Color = 2);
       Check(CA.One.Name = 'test2');
@@ -1305,6 +1314,7 @@ var
       for i := 0 to high(CA.TimeLog) do
         Check(CA.TimeLog[i] = TLNow + i and 31);
       DA.Init(TypeInfo(TFVs), CA.fFileVersions);
+      FillcharFast(F, SizeOf(F), 0); // initialize all fields before DA.Add(F)
       for i := 1 to 1000 do
       begin
         F.Major := i;
@@ -1767,6 +1777,33 @@ var
     Check(SetValueObject(G2, 'nestedobject.fieldinteger', 10));
     Check(G2.NestedObject.FieldInteger = 10);
     ClearObject(G2);
+    U := ObjectToIni(G2);
+    CheckEqual(U, '[Main]'#$0A'SomeField='#$0A#$0A'[NestedObject]'#$0A +
+      'FieldString='#$0A'FieldInteger=0'#$0A'FieldVariant=null'#$0A#$0A);
+    Check(not IniToObject('[main2]'#10'somefield=toto', G2));
+    CheckEqual(G2.SomeField, '');
+    CheckEqual(G2.NestedObject.FieldInteger, 0);
+    Check(IniToObject('[main]'#10'somefield=toto', G2));
+    CheckEqual(G2.SomeField, 'toto');
+    CheckEqual(G2.NestedObject.FieldInteger, 0);
+    Check(IniToObject('[main]'#10'somefield=titi'#10'[nestedobject]'#10'fieldinteger=7', G2));
+    CheckEqual(G2.SomeField, 'titi');
+    CheckEqual(G2.NestedObject.FieldInteger, 7);
+    Check(IniToObject('[main]'#10'[nestedobject]'#10'fieldstring=c:\abc', G2));
+    CheckEqual(G2.SomeField, 'titi');
+    CheckEqual(G2.NestedObject.FieldInteger, 7);
+    CheckEqual(G2.NestedObject.FieldString, 'c:\abc');
+    U := ObjectToIni(G2);
+    CheckEqual(U, '[Main]'#$0A'SomeField=titi'#$0A#$0A'[NestedObject]'#$0A +
+      'FieldString=c:\abc'#$0A'FieldInteger=7'#$0A'FieldVariant=null'#$0A#$0A);
+    G3 := TDtoObject2.Create;
+    U := ObjectToIni(G3);
+    CheckHash(U, $CDBF8A87);
+    TDtoObject2(G3).fLevel := sllTrace;
+    U := ObjectToIni(G3);
+    CheckHash(U, $E54B4E82);
+    G3.Free;
+    ClearObject(G2);
     ClearObject(GDtoObject);
     Check(IsObjectDefaultOrVoid(GDtoObject));
     Check(IsObjectDefaultOrVoid(G2));
@@ -1882,23 +1919,20 @@ var
   procedure TestGetJsonField(const s, v: RawUtf8; str, error: boolean;
     eof, next: AnsiChar);
   var
-    P, d: PUtf8Char;
-    ws: boolean;
-    e: AnsiChar;
-    l: integer;
     s2: RawUtf8;
+    info: TGetJsonField;
   begin
     s2 := s;
-    P := UniqueRawUtf8(s2);
-    P := GetJsonField(P, d, @ws, @e, @l);
-    check(error = (d = nil));
-    if d = nil then
+    info.Json := UniqueRawUtf8(s2);
+    info.GetJsonField;
+    check(error = (info.Json = nil));
+    if info.Json = nil then
       exit;
-    check(str = ws);
-    check(eof = e);
-    check(d^ = next);
-    check(l = length(v));
-    check(CompareMem(P, pointer(v), length(v)));
+    check(info.WasString = str);
+    check(info.EndOfObject = eof);
+    check(info.Json^ = next);
+    check(info.ValueLen = length(v));
+    check(CompareMem(info.Value, pointer(v), info.ValueLen));
   end;
 
 begin
@@ -2195,19 +2229,19 @@ begin
       AddVariant(U);
       J := Text;
       CheckEqual(J, U + ',' + DoubleToStr(r) + ',' + DoubleToStr(c) + ',"' + U + '"');
-      P := UniqueRawUtf8(J);
-      GetJsonToAnyVariant(Va, P, nil, nil, false);
-      Check(P <> nil);
+      info.Json := UniqueRawUtf8(J);
+      JsonToAnyVariant(Va, info, nil, false);
+      Check(info.Json <> nil);
       Check(Va = a);
-      GetJsonToAnyVariant(Va, P, nil, nil, true);
-      Check(P <> nil);
+      JsonToAnyVariant(Va, info, nil, true);
+      Check(info.Json <> nil);
       CheckSame(VariantToDoubleDef(Va), r);
-      GetJsonToAnyVariant(Va, P, nil, nil, false);
-      Check(P <> nil);
+      JsonToAnyVariant(Va, info, nil, false);
+      Check(info.Json <> nil);
       Check(Va = c);
-      GetJsonToAnyVariant(Va, P, nil, nil, false);
-      Check((P <> nil) and
-            (P^ = #0));
+      JsonToAnyVariant(Va, info, nil, false);
+      Check((info.Json <> nil) and
+            (info.Json^ = #0));
       Check(Va = U);
       binary := VariantSave(Va);
       Vb := VariantLoad(binary, @JSON_[mFast]);
@@ -2949,9 +2983,11 @@ begin
   end;
   Rtti.RegisterFromText(TypeInfo(TTestCustomDiscogs), '');
   SetString(U, PAnsiChar('true'#0'footer,'), 12);
-  Check(IdemPChar(GetJsonField(pointer(U), P), 'TRUE'));
-  Check((P <> nil) and
-        (P^ = #0));
+  info.Json := pointer(U);
+  info.GetJsonField;
+  Check(IdemPChar(info.Value, 'TRUE'));
+  Check((info.Json <> nil) and
+        (info.Json^ = #0));
   CheckEqual(U, 'true'#0'footer,', '3cce80e8df');
   // validates RawJson (custom) serialization
   Enemy := TEnemy.Create;
@@ -4406,11 +4442,25 @@ var
   i, ndx: PtrInt;
   V, V1, V2: variant;
   s, j: RawUtf8;
+  d: TDocVariantData;
   vd: double;
   vs: single;
   lTable: TOrmTableJson;
   lRefreshed: Boolean;
 begin
+  j := '{"id": 1, "name": Tom}'; // invalid JSON
+  Check(not IsValidJson(j, {strict=}false));
+  Check(not IsValidJson(j, {strict=}true));
+  Check(not d.InitJson(j));
+  CheckEqual(d.Count, 0);
+  j := '{ id : 1 , name : ''To''''m'' , another : true }'; // valid extended JSON
+  Check(IsValidJson(j, {strict=}false));
+  Check(not IsValidJson(j, {strict=}true));
+  Check(d.InitJson(j));
+  CheckEqual(d.Count, 3);
+  CheckEqual(d.I['ID'], 1);
+  CheckEqual(d.U['NAME'], 'To''m');
+  Check(d.B['another']);
   V := _Json('[{"id":0}');
   Check(VarIsEmpty(V));
   Doc.InitFast;
@@ -4768,7 +4818,7 @@ begin
   V2.Val2 := 'blybly';
   V1.Val1 := V2.Val1;
   V1.Val2 := V2.Val2;
-  check(VariantSaveJson(V1) = VariantSaveJson(V2));
+  CheckEqual(VariantSaveJson(V1), VariantSaveJson(V2));
   Doc.Clear;
   V := _Json('{"ID": 1,"Notation": "ABC", "Price": 10.1, "CustomNotation": "XYZ"}');
   Doc.InitCopy(V, []);
@@ -4828,6 +4878,13 @@ begin
   Doc2.Clear;
   Doc2.InitJson('{"order_id": -1}');
   Check(Doc.Equals(Doc2));
+  Doc.Clear;
+  Doc.InitJson('[{"order_id": -1}]');
+  Check(Doc.IsArray);
+  Check(Doc._[0]^.Count = 1);
+  Doc2.Clear;
+  Doc2.InitArrayFromResults('[{"order_id": -1}]');
+  Check(Doc.Equals(Doc2), 'InitArrayFromResults1');
   Doc.Clear;
   Doc.InitJson(
    '{' + #13#10 +

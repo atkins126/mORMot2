@@ -2447,14 +2447,10 @@ function FindIniNameValue(P: PUtf8Char; UpperName: PAnsiChar;
 /// return TRUE if one of the Value of UpperName exists in P, till end of
 // current section
 // - expect UpperName e.g. as 'CONTENT-TYPE: '
-// - expect UpperValues to be any upper value with left side matching, e.g. as
-// used by IsHtmlContentTypeTextual() function:
-// ! result := ExistsIniNameValue(htmlHeaders,HEADER_CONTENT_TYPE_UPPER,
-// !  ['TEXT/','APPLICATION/JSON','APPLICATION/XML']);
-// - warning: this function calls IdemPCharArray(), so expects UpperValues[]
-/// items to have AT LEAST TWO CHARS (it will use fast initial 2 bytes compare)
+// - expect UpperValues to be an array of upper values with left side matching,
+// and ending with nil - as expected by IdemPPChar(), i.e. with at least 2 chars
 function ExistsIniNameValue(P: PUtf8Char; const UpperName: RawUtf8;
-  const UpperValues: array of PAnsiChar): boolean;
+  UpperValues: PPAnsiChar): boolean;
 
 /// find the integer Value of UpperName in P, till end of current section
 // - expect UpperName as 'NAME='
@@ -2469,10 +2465,24 @@ function FindIniNameValueInteger(P: PUtf8Char; const UpperName: RawUtf8): PtrInt
 function UpdateIniNameValue(var Content: RawUtf8;
   const Name, UpperName, NewValue: RawUtf8): boolean;
 
+/// fill a class Instance properties from an .ini content
+// - the class property fields are searched in the supplied main SectionName
+// - nested objects are searched in their own section, named from their property
+// - returns true if at least one property has been identified
+function IniToObject(const Ini: RawUtf8; Instance: TObject;
+  const SectionName: RawUtf8 = 'Main'): boolean;
+
+/// serialize a class Instance properties into an .ini content
+// - the class property fields are written in the supplied main SectionName
+// - nested objects are written in their own section, named from their property
+function ObjectToIni(const Instance: TObject; const SectionName: RawUtf8 = 'Main';
+  Options: TTextWriterWriteObjectOptions =
+    [woEnumSetsAsText, woRawBlobAsBase64, woHumanReadableEnumSetAsComment]): RawUtf8;
+
 /// returns TRUE if the supplied HTML Headers contains 'Content-Type: text/...',
 // 'Content-Type: application/json' or 'Content-Type: application/xml'
 function IsHtmlContentTypeTextual(Headers: PUtf8Char): boolean;
-
+  {$ifdef HASINLINE}inline;{$endif}
 
 
 { ************ RawUtf8 String Values Interning and TRawUtf8List }
@@ -3755,15 +3765,15 @@ begin
 end;
 
 function ExistsIniNameValue(P: PUtf8Char; const UpperName: RawUtf8;
-  const UpperValues: array of PAnsiChar): boolean;
+  UpperValues: PPAnsiChar): boolean;
 var
-  PBeg: PUtf8Char;
   table: PNormTable;
 begin
-  result := true;
-  if (high(UpperValues) >= 0) and
+  if (UpperValues <> nil) and
+     (UpperValues^ <> nil) and
      (UpperName <> '') then
   begin
+    result := true;
     table := @NormToUpperAnsi7;
     while (P <> nil) and
           (P^ <> '[') do
@@ -3772,11 +3782,10 @@ begin
         repeat
           inc(P)
         until P^ <> ' '; // trim left ' '
-      PBeg := P;
-      if IdemPChar2(table, PBeg, pointer(UpperName)) then
+      if IdemPChar2(table, P, pointer(UpperName)) then
       begin
-        inc(PBeg, length(UpperName));
-        if IdemPCharArray(PBeg, UpperValues) >= 0 then
+        inc(P, length(UpperName));
+        if IdemPPChar(P, UpperValues) >= 0 then
           exit; // found one value
         break;
       end;
@@ -4065,9 +4074,114 @@ end;
 
 function IsHtmlContentTypeTextual(Headers: PUtf8Char): boolean;
 begin
-  result := ExistsIniNameValue(Headers, HEADER_CONTENT_TYPE_UPPER,
-    [JSON_CONTENT_TYPE_UPPER, 'TEXT/', 'APPLICATION/XML',
-     'APPLICATION/JAVASCRIPT', 'APPLICATION/X-JAVASCRIPT', 'IMAGE/SVG+XML']);
+  result := ExistsIniNameValue(Headers, HEADER_CONTENT_TYPE_UPPER, @CONTENT_TYPE_TEXTUAL);
+end;
+
+function IniToObject(const Ini: RawUtf8; Instance: TObject;
+  const SectionName: RawUtf8): boolean;
+var
+  r: TRttiCustom;
+  i: integer;
+  p: PRttiCustomProp;
+  section: PUtf8Char;
+  v: RawUtf8;
+  up: array[byte] of AnsiChar;
+begin
+  result := false;
+  if (Ini = '') or
+     (Instance = nil) then
+    exit;
+  PWord(UpperCopy255(up{%H-}, SectionName))^ := ord(']');
+  section := pointer(Ini);
+  if not FindSectionFirstLine(section, @up) then
+    exit; // section not found
+  r := Rtti.RegisterClass(Instance);
+  p := pointer(r.Props.List);
+  for i := 1 to r.Props.Count do
+  begin
+    if p^.Prop <> nil then
+      if p^.Value.Kind = rkClass then
+      begin // recursive load from another per-property section
+        if IniToObject(Ini, p^.Prop^.GetObjProp(Instance), p^.Name) then
+          result := true;
+      end
+      else
+      begin
+        PWord(UpperCopy255(up{%H-}, p^.Name))^ := ord('=');
+        v := FindIniNameValue(section, @up, #0);
+        if (v <> #0) and
+           p^.Prop^.SetValueText(Instance, v) then
+          result := true;
+      end;
+    inc(p);
+  end;
+end;
+
+function ObjectToIni(const Instance: TObject; const SectionName: RawUtf8;
+  Options: TTextWriterWriteObjectOptions): RawUtf8;
+var
+  W: TTextWriter;
+  tmp: TTextWriterStackBuffer;
+  nested: TRawUtf8DynArray;
+  i, nestedcount: integer;
+  o: TTextWriterWriteObjectOptions;
+  r: TRttiCustom;
+  p: PRttiCustomProp;
+  s: RawUtf8;
+begin
+  result := '';
+  if Instance = nil then
+    exit;
+  nestedcount := 0;
+  W := DefaultJsonWriter.CreateOwnedStream(tmp);
+  try
+    W.CustomOptions := W.CustomOptions + [twoTrimLeftEnumSets];
+    W.Add('[%]'#10, [SectionName]);
+    r := Rtti.RegisterClass(Instance);
+    p := pointer(r.Props.List);
+    for i := 1 to r.Props.Count do
+    begin
+      if p^.Prop <> nil then
+        if p^.Value.Kind = rkClass then
+        begin
+          s := ObjectToIni(p^.Prop^.GetObjProp(Instance), p^.Name);
+          if s <> '' then
+            AddRawUtf8(nested, nestedcount, s);
+        end
+        else
+        begin
+          o := Options - [woHumanReadableEnumSetAsComment];
+          case p^.Value.Kind of
+            rkSet: // not supported yet in IniToObject/SetValueText above
+              exclude(o, woEnumSetsAsText);
+            rkEnumeration:
+              if woHumanReadableEnumSetAsComment in Options then
+              begin
+                p^.Value.Cache.EnumInfo^.GetEnumNameAll(
+                  s, '; values=', false, #10, true);
+                W.AddString(s);
+              end;
+          end;
+          W.AddString(p^.Name);
+          W.Add('=');
+          case p^.Value.Kind of
+            rkEnumeration: // AddValueJson() would have written "quotes"
+              W.AddTrimLeftLowerCase(p^.Value.Cache.EnumInfo^.GetEnumNameOrd(
+                p^.Prop^.GetOrdProp(Instance)));
+          else
+            p^.AddValueJson(W, Instance, o, twOnSameLine);
+          end;
+          W.Add(#10);
+        end;
+      inc(p);
+    end;
+    W.Add(#10);
+    for i := 0 to nestedcount - 1 do
+      W.AddString(nested[i]);
+    W.SetText(result);
+  finally
+    W.Free;
+  end;
 end;
 
 

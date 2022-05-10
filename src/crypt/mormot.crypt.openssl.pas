@@ -320,6 +320,15 @@ type
     destructor Destroy; override;
   end;
 
+/// retrieve a low-level PEVP_MD digest from its algorithm name
+// - raise an EOpenSslHash if this algorithm is not found
+function OpenSslGetMd(const Algorithm: RawUtf8; const Caller: shortstring): PEVP_MD; overload;
+
+/// retrieve a low-level PEVP_MD digest from mORMot THashAlgo algorithm enum
+// - returns nil if not found, e.g. if OpenSsl is not available
+function OpenSslGetMd(Algorithm: THashAlgo): PEVP_MD; overload;
+
+
 
 { ************** OpenSSL Asymmetric Cryptography }
 
@@ -500,6 +509,8 @@ type
     fHashAlgorithm: RawUtf8;
     fGenEvpType: integer;
     fGenBitsOrCurve: integer;
+    fAlgoMd: PEVP_MD;
+    fPrivKey, fPubKey: PEVP_PKEY;
     function ComputeSignature(const headpayload: RawUtf8): RawUtf8; override;
     procedure CheckSignature(const headpayload: RawUtf8; const signature: RawByteString;
       var JWT: TJwtContent); override;
@@ -526,17 +537,17 @@ type
   // - inherited classes implement all official algorithms from https://jwt.io
   // - we abbreviate OpenSsl as Osl in class names for brevity
   // - some numbers from our regresssion tests on Linux x86_64 for JWT validation:
-  // $ 100 RS256 in 5.11ms i.e. 19,550/s, aver. 51us
-  // $ 100 RS384 in 5.09ms i.e. 19,642/s, aver. 50us
-  // $ 100 RS512 in 5.12ms i.e. 19,508/s, aver. 51us
-  // $ 100 PS256 in 5.41ms i.e. 18,474/s, aver. 54us
-  // $ 100 PS384 in 5.38ms i.e. 18,563/s, aver. 53us
-  // $ 100 PS512 in 5.33ms i.e. 18,740/s, aver. 53us
-  // $ 100 ES256 in 13.75ms i.e. 7,270/s, aver. 137us
-  // $ 100 ES384 in 118.64ms i.e. 842/s, aver. 1.18ms
-  // $ 100 ES512 in 93.95ms i.e. 1,064/s, aver. 939us
-  // $ 100 ES256K in 62.19ms i.e. 1,607/s, aver. 621us
-  // $ 100 EdDSA in 18.08ms i.e. 5,529/s, aver. 180us
+  // $ 100 RS256 in 2.03ms i.e. 47.8K/s, aver. 20us
+  // $ 100 RS384 in 1.99ms i.e. 48.9K/s, aver. 19us
+  // $ 100 RS512 in 1.99ms i.e. 48.9K/s, aver. 19us
+  // $ 100 PS256 in 2.30ms i.e. 42.3K/s, aver. 23us
+  // $ 100 PS384 in 2.26ms i.e. 43.1K/s, aver. 22us
+  // $ 100 PS512 in 2.75ms i.e. 35.4K/s, aver. 27us
+  // $ 100 ES256 in 8.64ms i.e. 11.3K/s, aver. 86us
+  // $ 100 ES384 in 81.43ms i.e. 1.1K/s, aver. 814us
+  // $ 100 ES512 in 59.81ms i.e. 1.6K/s, aver. 598us
+  // $ 100 ES256K in 40.43ms i.e. 2.4K/s, aver. 404us
+  // $ 100 EdDSA in 11.55ms i.e. 8.4K/s, aver. 115us
   TJwtAbstractOsl = class(TJwtOpenSsl)
   protected
     fAsym: TOpenSslAsym;
@@ -564,9 +575,10 @@ type
   TJwtAbstractOslClass = class of TJwtAbstractOsl;
 
   /// implements 'ES256' secp256r1 ECC algorithm over SHA-256 using OpenSSL
-  // - note that our TJwtES256 class pre-computes the public key so is faster:
-  //  TJwtES256:    100 ES256 in 6.90ms i.e. 14.1K/s, aver. 69us
-  //  TJwtES256Osl: 100 ES256 in 9.56ms i.e. 10.2K/s, aver. 95us
+  // - note that our TJwtES256 class is slightly faster on Linux x86_64:
+  // $ TJwtES256 pascal:   100 ES256 in 33.57ms i.e. 2.9K/s, aver. 335us
+  // $ TJwtES256 OpenSSL:  100 ES256 in 6.90ms i.e. 14.1K/s, aver. 69us
+  // $ TJwtES256Osl:       100 ES256 in 8.64ms i.e. 11.3K/s, aver. 86us
   TJwtES256Osl = class(TJwtAbstractOsl)
   protected
     procedure SetAlgorithm; override;
@@ -699,14 +711,18 @@ end;
 procedure TAesOsl.UpdEvp(DoEncrypt: boolean; BufIn, BufOut: pointer; Count: cardinal);
 var
   outl: integer;
+var
+  c: PEVP_CIPHER_CTX;
 begin
   if (BufOut <> nil) and
      (Count and AesBlockMod <> 0) then
     raise ESynCrypto.CreateUtf8('%.%: Count=% is not a multiple of 16',
       [Owner, 'UpdEvp', Count]);
   outl := 0;
+  c := Ctx[DoEncrypt];
   EOpenSslCrypto.Check(Owner, 'UpdEvp',
-    EVP_CipherUpdate(Ctx[DoEncrypt], BufOut, @outl, BufIn, Count));
+    EVP_CipherUpdate(c, BufOut, @outl, BufIn, Count));
+  Owner.IV := PAesBlock(EVP_CIPHER_CTX_iv(c))^; // for fIVUpdated := true
   // no need to call EVP_CipherFinal_ex() since we expect no padding
 end;
 
@@ -785,6 +801,7 @@ var
 begin
   AlgoName(nam); // always #0 terminated
   fAes.Init(self, pointer(@nam[1]));
+  fIVUpdated := true; // fAes.UpdEvp() calls EVP_CIPHER_CTX_iv() to set IV
 end;
 
 destructor TAesAbstractOsl.Destroy;
@@ -1104,11 +1121,9 @@ begin
 end;
 
 
-{ ************** OpenSSL Asymmetric Cryptography }
-
-function GetMd(const Algorithm: RawUtf8; const Caller: shortstring): PEVP_MD;
+function OpenSslGetMd(const Algorithm: RawUtf8; const Caller: shortstring): PEVP_MD;
 begin
-  EOpenSslAsymmetric.CheckAvailable(nil, Caller);
+  EOpenSslHash.CheckAvailable(nil, Caller);
   if Algorithm = 'null' then
     result := nil // e.g. for ed25519
   else
@@ -1118,10 +1133,31 @@ begin
       else
         result := EVP_get_digestbyname(pointer(Algorithm));
       if result = nil then
-        raise EOpenSslAsymmetric.CreateFmt(
+        raise EOpenSslHash.CreateFmt(
           '%s: unknown [%s] algorithm', [Caller, Algorithm]);
     end;
 end;
+
+var
+  _HashAlgoMd: array[THashAlgo] of PEVP_MD;
+
+const
+  _HASHALGONAME: array[THashAlgo] of PUtf8Char = (
+    'MD5', 'SHA1', 'SHA256', 'SHA384', 'SHA512', 'SHA3-256', 'SHA3-512');
+
+function OpenSslGetMd(Algorithm: THashAlgo): PEVP_MD;
+var
+  h: THashAlgo;
+begin
+  if (_HashAlgoMd[hfSHA256] = nil) and
+     OpenSslIsAvailable then
+    for h := low(h) to high(h) do
+      _HashAlgoMd[h] := EVP_get_digestbyname(_HASHALGONAME[h]);
+  result := _HashAlgoMd[Algorithm];
+end;
+
+
+{ ************** OpenSSL Asymmetric Cryptography }
 
 function OpenSslSign(const Algorithm: RawUtf8;
   Message, PrivateKey: pointer; MessageLen, PrivateKeyLen: integer;
@@ -1131,7 +1167,8 @@ var
 begin
   pkey := LoadPrivateKey(PrivateKey, PrivateKeyLen, PrivateKeyPassword);
   try
-    Signature := pkey^.Sign(GetMd(Algorithm, 'OpenSslSign'), Message, MessageLen);
+    Signature := pkey^.Sign(
+      OpenSslGetMd(Algorithm, 'OpenSslSign'), Message, MessageLen);
     result := length(Signature);
   finally
     if pkey <> nil then
@@ -1145,25 +1182,18 @@ function OpenSslVerify(const Algorithm, PublicKeyPassword: RawUtf8;
 var
   md: PEVP_MD;
   pkey: PEVP_PKEY;
-  ctx: PEVP_MD_CTX;
 begin
-  result := false;
+  md := OpenSslGetMd(Algorithm, 'OpenSslVerify');
   pkey := LoadPublicKey(PublicKey, PublicKeyLen, PublicKeyPassword);
   if (pkey = nil) or
      (SignatureLen <= 0)  then
-    exit;
-  md := GetMd(Algorithm, 'OpenSslVerify');
-  ctx := EVP_MD_CTX_new;
-  try
-    // note: ED25519 requires single-pass EVP_DigestVerify()
-    if (EVP_DigestVerifyInit(ctx, nil, md, nil, pkey) = OPENSSLSUCCESS) and
-       (EVP_DigestVerify(ctx, Signature, SignatureLen,
-          Message, MessageLen) = OPENSSLSUCCESS) then
-      result := true {else WritelnSSL_error};
-  finally
-    EVP_MD_CTX_free(ctx);
-    pkey.Free;
-  end;
+    result := false
+  else
+    try
+      result := pkey^.Verify(md, Signature, Message, SignatureLen, MessageLen);
+    finally
+      pkey.Free;
+    end;
 end;
 
 function OpenSslGenerateKeys(EvpType, BitsOrCurve: integer): PEVP_PKEY;
@@ -1434,6 +1464,7 @@ constructor TJwtOpenSsl.Create(const aJwtAlgorithm, aHashAlgorithm: RawUtf8;
   aIDObfuscationKey: RawUtf8; aIDObfuscationKeyNewKdf: integer);
 begin
   EOpenSsl.CheckAvailable(PClass(self)^, 'Create');
+  fAlgoMd := OpenSslGetMd(aHashAlgorithm, 'TJwtOpenSsl.Create');
   fHashAlgorithm := aHashAlgorithm;
   fGenEvpType := aGenEvpType;
   fGenBitsOrCurve := aGenBitsOrCurve;
@@ -1451,6 +1482,8 @@ begin
   FillZero(fPrivateKeyPassword);
   FillZero(fPublicKey);
   FillZero(fPublicKeyPassword);
+  fPrivKey.Free;
+  fPubKey.Free;
   inherited Destroy;
 end;
 
@@ -1462,12 +1495,12 @@ end;
 function TJwtOpenSsl.ComputeSignature(const headpayload: RawUtf8): RawUtf8;
 var
   sign: RawByteString;
-  signlen: integer;
 begin
-  signlen := OpenSslSign(fHashAlgorithm,
-    pointer(headpayload), pointer(fPrivateKey),
-    length(headpayload), length(fPrivateKey), sign, fPrivateKeyPassword);
-  if signlen = 0 then
+  if fPrivKey = nil then
+    fPrivKey := LoadPrivateKey(
+      pointer(fPrivateKey), length(fPrivateKey), fPrivateKeyPassword);
+  sign := fPrivKey^.Sign(fAlgoMd, pointer(headpayload), length(headpayload));
+  if sign = '' then
     raise EJwtException.CreateUtf8('%.ComputeSignature: OpenSslSign failed [%]',
       [self, SSL_error_short(ERR_get_error)]);
   result := BinToBase64Uri(sign);
@@ -1476,9 +1509,11 @@ end;
 procedure TJwtOpenSsl.CheckSignature(const headpayload: RawUtf8;
   const signature: RawByteString; var JWT: TJwtContent);
 begin
-  if OpenSslVerify(fHashAlgorithm, fPublicKeyPassword,
-       pointer(headpayload), pointer(fPublicKey), pointer(signature),
-       length(headpayload), length(fPublicKey), length(signature)) then
+  if fPubKey = nil then
+    fPubKey := LoadPublicKey(
+      pointer(fPublicKey), length(fPublicKey), fPublicKeyPassword);
+  if fPubKey^.Verify(fAlgoMd, pointer(signature), pointer(headpayload),
+      length(signature), length(headpayload)) then
     JWT.result := jwtValid
   else
     JWT.result := jwtInvalidSignature;
@@ -1715,10 +1750,14 @@ type
     function GetNotAfter: TDateTime; override;
     function GetUsage: TCryptCertUsages; override;
     function GetPeerInfo: RawUtf8; override;
-    function Save(const PrivatePassword, Format: RawUtf8): RawByteString; override;
+    function Save(const PrivatePassword: RawUtf8;
+      Format: TCryptCertFormat): RawByteString; override;
     function HasPrivateSecret: boolean; override;
     function GetPrivateKey: RawByteString; override;
-    function Sign(Data: pointer; Len: integer): RawUtf8; override;
+    function Sign(Data: pointer; Len: integer): RawByteString; override;
+    function Verify(Sign, Data: pointer;
+      SignLen, DataLen: integer): TCryptCertValidity; override;
+    function Handle: pointer; override;
   end;
 
   /// 'x509-store' ICryptStore algorithm
@@ -1745,7 +1784,7 @@ type
     function Revoke(const Cert: ICryptCert; RevocationDate: TDateTime;
       Reason: TCryptCertRevocationReason): boolean; override;
     function IsValid(const cert: ICryptCert): TCryptCertValidity; override;
-    function Verify(const Signature: RawUtf8;
+    function Verify(const Signature: RawByteString;
       Data: pointer; Len: integer): TCryptCertValidity; override;
     function Count: integer; override;
     function CrlCount: integer; override;
@@ -1758,7 +1797,7 @@ type
 
 constructor TCryptCertAlgoOpenSsl.Create(osa: TOpenSslAsym);
 begin
-  fHash := GetMd(OSA_HASH[osa], 'TCryptCertAlgoOpenSsl.Create');
+  fHash := OpenSslGetMd(OSA_HASH[osa], 'TCryptCertAlgoOpenSsl.Create');
   fEvpType := OSA_EVPTYPE[osa];
   fBitsOrCurve := OSA_BITSORCURVE[osa];
   Create('x509-' + LowerCase(OSA_JWT[osa]));
@@ -1902,7 +1941,7 @@ function TCryptCertOpenSsl.GetSubject: RawUtf8;
 var
   subs: TRawUtf8DynArray;
 begin
-  result := fX509.SubjectName;
+  result := fX509.GetSubject('CN');
   if result <> '' then
     exit;
   subs := fX509.SubjectAlternativeNames;
@@ -1945,52 +1984,90 @@ begin
   result := fX509.PeerInfo;
 end;
 
-function TCryptCertOpenSsl.Save(const PrivatePassword, Format: RawUtf8): RawByteString;
+function TCryptCertOpenSsl.Save(const PrivatePassword: RawUtf8;
+  Format: TCryptCertFormat): RawByteString;
 begin
   result := '';
   if fX509 = nil then
     exit;
-  result := fX509.ToBinary;
-  if PrivatePassword = '' then
-    // only include the X509 certificate DER binary
-    exit;
-  if fPrivKey = nil then
-    RaiseError('Save(password) with no Private Key');
-  if Format = 'PKCS12' then
-    result := fX509.ToPkcs12(fPrivKey, PrivatePassword)
+  if not (Format in [ccfBinary, ccfPem]) then
+    result := inherited Save(PrivatePassword, Format)
+  else if PrivatePassword = '' then
+  begin
+    // include the X509 certificate (but not any private key) as DER or PEM
+    result := fX509.ToBinary;
+    if Format = ccfPem then
+      result := DerToPem(result, pemCertificate);
+  end
   else
-    // concatenate PEM certificate and PEM private key
-    result := DerToPem(result, pemCertificate) + #13#10#13#10 +
-              fPrivKey.PrivateKeyToPem(PrivatePassword);
+  begin
+    // PrivatePassword will be used to encrypt the private key
+    if fPrivKey = nil then
+      RaiseError('Save(password) with no Private Key');
+    if Format = ccfPem then
+      // concatenate the certificate and its private key as PEM
+      result := DerToPem(fX509.ToBinary, pemCertificate) + #13#10 +
+                fPrivKey.PrivateKeyToPem(PrivatePassword)
+    else
+      // ccfBinary will use the PKCS12 binary encoding
+      result := fX509.ToPkcs12(fPrivKey, PrivatePassword)
+  end;
 end;
 
 function TCryptCertOpenSsl.Load(const Saved: RawByteString;
   const PrivatePassword: RawUtf8): boolean;
 var
   P: PUtf8Char;
-  cert, priv: RawByteString;
+  k: TPemKind;
+  pem, cert, priv: RawByteString;
+  pkcs12: PPKCS12;
 begin
   result := false;
   Clear;
   if Saved = '' then
     exit;
   if PrivatePassword = '' then
-    // input only include the X509 certificate DER binary
-    fX509 := LoadCertificate(Saved)
+    // input only include the X509 certificate as DER or PEM
+    if IsPem(Saved) then
+      fX509 := LoadCertificate(PemToDer(Saved))
+    else
+      fX509 := LoadCertificate(Saved)
   else
   begin
-    // PEM certificate and PEM private key were concatenated in such order
-    P := pointer(Saved);
-    cert := PemToDer(NextPem(P));
-    priv := NextPem(P);
-    if (cert = '') or
-       (priv = '') then
-      exit;
-    fX509 := LoadCertificate(cert);
-    if fX509 = nil then
-      exit;
-    fPrivKey := LoadPrivateKey(pointer(priv), length(priv), PrivatePassword);
-    if fPrivKey = nil then
+    // input include the X509 certificate and its associated private key
+    if IsPem(Saved) then
+    begin
+      // PEM certificate and PEM private key were concatenated
+      P := pointer(Saved);
+      repeat
+        pem := NextPem(P, @k);
+        if pem = '' then
+          break;
+        if k = pemCertificate then
+          if cert <> '' then
+            exit // should contain a single Certificate
+          else
+            cert := PemToDer(pem)
+        else
+          priv := pem; // private key may be with several TPemKind markers
+      until false;
+      if (cert = '') or
+         (priv = '') then
+        exit;
+      fX509 := LoadCertificate(cert);
+      if fX509 = nil then
+        exit;
+      fPrivKey := LoadPrivateKey(pointer(priv), length(priv), PrivatePassword);
+    end
+    else
+    begin
+      // input should be some PKCS12 binary with certificate and private key
+      pkcs12 := LoadPkcs12(Saved);
+      if not pkcs12.Extract(PrivatePassword, @fPrivKey, @fX509, nil) then
+        Clear;
+      pkcs12.Free;
+    end;
+    if not fX509.MatchPrivateKey(fPrivKey) then
       Clear;
   end;
   result := fX509 <> nil;
@@ -2009,12 +2086,39 @@ begin
     result := '';
 end;
 
-function TCryptCertOpenSsl.Sign(Data: pointer; Len: integer): RawUtf8;
+function TCryptCertOpenSsl.Sign(Data: pointer; Len: integer): RawByteString;
 begin
   if HasPrivateSecret then
-    result := BinToHexLower(fPrivKey.Sign(GetMD, Data, Len))
+    result := fPrivKey.Sign(GetMD, Data, Len)
   else
     result := '';
+end;
+
+function TCryptCertOpenSsl.Verify(Sign, Data: pointer;
+  SignLen, DataLen: integer): TCryptCertValidity;
+var
+  now: TDateTime;
+begin
+  now := NowUtc;
+  if (fX509 = nil) or
+     (SignLen <= 0) or
+     (DataLen <= 0) then
+    result := cvBadParameter
+  else if (now >= fX509.NotAfter) or
+          (now < fX509.NotBefore) then
+    result := cvDeprecatedAuthority
+  else if fX509.GetPublicKey.Verify(GetMD, Sign, Data, SignLen, DataLen) then
+    if fX509.IsSelfSigned then
+      result := cvValidSelfSigned
+    else
+      result := cvValidSigned
+  else
+    result := cvInvalidSignature;
+end;
+
+function TCryptCertOpenSsl.Handle: pointer;
+begin
+  result := fX509;
 end;
 
 
@@ -2279,7 +2383,7 @@ begin
     result := ToValidity(res);
 end;
 
-function TCryptStoreOpenSsl.Verify(const Signature: RawUtf8;
+function TCryptStoreOpenSsl.Verify(const Signature: RawByteString;
   Data: pointer; Len: integer): TCryptCertValidity;
 begin
   result := cvNotSupported;

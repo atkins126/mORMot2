@@ -8,7 +8,7 @@
       <SearchPaths>
         <IncludeFiles Value="../../src;../../src/core;../../src/net"/>
         <Libraries Value="../../static/$(TargetCPU)-$(TargetOS)"/>
-        <OtherUnitFiles Value="../../src/app;../../src/core;../../src/crypt;../../src/db;../../src/lib;../../src/net;../../src/orm;../../src/rest;../../src/soa;../../src/script;../../src/ui"/>
+        <OtherUnitFiles Value="../../src/app;../../src/core;../../src/crypt;../../src/db;../../src/lib;../../src/net;../../src/orm;../../src/rest;../../src/soa;../../src/script"/>
         <UnitOutputDirectory Value="lib/$(TargetCPU)-$(TargetOS)"/>
       </SearchPaths>
       <CodeGeneration>
@@ -46,7 +46,7 @@
     <Description Value="mORMot 2 ORM/SOA/MVC framework"/>
     <License Value="MPL, GPL or LGPL"/>
     <Version Major="2" Release="1"/>
-    <Files Count="98">
+    <Files Count="101">
       <Item1>
         <Filename Value="../../src/app/mormot.app.console.pas"/>
         <UnitName Value="mormot.app.console"/>
@@ -429,17 +429,29 @@
         <UnitName Value="mormot.soa.server"/>
       </Item95>
       <Item96>
-        <Filename Value="../../src/ui/mormot.ui.rad.pas"/>
-        <UnitName Value="mormot.ui.rad"/>
+        <Filename Value="../../src/ui/mormot.db.rad.ui.pas"/>
+        <UnitName Value="mormot.db.rad.ui"/>
       </Item96>
       <Item97>
-        <Filename Value="../../src/ui/mormot.ui.rad.json.pas"/>
-        <UnitName Value="mormot.ui.rad.json"/>
+        <Filename Value="../../src/ui/mormot.db.rad.ui.orm.pas"/>
+        <UnitName Value="mormot.db.rad.ui.orm"/>
       </Item97>
       <Item98>
-        <Filename Value="../../src/ui/mormot.ui.rad.sql.pas"/>
-        <UnitName Value="mormot.ui.rad.sql"/>
+        <Filename Value="../../src/ui/mormot.db.rad.ui.sql.pas"/>
+        <UnitName Value="mormot.db.rad.ui.sql"/>
       </Item98>
+      <Item99>
+        <Filename Value="../../src/net/mormot.net.tftp.client.pas"/>
+        <UnitName Value="mormot.net.tftp.client"/>
+      </Item99>
+      <Item100>
+        <Filename Value="../../src/net/mormot.net.tftp.server.pas"/>
+        <UnitName Value="mormot.net.tftp.server"/>
+      </Item100>
+      <Item101>
+        <Filename Value="../../src/lib/mormot.lib.gdiplus.pas"/>
+        <UnitName Value="mormot.lib.gdiplus"/>
+      </Item101>
     </Files>
     <CompatibilityMode Value="True"/>
     <UsageOptions>

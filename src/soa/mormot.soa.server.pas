@@ -310,6 +310,9 @@ type
       read GetInstanceGCCount;
   end;
 
+var
+  /// global mutex used by optExecGlobalLocked and optFreeGlobalLocked
+  GlobalInterfaceExecuteMethod: TRTLCriticalSection;
 
 
 { ***************** TServiceContainerServer Services Holder }
@@ -806,16 +809,34 @@ begin
     else if (optFreeInPerInterfaceThread in fAnyOptions) and
             Assigned(fBackgroundThread) then
       BackgroundExecuteInstanceRelease(Obj, fBackgroundThread)
+    else if optFreeGlobalLocked in fAnyOptions then
+    begin
+      EnterCriticalSection(GlobalInterfaceExecuteMethod);
+      try
+        IInterface(Obj)._Release;
+      finally
+        LeaveCriticalSection(GlobalInterfaceExecuteMethod);
+      end;
+    end
+    else if optFreeLockedPerInterface in fAnyOptions then
+    begin
+      EnterCriticalSection(fExecuteLock);
+      try
+        IInterface(Obj)._Release;
+      finally
+        LeaveCriticalSection(fExecuteLock);
+      end;
+    end
     else
-      IInterface(Obj)._Release; // dec(RefCount) + Free if 0
+      IInterface(Obj)._Release;
     QueryPerformanceMicroSeconds(stop);
     dec(stop, start);
     if stop > 500 then
-      fRestServer.Internallog('%.DoInstanceGC: I%._Release took %',
+      fRestServer.Internallog('%.InstanceFree: I%._Release took %',
         [ClassType, InterfaceUri, MicroSecToString(stop)], sllWarning);
   except
     on E: Exception do
-      fRestServer.Internallog('%.DoInstanceGC: Ignored % exception ' +
+      fRestServer.Internallog('%.InstanceFree: ignored % exception ' +
         'during I%._Release', [ClassType, E.ClassType, InterfaceUri], sllDebug);
   end;
 end;
@@ -1170,7 +1191,7 @@ begin
     case Step of
       smsBefore:
         begin
-          W.CancelAll;
+          W.CancelAll; // not CancelAllAsNew to keep twoForceJsonExtended
           W.AddShort('"POST",{Method:"');
           W.AddString(InterfaceDotMethodName);
           W.AddShort('",Input:{'); // as TOrmPropInfoRttiVariant.GetJsonValues
@@ -1272,7 +1293,7 @@ begin
   W := exec.TempTextWriter;
   if exec.CurrentStep < smsBefore then
   begin
-    W.CancelAll;
+    W.CancelAll; // not CancelAllAsNew to keep twoForceJsonExtended
     W.AddShort('"POST",{Method:"');
     W.AddJsonEscape(pointer(exec.Method^.InterfaceDotMethodName));
     W.AddShort('%",Input:{');
@@ -1422,7 +1443,9 @@ begin
     if mlInterfaces in fRestServer.StatLevels then
       stats := GetStats(Ctxt, m);
     if optExecLockedPerInterface in opt then
-      EnterCriticalSection(fExecuteLock);
+      EnterCriticalSection(fExecuteLock)
+    else if optExecGlobalLocked in opt then
+      EnterCriticalSection(GlobalInterfaceExecuteMethod);
     try
       exec.BackgroundExecutionThread := fBackgroundThread;
       exec.OnCallback := Ctxt.ExecuteCallback;
@@ -1457,7 +1480,9 @@ begin
       Ctxt.Call.OutStatus := exec.ServiceCustomAnswerStatus;
     finally
       if optExecLockedPerInterface in opt then
-        LeaveCriticalSection(fExecuteLock);
+        LeaveCriticalSection(fExecuteLock)
+      else if optExecGlobalLocked in opt then
+        LeaveCriticalSection(GlobalInterfaceExecuteMethod);
     end;
     if Ctxt.Call.OutHead = '' then
     begin
@@ -2209,7 +2234,7 @@ begin
   try
     rec.FillFrom(NewContent, @fields);
     if fBatch = nil then
-      fSlave.ORM.Add(rec, true, true, true)
+      fSlave.Orm.Add(rec, true, true, true)
     else
       fBatch.Add(rec, true, true, fields, true);
     SetCurrentRevision(fRecordVersionField.PropInfo.GetInt64Prop(rec), ooInsert);
@@ -2229,7 +2254,7 @@ begin
   try
     rec.FillFrom(ModifiedContent, @fields);
     if fBatch = nil then
-      fSlave.ORM.Update(rec, fields, true)
+      fSlave.Orm.Update(rec, fields, true)
     else
       fBatch.Update(rec, fields, true);
     SetCurrentRevision(fRecordVersionField.PropInfo.GetInt64Prop(rec), ooUpdate);
@@ -2253,8 +2278,8 @@ begin
     try
       fSlave.AcquireExecution[execOrmWrite].Safe.Lock;
       TRestOrmServer(fSlave.OrmInstance).RecordVersionDeleteIgnore := true;
-      fSlave.ORM.Add(del, true, true, true);
-      fSlave.ORM.Delete(fTable, ID);
+      fSlave.Orm.Add(del, true, true, true);
+      fSlave.Orm.Delete(fTable, ID);
     finally
       TRestOrmServer(fSlave.OrmInstance).RecordVersionDeleteIgnore := false;
       fSlave.AcquireExecution[execOrmWrite].Safe.UnLock;
@@ -2292,7 +2317,7 @@ begin
   try
     fSlave.AcquireExecution[execOrmWrite].Safe.Lock;
     TRestOrmServer(fSlave.OrmInstance).RecordVersionDeleteIgnore := true;
-    fSlave.ORM.BatchSend(fBatch);
+    fSlave.Orm.BatchSend(fBatch);
   finally
     TRestOrmServer(fSlave.OrmInstance).RecordVersionDeleteIgnore := false;
     fSlave.AcquireExecution[execOrmWrite].Safe.UnLock;
@@ -2316,7 +2341,7 @@ begin
           exit;
       until GetTickCount64 > timeOut;
       fSlave.InternalLog('%.Destroy on %: active BATCH', [self, fTable], sllError);
-      fSlave.ORM.BatchSend(fBatch);
+      fSlave.Orm.BatchSend(fBatch);
       fBatch.Free;
     end;
   finally
@@ -2324,6 +2349,12 @@ begin
   end;
 end;
 
+
+initialization
+  InitializeCriticalSection(GlobalInterfaceExecuteMethod);
+
+finalization
+  DeleteCriticalSection(GlobalInterfaceExecuteMethod);
 
 end.
 

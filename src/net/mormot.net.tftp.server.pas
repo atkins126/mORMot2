@@ -33,6 +33,7 @@ uses
   mormot.core.log,
   mormot.core.rtti,
   mormot.core.buffers,
+  mormot.core.json,
   mormot.net.sock,
   mormot.net.tftp.client;
 
@@ -60,8 +61,8 @@ type
     procedure DoExecute; override;
     // this is the main processing method for all incoming frames
     procedure OnFrameReceived(len: integer; var remote: TNetAddr); virtual; abstract;
+    procedure OnIdle(tix64: Int64); virtual; // called every 512 ms at most
     procedure OnShutdown; virtual; abstract;
-    procedure OnIdle; virtual;
   public
     /// initialize and bind the server instance, in non-suspended state
     constructor Create(LogClass: TSynLogClass;
@@ -80,11 +81,15 @@ type
   // - ttoAllowSubFolders will allow RRW/WRQ to access nested files in
   // TTftpServerThread.FileFolder sub-directories
   // - ttoLowLevelLog will log each incoming/outgoing TFTP/UDP frames
+  // - ttoDropPriviledges on POSIX would impersonate the process as 'nobody'
+  // - ttoChangeRoot on POSIX would make the FileFolder the root folder
   TTftpThreadOption = (
     ttoRrq,
     ttoWrq,
     ttoAllowSubFolders,
-    ttoLowLevelLog);
+    ttoLowLevelLog,
+    ttoDropPriviledges,
+    ttoChangeRoot);
 
   TTftpThreadOptions = set of TTftpThreadOption;
 
@@ -120,6 +125,8 @@ type
     fMaxRetry: integer;
     fConnectionTotal: integer;
     fOptions: TTftpThreadOptions;
+    fAsNobody: boolean;
+    fFileCache: TSynDictionary; // thread-safe <16MB files content cache
     function GetConnectionCount: integer;
     // default implementation will read/write from FileFolder
     procedure SetFileFolder(const Value: TFileName);
@@ -128,13 +135,19 @@ type
     function SetWrqStream(var Context: TTftpContext): TTftpError; virtual;
     // main processing methods for all incoming frames
     procedure OnFrameReceived(len: integer; var remote: TNetAddr); override;
+    procedure OnIdle(tix64: Int64); override;
     procedure OnShutdown; override; // = Destroy
     procedure NotifyShutdown;
   public
     /// initialize and bind the server instance, in non-suspended state
+    // - will cache served file content for 15 minutes by default, but you could
+    // set CacheTimeoutSecs=0 to disable any file caching
     constructor Create(const SourceFolder: TFileName;
       Options: TTftpThreadOptions; LogClass: TSynLogClass;
-      const BindAddress, BindPort, ProcessName: RawUtf8); reintroduce;
+      const BindAddress, BindPort, ProcessName: RawUtf8;
+      CacheTimeoutSecs: integer = 15 * 60); reintroduce;
+    /// finalize the server instance
+    destructor Destroy; override;
     /// notify the server thread(s) to be terminated, and wait for pending
     // threads to actually abort their background process
     procedure TerminateAndWaitFinished(TimeOutMs: integer = 5000); override;
@@ -168,7 +181,7 @@ implementation
 
 { TUdpServerThread }
 
-procedure TUdpServerThread.OnIdle;
+procedure TUdpServerThread.OnIdle(tix64: Int64);
 begin
   // do nothing by default
 end;
@@ -208,6 +221,7 @@ end;
 procedure TUdpServerThread.DoExecute;
 var
   len: integer;
+  tix64: Int64;
   tix, lasttix: cardinal;
   remote: TNetAddr;
   res: TNetResult;
@@ -234,11 +248,12 @@ begin
             OnFrameReceived(len, remote);
         end;
       end;
-      tix := mormot.core.os.GetTickCount64 shr 9;
+      tix64 := mormot.core.os.GetTickCount64;
+      tix := tix64 shr 9;
       if tix <> lasttix then
       begin
         lasttix := tix;
-        OnIdle; // called every 512 ms at most
+        OnIdle(tix64); // called every 512 ms at most
       end;
     end;
     OnShutdown; // should close all connections
@@ -374,18 +389,49 @@ end;
 
 constructor TTftpServerThread.Create(const SourceFolder: TFileName;
   Options: TTftpThreadOptions; LogClass: TSynLogClass;
-  const BindAddress, BindPort, ProcessName: RawUtf8);
+  const BindAddress, BindPort, ProcessName: RawUtf8; CacheTimeoutSecs: integer);
+{$ifdef OSPOSIX}
+var
+  ok: boolean;
+{$endif OSPOSIX}
 begin
   fConnection := TSynObjectListLocked.Create({ownobject=}false);
   SetFileFolder(SourceFolder);
   fMaxConnections := 100; // = 100 threads, good enough for regular TFTP server
   fMaxRetry := 2;
   fOptions := Options;
-  inherited Create(LogClass, BindAddress, BindPort, ProcessName);
+  inherited Create(LogClass, BindAddress, BindPort, ProcessName); // bind port
+  {$ifdef OSPOSIX}
+  if ttoDropPriviledges in fOptions then
+  begin
+    ok := DropPriviledges;
+    if not ok then
+      exclude(fOptions, ttoDropPriviledges);
+    LogClass.Add.Log(LOG_INFOWARNING[not ok],
+      'Create: DropPriviledges(nobody)=%', [ok], self);
+  end;
+  if ttoChangeRoot in fOptions then
+  begin
+    ok := ChangeRoot(StringToUtf8(ExcludeTrailingPathDelimiter(fFileFolder)));
+    if ok then
+      fFileFolder := '/'
+    else
+      exclude(fOptions, ttoDropPriviledges);
+    LogClass.Add.Log(LOG_INFOWARNING[not ok],
+      'Create: ChangeRoot(%)=%', [SourceFolder, ok], self);
+  end;
+  {$endif OSPOSIX}
+  if CacheTimeoutSecs > 0 then
+    fFileCache := TSynDictionary.Create(
+      TypeInfo(TFileNameDynArray), TypeInfo(TRawByteStringDynArray),
+      PathCaseInsensitive, CacheTimeoutSecs);
 end;
 
-// note: no need to override Destroy since OnShutdown is eventually called
-//       and will release fConnection list
+destructor TTftpServerThread.Destroy;
+begin
+  inherited Destroy;
+  fFileCache.Free;
+end;
 
 procedure TTftpServerThread.OnShutdown;
 begin
@@ -407,7 +453,7 @@ begin
   t := pointer(fConnection.List);
   for i := 1 to fConnection.Count do
   begin
-    t^.NotifyShutdown;
+    t^.NotifyShutdown; // also set fOwner=nil to avoid fConnection.Delete()
     inc(t);
   end;
 end;
@@ -457,24 +503,40 @@ begin
 end;
 
 const
-  RRQ_MEM_CHUNK = 128 shl 10; // buffered read in 128KB chunks
+  RRQ_FILE_MAX  = 1 shl 30;   // don't send files bigger than 1 GB
+  RRQ_CACHE_MAX = 16 shl 20;  // cache files < 16MB in memory
+  RRQ_MEM_CHUNK = 128 shl 10; // huge file is read buffered in 128KB chunks
 
 function TTftpServerThread.SetRrqStream(var Context: TTftpContext): TTftpError;
 var
+  fsize: Int64;
   fn: TFileName;
+  cached: RawByteString;
 begin
   if ttoRrq in fOptions then
   begin
     result := teFileNotFound;
     fn := GetFileName(Context.FileName);
-    if (fn = '') or
-       not FileExists(fn) then
+    if fn = '' then
       exit;
-    Context.FileStream := TBufferedStreamReader.Create(fn, RRQ_MEM_CHUNK);
-    if Context.FileStream.Size < maxInt then
-      result := teNoError
+    fsize := FileSize(fn);
+    if (fsize = 0) or
+       (fsize >= RRQ_FILE_MAX) then
+      exit;
+    if Assigned(fFileCache) and
+       (fsize < RRQ_CACHE_MAX) then
+      if (not fFileCache.FindAndCopy(fn, cached)) or
+         (fsize <> length(cached)) then
+      begin
+        // not yet available in cache, or changed on disk
+        cached := StringFromFile(fn);
+        fFileCache.AddOrUpdate(fn, cached);
+      end;
+    if cached <> '' then
+      Context.FileStream := TRawByteStringStream.Create(cached)
     else
-      FreeAndNil(Context.FileStream);
+      Context.FileStream := TBufferedStreamReader.Create(fn, RRQ_MEM_CHUNK);
+    result := teNoError;
   end
   else
     result := teIllegalOperation;
@@ -566,6 +628,11 @@ begin
     fLog.Log(sllDebug, 'OnFrameReceived: [%] sending %',
       [ToText(nr)^, ToText(c.Frame^)], self);
   end;
+end;
+
+procedure TTftpServerThread.OnIdle(tix64: Int64);
+begin
+  fFileCache.DeleteDeprecated(tix64);
 end;
 
 

@@ -38,12 +38,14 @@ uses
 type
   /// abstract parent containing information able to initialize a TSynDaemon class
   // - will handle persistence as JSON local files
+  // - could fallback to read an .INI file if no valid JSON is found
   // - by default in this abstract parent class, no property is published to let
   // inherited classes define the values customizable from JSON serialization
   TSynDaemonAbstractSettings  = class(TSynJsonFileSettings)
   protected
     fServiceName: string;
     fServiceDisplayName: string;
+    fServiceExecutable: string;
     fServiceDependencies: string;
     fLog: TSynLogInfos;
     fLogRotateFileCount: integer;
@@ -77,6 +79,11 @@ type
     // - default is the executable name
     property ServiceDisplayName: string
       read fServiceDisplayName write fServiceDisplayName;
+    /// the service executable path and parameters
+    // - default is void '', so the executable name (with full path) will be used
+    // - by definition, is available only on Windows
+    property ServiceExecutable: string
+      read fServiceExecutable write fServiceExecutable;
     /// if not void, will enable the logs (default is LOG_STACKTRACE)
     property Log: TSynLogInfos
       read fLog write fLog;
@@ -100,6 +107,9 @@ type
     /// the service name, as displayed by Windows or at the console level
     // - default is the executable name
     property ServiceDisplayName;
+    /// the service executable path and parameters
+    // - default is none '', so the executable name (with full path) will be used
+    property ServiceExecutable;
     /// if not void, will enable the logs (default is LOG_STACKTRACE)
     property Log: TSynLogInfos
       read fLog write fLog;
@@ -465,7 +475,7 @@ begin
           Start;
           writeln('Press [Enter] to quit');
           ioresult;
-          readln;
+          ConsoleWaitForEnterKey;
           writeln('Shutting down server');
         finally
           ioresult;
@@ -511,7 +521,8 @@ begin
       cInstall:
         with fSettings do
           Show(TServiceController.Install(ServiceName, ServiceDisplayName,
-            ServiceDescription, aAutoStart, '', ServiceDependencies) <> ssNotInstalled);
+            ServiceDescription, aAutoStart, ServiceExecutable,
+            ServiceDependencies) <> ssNotInstalled);
       cStart,
       cStop,
       cUninstall,

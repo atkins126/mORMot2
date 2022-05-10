@@ -2109,8 +2109,9 @@ type
     /// Specify the encryption key on a newly opened database connection
     // - Assigned(key)=false if encryption is not available for this .dll
     // - mormot.db.raw.sqlite3.static will use its own internal encryption format
-    // - key/keylen may be a JSON-serialized TSynSignerParams object, or will use
-    // AES-OFB-128 after SHAKE_128 with rounds=1000 and a fixed salt on plain password text
+    // - key/keylen will use AES-128 OFB/CTR after PBKDF2 SHAKE_128 with rounds=1000
+    // or a JSON (extended) serialized TSynSignerParams object like
+    // ${algo:"saSha512",secret:"StrongPassword",salt:"FixedSalt",rounds:10000}
     key: function(DB: TSqlite3DB; key: pointer; keyLen: integer): integer; cdecl;
 
     /// change the encryption key on a database connection that is already opened
@@ -2118,7 +2119,7 @@ type
     // from any version of SQLite) by specifying a nil key
     // - Assigned(rekey)=false if encryption is not available, i.e. if
     // NOSQLITE3STATIC is defined
-    // - also see ChangeSQLEncryptTablePassWord() procedure
+    // - also see ChangeSqlEncryptTablePassWord() procedure
     rekey: function(DB: TSqlite3DB; key: pointer; keyLen: integer): integer; cdecl;
 
     /// Destructor for the sqlite3 object, which handle is DB
@@ -2131,7 +2132,7 @@ type
     close: function(DB: TSqlite3DB): integer; cdecl;
 
     /// Return the version of the SQLite database engine, in ascii format
-    // - currently returns '3.38.1', when used in conjunction with our
+    // - currently returns '3.38.5', when used in conjunction with our
     // mormot.db.raw.sqlite3.static unit
     // - if an external SQLite3 library is used, version may vary
     // - you may use the VersionText property (or Version for full details) instead
@@ -2756,7 +2757,7 @@ type
     // not already been done, and returns an error if any errors are encountered while loading the schema.
     table_column_metadata: function(DB: TSqlite3DB; zDbName, zTableName,
       zColumnName: PUtf8Char; var pzDataType, pzCollSeq: PUtf8Char;
-      var pNotNull, pPrimaryKey, pAutoinc: PInteger): integer; cdecl;
+      out pNotNull, pPrimaryKey, pAutoinc: integer): integer; cdecl;
 
     /// Get the number of columns in the result set for the statement
     column_count: function(S: TSqlite3Statement): integer; cdecl;
@@ -4019,11 +4020,12 @@ procedure sqlite3InternalFreeObject(p: pointer); cdecl;
 procedure sqlite3InternalFreeRawByteString({%H-}p: pointer); cdecl;
 
 /// wrapper around sqlite3.result_error() to be called if wrong number of arguments
-procedure ErrorWrongNumberOfArgs(Context: TSqlite3FunctionContext);
+procedure ErrorWrongNumberOfArgs(Context: TSqlite3FunctionContext;
+  const caller: shortstring);
 
 /// wrapper around sqlite3.result_error() validating the expected number of arguments
 function CheckNumberOfArgs(Context: TSqlite3FunctionContext;
-  expected, sent: integer): boolean;
+  expected, sent: integer; const caller: shortstring): boolean;
 
 /// create a TSqlite3Module.pzErr UTF-8 text buffer according to the given
 // Exception class
@@ -4769,7 +4771,7 @@ type
     fPageSize, fFileDefaultPageSize: cardinal;
     fFileDefaultCacheSize: integer;
     fIsMemory: boolean;
-    fPassword: RawUtf8;
+    fPassword: SpiUtf8;
     fTransactionActive: boolean;
     /// if not nil, cache is used - see UseCache property
     fCache: TSynCache;
@@ -4859,12 +4861,11 @@ type
   public
     /// open a SQLite3 database file
     // - open an existing database file or create a new one if no file exists
-    // - if specified, the password will be used to cypher this file on disk
-    // (the main SQLite3 database file is encrypted, not the wal file during run);
-    // the password may be a JSON-serialized TSynSignerParams object, or will use
-    // AES-OFB-128 after SHAKE_128 with rounds=1000 and a fixed salt on plain
-    // password text; note that our custom encryption is not compatible with the
-    // official SQLite Encryption Extension module
+    // - password will use AES-128 (see ForceSQLite3AesCtr) after PBKDF2 SHAKE_128
+    // with rounds=1000 or a JSON (extended) serialized TSynSignerParams object like
+    // ${algo:"saSha512",secret:"StrongPassword",salt:"FixedSalt",rounds:10000}
+    // note that our custom encryption is not compatible with the official
+    // SQLite Encryption Extension (SEE) module nor any other library
     // - you can specify some optional flags for sqlite3.open_v2() as
     // SQLITE_OPEN_READONLY or SQLITE_OPEN_READWRITE instead of supplied default
     // value (which corresponds to the sqlite3.open() behavior)
@@ -4883,7 +4884,7 @@ type
     // Byte/Word/Integer/Cardinal/Int64/Currency/RawUtf8DynArrayContains
     // - initialize a internal mutex to ensure that all access to the database is atomic
     // - raise an ESqlite3Exception on any error
-    constructor Create(const aFileName: TFileName; const aPassword: RawUtf8 = '';
+    constructor Create(const aFileName: TFileName; const aPassword: SpiUtf8 = '';
       aOpenV2Flags: integer = 0; aDefaultCacheSize: integer = 10000;
       aDefaultPageSize: integer = 4096); reintroduce;
     /// close a database and free its memory and context
@@ -5060,7 +5061,7 @@ type
     // the backup - so this method will work perfectly e.g. for our ORM
     // - if specified, a password will be used to cypher BackupFileName on disk
     // (it will work only with mormot.db.raw.sqlite3.static) - you can uncypher
-    // the resulting encrypted database file via ChangeSQLEncryptTablePassWord()
+    // the resulting encrypted database file via ChangeSqlEncryptTablePassWord()
     // - returns TRUE if backup started as expected, or FALSE in case of error
     // (e.g. if there is already another backup started, if the source or
     // destination databases are locked or invalid, or if the sqlite3.dll is too
@@ -5119,9 +5120,9 @@ type
     property DB: TSqlite3DB
       read fDB;
     /// read-only access to the SQlite3 password used for encryption
-    // - may be a JSON-serialized TSynSignerParams object, or will use AES-OFB-128
-    // after SHAKE_128 with rounds=1000 and a fixed salt on plain password text
-    property Password: RawUtf8
+    // - may be a JSON-serialized TSynSignerParams object, or will use AES-128
+    // after PBKDF2 SHAKE_128 with rounds=1000 and a fixed salt on its plain text
+    property Password: SpiUtf8
       read fPassword;
     /// read-only access to the SQLite3 database filename opened without its path
     property FileNameWithoutPath: TFileName
@@ -5156,14 +5157,14 @@ type
     // - this pointer is thread-safe updated, inside a critical section
     property InternalState: PCardinal
       read fInternalState write fInternalState;
-  published
-    /// read-only access to the SQLite3 database filename opened
-    property FileName: TFileName
-      read fFileName;
     /// equals TRUE if the SQLite3 database was created as ':memory:'
     // (i.e. SQLITE_MEMORY_DATABASE_NAME)
     property IsMemory: boolean
       read fIsMemory;
+  published
+    /// read-only access to the SQLite3 database filename opened
+    property FileName: TFileName
+      read fFileName;
     /// if this property is set, all ExecuteJson() responses will be cached
     // - cache is flushed on any write access to the DB (any not SELECT statement)
     // - cache is consistent only if ExecuteJson() Expand parameter is constant
@@ -5454,8 +5455,8 @@ begin
       sqlite3.result_double(Context, Res.VCurrency);
     ftDate:
       begin
-        DateTimeToIso8601ExpandedPChar(Res.VDateTime, tmp{%H-}, 'T',
-          svoDateWithMS in Res.Options);
+        DateTimeToIso8601ExpandedPChar(
+          Res.VDateTime, tmp{%H-}, 'T', svoDateWithMS in Res.Options);
         sqlite3.result_text(Context, tmp, -1, SQLITE_TRANSIENT_VIRTUALTABLE);
       end;
     // WARNING! use pointer(integer(-1)) instead of SQLITE_TRANSIENT=pointer(-1)
@@ -5471,8 +5472,8 @@ begin
   else
     begin
       sqlite3.result_null(Context);
-      SQLite3Log.DebuggerNotify(sllWarning, 'SqlVarToSQlite3Context(%)',
-        [ord(Res.VType)]);
+      SQLite3Log.DebuggerNotify(
+        sllWarning, 'SqlVarToSQlite3Context(%)', [ord(Res.VType)]);
       result := false; // not handled type (will set null value)
       exit;
     end;
@@ -5534,20 +5535,24 @@ begin
   RawByteString(p) := '';
 end;
 
-procedure ErrorWrongNumberOfArgs(Context: TSqlite3FunctionContext);
+procedure ErrorWrongNumberOfArgs(Context: TSqlite3FunctionContext;
+  const caller: shortstring);
+var
+  msg: ShortString;
 begin
-  sqlite3.result_error(Context, 'wrong number of arguments');
+  FormatShort('wrong number of arguments for %()', [caller], msg);
+  sqlite3.result_error(Context, @msg[1], ord(msg[0]));
 end;
 
 function CheckNumberOfArgs(Context: TSqlite3FunctionContext;
-  expected, sent: integer): boolean;
+  expected, sent: integer; const caller: shortstring): boolean;
 var
   msg: ShortString;
 begin
   if sent <> expected then
   begin
-    FormatShort('wrong number of arguments: expected %, got %',
-      [expected, sent], msg);
+    FormatShort('wrong number of arguments for %(): expected %, got %',
+      [caller, expected, sent], msg);
     sqlite3.result_error(Context, @msg[1], ord(msg[0]));
     result := false;
   end
@@ -5603,34 +5608,36 @@ end;
 procedure JsonToSQlite3Context(json: PUtf8Char;
   Context: TSqlite3FunctionContext);
 var
-  tmp: Variant;
-  start: PUtf8Char;
+  info: TGetJsonField;
+  tmp: TRttiVarData;
 begin
   if json = nil then
     sqlite3.result_null(Context)
   else
   begin
-    start := GotoNextNotSpace(json);
-    if start^ in ['[', '{'] then
+    info.Json := GotoNextNotSpace(json);
+    if info.Json^ in ['[', '{'] then
     begin
       // JSON object or array is returned as plain TEXT
-      json := GotoEndJsonItem(start);
+      json := GotoEndJsonItem(info.Json);
       if json = nil then
         sqlite3.result_null(Context)
       else
       begin
         json^ := #0; // truncate to the matching object or array end
-        sqlite3.result_text(Context, start, json - start + 1, SQLITE_TRANSIENT);
+        sqlite3.result_text(Context, info.Json, json - info.Json + 1, SQLITE_TRANSIENT);
       end;
     end
     else
     begin
       // JSON simple types (text, numbers) would be converted via a variant
-      GetJsonToAnyVariant(tmp, start, nil, nil, {allowdouble=}true);
-      if start = nil then
+      tmp.VType := 0;
+      JsonToAnyVariant(variant(tmp), info, nil, {allowdouble=}true);
+      if info.Json = nil then
         sqlite3.result_null(Context)
       else
-        VariantToSQlite3Context(tmp, Context);
+        VariantToSQlite3Context(variant(tmp), Context);
+      VarClearProc(tmp.Data);
     end;
   end;
 end;
@@ -6198,14 +6205,14 @@ end;
 procedure InternalSoundex(Context: TSqlite3FunctionContext; argc: integer;
   var argv: TSqlite3ValueArray); cdecl;
 begin
-  if CheckNumberOfArgs(Context, 1, argc) then
+  if CheckNumberOfArgs(Context, 1, argc, 'soundex') then
     sqlite3.result_int64(Context, SoundExUtf8(sqlite3.value_text(argv[0])));
 end;
 
 procedure InternalSoundexFr(Context: TSqlite3FunctionContext; argc: integer;
   var argv: TSqlite3ValueArray); cdecl;
 begin
-  if CheckNumberOfArgs(Context, 1, argc) then
+  if CheckNumberOfArgs(Context, 1, argc, 'soundexfr') then
     sqlite3.result_int64(Context, SoundExUtf8(sqlite3.value_text(argv[0]), nil,
       sndxFrench));
 end;
@@ -6213,7 +6220,7 @@ end;
 procedure InternalSoundexEs(Context: TSqlite3FunctionContext; argc: integer;
   var argv: TSqlite3ValueArray); cdecl;
 begin
-  if CheckNumberOfArgs(Context, 1, argc) then
+  if CheckNumberOfArgs(Context, 1, argc, 'soundexes') then
     sqlite3.result_int64(Context, SoundExUtf8(sqlite3.value_text(argv[0]), nil,
       sndxSpanish));
 end;
@@ -6224,11 +6231,8 @@ var
   A1, A2: Int64;
 begin
   // implements the MOD() function, just like Oracle and others
-  if argc <> 2 then
-  begin
-    ErrorWrongNumberOfArgs(Context);
-    exit; // two parameters expected
-  end;
+  if not CheckNumberOfArgs(Context, 2, argc, 'mod') then
+    exit;
   A1 := sqlite3.value_int64(argv[0]);
   A2 := sqlite3.value_int64(argv[1]);
   if A2 = 0 then // avoid computation exception, returns NULL
@@ -6242,11 +6246,8 @@ procedure InternalTimeLog(Context: TSqlite3FunctionContext; argc: integer;
 var
   TimeLog: TTimeLogBits;
 begin
-  if argc <> 1 then
-  begin
-    ErrorWrongNumberOfArgs(Context);
+  if not CheckNumberOfArgs(Context, 1, argc, 'timelog') then
     exit;
-  end;
   TimeLog.Value := sqlite3.value_int64(argv[0]);
   RawUtf8ToSQlite3Context(TimeLog.Text(True, 'T'), Context, false);
 end;
@@ -6256,11 +6257,8 @@ procedure InternalTimeLogUnix(Context: TSqlite3FunctionContext; argc: integer;
 var
   TimeLog: TTimeLogBits;
 begin
-  if argc <> 1 then
-  begin
-    ErrorWrongNumberOfArgs(Context);
+  if not CheckNumberOfArgs(Context, 1, argc, 'timelogunix') then
     exit;
-  end;
   TimeLog.Value := sqlite3.value_int64(argv[0]);
   sqlite3.result_int64(Context, TimeLog.ToUnixTime);
 end;
@@ -6295,7 +6293,7 @@ begin
       exit; // success: don't call sqlite3.result_error()
     end;
   end;
-  ErrorWrongNumberOfArgs(Context);
+  ErrorWrongNumberOfArgs(Context, 'rank');
 end;
 
 // supplies a CONCAT() function to process fast string concatenation
@@ -6332,7 +6330,7 @@ begin
       inc(resultlen, txtlen);
     end
   else
-    ErrorWrongNumberOfArgs(Context);
+    ErrorWrongNumberOfArgs(Context, 'concat');
 end;
 
 procedure InternalConcatFinal(Context: TSqlite3FunctionContext); cdecl;
@@ -6350,7 +6348,7 @@ var
   Count: integer;
 begin
   // SQL function: IntegerDynArrayContains(BlobField,10) returning a boolean
-  if not CheckNumberOfArgs(Context, 2, argc) then
+  if not CheckNumberOfArgs(Context, 2, argc, 'integerdynarraycontains') then
     exit;
   Blob := sqlite3.value_blob(argv[0]);
   if Blob <> nil then
@@ -6371,7 +6369,7 @@ var
 begin
   // Byte/Word/Cardinal/Int64/CurrencyDynArrayContains(BlobField,I64)
   // for currency, expect I64 value = aCurrency*10000 = PInt64(@aCurrency)^
-  if not CheckNumberOfArgs(Context, 2, argc) then
+  if not CheckNumberOfArgs(Context, 2, argc, 'dynarraycontains') then
     exit;
   Blob := sqlite3.value_blob(argv[0]);
   if Blob <> nil then
@@ -6397,7 +6395,7 @@ var
   Value: PUtf8Char;
 begin
   // SQL function: RawUtf8DynArrayContainsCase/NoCase(BlobField,'Text'): boolean
-  if not CheckNumberOfArgs(Context, 2, argc) then
+  if not CheckNumberOfArgs(Context, 2, argc, 'rawutf8dynarraycontains') then
     exit;
   Blob := sqlite3.value_blob(argv[0]);
   if Blob <> nil then
@@ -6441,7 +6439,7 @@ begin
   // JsonGet(VariantField,'Prop*') returns the values as a JSON object
   // JsonGet(VariantField,'Obj1.Obj2.Prop1,Obj1.Prop2') to search by path
   // JsonGet(VariantField,'Obj1.Obj2.Prop*,Obj1.Prop2') to search by path
-  if not CheckNumberOfArgs(Context, 2, argc) then
+  if not CheckNumberOfArgs(Context, 2, argc, 'jsonget') then
     exit;
   if sqlite3.value_type(argv[0]) <> SQLITE_TEXT then
     sqlite3.result_null(Context)
@@ -6474,17 +6472,17 @@ begin
   // JsonHas(VariantField,'PropName') returns TRUE if matches a JSON object property
   // JsonHas(VariantField,'Obj1.Obj2.PropName') to search by path
   // JsonHas(VariantField,0) returns TRUE if the JSON array has at least one item
-  if not CheckNumberOfArgs(Context, 2, argc) then
+  if not CheckNumberOfArgs(Context, 2, argc, 'jsonhas') then
     exit;
   if sqlite3.value_type(argv[0]) <> SQLITE_TEXT then
     sqlite3.result_int64(Context, Int64(false))
   else
     case sqlite3.value_type(argv[1]) of // fast SAX search (no memory allocation)
       SQLITE_TEXT:
-        sqlite3.result_int64(Context,ord(JsonObjectByPath(
+        sqlite3.result_int64(Context, ord(JsonObjectByPath(
           sqlite3.value_text(argv[0]), sqlite3.value_text(argv[1])) <> nil));
       SQLITE_INTEGER:
-        sqlite3.result_int64(Context,ord(JsonArrayItem(
+        sqlite3.result_int64(Context, ord(JsonArrayItem(
           sqlite3.value_text(argv[0]), sqlite3.value_int64(argv[1])) <> nil));
     else
       sqlite3.result_int64(Context, Int64(false));
@@ -6496,36 +6494,35 @@ procedure InternalJsonSet(Context: TSqlite3FunctionContext; argc: integer;
 var
   doc: TDocVariantData;
   json: PUtf8Char;
-  tmp: RawUtf8;
+  info: TGetJsonField;
+  tmp: TSynTempBuffer;
+  u: RawUtf8;
   v: PVariant;
 begin
   // JsonSet(VariantField,'PropName','abc') to set a value
   // JsonSet(VariantField,'Obj1.Obj2.PropName','def') to set by path
-  if not CheckNumberOfArgs(Context, 3, argc) then
+  if not CheckNumberOfArgs(Context, 3, argc, 'jsonset') then
     exit;
   if sqlite3.value_type(argv[0]) <> SQLITE_TEXT then
     sqlite3.result_null(Context)
   else
   begin
     json := sqlite3.value_text(argv[0]);
-    FastSetString(tmp, json, StrLen(json));
-    doc.InitJsonInPlace(pointer(tmp), JSON_FAST_FLOAT);
+    doc.InitJsonInPlace(tmp.Init(json), JSON_FAST_FLOAT);
+    tmp.Done;
     v := doc.GetPVariantByPath(sqlite3.value_text(argv[1]));
     if v <> nil then
     begin
       // update the field, then return whole JSON
-      json := sqlite3.value_text(argv[2]);
-      FastSetString(tmp, json, StrLen(json));
-      json := pointer(tmp);
-      GetJsonToAnyVariant(v^, json, nil, @JSON_[mFastFloat], false);
-      RawUtf8ToSQlite3Context(doc.ToJson, Context, false);
+      info.Json := tmp.Init(sqlite3.value_text(argv[2]));
+      JsonToAnyVariant(v^, info, @JSON_[mFastFloat], false);
+      tmp.Done;
+      u := doc.ToJson;
     end
     else
-    begin
       // field was not found: just return whole untouched JSON
-      FastSetString(tmp, json, StrLen(json)); // doc.InitJsonInPlace modified it
-      RawUtf8ToSQlite3Context(tmp, Context, false);
-    end;
+      FastSetString(u, json, StrLen(json)); // doc.InitJsonInPlace modified it
+    RawUtf8ToSQlite3Context(u, Context, false);
   end;
 end;
 
@@ -6533,10 +6530,10 @@ procedure InternalUnicodeUpper(Context: TSqlite3FunctionContext; argc: integer;
   var argv: TSqlite3ValueArray); cdecl;
 var
   input: PUtf8Char;
-  len: integer;
+  len: PtrInt;
   tmp: RawUtf8;
 begin
-  if not CheckNumberOfArgs(Context, 1, argc) then
+  if not CheckNumberOfArgs(Context, 1, argc, 'unicodeupper') then
     exit;
   input := sqlite3.value_text(argv[0]);
   len := StrLen(input);
@@ -6545,7 +6542,7 @@ begin
     FastSetString(tmp, nil, len * 2); // Unicode Upper may enhance input length
     len := Utf8UpperReference(input, pointer(tmp), len) - PUtf8Char(pointer(tmp));
   end;
-  // don't call SetLength() but set forcedlen to truncate the value
+  // don't call SetLength() but use forcedlen to truncate the value
   RawUtf8ToSQlite3Context(tmp, Context, false, {forced=}len);
 end;
 
@@ -6609,7 +6606,7 @@ begin
 end;
 
 constructor TSqlDataBase.Create(
-  const aFileName: TFileName; const aPassword: RawUtf8;
+  const aFileName: TFileName; const aPassword: SpiUtf8;
   aOpenV2Flags, aDefaultCacheSize, aDefaultPageSize: integer);
 var
   result: integer;
@@ -7399,9 +7396,9 @@ begin
   begin
     if (fOpenV2Flags and SQLITE_OPEN_CREATE <> 0) and
        (fFileDefaultPageSize <> 0) then
-      PageSize := fFileDefaultPageSize;
+      SetPageSize(fFileDefaultPageSize);
     if fFileDefaultCacheSize <> 0 then
-      CacheSize := fFileDefaultCacheSize; // 10000 by default (i.e. 40 MB)
+      SetCacheSize(fFileDefaultCacheSize); // 10000 by default (i.e. 40 MB)
   end;
   // always try to check for proper database content (and password)
   if not ExecuteNoException('select count(*) from sqlite_master') then
@@ -8723,12 +8720,8 @@ var
   PLen, itemLen: PtrInt;
   caller: TSqlDataBaseSQLFunctionDynArray;
 begin
-  if argc <> 2 then
-  begin
-    // two parameters expected
-    ErrorWrongNumberOfArgs(Context);
+  if not CheckNumberOfArgs(Context, 2, argc, 'dynarrayblob') then
     exit;
-  end;
   P       := sqlite3.value_blob(argv[0]);
   PLen    := sqlite3.value_bytes(argv[0]);
   item    := sqlite3.value_blob(argv[1]);

@@ -260,7 +260,7 @@ begin
       end;
   else
     begin
-      ErrorWrongNumberOfArgs(Context);
+      ErrorWrongNumberOfArgs(Context, 'charindex');
       exit;
     end;
   end;
@@ -268,22 +268,24 @@ begin
      (sqlite3.value_type(argv[1]) = SQLITE_NULL) then
     sqlite3.result_int64(Context, 0)
   else
-    sqlite3.result_int64(Context, PosEx(sqlite3.value_text(argv[0]),
-      sqlite3.value_text(argv[1]), StartPos));
+    sqlite3.result_int64(Context,
+      PosEx(sqlite3.value_text(argv[0]), sqlite3.value_text(argv[1]), StartPos));
 end;
 
 const
-  // BLOBs are stored as array of byte to avoid any charset conflict
+  // BLOBs are stored as array of byte to avoid any charset/IDE conflict
   BlobDali: array[0..3] of byte = (
     97, 233, 224, 231);
   BlobMonet: array[0..13] of byte = (
     224, 233, 231, ord('d'), ord('s'), ord('j'), ord('d'), ord('s'),
     ord('B'), ord('L'), ord('O'), ord('B'), ord('2'), ord('3'));
 
+  // some WinAnsi chars to avoid any charset/IDE conflict
   UTF8_E0_F4_BYTES: array[0..5] of byte = (
     $E0, $E7, $E8, $E9, $EA, $F4);
 
 var
+  // manual encoding of some UTF-8 chars to avoid any charset/IDE conflict
   _uE0, _uE7, _uE8, _uE9, _uEA, _uF4: RawUtf8;
 
 procedure TTestSQLite3Engine.DatabaseDirectAccess;
@@ -478,19 +480,19 @@ begin
     FreeAndNil(Demo); // if any exception occurs in Create(), Demo.Free is OK
     check(IsSQLite3File(TempFileName));
     check(IsSQLite3FileEncrypted(TempFileName));
-    check(not IsOldSQLEncryptTable(TempFileName));
-    check(not ChangeSQLEncryptTablePassWord(TempFileName, 'password1', 'password1'));
+    check(not IsOldSqlEncryptTable(TempFileName));
+    check(not ChangeSqlEncryptTablePassWord(TempFileName, 'password1', 'password1'));
     check(IsSQLite3File(TempFileName));
     check(IsSQLite3FileEncrypted(TempFileName));
-    check(not IsOldSQLEncryptTable(TempFileName));
-    check(ChangeSQLEncryptTablePassWord(TempFileName, 'password1', ''));
+    check(not IsOldSqlEncryptTable(TempFileName));
+    check(ChangeSqlEncryptTablePassWord(TempFileName, 'password1', ''));
     check(IsSQLite3File(TempFileName));
-    check(not IsOldSQLEncryptTable(TempFileName));
+    check(not IsOldSqlEncryptTable(TempFileName));
     check(not IsSQLite3FileEncrypted(TempFileName));
-    check(ChangeSQLEncryptTablePassWord(TempFileName, '', 'NewPass'));
+    check(ChangeSqlEncryptTablePassWord(TempFileName, '', 'NewPass'));
     check(IsSQLite3File(TempFileName));
     check(IsSQLite3FileEncrypted(TempFileName));
-    check(not IsOldSQLEncryptTable(TempFileName));
+    check(not IsOldSqlEncryptTable(TempFileName));
     Demo := TSqlDataBase.Create(TempFileName, 'NewPass'); // reuse the temporary file
     Demo.Synchronous := smOff;
     Demo.LockingMode := lmExclusive;
@@ -706,6 +708,19 @@ var
 begin
   Model := TOrmModel.Create(
     [TOrmPeople, TOrmPeopleVersioned, TOrmTableDeleted], 'root0');
+  Master := CreateServer(SQLITE_MEMORY_DATABASE_NAME, true);
+  try
+    Rec := TOrmPeopleVersioned.Create;
+    try
+      for i := 1 to 20 do
+        Master.Orm.Add(Rec, true);
+      Master.Orm.Delete(TOrmPeopleVersioned, 'RowID>?', [2]);
+    finally
+      Rec.Free;
+    end;
+  finally
+    Master.Free;
+  end;
   CreateMaster(true);
   Slave1 := CreateServer('testversionreplicated' + DBExt, true);
   Slave2 := CreateServer('testversioncallback' + DBExt, true);
@@ -1962,7 +1977,7 @@ begin
   {$ifndef NOSQLITE3STATIC}
   if EncryptedFile then
   begin
-    check(ChangeSQLEncryptTablePassWord(TempFileName, 'NewPass', '')); // uncrypt file
+    check(ChangeSqlEncryptTablePassWord(TempFileName, 'NewPass', '')); // uncrypt file
     check(IsSQLite3File(TempFileName));
   end;
   {$endif NOSQLITE3STATIC}
@@ -2393,7 +2408,8 @@ begin
     BoxPlain := TOrmMapBoxPlain.Create;
     try
       Client.TransactionBegin(TOrmMapBoxPlain);
-      for i := 1 to COUNT do begin
+      for i := 1 to COUNT do
+      begin
         BoxPlain.fID := i*2; // force ID
         BoxPlain.MinX := i*1.0;
         BoxPlain.MaxX := i*1.0+0.5;
@@ -2403,19 +2419,22 @@ begin
       end;
       Client.Commit;
       writeln('added in ',timer.Stop); timer.Start;
-      with Client.Server as TRestServer do begin
+      with Client.Server as TRestServer do
+      begin
         CreateSqlIndex(TOrmMapBoxPlain,'MinX',false);
         CreateSqlIndex(TOrmMapBoxPlain,'MaxX',false);
         CreateSqlIndex(TOrmMapBoxPlain,'MinY',false);
         CreateSqlIndex(TOrmMapBoxPlain,'MaxY',false);
       end;
       writeln('indexes created in ',timer.Stop); timer.Start;
-      for i := 1 to COUNT do begin
+      for i := 1 to COUNT do
+      begin
         check(Client.Retrieve(i*2,BoxPlain));
         CheckBoxPlain(i);
       end;
       writeln('retrieved by id in ',timer.Stop); timer.Start;
-      for i := 1 to COUNT do begin
+      for i := 1 to COUNT do
+      begin
         BoxPlain.FillPrepare(Client,'MinX<=? and ?<=MaxX and MinY<=? and ?<=MaxY',
           [i*1.0+0.25,i*1.0+0.25,i*2.0+0.25,i*2.0+0.25]);
         check(BoxPlain.FillOne);

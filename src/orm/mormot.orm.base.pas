@@ -884,7 +884,7 @@ type
       read fOrmOptions write SetOrmOptions;
   end;
 
-// for backward compatibility - use TRttiJson.Register* class methods instead
+// for backward compatibility - use Rtti/TRttiJson.Register* methods instead
 {$ifndef PUREMORMOT2}
 
 type
@@ -896,6 +896,19 @@ type
       aItem: TCollectionItemClass);
     class procedure RegisterObjArrayForJson(aDynArray: PRttiInfo; aItem: TClass); overload;
     class procedure RegisterObjArrayForJson(const aDynArrayClassPairs: array of const); overload;
+    class function RegisterCustomJSONSerializerFromText(aTypeInfo: pointer;
+      const aRTTIDefinition: RawUtf8): TRttiCustom; overload;
+    class procedure RegisterCustomJSONSerializerFromText(
+      const aTypeInfoTextDefinitionPairs: array of const); overload;
+    class procedure RegisterCustomJSONSerializerFromTextSimpleType(
+       aTypeInfo: PRttiInfo); overload;
+    class procedure RegisterCustomJSONSerializerFromTextBinaryType(
+       aTypeInfo: PRttiInfo; aDataSize: integer); overload;
+    class procedure RegisterCustomJSONSerializerFromTextBinaryType(
+      const InfoBinarySize: array of const); overload;
+    // warning: Reader/Writer have changed signature in mORMot 2
+    class function RegisterCustomJsonSerializer(Info: PRttiInfo;
+      const Reader: TOnRttiJsonRead; const Writer: TOnRttiJsonWrite): TRttiJson;
   end;
 
 const
@@ -918,6 +931,14 @@ type
   /// set of ORM attributes for a TOrmPropInfo definition
   TOrmPropInfoAttributes = set of TOrmPropInfoAttribute;
 
+  /// allow a quick detection of some particular TOrmPropInfo classes
+  // - picInt32 match TOrmPropInfoRttiInt32
+  // - picInt64 match TOrmPropInfoRttiInt64
+  TOrmPropInfoClassType = (
+    picOther,
+    picInt32,
+    picInt64);
+
   /// abstract parent class to store information about a published property
   // - property information could be retrieved from RTTI (TOrmPropInfoRtti*),
   // or be defined by code (TOrmPropInfoCustom derivated classes) when RTTI
@@ -930,6 +951,7 @@ type
     fOrmFieldTypeStored: TOrmFieldType;
     fSqlDBFieldType: TSqlDBFieldType;
     fAttributes: TOrmPropInfoAttributes;
+    fPropInfoClass: TOrmPropInfoClassType;
     fFieldWidth: integer;
     fPropertyIndex: integer;
     function GetNameDisplay: string; virtual;
@@ -990,6 +1012,9 @@ type
       read fSqlDBFieldType;
     /// the corresponding column type name, as managed for abstract database access
     function SqlDBFieldTypeName: PShortString;
+    /// allow quick detection of some TOrmPropInfo classes
+    property PropInfoClass: TOrmPropInfoClassType
+      read fPropInfoClass;
     /// the ORM attributes of this property
     // - contains aIsUnique e.g for TOrm published properties marked as
     // ! property MyProperty: RawUtf8 stored AS_UNIQUE;
@@ -1974,11 +1999,10 @@ type
     /// fill a TRawUtf8DynArray instance from the field names
     // - excluding ID
     procedure NamesToRawUtf8DynArray(var Names: TRawUtf8DynArray);
-    /// returns the number of TOrmPropInfo in the list
+    /// returns the number of TOrmPropInfo in the list, i.e. length(List)
     property Count: integer
       read fCount;
     /// quick access to the TOrmPropInfo list
-    // - note that length(List) may not equal Count, since is its capacity
     property List: TOrmPropInfoObjArray
       read fList;
     /// low-level access to the last TOrmPropInfo in the list
@@ -2055,6 +2079,7 @@ type
   TOrmTableDataArray = PIntegerArray; // 0 = nil, or offset in fDataStart[]
   TOrmTableJsonDataArray = TIntegerDynArray;
   {$endif NOPOINTEROFFSET}
+  POrmTableData = ^TOrmTableData;
 
   /// abstract parent to TOrmTable and TOrmTableJson classes
   // - will be fully implemented as TOrmTableJson holding JSON content
@@ -2144,6 +2169,8 @@ type
     function GetA(Row, Field: PtrInt): WinAnsiString;
     /// read-only access to a particular field value, as Win Ansi text ShortString
     function GetS(Row, Field: PtrInt): ShortString;
+    /// read-only access to a particular field value, as boolean
+    function GetB(Row, Field: PtrInt): boolean;
     /// read-only access to a particular field value, as a Variant
     // - text will be stored as RawUtf8 (as varString type)
     // - will try to use the most approriate Variant type for conversion (will
@@ -2430,6 +2457,8 @@ type
     procedure SortFields(const Fields: array of integer;
       const Asc: array of boolean;
       const CustomCompare: array of TUtf8Compare); overload;
+    /// sort result Rows, according to the Bits set to 1 first
+    procedure SortBitsFirst(var Bits);
     /// guess the field type from first non null data row
     // - if QueryTables[] are set, exact field type and enumerate TypeInfo() is
     // retrieved from the Delphi RTTI; otherwise, get from the cells content
@@ -3533,6 +3562,7 @@ const
   var
     tmp: TSynTempBuffer;
     da: RawJson;
+    info: TGetJsonField;
   begin
     tmp.buf := nil;
     try
@@ -3543,15 +3573,16 @@ const
          Base64MagicCheckAndDecode(Value, tmp, ValueLen) then
       begin
         da := DynArrayBlobSaveJson(typeInfo, tmp.buf);
-        Value := pointer(da);
-        ValueLen := length(da);
+        info.Json := pointer(da);
       end
       else if createValueTempCopy then
       begin
         tmp.Init(Value, ValueLen);
-        Value := tmp.buf;
-      end;
-      GetJsonToAnyVariant(variant(result), Value, nil, @options, false);
+        info.Json := tmp.buf;
+      end
+      else
+        info.Json := Value;
+      JsonToAnyVariant(variant(result), info, @options, false);
     finally
       tmp.Done;
     end;
@@ -3757,50 +3788,38 @@ end;
 function Utf8CompareDouble(P1, P2: PUtf8Char): PtrInt;
 var
   V1, V2: TSynExtended;
-  Err: integer;
-label
-  er;
+  err: integer;
 begin
-  if P1 = P2 then
-  begin
-    result := 0;
+  result := StrComp(P1, P2); // compare as string as fallback
+  if result = 0 then         // also handle P1=P2
     exit;
-  end;
-  V1 := GetExtended(P1, Err);
-  if Err <> 0 then
-  begin
-er: result := Utf8IComp(P1, P2);
-    exit;
-  end;
-  V2 := GetExtended(P2, Err);
-  if Err <> 0 then
-    goto er;
-  if V1 < V2 then // we don't care about exact = for a sort: Epsilon check is slow
-    result := -1
-  else
-    result := +1;
+  V1 := GetExtended(P1, err);
+  if err <> 0 then
+    exit; // any invalid double value -> compare as strings
+  V2 := GetExtended(P2, err);
+  if err = 0 then
+    if V1 < V2 then // we don't care about exact = for a sort: Epsilon check is slow
+      result := -1
+    else
+      result := +1;
 end;
 
 function Utf8CompareIso8601(P1, P2: PUtf8Char): PtrInt;
 var
   V1, V2: TDateTime;
 begin
-  if P1 = P2 then
-  begin
-    result := 0;
+  result := StrComp(P1, P2);
+  if result = 0 then
     exit;
-  end;
-  Iso8601ToDateTimePUtf8CharVar(P1, 0, V1);
+  Iso8601ToDateTimePUtf8CharVar(P1, 0, V1); // normalize values ('T', 'Z'...)
+  if V1 = 0 then
+    exit; // any invalid date -> compare as strings
   Iso8601ToDateTimePUtf8CharVar(P2, 0, V2);
-  if (V1 = 0) or
-     (V2 = 0) then // any invalid date -> compare as strings
-    result := StrComp(P1, P2)
-  else if SameValue(V1, V2, 1 / MSecsPerDay) then
-    result := 0
-  else if V1 < V2 then
-    result := -1
-  else
-    result := +1;
+  if V2 <> 0 then
+    if V1 < V2 then
+      result := -1
+    else
+      result := +1;
 end;
 
 
@@ -3818,7 +3837,7 @@ begin
       ColNames[0] := '"ID":'; // as expected by AJAX
 end;
 
-// backward compatibility methods - use Rtti global instead
+// backward compatibility methods - use Rtti/TRttiJson global instead
 {$ifndef PUREMORMOT2}
 
 class procedure TJsonSerializer.RegisterClassForJson(aItemClass: TClass);
@@ -3848,6 +3867,42 @@ class procedure TJsonSerializer.RegisterObjArrayForJson(
   const aDynArrayClassPairs: array of const);
 begin
   Rtti.RegisterObjArrays(aDynArrayClassPairs);
+end;
+
+class function TJsonSerializer.RegisterCustomJSONSerializerFromText(
+  aTypeInfo: pointer; const aRTTIDefinition: RawUtf8): TRttiCustom;
+begin
+  result := Rtti.RegisterFromText(aTypeInfo, aRTTIDefinition);
+end;
+
+class procedure TJsonSerializer.RegisterCustomJSONSerializerFromText(
+  const aTypeInfoTextDefinitionPairs: array of const);
+begin
+  Rtti.RegisterFromText(aTypeInfoTextDefinitionPairs);
+end;
+
+class procedure TJsonSerializer.RegisterCustomJSONSerializerFromTextSimpleType(
+  aTypeInfo: PRttiInfo);
+begin
+  Rtti.RegisterType(aTypeInfo);
+end;
+
+class procedure TJsonSerializer.RegisterCustomJSONSerializerFromTextBinaryType(
+  aTypeInfo: PRttiInfo; aDataSize: integer);
+begin
+  Rtti.RegisterBinaryType(aTypeInfo, aDataSize);
+end;
+
+class procedure TJsonSerializer.RegisterCustomJSONSerializerFromTextBinaryType(
+  const InfoBinarySize: array of const);
+begin
+  Rtti.RegisterBinaryTypes(InfoBinarySize);
+end;
+
+class function TJsonSerializer.RegisterCustomJsonSerializer(Info: PRttiInfo;
+  const Reader: TOnRttiJsonRead; const Writer: TOnRttiJsonWrite): TRttiJson;
+begin
+  result := TRttiJson.RegisterCustomSerializer(Info, Reader, Writer);
 end;
 
 {$endif PUREMORMOT2}
@@ -4476,6 +4531,7 @@ begin
     fIntegerGetPropOffset := fGetterIsFieldPropOffset <> 0;
   if fPropType^.RttiOrd in [roSLong, roULong] then
     fIntegerSetPropOffset := fSetterIsFieldPropOffset <> 0;
+  fPropInfoClass := picInt32;
 end;
 
 function TOrmPropInfoRttiInt32.GetValueInt32(Instance: TObject): integer;
@@ -4773,6 +4829,7 @@ constructor TOrmPropInfoRttiInt64.Create(aPropInfo: PRttiProp;
 begin
   inherited Create(aPropInfo, aPropIndex, aOrmFieldType, aOptions);
   fIsQWord := fPropType^.IsQword;
+  fPropInfoClass := picInt64;
 end;
 
 procedure TOrmPropInfoRttiInt64.SetValueInt64(Instance: TObject; V64: Int64);
@@ -7029,7 +7086,7 @@ var
   Data: PByte;
 begin
   Data := GetFieldAddr(Instance);
-  W.AddRttiCustomJson(Data, fCustomParser, []);
+  W.AddRttiCustomJson(Data, fCustomParser, twJsonEscape, []);
 end;
 
 procedure TOrmPropInfoCustomJson.GetValueVar(Instance: TObject; ToSql: boolean;
@@ -8505,6 +8562,11 @@ begin
   Utf8ToShortString(result, Get(Row, Field));
 end;
 
+function TOrmTableAbstract.GetB(Row, Field: PtrInt): boolean;
+begin
+  result := GetBoolean(Get(Row, Field));
+end;
+
 function TOrmTableAbstract.GetString(Row, Field: PtrInt): string;
 var
   U: PUtf8Char;
@@ -9582,6 +9644,45 @@ end;
 function TOrmTableAbstract.SortCompare(Field: integer): TUtf8Compare;
 begin
   result := OrmFieldTypeComp[FieldType(Field)];
+end;
+
+procedure TOrmTableAbstract.SortBitsFirst(var Bits);
+var
+  n, i, nset: PtrInt;
+  old:  array of TOrmTableData; // local copy
+  s, d: POrmTableData;
+  pass: boolean;
+begin
+  if (self = nil) or
+     (fRowCount <= 1) or
+     (FieldCount <= 0) then
+    exit;
+  // move fData[] in two passes: rows with bit set, then rows with bit unset
+  n := fRowCount * FieldCount;
+  SetLength(old, n);
+  d := @fData[FieldCount]; // ignore first row = header
+  MoveFast(d^, pointer(old)^, n * SizeOf(TOrmTableData));
+  n := FieldCount * SizeOf(TOrmTableData);
+  nset := 0;
+  for pass := true downto false do
+  begin
+    s := pointer(old);
+    for i := 1 to fRowCount do
+    begin
+      if GetBitPtr(@Bits, i) = pass then
+      begin
+        MoveFast(s^, d^, n);
+        inc(d, FieldCount);
+        if pass then
+          inc(nset);
+      end;
+      inc(s, FieldCount);
+    end;
+  end;
+  // recalcultate Bits[]
+  FillCharFast(Bits, (fRowCount shr 3) + 1, 0);
+  for i := 0 to nset - 1 do
+    SetBitPtr(@Bits,i);
 end;
 
 function TOrmTableAbstract.Step(SeekFirst: boolean; RowVariant: PVariant): boolean;
@@ -10711,26 +10812,28 @@ var
   decoded: TID;
   W: TOrmWriter;
   Start: PUtf8Char;
+  info: TGetJsonField;
   temp: TTextWriterStackBuffer;
 begin
   result := '';
-  if P = nil then
+  info.Json := P;
+  if info.Json = nil then
     exit;
-  while (P^ <= ' ') and
-        (P^ <> #0) do
-    inc(P);
-  if P^ <> '[' then
+  while (info.Json^ <= ' ') and
+        (info.Json^ <> #0) do
+    inc(info.Json);
+  if info.Json^ <> '[' then
     exit;
   repeat
-    inc(P)
-  until (P^ > ' ') or
-        (P^ = #0);
+    inc(info.Json)
+  until (info.Json^ > ' ') or
+        (info.Json^ = #0);
   if ID = nil then
     decoded := 0
   else
     decoded := ID^;
   if sfoStartWithID in Format then
-    decoded := GetInt64(GetJsonField(P, P));
+    decoded := info.GetJsonInt64;
   W := TOrmWriter.CreateOwnedStream(temp);
   try
     if sfoExtendedJson in Format then
@@ -10743,20 +10846,20 @@ begin
       if GetBitPtr(@Bits, i) then
       begin
         W.AddFieldName(Fields.List[i].Name);
-        Start := P;
-        P := GotoEndJsonItem(P);
-        if (P = nil) or
-           not (P^ in [',', ']']) then
+        Start := info.Json;
+        info.Json := GotoEndJsonItem(info.Json);
+        if (info.Json = nil) or
+           not (info.Json^ in [',', ']']) then
           exit;
-        W.AddNoJsonEscape(Start, P - Start);
+        W.AddNoJsonEscape(Start, info.Json - Start);
         W.AddComma;
         repeat
-          inc(P)
-        until (P^ > ' ') or
-              (P^ = #0);
+          inc(info.Json)
+        until (info.Json^ > ' ') or
+              (info.Json^ = #0);
       end;
     if sfoEndWithID in Format then
-      decoded := GetInt64(GetJsonField(P, P));
+      decoded := info.GetJsonInt64;
     if (decoded <> 0) and
        (sfoPutIDLast in Format) then
       W.AddPropJsonInt64('ID', decoded);
@@ -10770,12 +10873,13 @@ begin
      (decoded <> 0) then
     ID^ := decoded;
   if EndOfObject <> nil then
-    EndOfObject^ := P^;
-  if P^ <> #0 then
+    EndOfObject^ := info.Json^;
+  if info.Json^ <> #0 then
     repeat
-      inc(P)
-    until (P^ > ' ') or
-          (P^ = #0);
+      inc(info.Json)
+    until (info.Json^ > ' ') or
+          (info.Json^ = #0);
+  P := info.Json;
 end;
 
 procedure TOrmPropertiesAbstract.SaveBinaryHeader(W: TBufferWriter);
@@ -11131,9 +11235,9 @@ begin
   result := false; // success
   if FieldIndex = VIRTUAL_TABLE_ROWID_COLUMN then
     if ForceNoRowID then
-      Text := Text + 'ID'
+      Text := Text + ID_TXT
     else
-      Text := Text + 'RowID'
+      Text := Text + ROWID_TXT
   else if (self = nil) or
           (cardinal(FieldIndex) >= cardinal(Fields.Count)) then
     result := true

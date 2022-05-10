@@ -985,7 +985,8 @@ begin
   try
     TOrmVirtualTableModuleSQLite3(result).Attach(aDatabase);
   except
-    on Exception do begin
+    on Exception do
+    begin
       result.Free; // should be released by hand here
       raise; // e.g. EBusinessLayerException or ESqlite3Exception
     end;
@@ -1067,8 +1068,7 @@ begin
   end
   else
     mask := fShardRootFileName + '*.dbs';
-  db := FindFiles(ExtractFilePath(mask), ExtractFileName(mask),
-    '', {sorted=}true);
+  db := FindFiles(ExtractFilePath(mask), ExtractFileName(mask), '', [ffoSortByName]);
   if db = nil then
     exit; // no existing data
   fShardOffset := -1;
@@ -1372,11 +1372,8 @@ var
   rtree: TOrmRTreeClass;
   blob0, blob1: pointer;
 begin
-  if argc <> 2 then
-  begin
-    ErrorWrongNumberOfArgs(Context);
+  if not CheckNumberOfArgs(Context, 2, argc, 'rtreein') then
     exit;
-  end;
   rtree := sqlite3.user_data(Context);
   blob0 := sqlite3.value_blob(argv[0]);
   blob1 := sqlite3.value_blob(argv[1]);
@@ -1563,7 +1560,8 @@ begin
   InitializeEngine;
 end;
 
-constructor TRestOrmServerDB.Create(aRest: TRest; aDB: TSqlDataBase; aOwnDB: boolean);
+constructor TRestOrmServerDB.Create(aRest: TRest; aDB: TSqlDataBase;
+  aOwnDB: boolean);
 begin
   fDB := aDB; // should be done before CreateWithoutRest/Create
   if aOwnDB then
@@ -1577,7 +1575,8 @@ begin
   fModel := aModel;
   fModel.Owner := self; // TRestOrmServerDB.Destroy will free its TOrmModel
   fRest := aRest;
-  fOwner := aRest as TRestServer;
+  if aRest <> nil then
+    fOwner := aRest as TRestServer;
   Create(nil, aDB, aOwnDB);
 end;
 
@@ -1946,7 +1945,8 @@ begin
     fRest.AcquireExecution[execOrmWrite].Safe.Lock; // protect fJsonDecoder
     try
       fJsonDecoder.Decode(SentData, nil, pInlined, ID, false);
-      if props.RecordVersionField <> nil then
+      if (props.RecordVersionField <> nil) and
+         (fOwner <> nil) then
         fOwner.RecordVersionHandle(ooUpdate, TableModelIndex,
           fJsonDecoder, props.RecordVersionField);
       sql := fJsonDecoder.EncodeAsSql('', '', {update=}true);
@@ -2231,56 +2231,56 @@ end;
 function BindDirect(Props: TOrmPropInfoList; var P: PUtf8Char; Stmt: PSqlRequest;
   const Fields: TFieldBits; firstarg: integer; id: PID): integer;
 var
+  info: TGetJsonField;
   f: PtrInt;
-  nfo: POrmPropInfo;
-  val: PUtf8Char;
-  len: integer;
-  wasstring: boolean;
+  prop: POrmPropInfo;
 begin
-  P := GotoNextNotSpace(P);
-  if P^ <> '[' then
+  info.Json := GotoNextNotSpace(P);
+  if info.Json^ <> '[' then
     raise EOrmBatchException.Create('Invalid simple batch');
-  inc(P);
+  inc(info.Json);
   if id <> nil then
-    id^ := GetNextItemInt64(P);
+    id^ := GetNextItemInt64(info.Json);
   result := firstarg;
-  nfo := pointer(Props.List);
+  prop := pointer(Props.List);
   for f := 0 to Props.Count - 1 do
   begin
     if GetBitPtr(@Fields, f) then
     begin
       inc(result);
       // regular in-place JSON decoding
-      val := GetJsonFieldOrObjectOrArray(P, @wasstring, nil, true, true, @len);
-      if (val = nil) and
-         not wasstring then
+      info.GetJsonFieldOrObjectOrArray;
+      if (info.Value = nil) and
+         not info.Wasstring then
         Stmt^.BindNull(result)
       else
-        case nfo^.SqlDBFieldType of
+        case prop^.SqlDBFieldType of
           ftInt64:
-            Stmt^.Bind(result, GetInt64(val));
+            Stmt^.Bind(result, GetInt64(info.Value));
           ftDouble,
           ftCurrency:
-            Stmt^.Bind(result, GetExtended(val));
+            Stmt^.Bind(result, GetExtended(info.Value));
           ftDate,
           ftUtf8:
             begin
-              if (len > 3) and
-                 (PCardinal(val)^  and $00ffffff = JSON_SQLDATE_MAGIC_C) then
+              if (info.ValueLen > 3) and
+                 (PCardinal(info.Value)^  and $00ffffff = JSON_SQLDATE_MAGIC_C) then
               begin
-                inc(val, 3);
-                dec(len, 3);
+                inc(info.Value, 3);
+                dec(info.ValueLen, 3);
               end;
               // direct text/iso8601 parameter binding
-              Stmt^.BindU(result, val, len, {static=}true);
+              Stmt^.BindU(result, info.Value, info.ValueLen, {static=}true);
             end;
           ftBlob:
             // with in-place Base64-decoding
-            Stmt^.BindBlobDecode(result, pointer(val), len, {static=}true);
+            Stmt^.BindBlobDecode(
+              result, pointer(info.Value), info.ValueLen, {static=}true);
         end;
     end;
-    inc(nfo);
+    inc(prop);
   end;
+  P := info.Json;
 end;
 
 function TRestOrmServerDB.InternalBatchStart(Encoding: TRestBatchEncoding;
@@ -2344,7 +2344,8 @@ begin
             b^.Simples[0], b^.SimpleFields, nil, nil, [sfoExtendedJson]);
       end;
       fJsonDecoder.Decode(v, nil, pInlined, b^.ID[0]);
-      if props.RecordVersionField <> nil then
+      if (props.RecordVersionField <> nil) and
+         (fOwner <> nil) then
         fOwner.RecordVersionHandle(
           ooInsert, b^.TableIndex, fJsonDecoder, props.RecordVersionField);
       sql := fJsonDecoder.EncodeAsSql(
@@ -2432,7 +2433,8 @@ begin
             if updateeventneeded then
               b^.Temp.Done;
           end;
-          if props.RecordVersionField <> nil then
+          if (props.RecordVersionField <> nil) and
+             (fOwner <> nil) then
             fOwner.RecordVersionHandle(ooInsert, b^.TableIndex,
               fJsonDecoder, props.RecordVersionField);
         end;

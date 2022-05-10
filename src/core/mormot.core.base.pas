@@ -1088,6 +1088,10 @@ function GetInt64(P: PUtf8Char): Int64; overload;
 // - if P if nil or not start with a valid numerical value, returns Default
 function GetInt64Def(P: PUtf8Char; const Default: Int64): Int64;
 
+/// get the 64-bit integer value from P^, recognizing true/false/yes/no input
+// - return true on correct parsing, false if P is no number or boolean
+function GetInt64Bool(P: PUtf8Char; out V: Int64): boolean;
+
 /// get the 64-bit signed integer value stored in P^
 procedure SetInt64(P: PUtf8Char; var result: Int64);
   {$ifdef CPU64}inline;{$endif}
@@ -2187,6 +2191,11 @@ function GetBitsCountPas(value: PtrInt): PtrInt;
 // - this redirected function will use fast SSE4.2 popcnt opcode, if available
 var GetBitsCountPtrInt: function(value: PtrInt): PtrInt = GetBitsCountPas;
 
+/// compute how many bytes are needed to store a given number of bits
+// - e.g. 0 returns 0, 1..8 returns 1, 9..16 returns 2, and so on
+function BitsToBytes(bits: byte): byte;
+  {$ifdef HASINLINE}inline;{$endif}
+
 const
   /// could be used to compute the index in a pointer list from its byte position
   POINTERSHR =     {$ifdef CPU64}  3 {$else}  2 {$endif};
@@ -2433,21 +2442,25 @@ procedure DACntAdd(var refcnt: TDACnt; increment: TDACnt);
 // - used e.g. as thread-safe atomic operation for TLightLock/TRWLock
 // - Target should be aligned, which is the case when defined as a class field
 function LockedExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt): boolean;
+  {$ifndef CPUINTEL} inline; {$endif}
 
 /// fast atomic addition operation on a pointer-sized integer value
 // - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(pointer)
 // - Target should be aligned, which is the case when defined as a class field
 procedure LockedAdd(var Target: PtrUInt; Increment: PtrUInt);
+  {$ifndef CPUINTEL} inline; {$endif}
 
 /// fast atomic substraction operation on a pointer-sized integer value
 // - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(-pointer)
 // - Target should be aligned, which is the case when defined as a class field
 procedure LockedDec(var Target: PtrUInt; Decrement: PtrUInt);
+  {$ifndef CPUINTEL} inline; {$endif}
 
 /// fast atomic addition operation on a 32-bit integer value
 // - via Intel/AMD custom asm or FPC RTL InterlockedExchangeAdd(pointer)
 // - Target should be aligned, which is the case when defined as a class field
 procedure LockedAdd32(var Target: cardinal; Increment: cardinal);
+  {$ifndef CPUINTEL} inline; {$endif}
 
 {$ifndef FPC}
 
@@ -2886,7 +2899,7 @@ type
     // - equals nil if len=0
     buf: pointer;
     /// default 4KB buffer allocated on stack - after the len/buf main fields
-    // - 16 last bytes are reseverd to prevent potential buffer overflow,
+    // - 16 last bytes are reserved to prevent potential buffer overflow,
     // so usable length is 4080 bytes
     tmp: array[0..4095] of AnsiChar;
     /// initialize a temporary copy of the content supplied as RawByteString
@@ -2902,6 +2915,7 @@ type
     function Init(SourceLen: PtrInt): pointer; overload;
     /// initialize a temporary buffer with the length of the internal stack
     function InitOnStack: pointer;
+      {$ifdef HASINLINE}inline;{$endif}
     /// initialize the buffer returning the internal buffer size (4080 bytes)
     // - also set len to the internal buffer size
     // - could be used e.g. for an API call, first trying with plain temp.Init
@@ -3651,6 +3665,9 @@ type
     function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
+/// raise a EStreamError exception - e.g. from TSynMemoryStream.Write
+function RaiseStreamError(Caller: TObject; const Context: shortstring): Longint;
+
 
 { ************ Raw Shared Constants / Types Definitions }
 
@@ -4137,7 +4154,8 @@ var
   r: pointer;
 begin
   r := FastNewString(len, codepage);
-  if p <> nil then
+  if (p <> nil) and
+     (r <> nil) then
     MoveFast(p^, r^, len);
   FastAssignNew(s, r);
 end;
@@ -4147,7 +4165,8 @@ var
   r: pointer;
 begin
   r := FastNewString(len, CP_UTF8); // FPC will do proper constant propagation
-  if p <> nil then
+  if (p <> nil) and
+     (r <> nil) then
     MoveFast(p^, r^, len);
   FastAssignNew(s, r);
 end;
@@ -4157,7 +4176,8 @@ var
   r: pointer;
 begin
   r := FastNewString(len, CP_RAWBYTESTRING); // FPC does constant propagation
-  if p <> nil then
+  if (p <> nil) and
+     (r <> nil) then
     MoveFast(p^, r^, len);
   FastAssignNew(s, r);
 end;
@@ -4591,6 +4611,27 @@ begin
             (PInteger(P)^ <> FALSE_LOW) and
             ((PInteger(P)^ = TRUE_LOW) or
              ((PInteger(P)^ and $ffff) <> ord('0')));
+end;
+
+function GetInt64Bool(P: PUtf8Char; out V: Int64): boolean;
+var
+  err, c: integer;
+begin
+  result := P <> nil;
+  if not result then
+    exit;
+  V := GetInt64(P, err);
+  if err = 0 then
+    exit;
+  c := PInteger(P)^ and $dfdfdfdf;
+  if (c = ord('F') + ord('A') shl 8 + ord('L') shl 16 + ord('S') shl 24) or
+     (c and $ffffff = ord('N') + ord('O') shl 8) then
+    V := 0
+  else if (c = ord('T') + ord('R') shl 8 + ord('U') shl 16 + ord('E') shl 24) or
+          (c = ord('Y') + ord('E') shl 8 + ord('S') shl 16) then
+    V := 1
+  else
+    result := false;
 end;
 
 function GetCardinalDef(P: PUtf8Char; Default: PtrUInt): PtrUInt;
@@ -5370,7 +5411,7 @@ end;
 
 function IsZero(const Values: TIntegerDynArray): boolean;
 var
-  i: integer;
+  i: PtrInt;
 begin
   result := false;
   for i := 0 to length(Values) - 1 do
@@ -5381,7 +5422,7 @@ end;
 
 function IsZero(const Values: TInt64DynArray): boolean;
 var
-  i: integer;
+  i: PtrInt;
 begin
   result := false;
   for i := 0 to length(Values) - 1 do
@@ -7394,6 +7435,11 @@ begin
   end
   else
     result := false;
+end;
+
+function BitsToBytes(bits: byte): byte;
+begin
+  result := (bits + 7) shr 3;
 end;
 
 
@@ -11134,9 +11180,15 @@ begin
   SetPointer(Data, DataLen);
 end;
 
-function TSynMemoryStream.{%H-}Write(const Buffer; Count: integer): Longint;
+function TSynMemoryStream.Write(const Buffer; Count: integer): Longint;
 begin
-  raise EStreamError.Create('Unexpected TSynMemoryStream.Write');
+  result := RaiseStreamError(self, 'Write');
+end;
+
+
+function {%H-}RaiseStreamError(Caller: TObject; const Context: shortstring): Longint;
+begin
+  raise EStreamError.CreateFmt('Unexpected %s.%s', [ClassNameShort(Caller), Context]);
 end;
 
 

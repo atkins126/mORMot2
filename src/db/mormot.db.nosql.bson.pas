@@ -1909,7 +1909,7 @@ const
 
 var
   GlobalBsonObjectID: record
-    Section: TRTLCriticalSection;
+    Safe: TLightLock;
     DefaultValues: packed record
       Counter: cardinal;
       MachineID: TBson24;
@@ -1921,7 +1921,6 @@ var
 
 procedure InitBsonObjectIDComputeNew;
 begin
-  InitializeCriticalSection(GlobalBsonObjectID.Section);
   with GlobalBsonObjectID.DefaultValues do
   begin
     Counter := Random32 and COUNTER_MASK;
@@ -1947,32 +1946,41 @@ procedure TBsonObjectID.ComputeNew;
 var
   now, count: cardinal;
 begin
-  now := UnixTimeUtc; // fast API call (no need of cache)
+  now := UnixTimeUtc; // fast API call (no need of cache) outside of the lock
   with GlobalBsonObjectID do
   begin
-    EnterCriticalSection(Section);
-    if now > LastCreateTime then
+    Safe.Lock;
+    {$ifdef HASFASTTRYFINALLY}
+    try
+    {$else}
     begin
-      LastCreateTime := now;
-      count := DefaultValues.Counter; // reset
-    end
-    else
-    begin
-      count := LastCounter + 1;
-      if count and COUNTER_MASK = DefaultValues.Counter then
+    {$endif HASFASTTRYFINALLY}
+      if now > LastCreateTime then
       begin
-        count := DefaultValues.Counter;
-        inc(LastCreateTime); // collision -> cheat on timestamp
+        LastCreateTime := now;
+        count := DefaultValues.Counter; // reset
+      end
+      else
+      begin
+        count := LastCounter + 1;
+        if count and COUNTER_MASK = DefaultValues.Counter then
+        begin
+          count := DefaultValues.Counter;
+          inc(LastCreateTime); // collision -> cheat on timestamp
+        end;
       end;
+      Counter.b1 := count shr 16; // stored as bigendian
+      Counter.b2 := count shr 8;
+      Counter.b3 := count;
+      LastCounter := count;
+      UnixCreateTime := bswap32(LastCreateTime);
+      MachineID := DefaultValues.MachineID;
+      ProcessID := DefaultValues.ProcessID;
+    {$ifdef HASFASTTRYFINALLY}
+    finally
+    {$endif HASFASTTRYFINALLY}
+      Safe.UnLock;
     end;
-    Counter.b1 := count shr 16; // stored as bigendian
-    Counter.b2 := count shr 8;
-    Counter.b3 := count;
-    LastCounter := count;
-    UnixCreateTime := bswap32(LastCreateTime);
-    MachineID := DefaultValues.MachineID;
-    ProcessID := DefaultValues.ProcessID;
-    LeaveCriticalSection(Section);
   end;
 end;
 
@@ -3823,12 +3831,10 @@ procedure TBsonWriter.BsonWriteFromJson(const name: RawUtf8; var Json: PUtf8Char
 var
   tmp: variant;
   blob: RawByteString;
-  wasString: boolean;
-  Value: PUtf8Char;
-  ValueLen: integer;
   VDouble: double;
   ValueDateTime: TDateTime absolute VDouble;
   Kind: TBsonElementType;
+  info: TGetJsonField;
 begin
   if Json^ in [#1..' '] then
     repeat
@@ -3838,7 +3844,8 @@ begin
      BsonVariantType.TryJsonToVariant(Json, tmp, EndOfObject) then
     // was betDateTime, betObjectID or betRegEx, from strict or extended Json
     BsonWriteVariant(name, tmp)
-  else    // try from simple types
+  else
+    // try from simple types
     case Json^ of
       #0:
         begin
@@ -3862,33 +3869,36 @@ begin
     else
       begin
         // simple types
-        Value := GetJsonField(Json, Json, @wasString, EndOfObject, @ValueLen);
+        info.Json := Json;
+        info.GetJsonField;
+        Json := info.Json;
         if Json = nil then
           Json := @NULCHAR;
-        if (Value = nil) or
-           not wasString then
-          if GetVariantFromNotStringJson(Value, TVarData(tmp), true) then
+        if EndOfObject <> nil then
+          EndOfObject^ := info.EndOfObject;
+        if (info.Value = nil) or
+           not info.WasString then
+          if GetVariantFromNotStringJson(info.Value, TVarData(tmp), true) then
           begin
             BsonWriteVariant(name, tmp); // null,boolean,Int64,double
             exit;
           end;
         // found no simple value -> check text value
-        if Base64MagicCheckAndDecode(Value, ValueLen, blob) then
+        if Base64MagicCheckAndDecode(info.Value, info.ValueLen, blob) then
           // recognized '\uFFF0base64encodedbinary' pattern
           BsonWrite(name, pointer(blob), length(blob))
-        else if Iso8601CheckAndDecode(Value, ValueLen, ValueDateTime) then
+        else if Iso8601CheckAndDecode(info.Value, info.ValueLen, ValueDateTime) or
+                ((PInteger(info.Value)^ and $ffffff = JSON_SQLDATE_MAGIC_C) and
+                 Iso8601CheckAndDecode(info.Value + 3, info.ValueLen - 3, ValueDateTime)) then
           // recognized TJsonWriter.AddDateTime() pattern
           BsonWriteDateTime(name, ValueDateTime)
-        else if (PInteger(Value)^ and $ffffff = JSON_SQLDATE_MAGIC_C) and
-           Iso8601CheckAndDecode(Value + 3, ValueLen - 3, ValueDateTime) then
-          // recognized TJsonWriter.AddDateTime(woDateTimeWithMagic) pattern
-          BsonWriteDateTime(name, ValueDateTime)
-        else        // will point to the in-place escaped Json text
-          BsonWriteString(name, Value, ValueLen);
+        else
+          // append the in-place escaped Json text
+          BsonWriteString(name, info.Value, info.ValueLen);
       end;
     end;
   if TotalWritten > BSON_MAXDOCUMENTSIZE then
-    raise EBsonException.CreateUtf8('%.BsonWriteDoc(size=% > max=%)',
+    raise EBsonException.CreateUtf8('Unexpected %.BsonWriteDoc(size=% > max=%)',
       [self, TotalWritten, BSON_MAXDOCUMENTSIZE]);
 end;
 

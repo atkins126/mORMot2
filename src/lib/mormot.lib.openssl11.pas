@@ -899,7 +899,7 @@ type
     function CurrentCipher: PSSL_CIPHER;
     function PeerChain: Pstack_st_X509;
     function PeerCertificate: PX509;
-    function PeerCertificates: PX509DynArray;
+    function PeerCertificates(acquire: boolean = false): PX509DynArray;
     function PeerCertificatesAsPEM: RawUtf8;
     function PeerCertificatesAsText: RawUtf8;
     function IsVerified: boolean;
@@ -963,6 +963,8 @@ type
     function PublicKeyToPem: RawUtf8;
     procedure ToPem(out PrivateKey, PublicKey: RawUtf8);
     function Sign(Algo: PEVP_MD; Msg: pointer; Len: integer): RawByteString;
+    function Verify(Algo: PEVP_MD;
+      Sig, Msg: pointer; SigLen, MsgLen: integer): boolean;
     function Size: integer;
     procedure Free;
       {$ifdef HASINLINE} inline; {$endif}
@@ -1000,11 +1002,13 @@ type
 
   OPENSSL_STACK = object
   private
-    function GetItem(index: PtrInt): pointer;
+    function GetItem(index: integer): pointer;
       {$ifdef HASINLINE} inline; {$endif}
   public
     function Count: integer;
+      {$ifdef HASINLINE} inline; {$endif}
     function Add(one: pointer): integer;
+      {$ifdef HASINLINE} inline; {$endif}
     function Find(one: pointer): integer;
     function Extract(index: integer): pointer;
     /// low-level method needing an explicit result typecast e.g. to PX509DynArray
@@ -1014,7 +1018,7 @@ type
     /// make PX509/PX509_CRL.Free to all items, then free the stack
     procedure FreeX509;
     procedure FreeX509_CRL;
-    property Items[index: PtrInt]: pointer
+    property Items[index: integer]: pointer
       read GetItem; default;
   end;
 
@@ -1398,13 +1402,18 @@ type
       {$ifdef HASINLINE} inline; {$endif}
     function GetName: PX509_NAME;
       {$ifdef HASINLINE} inline; {$endif}
+    function GetPublicKey: PEVP_PKEY;
+      {$ifdef HASINLINE} inline; {$endif}
     /// the Certificate Genuine Serial Number
     // - e.g. '04:f9:25:39:39:f8:ce:79:1a:a4:0e:b3:fa:72:e3:bc:9e:d6'
     function SerialNumber: RawUtf8;
     /// the High-Level Certificate Main Subject
-    // - e.g. '/CN=synopse.info'
+    // - e.g. 'CN=synopse.info'
     // - see SubjectAlternativeNames for a full set of items
     function SubjectName: RawUtf8;
+    /// extract a given part of the Certificate Main Subject
+    // - e.g. 'synopse.info' from SubjectName = 'CN=synopse.info'
+    function GetSubject(const id: RawUtf8 = 'CN'): RawUtf8;
     /// an array of (DNS) Subject names covered by this Certificate
     // - will search and remove the 'DNS:' trailer by default (dns=true)
     // - e.g. ['synopse.info', 'www.synopse.info']
@@ -1429,6 +1438,7 @@ type
     /// if the Certificate X509v3 Basic Constraints contains 'CA:TRUE'
     // - match kuCA flag in GetUsage/HasUsage
     function IsCA: boolean;
+    /// if the Certificate issuer is itself
     function IsSelfSigned: boolean;
     /// the X509v3 Key and Extended Key Usage Flags of this Certificate
     function GetUsage: TX509Usages;
@@ -1465,6 +1475,8 @@ type
     /// set key_usage/ext_key_usage extensions
     // - any previous usage set will be first deleted
     function SetUsage(usages: TX509Usages): boolean;
+    /// check if the public key of this certificate matches a given private key
+    function MatchPrivateKey(pkey: PEVP_PKEY): boolean;
     /// serialize the certificate as DER raw binary
     function ToBinary: RawByteString;
     /// serialize the certificate as PEM text
@@ -1882,6 +1894,7 @@ function EVP_CipherUpdate(ctx: PEVP_CIPHER_CTX; _out: PByte; outl: PInteger;
   _in: PByte; inl: integer): integer; cdecl;
 function EVP_CipherFinal_ex(ctx: PEVP_CIPHER_CTX; outm: PByte; outl: PInteger): integer; cdecl;
 function EVP_CIPHER_CTX_set_padding(c: PEVP_CIPHER_CTX; pad: integer): integer; cdecl;
+function EVP_CIPHER_CTX_iv(ctx: PEVP_CIPHER_CTX): PByte; cdecl;
 function EVP_MD_CTX_new(): PEVP_MD_CTX; cdecl;
 procedure EVP_MD_CTX_free(ctx: PEVP_MD_CTX); cdecl;
 function EVP_MD_CTX_md(ctx: PEVP_MD_CTX): PEVP_MD; cdecl;
@@ -2024,7 +2037,7 @@ procedure PX509DynArrayFree(var X509: PX509DynArray);
 function NewCertificate: PX509;
 
 /// unserialize a new X509 Certificate Instance
-// - from DER binary as serialized by X509.ToBinary
+// - from DER binary as serialized by X509.ToBinary, or PEM format
 // - use LoadCertificate(PemToDer()) to load a PEM certificate
 function LoadCertificate(const Der: RawByteString): PX509;
 
@@ -2090,6 +2103,15 @@ type
 // ! @NewNetTls := @OpenSslNewNetTls;
 function OpenSslNewNetTls: INetTls;
 
+/// retrieve the peer certificates chain from a given HTTPS server URI
+// - caller should call procedure PX509DynArrayFree(result) once done
+function GetPeerCertFromUrl(const url: RawUtf8): PX509DynArray;
+
+/// retrieve the peer certificates PEM chain from a given HTTPS server URI
+function GetPeerCertPemFromUrl(const url: RawUtf8): RawUtf8;
+
+/// retrieve the peer certificates information from a given HTTPS server URI
+function GetPeerCertInfoFromUrl(const url: RawUtf8): RawUtf8;
 
 
 implementation
@@ -2666,6 +2688,7 @@ type
     EVP_CipherUpdate: function(ctx: PEVP_CIPHER_CTX; _out: PByte; outl: PInteger; _in: PByte; inl: integer): integer; cdecl;
     EVP_CipherFinal_ex: function(ctx: PEVP_CIPHER_CTX; outm: PByte; outl: PInteger): integer; cdecl;
     EVP_CIPHER_CTX_set_padding: function(c: PEVP_CIPHER_CTX; pad: integer): integer; cdecl;
+    EVP_CIPHER_CTX_iv: function(ctx: PEVP_CIPHER_CTX): PByte; cdecl;
     EVP_MD_CTX_new: function: PEVP_MD_CTX; cdecl;
     EVP_MD_CTX_free: procedure(ctx: PEVP_MD_CTX); cdecl;
     EVP_MD_CTX_md: function(ctx: PEVP_MD_CTX): PEVP_MD; cdecl;
@@ -2730,7 +2753,7 @@ type
   end;
 
 const
-  LIBCRYPTO_ENTRIES: array[0..280] of RawUtf8 = (
+  LIBCRYPTO_ENTRIES: array[0..281] of RawUtf8 = (
     'CRYPTO_malloc',
     'CRYPTO_set_mem_functions',
     'CRYPTO_free',
@@ -2951,6 +2974,7 @@ const
     'EVP_CipherUpdate',
     'EVP_CipherFinal_ex',
     'EVP_CIPHER_CTX_set_padding',
+    'EVP_CIPHER_CTX_iv',
     'EVP_MD_CTX_new',
     'EVP_MD_CTX_free',
     'EVP_MD_CTX_md',
@@ -4155,6 +4179,11 @@ end;
 function EVP_CIPHER_CTX_set_padding(c: PEVP_CIPHER_CTX; pad: integer): integer;
 begin
   result := libcrypto.EVP_CIPHER_CTX_set_padding(c, pad);
+end;
+
+function EVP_CIPHER_CTX_iv(ctx: PEVP_CIPHER_CTX): PByte;
+begin
+  result := libcrypto.EVP_CIPHER_CTX_iv(ctx);
 end;
 
 function EVP_MD_CTX_new: PEVP_MD_CTX;
@@ -5436,6 +5465,9 @@ function EVP_CipherFinal_ex(ctx: PEVP_CIPHER_CTX; outm: PByte; outl: PInteger): 
 function EVP_CIPHER_CTX_set_padding(c: PEVP_CIPHER_CTX; pad: integer): integer; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_CIPHER_CTX_set_padding';
 
+function EVP_CIPHER_CTX_iv(ctx: PEVP_CIPHER_CTX): PByte; cdecl;
+  external LIB_CRYPTO name _PU + 'EVP_CIPHER_CTX_iv';
+
 function EVP_MD_CTX_new(): PEVP_MD_CTX; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_MD_CTX_new';
 
@@ -5804,7 +5836,7 @@ begin
   result := OPENSSL_sk_delete(@self, index);
 end;
 
-function OPENSSL_STACK.GetItem(index: PtrInt): pointer;
+function OPENSSL_STACK.GetItem(index: integer): pointer;
 begin
   result := OPENSSL_sk_value(@self, index);
 end;
@@ -5894,9 +5926,14 @@ begin
     result := SSL_get_peer_cert_chain(@self);
 end;
 
-function SSL.PeerCertificates: PX509DynArray;
+function SSL.PeerCertificates(acquire: boolean): PX509DynArray;
+var
+  i: PtrInt;
 begin
   result := PX509DynArray(PeerChain.ToDynArray);
+  if acquire then
+    for i := 0 to high(result) do
+      result[i].Acquire;
 end;
 
 function SSL.PeerCertificatesAsPEM: RawUtf8;
@@ -6034,6 +6071,24 @@ begin
       else
         result := '';
     end {else WritelnSSL_error};
+  finally
+    EVP_MD_CTX_free(ctx);
+  end;
+end;
+
+function EVP_PKEY.Verify(Algo: PEVP_MD; Sig, Msg: pointer;
+  SigLen, MsgLen: integer): boolean;
+var
+  ctx: PEVP_MD_CTX;
+begin
+  // we don't check "if @self = nil" because may be called without EVP_PKEY
+  // we don't check "Algo = nil" because algo may have its built-in hashing
+  ctx := EVP_MD_CTX_new;
+  try
+    // note: ED25519 requires single-pass EVP_DigestVerify()
+    result :=
+      (EVP_DigestVerifyInit(ctx, nil, Algo, nil, @self) = OPENSSLSUCCESS) and
+      (EVP_DigestVerify(ctx, Sig, SigLen, Msg, MsgLen) = OPENSSLSUCCESS);
   finally
     EVP_MD_CTX_free(ctx);
   end;
@@ -6361,7 +6416,7 @@ function X509_CRL.IsRevoked(const serialnumber: RawUtf8): integer;
 var
   rev: Pstack_st_X509_REVOKED;
   r: PX509_REVOKED;
-  i: PtrInt;
+  i: integer;
 begin
   rev := Revoked;
   for i := 0 to rev^.Count - 1 do
@@ -6382,7 +6437,7 @@ function X509_CRL.IsRevoked(serial: PASN1_INTEGER): integer;
 var
   rev: Pstack_st_X509_REVOKED;
   r: PX509_REVOKED;
-  i: PtrInt;
+  i: integer;
 begin
   if serial.Len <> 0 then
   begin
@@ -6405,7 +6460,7 @@ end;
 function X509_CRL.AddFrom(another: PX509_CRL): integer;
 var
   rev: Pstack_st_X509_REVOKED;
-  i: PtrInt;
+  i: integer;
 begin
   result := 0;
   if (@self = nil) or
@@ -6498,7 +6553,7 @@ end;
 
 function X509_CRL.Extension(nid: integer): PX509_EXTENSION;
 var
-  i: PtrInt;
+  i: integer;
   ext: Pstack_st_X509_EXTENSION;
 begin
   ext := Extensions;
@@ -7022,6 +7077,14 @@ begin
     result := X509_get_subject_name(@self);
 end;
 
+function X509.GetPublicKey: PEVP_PKEY;
+begin
+  if @self = nil then
+    result := nil
+  else
+    result := X509_get_pubkey(@self);
+end;
+
 function X509.SerialNumber: RawUtf8;
 begin
   GetSerial.ToHex(result);
@@ -7030,6 +7093,43 @@ end;
 function X509.SubjectName: RawUtf8;
 begin
   GetName.ToUtf8(result);
+end;
+
+procedure GetNext(var P: PUtf8Char; Sep: AnsiChar; var result: RawUtf8);
+var
+  S, E: PUtf8Char;
+begin // see GetNextItemTrimed() from mormot.core.text
+  while (P^ <= ' ') and
+        (P^ <> #0) do
+    inc(P); // trim left
+  S := P;
+  while (S^ <> #0) and
+        (S^ <> Sep) do
+    inc(S);
+  E := S;
+  while (E > P) and (E[-1] in [#1..' ']) do
+    dec(E); // trim right
+  FastSetString(result, P, E - P);
+  if S^ <> #0 then
+    P := S + 1
+  else
+    P := nil;
+end;
+
+function X509.GetSubject(const id: RawUtf8): RawUtf8;
+var
+  p: PUtf8Char;
+  nam: RawUtf8;
+begin
+  p := pointer(SubjectName);
+  while p <> nil do
+  begin
+    GetNext(p, '=', nam);
+    GetNext(p, ',', result);
+    if nam = id then
+      exit;
+  end;
+  result := '';
 end;
 
 function X509.IssuerName: RawUtf8;
@@ -7336,6 +7436,13 @@ begin
   result := true;
 end;
 
+function X509.MatchPrivateKey(pkey: PEVP_PKEY): boolean;
+begin
+  result := (@self <> nil) and
+            (pkey <> nil) and
+            (X509_check_private_key(@self, pkey) = OPENSSLSUCCESS);
+end;
+
 function X509.ToBinary: RawByteString;
 begin
   result := BioSave(@self, @i2d_X509_bio);
@@ -7526,8 +7633,7 @@ function NewPkcs12(const Password: RawUtf8; PrivKey: PEVP_PKEY;
   const FriendlyName: RawUtf8): PPKCS12;
 begin
   EOpenSsl.CheckAvailable(nil, 'NewPkcs12');
-  if (Cert <> nil) and
-     (X509_check_private_key(Cert, PrivKey) <> OPENSSLSUCCESS) then
+  if not Cert.MatchPrivateKey(PrivKey) then
     raise EOpenSsl.Create('NewPkcs12: PrivKey does not match Cert');
   result := PKCS12_create(pointer(Password), pointer(FriendlyName),
     PrivKey, Cert, CA, nid_key, nid_cert, iter, mac_iter, 0);
@@ -7987,6 +8093,55 @@ begin
     result := TOpenSslClient.Create
   else
     result := nil;
+end;
+
+
+function GetPeerCertFromUrl(const url: RawUtf8): PX509DynArray;
+var
+  u: TUri;
+  ns: TNetSocket;
+  c: PSSL_CTX;
+  s: PSSL;
+begin
+  Finalize(result);
+  if OpenSslIsAvailable and
+     u.From(url) and
+     (NewSocket(u.Server, u.Port, nlTcp, false, 1000, 1000, 1000, 2, ns) = nrOk) then
+  try
+    // cut-down version of TOpenSslClient.AfterConnection
+    c := SSL_CTX_new(TLS_client_method);
+    SSL_CTX_set_verify(c, SSL_VERIFY_NONE, nil);
+    s := SSL_new(c);
+    SSL_set_tlsext_host_name(s, u.Server);
+    try
+      if (SSL_set_fd(s, ns.Socket) = OPENSSLSUCCESS) and
+         (SSL_connect(s) = OPENSSLSUCCESS) then
+        result := s.PeerCertificates({acquire=}true);
+    finally
+      s.Free;
+      SSL_CTX_free(c);
+    end;
+  finally
+    ns.ShutdownAndClose(true);
+  end;
+end;
+
+function GetPeerCertPemFromUrl(const url: RawUtf8): RawUtf8;
+var
+  chain: PX509DynArray;
+begin
+  chain := GetPeerCertFromUrl(url);
+  result := PX509DynArrayToPem(chain);
+  PX509DynArrayFree(chain);
+end;
+
+function GetPeerCertInfoFromUrl(const url: RawUtf8): RawUtf8;
+var
+  chain: PX509DynArray;
+begin
+  chain := GetPeerCertFromUrl(url);
+  result := PX509DynArrayToText(chain);
+  PX509DynArrayFree(chain);
 end;
 
 

@@ -10,6 +10,7 @@ uses
   unix,
   unixcp,
   unixtype,
+  unixutil,
   {$ifdef OSBSDDARWIN}
   sysctl,
   {$else}
@@ -514,14 +515,15 @@ const // Date Translation - see http://en.wikipedia.org/wiki/Julian_day
   MinsPerDay  = HoursPerDay * MinsPerHour;
   SecsPerDay  = MinsPerDay * SecsPerMin;
   SecsPerHour = MinsPerHour * SecsPerMin;
+  MilliSecsPerSec = 1000;
+  MicroSecsPerSec = 1000000;
+  MicroSecsPerMilliSec = 1000;
+  NanoSecsPerMicroSec = 1000;
+  NanoSecsPerMilliSec = 1000000;
   C1970       = 2440588;
   D0          = 1461;
   D1          = 146097;
   D2          = 1721119;
-  UnixDelta   = 25569;
-  
-  THOUSAND = Int64(1000);
-  MILLION  = Int64(THOUSAND * THOUSAND);
 
 procedure JulianToGregorian(JulianDN: PtrUInt; out result: TSystemTime);
   {$ifdef HASINLINE}inline;{$endif}
@@ -600,12 +602,10 @@ end;
 procedure QueryPerformanceMicroSeconds(out Value: Int64);
 begin
   if mach_timenanosecond then
-    Value := mach_absolute_time div THOUSAND
+    Value := mach_absolute_time
   else
-  begin
     QueryPerformanceNanosec(Value);
-    Value := Value div THOUSAND; // ns to us
-  end;
+  Value := Value div NanoSecsPerMicroSec; // ns to us
 end;
 
 function GetTickCount64: Int64;
@@ -614,7 +614,7 @@ begin
     result := mach_absolute_time
   else
     QueryPerformanceNanosec(result);
-  result := result div MILLION; // ns to ms
+  result := result div NanoSecsPerMilliSec; // ns to ms
 end;
 
 function UnixTimeUtc: TUnixTime;
@@ -630,7 +630,8 @@ var
   tz: timeval;
 begin
   fpgettimeofday(@tz, nil);
-  result := (tz.tv_sec * THOUSAND) + tz.tv_usec div THOUSAND; // in milliseconds
+  result := (tz.Int64(tv_sec) * MilliSecsPerSec) +
+            tz.tv_usec div MicroSecsPerMilliSec; // in milliseconds
 end;
 
 procedure GetSystemTime(out result: TSystemTime);
@@ -639,7 +640,7 @@ var
 begin
   fpgettimeofday(@tz, nil);
   EpochToSystemTime(tz.tv_sec, result);
-  result.MilliSecond := tz.tv_usec div THOUSAND;
+  result.MilliSecond := tz.tv_usec div MicroSecsPerMilliSec;
 end;
 
 {$else}
@@ -698,7 +699,8 @@ var
 begin
   clock_gettime(CLOCK_REALTIME_FAST, @r); // likely = CLOCK_REALTIME_COARSE
   // convert from nanoseconds into milliseconds
-  result := PtrUInt(r.tv_nsec) div MILLION + (r.tv_sec * THOUSAND);
+  result := QWord(PtrUInt(r.tv_nsec) div PtrUInt(NanoSecsPerMilliSec)) +
+            QWord(r.tv_sec) * MilliSecsPerSec;
 end;
 
 function UnixTimeUtc: TUnixTime;
@@ -715,7 +717,8 @@ var
 begin
   clock_gettime(CLOCK_MONOTONIC_HIRES, @r);
   // convert from nanoseconds into microseconds
-  Value := PtrUInt(r.tv_nsec) div THOUSAND + r.tv_sec * MILLION;
+  Value := QWord(PtrUInt(r.tv_nsec) div PtrUInt(NanoSecsPerMicroSec)) +
+           QWord(r.tv_sec) * MicroSecsPerSec;
 end;
 
 procedure GetSystemTime(out result: TSystemTime);
@@ -725,7 +728,7 @@ begin
   // faster than fpgettimeofday() which makes a syscall and don't use vDSO
   clock_gettime(CLOCK_REALTIME_FAST, @r);
   EpochToSystemTime(r.tv_sec, result);
-  result.MilliSecond := r.tv_nsec div MILLION;
+  result.MilliSecond := PtrUInt(r.tv_nsec) div PtrUInt(NanoSecsPerMilliSec);
 end;
 
 function GetTickCount64: Int64;
@@ -734,7 +737,8 @@ var
 begin
   clock_gettime(CLOCK_MONOTONIC_FAST, @tp); // likely = CLOCK_MONOTONIC_COARSE
   // convert from nanoseconds into milliseconds
-  result := PtrUInt(tp.tv_nsec) div MILLION + (tp.tv_sec * THOUSAND);
+  result := QWord(PtrUInt(tp.tv_nsec) div PtrUInt(NanoSecsPerMilliSec)) +
+            QWord(tp.tv_sec) * MilliSecsPerSec;
 end;
 
 {$endif OSDARWIN}
@@ -749,6 +753,7 @@ end;
 var
   {%H-}pthread: pointer;
   pthread_setname_np: function(thread: pointer; name: PAnsiChar): integer; cdecl;
+  pthread_cancel: function (thread: pointer): integer; cdecl;
 
 {$endif OSPTHREADS}
 
@@ -787,11 +792,12 @@ begin
   trunc[L] := #0;
   {$ifdef OSPTHREADS} // see https://stackoverflow.com/a/7989973
   if Assigned(pthread_setname_np) then
-  try
-    pthread_setname_np(pointer(ThreadID), @trunc[0]);
-  except
-    ; // ignore any exception (pthread confusion with its static version?)
-  end;
+    try
+      pthread_setname_np(pointer(ThreadID), @trunc[0]);
+    except
+      // ignore any exception (pthread confusion with its static version?)
+      @pthread_setname_np := nil; // don't continue that way
+    end;
   {$endif OSPTHREADS}
 end;
 
@@ -799,6 +805,20 @@ procedure RawSetThreadName(ThreadID: TThreadID; const Name: RawUtf8);
 begin
   if ThreadID <> MainThreadID then // don't change the main process name
     SetUnixThreadName(ThreadID, Name); // call pthread_setname_np()
+end;
+
+function RawKillThread(Thread: TThread): boolean;
+begin
+  result := false;
+  {$ifdef OSPTHREADS}
+  if Assigned(pthread_cancel) then
+    try
+      result := pthread_cancel(pointer(Thread.ThreadID)) = 0;
+    except
+      // ignore any exception (pthread confusion with its static version?)
+      @pthread_cancel := nil; // don't continue that way
+    end;
+  {$endif OSPTHREADS}
 end;
 
 {$ifndef NOEXCEPTIONINTERCEPT}
@@ -822,25 +842,29 @@ const
   faInvalidFile = faDirectory;
   faDirectoryMask = faDirectory;
 
-function FileAgeToDateTime(const FileName: TFileName): TDateTime;
-var
-  Age: integer;
+function FileDateToDateTime(const FileDate: TFileAge): TDateTime;
 begin
-  Age := FileAge(FileName);
-  if Age <> -1 then
-    result := FileDateToDateTime(Age)
+  if FileDate <= 0 then
+    result := 0
   else
-    result := 0;
+    // + unixutil.TZSeconds = UTC to local time conversion
+    result := (FileDate + TZSeconds) / SecsPerDay + UnixDelta;
+end;
+
+function FileAgeToDateTime(const FileName: TFileName): TDateTime;
+begin
+  // faster to use POSIX time than RTL FileDateToDateTime(FileAge())
+  result := FileDateToDateTime(FileAgeToUnixTimeUtc(FileName)); // UTC to local
 end;
 
 function FileAgeToUnixTimeUtc(const FileName: TFileName; AllowDir: boolean): TUnixTime;
 var
-  st: stat;
+  st: TStat;
 begin
   if (fpStat(pointer(FileName), st) = 0) and
      (AllowDir or
       (not FpS_ISDIR(st.st_mode))) then
-    result := st.st_mtime // no local conversion
+    result := st.st_mtime // as TUnixTime seconds, with no local conversion
   else
     result := 0
 end;
@@ -883,6 +907,29 @@ begin
     result := st.st_size;
 end;
 
+procedure StatTimeMS(const st: TStat; out time: TUnixMSTime); inline;
+begin
+  time := st.st_mtime * MilliSecsPerSec + // no local conversion needed
+          // include milliseconds information
+          {$ifdef OSLINUXANDROID}
+          st.st_mtime_nsec div NanoSecsPerMilliSec;
+          {$else}
+          st.st_mtimensec div NanoSecsPerMilliSec;
+          {$endif OSLINUXANDROID}
+end;
+
+function FileInfo(const FileName: TFileName; out FileSize: Int64;
+  out FileTimestampUtc: TUnixMSTime): boolean;
+var
+  st: TStat;
+begin
+  result := fpStat(pointer(FileName), st) = 0;
+  if not result then
+    exit;
+  FileSize := st.st_size;
+  StatTimeMS(st, FileTimestampUtc);
+end;
+
 function FileSize(F: THandle): Int64;
 var
   st: TStat;
@@ -898,11 +945,11 @@ begin
   result := FPLSeek(Handle, Offset, Origin);
 end;
 
-function FileInfoByHandle(aFileHandle: THandle;
-  out FileId, FileSize, LastWriteAccess, FileCreateDateTime: Int64): boolean;
+function FileInfoByHandle(aFileHandle: THandle; out FileId, FileSize: Int64;
+  out LastWriteAccess, FileCreateDateTime: TUnixMSTime): boolean;
 var
   lastreadaccess: Int64;
-  lp: stat;
+  lp: TStat;
   r: integer;
 begin
   r := FpFStat(aFileHandle, lp);
@@ -911,18 +958,19 @@ begin
     exit;
   FileId := lp.st_ino;
   FileSize := lp.st_size;
-  lastreadaccess := lp.st_atime * MSecsPerSec;
-  LastWriteAccess := lp.st_mtime * MSecsPerSec;
+  StatTimeMS(lp, LastWriteAccess);
+  // some FS don't populate all fields, so we use what we actually got
   {$ifdef OSOPENBSD}
   if (lp.st_birthtime <> 0) and
      (lp.st_birthtime < lp.st_ctime) then
     lp.st_ctime := lp.st_birthtime;
   {$endif OSOPENBSD}
-  FileCreateDateTime := lp.st_ctime * MSecsPerSec;
+  FileCreateDateTime := lp.st_ctime * MilliSecsPerSec;
   if LastWriteAccess <> 0 then
     if (FileCreateDateTime = 0) or
        (FileCreateDateTime > LastWriteAccess) then
       FileCreateDateTime := LastWriteAccess;
+  lastreadaccess := lp.st_atime * MilliSecsPerSec;
   if lastreadaccess <> 0 then
     if (FileCreateDateTime = 0) or
        (FileCreateDateTime > lastreadaccess) then
@@ -1066,7 +1114,7 @@ end;
 procedure SleepHiRes(ms: cardinal);
 var
   timeout: TTimespec;
-  d: cardinal;
+  s: cardinal;
 begin
   if ms = 0 then
     // handle SleepHiRes(0) special case
@@ -1084,9 +1132,9 @@ begin
     end
   else
   begin
-    d := ms div 1000;
-    timeout.tv_sec := d;
-    timeout.tv_nsec := 1000000 * (ms - d * 1000);
+    s := ms div MilliSecsPerSec;
+    timeout.tv_sec := s;
+    timeout.tv_nsec := (ms - s * MilliSecsPerSec) * NanoSecsPerMilliSec;
   end;
   fpnanosleep(@timeout, nil)
   // no retry loop on ESysEINTR (as with regular RTL's Sleep)
@@ -1234,7 +1282,7 @@ end;
 
 procedure AllocConsole;
 begin
-  // nothing to do on Linux
+  StdOut := StdOutputHandle;
 end;
 
 {$I-}
@@ -1247,7 +1295,7 @@ const
   TERM_CTRL: string[8] = '04261537';
 begin
 {$ifdef OSPOSIX}
-  if not stdoutIsTTY then
+  if not StdOutIsTTY then
     exit;
 {$endif OSPOSIX}
   if ord(Color) = TextAttr then
@@ -1393,66 +1441,130 @@ begin
 end;
 
 var
-  _HomePath,
-  _TempPath,
-  _UserPath,
-  _LogPath: TFileName;
+  _Path: array[TSystemPath] of TFileName;
 
-function GetSystemPath(kind: TSystemPath): TFileName;
+procedure SetSystemPath(kind: TSystemPath);
+var
+  s: TFileName;
 begin
   case kind of
     spLog:
-      begin
-        if _LogPath = '' then
-          if IsDirectoryWritable('/var/log') then
-             // may not be writable by not root on POSIX
-            _LogPath := '/var/log/'
-          else if IsDirectoryWritable(Executable.ProgramFilePath) then
-            _LogPath := Executable.ProgramFilePath
-          else
-            _LogPath := GetSystemPath(spUserData);
-        result := _LogPath;
-      end;
+      if IsDirectoryWritable('/var/log') then
+         // may not be writable by not root on POSIX
+        s := '/var/log/'
+      else if IsDirectoryWritable(Executable.ProgramFilePath) then
+        s := Executable.ProgramFilePath
+      else
+        s := GetSystemPath(spUserData);
     spUserData:
       begin
-        if _UserPath = '' then
-        begin
-          //  ~/.cache/appname
-          _UserPath := GetEnvironmentVariable('XDG_CACHE_HOME');
-          if (_UserPath = '') or
-             not IsDirectoryWritable(_UserPath) then
-            _UserPath := EnsureDirectoryExists(
-              GetSystemPath(spUserDocuments) + '.cache');
-          _UserPath := EnsureDirectoryExists(
-            _UserPath + TFileName(Executable.ProgramName));
-        end;
-        result := _UserPath;
+        //  ~/.cache/appname
+        s := GetEnvironmentVariable('XDG_CACHE_HOME');
+        if (s = '') or
+           not IsDirectoryWritable(s) then
+          s := EnsureDirectoryExists(GetSystemPath(spUserDocuments) + '.cache');
+        s := EnsureDirectoryExists(s + TFileName(Executable.ProgramName));
       end;
     spTempFolder:
       begin
-        if _TempPath = '' then
-        begin
-          _TempPath := GetEnvironmentVariable('TMPDIR'); // POSIX
-          if _TempPath = '' then
-            _TempPath := GetEnvironmentVariable('TMP');
-          if _TempPath = '' then
-            if DirectoryExists('/tmp') then
-              _TempPath := '/tmp'
-            else
-              _TempPath := '/var/tmp';
-          _TempPath := IncludeTrailingPathDelimiter(_TempPath);
-        end;
-        result := _TempPath;
-      end
+        s := GetEnvironmentVariable('TMPDIR'); // POSIX
+        if s = '' then
+          s := GetEnvironmentVariable('TMP');
+        if s = '' then
+          if DirectoryExists('/tmp') then
+            s := '/tmp'
+          else
+            s := '/var/tmp';
+        s := IncludeTrailingPathDelimiter(s);
+      end;
   else
+    // POSIX requires a value for $HOME
+    s := IncludeTrailingPathDelimiter(GetEnvironmentVariable('HOME'));
+  end;
+  _Path[kind] := s;
+end;
+
+function GetSystemPath(kind: TSystemPath): TFileName;
+begin
+  result := _Path[kind];
+  if result <> '' then
+    exit;
+  SetSystemPath(kind);
+  result := _Path[kind];
+end;
+
+var
+  _SystemStoreAsPem: record
+    Tix: cardinal;
+    Pem: RawUtf8;
+  end;
+
+function GetSystemStoreAsPem(CertStores: TSystemCertificateStores;
+  FlushCache: boolean): RawUtf8;
+var
+  now: cardinal;
+  files: TRawUtf8DynArray;
+  f: PtrInt;
+begin
+  now := GetTickCount64 shr 18; // div 262.144 seconds = refresh every 4.4 min
+  if not FlushCache then
+    with _SystemStoreAsPem do
+      if (Tix = now) and
+         (Pem <> '') then
+      begin
+        result := Pem; // quick retrieved from cache
+        exit;
+      end;
+  // first search if bounded within the application
+  if GetSystemStoreAsPemLocalFile <> '' then
+    if GetSystemStoreAsPemLocalFile[1] = '/' then
+      result := StringFromFile(GetSystemStoreAsPemLocalFile)
+    else
+      result := StringFromFile(
+        Executable.ProgramFilePath + GetSystemStoreAsPemLocalFile);
+  if result = '' then
+    result := StringFromFile(GetEnvironmentVariable('SSL_CA_CERT_FILE'));
+  if result = '' then
+  begin
+    // see https://go.dev/src/crypto/x509/root_unix.go as reference
+    if scsRoot in CertStores then
+      result := StringFromFirstFile([
+        {$ifdef OSLINUXANDROID}
+          '/etc/ssl/certs/ca-certificates.crt',                // Debian/Gentoo
+      	  '/etc/pki/tls/certs/ca-bundle.crt',                  // Fedora/RHEL 6
+          '/etc/ssl/ca-bundle.pem',                            // OpenSUSE
+          '/etc/pki/tls/cacert.pem',                           // OpenELEC
+          '/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem', // CentOS/RHEL 7
+          '/etc/ssl/cert.pem'                                  // Alpine Linux
+        {$else}
+      	  '/usr/local/etc/ssl/cert.pem',            // FreeBSD
+      	  '/etc/ssl/cert.pem',                      // OpenBSD
+      	  '/usr/local/share/certs/ca-root-nss.crt', // DragonFly
+      	  '/etc/openssl/certs/ca-certificates.crt'  // NetBSD
+        {$endif OSLINUXANDROID}
+        ]);
+    if scsCA in CertStores then
     begin
-      if _HomePath = '' then
-        // POSIX requires a value for $HOME
-        _HomePath := IncludeTrailingPathDelimiter(
-          GetEnvironmentVariable('HOME'));
-      result := _HomePath;
+      files := StringFromFolders([
+        {$ifdef OSLINUXANDROID}
+          '/etc/ssl/certs',               // Debian/SLES10/SLES11
+          '/etc/pki/tls/certs',           // Fedora/RHEL
+      	  '/system/etc/security/cacerts'  // Android
+        {$else}
+          '/etc/ssl/certs',         // FreeBSD 12.2+
+          '/usr/local/share/certs', // FreeBSD
+          '/etc/openssl/certs'      // NetBSD
+        {$endif OSLINUXANDROID}
+        ]);
+      for f := 0 to length(files) - 1 do
+        if (PosEx('-----BEGIN', files[f]) <> 0) and
+           IsAnsiCompatible(files[f]) and
+           (PosEx(files[f], result) = 0) then // append unknown PEM files
+          result := result + #10 + files[f];
     end;
   end;
+  _SystemStoreAsPem.Tix := now;
+  _SystemStoreAsPem.Pem := result;
 end;
 
 function SeemsRealPointer(p: pointer): boolean;
@@ -1883,14 +1995,15 @@ begin
     ProtectedResult := SynMProtect(
       AlignedAddr, PageSize, PROT_READ or PROT_WRITE) = 0;
   if ProtectedResult then
-  try
-    for i := 0 to Size - 1 do // do not use Move() here
-      PByteArray(Old)^[i] := PByteArray(New)^[i];
-    if not LeaveUnprotected and
-       ProtectedMemory then
-      SynMProtect(AlignedAddr, PageSize, PROT_READ or PROT_EXEC);
-  except
-  end;
+    try
+      for i := 0 to Size - 1 do // do not use Move() here
+        PByteArray(Old)^[i] := PByteArray(New)^[i];
+      if not LeaveUnprotected and
+         ProtectedMemory then
+        SynMProtect(AlignedAddr, PageSize, PROT_READ or PROT_EXEC);
+    except
+      // we ignore any exception here - it should work anyway
+    end;
 end;
 
 const
@@ -2021,10 +2134,64 @@ begin
   fpSigaction(SIGABRT, @saNew, @saOld);
 end;
 
+type
+  TPasswd = record
+    pw_name: PAnsiChar;    // user name
+    pw_passwd: PAnsiChar;  // encrypted password
+    pw_uid: TUid;	   // user uid
+    pw_gid: TGid;	   // user gid
+    // following fields are not consistent on BSD or Linux, but not needed
+  end;
+  PPasswd  = ^TPasswd;
+
+// retrieve information of a given user by name
+function getpwnam(name: PAnsiChar): PPasswd;
+  cdecl; external clib;
+
+// sets the supplementary group IDs for the calling process
+function setgroups(n: size_t; groups: PGid): integer;
+  cdecl; external clib;
+
+function setuid(uid: TUid): integer;
+  cdecl; external clib;
+function setgid(gid: TGid): integer;
+  cdecl; external clib;
+
+// changes the root directory of the calling process
+function chroot(rootpath: PAnsiChar): integer;
+  cdecl; external clib;
+
+function DropPriviledges(const UserName: RawUtf8): boolean;
+var
+  pwnam: PPasswd;
+begin
+  result := false;
+  pwnam := getpwnam(pointer(UserName));
+  if (pwnam = nil) or
+     ((setgid(pwnam.pw_gid) <> 0) and
+      (fpgeterrno <> ESysEPERM)) or
+     ((setuid(pwnam.pw_uid) <> 0) and
+      (fpgeterrno <> ESysEPERM)) then
+    exit;
+  result := true;
+end;
+
+function ChangeRoot(const FolderName: RawUtf8): boolean;
+begin
+  result := (FolderName <> '') and
+            (FpChdir(pointer(FolderName)) = 0) and
+            (chroot('.') = 0);
+end;
+
 function RunUntilSigTerminatedPidFile: TFileName;
 begin
-  result := Format('%s.%s.pid',
-     [Executable.ProgramFilePath, Executable.ProgramName]);
+  result := RunUntilSigTerminatedPidFilePath;
+  if result = '' then
+    result := Executable.ProgramFilePath;
+  if not IsDirectoryWritable(result) then
+    // if the executable folder is not writable, use the temporary folder
+    result := GetSystemPath(spTempFolder);
+  result := Format('%s.%s.pid', [result, Executable.ProgramName]);
 end;
 
 function RunUntilSigTerminatedForKill(waitseconds: integer): boolean;
@@ -2053,7 +2220,7 @@ begin
     result := true;
     exit;
   end;
-  tix := GetTickCount64 + waitseconds * 1000;
+  tix := GetTickCount64 + waitseconds * MilliSecsPerSec;
   repeat
     // RunUntilSigTerminated() below should delete the .pid file
     sleep(10);
@@ -2122,7 +2289,10 @@ begin
         [servicename, TXT[dofork], Executable.Version.DetailedOrVoid], nil);
     Start;
     while SynDaemonTerminated = 0 do
-      fpPause;
+      if GetCurrentThreadID = MainThreadID then
+        CheckSynchronize(100)
+      else
+        Sleep(100);
   finally
     if Assigned(onlog) then
       onlog(sllNewRun, 'Stop /% from Sig=%',
@@ -2443,14 +2613,19 @@ begin
 end;
 
 {$ifdef CPUAARCH64}
+{$ifdef OSLINUXANDROID}
+// AARCH64 armv8.o is only validated on Linux
+// (it should work on other POSIX ABI, but was reported to fail)
 
-{$L ..\..\static\aarch64-linux\armv8.o} // ARMv8 crc32c Linux code for POSIX
+{$define ARMV8STATIC}
+{$L ..\..\static\aarch64-linux\armv8.o} // ARMv8 crc32c Linux code
 
 function crc32carm64(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal; external;
 function crc32cby4arm64(crc, value: cardinal): cardinal; external;
 procedure crc32blockarm64(crc128, data128: PBlock128); external;
 procedure crc32blocksarm64(crc128, data128: PBlock128; count: integer); external;
 
+{$endif OSLINUXANDROID}
 {$endif CPUAARCH64}
 
 function KB(Size: cardinal): shortstring;
@@ -2497,7 +2672,7 @@ var
   tm: TThreadManager;
 begin
   // retrieve Kernel and Hardware information
-  stdoutIsTTY := (IsATTY(StdOutputHandle) = 1) and
+  StdOutIsTTY := (IsATTY(StdOutputHandle) = 1) and
                  IdemPChars(RawUtf8(GetEnvironmentVariable('TERM')), [
                    'XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']);
   modname := nil;
@@ -2725,18 +2900,21 @@ begin
   // direct access to the pthread library if possible (Linux only)
   {$ifdef OSPTHREADS}
   // mutex_lock() is blocking when dlopen run from a .so: cthreads uses both
-  // both static and dynamic linking, which is really confusing to our code
+  // static and dynamic linking, which is really confusing to our code
   // -> we don't open libpthread but we get its symbol
   pthread := dlopen('libpthread.so.0', RTLD_LAZY);
   if pthread <> nil then
+  begin
     @pthread_setname_np := dlsym(pthread, 'pthread_setname_np');
+    @pthread_cancel := dlsym(pthread, 'pthread_cancel');
+  end;
   {$endif OSPTHREADS}
-  // redirect some syscall FPC RTL functions to faster vDSO libc variant
+  // some ARM/AARCH64 specific initialization
   {$ifdef CPUARM3264}
   StrLen := @StrLenLibc; // libc version is faster than plain pascal or RTL code
   MoveFast := @MoveFastLibC;
   FillCharFast := @FillCharLibC;
-  {$ifdef CPUAARCH64}
+  {$ifdef ARMV8STATIC}
   if ahcCrc32 in CpuFeatures then
     try
       if (crc32cby4arm64(0, 1) = 3712330424) and
@@ -2753,14 +2931,15 @@ begin
     except
       exclude(CpuFeatures, ahcCrc32); // crc32 was actually not supported
     end;
-  {$endif CPUAARCH64}
+  {$endif ARMV8STATIC}
   {$endif CPUARM3264}
   {$ifdef CPUX64}
   {$ifdef OSLINUX}
   {$ifndef NOPATCHRTL}
+  // redirect some syscall FPC RTL functions to faster vDSO libc variant
   {$ifndef FPC_USE_LIBC}
-  // will avoid syscall e.g. for events timeout in cthreads.pp
   RedirectCode(@Linux.clock_gettime, @clock_gettime_c);
+  // will avoid syscall e.g. for events timeout in cthreads.pp
   RedirectCode(@fpgettimeofday, @gettimeofday_c);
   {$endif FPC_USE_LIBC}
   {$endif NOPATCHRTL}

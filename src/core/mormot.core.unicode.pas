@@ -666,11 +666,13 @@ function Utf8DecodeToRawUnicode(const S: RawUtf8): RawUnicode; overload;
 // - this version doesn't resize the length of the result RawUnicode
 // and is therefore useful before a Win32 Unicode API call (with nCount=-1)
 // - if DestLen is not nil, the resulting length (in bytes) will be stored within
+// - see also Utf8DecodeToUnicode() which uses a TSynTempBuffer for storage
 function Utf8DecodeToRawUnicodeUI(const S: RawUtf8;
   DestLen: PInteger = nil): RawUnicode; overload;
 
 /// convert a UTF-8 string into a RawUnicode string
 // - returns the resulting length (in bytes) will be stored within Dest
+// - see also Utf8DecodeToUnicode() which uses a TSynTempBuffer for storage
 function Utf8DecodeToRawUnicodeUI(const S: RawUtf8;
   var Dest: RawUnicode): integer; overload;
 
@@ -913,6 +915,15 @@ procedure Utf8ToSynUnicode(const Text: RawUtf8; var result: SynUnicode); overloa
 /// convert any UTF-8 encoded buffer into a generic SynUnicode Text
 procedure Utf8ToSynUnicode(Text: PUtf8Char; Len: PtrInt; var result: SynUnicode); overload;
 
+/// convert any UTF-8 encoded string into an UTF-16 temporary buffer
+// - returns the number of WideChar stored in temp (not bytes)
+// - caller should make temp.Done after temp.buf has been used
+function Utf8DecodeToUnicode(const Text: RawUtf8; var temp: TSynTempBuffer): PtrInt; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert any UTF-8 encoded buffer into an UTF-16 temporary buffer
+function Utf8DecodeToUnicode(Text: PUtf8Char; Len: PtrInt; var temp: TSynTempBuffer): PtrInt; overload;
+
 /// convert any Ansi 7-bit encoded String into a generic VCL Text
 // - the Text content must contain only 7-bit pure ASCII characters
 function Ansi7ToString(const Text: RawByteString): string; overload;
@@ -1065,6 +1076,16 @@ function IdemPropNameUSameLenNotNull(P1, P2: PUtf8Char; P1P2Len: PtrInt): boolea
 function IdemPropNameU(const P1, P2: RawUtf8): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// return the index of Value in Values[], -1 if not found
+// - here name search would use fast IdemPropNameU() function
+function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer; overload;
+
+/// return the index of Value in Values[] using IdemPropNameU(), -1 if not found
+// - typical use with a dynamic array is like:
+// ! index := FindPropName(pointer(aDynArray),aValue,length(aDynArray));
+function FindPropName(Values: PRawUtf8;
+  const Value: RawUtf8; ValuesCount: integer): integer; overload;
+
 /// returns true if the beginning of p^ is the same as up^
 // - ignore case - up^ must be already Upper
 // - chars are compared as 7-bit Ansi only (no accentuated characters): but when
@@ -1105,7 +1126,7 @@ function IdemPCharArray(p: PUtf8Char; const upArray: array of PAnsiChar): intege
 // - chars are compared as 7-bit Ansi only (no accentuated characters)
 // - warning: this function expects up^ items to have AT LEAST TWO CHARS
 // (it will use a fast 16-bit comparison of initial 2 bytes)
-function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): integer;
+function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): PtrInt;
 
 /// returns the index of a matching beginning of p^ in upArray two characters
 // - returns -1 if no item matched
@@ -1277,9 +1298,6 @@ function UpperCopy255(dest: PAnsiChar; const source: RawUtf8): PAnsiChar; overlo
 // - returns final dest pointer
 // - will copy up to 255 AnsiChar (expect the dest buffer to be defined e.g. as
 // array[byte] of AnsiChar on the caller stack)
-// - won't use SSE4.2 instructions on supported CPUs by default, which may read
-// some bytes beyond the s string, so should be avoided e.g. over memory mapped
-// files - call explicitly UpperCopy255BufSSE42() if you are confident on your input
 function UpperCopy255Buf(dest: PAnsiChar; source: PUtf8Char; sourceLen: PtrInt): PAnsiChar;
 
 /// copy source into dest^ with WinAnsi 8-bit upper case conversion
@@ -1454,6 +1472,12 @@ function UpperCaseUnicode(const S: RawUtf8): RawUtf8;
 // all systems - and also slower than LowerCase/LowerCaseU versions
 function LowerCaseUnicode(const S: RawUtf8): RawUtf8;
 
+/// use the RTL to convert the SynUnicode text to UpperCase
+function UpperCaseSynUnicode(const S: SynUnicode): SynUnicode;
+
+/// use the RTL to convert the SynUnicode text to LowerCase
+function LowerCaseSynUnicode(const S: SynUnicode): SynUnicode;
+
 /// fast WinAnsi comparison using the NormToUpper[] array for all 8-bit values
 function AnsiIComp(Str1, Str2: pointer): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
@@ -1513,8 +1537,6 @@ function UpperCaseUcs4Reference(const S: RawUtf8): RawUcs4;
 // - won't call the Operating System, so is consistent on all platforms, and
 // don't require any temporary UTF-16 decoding
 function StrPosIReference(U: PUtf8Char; const Up: RawUcs4): PUtf8Char;
-
-
 
 
 implementation
@@ -4129,18 +4151,30 @@ end;
 procedure Utf8ToSynUnicode(Text: PUtf8Char; Len: PtrInt; var result: SynUnicode);
 var
   tmp: TSynTempBuffer;
+  n: PtrInt;
+begin
+  n := Utf8DecodeToUnicode(Text, Len, tmp);
+  SetString(result, PWideChar(tmp.buf), n);
+  if n <> 0 then
+    tmp.Done;
+end;
+
+function Utf8DecodeToUnicode(const Text: RawUtf8; var temp: TSynTempBuffer): PtrInt;
+begin
+  result := Utf8DecodeToUnicode(pointer(Text), length(Text), temp);
+end;
+
+function Utf8DecodeToUnicode(Text: PUtf8Char; Len: PtrInt; var temp: TSynTempBuffer): PtrInt;
 begin
   if (Text = nil) or
      (Len <= 0) then
-    result := ''
+    result := 0
   else
   begin
-    tmp.Init(Len * 3); // maximum posible unicode size (if all <#128)
-    SetString(result, PWideChar(tmp.buf), Utf8ToWideChar(tmp.buf, Text, Len) shr 1);
-    tmp.Done;
+    temp.Init(Len * 3); // maximum posible unicode size (if all <#128)
+    result := Utf8ToWideChar(temp.buf, Text, Len) shr 1;
   end;
 end;
-
 
 
 { **************** Text Case-(in)sensitive Conversion and Comparison }
@@ -4256,6 +4290,36 @@ begin
       result := false
   else
     result := true;
+end;
+
+function FindPropName(Values: PRawUtf8; const Value: RawUtf8; ValuesCount: integer): integer;
+var
+  ValueLen: TStrLen;
+begin
+  dec(ValuesCount);
+  ValueLen := length(Value);
+  if ValueLen = 0 then
+    for result := 0 to ValuesCount do
+      if Values^ = '' then
+        exit
+      else
+        inc(Values)
+  else
+    for result := 0 to ValuesCount do
+      if (PtrUInt(Values^) <> 0) and
+         ({%H-}PStrLen(PtrUInt(Values^) - _STRLEN)^ = ValueLen) and
+         IdemPropNameUSameLenNotNull(pointer(Values^), pointer(Value), ValueLen) then
+        exit
+      else
+        inc(Values);
+  result := -1;
+end;
+
+function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer;
+begin
+  result := high(Names);
+  if result >= 0 then
+    result := FindPropName(@Names[0], Name, result + 1);
 end;
 
 function IdemPChar(p: PUtf8Char; up: PAnsiChar): boolean;
@@ -4397,7 +4461,7 @@ begin
   result := -1;
 end;
 
-function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): integer;
+function IdemPPChar(p: PUtf8Char; up: PPAnsiChar): PtrInt;
 var
   w: word;
   u: PAnsiChar;
@@ -5196,6 +5260,8 @@ var
   {$else}
   table: PByteArray;
   {$endif CPUX86NOTPIC}
+label
+  c2low;
 begin
   // fast UTF-8 comparison using the NormToUpper[] array for all 8-bit values
   {$ifndef CPUX86NOTPIC}
@@ -5214,7 +5280,7 @@ begin
               result := table[result];
               if c2 <= 127 then
               begin
-                if c2 = 0 then
+c2low:          if c2 = 0 then
                   exit; // u1>u2 -> return u1^
                 inc(u2);
                 dec(result, table[c2]);
@@ -5232,30 +5298,30 @@ begin
             end
           else
           begin
-            result := UTF8_TABLE.GetHighUtf8Ucs4(u1);
+            if result and $20 = 0 then // fast $0..$7ff process
+            begin
+              result := (result shl 6) + byte(u1[1]) - $3080;
+              inc(u1, 2);
+            end
+            else
+              result := UTF8_TABLE.GetHighUtf8Ucs4(u1);
             if result <= 255 then
               result := table[result]; // 8-bit to upper, 32-bit as is
           end;
           if c2 <= 127 then
+            goto c2low
+          else if c2 and $20 = 0 then // fast $0..$7ff process
           begin
-            if c2 = 0 then
-              exit; // u1>u2 -> return u1^
-            inc(u2);
-            dec(result, table[c2]);
-            if result <> 0 then
-              exit;
-            continue;
+            c2 := (c2 shl 6) + byte(u2[1]) - $3080;
+            inc(u2, 2);
           end
           else
-          begin
             c2 := UTF8_TABLE.GetHighUtf8Ucs4(u2);
-            if c2 <= 255 then
-              dec(result, table[c2])
-            else // 8-bit to upper
-              dec(result, c2); // 32-bit widechar returns diff
-            if result <> 0 then
-              exit;
-          end;
+          if c2 <= 255 then
+            c2 := table[c2]; // 8-bit to upper
+          dec(result, c2);
+          if result <> 0 then
+            exit;
         until false
       else
         result := 1 // u2=''
@@ -5633,21 +5699,21 @@ begin
     _80 := PtrUInt($8080808080808080); // use registers for constants
     _61 := $6161616161616161;
     _7b := $7b7b7b7b7b7b7b7b;
-    for i := 0 to sourceLen shr 3 do
+    for i := 0 to (sourceLen - 1) shr 3 do
     begin
       c := PPtrUIntArray(source)^[i];
       d := c or _80;
-      PPtrUIntArray(dest)^[i] := c - ((d - PtrUInt(_61)) and
+      PPtrUIntArray(dest)^[i] := c - ((d - _61) and
         not (d - _7b)) and ((not c) and _80) shr 2;
     end;
     {$else}
     // unbranched uppercase conversion of 4 chars blocks
-    for i := 0 to sourceLen shr 2 do
+    for i := 0 to (sourceLen - 1) shr 2 do
     begin
       c := PPtrUIntArray(source)^[i];
       d := c or PtrUInt($80808080);
       PPtrUIntArray(dest)^[i] := c - ((d - PtrUInt($61616161)) and
-        not (d - PtrUInt($7b7b7b7b))) and ((not c) and PtrUInt($80808080)) shr 2;
+        not(d - PtrUInt($7b7b7b7b))) and ((not c) and PtrUInt($80808080)) shr 2;
     end;
     {$endif CPU64}
   end;
@@ -5875,6 +5941,32 @@ begin
   tmp.Done;
 end;
 
+function UpperCaseSynUnicode(const S: SynUnicode): SynUnicode;
+begin
+  {$ifdef UNICODE}
+  result := SysUtils.UpperCase(S);
+  {$else}
+  {$ifdef HASVARUSTRING}
+  result := UnicodeUpperCase(S);
+  {$else}
+  result := WideUpperCase(s);
+  {$endif HASVARUSTRING}
+  {$endif UNICODE}
+end;
+
+function LowerCaseSynUnicode(const S: SynUnicode): SynUnicode;
+begin
+  {$ifdef UNICODE}
+  result := SysUtils.LowerCase(S);
+  {$else}
+  {$ifdef HASVARUSTRING}
+  result := UnicodeLowerCase(S);
+  {$else}
+  result := WideLowerCase(s);
+  {$endif HASVARUSTRING}
+  {$endif UNICODE}
+end;
+
 function LowerCaseUnicode(const S: RawUtf8): RawUtf8;
 var
   tmp: TSynTempBuffer;
@@ -5915,7 +6007,7 @@ var
   L, i: PtrInt;
 begin
   L := length(S);
-  FastSetString(Result, pointer(S), L);
+  FastSetString(result, pointer(S), L);
   for i := 0 to L - 1 do
     if PByteArray(result)[i] in [ord('a')..ord('z')] then
       dec(PByteArray(result)[i], 32);
@@ -6466,8 +6558,7 @@ end;
 
 function UpperCaseUcs4Reference(const S: RawUtf8): RawUcs4;
 var
-  n: PtrInt;
-  c: PtrUInt;
+  c, n: PtrUInt;
   U: PUtf8Char;
 begin
   if S = '' then
@@ -6504,6 +6595,8 @@ var
   {$else}
   tab: PUnicodeUpperTable;
   {$endif CPUX86NOTPIC}
+label
+  c2low;
 begin
   {$ifndef CPUX86NOTPIC}
   tab := @UU;
@@ -6521,7 +6614,7 @@ begin
               inc(result, tab.Block[0, result]); // branchless a..z -> A..Z
               if c2 <= 127 then
               begin
-                if c2 = 0 then
+c2low:          if c2 = 0 then
                   exit; // u1>u2 -> return u1^
                 inc(u2);
                 inc(c2, tab.Block[0, c2]);
@@ -6543,44 +6636,28 @@ begin
             // fast Unicode 10.0 uppercase conversion
             if result and $20 = 0 then // $0..$7ff common case
             begin
-              result := tab.Ucs4Upper((result shl 6) + byte(u1[1]) - $3080);
+              result := (result shl 6) + byte(u1[1]) - $3080;
               inc(u1, 2);
             end
             else
-            begin
               result := UTF8_TABLE.GetHighUtf8Ucs4(u1);
-              if result <= UU_MAX then
-                result := tab.Ucs4Upper(result);
-            end;
+            if result <= UU_MAX then
+              result := tab.Ucs4Upper(result);
           end;
           if c2 <= 127 then
+            goto c2low
+          else if c2 and $20 = 0 then // $0..$7ff common case
           begin
-            if c2 = 0 then
-              exit; // u1>u2 -> return u1^
-            inc(u2);
-            inc(c2, tab.Block[0, c2]);
-            dec(result, c2);
-            if result <> 0 then
-              exit;
-            continue;
+            c2 := (c2 shl 6) + byte(u2[1]) - $3080;
+            inc(u2, 2);
           end
           else
-          begin
-            if c2 and $20 = 0 then // $0..$7ff common case
-            begin
-              c2 := tab.Ucs4Upper((c2 shl 6) + byte(u2[1]) - $3080);
-              inc(u2, 2);
-            end
-            else
-            begin
-              c2 := UTF8_TABLE.GetHighUtf8Ucs4(u2);
-              if c2 <= UU_MAX then
-                c2 := tab.Ucs4Upper(c2);
-            end;
-            dec(result, c2);
-            if result <> 0 then
-              exit;
-          end;
+            c2 := UTF8_TABLE.GetHighUtf8Ucs4(u2);
+          if c2 <= UU_MAX then
+            c2 := tab.Ucs4Upper(c2);
+          dec(result, c2);
+          if result <> 0 then
+            exit;
         until false
       else
         result := 1 // u2=''
@@ -6901,9 +6978,14 @@ begin
   lz := SynLZCompress1(@tmp1, rle, @tmp2);
   writeln(SizeOf(UU)); writeln(rle); writeln(lz);
   writeln('UU_ = array[byte] of cardinal = ('); l := '  ';
-  for i := 0 to 255 do begin
+  for i := 0 to 255 do
+  begin
     l := l + '$' + HexStr(tmp2[i], 8) + ',';
-    if length(l) > 70 then begin writeln(l); l := '  '; end;
+    if length(l) > 70 then
+    begin
+      writeln(l);
+      l := '  ';
+    end;
   end;
   writeln(l, ');');
 end;

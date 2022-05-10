@@ -1045,7 +1045,7 @@ type
     // - returns an Int64 to properly support cardinal values
     // - return -1 on any error
     function GetOrdValue(Instance: TObject): Int64;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef FPC}inline;{$endif}
     /// low-level getter of the ordinal property value of a given instance
     // - this method will check if the corresponding property is ordinal
     // - ordinal properties smaller than rkInt64 will return an Int64-converted
@@ -1084,7 +1084,11 @@ type
     {$endif HASVARUSTRING}
     /// retrieve rkLString, rkSString, rkUString, rkWString, rkChar, rkWChar as RawUtf8
     // - this would make heap allocations and encoding conversion, so may be slow
-    procedure GetAsString(Instance: TObject; var Value: RawUtf8);
+    procedure GetAsString(Instance: TObject; var Value: RawUtf8); overload;
+    /// retrieve rkLString, rkSString, rkUString, rkWString, rkChar, rkWChar as RawUtf8
+    // - just a wrapper around the overloaded GetAsString() function
+    function GetAsString(Instance: TObject): RawUtf8; overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// set rkLString, rkSString, rkUString, rkWString, rkChar, rkWChar from
     // a RawUtf8 value
     // - this would make heap allocations and encoding conversion, so may be slow
@@ -1092,6 +1096,8 @@ type
     /// set a property value from a variant value
     // - to be called when a setter is involved - not very fast, but safe
     function SetValue(Instance: TObject; const Value: variant): boolean;
+    /// set a property value from a text value
+    function SetValueText(Instance: TObject; const Value: RawUtf8): boolean;
   end;
 
 const
@@ -2099,7 +2105,7 @@ type
     /// append the field value as JSON with proper getter method call
     // - wrap GetValue() + AddVariant() over a temp TRttiVarData
     procedure AddValueJson(W: TTextWriter; Data: pointer;
-      Options: TTextWriterWriteObjectOptions);
+      Options: TTextWriterWriteObjectOptions; K: TTextWriterKind = twNone);
   end;
 
   /// store information about the properties/fields of a given TypeInfo/PRttiInfo
@@ -2438,7 +2444,9 @@ type
     /// efficient PerHash[].Pairs thread-safety during Find/AddToPairs
     Safe: TRWLightLock;
     /// speedup search by name e.g. from a loop
-    Last: TRttiCustom;
+    LastName: TRttiCustom;
+    /// speedup search by PRttiInfo e.g. from a loop
+    LastInfo: TRttiCustom;
     /// CPU L1 cache efficient PRttiInfo/TRttiCustom pairs hashed by Name[0][1]
     PerHash: array[0..RTTICUSTOMTYPEINFOHASH] of TRttiCustomListPair;
   end;
@@ -2776,6 +2784,11 @@ type
 
   /// used to determine the exact class type of a TObjectWithID
   TObjectWithIDClass = class of TObjectWithID;
+
+/// internal wrapper to protected TObjectWithCustomCreate.RttiCustomSetParser()
+// - a local TCCHook was reported to have issues on FPC with class methods
+procedure TObjectWithCustomCreateRttiCustomSetParser(
+  O: TObjectWithCustomCreateClass; Rtti: TRttiCustom);
 
 
 
@@ -3311,8 +3324,7 @@ end;
 
 function TRttiInfo.DynArrayItemSize: PtrInt;
 begin
-  if DynArrayItemType(result) = nil then
-    result := 0;
+  DynArrayItemType(result); // fast enough (not used internally)
 end;
 
 function TRttiInfo.RttiSize: PtrInt;
@@ -3715,8 +3727,8 @@ end;
 function TRttiProp.SetValue(Instance: TObject; const Value: variant): boolean;
 var
   k: TRttiKind;
-  v64: Int64;
-  f64: double;
+  v: Int64;
+  f: double;
   u: RawUtf8;
 begin
   result := false; // invalid or unsupported type
@@ -3725,8 +3737,8 @@ begin
     exit;
   k := TypeInfo^.Kind;
   if k in rkOrdinalTypes then
-    if VariantToInt64(Value, v64) then
-      SetInt64Value(Instance, v64)
+    if VariantToInt64(Value, v) then
+      SetInt64Value(Instance, v)
     else
       exit
   else if k in rkStringTypes then
@@ -3737,15 +3749,60 @@ begin
     else
       exit
   else if k = rkFloat then
-    if VariantToDouble(Value, f64) then
-      SetFloatProp(Instance, f64)
+    if VariantToDouble(Value, f) then
+      SetFloatProp(Instance, f)
     else if Assigned(_Iso8601ToDateTime) and
             VariantToUtf8(Value, u) then
     begin
-      f64 := _Iso8601ToDateTime(u);
-      if f64 = 0 then
+      f := _Iso8601ToDateTime(u);
+      if f = 0 then
         exit;
-      SetFloatProp(Instance, f64);
+      SetFloatProp(Instance, f);
+    end
+    else
+      exit
+  else if k = rkVariant then
+    SetVariantProp(Instance, Value)
+  else
+    exit;
+  result := true;
+end;
+
+function TRttiProp.SetValueText(Instance: TObject; const Value: RawUtf8): boolean;
+var
+  k: TRttiKind;
+  v: Int64;
+  f: double;
+begin
+  result := false; // invalid or unsupported type
+  if (@self = nil) or
+     (Instance = nil) then
+    exit;
+  k := TypeInfo^.Kind;
+  if k in rkOrdinalTypes then
+    if ToInt64(Value, v) then
+      SetInt64Value(Instance, v)
+    else if (k = rkEnumeration) and
+            (Value <> '') then
+    begin
+      v := GetEnumNameValue(TypeInfo, Value, {trimlowcase=}true);
+      if v < 0 then
+        exit;
+      SetOrdProp(Instance, v);
+    end
+    else
+      exit
+  else if k in rkStringTypes then
+    SetAsString(Instance, Value)
+  else if k = rkFloat then
+    if ToDouble(Value, f) then
+      SetFloatProp(Instance, f)
+    else if Assigned(_Iso8601ToDateTime) then
+    begin
+      f := _Iso8601ToDateTime(Value);
+      if f = 0 then
+        exit;
+      SetFloatProp(Instance, f);
     end
     else
       exit
@@ -4389,6 +4446,11 @@ begin
 end;
 
 {$endif HASVARUSTRING}
+
+function TRttiProp.GetAsString(Instance: TObject): RawUtf8;
+begin
+  GetAsString(Instance, result);
+end;
 
 procedure TRttiProp.GetAsString(Instance: TObject; var Value: RawUtf8);
 var
@@ -6503,17 +6565,17 @@ begin
 end;
 
 procedure TRttiCustomProp.AddValueJson(W: TTextWriter; Data: pointer;
-  Options: TTextWriterWriteObjectOptions);
+  Options: TTextWriterWriteObjectOptions; K: TTextWriterKind);
 var
   rvd: TRttiVarData;
-  tw: TTextWriterKind;
 begin
   GetValue(Data, rvd);
-  if Value.Parser = ptRawJson then
-    tw := twNone
-  else
-    tw := twJsonEscape;
-  W.AddVariant(variant(rvd), tw, Options);
+  if K <> twOnSameLine then
+    if Value.Parser = ptRawJson then
+      K := twNone
+    else
+      K := twJsonEscape;
+  W.AddVariant(variant(rvd), K, Options);
   if rvd.NeedsClear then
     VarClearProc(rvd.Data);
 end;
@@ -7911,11 +7973,17 @@ begin
   begin
     // our optimized "hash table of the poor" (tm) lookup
     k := @PerKind^[Info^.Kind];
+    // try latest found RTTI
+    result := k^.LastInfo;
+    if (result <> nil) and
+       (result.Info = Info) then
+      exit;
     // note: we tried to include RawName[2] and $df, but with no gain
     k^.Safe.ReadLock;
     result := LockedFind(Info, @k^.PerHash[(PtrUInt(Info.RawName[0]) xor
       PtrUInt(Info.RawName[1])) and RTTICUSTOMTYPEINFOHASH]);
     k^.Safe.ReadUnLock;
+    k^.LastInfo := result;
   end
   else
     // direct lookup of the vmtAutoTable slot for classes
@@ -7980,7 +8048,7 @@ begin
   begin
     k := @PerKind^[Kind];
     // try latest found value e.g. calling from JsonRetrieveObjectRttiCustom()
-    result := k^.Last;
+    result := k^.LastName;
     if (result <> nil) and
        (PStrLen(PAnsiChar(pointer(result.Name)) - _STRLEN)^ = NameLen) and
        IdemPropNameUSameLenNotNull(pointer(result.Name), Name, NameLen) then
@@ -7994,7 +8062,7 @@ begin
       result := LockedFindNameInPairs(pointer(result), p^.PairsEnd, Name, NameLen);
     k^.Safe.ReadUnLock;
     if result <> nil then
-      k^.Last := result;
+      k^.LastName := result;
   end
   else
     result := nil;
@@ -8529,7 +8597,7 @@ var
 begin
   if Instance = nil then
     exit;
-  rc := Rtti.RegisterClass(Instance.ClassType);
+  rc := Rtti.RegisterClass(Instance);
   p := pointer(rc.Props.List);
   for i := 1 to rc.Props.Count do
   begin
@@ -8554,7 +8622,7 @@ begin
   if (Instance = nil) or
      (paf = nil) then
     exit;
-  rc := Rtti.RegisterClass(Instance.ClassType);
+  rc := Rtti.RegisterClass(Instance);
   repeat
     GetNextItemShortString(paf, @n, '.');
     if n[0] in [#0, #254] then
@@ -8683,6 +8751,12 @@ end;
 procedure TObjectWithCustomCreate.RttiAfterReadObject;
 begin
   // nothing to do
+end;
+
+procedure TObjectWithCustomCreateRttiCustomSetParser(
+  O: TObjectWithCustomCreateClass; Rtti: TRttiCustom);
+begin
+  O.RttiCustomSetParser(Rtti); // to circumvent some compiler issue
 end;
 
 
