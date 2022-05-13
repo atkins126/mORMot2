@@ -4683,25 +4683,8 @@ begin
 end;
 
 function TPdfWrite.Add(const Text: RawByteString): TPdfWrite;
-var
-  L: PtrInt;
 begin
-  if PtrInt(Text) <> 0 then
-  begin
-    L := length(Text);
-    if BEnd - B <= L then
-    begin
-      Save;
-      inc(fDestStreamPosition, L);
-      fDestStream.WriteBuffer(pointer(Text)^, L);
-    end
-    else
-    begin
-      MoveFast(pointer(Text)^, B^, L);
-      inc(B, L);
-    end;
-  end;
-  result := self;
+  result := Add(pointer(Text), length(Text));
 end;
 
 function TPdfWrite.Add(Text: PAnsiChar; Len: PtrInt): TPdfWrite;
@@ -6165,7 +6148,7 @@ begin
       flags := PDF_FONT_SYMBOLIC
     else
       flags := PDF_FONT_STD_CHARSET;
-    FFontDescriptor.AddItem('flags', flags);
+    FFontDescriptor.AddItem('Flags', flags);
     with fOTM.otmrcFontBox do
       FFontDescriptor.AddItem('FontBBox', TPdfArray.Create(fDoc.fXRef, [Left,
         Bottom, Right, Top]));
@@ -9235,14 +9218,14 @@ begin
   begin
     id := 'oc' + UInt32ToPdfString(Group.ObjectNumber);
     // register Group in page r p
-    r := fPage.PdfDictionaryByName('r');
+    r := fPage.PdfDictionaryByName('Resources');
     if r <> nil then
     begin
-      p := r.PdfDictionaryByName('p');
+      p := r.PdfDictionaryByName('Properties');
       if p = nil then
       begin
         p := TPdfDictionary.Create(fDoc.fXRef);
-        r.AddItem('p', p);
+        r.AddItem('Properties', p);
       end;
       if p <> nil then
         p.AddItem(id, Group);

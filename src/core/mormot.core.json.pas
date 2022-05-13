@@ -216,8 +216,8 @@ function JsonPropNameValid(P: PUtf8Char): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
 type
-  /// internal parsing structure used by legacy GetJsonField() and
-  // GetJsonFieldOrObjectOrArray() wrapper functions
+  /// internal JSON field parsing structure
+  // - used e.g. by GetJsonField() and GetJsonFieldOrObjectOrArray() wrappers
   TGetJsonField = object
     /// input/output JSON parsing buffer address
     Json: PUtf8Char;
@@ -2237,8 +2237,8 @@ function DoRegisterAutoCreateFields(ObjectInstance: TObject): TRttiJson;
 
 
 type
-  /// abstract TPersistent class, which will instantiate all its nested TPersistent
-  // class published properties, then release them (and any T*ObjArray) when freed
+  /// abstract TPersistent class, which will instantiate all its nested class
+  // published properties, then release them (and any T*ObjArray) when freed
   // - TSynAutoCreateFields is to be preferred in most cases, thanks to its
   // lower overhead
   // - note that non published (e.g. public) properties won't be instantiated,
@@ -2252,9 +2252,9 @@ type
   TPersistentAutoCreateFields = class(TPersistentWithCustomCreate)
   public
     /// this overriden constructor will instantiate all its nested
-    // TPersistent/TSynPersistent/TSynAutoCreateFields published properties
+    // class or T*ObjArray published properties
     constructor Create; override;
-    /// finalize the instance, and release its published properties
+    /// finalize the instance, and its class or T*ObjArray published properties
     destructor Destroy; override;
   end;
 
@@ -2283,23 +2283,24 @@ type
   TSynAutoCreateFields = class(TSynPersistent)
   public
     /// this overriden constructor will instantiate all its nested
-    // TPersistent/TSynPersistent/TSynAutoCreateFields published properties
+    // class or T*ObjArray published properties
     constructor Create; override;
-    /// finalize the instance, and release its published properties
+    /// finalize the instance, and its class or T*ObjArray published properties
     destructor Destroy; override;
   end;
 
   /// adding locking methods to a TSynAutoCreateFields with virtual constructor
   TSynAutoCreateFieldsLocked = class(TSynPersistentLock)
   public
-    /// initialize the object instance, and its associated lock
+    /// initialize the object instance, its associated lock, and its nested
+    // class or T*ObjArray published properties
     constructor Create; override;
-    /// release the instance (including the locking resource)
+    /// release the instance (including the locking resource) and nested classes
     destructor Destroy; override;
   end;
 
   /// abstract TInterfacedObject class, which will instantiate all its nested
-  // TPersistent/TSynPersistent published properties, then release them when freed
+  // class published properties, then release them when freed
   // - will handle automatic memory management of all nested class and T*ObjArray
   // published properties: any class or T*ObjArray defined as a published
   // property will be owned by this instance - i.e. with strong reference
@@ -2314,8 +2315,7 @@ type
   TInterfacedObjectAutoCreateFields = class(TInterfacedObjectWithCustomCreate)
   public
     /// this overriden constructor will instantiate all its nested
-    // TPersistent/TSynPersistent/TSynAutoCreateFields class and T*ObjArray
-    // published properties
+    // class or T*ObjArray published properties
     constructor Create; override;
     /// finalize the instance, and release its published properties
     destructor Destroy; override;
@@ -2340,7 +2340,7 @@ type
   TCollectionItemAutoCreateFields = class(TCollectionItem)
   public
     /// this overriden constructor will instantiate all its nested
-    // TPersistent/TSynPersistent/TSynAutoCreateFields published properties
+    // class or T*ObjArray published properties
     constructor Create(Collection: TCollection); override;
     /// finalize the instance, and release its published properties
     destructor Destroy; override;
@@ -2348,7 +2348,7 @@ type
 
   /// customize TSynJsonFileSettings process
   // - fsoDisableSaveIfNeeded will disable SaveIfNeeded method process
-  // - fsoReadIni will disable JSON loading, and expect INI
+  // - fsoReadIni will disable JSON loading, and expect INI file format
   // - fsoWriteIni will force SaveIfNeeded to use the INI layout
   TSynJsonFileSettingsOption = (
     fsoDisableSaveIfNeeded,
@@ -4985,7 +4985,14 @@ end;
 
 procedure _JS_Interface(Data: PInterface; const Ctxt: TJsonSaveContext);
 begin
-  Ctxt.W.AddNull;
+  {$ifdef HASINTERFACEASTOBJECT}
+  // interfaces can be saved/serialized as their own object instance,
+  // but not restored/unserialized in _JL_Interface()
+  if Data^ <> nil then
+    Ctxt.W.WriteObject(Data^ as TObject)
+  else
+  {$endif HASINTERFACEASTOBJECT}
+    Ctxt.W.AddNull;
 end;
 
 procedure _JS_ID(Data: PInt64; const Ctxt: TJsonSaveContext);
@@ -7959,6 +7966,8 @@ end;
 
 procedure _JL_Interface(Data: PInterface; var Ctxt: TJsonParserContext);
 begin
+  // _JS_Interface() may have serialized the object instance, but we can't
+  // unserialize it since we don't know which class to create
   Ctxt.Valid := Ctxt.ParseNull;
   Data^ := nil;
 end;
@@ -10609,7 +10618,7 @@ procedure AutoCreateFields(ObjectInstance: TObject);
 var
   rtti: TRttiJson;
   n: integer;
-  p: ^PRttiCustomProp;
+  p: PPRttiCustomProp;
 begin
   // inlined Rtti.RegisterClass()
   rtti := PPointer(PPAnsiChar(ObjectInstance)^ + vmtAutoTable)^;
@@ -10634,7 +10643,7 @@ procedure AutoDestroyFields(ObjectInstance: TObject);
 var
   rtti: TRttiJson;
   n: integer;
-  p: ^PRttiCustomProp;
+  p: PPRttiCustomProp;
   arr: pointer;
   o: TObject;
 begin

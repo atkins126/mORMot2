@@ -1962,6 +1962,7 @@ type
   TRttiCustom = class;
 
   PRttiCustomProp = ^TRttiCustomProp;
+  PPRttiCustomProp = ^PRttiCustomProp;
 
   /// variant-like value as returned by TRttiCustomProp.GetValueDirect and
   // GetValueGetter methods
@@ -3615,7 +3616,7 @@ procedure TRttiInfo.InterfaceAncestors(out Ancestors: PRttiInfoDynArray;
   OnlyImplementedBy: TInterfacedObjectClass;
   out AncestorsImplementedEntry: TPointerDynArray);
 var
-  n: integer;
+  n: PtrInt;
   nfo: PRttiInfo;
   typ: PRttiInterfaceTypeData;
   entry: pointer;
@@ -7134,7 +7135,7 @@ end;
 
 procedure TRttiCustomProps.FinalizeManaged(Data: PAnsiChar);
 var
-  pp: ^PRttiCustomProp;
+  pp: PPRttiCustomProp;
   p: PRttiCustomProp;
   n: integer;
 begin
@@ -7193,7 +7194,7 @@ end;
 
 procedure TRttiCustomProps.CopyRecord(Dest, Source: PAnsiChar);
 var
-  pp: ^PRttiCustomProp;
+  pp: PPRttiCustomProp;
   n: integer;
   offset: PtrInt;
 begin

@@ -10,6 +10,7 @@ unit mormot.orm.sqlite3;
     - TOrmTableDB as Efficient ORM-Aware TOrmTable
     - TOrmVirtualTableModuleServerDB for SQLite3 Virtual Tables
     - TRestStorageShardDB for REST Storage Sharded Over SQlite3 Files
+    - TRestStorageMultiDB for REST Storage of Multi-User SQlite3 Files
     - TRestOrmServerDB REST Server ORM Engine over SQLite3
     - TRestOrmClientDB REST Client ORM Engine over SQLite3
 
@@ -153,8 +154,11 @@ type
     fSynchronous: TSqlSynchronousMode;
     fInitShardsIsLast: boolean;
     fCacheSizePrevious, fCacheSizeLast: integer;
+    fDBPassword: SpiUtf8;
     procedure InitShards; override;
     function InitNewShard: TRestOrm; override;
+    // you can override those methods to customize the stored SQlite3 files
+    function DBPassword(ShardIndex: integer): SpiUtf8; virtual;
     function DBFileName(ShardIndex: integer): TFileName; virtual;
   public
     /// initialize the table storage redirection for sharding over SQLite3 DB
@@ -168,10 +172,11 @@ type
       aShardRange: TID;
       aOptions: TRestStorageShardOptions = [];
       const aShardRootFileName: TFileName = '';
-      aMaxShardCount: integer = 100;
-      aSynchronous: TSqlSynchronousMode = smOff;
-      aCacheSizePrevious: integer = 250;
-      aCacheSizeLast: integer = 500); reintroduce; virtual;
+      aMaxShardCount: integer = 100; aSynchronous: TSqlSynchronousMode = smOff;
+      aCacheSizePrevious: integer = 250; aCacheSizeLast: integer = 500;
+      const aDBPassword: SpiUtf8 = ''); reintroduce; virtual;
+    /// finalize the table storage, including Shards[] instances
+    destructor Destroy; override;
   published
     /// associated file name for the SQLite3 database files
     // - contains the folder, and root file name for the storage
@@ -182,8 +187,37 @@ type
   end;
 
 
+{ *********** TRestStorageMultiDB for REST Storage of Multi-User SQlite3 Files }
+
+type
+  /// abstract REST storage with several SQLite3 database instances
+  TRestStorageMultiDB = class(TRestStorageMultiOnDisk)
+  protected
+    // overriden to proper create each SQlite3 database
+    fSynchronous: TSqlSynchronousMode;
+    fDefaultCacheSize: integer;
+    function NewDB(aID: TRestStorageMultiDatabaseID): IRestOrmServer; override;
+  public
+    /// initialize this REST storage with several SQLite3 database instances
+    // - aDatabaseIDBits will define how many bits (1-63) are allowed for
+    // TRestStorageMultiDatabaseID values
+    // - aSettings instance will be owned by this main class instance
+    // - aDataFolder, aFilePrefix will be used by overriden NewDB()
+    // - aModelClasses will be used by the overriden NewModel()
+    // - aSynchronous/aDefaultCacheSize can override default smOff/2MB
+    constructor Create(aLog: TSynLogFamily; aDatabaseIDBits: byte;
+      const aDataFolder, aFilePrefix: TFileName;
+      const aModelClasses: array of TOrmClass;
+      aSettings: TRestStorageMultiSettings;
+      aSynchronous: TSqlSynchronousMode = smOff;
+      aDefaultCacheSize: integer = 500); reintroduce;
+  end;
+
+
+
 { *********** TRestOrmServerDB REST ORM Engine over SQLite3 }
 
+type
   /// low-level internal structure used by TRestOrmServerDB for its Batch process
   TRestOrmServerDBBatch = record
     Encoding: TRestBatchEncoding;
@@ -368,7 +402,14 @@ type
     /// initialize a stand-alone REST ORM server with a given SQLite3 database
     // - you can specify an associated TOrmModel but no TRest
     constructor CreateStandalone(aModel: TOrmModel; aRest: TRest;
-      aDB: TSqlDataBase; aOwnDB: boolean); reintroduce;
+      aDB: TSqlDataBase; aOwnDB: boolean); reintroduce; overload;
+    /// initialize a stand-alone REST ORM server with a given SQLite3 filename
+    // - you can specify an associated TOrmModel but no TRest
+    // - the SQlite3 database instance will be createa as lmExclusive/aSynchronous
+    constructor CreateStandalone(aModel: TOrmModel; aRest: TRest;
+      const aDB: TFileName; const aPassword: SpiUtf8 = '';
+      aSynchronous: TSqlSynchronousMode = smOff;
+      aDefaultCacheSize: integer = 10000); reintroduce; overload;
     /// close any owned database and free used memory
     destructor Destroy; override;
     /// Missing tables are created if they don't exist yet for every TOrm
@@ -385,6 +426,8 @@ type
     // - will execute not default select max(rowid) from Table, but faster
     // $ select rowid from Table order by rowid desc limit 1
     function TableMaxID(Table: TOrmClass): TID; override;
+    /// overridden method for direct SQLite3 engine call
+    function MemberExists(Table: TOrmClass; ID: TID): boolean; override;
     /// prepared statements with parameters for faster SQLite3 execution
     // - used for SQL code with :(%): internal parameters
     property StatementCache: TSqlStatementCached
@@ -457,7 +500,8 @@ begin
     // not retrieved from cache -> call SQLite3 engine
     try
       n := 0;
-      jsoncached := r.ExecuteJson(aDB.DB, aSql, Expand, @n, aDB.StatementMaxMemory);
+      jsoncached := r.ExecuteJson(
+        aDB.DB, aSql, Expand, @n, aDB.StatementMaxMemory);
       // big JSON is faster than sqlite3_get_table(): less heap allocations
       inherited CreateFromTables(Tables, aSql, jsoncached);
       Assert(n = fRowCount);
@@ -581,7 +625,8 @@ begin
     prepared^.WhereCount := pInfo.nConstraint;
     prepared^.EstimatedCost := costFullScan;
     for i := 0 to pInfo.nConstraint - 1 do
-      with prepared^.Where[i], pInfo.aConstraint^[i] do
+      with prepared^.Where[i],
+           pInfo.aConstraint^[i] do
       begin
         OmitCheck := False;
         Value.VType := ftUnknown;
@@ -726,7 +771,7 @@ begin
   result := SQLITE_OK;
 end;
 
-function vt_next(var pVtabCursor: TSqlite3VTabCursor): integer; cdecl;
+function vt_Next(var pVtabCursor: TSqlite3VTabCursor): integer; cdecl;
 begin
   if TOrmVirtualTableCursor(pVtabCursor.pInstance).Next then
     result := SQLITE_OK
@@ -998,11 +1043,11 @@ end;
 
 { TRestStorageShardDB }
 
-constructor TRestStorageShardDB.Create(aClass: TOrmClass;
-  aServer: TRestServer; aShardRange: TID;
-  aOptions: TRestStorageShardOptions; const aShardRootFileName: TFileName;
-  aMaxShardCount: integer; aSynchronous: TSqlSynchronousMode;
-  aCacheSizePrevious, aCacheSizeLast: integer);
+constructor TRestStorageShardDB.Create(aClass: TOrmClass; aServer: TRestServer;
+  aShardRange: TID; aOptions: TRestStorageShardOptions;
+  const aShardRootFileName: TFileName; aMaxShardCount: integer;
+  aSynchronous: TSqlSynchronousMode; aCacheSizePrevious: integer;
+  aCacheSizeLast: integer; const aDBPassword: SpiUtf8);
 var
   orm: TRestOrmServer;
 begin
@@ -1010,12 +1055,24 @@ begin
   fSynchronous := aSynchronous;
   fCacheSizePrevious := aCacheSizePrevious;
   fCacheSizeLast := aCacheSizeLast;
+  fDBPassword := aDBPassword;
   orm := aServer.OrmInstance as TRestOrmServer;
   if orm = nil then
     raise ERestStorage.CreateUtf8(
       '%.Create: % has no OrmInstance - use TRestServerDB', [self, aServer]);
   inherited Create(aClass, orm, aShardRange, aOptions, aMaxShardCount);
   orm.StaticTableSetup(fStoredClassProps.TableIndex, self, sStaticDataTable);
+end;
+
+destructor TRestStorageShardDB.Destroy;
+begin
+  inherited Destroy;
+  FillZero(fDBPassword); // to avoid forensic leak
+end;
+
+function TRestStorageShardDB.DBPassword(ShardIndex: integer): SpiUtf8;
+begin
+  result := fDBPassword; // no encryption by default
 end;
 
 function TRestStorageShardDB.DBFileName(ShardIndex: integer): TFileName;
@@ -1028,7 +1085,6 @@ function TRestStorageShardDB.InitNewShard: TRestOrm;
 var
   db: TRestOrmServerDB;
   cachesize: integer;
-  sql: TSqlDataBase;
   model: TOrmModel;
 begin
   inc(fShardLast);
@@ -1038,12 +1094,9 @@ begin
     cachesize := fCacheSizeLast
   else
     cachesize := fCacheSizePrevious;
-  sql := TSqlDatabase.Create(DBFileName(fShardLast), '', 0, cachesize);
-  sql.LockingMode := lmExclusive;
-  sql.Synchronous := fSynchronous;
-  db := TRestOrmServerDB.CreateStandalone(model, fRest, sql, {owndb=}true);
+  db := TRestOrmServerDB.CreateStandalone(model, fRest,
+    DBFileName(fShardLast), DBPassword(fShardLast), fSynchronous, cachesize);
   db._AddRef;
-  db.CreateMissingTables;
   result := db;
   SetLength(fShards, fShardLast + 1);
   fShards[fShardLast] := result;
@@ -1105,6 +1158,29 @@ begin
   fShardLastID := fShards[fShardLast].TableMaxID(fStoredClass);
   if fShardLastID < 0 then
     fShardLastID := 0; // no data yet
+end;
+
+
+{ *********** TRestStorageMultiDB for REST Storage of Multi-User SQlite3 Files }
+
+{ TRestStorageMultiDB }
+
+function TRestStorageMultiDB.NewDB(
+  aID: TRestStorageMultiDatabaseID): IRestOrmServer;
+begin
+  result := TRestOrmServerDB.CreateStandalone(NewModel, nil,
+    GetDBFileName(aID), GetDBPassword(aID), fSynchronous, fDefaultCacheSize);
+end;
+
+constructor TRestStorageMultiDB.Create(aLog: TSynLogFamily;
+  aDatabaseIDBits: byte; const aDataFolder, aFilePrefix: TFileName;
+  const aModelClasses: array of TOrmClass; aSettings: TRestStorageMultiSettings;
+  aSynchronous: TSqlSynchronousMode; aDefaultCacheSize: integer);
+begin
+  inherited Create(
+    aLog, aDatabaseIDBits, aModelClasses, aDataFolder, aFilePrefix, aSettings);
+  fSynchronous := aSynchronous;
+  fDefaultCacheSize := aDefaultCacheSize;
 end;
 
 
@@ -1275,13 +1351,32 @@ var
   sql: RawUtf8;
 begin
   if StaticTable[Table] <> nil then
+    // select(max(RowID)) with proper SQL detection e.g. for ext/MongoDB
     result := inherited TableMaxID(Table)
   else
   begin
     sql := 'select rowid from ' + Table.SqlTableName +
-           ' order by rowid desc limit 1';
+           ' order by rowid desc limit 1'; // faster than max(RowID) on SQlite3
     if not InternalExecute(sql, true, PInt64(@result)) then
       result := 0;
+  end;
+end;
+
+function TRestOrmServerDB.MemberExists(Table: TOrmClass; ID: TID): boolean;
+var
+  sql: RawUtf8;
+  res: Int64;
+begin
+  if StaticTable[Table] <> nil then
+    // call overriden method for ext/MongoDB/in-memory, or EngineRetrieve()
+    result := inherited MemberExists(Table, ID)
+  else
+  begin
+    FormatUtf8('select rowid from % where rowid=:(%): limit 1',
+      [Table.SqlTableName, ID], sql); // faster than EngineRetrieve() on SQLite3
+    res := 0;
+    result := InternalExecute(sql, true, @res) and
+              (res = ID);
   end;
 end;
 
@@ -1580,6 +1675,19 @@ begin
   Create(nil, aDB, aOwnDB);
 end;
 
+constructor TRestOrmServerDB.CreateStandalone(aModel: TOrmModel; aRest: TRest;
+  const aDB: TFileName; const aPassword: SpiUtf8; aSynchronous: TSqlSynchronousMode;
+  aDefaultCacheSize: integer);
+var
+  sql: TSqlDataBase;
+begin
+  sql := TSqlDatabase.Create(aDB, aPassword, 0, aDefaultCacheSize);
+  sql.LockingMode := lmExclusive;
+  sql.Synchronous := aSynchronous;
+  CreateStandalone(aModel, aRest, sql, {ownsql=}true);
+  CreateMissingTables;
+end;
+
 destructor TRestOrmServerDB.Destroy;
 begin
   with fDB.Log.Enter('Destroy %', [fModel.SafeRoot], self) do
@@ -1604,11 +1712,12 @@ begin
   result := not IdemPChar(Pointer(aSql), 'VACUUM');
   if result then
     exit;
+  // VACUUM is not compatible with SQLite3 virtual tables
   result := (fStaticVirtualTable = nil) or
     IsZero(fStaticVirtualTable, length(fStaticVirtualTable) * SizeOf(pointer));
   if result then
     // VACUUM will fail if there are one or more active SQL statements
-    fStatementCache.ReleaseAllDBStatements;
+    fStatementCache.ReleaseAllDBStatements; // done within DB.Lock()
 end;
 
 function TRestOrmServerDB.InternalExecute(const aSql: RawUtf8;
@@ -1768,7 +1877,7 @@ end;
 function TRestOrmServerDB.MainEngineList(const SQL: RawUtf8; ForceAjax: boolean;
   ReturnedRowCount: PPtrInt): RawUtf8;
 var
-  strm: TRawByteStringStream;
+  res: TRawByteStringStream;
   rows: integer;
 begin
   result := '';
@@ -1785,13 +1894,13 @@ begin
       // Execute request if was not got from cache
       try
         GetAndPrepareStatement(SQL, {forcecache=}false);
-        strm := TRawByteStringStream.Create;
+        res := TRawByteStringStream.Create;
         try
-          rows := fStatement^.Execute(0, '', strm,
+          rows := fStatement^.Execute(0, '', res,
             ForceAjax or not fOwner.NoAjaxJson, DB.StatementMaxMemory);
-          result := strm.DataString;
+          result := res.DataString;
         finally
-          strm.Free;
+          res.Free;
         end;
         GetAndPrepareStatementRelease(nil, 'returned % as %',
           [Plural('row', rows), KB(result)]);
@@ -1823,7 +1932,7 @@ begin
   DB.Lock;
   try
     PrepareCachedStatement(
-      Model.TableProps[TableModelIndex].SQL.SelectOneWithID, 1);
+      Model.TableProps[TableModelIndex].Sql.SelectOneWithID, 1);
     fStatement^.Bind(1, ID);
     // faster than fStatement^.ExecuteJson()
     WR := AcquireJsonWriter;
@@ -2001,7 +2110,8 @@ begin
       DB.UnLock;
     end;
     props.FieldBitsFromBlobField(BlobField, affectedfields);
-    InternalUpdateEvent(oeUpdateBlob, TableModelIndex, aID, '', @affectedfields, nil);
+    InternalUpdateEvent(
+      oeUpdateBlob, TableModelIndex, aID, '', @affectedfields, nil);
   except
     on ESqlite3Exception do
       result := false;
@@ -2025,11 +2135,11 @@ begin
   if InternalUpdateEventNeeded(oeUpdate, TableModelIndex) or
      (props.RecordVersionField <> nil) then
     result := OneFieldValue(props.Table, FieldName, 'ID=?', [], [ID], value) and
-      UpdateField(props.Table, ID, FieldName, [value + Increment])
+              UpdateField(props.Table, ID, FieldName, [value + Increment])
   else
     result := RecordCanBeUpdated(props.Table, ID, oeUpdate) and
       ExecuteFmt('UPDATE % SET %=%+:(%): WHERE ID=:(%):',
-       [props.SqlTableName, FieldName, FieldName, Increment, ID]);
+        [props.SqlTableName, FieldName, FieldName, Increment, ID]);
 end;
 
 function TRestOrmServerDB.MainEngineUpdateField(TableModelIndex: integer;
@@ -2084,7 +2194,7 @@ begin
       else
         result := ExecuteFmt('UPDATE % SET %=:(%):,%=:(%): WHERE RowID=:(%):',
           [props.SqlTableName, SetFieldName, SetValue,
-          props.RecordVersionField.Name, RecordVersionCompute, ID[0]])
+           props.RecordVersionField.Name, RecordVersionCompute, ID[0]])
     else
     begin
       IDs := Int64DynArrayToCsv(pointer(ID), length(ID));
@@ -2525,15 +2635,19 @@ begin
                 else
                   case b^.Types[arg] of
                     ftInt64:
-                      fStatement^.Bind(f + 1, GetInt64(pointer(b^.PostValues[f])));
+                      fStatement^.Bind(
+                        f + 1, GetInt64(pointer(b^.PostValues[f])));
                     ftDouble,
                     ftCurrency:
-                      fStatement^.Bind(f + 1, GetExtended(pointer(b^.PostValues[f])));
+                      fStatement^.Bind(
+                        f + 1, GetExtended(pointer(b^.PostValues[f])));
                     ftDate,
                     ftUtf8:
-                      fStatement^.Bind(f + 1, b^.PostValues[f]);
+                      fStatement^.Bind(
+                        f + 1, b^.PostValues[f]);
                     ftBlob:
-                      fStatement^.BindBlob(f + 1, b^.PostValues[f]);
+                      fStatement^.BindBlob(
+                        f + 1, b^.PostValues[f]);
                   end;
                 b^.PostValues[f] := ''; // release memory ASAP
                 inc(arg);
@@ -2547,7 +2661,8 @@ begin
             for r := firstrow to firstrow + rowcount - 1 do
             begin
               if updateeventneeded then
-                InternalUpdateEvent(oeAdd, b^.TableIndex, b^.ID[r], b^.Values[r], nil, nil);
+                InternalUpdateEvent(
+                  oeAdd, b^.TableIndex, b^.ID[r], b^.Values[r], nil, nil);
               b^.Values[r] := ''; // release memory ASAP
             end;
           inc(firstrow, rowcount);
@@ -2725,7 +2840,7 @@ begin
     else
       // we access localy the DB -> TOrmTableDB handle Tables parameter
       result := TOrmTableDB.Create(fServer.DB, Tables, sql,
-        not fServer.Owner.NoAjaxJson);
+                  not fServer.Owner.NoAjaxJson);
     if fServer.DB.InternalState <> nil then
       result.InternalState := fServer.DB.InternalState^;
   except

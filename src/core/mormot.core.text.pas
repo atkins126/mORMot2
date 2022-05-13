@@ -132,11 +132,13 @@ procedure FillZero(var secret: RawByteString); overload;
 // - may be used to cleanup stack-allocated content
 // ! ... finally FillZero(secret); end;
 procedure FillZero(var secret: RawUtf8); overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// fill all bytes of this UTF-8 string with zeros, i.e. 'toto' -> #0#0#0#0
 // - SpiUtf8 type has been defined explicitly to store Sensitive Personal
 // Information
 procedure FillZero(var secret: SpiUtf8); overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// fill all bytes of this dynamic array of bytes with zeros
 // - will write the memory buffer directly, if this array instance is not shared
@@ -2687,7 +2689,7 @@ begin
     exit; // nothing to trim
   Right := PStrLen(P - _STRLEN)^ - Right; // compute new length
   if Right > 0 then
-    if PStrCnt(P - _STRCNT)^ = 1 then
+    if PStrCnt(P - _STRCNT)^ = 1 then // RefCnt=1 ?
     begin
       PStrLen(P - _STRLEN)^ := Right; // we can modify it in-place
       if Left <> 0 then
