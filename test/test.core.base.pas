@@ -5031,6 +5031,8 @@ begin
   CheckSame(D, 0.252314, 1e-5);
   D := IntervalTextToDateTime('+1 06:03:20');
   CheckSame(D, 1.252314, 1e-5);
+  D := Iso8601ToDateTime('2022-05-11T23:59:56.971655858Z');
+  CheckEqual(DateTimeToIso8601(D, true, 'T', true), '2022-05-11T23:59:56.971');
   CheckSame(IntervalTextToDateTime('-20 06:03:20'), -20.252314, 1e-6);
   Check(DateTimeToIso8601Text(IntervalTextToDateTime('+0 06:03:20')) = 'T06:03:20');
   tmp := DateTimeToIso8601Text(IntervalTextToDateTime('+1 06:03:20'));
@@ -6336,10 +6338,32 @@ var
 
 var
   v: tvalue;
-  s, k: RawUtf8;
+  s, k, key, val: RawUtf8;
   i, n: integer;
   exists: boolean;
 begin
+  {$ifdef HASGENERICS}
+  dict := TSynDictionary.New<RawUtf8, RawUtf8>(True);
+  {$else}
+  dict := TSynDictionary.Create(TypeInfo(TRawUtf8DynArray), TypeInfo(TRawUtf8DynArray), True);
+  {$endif HASGENERICS}
+  try
+    key := 'Foobar';
+    val := 'lol';
+    dict.AddOrUpdate(key, val);
+    s := dict.SaveToJson;
+    CheckEqual(s, '{"Foobar":"lol"}');
+    key := 'foobar';
+    val := 'xxx';
+    dict.AddOrUpdate(key, val);
+    s := dict.SaveToJson;
+    CheckEqual(s, '{"Foobar":"xxx"}');
+    key := 'FooBar';
+    dict.FindAndCopy(key, val, False);
+    CheckEqual(val, 'xxx');
+  finally
+    dict.Free;
+  end;
   {$ifdef DYNARRAYHASHCOLLISIONCOUNT}
   n := 1000;
   for i := 1 to 5 do

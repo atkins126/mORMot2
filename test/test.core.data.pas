@@ -4442,12 +4442,38 @@ var
   i, ndx: PtrInt;
   V, V1, V2: variant;
   s, j: RawUtf8;
-  d: TDocVariantData;
+  d, a: TDocVariantData;
   vd: double;
   vs: single;
   lTable: TOrmTableJson;
   lRefreshed: Boolean;
 begin
+  a.Init;
+  a.AddObject(['source', 'source0', // not same order as in for loop below
+               'id',     0,
+               'dummy',  'toto',
+               'target', 'target0']);
+  for i := 1 to 2 do
+  begin
+    d.Init;
+    d.I['id'] := i;
+    d.U['source'] := 'source' + SmallUInt32Utf8[i];
+    d.U['target'] := 'target' + SmallUInt32Utf8[i];
+    a.AddItem(Variant(d));
+    s := _Safe(d.Reduce(['id','TARGet'], {casesens=}false))^.ToJson;
+    CheckEqual(s, '{"id":' + SmallUInt32Utf8[i] +
+      ',"target":"target' + SmallUInt32Utf8[i] + '"}');
+    s := _Safe(d.Reduce(['id','TARGet'], {casesens=}true))^.ToJson;
+    CheckEqual(s, '{"id":' + SmallUInt32Utf8[i] + '}');
+    d.Clear;
+  end;
+  s := _Safe(a.ReduceAsArray('source'))^.ToCsv;
+  CheckEqual(s, 'source0,source1,source2', 'ReduceAsArray');
+  s := _Safe(a.Reduce(['source', 'target'], False))^.ToCsv;
+  CheckEqual(s, '{"source":"source0","target":"target0"},' +
+                '{"source":"source1","target":"target1"},' +
+                '{"source":"source2","target":"target2"}', 'Reduce');
+  a.Clear;
   j := '{"id": 1, "name": Tom}'; // invalid JSON
   Check(not IsValidJson(j, {strict=}false));
   Check(not IsValidJson(j, {strict=}true));

@@ -1188,8 +1188,10 @@ type
   // - thread-safe by default, since most methods are protected by a TSynLocker;
   // use the ThreadUse option to tune thread-safety (e.g. disable or use a TRWLock)
   // - TDynArray is a wrapper which does not store anything, whereas this class
-  // is able to store both keys and values, and provide convenient methods to
+  // actually stores both keys and values, and provide convenient methods to
   // access the stored data, including JSON serialization and binary storage
+  // - consider IKeyValue<> from mormot.core.collections.pas, for more robust
+  // generics-based code where TKey/TValue are propagated to all methods
   TSynDictionary = class(TSynLocked)
   protected
     fKeys: TDynArrayHashed;
@@ -1212,7 +1214,7 @@ type
     procedure SetThreadUse(const Value: TSynLockerUse);
       {$ifdef HASINLINE} inline; {$endif}
   public
-    /// initialize the dictionary storage, specifyng dynamic array keys/values
+    /// initialize the dictionary storage, specifying dynamic array keys/values
     // - aKeyTypeInfo should be a dynamic array TypeInfo() RTTI pointer, which
     // would store the keys within this TSynDictionary instance
     // - aValueTypeInfo should be a dynamic array TypeInfo() RTTI pointer, which
@@ -1224,6 +1226,16 @@ type
     constructor Create(aKeyTypeInfo, aValueTypeInfo: PRttiInfo;
       aKeyCaseInsensitive: boolean = false; aTimeoutSeconds: cardinal = 0;
       aCompressAlgo: TAlgoCompress = nil; aHasher: THasher = nil); reintroduce; virtual;
+    {$ifdef HASGENERICS}
+    /// initialize the dictionary storage, specifying keys/values as generic types
+    // - just a convenient wrapper around TSynDictionary.Create()
+    // - consider IKeyValue<> from mormot.core.collections.pas, for more robust
+    // generics-based code where TKey/TValue are propagated to all methods
+    class function New<TKey, TValue>(aKeyCaseInsensitive: boolean = false;
+      aTimeoutSeconds: cardinal = 0; aCompressAlgo: TAlgoCompress = nil;
+      aHasher: THasher = nil): TSynDictionary;
+        static; {$ifdef FPC} inline; {$endif}
+    {$endif HASGENERICS}
     /// finalize the storage
     // - would release all internal stored values
     destructor Destroy; override;
@@ -1987,6 +1999,14 @@ procedure SaveJson(const Value; TypeInfo: PRttiInfo;
 function SaveJson(const Value; TypeInfo: PRttiInfo;
   EnumSetsAsText: boolean = false): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// serialize most kind of content as JSON, using its RTTI and a type name
+// - could be used if you know the type name and not the TypeInfo()
+// - will use Rtti.RegisterTypeFromName() so the type should be known, i.e. be
+// a simple type, or have been alredy registered
+// - returns '' if TypeName is not recognized
+function SaveJson(const Value; const TypeName: RawUtf8;
+  Options: TTextWriterOptions = []): RawUtf8; overload;
 
 /// save record into its JSON serialization as saved by TJsonWriter.AddRecordJson
 // - will use default Base64 encoding over RecordSave() binary - or custom true
@@ -7091,7 +7111,10 @@ begin
   end
   else if jpoHandleCustomVariants in O then
   begin
-    DVO := JSON_FAST;
+    if jpoAllowDouble in o then
+      DVO := JSON_FAST_FLOAT
+    else
+      DVO := JSON_FAST;
     CustomVariant := @DVO;
   end
   else
@@ -8965,6 +8988,16 @@ begin
   fSafe.Padding[DIC_TIMESEC].VInteger := aTimeoutSeconds;
 end;
 
+{$ifdef HASGENERICS}
+class function TSynDictionary.New<TKey, TValue>(aKeyCaseInsensitive: boolean;
+  aTimeoutSeconds: cardinal; aCompressAlgo: TAlgoCompress;
+  aHasher: THasher): TSynDictionary;
+begin
+  result := TSynDictionary.Create(TypeInfo(TArray<TKey>), TypeInfo(TArray<TValue>),
+    aKeyCaseInsensitive, aTimeoutSeconds, aCompressAlgo, aHasher);
+end;
+{$endif HASGENERICS}
+
 function TSynDictionary.ComputeNextTimeOut: cardinal;
 begin
   result := fSafe.Padding[DIC_TIMESEC].VInteger;
@@ -9110,7 +9143,7 @@ begin
     end
     else if aUpdate then
     begin
-      fValues.ItemCopyFrom(@aValue, result, {ClearBeforeCopy=}true);
+      fValues.ItemCopyFrom(aValue, result, {ClearBeforeCopy=}true);
       if tim <> 0 then
         fTimeOut[result] := tim;
     end
@@ -9658,23 +9691,25 @@ var
   tmp: TTextWriterStackBuffer;
   W: TBufferWriter;
 begin
-  fSafe.RWLock(cReadOnly);
+  result := '';
+  if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
+    exit;
+  W := TBufferWriter.Create(tmp{%H-});
   try
-    result := '';
-    if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
-      exit;
-    W := TBufferWriter.Create(tmp{%H-});
+    fSafe.RWLock(cReadOnly);
     try
+      if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
+        exit;
       DynArraySave(pointer(fKeys.Value),
         @fSafe.Padding[DIC_KEYCOUNT].VInteger, W, fKeys.Info.Info);
       DynArraySave(pointer(fValues.Value),
         @fSafe.Padding[DIC_VALUECOUNT].VInteger, W, fValues.Info.Info);
-      result := W.FlushAndCompress(NoCompression, Algo);
     finally
-      W.Free;
+      fSafe.RWUnLock(cReadOnly);
     end;
+    result := W.FlushAndCompress(NoCompression, Algo);
   finally
-    fSafe.RWUnLock(cReadOnly);
+    W.Free;
   end;
 end;
 
@@ -10267,6 +10302,18 @@ end;
 function SaveJson(const Value; TypeInfo: PRttiInfo; EnumSetsAsText: boolean): RawUtf8;
 begin
   SaveJson(Value, TypeInfo, TEXTWRITEROPTIONS_SETASTEXT[EnumSetsAsText], result);
+end;
+
+function SaveJson(const Value; const TypeName: RawUtf8;
+  Options: TTextWriterOptions): RawUtf8;
+var
+  nfo: TRttiCustom;
+begin
+  nfo := Rtti.RegisterTypeFromName(TypeName);
+  if nfo = nil then
+    result := ''
+  else
+    SaveJson(Value, nfo.Cache.Info, Options, result);
 end;
 
 function RecordSaveJson(const Rec; TypeInfo: PRttiInfo;
