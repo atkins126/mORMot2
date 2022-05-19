@@ -447,6 +447,7 @@ const
   end;
 
 var
+  gen, ref: TLecuyer;
   Bits: array[byte] of byte;
   Bits64: Int64 absolute Bits;
   Si, i: integer;
@@ -481,46 +482,49 @@ begin
     Check(not GetBit(Bits, i));
     Check(not GetBitPtr(@Bits, i));
   end;
-  RandSeed := 10; // will reproduce the same Random() values
+  ref.SeedGenerator(0); // will reproduce the same gen.Next values
+  gen := ref;
   for i := 1 to 100 do
   begin
-    Si := Random(high(Bits));
+    Si := gen.Next(SizeOf(Bits) shl 3);
     SetBit(Bits, Si);
     Check(GetBit(Bits, Si));
     Check(GetBitPtr(@Bits, Si));
   end;
-  RandSeed := 10;
+  gen.SeedGenerator(0); // rewind
   for i := 1 to 100 do
-    Check(GetBit(Bits, Random(high(Bits))));
-  RandSeed := 10;
+    Check(GetBit(Bits, gen.Next(SizeOf(Bits) shl 3)));
+  gen := ref; // rewind
   for i := 1 to 100 do
   begin
-    Si := Random(high(Bits));
+    Si := gen.Next(SizeOf(Bits) shl 3);
     UnSetBit(Bits, Si);
     Check(not GetBit(Bits, Si));
     Check(not GetBitPtr(@Bits, Si));
   end;
+  Check(IsZero(@Bits, SizeOf(Bits)));
   for i := 0 to high(Bits) * 8 + 7 do
     Check(not GetBit(Bits, i));
   for i := 0 to 63 do
     Check(not GetBit64(Bits64, i));
-  RandSeed := 10;
+  gen.SeedGenerator(0);
   for i := 1 to 30 do
   begin
-    Si := Random(63);
+    Si := gen.Next(64);
     SetBit64(Bits64, Si);
     Check(GetBit64(Bits64, Si));
   end;
-  RandSeed := 10;
+  gen := ref;
   for i := 1 to 30 do
-    Check(GetBit64(Bits64, Random(63)));
-  RandSeed := 10;
+    Check(GetBit64(Bits64, gen.Next(64)));
+  gen := ref;
   for i := 1 to 30 do
   begin
-    Si := Random(63);
+    Si := gen.Next(64);
     UnSetBit64(Bits64, Si);
     Check(not GetBit64(Bits64, Si));
   end;
+  Check(IsZero(@Bits, SizeOf(Bits)));
   for i := 0 to 63 do
     Check(not GetBit64(Bits64, i));
   c := 1;
@@ -533,7 +537,6 @@ begin
     Check(GetAllBits(ALLBITS_CARDINAL[i], i));
     c := c or (1 shl i);
   end;
-  Randomize; // we fixed the RandSeed value above -> get true random now
 end;
 
 procedure TTestCoreBase.Curr64;
@@ -2848,12 +2851,25 @@ begin
   end;
 end;
 
+const
+  REF_LECUYER_GENERATOR: array[0..15] of cardinal = (
+    2094674600, 1801471443, 1564436181, 3659342702,
+    1831620425, 3729943674, 687904812,  2066320563,
+    3494904290, 3023528103, 1358263417, 3202492728,
+    1577967257, 3235083616, 712712534,  1900728807);
+  REF_LECUYER_GENERATOR_TRAIL: array[0..15] of cardinal = (
+    2912814506, 4264204172, 1224264557, 457988427,
+    3671383357, 2304790299, 1068635130, 1812365788,
+    18904424,   1385490254, 3829840815, 3086100873,
+    1986702847, 635322329,  2467062584, 3233345822);
+
 procedure TTestCoreBase._Random32;
 var
   i, n: PtrInt;
   q, qp: QWord;
   c: array[0..1000] of cardinal;
   timer: TPrecisionTimer;
+  gen: TLecuyer;
 begin
   for i := 0 to high(c) do
     c[i] := Random32;
@@ -2883,6 +2899,14 @@ begin
   for i := 1 to 100 do
     RandomBytes(@c, SizeOf(c));
   NotifyTestSpeed('RandomBytes', 0, SizeOf(c) * 100, @timer);
+  for i := 0 to high(REF_LECUYER_GENERATOR) do
+  begin
+    gen.SeedGenerator(i);
+    FillCharFast(c, SizeOf(c), 0); // gen.Fill() will XOR the buffer
+    gen.Fill(@c, SizeOf(c));
+    CheckEqual(Hash32(@c, SizeOf(c)), REF_LECUYER_GENERATOR[i], 'lecgen');
+    CheckEqual(gen.Next, REF_LECUYER_GENERATOR_TRAIL[i], 'lecgentrail');
+  end;
 end;
 
 procedure TTestCoreBase._TRawUtf8Interning;
@@ -3260,12 +3284,17 @@ begin
       c2 := HmacCrc32c(@c1, pointer(S), 4, length(S));
       hmac32.Init(@c1, 4);
       hmac32.Update(pointer(S), length(S));
-      check(hmac32.Done = c2);
+      CheckEqual(hmac32.Done, c2, 'hmac32');
       s2 := S;
       SymmetricEncrypt(i, s2);
       check(s2 <> S);
       SymmetricEncrypt(i, s2);
-      check(s2 = S);
+      CheckEqual(s2, S, 'SymmetricEncrypt');
+      s2 := S;
+      LecuyerEncrypt(i, s2);
+      Check(s2 <> S);
+      LecuyerEncrypt(i, s2);
+      CheckEqual(s2, S, 'LecuyerEncrypt');
     end;
   Test(crc32creference, 'pas');
   Test(crc32cfast, 'fast');
@@ -4009,8 +4038,8 @@ begin
     CheckEqual(FormatUtf8('? %', [vj], [vj], true), s + ' ' + s);
     CheckEqual(FormatUtf8(' ?? ', [], [vs], true), ' "' + s + '" ');
     CheckEqual(FormatUtf8('? %', [vs], [vj], true), s + ' ' + s);
-    k := Int64(j) * Random(MaxInt);
-    b := Random(64);
+    k := Int64(j) * Random32(MaxInt);
+    b := Random32(64);
     s := GetBitCsv(k, b);
     l := 0;
     P := pointer(s);
@@ -4074,7 +4103,7 @@ begin
       9993:
         d := 1E-210;
     else
-      d := Random * 1E-17 - Random * 1E-19;
+      d := RandomDouble * 1E-17 - RandomDouble * 1E-19;
     end;
     str(d, a);
     s := RawUtf8(a);
@@ -4212,9 +4241,8 @@ begin
   fRunConsole := format('%s SysUtils.IntToStr %s %s/s', [fRunConsole, Timer.Stop,
     IntToThousandString(Timer.PerSec(100000))]);
   Timer.Start;
-  RandSeed := 10;
   for i := 0 to 99999 do
-    StrInt64(@varint[31], Int64(7777) * Random(maxInt));
+    StrInt64(@varint[31], Int64(7777) * Random32);
   fRunConsole := format('%s StrInt64 %s %s/s', [fRunConsole, Timer.Stop,
     IntToThousandString(Timer.PerSec(100000))]);
 end;
@@ -4278,7 +4306,7 @@ begin
     for k := 1 to 50 do
     begin
       for j := 0 to i - 1 do
-        P[j] := CHR[Random(83)];
+        P[j] := CHR[Random32(83)];
       b := AsciiToBaudot(u);
       check(BaudotToAscii(b) = u);
     end;
@@ -5014,12 +5042,12 @@ begin
   for i := 1700 to 2500 do
     Check(mormot.core.datetime.IsLeapYear(i) = SysUtils.IsLeapYear(i), 'IsLeapYear');
   // this will test typically from year 1905 to 2065
-  D := Now / 20 + Random * 20; // some starting random date/time
+  D := Now / 20 + RandomDouble * 20; // some starting random date/time
   for i := 1 to 2000 do
   begin
     Test(D, true);
     Test(D, false);
-    D := D + Random * 57; // go further a little bit: change date/time
+    D := D + RandomDouble * 57; // go further a little bit: change date/time
   end;
   b.Value := Iso8601ToTimeLog('20150504');
   Check(b.Year = 2015);
@@ -5642,7 +5670,7 @@ var
 begin
   for i := 1 to 100 do
   begin
-    s := DateTimeToIso8601(Now / 20 + Random * 20, true);
+    s := DateTimeToIso8601(Now / 20 + RandomDouble * 20, true);
     t := UrlEncode(s);
     Check(UrlDecode(t) = s);
     d := 'seleCT=' + t + '&where=' + Int32ToUtf8(i);
