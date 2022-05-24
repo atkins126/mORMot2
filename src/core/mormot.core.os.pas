@@ -1454,7 +1454,7 @@ function CryptDataForCurrentUserDPAPI(const Data, AppSecret: RawByteString;
   Encrypt: boolean): RawByteString;
 
 const
-  WINDOWS_CERTSTORE: array[TSystemCertificateStore] of RawUtf8 = (
+  WINDOWS_CERTSTORE: array[TSystemCertificateStore] of PWideChar = (
     'CA', 'MY', 'ROOT', 'SPC');
 
 /// retrieve all certificates of a given system store as PEM text
@@ -2110,11 +2110,13 @@ function FileAgeToUnixTimeUtc(const FileName: TFileName;
 function FileAgeToWindowsTime(const FileName: TFileName): integer;
 
 /// copy the date of one file to another
+// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
 function FileSetDateFrom(const Dest: TFileName; SourceHandle: THandle): boolean;
 
 /// copy the date of one file from a Windows File 32-bit TimeStamp
 // - this cross-system function is used e.g. by mormot.core.zip which expects
 // Windows TimeStamps in its headers
+// - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
 function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): boolean;
 
 /// convert a Windows API File 32-bit TimeStamp into a regular TDateTime

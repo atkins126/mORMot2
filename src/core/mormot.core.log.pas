@@ -3032,7 +3032,6 @@ function TDebugFile.LoadMab(const aMabFile: TFileName): boolean;
 var
   R: TFastReader;
   i: PtrInt;
-  S: TCustomMemoryStream;
   MS: TMemoryStream;
   u: PDebugUnit;
 begin
@@ -3040,30 +3039,25 @@ begin
   fDebugFile := aMabFile;
   if FileExists(aMabFile) then
   try
-    S := TSynMemoryStreamMapped.Create(aMabFile);
+    // StreamUnCompress() will try from the end if aMabFile is an executable
+    MS := AlgoSynLZ.StreamUnCompress(aMabFile, MAGIC_MAB, {hash32=}true);
+    if MS <> nil then
     try
-      // StreamUnCompress() will try from the end if aMabFile is an executable
-      MS := AlgoSynLZ.StreamUnCompress(aMabFile, MAGIC_MAB, {hash32=}true);
-      if MS <> nil then
-      try
-        R.Init(MS.Memory, MS.Size);
-        ReadSymbol(R, fSymbols);
-        ReadSymbol(R, fUnits);
-        for i := 0 to fUnitsCount - 1 do
-          R.VarUtf8(fUnit[i].FileName);
-        u := pointer(fUnit);
-        for i := 1 to fUnitsCount do
-        begin
-          R.ReadVarUInt32Array(u^.Line);
-          R.ReadVarUInt32Array(u^.Addr);
-          inc(u);
-        end;
-        result := true;
-      finally
-        MS.Free;
+      R.Init(MS.Memory, MS.Size);
+      ReadSymbol(R, fSymbols);
+      ReadSymbol(R, fUnits);
+      for i := 0 to fUnitsCount - 1 do
+        R.VarUtf8(fUnit[i].FileName);
+      u := pointer(fUnit);
+      for i := 1 to fUnitsCount do
+      begin
+        R.ReadVarUInt32Array(u^.Line);
+        R.ReadVarUInt32Array(u^.Addr);
+        inc(u);
       end;
+      result := true;
     finally
-      S.Free;
+      MS.Free;
     end;
   except
     on Exception do
@@ -3225,7 +3219,7 @@ begin
       inc(u);
     end;
     W.Flush; // now MS contains the uncompressed binary data
-    AlgoSynLZ.StreamCompress(MS, aStream, MAGIC_MAB, {hash32=}true);
+    AlgoSynLZ.StreamCompress(MS, aStream, MAGIC_MAB, {hash32=}true, {trailer=}true);
   finally
     W.Free;
     MS.Free;
@@ -3671,11 +3665,14 @@ begin
   with fToConsole do
   begin
     Safe.Lock;
-    Text[Next] := s;
-    Color[Next] := c;
-    Next := (Next + 1) and high(Text); // simple round-robin data buffer
-    inc(Count);
-    Safe.UnLock;
+    try
+      Text[Next] := s;
+      Color[Next] := c;
+      Next := (Next + 1) and high(Text); // simple round-robin data buffer
+      inc(Count);
+    finally
+      Safe.UnLock;
+    end;
   end;
 end;
 
@@ -3685,11 +3682,14 @@ var
   c: TAutoFlushThreadToConsole;
 begin
   fToConsole.Safe.Lock;
-  c := fToConsole; // thread-safe local copy
-  Finalize(fToConsole.Text);
-  fToConsole.Count := 0;
-  fToConsole.Next := 0;
-  fToConsole.Safe.UnLock;
+  try
+    c := fToConsole; // thread-safe local copy
+    Finalize(fToConsole.Text);
+    fToConsole.Count := 0;
+    fToConsole.Next := 0;
+  finally
+    fToConsole.Safe.UnLock;
+  end;
   if c.Count >= length(c.Text) then
   begin
     ConsoleWrite('... (truncated) ...', ccBlue);

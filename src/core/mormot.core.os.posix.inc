@@ -881,7 +881,7 @@ var
 begin
   datetime := WindowsFileTimeToDateTime(WinTime);
   result := (datetime <> 0) and
-            (FileSetDate(Dest, DateTimeToFileDate(datetime)) = 0);
+            (FileSetDate(Dest, DateTimeToFileDate(datetime)) = 0); // with LocalToEpoch()
 end;
 
 function FileAgeToWindowsTime(const FileName: TFileName): integer;
@@ -1326,10 +1326,12 @@ procedure ConsoleWaitForEnterKey;
 var
   c: AnsiChar;
 begin
-  if IsMultiThread and
-     (GetCurrentThreadID = MainThreadID) then
+  if GetCurrentThreadID = MainThreadID then
     repeat
-      CheckSynchronize(100);
+      if IsMultiThread then
+        CheckSynchronize(100)
+      else
+        Sleep(100);
       if UnixKeyPending then
         repeat
           c := #0;
