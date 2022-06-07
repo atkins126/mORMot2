@@ -1118,6 +1118,23 @@ begin
     inc(P);
 end;
 
+function GetNextItem(var P: PAnsiChar): RawUtf8;
+var
+  S: PAnsiChar;
+begin
+  result := '';
+  while P^ <= ' ' do
+    if P^ = #0 then
+      exit
+    else
+      inc(P);
+  S := P;
+  repeat
+    inc(P);
+  until P^ <= ' ';
+  FastSetString(result, S, P - S);
+end;
+
 const
   PAGE_GUARD = $0100;
   PAGE_VALID = $00e6; // PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or
@@ -1925,7 +1942,9 @@ begin
   if RegQueryValueExW(key, pointer(entry), nil, nil, tmp.buf, @rsize) = 0 then
   begin
     case rtype of
-      REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ:
+      REG_SZ,
+      REG_EXPAND_SZ,
+      REG_MULTI_SZ:
         Win32PWideCharToUtf8(tmp.buf, StrLenW(tmp.buf), result);
     end;
     if andtrim then
@@ -3374,7 +3393,8 @@ begin
 end;
 
 function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName;
-  envaddexisting: boolean; parsed: PParseCommands): integer;
+  envaddexisting: boolean; parsed: PParseCommands; waitfordelayms: cardinal;
+  processid: PHandle): integer;
 var
   startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
   processinfo: TProcessInformation;
@@ -3436,15 +3456,20 @@ begin
       DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP,
     pointer({%H-}wenv), pointer(wpath), startupinfo, processinfo) then
   begin
+    if processid <> nil then
+      processid^ := processinfo.hProcess;
     if waitfor then
-      if WaitForSingleObject(processinfo.hProcess, INFINITE) = WAIT_FAILED then
-        result := -GetLastError
-      else if not GetExitCodeProcess(processinfo.hProcess, exitcode) then
-        result := -GetLastError
-      else
-        result := exitcode
+      if WaitForSingleObject(processinfo.hProcess, waitfordelayms) = WAIT_FAILED then
+        if waitfordelayms <> INFINITE then
+          result := -1 // still runing after waitfordelayms
+        else
+          result := -GetLastError // failed to wait
+      else if GetExitCodeProcess(processinfo.hProcess, exitcode) then
+          result := exitcode      // waited for process to end -> return code
+        else
+          result := -GetLastError // was not able to retrieve exit code
     else
-      result := 0;
+      result := 0; // asynchronous process launch
     CloseHandle(processinfo.hProcess);
     CloseHandle(processinfo.hThread);
   end

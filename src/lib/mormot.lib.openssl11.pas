@@ -1,4 +1,4 @@
-/// low-level access to the Open SSL 1.1.1 Library
+/// low-level access to the Open SSL 1.1.1 / 3.x Library
 // - this unit is a part of the Open Source Synopse mORMot framework 2,
 // licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 unit mormot.lib.openssl11;
@@ -6,7 +6,7 @@ unit mormot.lib.openssl11;
 {
   *****************************************************************************
 
-   Cross-Platform and Cross-Compiler OpenSSL 1.1.1 API
+   Cross-Platform and Cross-Compiler OpenSSL 1.1.1 / 3.x API
    - Dynamic or Static OpenSSL Library Loading
    - OpenSSL Library Constants
    - OpenSSL Library Types and Structures
@@ -17,6 +17,8 @@ unit mormot.lib.openssl11;
     In respect to OpenSSL 1.0.x, the new 1.1.1 API hides most structures
    behind getter/setter functions, and doesn't require complex initialization.
     OpenSSL 1.1.1 features TLS 1.3, and is a LTS revision (until 2023-09-11).
+    OpenSSL 3.x is also supported on some platforms, as the next major version.
+    OpenSSL 1.1.1 / 3.x API adaptation is done at runtime by dynamic loading.
 
   *****************************************************************************
 
@@ -39,6 +41,14 @@ unit mormot.lib.openssl11;
 // define this so that OpenSSL will use pascal RTL getmem/freemem/reallocmem
 // - note that OpenSSL has no "finalize" API, and is likely to leak memory - so
 // you may try to define it if you don't check memory leaks (at you own risk)
+
+{.$define NOOPENSSL1}
+// define this to disable OpenSSL 1.1.1 API
+
+{.$define NOOPENSSL3}
+// define this to disable OpenSSL 3.x API - only Linux and Windows by now
+// on dynamic linking, will fallback to 1.1.1 if 3.x is not available
+
 
 {$ifdef FPCMM_REPORTMEMORYLEAKS}
   {$undef OPENSSLUSERTLMM} // incompatible for sure
@@ -98,54 +108,66 @@ type
 
 const
   // some binaries may be retrieved from https://github.com/grijjy/DelphiOpenSsl
+  // or http://wiki.overbyte.eu/wiki/index.php/ICS_Download (more up-to-date)
+  // - on Windows, we found out that ICS OpenSSL 3 is slower than OpenSSL 1.1.1
   {$ifdef OSWINDOWS}
     {$ifdef CPU32}
-    LIB_CRYPTO = 'libcrypto-1_1.dll';
-    LIB_SSL = 'libssl-1_1.dll';
+    LIB_CRYPTO1 = 'libcrypto-1_1.dll';
+    LIB_SSL1 = 'libssl-1_1.dll';
+    LIB_CRYPTO3 = 'libcrypto-3.dll';
+    LIB_SSL3 = 'libssl-3.dll';
     _PU = '';
     {$else}
-    LIB_CRYPTO = 'libcrypto-1_1-x64.dll';
-    LIB_SSL = 'libssl-1_1-x64.dll';
+    LIB_CRYPTO1 = 'libcrypto-1_1-x64.dll';
+    LIB_SSL1 = 'libssl-1_1-x64.dll';
+    LIB_CRYPTO3 = 'libcrypto-3-x64.dll';
+    LIB_SSL3 = 'libssl-3-x64.dll';
     _PU = '';
     {$endif CPU32}
   {$else}
     {$ifdef OSANDROID}
+      {$define NOOPENSSL3} // unsupported yet
       {$ifdef CPUARM}
-      LIB_CRYPTO = 'libcrypto-android32.a';
-      LIB_SSL = 'libssl-android32.a';
+      LIB_CRYPTO1 = 'libcrypto-android32.a';
+      LIB_SSL1 = 'libssl-android32.a';
       _PU = '';
       {$define OPENSSLSTATIC}
       {$else}
-      LIB_CRYPTO = 'libcrypto-android64.a';
-      LIB_SSL = 'libssl-android64.a';
+      LIB_CRYPTO1 = 'libcrypto-android64.a';
+      LIB_SSL1 = 'libssl-android64.a';
       _PU = '';
       {$define OPENSSLSTATIC}
       {$endif CPUARM}
     {$else}
       {$ifdef OSDARWIN}
+        {$define NOOPENSSL3} // unsupported yet
         {$ifdef CPUX86}
-        LIB_CRYPTO = 'libssl-merged-osx32.dylib';
-        LIB_SSL = 'libssl-merged-osx32.dylib';
+        LIB_CRYPTO1 = 'libssl-merged-osx32.dylib';
+        LIB_SSL1 = 'libssl-merged-osx32.dylib';
         _PU = '_';
         {$endif CPUX86}
         {$ifdef CPUX64}
-        LIB_CRYPTO = 'libssl-merged-osx64.dylib';
-        LIB_SSL = 'libssl-merged-osx64.dylib';
+        LIB_CRYPTO1 = 'libssl-merged-osx64.dylib';
+        LIB_SSL1 = 'libssl-merged-osx64.dylib';
         _PU = '_';
         {$endif CPUX64}
         {$ifdef CPUX64_static}
-        LIB_CRYPTO = 'libcrypto-osx64.a';
-        LIB_SSL = 'libssl-osx64.a';
+        LIB_CRYPTO1 = 'libcrypto-osx64.a';
+        LIB_SSL1 = 'libssl-osx64.a';
         _PU = '';
         {$define OPENSSLSTATIC}
         {$endif CPUX64}
       {$else}
         {$ifdef OSLINUX}
-        LIB_CRYPTO = 'libcrypto.so.1.1'; // specific version on Linux
-        LIB_SSL = 'libssl.so.1.1';
+        // specific versions on Linux
+        LIB_CRYPTO1 = 'libcrypto.so.1.1';
+        LIB_SSL1 = 'libssl.so.1.1';
+        LIB_CRYPTO3 = 'libcrypto.so.3';
+        LIB_SSL3 = 'libssl.so.3';
         {$else}
-        LIB_CRYPTO = 'libcrypto.so'; // should redirect to 1.1.1
-        LIB_SSL = 'libssl.so';
+        {$define NOOPENSSL3} // unsupported yet
+        LIB_CRYPTO1 = 'libcrypto.so'; // should redirect to 1.1.1
+        LIB_SSL1 = 'libssl.so';
         {$endif OSLINUX}
         _PU = '';
       {$endif OSDARWIN}
@@ -166,16 +188,43 @@ var
   // - equals e.g. '1010106F'
   OpenSslVersionHexa: string;
 
-{$ifndef OPENSSLSTATIC}
+{$ifdef OPENSSLSTATIC}
+
+  // only OpenSSL 1.1.1 is supported yet as static linking (need more testing)
+  {$undef NOOPENSSL1}
+  {$define NOOPENSSL3}
+
+const
+  LIB_CRYPTO = LIB_CRYPTO1;  // for external LIB_CRYPTO function definitions
+  LIB_SSL    = LIB_SSL1;     // for external LIB_SSL    function definitions
+
+{$else}
+
+var
   /// internal flag used by OpenSslIsAvailable function for dynamic loading
   openssl_initialized: (
     osslUnTested,
     osslAvailable,
     osslNotAvailable);
+
 {$endif OPENSSLSTATIC}
 
 
-/// return TRUE if OpenSSL 1.1.1 library can be used
+const
+  {$ifdef NOOPENSSL3}
+  LIB_TXT = '1.1.1';
+  LIB_MIN = $10101000;
+  {$else}
+  {$ifdef NOOPENSSL1}
+  LIB_TXT = '3.x';
+  LIB_MIN = $30000000;
+  {$else}
+  LIB_TXT = '1.1.1/3.x';
+  LIB_MIN = $10101000;
+  {$endif NOOPENSSL1}
+  {$endif NOOPENSSL3}
+
+/// return TRUE if OpenSSL 1.1.1 / 3.x library can be used
 // - will load and initialize it, calling OpenSslInitialize if necessary,
 // catching any exception during the process
 // - return always true if OPENSSLFULLAPI or OPENSSLSTATIC conditionals have
@@ -184,14 +233,16 @@ var
 function OpenSslIsAvailable: boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// initialize the OpenSSL 1.1.1 API, accessible via the global functions
+/// initialize the OpenSSL 1.1.1 / 3.x API, accessible via the global functions
 // - will raise EOpenSsl exception on any loading issue
-// - you can force the library names to load
+// - you can force the library names to load, but by default OpenSSL 3.x then
+// OpenSSL 1.1.1 libraries will be searched within the executable folder (on
+// Windows) and then in the system path
 // - do nothing if the library has already been loaded or if
 // OPENSSLFULLAPI or OPENSSLSTATIC conditionals have been defined
 function OpenSslInitialize(
-   const libcryptoname: TFileName = LIB_CRYPTO;
-   const libsslname: TFileName = LIB_SSL;
+   const libcryptoname: TFileName = '';
+   const libsslname: TFileName = '';
    const libprefix: RawUtf8 = _PU): boolean;
 
 
@@ -1520,8 +1571,9 @@ type
       {$ifdef HASINLINE} inline; {$endif}
   end;
 
-
-  v3_ext_ctx = object
+  // OpenSSL (even 3.0!) uses an hardcoded struct for this, which is against its
+  // own policy since 1.1.x to never expose internal structures :(
+  v3_ext_ctx = record
     flags: integer;
     issuer_cert: PX509;
     subject_cert: PX509;
@@ -1529,8 +1581,8 @@ type
     crl: PX509_CRL;
     db_meth: PX509V3_CONF_METHOD;
     db: pointer;
-    procedure Init(issuer, subject: PX509);
-      {$ifdef HASINLINE} inline; {$endif}
+    issuer_pkey: PEVP_PKEY; // introduced in OpenSSL 3.0
+    padding: array[0..3] of pointer; // paranoid - to avoid stack corruption
   end;
 
   Ptm = ^tm;
@@ -1606,6 +1658,7 @@ function SSL_get_peer_certificate(s: PSSL): PX509; cdecl;
 function SSL_get_peer_cert_chain(s: PSSL): Pstack_st_X509; cdecl;
 procedure SSL_free(ssl: PSSL); cdecl;
 function SSL_connect(ssl: PSSL): integer; cdecl;
+function SSL_accept(ssl: PSSL): integer; cdecl;
 procedure SSL_set_connect_state(s: PSSL); cdecl;
 procedure SSL_set_accept_state(s: PSSL); cdecl;
 function SSL_read(ssl: PSSL; buf: pointer; num: integer): integer; cdecl;
@@ -1616,6 +1669,7 @@ function SSL_set_cipher_list(s: PSSL; str: PUtf8Char): integer; cdecl;
 procedure SSL_get0_alpn_selected(ssl: PSSL; data: PPByte; len: PCardinal); cdecl;
 function SSL_clear(s: PSSL): integer; cdecl;
 function TLS_client_method(): PSSL_METHOD; cdecl;
+function TLS_server_method(): PSSL_METHOD; cdecl;
 function SSL_CTX_set_default_verify_paths(ctx: PSSL_CTX): integer; cdecl;
 procedure SSL_CTX_set_default_passwd_cb(ctx: PSSL_CTX; cb: Ppem_password_cb); cdecl;
 procedure SSL_CTX_set_default_passwd_cb_userdata(ctx: PSSL_CTX; u: pointer); cdecl;
@@ -1702,7 +1756,8 @@ function X509_REQ_set_pubkey(x: PX509_REQ; pkey: PEVP_PKEY): integer; cdecl;
 function X509_getm_notBefore(x: PX509): PASN1_TIME; cdecl;
 function X509_getm_notAfter(x: PX509): PASN1_TIME; cdecl;
 function X509V3_EXT_conf_nid(conf: Plhash_st_CONF_VALUE; ctx: PX509V3_CTX; ext_nid: integer; value: PUtf8Char): PX509_EXTENSION; cdecl;
-function X509_add_ext(x: PX509; ex: PX509_EXTENSION; loc: integer): integer; cdecl;
+function X509_add_ext(x: PX509; ex: PX509_EXTENSION; loc: integer): integer;
+  {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
 function X509_delete_ext(x: PX509; loc: integer): PX509_EXTENSION; cdecl;
 procedure X509V3_set_ctx(ctx: PX509V3_CTX; issuer, subject: PX509; req: PX509_REQ; crl: PX509_CRL; flags: integer);
   {$ifdef OPENSSLSTATIC} cdecl; {$else} {$ifdef FPC} inline; {$endif} {$endif}
@@ -1822,8 +1877,8 @@ function X509_VERIFY_PARAM_set_purpose(param: PX509_VERIFY_PARAM; purpose: integ
 function X509_VERIFY_PARAM_set_trust(param: PX509_VERIFY_PARAM; trust: integer): integer; cdecl;
 procedure X509_VERIFY_PARAM_set_depth(param: PX509_VERIFY_PARAM; depth: integer); cdecl;
 procedure X509_VERIFY_PARAM_set_auth_level(param: PX509_VERIFY_PARAM; auth_level: integer); cdecl;
-function X509_LOOKUP_load_file(ctx: PX509_LOOKUP; name: PUtf8Char; typ: integer): integer;
-function X509_LOOKUP_add_dir(ctx: PX509_LOOKUP; name: PUtf8Char; typ: integer): integer;
+function X509_LOOKUP_load_file(ctx: PX509_LOOKUP; name: PUtf8Char; typ: integer): integer; cdecl;
+function X509_LOOKUP_add_dir(ctx: PX509_LOOKUP; name: PUtf8Char; typ: integer): integer; cdecl;
 function PKCS12_new(): PPKCS12; cdecl;
 procedure PKCS12_free(a: PPKCS12); cdecl;
 function PKCS12_create(pass: PUtf8Char; name: PUtf8Char; pkey: PEVP_PKEY; cert: PX509;
@@ -1890,6 +1945,8 @@ function EVP_CIPHER_CTX_ctrl(ctx: PEVP_CIPHER_CTX; typ: integer;
   arg: integer; ptr: pointer): integer; cdecl;
 function EVP_CipherInit_ex(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER;
   impl: PENGINE; key: PByte; iv: PByte; enc: integer): integer; cdecl;
+function EVP_CipherInit_ex2(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER;
+  key: PByte; iv: PByte; enc: integer; params: pointer): integer; cdecl;
 function EVP_CipherUpdate(ctx: PEVP_CIPHER_CTX; _out: PByte; outl: PInteger;
   _in: PByte; inl: integer): integer; cdecl;
 function EVP_CipherFinal_ex(ctx: PEVP_CIPHER_CTX; outm: PByte; outl: PInteger): integer; cdecl;
@@ -2150,6 +2207,7 @@ type
     SSL_get_peer_cert_chain: function(s: PSSL): Pstack_st_X509; cdecl;
     SSL_free: procedure(ssl: PSSL); cdecl;
     SSL_connect: function(ssl: PSSL): integer; cdecl;
+    SSL_accept: function(ssl: PSSL): integer; cdecl;
     SSL_set_connect_state: procedure(s: PSSL); cdecl;
     SSL_set_accept_state: procedure(s: PSSL); cdecl;
     SSL_read: function(ssl: PSSL; buf: pointer; num: integer): integer; cdecl;
@@ -2160,6 +2218,7 @@ type
     SSL_get0_alpn_selected: procedure(ssl: PSSL; data: PPByte; len: PCardinal); cdecl;
     SSL_clear: function(s: PSSL): integer; cdecl;
     TLS_client_method: function(): PSSL_METHOD; cdecl;
+    TLS_server_method: function(): PSSL_METHOD; cdecl;
     SSL_CTX_set_default_verify_paths: function(ctx: PSSL_CTX): integer; cdecl;
     SSL_CTX_set_default_passwd_cb: procedure(ctx: PSSL_CTX; cb: Ppem_password_cb); cdecl;
     SSL_CTX_set_default_passwd_cb_userdata: procedure(ctx: PSSL_CTX; u: pointer); cdecl;
@@ -2175,7 +2234,7 @@ type
   end;
 
 const
-  LIBSSL_ENTRIES: array[0..46] of RawUtf8 = (
+  LIBSSL_ENTRIES: array[0..48] of RawUtf8 = (
     'SSL_CTX_new',
     'SSL_CTX_free',
     'SSL_CTX_set_timeout',
@@ -2197,10 +2256,11 @@ const
     'SSL_get_error',
     'SSL_ctrl',
     'SSL_set_bio',
-    'SSL_get_peer_certificate',
+    'SSL_get1_peer_certificate SSL_get_peer_certificate', // OpenSSL 3.0 / 1.1.1
     'SSL_get_peer_cert_chain',
     'SSL_free',
     'SSL_connect',
+    'SSL_accept',
     'SSL_set_connect_state',
     'SSL_set_accept_state',
     'SSL_read',
@@ -2211,6 +2271,7 @@ const
     'SSL_get0_alpn_selected',
     'SSL_clear',
     'TLS_client_method',
+    'TLS_server_method',
     'SSL_CTX_set_default_verify_paths',
     'SSL_CTX_set_default_passwd_cb',
     'SSL_CTX_set_default_passwd_cb_userdata',
@@ -2352,6 +2413,11 @@ begin
   result := libssl.SSL_connect(ssl);
 end;
 
+function SSL_accept(ssl: PSSL): integer;
+begin
+  result := libssl.SSL_accept(ssl);
+end;
+
 procedure SSL_set_connect_state(s: PSSL);
 begin
   libssl.SSL_set_connect_state(s);
@@ -2400,6 +2466,11 @@ end;
 function TLS_client_method(): PSSL_METHOD;
 begin
   result := libssl.TLS_client_method;
+end;
+
+function TLS_server_method(): PSSL_METHOD;
+begin
+  result := libssl.TLS_server_method;
 end;
 
 function SSL_CTX_set_default_verify_paths(ctx: PSSL_CTX): integer;
@@ -2685,6 +2756,8 @@ type
     EVP_CIPHER_CTX_copy: function(_out: PEVP_CIPHER_CTX; _in: PEVP_CIPHER_CTX): integer; cdecl;
     EVP_CIPHER_CTX_ctrl: function(ctx: PEVP_CIPHER_CTX; typ: integer; arg: integer; ptr: pointer): integer; cdecl;
     EVP_CipherInit_ex: function(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER; impl: PENGINE; key: PByte; iv: PByte; enc: integer): integer; cdecl;
+    EVP_CipherInit_ex2: function(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER;
+      key: PByte; iv: PByte; enc: integer; params: pointer): integer; cdecl;
     EVP_CipherUpdate: function(ctx: PEVP_CIPHER_CTX; _out: PByte; outl: PInteger; _in: PByte; inl: integer): integer; cdecl;
     EVP_CipherFinal_ex: function(ctx: PEVP_CIPHER_CTX; outm: PByte; outl: PInteger): integer; cdecl;
     EVP_CIPHER_CTX_set_padding: function(c: PEVP_CIPHER_CTX; pad: integer): integer; cdecl;
@@ -2753,7 +2826,7 @@ type
   end;
 
 const
-  LIBCRYPTO_ENTRIES: array[0..281] of RawUtf8 = (
+  LIBCRYPTO_ENTRIES: array[0..282] of RawUtf8 = (
     'CRYPTO_malloc',
     'CRYPTO_set_mem_functions',
     'CRYPTO_free',
@@ -2764,7 +2837,7 @@ const
     'ERR_load_BIO_strings',
     'EVP_MD_CTX_new',
     'EVP_MD_CTX_free',
-    'EVP_PKEY_size',
+    'EVP_PKEY_get_size EVP_PKEY_size', // OpenSSL 3.0 / 1.1.1 alternate names
     'EVP_PKEY_free',
     'EVP_DigestSignInit',
     'EVP_DigestUpdate',
@@ -2821,7 +2894,7 @@ const
     'X509_NAME_print_ex_fp',
     'X509_NAME_entry_count',
     'X509_NAME_oneline',
-    'X509_NAME_hash',
+    '?X509_NAME_hash', // not defined on OpenSSL 3.0 -> ? = ignored by now
     'X509_NAME_cmp',
     'X509_STORE_CTX_get_current_cert',
     'X509_digest',
@@ -2971,6 +3044,7 @@ const
     'EVP_CIPHER_CTX_copy',
     'EVP_CIPHER_CTX_ctrl',
     'EVP_CipherInit_ex',
+    '?EVP_CipherInit_ex2',    // OpenSSL 3.0 only
     'EVP_CipherUpdate',
     'EVP_CipherFinal_ex',
     'EVP_CIPHER_CTX_set_padding',
@@ -2978,8 +3052,8 @@ const
     'EVP_MD_CTX_new',
     'EVP_MD_CTX_free',
     'EVP_MD_CTX_md',
-    'EVP_MD_flags',
-    'EVP_MD_size',
+    'EVP_MD_get_flags EVP_MD_flags', // OpenSSL 3.0 / 1.1.1 alternate names
+    'EVP_MD_get_size EVP_MD_size',
     'EVP_DigestInit_ex',
     'EVP_DigestFinal_ex',
     'EVP_DigestFinalXOF',
@@ -4165,6 +4239,17 @@ begin
   result := libcrypto.EVP_CipherInit_ex(ctx, cipher, impl, key, iv, enc);
 end;
 
+function EVP_CipherInit_ex2(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER;
+  key: PByte; iv: PByte; enc: integer; params: pointer): integer;
+begin
+  // note: the latest API (i.e. EVP_CipherInit_ex on 1.1.1, EVP_CipherInit_ex2
+  // on 3.0) should be called to be able to reuse the context
+  if Assigned(libcrypto.EVP_CipherInit_ex2) then // OpenSSL 3.0 API
+    result := libcrypto.EVP_CipherInit_ex2(ctx, cipher, key, iv, enc, params)
+  else                                // fallback to OpenSSL 1.1.1 call
+    result := libcrypto.EVP_CipherInit_ex(ctx, cipher, nil, key, iv, enc);
+end;
+
 function EVP_CipherUpdate(ctx: PEVP_CIPHER_CTX; _out: PByte; outl: PInteger;
   _in: PByte; inl: integer): integer;
 begin
@@ -4549,10 +4634,9 @@ function OpenSslInitialize(const libcryptoname, libsslname: TFileName;
 var
   P: PPointerArray;
   api: PtrInt;
+  lib1, lib3: TFileName;
 begin
-  {$ifndef UNICODE}
   result := false; // make old Delphi compilers happy
-  {$endif UNICODE}
   GlobalLock;
   try
     if openssl_initialized = osslAvailable then
@@ -4562,39 +4646,70 @@ begin
     libssl := TLibSsl.Create;
     try
       // attempt to load libcrypto
+      if libcryptoname = '' then
+      begin
+        {$ifndef NOOPENSSL1}
+        lib1 := LIB_CRYPTO1;
+        {$endif NOOPENSSL1}
+        {$ifndef NOOPENSSL3}
+        lib3 := LIB_CRYPTO3;
+        {$endif NOOPENSSL3}
+      end
+      else
+        lib1 := libcryptoname;
+      if lib3 = '' then
+        lib3 := lib1; // duplicated names are just ignored by TryLoadLibrary()
       libcrypto.TryLoadLibrary([
+        // first try with the global variable
         OpenSslDefaultCrypto,
       {$ifdef OSWINDOWS}
-        // first try the libcrypto*.dll in the local executable folder
-        Executable.ProgramFilePath + libcryptoname,
+        // try the 3.x / 1.1.1 libcrypto*.dll in the local executable folder
+        Executable.ProgramFilePath + lib3,
+        Executable.ProgramFilePath + lib1,
       {$endif OSWINDOWS}
-        libcryptoname
+        lib3,
+        lib1
       {$ifdef OSPOSIX}
         , 'libcrypto.so' // generic library name on most systems
       {$endif OSPOSIX}
         ], EOpenSsl);
       P := @@libcrypto.CRYPTO_malloc;
       for api := low(LIBCRYPTO_ENTRIES) to high(LIBCRYPTO_ENTRIES) do
-        libcrypto.Resolve(pointer(libprefix + LIBCRYPTO_ENTRIES[api]),
-          @P[api], {onfail=}EOpenSsl);
+        libcrypto.Resolve(libprefix, LIBCRYPTO_ENTRIES[api], @P[api], EOpenSsl);
       if not Assigned(libcrypto.X509_print) then // last known entry
         raise EOpenSsl.Create('OpenSslInitialize: incorrect libcrypto API');
       // attempt to load libssl
+      lib3 := '';
+      if libsslname = '' then
+      begin
+        {$ifndef NOOPENSSL1}
+        lib1 := LIB_SSL1;
+        {$endif NOOPENSSL1}
+        {$ifndef NOOPENSSL3}
+        lib3 := LIB_SSL3;
+        {$endif NOOPENSSL3}
+      end
+      else
+        lib1 := libsslname;
+      if lib3 = '' then
+        lib3 := lib1;
       libssl.TryLoadLibrary([
+        // first try with the global variable
         OpenSslDefaultSsl,
       {$ifdef OSWINDOWS}
-        // first try the libssl*.dll in the local executable folder
-        Executable.ProgramFilePath + libsslname,
+        // first try the 3.x / 1.1.1 libssl*.dll in the local executable folder
+        Executable.ProgramFilePath + lib3,
+        Executable.ProgramFilePath + lib1,
       {$endif OSWINDOWS}
-        libsslname
+        lib3,
+        lib1
       {$ifdef OSPOSIX}
         , 'libssl.so'  // generic library name on most UNIX
       {$endif OSPOSIX}
         ], EOpenSsl);
       P := @@libssl.SSL_CTX_new;
       for api := low(LIBSSL_ENTRIES) to high(LIBSSL_ENTRIES) do
-        libssl.Resolve(pointer(libprefix + LIBSSL_ENTRIES[api]),
-          @P[api], {onfail=}EOpenSsl);
+        libssl.Resolve(libprefix, LIBSSL_ENTRIES[api], @P[api], EOpenSsl);
       if not Assigned(libssl.SSL_add1_host) then // last known entry
         raise EOpenSsl.Create('OpenSslInitialize: incorrect libssl API');
       // nothing is to be initialized with OpenSSL 1.1.*
@@ -4604,9 +4719,10 @@ begin
       {$endif OPENSSLUSERTLMM}
       OpenSslVersion := libcrypto.OpenSSL_version_num;
       OpenSslVersionHexa := IntToHex(OpenSslVersion, 8);
-      if OpenSslVersion and $ffffff00 < $10101000 then // paranoid check 1.1.1
-        raise EOpenSsl.CreateFmt('Incorrect OpenSSL version %x in %s - expects' +
-          ' >= 101010xx (1.1.1.x)', [OpenSslVersion, libcrypto.LibraryPath]);
+      if OpenSslVersion and $ffffff00 < LIB_MIN then // paranoid check
+        raise EOpenSsl.CreateFmt(
+          'Incorrect OpenSSL version %s in %s - expects ' + LIB_TXT,
+          [OpenSslVersionHexa, libcrypto.LibraryPath]);
     except
       FreeAndNil(libssl);
       FreeAndNil(libcrypto);
@@ -4716,6 +4832,9 @@ procedure SSL_free(ssl: PSSL); cdecl;
 function SSL_connect(ssl: PSSL): integer; cdecl;
   external LIB_SSL name _PU + 'SSL_connect';
 
+function SSL_accept(ssl: PSSL): integer; cdecl;
+  external LIB_SSL name _PU + 'SSL_accept';
+
 procedure SSL_set_connect_state(s: PSSL); cdecl;
   external LIB_SSL name _PU + 'SSL_set_connect_state';
 
@@ -4745,6 +4864,9 @@ function SSL_clear(s: PSSL): integer; cdecl;
 
 function TLS_client_method(): PSSL_METHOD; cdecl;
   external LIB_SSL name _PU + 'TLS_client_method';
+
+function TLS_server_method(): PSSL_METHOD; cdecl;
+  external LIB_SSL name _PU + 'TLS_server_method';
 
 function SSL_CTX_set_default_verify_paths(ctx: PSSL_CTX): integer; cdecl;
   external LIB_SSL name _PU + 'SSL_CTX_set_default_verify_paths';
@@ -5296,6 +5418,12 @@ procedure X509_VERIFY_PARAM_set_depth(param: PX509_VERIFY_PARAM; depth: integer)
 procedure X509_VERIFY_PARAM_set_auth_level(param: PX509_VERIFY_PARAM; auth_level: integer); cdecl;
   external LIB_CRYPTO name _PU + 'X509_VERIFY_PARAM_set_auth_level';
 
+function X509_LOOKUP_load_file(ctx: PX509_LOOKUP; name: PUtf8Char; typ: integer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_LOOKUP_load_file';
+
+function X509_LOOKUP_add_dir(ctx: PX509_LOOKUP; name: PUtf8Char; typ: integer): integer; cdecl;
+  external LIB_CRYPTO name _PU + 'X509_LOOKUP_add_dir';
+
 function PKCS12_new(): PPKCS12; cdecl;
   external LIB_CRYPTO name _PU + 'PKCS12_new';
 
@@ -5345,7 +5473,7 @@ function OPENSSL_sk_new(cmp: OPENSSL_sk_compfunc): POPENSSL_STACK; cdecl;
   external LIB_CRYPTO name _PU + 'OPENSSL_sk_new';
 
 procedure OPENSSL_sk_pop_free(st: POPENSSL_STACK; func: OPENSSL_sk_freefunc); cdecl;
-      external LIB_CRYPTO name _PU +
+  external LIB_CRYPTO name _PU + 'OPENSSL_sk_pop_free';
 
 procedure OPENSSL_sk_free(p1: POPENSSL_STACK); cdecl;
   external LIB_CRYPTO name _PU + 'OPENSSL_sk_free';
@@ -5454,6 +5582,12 @@ function EVP_CIPHER_CTX_ctrl(ctx: PEVP_CIPHER_CTX; typ: integer; arg: integer;
 function EVP_CipherInit_ex(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER; impl: PENGINE;
   key: PByte; iv: PByte; enc: Integer): Integer; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_CipherInit_ex';
+
+function EVP_CipherInit_ex2(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER;
+  key: PByte; iv: PByte; enc: integer; params: pointer): integer;
+begin // redirect from OpenSSL 3 API into 1.1.1 call
+  result := EVP_CipherInit_ex(ctx, cipher, nil, key, iv, enc);
+end;
 
 function EVP_CipherUpdate(ctx: PEVP_CIPHER_CTX; _out: PByte; outl: PInteger;
   _in: PByte; inl: Integer): Integer; cdecl;
@@ -5662,7 +5796,8 @@ function X509_print(bp: PBIO; x: PX509): integer; cdecl;
   external LIB_CRYPTO name _PU + 'X509_print';
 
 
-function OpenSslInitialize(const libcryptoname, libsslname: TFileName): boolean;
+function OpenSslInitialize(const libcryptoname, libsslname: TFileName;
+  const libprefix: RawUtf8): boolean;
 begin
   OpenSslVersion := OpenSSL_version_num;
   result := true;
@@ -6145,14 +6280,6 @@ begin
 end;
 
 
-{ v3_ext_ctx }
-
-procedure v3_ext_ctx.Init(issuer, subject: PX509);
-begin
-  X509V3_set_ctx(@self, issuer, subject, nil, nil, 0);
-  db := nil;
-end;
-
 
 { BIO }
 
@@ -6303,7 +6430,8 @@ end;
 
 function X509_NAME.Hash: cardinal;
 begin
-  if @self = nil then
+  if (@self = nil) or
+     not Assigned(@X509_NAME_hash) then
     result := 0
   else
     result := X509_NAME_hash(@self);
@@ -7354,7 +7482,8 @@ begin
     issuer := @self;
   if subject = nil then
     subject := @self;
-  {%H-}c.Init(issuer, subject);
+  FillCharFast(c, SizeOf(c), 0); // paranoid on non opaque structures
+  X509V3_set_ctx(@c, issuer, subject, nil, nil, 0);
   x := X509V3_EXT_conf_nid(nil, @c, nid, pointer(value));
   if x = nil then
     exit;
@@ -7734,9 +7863,9 @@ class procedure EOpenSsl.CheckAvailable(caller: TClass; const method: shortstrin
 begin
   if not OpenSslIsAvailable then
     if caller = nil then
-      raise CreateFmt('%s: OpenSSL 1.1.1 is not available', [method])
+      raise CreateFmt('%s: OpenSSL ' + LIB_TXT + ' not available', [method])
     else
-      raise CreateFmt('%s.%s: OpenSSL 1.1.1 is not available',
+      raise CreateFmt('%s.%s: OpenSSL ' + LIB_TXT + ' not available',
         [ClassNameShort(caller)^, method]);
 end;
 
@@ -7766,6 +7895,8 @@ type
     // INetTls methods
     procedure AfterConnection(Socket: TNetSocket; var Context: TNetTlsContext;
       const ServerAddress: RawUtf8);
+    procedure AfterAccept(Socket: TNetSocket; const RemoteIP: RawUtf8;
+      var Context: TNetTlsContext);
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     function Send(Buffer: pointer; var Length: integer): TNetResult;
   end;
@@ -8013,6 +8144,45 @@ begin
       fPeer := nil;
     end;
   end;
+end;
+
+procedure TOpenSslClient.AfterAccept(Socket: TNetSocket; const RemoteIP: RawUtf8;
+  var Context: TNetTlsContext);
+var
+  v: Integer;
+begin
+  fSocket := Socket;
+  fContext := @Context;
+  // reset output information
+  Context.LastError := '';
+  // prepare TLS connection properties
+  fCtx := SSL_CTX_new(TLS_server_method);
+  if Context.CertificateFile = '' then
+    raise EOpenSslClient.Create('CertificateFile required');
+  SSL_CTX_use_certificate_file(
+    fCtx, pointer(Context.CertificateFile), SSL_FILETYPE_PEM);
+  if Context.PrivatePassword <> '' then
+    SSL_CTX_set_default_passwd_cb_userdata(
+      fCtx, pointer(Context.PrivatePassword));
+  if Context.PrivateKeyFile = '' then
+    raise EOpenSslClient.Create('PrivateKeyFile required');
+  SSL_CTX_use_PrivateKey_file(
+    fCtx, pointer(Context.PrivateKeyFile), SSL_FILETYPE_PEM);
+  EOpenSslClient.Check(self, 'AfterAccept check_private_key',
+    SSL_CTX_check_private_key(fCtx), @Context.LastError);
+  v := TLS1_2_VERSION; // no SSL3 TLS1.0 TLS1.1
+  if Context.AllowDeprecatedTls then
+    v := TLS1_VERSION; // allow TLS1.0 TLS1.1
+  SSL_CTX_set_min_proto_version(fCtx, v);
+  fSsl := SSL_new(fCtx);
+  EOpenSslClient.Check(self, 'AfterAccept setfd',
+    SSL_set_fd(fSsl, Socket.Socket), @Context.LastError);
+  // server TLS negotiation with server
+  EOpenSslClient.Check(self, 'AfterAccept connect', SSL_accept(fSsl),
+    @Context.LastError, fSsl);
+  fDoSslShutdown := true; // need explicit SSL_shutdown() at closing
+  Context.CipherName := fSsl.CurrentCipher.Description;
+  // writeln(Context.CipherName);
 end;
 
 destructor TOpenSslClient.Destroy;
