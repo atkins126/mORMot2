@@ -1735,7 +1735,7 @@ type
     /// generate a new IList<TOrm> instance for the specific TOrm class
     // - a single TIList<TOrm> instance will be shared for all TOrm classes,
     // even on oldest compilers which do not support specialization
-    // - the returned IList<T: TOrm> will own and free each T instance
+    // - the weakly returned IList<T: TOrm> will own and free each T instance
     // - as used e.g. by TOrmTable.ToNewIList()
     class function NewIList(var IListOrm): TIListParent;
     {$endif ORMGENERICS}
@@ -2903,12 +2903,15 @@ type
     procedure ToObjectList(DestList: TObjectList;
       RecordType: TOrmClass = nil); overload;
     {$ifdef ORMGENERICS}
-    /// create a IList<TOrm> with TOrm instances corresponding to this resultset
+    /// create a IList<TOrm*> with TOrm instances corresponding to this resultset
     // - always returns an IList<> instance, even if the TOrmTable is nil or void
     // - our IList<> and IKeyValue<> interfaces are faster and generates smaller
     // executables than Generics.Collections, and need no try..finally Free: a
     // single TIList<TOrm> class will be reused for all IList<>
-    procedure ToNewIList(Item: TOrmClass; var Result);
+    function ToIList<T: TOrm>: IList<T>;
+    /// create a IList<TOrm> with TOrm instances corresponding to this resultset
+    // - weak typed result - rather use the ToIList<T> function (which calls it)
+    procedure ToNewIList(Item: TOrmClass; var IListOrm);
     {$endif ORMGENERICS}
     /// fill an existing T*ObjArray variable with TOrm instances
     // corresponding to this TOrmTable result set
@@ -3533,6 +3536,7 @@ type
     fFilters: TSynFilterOrValidateObjArrayArray;
     fModel: array of TOrmPropertiesModelEntry; // associated TOrmModel instances
     fModelMax: integer;
+    fTableObjArrayRtti: TBytes; // pointer()=TRttiJson of fake TOrm*ObjArray
     /// add an entry in fModel[] / fModelMax
     procedure InternalRegisterModel(aModel: TOrmModel; aTableIndex: integer;
       aProperties: TOrmModelProperties);
@@ -3578,6 +3582,10 @@ type
     procedure AddFilterOrValidate(const aFieldName: RawUtf8;
       aFilter: TSynFilterOrValidate); overload;
 
+    /// RTTI information of a fake but compatible TOrm*ObjArray
+    // - just a raw copy of TOrmObjArray RTTI with the proper array item info
+    // - as used e.g. by TOrm.NewIList and TRestStorageInMemory.Create
+    function TableObjArrayRtti: TRttiJson; {$ifdef HASINLINE}inline;{$endif}
     /// list all TOrm fields of this TOrm
     // - ready to be used by TOrmTableJson.CreateFromTables()
     // - i.e. the class itself then, all fields of type oftID (excluding oftMany)
@@ -4567,12 +4575,6 @@ procedure EncodeMultiInsertSQLite3(Props: TOrmProperties;
   BatchOptions: TRestBatchOptions; FieldCount, RowCount: integer;
   var result: RawUtf8);
 
-/// TDynArraySortCompare compatible function, sorting by TOrm.ID
-function TOrmDynArrayCompare(const Item1, Item2): integer;
-
-/// TDynArrayHashOne compatible function, hashing TOrm.ID
-function TOrmDynArrayHashOne(const Elem; Hasher: THasher): cardinal;
-
 /// create a TRecordReference with the corresponding parameters
 function RecordReference(Model: TOrmModel; aTable: TOrmClass;
   aID: TID): TRecordReference; overload;
@@ -4961,37 +4963,6 @@ end;
 
 { ************ TOrmModel TOrmTable IRestOrm Core Definitions }
 
-{$ifdef CPUX64}
-
-// very efficient branchless asm - rcx/rdi=Item1 rdx/rsi=Item2
-function TOrmDynArrayCompare(const Item1, Item2): integer;
-{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        mov     rcx, qword ptr [Item1]
-        mov     rdx, qword ptr [Item2]
-        mov     rcx, qword ptr [rcx + TOrm.fID]
-        mov     rdx, qword ptr [rdx + TOrm.fID]
-        xor     eax, eax
-        cmp     rcx, rdx
-        seta    al
-        sbb     eax, 0
-end;
-
-{$else}
-
-function TOrmDynArrayCompare(const Item1,Item2): integer;
-begin
-  // we assume Item1<>nil and Item2<>nil
-  result := CompareQWord(TOrm(Item1).fID, TOrm(Item2).fID);
-  // inlined branchless comparison or correct x86 asm for older Delphi
-end;
-
-{$endif CPUX64}
-
-function TOrmDynArrayHashOne(const Elem; Hasher: THasher): cardinal;
-begin
-  result := Hasher(0, pointer(@TOrm(Elem).fID), SizeOf(TID));
-end;
-
 function GetVirtualTableSqlCreate(Props: TOrmProperties): RawUtf8;
 var
   i: PtrInt;
@@ -5337,37 +5308,6 @@ begin
   fOwnedRecords.Add(result);
 end;
 
-{$ifdef ORMGENERICS}
-procedure TOrmTable.ToNewIList(Item: TOrmClass; var Result);
-var
-  list: TIListParent;
-  cloned, one: TOrm;
-  r: integer;
-  rec: POrm;
-begin
-  list := Item.NewIList(Result);
-  if (self = nil) or
-     (fRowCount = 0) then
-    exit;
-  cloned := Item.Create;
-  try
-    cloned.FillPrepare(self);
-    list.Count := fRowCount;  // allocate once
-    rec := list.First;        // fast direct iteration
-    for r := 1 to fRowCount do
-    begin
-      one := Item.Create;
-      rec^ := one;
-      inc(rec);
-      cloned.fFill.Fill(r, one);
-      one.fInternalState := fInternalState;
-    end;
-  finally
-    cloned.Free;
-  end;
-end;
-{$endif ORMGENERICS}
-
 procedure TOrmTable.FillOrms(P: POrm; RecordType: TOrmClass);
 var
   cloned: TOrm;
@@ -5411,6 +5351,25 @@ begin
   result := TObjectList.Create;
   ToObjectList(result, RecordType);
 end;
+
+{$ifdef ORMGENERICS}
+procedure TOrmTable.ToNewIList(Item: TOrmClass; var IListOrm);
+var
+  list: TIListParent;
+begin
+  list := Item.NewIList(IListOrm);
+  if (self = nil) or
+     (fRowCount = 0) then
+    exit;
+  list.Count := fRowCount;  // allocate once
+  FillOrms(list.First, Item);
+end;
+
+function TOrmTable.ToIList<T>: IList<T>;
+begin
+  ToNewIList(T, result);
+end;
+{$endif ORMGENERICS}
 
 function TOrmTable.ToObjArray(var ObjArray; RecordType: TOrmClass): boolean;
 var
@@ -8353,8 +8312,11 @@ end;
 {$ifdef ORMGENERICS}
 class function TOrm.NewIList(var IListOrm): TIListParent;
 begin
-  result := TIList<TOrm>.Create(
-    TypeInfo(TOrmObjArray), self.ClassInfo, [], ptClass);
+  if self = nil then
+    result := nil
+  else
+    result := TIList<TOrm>.CreateRtti(
+      OrmProps.TableObjArrayRtti, self.ClassInfo, [], ptClass);
   // all IList<T> share the same VMT -> assign shared TIList<TOrm>
   IList<TOrm>(IListOrm) := TIList<TOrm>(result);
 end;
@@ -9029,6 +8991,11 @@ begin
   end;
 end;
 
+function TOrmProperties.TableObjArrayRtti: TRttiJson;
+begin
+  result := pointer(fTableObjArrayRtti);
+end;
+
 const // the most ambigous keywords - others may be used as column names
   SQLITE3_KEYWORDS = ' from where group in as ';
 
@@ -9048,6 +9015,9 @@ begin
   // register for JsonToObject() and for TOrmPropInfoRttiTID.Create()
   // (should have been done before in TOrmModel.Create/AddTable)
   fTableRtti := Rtti.RegisterClass(aTable) as TRttiJson;
+  // create a fake TRttiJson matching this TOrm class as T*ObjArray item array
+  fTableObjArrayRtti := Rtti.RegisterType(TypeInfo(TOrmObjArray)).
+    ComputeFakeObjArrayRtti(aTable);
   // initialize internal structures
   fModelMax := -1;
   fTable := aTable;

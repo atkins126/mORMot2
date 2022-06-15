@@ -2339,6 +2339,8 @@ type
     /// retrieve an instance of a given class per RTTI
     // - previously registered by SetPrivateSlot
     function GetPrivateSlot(aClass: TClass): pointer;
+    /// create a fake TRttiCustom clone with an overloaded ArrayRtti
+    function ComputeFakeObjArrayRtti(aItemClass: TClass): TBytes;
     /// low-level RTTI kind, taken from Rtti property
     property Kind: TRttiKind
       read fCache.Kind;
@@ -2790,6 +2792,12 @@ type
 // - a local TCCHook was reported to have issues on FPC with class methods
 procedure TObjectWithCustomCreateRttiCustomSetParser(
   O: TObjectWithCustomCreateClass; Rtti: TRttiCustom);
+
+/// TDynArraySortCompare compatible function, sorting by TObjectWithID/TOrm.ID
+function TObjectWithIDDynArrayCompare(const Item1, Item2): integer;
+
+/// TDynArrayHashOne compatible function, hashing TObjectWithID/TOrm.ID
+function TObjectWithIDDynArrayHashOne(const Elem; Hasher: THasher): cardinal;
 
 
 
@@ -8015,6 +8023,16 @@ begin
   fPrivateSlotsSafe.UnLock;
 end;
 
+function TRttiCustom.ComputeFakeObjArrayRtti(aItemClass: TClass): TBytes;
+begin
+  if Kind <> rkDynArray then
+    raise ERttiException.CreateUtf8('ComputeFakeArrayRtti %?', [Name]);
+  SetLength(result, InstanceSize);
+  MoveFast(pointer(self)^, pointer(result)^, InstanceSize);  // weak copy
+  TRttiCustom(pointer(result)).fObjArrayClass := aItemClass; // overwrite class
+  TRttiCustom(pointer(result)).fArrayRtti := Rtti.RegisterClass(aItemClass);
+end; // no need to set other fields like Name
+
 function TRttiCustom.SetPrivateSlot(aObject: TObject): pointer;
 begin
   fPrivateSlotsSafe.Lock;
@@ -8888,6 +8906,38 @@ begin
 end;
 
 
+{$ifdef CPUX64}
+
+// very efficient branchless asm - rcx/rdi=Item1 rdx/rsi=Item2
+function TObjectWithIDDynArrayCompare(const Item1, Item2): integer;
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        mov     rcx, qword ptr [Item1]
+        mov     rdx, qword ptr [Item2]
+        mov     rcx, qword ptr [rcx + TObjectWithID.fID]
+        mov     rdx, qword ptr [rdx + TObjectWithID.fID]
+        xor     eax, eax
+        cmp     rcx, rdx
+        seta    al
+        sbb     eax, 0
+end;
+
+{$else}
+
+function TObjectWithIDDynArrayCompare(const Item1,Item2): integer;
+begin
+  // we assume Item1<>nil and Item2<>nil
+  result := CompareQWord(TObjectWithID(Item1).fID, TObjectWithID(Item2).fID);
+  // inlined branchless comparison or correct x86 asm for older Delphi
+end;
+
+{$endif CPUX64}
+
+function TObjectWithIDDynArrayHashOne(const Elem; Hasher: THasher): cardinal;
+begin
+  result := Hasher(0, pointer(@TObjectWithID(Elem).fID), SizeOf(TID));
+end;
+
+
 
 procedure InitializeUnit;
 var
@@ -9043,39 +9093,7 @@ begin
   ClassUnit := _ClassUnit;
   // redirect most used FPC RTL functions to optimized x86_64 assembly
   {$ifdef FPC_CPUX64}
-  {$ifndef NOPATCHRTL}
-  RedirectCode(@system.Move, @MoveFast);
-  RedirectCode(@system.FillChar, @FillCharFast);
-  PatchCode(@fpc_ansistr_incr_ref, @_ansistr_incr_ref, $17); // fpclen=$2f
-  PatchJmp(@fpc_ansistr_decr_ref, @_ansistr_decr_ref, $27); // fpclen=$3f
-  PatchJmp(@fpc_ansistr_assign, @_ansistr_assign, $3f);    // fpclen=$3f
-  PatchCode(@fpc_ansistr_compare, @_ansistr_compare,$77); // fpclen=$12f
-  PatchCode(@fpc_ansistr_compare_equal, @_ansistr_compare_equal,$57); // fpc=$cf
-  PatchCode(@fpc_unicodestr_incr_ref, @_ansistr_incr_ref, $17);      // fpc=$2f
-  PatchJmp(@fpc_unicodestr_decr_ref, @_ansistr_decr_ref, $27);      // fpc=$3f
-  PatchJmp(@fpc_unicodestr_assign, @_ansistr_assign, $3f);         // fpc=$3f
-  PatchCode(@fpc_dynarray_incr_ref, @_dynarray_incr_ref, $17);    // fpc=$2f
-  PatchJmp(@fpc_dynarray_clear, @_dynarray_decr_ref, $2f,
-    PtrUInt(@_dynarray_decr_ref_free));
-  RedirectCode(@fpc_dynarray_decr_ref, @fpc_dynarray_clear);
-  {$ifdef FPC_HAS_CPSTRING}
-  RedirectRtlCall(@_fpc_setstring_ansistr, @_setstring_ansistr_pansichar, $2d);
-  // Delphi/Windows is never natively UTF-8, but FPC+Lazarus may be :)
-  if DefaultSystemCodePage = CP_UTF8 then
-  begin
-    // dedicated UTF-8 concatenation RTL function replacements
-    RedirectRtlUtf8(@_fpc_ansistr_concat, @_ansistr_concat_utf8);
-    RedirectRtlUtf8(@_fpc_ansistr_concat_multi, @_ansistr_concat_multi_utf8);
-  end;
-  {$ifdef FPC_X64MM}
-  RedirectCode(@fpc_ansistr_setlength, @_ansistr_setlength);
-  {$endif FPC_X64MM}
-  {$endif FPC_HAS_CPSTRING}
-  {$ifdef FPC_X64MM}
-  RedirectCode(@fpc_getmem, @_Getmem);
-  RedirectCode(@fpc_freemem, @_Freemem);
-  {$endif FPC_X64MM}
-  {$endif NOPATCHRTL}
+  RedirectRtl;
   {$endif FPC_CPUX64}
   // validate some redefined RTTI structures with compiler definitions
   assert(SizeOf(TRttiVarData) = SizeOf(TVarData));

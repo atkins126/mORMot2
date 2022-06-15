@@ -455,6 +455,8 @@ type
     OnAfterPeerValidate: TOnNetTlsAfterPeerValidate;
     /// called by INetTls.AfterConnection to retrieve a private password
     OnPrivatePassword: TOnNetTlsGetPassword;
+    /// opaque pointer used by INetTls.AfterBind/AfterAccept
+    AcceptCert: pointer;
   end;
 
   /// abstract definition of the TLS encrypted layer
@@ -466,12 +468,18 @@ type
     // - should raise an exception on error
     procedure AfterConnection(Socket: TNetSocket; var Context: TNetTlsContext;
       const ServerAddress: RawUtf8);
-    /// method called for each new connection on server side
+    /// method called once the socket has been bound on server side
+    // - will set Context.AcceptCert with reusable server certificates info
+    procedure AfterBind(var Context: TNetTlsContext);
+    /// method called for each new connection accepted on server side
     // - should make the proper server-side TLS handshake and create a session
     // - should raise an exception on error
-    // - TNetTlsContext should have been copied from the server properties
-    procedure AfterAccept(Socket: TNetSocket; const RemoteIP: RawUTF8;
-      var Context: TNetTlsContext);
+    // - BoundContext is the associated server instance with proper AcceptCert
+    // as filled by AfterBind()
+    procedure AfterAccept(Socket: TNetSocket; const BoundContext: TNetTlsContext;
+      LastError, CipherName: PRawUtf8);
+    /// retrieve the textual name of the cipher used following AfterAccept()
+    function GetCipherName: RawUtf8;
     /// receive some data from the TLS layer
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     /// send some data from the TLS layer
@@ -483,8 +491,8 @@ type
 
 var
   /// global factory for a new TLS encrypted layer for TCrtSocket
-  // - is set to use the SChannel API on Windows; on other targets, may be nil
-  // unless the mormot.lib.openssl11.pas unit is included with your project
+  // - on Windows, this unit will set a factory using the system SChannel API
+  // - on other targets, could be set by the mormot.lib.openssl11.pas unit
   NewNetTls: TOnNewNetTls;
 
 
@@ -819,6 +827,11 @@ type
     cspNoData,
     cspDataAvailable);
 
+  TCrtSocketTlsAfter = (
+    cstaConnect,
+    cstaBind,
+    cstaAccept);
+
   {$M+}
   /// Fast low-level Socket implementation
   // - direct access to the OS (Windows, Linux) network layer API
@@ -848,15 +861,15 @@ type
     fTimeOut: PtrInt;
     fBytesIn: Int64;
     fBytesOut: Int64;
+    fSecure: INetTls;
     fSockInEofError: integer;
-    fSocketLayer: TNetLayer;
     fWasBind: boolean;
+    fSocketLayer: TNetLayer;
     // updated by every SockSend() call
     fSndBuf: RawByteString;
     fSndBufLen: integer;
     // updated during UDP connection, accessed via PeerAddress/PeerPort
     fPeerAddr: PNetAddr;
-    fSecure: INetTls;
     procedure SetKeepAlive(aKeepAlive: boolean); virtual;
     procedure SetLinger(aLinger: integer); virtual;
     procedure SetReceiveTimeout(aReceiveTimeout: integer); virtual;
@@ -864,7 +877,6 @@ type
     procedure SetTcpNoDelay(aTcpNoDelay: boolean); virtual;
     function GetRawSocket: PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
-    procedure DoTlsHandshake(doAccept: boolean);
   public
     /// direct access to the optional low-level HTTP proxy tunnelling information
     // - could have been assigned by a Tunnel.From() call
@@ -911,6 +923,8 @@ type
     /// initialize the instance with the supplied accepted socket
     // - is called from a bound TCP Server, just after Accept()
     procedure AcceptRequest(aClientSock: TNetSocket; aClientAddr: PNetAddr);
+    /// low-level TLS support method
+    procedure DoTlsAfter(caller: TCrtSocketTlsAfter);
     /// initialize SockIn for receiving with read[ln](SockIn^,...)
     // - data is buffered, filled as the data is available
     // - read(char) or readln() is indeed very fast
@@ -3147,27 +3161,32 @@ begin
   {$endif OSLINUX}
 end;
 
-procedure TCrtSocket.DoTlsHandshake(doAccept: boolean);
+procedure TCrtSocket.DoTlsAfter(caller: TCrtSocketTlsAfter);
 begin
+  if fSecure = nil then // ignore duplicated calls
   try
     if not Assigned(NewNetTls) then
-      raise ENetSock.Create('%s.DoTlsHandshake: TLS is not available - try ' +
-        'including mormot.lib.openssl11 and installing OpenSSL 1.1.1',
+      raise ENetSock.Create('%s.DoTlsAfter: TLS support not compiled ' +
+        '- try including mormot.lib.openssl11 in your project',
         [ClassNameShort(self)^]);
     fSecure := NewNetTls;
     if fSecure = nil then
-      raise ENetSock.Create('%s.DoTlsHandshake; TLS is not available on this ' +
-        'system - try installing OpenSSL 1.1.1', [ClassNameShort(self)^]);
-    if doAccept then
-      fSecure.AfterAccept(fSock, fRemoteIP, TLS)
-    else
-      fSecure.AfterConnection(fSock, TLS, fServer);
-    TLS.Enabled := true;
+      raise ENetSock.Create('%s.DoTlsAfter: TLS is not available on this ' +
+        'system - try installing OpenSSL 1.1.1/3.x', [ClassNameShort(self)^]);
+    case caller of
+      cstaConnect:
+        fSecure.AfterConnection(fSock, TLS, fServer);
+      cstaBind:
+        fSecure.AfterBind(TLS);
+      cstaAccept:
+        fSecure.AfterAccept(fSock, TLS, @TLS.LastError, @TLS.CipherName)
+    end;
+    TLS.Enabled := true; // set the flag AFTER fSecure has been initialized
   except
     on E: Exception do
     begin
       fSecure := nil;
-      raise ENetSock.CreateFmt('%s.DoTlsHandshake: TLS failed [%s %s]',
+      raise ENetSock.CreateFmt('%s.DoTlsAfter: TLS failed [%s %s]',
         [ClassNameShort(self)^, ClassNameShort(E)^, E.Message]);
     end;
   end;
@@ -3180,6 +3199,7 @@ var
   head: RawUtf8;
   res: TNetResult;
 begin
+  TLS.Enabled := false; // reset this flag which is set at output if aTLS=true
   fSocketLayer := aLayer;
   fWasBind := doBind;
   if {%H-}PtrInt(aSock)<=0 then
@@ -3232,7 +3252,7 @@ begin
       if Assigned(OnLog) then
         OnLog(sllTrace, 'Open(%:%) via proxy %', [fServer, fPort, fProxyUrl], self);
       if aTLS then
-        DoTlsHandshake({accept=}false);
+        DoTlsAfter(cstaConnect);
       exit;
     end
     else
@@ -3260,10 +3280,11 @@ begin
     end;
   end;
   if (aLayer = nlTcp) and
-     aTLS and
-     not doBind and
-     ({%H-}PtrInt(aSock) <= 0) then
-    DoTlsHandshake({accept=}false);
+     aTLS then
+    if doBind then
+      DoTlsAfter(cstaBind) // never called by OpenBind(aTLS=false) in practice
+    else if {%H-}PtrInt(aSock) <= 0 then
+      DoTlsAfter(cstaConnect);
   if Assigned(OnLog) then
     OnLog(sllTrace, '%(%:%) sock=% %', [BINDTXT[doBind], fServer, fPort,
       pointer(fSock.Socket), TLS.CipherName], self);
@@ -3470,20 +3491,21 @@ begin
   end;
 end;
 
-{.$define SYNCRTDEBUGLOW2}
+{ $define SYNCRTDEBUGLOW2}
 
 procedure TCrtSocket.Close;
 {$ifdef SYNCRTDEBUGLOW2}
-var
+var // closesocket() or shutdown() are slow e.g. on Windows with wrong Linger
   start, stop: int64;
 {$endif SYNCRTDEBUGLOW2}
 begin
+  // reset internal state
   fSndBufLen := 0; // always reset (e.g. in case of further Open)
   fSockInEofError := 0;
   ioresult; // reset readln/writeln value
   if SockIn <> nil then
   begin
-    PTextRec(SockIn)^.BufPos := 0;  // reset input buffer
+    PTextRec(SockIn)^.BufPos := 0;  // reset input buffer, but keep allocated
     PTextRec(SockIn)^.BufEnd := 0;
   end;
   if SockOut <> nil then
@@ -3493,7 +3515,10 @@ begin
   end;
   if not SockIsDefined then
     exit; // no opened connection, or Close already executed
-  fSecure := nil; // perform the TLS shutdown round and release the TLS context
+  // perform the TLS shutdown round and release the TLS context
+  fSecure := nil; // will depend on the actual implementation class
+  // don't reset TLS.Enabled := false because it is needed e.g. on re-connect
+  // actually close the socket and mark it as not SockIsDefined (<0)
   {$ifdef SYNCRTDEBUGLOW2}
   QueryPerformanceMicroSeconds(start);
   {$endif SYNCRTDEBUGLOW2}
@@ -3504,7 +3529,7 @@ begin
     fSock.ShutdownAndClose({rdwr=}fWasBind);
   {$ifdef SYNCRTDEBUGLOW2}
   QueryPerformanceMicroSeconds(stop);
-  if assigned(OnLog) then OnLog(sllTrace, 'ShutdownAndClose(%): %', [fWasBind, stop-start], self);
+  TSynLog.Add.Log(sllTrace, 'ShutdownAndClose(%): %', [fWasBind, stop-start], self);
   {$endif SYNCRTDEBUGLOW2}
   fSock := TNetSocket(-1);
   // don't reset fServer/fPort/fTls/fWasBind: caller may use them to reconnect
@@ -3668,7 +3693,7 @@ begin
         vtUnicodeString:
           begin
             Unicode_WideToShort(VUnicodeString, // assume WinAnsi encoding
-              length(UnicodeString(VUnicodeString)), 1252, tmp);
+              length(UnicodeString(VUnicodeString)), CODEPAGE_US, tmp);
             SockSend(@tmp[1], Length(tmp));
           end;
         {$endif HASVARUSTRING}
@@ -3827,7 +3852,7 @@ function TCrtSocket.TrySockRecv(Buffer: pointer; var Length: integer;
   StopBeforeLength: boolean): boolean;
 var
   expected, read: integer;
-  now, last, diff: Int64;
+  events: TNetEvents;
   res: TNetResult;
 begin
   result := false;
@@ -3837,7 +3862,6 @@ begin
   begin
     expected := Length;
     Length := 0;
-    last := {$ifdef OSWINDOWS}mormot.core.os.GetTickCount64{$else}0{$endif};
     repeat
       read := expected - Length;
       if fSecure <> nil then
@@ -3867,25 +3891,17 @@ begin
           break; // good enough for now
         inc(PByte(Buffer), read);
       end;
-      now := mormot.core.os.GetTickCount64;
-      if (last = 0) or
-         (read > 0) then // check timeout from unfinished read
-        last := now
-      else
+      events := fSock.WaitFor(TimeOut, [neRead]);
+      if neError in events then
       begin
-        diff := now - last;
-        if diff >= TimeOut then
-        begin
-          if Assigned(OnLog) then
-            OnLog(sllTrace, 'TrySockRecv: timeout (diff=%>%)',
-              [diff, TimeOut], self);
-          exit; // identify read timeout as error
-        end;
-        if diff < 100 then
-          SleepHiRes(0)
-        else
-          SleepHiRes(1);
-      end;
+        Close; // connection broken or socket closed gracefully
+        exit;
+      end
+      else if neRead in events then
+        continue;
+      if Assigned(OnLog) then
+        OnLog(sllTrace, 'TrySockRecv: timeout after %ms)', [TimeOut], self);
+      exit; // identify read timeout as error
     until false;
     result := true;
   end;
@@ -3998,7 +4014,7 @@ end;
 function TCrtSocket.TrySndLow(P: pointer; Len: integer): boolean;
 var
   sent: integer;
-  now, start: Int64;
+  events: TNetEvents;
   res: TNetResult;
 begin
   result := Len = 0;
@@ -4006,7 +4022,6 @@ begin
      (Len <= 0) or
      (P = nil) then
     exit;
-  start := {$ifdef OSWINDOWS}mormot.core.os.GetTickCount64{$else}0{$endif};
   repeat
     sent := Len;
     if fSecure <> nil then
@@ -4024,14 +4039,10 @@ begin
     else if (res <> nrOK) and
             (res <> nrRetry) then
       exit; // fatal socket error
-    now := mormot.core.os.GetTickCount64;
-    if (start = 0) or
-       (sent > 0) then
-      start := now
-    else // measure timeout since nothing written
-      if now - start > TimeOut then
-        exit; // identify timeout as error
-    SleepHiRes(1);
+    events := fSock.WaitFor(TimeOut, [neWrite]);
+    if (neError in events) or
+       not (neWrite in events) then // identify timeout as error
+      exit;
   until false;
   result := true;
 end;

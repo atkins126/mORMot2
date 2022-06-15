@@ -475,7 +475,7 @@ type
     fKey: TAesKey;
     fIV: TAesBlock;
     fAlgoMode: TAesMode;
-    fIVUpdated: boolean; // so you can call Encrypt() several times
+    fIVUpdated: boolean; // so you can chain Encrypt/Decrypt() calls
     procedure AfterCreate; virtual; // circumvent Delphi bug about const aKey
     function DecryptPkcs7Len(var InputLen, ivsize: integer; Input: pointer;
       IVAtBeginning, RaiseESynCryptoOnError: boolean): boolean;
@@ -1325,16 +1325,18 @@ type
 // - by default, a trailing random IV is expected, unless IV is supplied
 // - if src=dst a temporary .partial file is created, then will replace src
 // - raise an exception on error (e.g. missing or invalid input file)
-procedure AesPkcs7File(const src, dst: TFileName; encrypt: boolean; const key;
-  keySizeBits: cardinal; aesMode: TAesMode = mCtr; IV: PAesBlock = nil); overload;
+// - returns the number of bytes written to dst file
+function AesPkcs7File(const src, dst: TFileName; encrypt: boolean; const key;
+  keySizeBits: cardinal; aesMode: TAesMode = mCtr; IV: PAesBlock = nil): Int64; overload;
 
 /// cypher/decypher any file using AES and PKCS7 padding, from a password
 // - just a wrapper around TAesPkcs7Writer/TAesPkcs7Reader and TFileStream
 // - will derivate the password using PBKDF2 over HMAC-SHA256, using lower
 // 128-bit as AES-CTR-128 key, and the upper 128-bit as IV
-procedure AesPkcs7File(const src, dst: TFileName; encrypt: boolean;
+// - returns the number of bytes written to dst file
+function AesPkcs7File(const src, dst: TFileName; encrypt: boolean;
   const password: RawUtf8; const salt: RawByteString = '';
-  rounds: cardinal = 1000; aesMode: TAesMode = mCtr); overload;
+  rounds: cardinal = 1000; aesMode: TAesMode = mCtr): Int64; overload;
 
 var
   /// the fastest AES implementation classes available on the system, per mode
@@ -1349,6 +1351,11 @@ const
   TAesInternal: TAesAbstractClasses = (
     TAesEcb, TAesCbc, TAesCfb, TAesOfb, TAesC64, TAesCtr,
     TAesCfc, TAesOfc, TAesCtc, TAesGcm);
+
+/// create one AES instance which updates its IV between Encrypt/Decrypt calls
+// - will return either TAesFast[aesMode] or TAesInternal[aesMode] as fallback
+function AesIvUpdatedCreate(aesMode: TAesMode;
+  const key; keySizeBits: cardinal): TAesAbstract;
 
 const
   /// the AES chaining modes which supports AEAD process
@@ -6503,7 +6510,21 @@ end;
 { TAesPkcs7Abstract }
 
 var
-  AesModeIvUpdated: TAesAbstractClasses;
+  AesModeIvUpdated: TAesAbstractClasses; // IVUpdated=true -> chain En/Decrypt
+
+function AesIvUpdatedCreate(aesMode: TAesMode;
+  const key; keySizeBits: cardinal): TAesAbstract;
+begin
+  if AesModeIvUpdated[aesMode] = nil then
+    AesModeIvUpdated[aesMode] := TAesFast[aesMode]; // first try the fastest
+  result := AesModeIvUpdated[aesMode].Create(key, keySizeBits);
+  if not result.IVUpdated then // requires sequencial Encrypt/Decrypt() calls
+  begin
+    result.Free;
+    AesModeIvUpdated[aesMode] := TAesInternal[aesMode]; // our code sets the IV
+    result := TAesInternal[aesMode].Create(key, keySizeBits); // fallback
+  end;
+end;
 
 constructor TAesPkcs7Abstract.Create(aStream: TStream; const key;
   keySizeBits: cardinal; aesMode: TAesMode; IV: PAesBlock; bufferSize: integer);
@@ -6517,15 +6538,7 @@ begin
     RaiseStreamError(self, 'Create');
   fBufAvailable := bufferSize;
   fStream := aStream;
-  if AesModeIvUpdated[aesMode] = nil then
-    AesModeIvUpdated[aesMode] := TAesFast[aesMode];
-  fAes := AesModeIvUpdated[aesMode].Create(key, keySizeBits);
-  if not fAes.fIVUpdated then // Write() requires sequencial Encrypt() calls
-  begin
-    fAes.Free;
-    AesModeIvUpdated[aesMode] := TAesInternal[aesMode];
-    fAes := TAesInternal[aesMode].Create(key, keySizeBits); // fallback
-  end;
+  fAes := AesIvUpdatedCreate(aesMode, key, keySizeBits);
 end;
 
 const
@@ -6712,8 +6725,8 @@ begin
   result := RaiseStreamError(self, 'Write');
 end;
 
-procedure AesPkcs7File(const src, dst: TFileName; encrypt: boolean; const key;
-  keySizeBits: cardinal; aesMode: TAesMode; IV: PAesBlock);
+function AesPkcs7File(const src, dst: TFileName; encrypt: boolean; const key;
+  keySizeBits: cardinal; aesMode: TAesMode; IV: PAesBlock): Int64;
 var
   fn: TFileName;
   s, d: TFileStream;
@@ -6743,7 +6756,7 @@ begin
         begin
           aes := TAesPkcs7Writer.Create(d, key, keySizeBits, aesMode, IV, siz);
           try
-            StreamCopyUntilEnd(s, aes);
+            result := StreamCopyUntilEnd(s, aes);
             TAesPkcs7Writer(aes).Finish; // write padding
           finally
             aes.Free;
@@ -6753,7 +6766,7 @@ begin
         begin
           aes := TAesPkcs7Reader.Create(s, key, keySizeBits, aesMode, IV, siz);
           try
-            StreamCopyUntilEnd(aes, d); // d.CopyFrom(aes, 0) fails on Delphi
+            result := StreamCopyUntilEnd(aes, d); // d.CopyFrom(aes, 0) fails on Delphi
           finally
             aes.Free;
           end;
@@ -6772,18 +6785,19 @@ begin
   except
     if fn <> dst then
       DeleteFile(fn); // remove any remaining .partial file on error
+    raise;
   end;
 end;
 
-procedure AesPkcs7File(const src, dst: TFileName; encrypt: boolean;
+function AesPkcs7File(const src, dst: TFileName; encrypt: boolean;
   const password: RawUtf8; const salt: RawByteString; rounds: cardinal;
-  aesMode: TAesMode);
+  aesMode: TAesMode): Int64;
 var
-  dig: THash256Rec; // see TAesPkcs7Abstract.Create() oeverload
+  dig: THash256Rec; // see TAesPkcs7Abstract.Create() overload
 begin
   Pbkdf2HmacSha256(password, salt, rounds, dig.b, TAESPKCS7WRITER_SALT);
   try
-    AesPkcs7File(src, dst, encrypt, dig.Lo, 128, aesMode, @dig.Hi);
+    result := AesPkcs7File(src, dst, encrypt, dig.Lo, 128, aesMode, @dig.Hi);
   finally
     FillZero(dig.b);
   end;

@@ -514,7 +514,8 @@ var
   v: TLinger;
 begin
   v.l_linger := linger;
-  v.l_onoff := ord(linger >= 0);
+  v.l_onoff := 0; // don't wait - ord(linger >= 0) would wait
+  // https://docs.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-closesocket
   SetOpt(SOL_SOCKET, SO_LINGER, @v, SizeOf(v));
 end;
 
@@ -538,7 +539,7 @@ var
   sock: TSocket;
   rd, wr: record
     fd_count: integer;
-    fd_array: array[0..0] of TSocket; // no need of 512 entries here
+    fd_array: array[0..0] of TSocket; // no need of the 512 entries of TFDSet
   end;
   rdp, wrp: PFDSet;
   tv: TTimeVal;
@@ -976,12 +977,11 @@ end;
 type
   ESChannel = class(Exception);
 
-  TSChannelClient = class(TInterfacedObject, INetTls)
+  TSChannelNetTls = class(TInterfacedObject, INetTls)
   private
     fSocket: TNetSocket;
-    fContext: PNetTlsContext;
+    fCipherName: RawUtf8;
     fServerAddressW: SynUnicode;
-    fRemoteIP: RawUtf8;
     fCred: TCredHandle;
     fCtxt: TCtxtHandle;
     fFlags: cardinal;
@@ -997,19 +997,22 @@ type
     procedure HandshakeLoop;
   public
     destructor Destroy; override;
+    // INetTls methods
     procedure AfterConnection(Socket: TNetSocket;  var Context: TNetTlsContext;
       const ServerAddress: RawUtf8);
-    procedure AfterAccept(Socket: TNetSocket; const RemoteIP: RawUtf8;
-      var Context: TNetTlsContext);
+    procedure AfterBind(var Context: TNetTlsContext);
+    procedure AfterAccept(Socket: TNetSocket; const BoundContext: TNetTlsContext;
+      LastError, CipherName: PRawUtf8);
+    function GetCipherName: RawUtf8;
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     function Send(Buffer: pointer; var Length: integer): TNetResult;
   end;
 
 
 
-{ TSChannelClient }
+{ TSChannelNetTls }
 
-procedure TSChannelClient.ESChannelRaiseLastError(res: cardinal);
+procedure TSChannelNetTls.ESChannelRaiseLastError(res: cardinal);
 var
   LastError: integer;
 begin
@@ -1019,7 +1022,7 @@ begin
      SysErrorMessage(LastError)]);
 end;
 
-function TSChannelClient.CheckSEC_E_OK(res: integer): cardinal;
+function TSChannelNetTls.CheckSEC_E_OK(res: integer): cardinal;
 begin
   if res <> SEC_E_OK then
     ESChannelRaiseLastError(res);
@@ -1036,7 +1039,7 @@ begin
 end;
 
 const
-  TLSRECMAXSIZE = 19000; // buffers for TSChannelClient.Receive/Send
+  TLSRECMAXSIZE = 19000; // buffers for TSChannelNetTls.Receive/Send
 
 type
   THandshakeBuf = record
@@ -1060,7 +1063,7 @@ begin
   buf.buf[4].BufferType := SECBUFFER_EMPTY;
 end;
 
-procedure TSChannelClient.AfterConnection(Socket: TNetSocket;
+procedure TSChannelNetTls.AfterConnection(Socket: TNetSocket;
   var Context: TNetTlsContext; const ServerAddress: RawUtf8);
 var
   buf: THandshakeBuf;
@@ -1068,7 +1071,6 @@ var
 begin
   // prepare execution context
   fSocket := Socket;
-  fContext := @Context;
   fServerAddressW := SynUnicode(ServerAddress);
   fAccept := false;
   CheckSEC_E_OK(AcquireCredentialsHandleW(
@@ -1095,38 +1097,20 @@ begin
   // make TLS handshake and prepare for process
   SetLength(fData, TLSRECMAXSIZE);
   HandshakeLoop;
-  CheckSEC_E_OK(QueryContextAttributesW(
-    @fCtxt, SECPKG_ATTR_STREAM_SIZES, @fSizes));
-  fInputSize := fSizes.cbHeader + fSizes.cbMaximumMessage + fSizes.cbTrailer;
-  if fInputSize > TLSRECMAXSIZE then
-    raise ESChannel.CreateFmt('InputSize=%d>%d on %s',
-      [fInputSize, TLSRECMAXSIZE, ServerAddress]);
-  SetLength(fInput, fInputSize);
-  fInputCount := 0;
+  Context.CipherName := fCipherName;
 end;
 
-procedure TSChannelClient.AfterAccept(Socket: TNetSocket; const RemoteIP: RawUTF8;
-  var Context: TNetTlsContext);
+procedure TSChannelNetTls.AfterBind(var Context: TNetTlsContext);
 var
   certblob: RawByteString;
   blob: TCryptDataBlob;
-  cred: TSChannelCred;
 begin
-  // prepare execution context
-  fSocket := Socket;
-  fContext := @Context;
-  fRemoteIP := RemoteIP;
-  fAccept := true;
-  if fContext.CertificateFile = '' then
-  begin
+  if Context.CertificateFile = '' then
     // Load certificate from Windows certificate store
-    fAcceptCertStore := CertOpenSystemStoreW(nil, 'MY');
-    fAcceptCert := CertFindCertificateInStore(fAcceptCertStore, 0, 0,
-      CERT_FIND_ANY, nil, nil);
-  end
+    fAcceptCertStore := CertOpenSystemStoreW(nil, 'MY')
   else
   begin
-    certblob := StringFromFile(TFileName(fContext.CertificateFile));
+    certblob := StringFromFile(TFileName(Context.CertificateFile));
     blob.cbData := Length(certblob);
     blob.pbData := pointer(certblob);
     // Load certificate from file. You can use Let's Encrypt certificate,
@@ -1134,16 +1118,31 @@ begin
     // openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
     fAcceptCertStore := PFXImportCertStore(@blob, nil,
       PKCS12_INCLUDE_EXTENDED_PROPERTIES);
-    // Find first certificate in store
-    fAcceptCert := CertFindCertificateInStore(fAcceptCertStore, 0, 0,
-      CERT_FIND_ANY, nil, nil);
   end;
+  // find first certificate in store
+  fAcceptCert := CertFindCertificateInStore(fAcceptCertStore, 0, 0,
+    CERT_FIND_ANY, nil, nil);
   if fAcceptCert = nil then
-    raise ESChannel.Create('Certificate not available');
+    raise ESChannel.Create('AfterBind: no Certificate available');
+  // this global certificate will be used by AfterAccept()
+  Context.AcceptCert := fAcceptCert;
+end;
+
+procedure TSChannelNetTls.AfterAccept(Socket: TNetSocket;
+  const BoundContext: TNetTlsContext; LastError, CipherName: PRawUtf8);
+var
+  cred: TSChannelCred;
+begin
+  // prepare execution context
+  fSocket := Socket;
+  fAccept := true;
+  // prepare TLS connection properties from AfterBind() global certificate
+  if BoundContext.AcceptCert = nil then
+    raise ESChannel.Create('AfterAccept: missing AfterBind');
   FillCharFast(cred, SizeOf(cred), 0);
   cred.dwVersion := SCHANNEL_CRED_VERSION;
   cred.cCreds := 1;
-  cred.paCred := @fAcceptCert;
+  cred.paCred := @BoundContext.AcceptCert;
   CheckSEC_E_OK(AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
     nil, @cred, nil, nil, @fCred, nil));
   fDataPos := 0;
@@ -1152,17 +1151,16 @@ begin
   // make TLS handshake and prepare for process
   SetLength(fData, TLSRECMAXSIZE);
   HandshakeLoop;
-  CheckSEC_E_OK(QueryContextAttributesW(
-    @fCtxt, SECPKG_ATTR_STREAM_SIZES, @fSizes));
-  fInputSize := fSizes.cbHeader + fSizes.cbMaximumMessage + fSizes.cbTrailer;
-  if fInputSize > TLSRECMAXSIZE then
-    raise ESChannel.CreateFmt('InputSize=%d>%d on %s',
-      [fInputSize, TLSRECMAXSIZE, fRemoteIP]);
-  SetLength(fInput, fInputSize);
-  fInputCount := 0;
+  if CipherName <> nil then
+    CipherName^ := fCipherName;
 end;
 
-procedure TSChannelClient.HandshakeLoop;
+function TSChannelNetTls.GetCipherName: RawUtf8;
+begin
+  result := fCipherName;
+end;
+
+procedure TSChannelNetTls.HandshakeLoop;
 
   function ComputeAndSendAnswer: cardinal;
   var
@@ -1218,8 +1216,8 @@ var
 begin
   repeat
     inc(fDataCount, CheckSocket(
-      Recv(fSocket.Socket, @PByteArray(fData)[fDataCount], length(fData) - fDataCount,
-        MSG_NOSIGNAL)));
+      Recv(fSocket.Socket, @PByteArray(fData)[fDataCount],
+        length(fData) - fDataCount, MSG_NOSIGNAL)));
     res := ComputeAndSendAnswer;
     if res = SEC_I_INCOMPLETE_CREDENTIALS then
       // check https://stackoverflow.com/a/47479968/458259
@@ -1230,10 +1228,22 @@ begin
   // note: fDataCount trailing content may come from SECBUFFER_EXTRA bytes
   if QueryContextAttributesW(
       @fCtxt, SECPKG_ATTR_CONNECTION_INFO, @nfo) = SEC_E_OK then
-    fContext.CipherName := nfo.ToText;
+    fCipherName := nfo.ToText;
+  if fInputSize = 0 then
+  begin
+    // retrieve the TLS field sizes during first handshake
+    CheckSEC_E_OK(QueryContextAttributesW(
+      @fCtxt, SECPKG_ATTR_STREAM_SIZES, @fSizes));
+    fInputSize := fSizes.cbHeader + fSizes.cbMaximumMessage + fSizes.cbTrailer;
+    if (fInputSize = 0) or
+       (fInputSize > TLSRECMAXSIZE) then
+      raise ESChannel.CreateFmt('InputSize=%d>%d', [fInputSize, TLSRECMAXSIZE]);
+    SetLength(fInput, fInputSize);
+    fInputCount := 0;
+  end;
 end;
 
-destructor TSChannelClient.Destroy;
+destructor TSChannelNetTls.Destroy;
 var
   desc: TSecBufferDesc;
   buf: TSecBuffer;
@@ -1242,6 +1252,7 @@ begin
   try
     if {%H-}PtrInt(fSocket.Socket) > 0 then
     begin
+      // notify the other end with proper TLS shutdown frames
       desc.ulVersion := SECBUFFER_VERSION;
       desc.cBuffers := 1;
       desc.pBuffers := @buf;
@@ -1274,9 +1285,11 @@ begin
         end;
       end;
     end;
+    // finalize TLS context for this connection
     DeleteSecurityContext(@fCtxt);
     FreeCredentialsHandle(@fCred);
   finally
+    // release AfterBind() certificates information
     if fAcceptCert <> nil then
       CertFreeCertificateContext(fAcceptCert);
     if fAcceptCertStore <> nil then
@@ -1285,7 +1298,7 @@ begin
   end;
 end;
 
-function TSChannelClient.Receive(Buffer: pointer; var Length: integer): TNetResult;
+function TSChannelNetTls.Receive(Buffer: pointer; var Length: integer): TNetResult;
 var
   desc: TSecBufferDesc;
   buf: array[0..3] of TSecBuffer;
@@ -1392,7 +1405,7 @@ begin
   result := nrOK;
 end;
 
-function TSChannelClient.Send(Buffer: pointer; var Length: integer): TNetResult;
+function TSChannelNetTls.Send(Buffer: pointer; var Length: integer): TNetResult;
 var
   desc: TSecBufferDesc;
   buf: array[0..3] of TSecBuffer;
@@ -1455,9 +1468,9 @@ end;
 
 
 
-function SChannelNewNetTls: INetTls;
+function NewSChannelNetTls: INetTls;
 begin
-  result := TSChannelClient.Create;
+  result := TSChannelNetTls.Create;
 end;
 
 var
@@ -1468,7 +1481,7 @@ begin
   WSAStartup($0202, WsaDataOnce);
   SocketAPIVersion := RawUtf8(Format(
     '%s.%d', [WsaDataOnce.szDescription, WsaDataOnce.wVersion]));
-  NewNetTls := SChannelNewNetTls;
+  NewNetTls := NewSChannelNetTls;
 end;
 
 procedure FinalizeUnit;

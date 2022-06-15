@@ -125,7 +125,7 @@ const
   /// the full text of the current Synopse mORMot framework version
   // - we don't supply full version number with build revision
   // (as SYNOPSE_FRAMEWORK_VERSION), to reduce potential attacker knowledge
-  XPOWEREDVALUE = SYNOPSE_FRAMEWORK_NAME + ' 2 synopse.info';
+  XPOWEREDVALUE = SYNOPSE_FRAMEWORK_NAME + ' 2';
 
 
 { ******************** Reusable HTTP State Machine }
@@ -294,9 +294,9 @@ type
     // - e.g. 'Content-Encoding: synlz' header if compressed using synlz
     // - and if Content is not '', will add 'Content-Type: ' header
     // - always compute ContentLength and add a 'Content-Length: ' header
-    // - then append small content (<MaxSizeAtOnce) to Head if possible, and
+    // - then append small content (<MaxSizeAtOnce) to result if possible, and
     // refresh the final State to hrsSendBody/hrsResponseDone
-    procedure CompressContentAndFinalizeHead(MaxSizeAtOnce: integer);
+    function CompressContentAndFinalizeHead(MaxSizeAtOnce: integer): PRawByteStringBuffer;
     /// body sending socket entry point of our asynchronous HTTP Server
     // - to be called when some bytes could be written to output socket
     procedure ProcessBody(var Dest: TRawByteStringBuffer; MaxSize: PtrInt);
@@ -424,7 +424,7 @@ type
   /// the server-side available authentication schemes
   // - as used by THttpServerRequest.AuthenticationStatus
   // - hraNone..hraKerberos will match low-level HTTP_REQUEST_AUTH_TYPE enum as
-  // defined in HTTP 2.0 API and
+  // defined in HTTP 2.0 API
   THttpServerRequestAuthentication = (
     hraNone,
     hraFailed,
@@ -436,8 +436,8 @@ type
 
   /// available THttpServerRequest connection attributes
   // - hsrHttps will indicates that the communication was made over HTTPS
-  // - hsrSecured is set if the transmission is encrypted or in-process,
-  // using e.g. HTTPS/TLS or our proprietary AES/ECDHE algorithms
+  // - hsrSecured is set if the transmission is encrypted or in-process, using
+  // e.g. HTTPS/TLS or our proprietary AES/ECDHE algorithm over WebSockets
   // - hsrWebsockets communication was made using WebSockets
   // - hsrInProcess is done when run from the same process, i.e. on server side
   // - should exactly match TRestUriParamsLowLevelFlag in mormot.rest.core
@@ -1367,8 +1367,8 @@ begin
   result := true; // notify the next main state change
 end;
 
-procedure THttpRequestContext.CompressContentAndFinalizeHead(
-  MaxSizeAtOnce: integer);
+function THttpRequestContext.CompressContentAndFinalizeHead(
+  MaxSizeAtOnce: integer): PRawByteStringBuffer;
 begin
   // same logic than THttpSocket.CompressDataAndWriteHeaders below
   if (integer(CompressAcceptHeader) <> 0) and
@@ -1397,6 +1397,7 @@ begin
     Head.Append('Connection: Keep-Alive', {crlf=}true);
   end;
   Head.Append(nil, 0, {crlf=}true); // headers always end with a void line
+  result := @Head;
   Process.Reset;
   if ContentStream = nil then
     if ContentLength = 0 then
@@ -1419,6 +1420,7 @@ begin
         Process.Append(Content);
         Content := ''; // release ASAP
         Head.Reset; // DoRequest will use Process
+        result := @Process;
         State := hrsResponseDone;
       end
       else
