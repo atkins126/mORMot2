@@ -2190,7 +2190,7 @@ begin
   if self = nil then
     result := ecvUnknownAuthority
   else if not (cuDigitalSignature in GetUsage) then
-    result := ecvNotSupported
+    result := ecvWrongUsage
   else
     result := Signature.Verify(hash, fContent);
 end;
@@ -2777,7 +2777,8 @@ end;
 function TEccCertificateSecret.SignToBinary(Data: pointer; Len: integer): RawByteString;
 begin
   if (Data = nil) or
-     (Len < 0) then
+     (Len < 0) or
+     not (cuDigitalSignature in GetUsage) then
     result := ''
   else
     result := SignToBinary(Sha256Digest(Data, Len));
@@ -5128,16 +5129,23 @@ begin
   if fEcc = nil then
     result := ''
   else if not (Format in [ccfBinary, ccfPem]) then
+    // hexa or base64 encoding of the binary output
     result := inherited Save(PrivatePassword, Format)
   else
   begin
     if fEcc.InheritsFrom(TEccCertificateSecret) and
        (PrivatePassword <> '') then
-      result := TEccCertificateSecret(fEcc).SaveToSecureBinary(PrivatePassword)
+    begin
+      result := TEccCertificateSecret(fEcc).SaveToSecureBinary(PrivatePassword);
+      if Format = ccfPem then
+        result := DerToPem(result, pemSynopsePrivateKeyAndCertificate);
+    end
     else
+    begin
       result := fEcc.SaveToBinary({publickeyonly=}true);
-    if Format = ccfPem then
-      result := DerToPem(result, pemSynopseCertificate);
+      if Format = ccfPem then
+        result := DerToPem(result, pemSynopseCertificate);
+    end;
   end;
 end;
 
@@ -5151,7 +5159,7 @@ begin
   if IsPem(Saved) then
   begin
     bin := PemToDer(Saved, @k);
-    if k <> pemSynopseCertificate then
+    if not (k in [pemSynopseCertificate, pemSynopsePrivateKeyAndCertificate]) then
       bin := '';
   end
   else
@@ -5230,7 +5238,7 @@ begin
 end;
 
 type
-  /// 'syn-store' ICryptStore algorithm
+  /// 'syn-store' / 'syn-store-nocache' ICryptStore algorithm
   TCryptStoreAlgoInternal = class(TCryptStoreAlgo)
   public
     function New: ICryptStore; override; // = TCryptStoreInternal.Create(self)
@@ -5401,6 +5409,8 @@ begin
   TCryptAsymInternal.Implements('ES256,secp256r1,NISTP-256,prime256v1');
   TCryptCertAlgoInternal.Implements('syn-es256,syn-es256-v1');
   TCryptStoreAlgoInternal.Implements('syn-store,syn-store-nocache');
+  CryptStoreAlgoSyn := StoreAlgo('syn-store');
+  CryptStoreAlgoSynNoCache := StoreAlgo('syn-store-nocache');
 end;
 
 

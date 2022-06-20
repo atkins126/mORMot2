@@ -4032,10 +4032,10 @@ begin
     vj := variant(j);
     RawUtf8ToVariant(s, vs);
     CheckEqual(FormatUtf8(' ?? ', [], [vj], true), ' ' + s + ' ');
-    CheckEqual(FormatUtf8(' ?? ', [], [vj]), ' :(''' + s + '''): ');
-    CheckEqual(FormatUtf8('% ?', [vj], [vj]), s + ' :(''' + s + '''):');
+    CheckEqual(FormatUtf8(' ?? ', [], [vj]), ' :(' + s + '): ');
+    CheckEqual(FormatUtf8('% ?', [vj], [vj]), s + ' :(' + s + '):');
     CheckEqual(FormatUtf8(' ?? ', [], [vs]), ' :(''' + s + '''): ');
-    CheckEqual(FormatUtf8('% ?', [vj], [vj]), s + ' :(''' + s + '''):');
+    CheckEqual(FormatUtf8('% ?', [vj], [vj]), s + ' :(' + s + '):');
     CheckEqual(FormatUtf8('? %', [vj], [vj], true), s + ' ' + s);
     CheckEqual(FormatUtf8(' ?? ', [], [vs], true), ' "' + s + '" ');
     CheckEqual(FormatUtf8('? %', [vs], [vj], true), s + ' ' + s);
@@ -6828,6 +6828,14 @@ begin
     end;
   finally
     ObjArrayClear(arr);
+  end;
+  r1 := TOrmArrayTest.Create;
+  r2 := TOrmArrayTest.Create;
+  try
+    check(r1.SameValues(r2));
+  finally
+    r2.Free;
+    r1.Free;
   end;
   {$ifndef HASDYNARRAYTYPE}
   Rtti.RegisterObjArray(TypeInfo(TComplexNumberObjArray), TComplexNumber);

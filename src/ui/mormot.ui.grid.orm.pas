@@ -397,6 +397,11 @@ type
   end;
 
 
+resourcestring
+  sErrorTOrmTableToGridNoData = '%s didn''t receive any data for %s';
+  sPutMarkedRowFirst = 'Sort marked rows first';
+
+
 {************ Fill a TStringGrid from ORM results }
 
 /// fill TStringGrid.Cells[] with the supplied data
@@ -415,13 +420,10 @@ procedure FillStringGrid(Source: TOrmTable; Dest: TStringGrid;
 implementation
 
 
-
 {************ TOrmTableToGrid wrapper to manage a TDrawGrid from a TOrmTable }
 
 { TOrmTableToGrid }
 
-resourcestring
-  sErrorTOrmTableToGridNoData = '%s didn''t receive any data for %s';
 
 constructor TOrmTableToGrid.Create(aGrid: TDrawGrid; aTable: TOrmTable;
   aClient: TRestClientURI);
@@ -672,6 +674,10 @@ var
 begin
   if NotDefined then // avoid any possible GPF
     exit;
+  {$ifdef FPC}
+  if TDrawGrid(Owner).CursorState = gcsColWidthChanging then 
+    exit; // prevent sorting when resizing columns on FPC
+  {$endif FPC}
   fMouseDownMarkedValue := markNone;
   TDrawGrid(Owner).MouseToCell(X, Y, c, r);
   if cardinal(c) < cardinal(Table.FieldCount) then
@@ -732,9 +738,6 @@ begin
     end;
   TDrawGrid(Owner).Invalidate;
 end;
-
-resourcestring
-  sPutMarkedRowFirst = 'Sort marked rows first';
 
 procedure TOrmTableToGrid.DrawGridMouseMove(Sender: TObject; Shift: TShiftState;
   X, Y: Integer);
@@ -1446,14 +1449,23 @@ begin
   if (Source = nil) or
      (Dest = nil) then
     exit; // avoid GPF
-  Dest.ColCount := Source.FieldCount;
-  Dest.RowCount := Source.RowCount + 1;
-  for row := 0 to Source.RowCount + 1 do
-    for col := 0 to Source.FieldCount-1 do
-    begin
-      Source.ExpandAsString(row, col, Model, s); // will do all the magic
-      Dest.Cells[col, row] := s;
-    end;
+  {$ifdef FPC}
+  Dest.BeginUpdate;
+  try
+  {$endif FPC}
+    Dest.ColCount := Source.FieldCount;
+    Dest.RowCount := Source.RowCount + 1;
+    for row := 0 to Source.RowCount + 1 do
+      for col := 0 to Source.FieldCount-1 do
+      begin
+        Source.ExpandAsString(row, col, Model, s); // will do all the magic
+        Dest.Cells[col, row] := s;
+      end;
+  {$ifdef FPC}
+  finally
+    Dest.EndUpdate;
+  end;
+  {$endif FPC}
 end;
 
 

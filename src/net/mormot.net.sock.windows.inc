@@ -1009,7 +1009,6 @@ type
   end;
 
 
-
 { TSChannelNetTls }
 
 procedure TSChannelNetTls.ESChannelRaiseLastError(res: cardinal);
@@ -1097,13 +1096,15 @@ begin
   // make TLS handshake and prepare for process
   SetLength(fData, TLSRECMAXSIZE);
   HandshakeLoop;
-  Context.CipherName := fCipherName;
+  Context.CipherName := GetCipherName;
 end;
 
 procedure TSChannelNetTls.AfterBind(var Context: TNetTlsContext);
 var
   certblob: RawByteString;
   blob: TCryptDataBlob;
+  pass: SynUnicode;
+  flags: integer;
 begin
   if Context.CertificateFile = '' then
     // Load certificate from Windows certificate store
@@ -1115,9 +1116,20 @@ begin
     blob.pbData := pointer(certblob);
     // Load certificate from file. You can use Let's Encrypt certificate,
     // converted to PFX:
-    // openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
-    fAcceptCertStore := PFXImportCertStore(@blob, nil,
-      PKCS12_INCLUDE_EXTENDED_PROPERTIES);
+    //   openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
+    // or using mormot.core.secure on OpenSSL:
+    //   c := Cert('x509-es256');
+    //   c.Generate([cuTlsServer], '127.0.0.1', nil, 3650);
+    //   FileFromString(c.Save('pass', ccfBinary), WorkDir + 'privkeycert.pfx');
+    pass := SynUnicode(Context.PrivatePassword);
+    flags := PKCS12_INCLUDE_EXTENDED_PROPERTIES;
+    if OSVersion < wVista then
+      flags := 0;
+    fAcceptCertStore := PFXImportCertStore(@blob, pointer(pass), flags);
+    if pass <> '' then
+      FillCharFast(pointer(pass)^, length(pass), 0); // anti forensic
+    if fAcceptCertStore = nil then
+      ESChannelRaiseLastError(SEC_E_CERT_UNKNOWN);
   end;
   // find first certificate in store
   fAcceptCert := CertFindCertificateInStore(fAcceptCertStore, 0, 0,
@@ -1152,11 +1164,13 @@ begin
   SetLength(fData, TLSRECMAXSIZE);
   HandshakeLoop;
   if CipherName <> nil then
-    CipherName^ := fCipherName;
+    CipherName^ := GetCipherName;
 end;
 
 function TSChannelNetTls.GetCipherName: RawUtf8;
 begin
+  if fCipherName = '' then
+    fCipherName := TlsConnectionInfo(fCtxt);
   result := fCipherName;
 end;
 
@@ -1212,7 +1226,6 @@ procedure TSChannelNetTls.HandshakeLoop;
 
 var
   res: cardinal;
-  nfo: TSecPkgConnectionInfo;
 begin
   repeat
     inc(fDataCount, CheckSocket(
@@ -1226,9 +1239,7 @@ begin
         (res <> SEC_E_INCOMPLETE_MESSAGE);
   CheckSEC_E_OK(res);
   // note: fDataCount trailing content may come from SECBUFFER_EXTRA bytes
-  if QueryContextAttributesW(
-      @fCtxt, SECPKG_ATTR_CONNECTION_INFO, @nfo) = SEC_E_OK then
-    fCipherName := nfo.ToText;
+  fCipherName := ''; // will be retrieved if needed 
   if fInputSize = 0 then
   begin
     // retrieve the TLS field sizes during first handshake

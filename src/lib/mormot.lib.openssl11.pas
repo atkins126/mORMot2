@@ -1,4 +1,4 @@
-/// low-level access to the Open SSL 1.1.1 / 3.x Library
+/// low-level access to the OpenSSL 1.1.1 / 3.x Library
 // - this unit is a part of the Open Source Synopse mORMot framework 2,
 // licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 unit mormot.lib.openssl11;
@@ -6195,7 +6195,7 @@ var
   s: PtrUInt;
 begin
   // we don't check "if @self = nil" because may be called without EVP_PKEY
-  result := ''; // on error
+  result := ''; // '' on error
   ctx := EVP_MD_CTX_new;
   try
     // note: ED25519 requires single-pass EVP_DigestSign()
@@ -7368,6 +7368,8 @@ begin
 end;
 
 function X509.HasUsage(u: TX509Usage): boolean;
+var
+  f: integer;
 begin
   if @self = nil then
     result := false
@@ -7375,11 +7377,17 @@ begin
   if u = kuCA then
     result := IsCA
   else if (u >= low(KU)) and
-     (u <= high(KU)) then
-    result := (X509_get_key_usage(@self) and KU[u]) <> 0
+          (u <= high(KU)) then
+  begin
+    f := X509_get_key_usage(@self); // -1 if not present
+    result := (f >= 0) and ((f and KU[u]) <> 0);
+  end
   else if (u >= low(XU)) and
           (u <= high(XU)) then
-    result := (X509_get_extended_key_usage(@self) and XU[u]) <> 0
+  begin
+    f := X509_get_extended_key_usage(@self);
+    result := (f >= 0) and ((f and XU[u]) <> 0);
+  end
   else
     result := false;
 end;
@@ -8090,7 +8098,7 @@ begin
   EOpenSslNetTls.Check(self, 'AfterConnection connect',
     SSL_connect(fSsl), @Context.LastError, fSsl);
   fDoSslShutdown := true; // need explicit SSL_shutdown() at closing
-  Context.CipherName := fSsl.CurrentCipher.Description;
+  Context.CipherName := GetCipherName;
   // writeln(Context.CipherName);
   // peer validation
   if Assigned(Context.OnPeerValidate) then
@@ -8202,14 +8210,14 @@ begin
   EOpenSslNetTls.Check(self, 'AfterAccept accept',
     SSL_accept(fSsl), LastError, fSsl);
   fDoSslShutdown := true; // need explicit SSL_shutdown() at closing
-  fCipherName := fSsl.CurrentCipher.Description;
-  // writeln(fCipherName);
   if CipherName <> nil then
-    CipherName^ := fCipherName;
+    CipherName^ := GetCipherName;
 end;
 
 function TOpenSslNetTls.GetCipherName: RawUtf8;
 begin
+  if fCipherName = '' then
+    fCipherName := fSsl.CurrentCipher.Description;
   result := fCipherName;
 end;
 

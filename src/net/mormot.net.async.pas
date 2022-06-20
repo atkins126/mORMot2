@@ -754,6 +754,7 @@ type
   THttpAsyncConnections = class(TAsyncServer)
   protected
     fAsyncServer: THttpAsyncServer;
+    procedure SetExecuteState(State: THttpServerExecuteState); override;
     procedure Execute; override;
   end;
 
@@ -1353,7 +1354,13 @@ begin
            not (fFirstRead in connection.fFlags) then
         begin
           include(connection.fFlags, fFirstRead);
-          fOnFirstRead(connection); // e.g. TAsyncServer.OnFirstReadDoTls
+          try
+            fOnFirstRead(connection); // e.g. TAsyncServer.OnFirstReadDoTls
+          except
+            // TLS error -> abort
+            UnlockAndCloseConnection(false, connection, 'ProcessRead OnFirstRead');
+            exit;
+          end;
         end;
         repeat
           if fRead.Terminated or
@@ -2607,6 +2614,7 @@ begin
   end;
   // TAsyncServer.Execute made Accept(async=false) from acoEnableTls
   Sender.fSecure := NewNetTls;  // should work since DoTlsAfter() was fine
+  Sender.fSocket.MakeBlocking;
   Sender.fSecure.AfterAccept(Sender.fSocket, fServer.TLS, nil, nil);
   Sender.fSocket.MakeAsync;     // as expected by our asynchronous code
 end;
@@ -3071,6 +3079,15 @@ begin
   inherited Execute;
 end;
 
+procedure THttpAsyncConnections.SetExecuteState(State: THttpServerExecuteState);
+begin
+  if (State = esRunning) and
+     (fAsyncServer <> nil) and
+     (fServer <> nil) then
+    fAsyncServer.fSock := fServer;
+  inherited SetExecuteState(State);
+end;
+
 
 { THttpAsyncServer }
 
@@ -3151,8 +3168,8 @@ begin
   WaitStarted(10); // wait for fAsync.Execute to bind and start
   if fAsync <> nil then
     try
-      fAsync.DoLog(sllTrace, 'Execute: main W loop', [], self);
       fSock := fAsync.fServer;
+      fAsync.DoLog(sllTrace, 'Execute: main W loop', [], self);
       tix := mormot.core.os.GetTickCount64 shr 16; // delay=500 after 1 min idle
       lasttix := tix;
       ms := 1000; // fine if OnGetOneIdle is called in-between

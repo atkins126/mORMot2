@@ -76,7 +76,7 @@ type
       CustomKey: cardinal = 0): SpiUtf8; overload;
     /// this class method could be used to decrypt a password, stored as JSON,
     // according to a given private key
-    // - may trigger a ESynException if the password was stored using hardened
+    // - may trigger a ECrypt if the password was stored using hardened
     // CryptDataForCurrentUser, and the current user doesn't match the
     // expected user stored in the field
     class function ComputePlainPassword(const CypheredPassword: SpiUtf8;
@@ -86,7 +86,7 @@ type
     property Key: cardinal
       read GetKey write fKey;
     /// access to the associated unencrypted Password value
-    // - may trigger a ESynException if the password was stored using hardened
+    // - may trigger a ECrypt if the password was stored using hardened
     // CryptDataForCurrentUser, and the current user doesn't match the
     // expected user stored in the field
     property PasswordPlain: SpiUtf8
@@ -694,11 +694,24 @@ type
   end;
 
 
+  /// the known 32-bit crc algorithms as returned by CryptCrc32()
+  // - ccaCrc32 and ccaAdler32 require mormot.lib.z.pas to be included
+  // - AesNiHash() is not part of it, because it is not cross-platform, and
+  // randomly seeded at process startup
+  TCrc32Algo = (
+    caCrc32c,
+    caCrc32,
+    caAdler32,
+    caxxHash32,
+    caFnv32);
 
+/// returns the 32-bit crc function for a given algorithm
+// - may return nil, e.g. for caCrc32/caAdler32 when mormot.lib.z is not loaded
+function CryptCrc32(algo: TCrc32Algo): THasher;
 
 function ToText(algo: TSignAlgo): PShortString; overload;
 function ToText(algo: THashAlgo): PShortString; overload;
-
+function ToText(algo: TCrc32Algo): PShortString; overload;
 
 /// compute the hexadecimal hash of any (big) file
 // - using a temporary buffer of 1MB for the sequential reading
@@ -894,12 +907,17 @@ type
     CryptNonce: cardinal;
     /// used when Generate() has TimeOutMinutes=0
     // - if equals 0, one month delay is used as "never expire"
-    DefaultTimeOutMinutes: cardinal;
+    DefaultTimeOutMinutes: word;
+    /// 32-bit checksum algorithm used for digital signature
+    CrcAlgo: TCrc32Algo;
+    /// padding byte for backward compatibility
+    Padding: byte;
     /// private random secret, used for encryption of the cookie content
     Crypt: array[byte] of byte;
     /// initialize ephemeral temporary cookie generation
     procedure Init(const Name: RawUtf8 = 'mORMot';
-      DefaultSessionTimeOutMinutes: cardinal = 0);
+      DefaultSessionTimeOutMinutes: cardinal = 0;
+      SignAlgo: TCrc32Algo = caCrc32c);
     /// will initialize a new Base64Uri-encoded session cookie
     // - with an optional record data
     // - will return the 32-bit internal session ID and a Base64Uri cookie
@@ -1177,6 +1195,24 @@ type
   /// exception class raised by our High-Level Certificates Process
   ECryptCert = class(ESynException);
 
+  /// the known asymmetric algorithms, e.g. as published by OpenSSL
+  // - is an exact match of TCryptAsymAlgo enumerate in mormot.crypt.openssl.pas
+  // - as implemented e.g. by TJwtAbstractOsl inherited classes, or
+  // TCryptAsymOsl/TCryptCertAlgoOpenSsl implementing TCryptAsym/ICryptCert,
+  // accessible via CryptAsymOpenSsl[] and CryptCertAlgoOpenSsl[] factories
+  TCryptAsymAlgo = (
+    caaES256,
+    caaES384,
+    caaES512,
+    caaES256K,
+    caaRS256,
+    caaRS384,
+    caaRS512,
+    caaPS256,
+    caaPS384,
+    caaPS512,
+    caaEdDSA);
+
   /// the known Key Usages for a given Certificate
   // - is an exact match of TX509Usage enumerate in mormot.lib.openssl11.pas
   // - stored as a 16-bit memory block, with CERTIFICATE_USAGE_ALL = 65535
@@ -1312,7 +1348,7 @@ type
     // - after Generate, will contain the public and private key, so
     // PrivatePassword is needed to secure its content - if PrivatePassword is
     // left to '' then only the generated public key will be serialized
-    // - will use PEM by default, but you can export to another formats,
+    // - will use binary by default, but you can export to another formats,
     // depending on the underlying TCryptCertAlgo
     function Save(const PrivatePassword: RawUtf8 = '';
       Format: TCryptCertFormat = ccfBinary): RawByteString;
@@ -1501,7 +1537,7 @@ type
     /// main factory to create a new Store instance with this engine
     function New: ICryptStore; virtual; abstract;
     /// main factory to create a new Store instance from saved Binary
-    function NewFrom(const Binary: RawByteString): ICryptStore;
+    function NewFrom(const Binary: RawByteString): ICryptStore; virtual;
   end;
 
 const
@@ -1615,7 +1651,7 @@ function CertAlgo(const name: RawUtf8): TCryptCertAlgo;
 function Cert(const name: RawUtf8): ICryptCert;
 
 /// main resolver for Certificates Store engines
-// - mormot.crypt.ecc.pas defines 'syn-store' or 'syn-store-nocache" for our
+// - mormot.crypt.ecc.pas defines 'syn-store' or 'syn-store-nocache' for our
 // TEccCertificateChain proprietary format (safe and efficient)
 // - mormot.crypt.openssl.pas will define 'x509-store'
 // - the shared TCryptStoreAlgo of this algorithm is returned: caller should
@@ -1625,12 +1661,36 @@ function StoreAlgo(const name: RawUtf8): TCryptStoreAlgo;
 /// main factory of Certificates Store engines as returned by StoreAlgo()
 function Store(const name: RawUtf8): ICryptStore;
 
+var
+  /// direct access to the mormot.crypt.ecc.pas 'syn-store' algorithm
+  // - may be nil if this unit was not included
+  CryptStoreAlgoSyn: TCryptStoreAlgo;
+
+  /// direct access to the mormot.crypt.ecc.pas 'syn-store-nocache' algorithm
+  // - may be nil if this unit was not included
+  CryptStoreAlgoSynNoCache: TCryptStoreAlgo;
+
+  /// direct access to the mormot.crypt.openssl.pas 'x509-store' algorithm
+  // - may be nil if this unit was not included or if OpenSSL is not available
+  // - is currently nil because TCryptStoreOpenSsl is not stable yet
+  CryptStoreAlgoOpenSsl: TCryptStoreAlgo;
+
+  /// direct access to the mormot.crypt.openssl.pas TCryptAsym factories
+  // - may be nil if this unit was not included or if OpenSSL is not available
+  CryptAsymOpenSsl: array[TCryptAsymAlgo] of TCryptAsym;
+
+  /// direct access to the mormot.crypt.openssl.pas  ICryptCert factories
+  // - may be nil if this unit was not included or if OpenSSL is not available
+  CryptCertAlgoOpenSsl: array[TCryptAsymAlgo] of TCryptCertAlgo;
+
+
 
 { ************************** Minimal PEM/DER Encoding/Decoding }
 
 type
   /// the DerToPem() supported contents of a PEM text instance
-  // - pemSynopseSignature and pemSynopseCertificate follow our proprietary
+  // - pemSynopseSignature, pemSynopseCertificate and
+  // pemSynopseCertificateAndPrivateKey follow our proprietary
   // mormot.crypt.ecc format, so are not compatible with other libraries
   TPemKind = (
     pemUnspecified,
@@ -1648,11 +1708,13 @@ type
     pemSsh2EncryptedPrivateKey,
     pemSsh2PublicKey,
     pemSynopseSignature,
-    pemSynopseCertificate);
+    pemSynopseCertificate,
+    pemSynopsePrivateKeyAndCertificate);
   PPemKind = ^TPemKind;
 
 const
   /// the supported trailer markers of a PEM text instance
+  // - only the first 10 chars after -----BEGIN will be used for recognition
   PEM_BEGIN: array[TPemKind] of RawUtf8 = (
     '-----BEGIN PRIVACY-ENHANCED MESSAGE-----'#13#10,
     '-----BEGIN CERTIFICATE-----'#13#10,
@@ -1669,7 +1731,8 @@ const
     '-----BEGIN SSH2 ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----BEGIN SSH2 PUBLIC KEY-----'#13#10,
     '-----BEGIN SYNECC SIGNATURE-----'#13#10,
-    '-----BEGIN SYNECC CERTIFICATE-----'#13#10);
+    '-----BEGIN SYNECC CERTIFICATE-----'#13#10,
+    '-----BEGIN SYNECC PRIVATE KEY AND CERTIFICATE-----'#13#10);
 
   /// the supported ending markers of a PEM text instance
   PEM_END: array[TPemKind] of RawUtf8 = (
@@ -1688,7 +1751,8 @@ const
     '-----END SSH2 ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----END SSH2 PUBLIC KEY-----'#13#10,
     '-----END SYNECC SIGNATURE-----'#13#10,
-    '-----END SYNECC CERTIFICATE-----'#13#10);
+    '-----END SYNECC CERTIFICATE-----'#13#10,
+    '-----END SYNECC PRIVATE KEY AND CERTIFICATE-----'#13#10);
 
 /// convert a binary DER content into a single-instance PEM text
 function DerToPem(der: pointer; len: PtrInt; kind: TPemKind): RawUtf8; overload;
@@ -1924,6 +1988,24 @@ begin
 end;
 
 
+function CryptCrc32(algo: TCrc32Algo): THasher;
+begin
+  case algo of
+    caCrc32c:
+      result := crc32c;
+    caCrc32:
+      result := crc32;   // maybe from mormot.lib.z
+    caAdler32:
+      result := adler32; // maybe from mormot.lib.z
+    caxxHash32:
+      result := @xxHash32;
+    caFnv32:
+      result := @fnv32;
+  else
+    result := nil;
+  end;
+end;
+
 
 function HashFull(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUtf8;
 var
@@ -2015,7 +2097,7 @@ const
 procedure HashFile(const aFileName: TFileName; aAlgos: THashAlgos);
 var
   h: TRawUtf8DynArray;
-  efn, fn: string;
+  efn, fn: TFileName;
   a: THashAlgo;
   n: PtrInt;
 begin
@@ -2027,7 +2109,7 @@ begin
   for a := low(a) to high(a) do
     if a in aAlgos then
     begin
-      FormatString('%.%', [efn, ALGO_EXT[a]], fn);
+      fn := FormatString('%.%', [efn, ALGO_EXT[a]]);
       FileFromString(FormatUtf8('% *%', [h[n], efn]), fn);
       inc(n);
     end;
@@ -2324,6 +2406,12 @@ begin
   result := GetEnumName(TypeInfo(THashAlgo), ord(algo));
 end;
 
+function ToText(algo: TCrc32Algo): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TCrc32Algo), ord(algo));
+end;
+
+
 
 { ***************** TSyn***Password and TSynConnectionDefinition Classes }
 
@@ -2443,7 +2531,7 @@ begin
   begin
     i := PosExChar(':', fPassword);
     if i > 0 then
-      raise ESynException.CreateUtf8('%.GetPassWordPlain unable to retrieve the ' +
+      raise ECrypt.CreateUtf8('%.GetPassWordPlain unable to retrieve the ' +
         'stored value: current user is [%], but password in % was encoded for [%]',
         [self, Executable.User, AppSecret, copy(fPassword, 1, i - 1)]);
   end;
@@ -2554,12 +2642,12 @@ end;
 
 procedure TSynAuthenticationAbstract.AuthenticateUser(const aName, aPassword: RawUtf8);
 begin
-  raise ESynException.CreateUtf8('%.AuthenticateUser() is not implemented', [self]);
+  raise ECrypt.CreateUtf8('%.AuthenticateUser() is not implemented', [self]);
 end;
 
 procedure TSynAuthenticationAbstract.DisauthenticateUser(const aName: RawUtf8);
 begin
-  raise ESynException.CreateUtf8('%.DisauthenticateUser() is not implemented', [self]);
+  raise ECrypt.CreateUtf8('%.DisauthenticateUser() is not implemented', [self]);
 end;
 
 function TSynAuthenticationAbstract.CheckCredentials(const UserName: RawUtf8;
@@ -3176,9 +3264,8 @@ end;
 { TBinaryCookieGenerator }
 
 procedure TBinaryCookieGenerator.Init(const Name: RawUtf8;
-  DefaultSessionTimeOutMinutes: cardinal);
+  DefaultSessionTimeOutMinutes: cardinal; SignAlgo: TCrc32Algo);
 begin
-  DefaultTimeOutMinutes := DefaultSessionTimeOutMinutes;
   CookieName := Name;
   // initial random session ID, small enough to remain 31-bit > 0
   SessionSequence := Random32 and $07ffffff;
@@ -3187,7 +3274,16 @@ begin
   Secret := Random32;
   // temporary secret for encryption
   CryptNonce := Random32;
-  MainAesPrng.FillRandom(@Crypt, SizeOf(Crypt)); // cryptographic randomness
+  // expiration
+  DefaultTimeOutMinutes := DefaultSessionTimeOutMinutes;
+  // default algorithm is 0, i.e. crc32c()
+  if not Assigned(CryptCrc32(SignAlgo)) then
+    raise ECrypt.CreateUtf8(
+      'Unsupported TBinaryCookieGenerator.Init(%)', [ToText(SignAlgo)^]);
+  CrcAlgo := SignAlgo;
+  Padding := 0;
+  // cryptographic randomness
+  MainAesPrng.FillRandom(@Crypt, SizeOf(Crypt));
 end;
 
 type
@@ -3195,7 +3291,7 @@ type
   TCookieContent = packed record
     head: packed record
       cryptnonce: cardinal; // ctr to cipher following bytes
-      crc: cardinal;        // = 32-bit digital signature (DefaultHasher)
+      crc: cardinal;        // = 32-bit digital signature (CrcAlgo)
       session: integer;     // = jti claim
       issued: cardinal;     // = iat claim (from UnixTimeUtc-UNIXTIME_MINIMAL)
       expires: cardinal;    // = exp claim
@@ -3208,6 +3304,7 @@ function TBinaryCookieGenerator.Generate(out Cookie: RawUtf8;
   PRecordTypeInfo: PRttiInfo): TBinaryCookieGeneratorSessionID;
 var
   cc: TCookieContent; // local working buffer
+  crc: THasher;
   tmp: TSynTempBuffer;
 begin
   tmp.Init(0);
@@ -3218,8 +3315,8 @@ begin
     begin
       BinarySave(PRecordData, tmp, PRecordTypeInfo, rkRecordTypes);
       if tmp.len > SizeOf(cc.data) then
-        // all cookies storage should be < 4K
-        raise ESynException.Create('TBinaryCookieGenerator: Too Big Too Fat');
+        // all cookies storage should be < 4K so a single 2K cookie seems huge
+        raise ECrypt.Create('TBinaryCookieGenerator: Too Big Too Fat');
     end;
     cc.head.cryptnonce := Random32;
     cc.head.session := result;
@@ -3233,7 +3330,8 @@ begin
     if tmp.len > 0 then
       MoveFast(tmp.buf^, cc.data, tmp.len);
     inc(tmp.len, SizeOf(cc.head));
-    cc.head.crc := DefaultHasher(Secret, @cc.head.session, tmp.len - 8);
+    crc := CryptCrc32(CrcAlgo); // in 2 steps for Delphi 7/2007
+    cc.head.crc := crc(Secret, @cc.head.session, tmp.len - 8);
     XorMemoryCtr(@cc.head.crc, tmp.len - 4,
       {ctr=}CryptNonce xor cc.head.cryptnonce, @Crypt);
     Cookie := BinToBase64Uri(@cc, tmp.len);
@@ -3249,6 +3347,7 @@ var
   clen, len: integer;
   now: cardinal;
   ccend: PAnsiChar;
+  crc: THasher;
   cc: TCookieContent;
 begin
   result := 0; // parsing/crc/timeout error
@@ -3260,11 +3359,12 @@ begin
      (len <= SizeOf(cc)) and
      Base64uriDecode(pointer(Cookie), @cc, clen) then
   begin
+    crc := CryptCrc32(CrcAlgo); // in 2 steps for Delphi 7/2007
     XorMemoryCtr(@cc.head.crc, len - SizeOf(cc.head.cryptnonce),
       {ctr=}CryptNonce xor cc.head.cryptnonce, @Crypt);
     if (cardinal(cc.head.session) >= cardinal(SessionSequenceStart)) and
        (cardinal(cc.head.session) <= cardinal(SessionSequence)) and
-       (DefaultHasher(Secret, @cc.head.session, len - 8) = cc.head.crc) then
+       (crc(Secret, @cc.head.session, len - 8) = cc.head.crc) then
     begin
       if PExpires <> nil then
         PExpires^ := cc.head.expires + UNIXTIME_MINIMAL;
@@ -3297,6 +3397,9 @@ function TBinaryCookieGenerator.Load(const Saved: RawUtf8): boolean;
 begin
   result := RecordLoadBase64(pointer(Saved), length(Saved),
     self, TypeInfo(TBinaryCookieGenerator), {uri=}true);
+  if not Assigned(CryptCrc32(CrcAlgo)) then
+    raise ECrypt.CreateUtf8(
+      'Unsupported TBinaryCookieGenerator.Load(%)', [ToText(CrcAlgo)^]);
 end;
 
 
@@ -3658,14 +3761,10 @@ end;
 
 
 
-{ TCryptCrcerInternal }
-
 type
-  TCryptCrc32Algo = (aCrc32, aCrc32c, axxHash32, aAdler32, aFnv32);
-
   TCryptCrc32Internal = class(TCryptHasher)
   protected
-    fAlgo: TCryptCrc32Algo;
+    fAlgo: TCrc32Algo;
   public
     constructor Create(const name: RawUtf8); override;
     function New: ICryptHash; override;
@@ -3681,13 +3780,16 @@ type
     function Update(buf: pointer; buflen: PtrInt): ICryptHash; override;
   end;
 
+
+{ TCryptCrc32Internal }
+
 const
-  /// CSV text of TCryptCrc32Algo items
+  /// CSV text of TCrc32Algo items
   CrcAlgosText: PUtf8Char = 'CRC32,CRC32C,XXHASH32,ADLER32,FNV32';
 
 constructor TCryptCrc32Internal.Create(const name: RawUtf8);
 begin
-  fAlgo := TCryptCrc32Algo(InternalResolve(name, CrcAlgosText));
+  fAlgo := TCrc32Algo(InternalResolve(name, CrcAlgosText));
   inherited Create(name); // should be done after InternalResolve()
 end;
 
@@ -3702,18 +3804,7 @@ end;
 constructor TCryptCrcInternal.Create(algo: TCryptCrc32Internal);
 begin
   // resolve fFunc in New/Create, since crc32/adler functions may be set later
-  case algo.fAlgo of
-    aCrc32:
-      fFunc := crc32; // maybe from mormot.lib.z
-    aCrc32c:
-      fFunc := crc32c;
-    axxHash32:
-      fFunc := @xxHash32;
-    aAdler32:
-      fFunc := adler32; // maybe from mormot.lib.z
-    aFnv32:
-      fFunc := @fnv32;
-  end;
+  fFunc := CryptCrc32(algo.fAlgo);
   if not Assigned(fFunc) then
     raise ECrypt.CreateUtf8('%.New: unavailable ''%'' function', [self, algo.fName]);
   inherited Create(algo);
@@ -4234,13 +4325,14 @@ end;
 function TCryptCert.Save(const PrivatePassword: RawUtf8;
   Format: TCryptCertFormat): RawByteString;
 begin
+  result := Save(PrivatePassword, ccfBinary);
   case Format of
     ccfHexa:
-      result := BinToHex(Save(PrivatePassword, ccfBinary));
+      result := BinToHex(result);
     ccfBase64:
-      result := BinToBase64(Save(PrivatePassword, ccfBinary));
+      result := BinToBase64(result);
     ccfBase64Uri:
-      result := BinToBase64uri(Save(PrivatePassword, ccfBinary));
+      result := BinToBase64uri(result);
   else
     result := '';
   end;

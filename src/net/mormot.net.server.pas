@@ -731,7 +731,7 @@ type
   // - The HTTP Server API enables applications to communicate over HTTP without
   // using Microsoft Internet Information Server (IIS). Applications can register
   // to receive HTTP requests for particular URLs, receive HTTP requests, and send
-  // HTTP responses. The HTTP Server API includes SSL support so that applications
+  // HTTP responses. The HTTP Server API includes TLS support so that applications
   // can exchange data over secure HTTP connections without IIS. It is also
   // designed to work with I/O completion ports.
   // - The HTTP Server API is supported on Windows Server 2003 operating systems
@@ -1620,13 +1620,15 @@ begin
   until false;
   // now the server socket has been bound, and is ready to accept connections
   if (hsoEnableTls in fOptions) and
-     (PrivateKeyFile <> '') and
+     (CertificateFile <> '') and
+     (fSock <> nil) and // may be nil at first
      not fSock.TLS.Enabled then
   begin
     StringToUtf8(CertificateFile, fSock.TLS.CertificateFile);
     StringToUtf8(PrivateKeyFile, fSock.TLS.PrivateKeyFile);
     fSock.TLS.PrivatePassword := PrivateKeyPassword;
     InitializeTlsAfterBind; // validate TLS certificate(s) now
+    sleep(1); // let some warmup happen
   end;
 end;
 

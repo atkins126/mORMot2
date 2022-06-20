@@ -5590,7 +5590,7 @@ var
 label
   raw;
 begin
-  iteminfo := Info^.DynArrayItemType(itemsize);
+  iteminfo := Info^.DynArrayItemType(itemsize); // nil for unmanaged items
   n := DynArrayLoadHeader(Source, Info, iteminfo);
   if PPointer(Data)^ <> nil then
     FastDynArrayClear(pointer(Data), iteminfo);
@@ -6757,7 +6757,7 @@ bin: // fast binary comparison with length
      result := MemCmp(A, B, fInfo.Cache.ItemSize)
   else
   begin
-    rtti := fInfo.Cache.ItemInfo;
+    rtti := fInfo.Cache.ItemInfo; // <> nil for managed items
     comp := RTTI_COMPARE[CaseInsensitive, rtti.Kind];
     if Assigned(comp) then
       comp(A, B, rtti, result)
@@ -8002,38 +8002,35 @@ var
 begin
   n := GetCount;
   result := n - B.Count;
-  if result <> 0 then
-    exit;
-  if fInfo.Cache.ItemInfo <> B.Info.Cache.ItemInfo then
-  begin
-    result := ComparePointer(fValue^, B.fValue^);
-    exit;
-  end;
-  if Assigned(fCompare) and
-     not ignorecompare then
-  begin
-    // use specified fCompare() function
-    P1 := fValue^;
-    P2 := B.fValue^;
-    s := fInfo.Cache.ItemSize;
-    for i := 1 to n do
+  if (result = 0) and
+     (n <> 0) then
+    if fInfo.Cache.ItemInfo <> B.Info.Cache.ItemInfo then
+      result := ComparePointer(fValue^, B.fValue^)
+    else if Assigned(fCompare) and
+       not ignorecompare then
     begin
-      result := fCompare(P1^, P2^);
-      if result <> 0 then
-        exit;
-      inc(P1, s);
-      inc(P2, s);
-    end;
-  end
-  else if not(rcfArrayItemManaged in fInfo.Flags) then
-    // binary comparison with length (always CaseSensitive)
-    result := MemCmp(fValue^, B.fValue^, n * fInfo.Cache.ItemSize)
-  else if rcfObjArray in fInfo.Flags then
-    // T*ObjArray comparison of published properties
-    result := ObjectCompare(fValue^, B.fValue^, n, not CaseSensitive)
-  else
-    result := BinaryCompare(fValue^, B.fValue^, fInfo.Cache.ItemInfo, n,
-      not CaseSensitive);
+      // use specified fCompare() function
+      P1 := fValue^;
+      P2 := B.fValue^;
+      s := fInfo.Cache.ItemSize;
+      for i := 1 to n do
+      begin
+        result := fCompare(P1^, P2^);
+        if result <> 0 then
+          exit;
+        inc(P1, s);
+        inc(P2, s);
+      end;
+    end
+    else if not(rcfArrayItemManaged in fInfo.Flags) then
+      // binary comparison with length (always CaseSensitive)
+      result := MemCmp(fValue^, B.fValue^, n * fInfo.Cache.ItemSize)
+    else if rcfObjArray in fInfo.Flags then
+      // T*ObjArray comparison of published properties
+      result := ObjectCompare(fValue^, B.fValue^, n, not CaseSensitive)
+    else
+      result := BinaryCompare(fValue^, B.fValue^, fInfo.Cache.ItemInfo, n,
+        not CaseSensitive);
 end;
 
 procedure TDynArray.Copy(Source: PDynArray; ObjArrayByRef: boolean);
@@ -8101,7 +8098,7 @@ bin:  result := AnyScanIndex(fValue^, @Item, n, fInfo.Cache.ItemSize)
     begin
       rtti := fInfo.Cache.ItemInfo;
       if rtti = nil then
-        goto bin;
+        goto bin; // unmanaged items
       cmp := RTTI_COMPARE[CaseInSensitive, rtti.Kind];
       if Assigned(cmp) then
         result := IndexFind(fValue^, @Item, cmp, rtti, n)
@@ -8192,7 +8189,7 @@ begin
       minLength := OldLength;
       if minLength > NewLength then
         minLength := NewLength;
-      if fInfo.Cache.ItemInfo = nil then
+      if fInfo.Cache.ItemInfo = nil then // unmanaged items
       begin
         GetMem(p, NeededSize);
         MoveFast(fValue^^, PByteArray(p)[SizeOf(TDynArrayRec)],
@@ -8418,7 +8415,7 @@ end;
 function TDynArray.ItemLoadMem(Source, SourceMax: PAnsiChar): RawByteString;
 begin
   if (Source <> nil) and
-     (fInfo.Cache.ItemInfo = nil) then
+     (fInfo.Cache.ItemInfo = nil) then // unmanaged items
     FastSetRawByteString(result, Source, fInfo.Cache.ItemSize)
   else
   begin
@@ -8464,7 +8461,7 @@ begin
   if (Source = nil) or
      (fInfo.Cache.ItemSize > SizeOf(tmp)) then
     exit;
-  if fInfo.Cache.ItemInfo = nil then
+  if fInfo.Cache.ItemInfo = nil then // nil for unmanaged items
     data := Source
   else
   begin
