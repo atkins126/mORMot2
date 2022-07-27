@@ -88,12 +88,12 @@ type
   protected
     fRefCount: integer;
     // returns E_NOINTERFACE by default
-    function VirtualQueryInterface(IID: PGUID; out Obj): TIntQry; virtual;
+    function VirtualQueryInterface(IID: PGuid; out Obj): TIntQry; virtual;
     // always return 1 for a "non allocated" instance (0 triggers release)
     function VirtualAddRef: integer;  virtual; abstract;
     function VirtualRelease: integer; virtual; abstract;
     function QueryInterface({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-      IID: TGUID; out Obj): TIntQry; {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
+      IID: TGuid; out Obj): TIntQry; {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
     function _AddRef: TIntCnt;       {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
     function _Release: TIntCnt;      {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
   public
@@ -1593,20 +1593,23 @@ type
     // stored checksum which is not needed any more
     function LoadFromBinary(const Buffer: RawByteString): boolean;
     /// serialize the dynamic array content as JSON
-    // - is just a wrapper around TTextWriter.AddTypedJson()
-    // - this method will therefore recognize T*ObjArray types
     function SaveToJson(EnumSetsAsText: boolean = false;
       reformat: TTextWriterJsonFormat = jsonCompact): RawUtf8; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// serialize the dynamic array content as JSON
+    procedure SaveToJson(out result: RawUtf8; EnumSetsAsText: boolean = false;
+      reformat: TTextWriterJsonFormat = jsonCompact); overload;
+    /// serialize the dynamic array content as JSON
     // - is just a wrapper around TTextWriter.AddTypedJson()
     // - this method will therefore recognize T*ObjArray types
-    procedure SaveToJson(out result: RawUtf8; EnumSetsAsText: boolean = false;
+    procedure SaveToJson(out result: RawUtf8; Options: TTextWriterOptions;
+      ObjectOptions: TTextWriterWriteObjectOptions = [];
       reformat: TTextWriterJsonFormat = jsonCompact); overload;
     /// serialize the dynamic array content as JSON
     // - is just a wrapper around TTextDateWTTextWriterriter.AddTypedJson()
     // - this method will therefore recognize T*ObjArray types
-    procedure SaveToJson(W: TTextWriter); overload;
+    procedure SaveToJson(W: TTextWriter;
+      ObjectOptions: TTextWriterWriteObjectOptions = []); overload;
     /// load the dynamic array content from an UTF-8 encoded JSON buffer
     // - expect the format as saved by TTextWriter.AddDynArrayJson method, i.e.
     // handling TbooleanDynArray, TIntegerDynArray, TInt64DynArray, TCardinalDynArray,
@@ -1939,6 +1942,8 @@ type
     function Find(aHashCode: cardinal; aForAdd: boolean): PtrInt; overload;
     /// returns position in array, or next void index in HashTable[] as -(index+1)
     function FindOrNew(aHashCode: cardinal; Item: pointer; aHashTableIndex: PPtrInt): PtrInt;
+    /// returns position in array, or -1 if not found with a custom comparer
+    function FindOrNewComp(aHashCode: cardinal; Item: pointer; Comp: TDynArraySortCompare): PtrInt;
     /// search an hashed element value for adding, updating the internal hash table
     // - trigger hashing if Count reaches CountTrigger
     function FindBeforeAdd(Item: pointer; out wasAdded: boolean;
@@ -2499,19 +2504,23 @@ function ObjectToIni(const Instance: TObject; const SectionName: RawUtf8 = 'Main
 function IsHtmlContentTypeTextual(Headers: PUtf8Char): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// search if the WebSocketUpgrade() header is present
+function IsWebSocketUpgrade(headers: PUtf8Char): boolean;
+
 
 { ************ RawUtf8 String Values Interning and TRawUtf8List }
 
 type
   /// used to store one list of hashed RawUtf8 in TRawUtf8Interning pool
   // - Delphi "object" is buggy on stack -> also defined as record with methods
+  // - each slot has its own TRWLightLock for efficient concurrent reads
   {$ifdef USERECORDWITHMETHODS}
   TRawUtf8InterningSlot = record
   {$else}
   TRawUtf8InterningSlot = object
   {$endif USERECORDWITHMETHODS}
   private
-    fSafe: TLightLock;
+    fSafe: TRWLightLock;
     fCount: integer;
     fValue: TRawUtf8DynArray;
     fValues: TDynArrayHashed;
@@ -2536,6 +2545,7 @@ type
     property Count: integer
       read fCount;
   end;
+  PRawUtf8InterningSlot = ^TRawUtf8InterningSlot;
 
   /// allow to store only one copy of distinct RawUtf8 values
   // - thanks to the Copy-On-Write feature of string variables, this may
@@ -2973,13 +2983,13 @@ begin
 end;
 
 function TSynInterfacedObject.QueryInterface(
-  {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} IID: TGUID;
+  {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} IID: TGuid;
   out Obj): TIntQry;
 begin
   result := VirtualQueryInterface(@IID, Obj);
 end;
 
-function TSynInterfacedObject.VirtualQueryInterface(IID: PGUID; out Obj): TIntQry;
+function TSynInterfacedObject.VirtualQueryInterface(IID: PGuid; out Obj): TIntQry;
 begin
   result := E_NOINTERFACE;
 end;
@@ -4092,6 +4102,17 @@ begin
   result := ExistsIniNameValue(Headers, HEADER_CONTENT_TYPE_UPPER, @CONTENT_TYPE_TEXTUAL);
 end;
 
+const
+  WS_UPGRADE: array[0..2] of PAnsiChar = (
+    'UPGRADE',
+    'KEEP-ALIVE, UPGRADE',
+    nil);
+
+function IsWebSocketUpgrade(headers: PUtf8Char): boolean;
+begin
+  result := ExistsIniNameValue(pointer(headers), 'CONNECTION: ', @WS_UPGRADE);
+end;
+
 function IniToObject(const Ini: RawUtf8; Instance: TObject;
   const SectionName: RawUtf8): boolean;
 var
@@ -4217,52 +4238,61 @@ var
   i: PtrInt;
   added: boolean;
 begin
-  fSafe.Lock;
-  {$ifdef HASFASTTRYFINALLY} // make a huge performance difference
-  try
-  {$else}
+  fSafe.ReadLock; // a TRWLightLock is faster here than an upgradable TRWLock
+  i := fValues.Hasher.FindOrNewComp(aTextHash, @aText, fValues.Hasher.Compare);
+  if i >= 0 then
   begin
-  {$endif HASFASTTRYFINALLY}
-    i := fValues.FindHashedForAdding(aText, added, aTextHash);
-    if added then
-    begin
-      fValue[i] := aText;   // copy new value to the pool
-      aResult := aText;
-    end
-    else
-      aResult := fValue[i]; // return unified string instance
-  {$ifdef HASFASTTRYFINALLY}
-  finally
-  {$endif HASFASTTRYFINALLY}
-    fSafe.UnLock;
+    aResult := fValue[i]; // return unified string instance
+    fSafe.ReadUnLock;
+    exit;
   end;
+  fSafe.ReadUnLock;
+  fSafe.WriteLock; // need to be added within the write lock
+  i := fValues.FindHashedForAdding(aText, added, aTextHash);
+  if added then
+  begin
+    fValue[i] := aText; // copy new value to the pool
+    aResult := aText;
+  end
+  else
+    aResult := fValue[i]; // was added in a background thread
+  fSafe.WriteUnLock;
 end;
 
 procedure TRawUtf8InterningSlot.UniqueFromBuffer(var aResult: RawUtf8;
   aText: PUtf8Char; aTextLen: PtrInt; aTextHash: cardinal);
 var
-  i: PtrInt;
+  c: AnsiChar;
   added: boolean;
+  i: PtrInt;
   bak: TDynArraySortCompare;
 begin
-  fSafe.Lock;
-  {$ifdef HASFASTTRYFINALLY} // make a huge performance difference
-  try
-  {$else}
+  if not fSafe.TryReadLock then
   begin
-  {$endif HASFASTTRYFINALLY}
-    bak := fValues.Hasher.fCompare; // (RawUtf8,RawUtf8) -> (RawUtf8,PUtf8Char)
-    PDynArrayHasher(@fValues.Hasher)^.fCompare := @SortDynArrayPUtf8Char;
-    i := fValues.FindHashedForAdding(aText, added, aTextHash);
-    PDynArrayHasher(@fValues.Hasher)^.fCompare := bak;
-    if added then
-      FastSetString(fValue[i], aText, aTextLen); // new value to the pool
-    aResult := fValue[i]; // return unified string instance
-  {$ifdef HASFASTTRYFINALLY}
-  finally
-  {$endif HASFASTTRYFINALLY}
-    fSafe.UnLock;
+    FastSetString(aResult, aText, aTextLen); // avoid waiting on contention
+    exit;
   end;
+  c := aText[aTextLen];
+  aText[aTextLen] := #0; // input buffer may not be #0 terminated
+  i := fValues.Hasher.FindOrNewComp(aTextHash, @aText, @SortDynArrayPUtf8Char);
+  if i >= 0 then
+  begin
+    aResult := fValue[i]; // return unified string instance
+    fSafe.ReadUnLock;
+    aText[aTextLen] := c;
+    exit;
+  end;
+  fSafe.ReadUnLock;
+  fSafe.WriteLock; // need to be added
+  bak := fValues.Hasher.Compare; // (RawUtf8,RawUtf8) -> (RawUtf8,PUtf8Char)
+  PDynArrayHasher(@fValues.Hasher)^.fCompare := @SortDynArrayPUtf8Char;
+  i := fValues.FindHashedForAdding(aText, added, aTextHash);
+  PDynArrayHasher(@fValues.Hasher)^.fCompare := bak;
+  if added then
+    FastSetString(fValue[i], aText, aTextLen); // new value to the pool
+  aResult := fValue[i];
+  fSafe.WriteUnLock;
+  aText[aTextLen] := c;
 end;
 
 procedure TRawUtf8InterningSlot.UniqueText(var aText: RawUtf8; aTextHash: cardinal);
@@ -4270,26 +4300,32 @@ var
   i: PtrInt;
   added: boolean;
 begin
-  fSafe.Lock;
-  try
-    i := fValues.FindHashedForAdding(aText, added, aTextHash);
-    if added then
-      fValue[i] := aText    // copy new value to the pool
-    else
-      aText := fValue[i];   // return unified string instance
-  finally
-    fSafe.UnLock;
+  fSafe.ReadLock;
+  i := fValues.Hasher.FindOrNewComp(aTextHash, @aText, fValues.Hasher.Compare);
+  if i >= 0 then
+  begin
+    aText := fValue[i]; // return unified string instance
+    fSafe.ReadUnLock;
+    exit;
   end;
+  fSafe.ReadUnLock;
+  fSafe.WriteLock; // need to be added
+  i := fValues.FindHashedForAdding(aText, added, aTextHash);
+  if added then
+    fValue[i] := aText  // copy new value to the pool
+  else
+    aText := fValue[i]; // was added in a background thread
+  fSafe.WriteUnLock;
 end;
 
 procedure TRawUtf8InterningSlot.Clear;
 begin
-  fSafe.Lock;
+  fSafe.WriteLock;
   try
     fValues.SetCount(0); // Values.Clear
     fValues.Hasher.ForceReHash;
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -4299,7 +4335,9 @@ var
   s, d: PPtrUInt; // points to RawUtf8 values
 begin
   result := 0;
-  fSafe.Lock;
+  if fCount = 0 then
+    exit;
+  fSafe.WriteLock;
   try
     if fCount = 0 then
       exit;
@@ -4333,7 +4371,7 @@ begin
       fValues.ForceReHash;
     end;
   finally
-    fSafe.UnLock;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -7169,6 +7207,13 @@ end;
 
 procedure TDynArray.SaveToJson(out result: RawUtf8; EnumSetsAsText: boolean;
   reformat: TTextWriterJsonFormat);
+begin
+  SaveToJson(result, TEXTWRITEROPTIONS_ENUMASTEXT[EnumSetsAsText],
+    TEXTWRITEROBJECTOPTIONS_ENUMASTEXT[EnumSetsAsText]);
+end;
+
+procedure TDynArray.SaveToJson(out result: RawUtf8; Options: TTextWriterOptions;
+  ObjectOptions: TTextWriterWriteObjectOptions; reformat: TTextWriterJsonFormat);
 var
   W: TTextWriter;
   temp: TTextWriterStackBuffer;
@@ -7179,9 +7224,8 @@ begin
   begin
     W := DefaultJsonWriter.CreateOwnedStream(temp);
     try
-      if EnumSetsAsText then
-        W.CustomOptions := W.CustomOptions + [twoEnumSetsAsTextInRecord];
-      SaveToJson(W);
+      W.CustomOptions := W.CustomOptions + Options;
+      SaveToJson(W, ObjectOptions);
       W.SetText(result, reformat);
     finally
       W.Free;
@@ -7189,7 +7233,8 @@ begin
   end;
 end;
 
-procedure TDynArray.SaveToJson(W: TTextWriter);
+procedure TDynArray.SaveToJson(W: TTextWriter;
+  ObjectOptions: TTextWriterWriteObjectOptions);
 var
   len, backup: PtrInt;
   hacklen: PDALen;
@@ -7203,7 +7248,7 @@ begin
     backup := hacklen^;
     try
       hacklen^ := len - _DAOFF; // may use ExternalCount
-      W.AddTypedJson(fValue, Info.Info); // serialization from mormot.core.json
+      W.AddTypedJson(fValue, Info.Info, ObjectOptions); // from mormot.core.json
     finally
       hacklen^ := backup;
     end;
@@ -8022,12 +8067,12 @@ begin
         inc(P2, s);
       end;
     end
-    else if not(rcfArrayItemManaged in fInfo.Flags) then
-      // binary comparison with length (always CaseSensitive)
-      result := MemCmp(fValue^, B.fValue^, n * fInfo.Cache.ItemSize)
     else if rcfObjArray in fInfo.Flags then
       // T*ObjArray comparison of published properties
       result := ObjectCompare(fValue^, B.fValue^, n, not CaseSensitive)
+    else if not(rcfArrayItemManaged in fInfo.Flags) then
+      // binary comparison with length (always CaseSensitive)
+      result := MemCmp(fValue^, B.fValue^, n * fInfo.Cache.ItemSize)
     else
       result := BinaryCompare(fValue^, B.fValue^, fInfo.Cache.ItemInfo, n,
         not CaseSensitive);
@@ -9036,6 +9081,37 @@ begin
       end;
   until false;
   RaiseFatalCollision('FindOrNew', aHashCode);
+end;
+
+function TDynArrayHasher.FindOrNewComp(aHashCode: cardinal; Item: pointer;
+  Comp: TDynArraySortCompare): PtrInt;
+var
+  first, last, ndx: PtrInt;
+begin // cut-down version of FindOrNew()
+  if not Assigned(Comp) then
+    Comp := fCompare;
+  ndx := HashTableIndex(aHashCode);
+  first := ndx;
+  last := fHashTableSize;
+  if hasHasher in fState then
+    repeat
+      result := HashTableIndexToIndex(ndx) - 1; // index+1 was stored
+      if (result < 0) or // void slot = not found, or return matching index
+         (Comp((PAnsiChar(fDynArray^.Value^) +
+           result * fDynArray^.fInfo.Cache.ItemSize)^, Item^) = 0) then
+        exit;
+      inc(ndx); // hash or slot collision -> search next item
+      if ndx = last then
+        if ndx= first then
+          break
+        else
+        begin
+          ndx := 0;
+          last := first;
+        end;
+    until false;
+  result := 0; // make compiler happy
+  RaiseFatalCollision('FindOrNewCompare', aHashCode);
 end;
 
 procedure TDynArrayHasher.HashAdd(aHashCode: cardinal; var result: PtrInt);

@@ -1526,8 +1526,8 @@ begin
             [GetEnumName(TypeInfo(TCrtSocketPending), ord(pending))^, TimeOut]);
           exit;
         end;
-        SockRecvLn(Http.Command); // will raise ENetSock on any error
-        P := pointer(Http.Command);
+        SockRecvLn(Http.CommandResp); // will raise ENetSock on any error
+        P := pointer(Http.CommandResp);
         if IdemPChar(P, 'HTTP/1.') then
         begin
           // get http numeric status code (200,404...) from 'HTTP/1.x ######'
@@ -1544,10 +1544,10 @@ begin
         else
         begin
           // error on reading answer -> 505=wrong format
-          if Http.Command = '' then
+          if Http.CommandResp = '' then
             DoRetry(HTTP_TIMEOUT, 'Broken Link - timeout=%ms', [TimeOut])
           else
-            DoRetry(HTTP_HTTPVERSIONNONSUPPORTED, 'Command=%', [Http.Command]);
+            DoRetry(HTTP_HTTPVERSIONNONSUPPORTED, 'Command=%', [Http.CommandResp]);
           exit;
         end;
         // retrieve all HTTP headers
@@ -2200,8 +2200,8 @@ begin
     aData := InData;
     if integer(fCompressAcceptHeader) <> 0 then
     begin
-      aDataEncoding := CompressContent(fCompressAcceptHeader,
-        fCompress, InDataType, aData);
+      CompressContent(fCompressAcceptHeader, fCompress, InDataType,
+        aData, aDataEncoding);
       if aDataEncoding <> '' then
         InternalAddHeader(RawUtf8('Content-Encoding: ') + aDataEncoding);
     end;
@@ -3482,7 +3482,7 @@ end;
 
 function SendEmailSubject(const Text: string): RawUtf8;
 begin
-  StringToUtf8(Text, result);
+  StringToUtf8(Text, result{%H-});
   result := MimeHeaderEncode(result);
 end;
 

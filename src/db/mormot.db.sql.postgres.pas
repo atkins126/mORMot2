@@ -27,6 +27,7 @@ uses
   mormot.core.datetime,
   mormot.core.data,
   mormot.core.rtti,
+  mormot.core.json,
   mormot.core.perf,
   mormot.core.log,
   mormot.db.core,
@@ -55,9 +56,11 @@ type
     // - raise an exception in case libpg is not thead-safe
     // - aDatabaseName can be a Connection URI - see
     // https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING
-    // - if aDatabaseName contains connection URI with password we recommend to repeat password
-    // in aPassword parameter to prevent logging it (see TSqlDBConnectionProperties.DatabaseNameSafe)
-    // - better to use environment variables and postgres config file for connection parameters
+    // - if aDatabaseName contains a connection URI with password, we recommend
+    // to repeat the password in aPassword parameter to prevent logging it
+    // (see TSqlDBConnectionProperties.DatabaseNameSafe)
+    // - it may be better to use environment variables and postgres config file
+    // for connection parameters
     constructor Create(
       const aServerName, aDatabaseName, aUserID, aPassword: RawUtf8); override;
     /// create a new connection
@@ -127,9 +130,9 @@ type
   TSqlDBPostgresStatement = class(TSqlDBStatementWithParamsAndColumns)
   protected
     fPreparedStmtName: RawUtf8; // = SHA-256 of the SQL
-    fPreparedParamsCount: integer;
     fRes: pointer;
     fResStatus: integer;
+    fPreparedParamsCount: integer;
     // pointers to query parameters; initialized by Prepare, filled in Executeprepared
     fPGParams: TPointerDynArray;
     // 0 - text, 1 - binary; initialized by Prepare, filled in Executeprepared
@@ -157,6 +160,11 @@ type
     // enabled in SynDBLog.Family.Level
     // - raise an ESqlDBPostgres on any error
     procedure ExecutePrepared; override;
+    /// bind an array of JSON values to a parameter
+    // - overloaded for direct assignment to the PostgreSQL client
+    // - warning: input JSON should already be in the expected format (ftDate)
+    procedure BindArrayJson(Param: integer; ParamType: TSqlDBFieldType;
+      var JsonArray: RawUtf8; ValuesCount: integer); override;
     /// gets a number of updates made by latest executed statement
     function UpdateCount: integer; override;
     /// Reset the previous prepared statement
@@ -399,8 +407,8 @@ end;
 procedure TSqlDBPostgresConnectionProperties.GetForeignKeys;
 begin
   // TODO - how to get field we reference to? (currently consider this is "ID")
-  with Execute('SELECT' + '  ct.conname as foreign_key_name, ' +
-      '  case when ct.condeferred then 1 else 0 end AS is_disabled, ' +
+  with Execute('SELECT ct.conname as foreign_key_name, ' +
+      '  case when ct.condeferred then 1 else 0 end as is_disabled, ' +
       '  (SELECT tc.relname from pg_class tc where tc.oid = ct.conrelid) || ''.'' || ' +
       '     (SELECT a.attname FROM pg_attribute a WHERE a.attnum = ct.conkey[1] AND a.attrelid = ct.conrelid) as from_ref, ' +
       '  (SELECT tc.relname from pg_class tc where tc.oid = ct.confrelid) || ''.id'' as referenced_object ' +
@@ -418,7 +426,7 @@ begin
   MapOid(FLOAT8OID, ftDouble);
   MapOid(TIMESTAMPOID, ftDate);
   MapOid(BYTEAOID, ftBlob);
-  MapOid(NUMERICOID, ftCurrency);// our ORM uses NUMERIC(19,4) for currency
+  MapOid(NUMERICOID, ftCurrency); // our ORM uses NUMERIC(19,4) for currency
   MapOid(BOOLOID, ftInt64);
   MapOid(INT2OID, ftInt64);
   MapOid(CASHOID, ftCurrency);
@@ -536,15 +544,6 @@ end;
 
 // see https://www.postgresql.org/docs/9.3/libpq-exec.html
 
-const
-  PREP_SQL: array[0..5] of PAnsiChar = (
-    'SELECT',
-    'INSERT',
-    'UPDATE',
-    'DELETE',
-    'VALUES',
-    nil);
-
 procedure TSqlDBPostgresStatement.Prepare(
   const aSql: RawUtf8; ExpectResults: boolean);
 begin
@@ -553,13 +552,13 @@ begin
     raise ESqlDBPostgres.CreateUtf8('%.Prepare: empty statement', [self]);
   inherited Prepare(aSql, ExpectResults); // will strip last ;
   fPreparedParamsCount := ReplaceParamsByNumbers(fSql, fSqlPrepared, '$');
-  if (fPreparedParamsCount > 0) and
-     (IdemPPChar(pointer(fSqlPrepared), @PREP_SQL) >= 0) then
+  if scPossible in fCache then
   begin
-    // preparable statement will be cached by Sha256(SQL) name on server side
-    fCacheIndex := TSqlDBPostgresConnection(fConnection).PrepareCached(
+    // preparable statements will be cached server-side by Sha256(SQL) as name
+    include(fCache, scOnServer);
+    TSqlDBPostgresConnection(fConnection).PrepareCached(
       fSqlPrepared, fPreparedParamsCount, fPreparedStmtName);
-    SqlLogEnd(' name=% cache=%', [fPreparedStmtName, fCacheIndex]);
+    SqlLogEnd(' cached as %', [fPreparedStmtName]);
   end
   else
     SqlLogEnd;
@@ -568,6 +567,9 @@ begin
   SetLength(fPGparamLengths, fPreparedParamsCount);
 end;
 
+var
+  _BindArrayJson: TRawUtf8DynArray; // fake variable as VArray marker
+
 procedure TSqlDBPostgresStatement.ExecutePrepared;
 var
   i: PtrInt;
@@ -575,6 +577,11 @@ var
   c: TSqlDBPostgresConnection;
 begin
   SqlLogBegin(sllSQL);
+  if fRes <> nil then
+  begin
+    PQ.Clear(fRes); // if forgot to call ReleaseRows
+    fRes := nil;
+  end;
   if fSqlPrepared = '' then
     raise ESqlDBPostgres.CreateUtf8(
       '%.ExecutePrepared: Statement not prepared', [self]);
@@ -599,7 +606,8 @@ begin
            ftUtf8]) then
         raise ESqlDBPostgres.CreateUtf8('%.ExecutePrepared: Invalid array ' +
           'type % on bound parameter #%', [Self, ToText(p^.VType)^, i]);
-      p^.VData := BoundArrayToJsonArray(p^.VArray);
+      if p^.VArray[0] <> _BindArrayJson[0] then // p^.VData set by BindArrayJson
+        p^.VData := BoundArrayToJsonArray(p^.VArray); // e.g. '{1,2,3}'
     end
     else
     begin
@@ -620,13 +628,13 @@ begin
         ftUtf8:
           ; // text already in p^.VData
         ftBlob:
-        begin
-          fPGParamFormats[i] := 1; // binary
-          fPGparamLengths[i] := length(p^.VData);
-        end;
-        else
-          raise ESqlDBPostgres.CreateUtf8('%.ExecutePrepared: cannot bind ' +
-            'parameter #% of type %', [self, i, ToText(p^.VType)^]);
+          begin
+            fPGParamFormats[i] := 1; // binary
+            fPGparamLengths[i] := length(p^.VData);
+          end;
+      else
+        raise ESqlDBPostgres.CreateUtf8('%.ExecutePrepared: cannot bind ' +
+          'parameter #% of type %', [self, i, ToText(p^.VType)^]);
       end;
     end;
     fPGParams[i] := pointer(p^.VData);
@@ -662,6 +670,25 @@ begin
   end
   else
     SqlLogEnd;
+end;
+
+procedure TSqlDBPostgresStatement.BindArrayJson(Param: integer;
+  ParamType: TSqlDBFieldType; var JsonArray: RawUtf8; ValuesCount: integer);
+var
+  p: PSqlDBParam;
+begin
+  if (ValuesCount <= 0) or
+     (JsonArray = '') or
+     (JsonArray[1] <> '[') or
+     (JsonArray[length(JsonArray)] <> ']') then
+    ParamType := ftUnknown;    // to raise exception
+  p := CheckParam(Param, ParamType, paramIn, 0);
+  p^.VArray := _BindArrayJson; // fake marker
+  p^.VInt64 := ValuesCount;
+  JsonArray[1] := '{';
+  JsonArray[length(JsonArray)] := '}'; // PostgreSQL weird syntax
+  p^.VData := JsonArray;       // ExecutePrepared will use directly this
+  fParamsArrayCount := ValuesCount;
 end;
 
 function TSqlDBPostgresStatement.UpdateCount: integer;
@@ -816,6 +843,8 @@ end;
 
 initialization
   TSqlDBPostgresConnectionProperties.RegisterClassNameForDefinition;
+  SetLength(_BindArrayJson, 1);
+  _BindArrayJson[0] := 'json'; // impossible SQL value (should be 'json')
 
 end.
 

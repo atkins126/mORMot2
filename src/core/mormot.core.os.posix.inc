@@ -220,10 +220,12 @@ const
     'u_setDataDirectory',
     'u_init');
   {$ifdef OSANDROID}
-  // from https://developer.android.com/guide/topics/resources/internationalization
+  // https://developer.android.com/guide/topics/resources/internationalization
   ICU_VER: array[1..15] of string = (
     '_3_8', '_4_2', '_44', '_46', '_48', '_50', '_51', '_53', '_55',
     '_56', '_58', '_60', '_63', '_66', '_68');
+  ICU_MAX = 80;
+  ICU_MIN = 69; // previous versions are known and listed within ICU_VER[]
   SYSDATA: PAnsiChar = '/system/usr/icu';
   {$else}
   ICU_MAX = 80;
@@ -234,7 +236,10 @@ var
   i: integer;
   err: SizeInt;
   P: PPointer;
-  so, v, vers: string;
+  {$ifndef OSDARWIN}
+  so: string;
+  {$endif OSDARWIN}
+  v, vers: string;
   data: PAnsiChar;
 begin
   GlobalLock;
@@ -913,9 +918,9 @@ begin
   result := DateTimeToWindowsFileTime(FileAgeToDateTime(FileName));
 end;
 
-procedure FileSetAttributes(const FileName: TFileName; Secret: boolean);
+procedure FileSetHidden(const FileName: TFileName; ReadOnly: boolean);
 begin
-  if Secret then
+  if ReadOnly then
     fpchmod(pointer(FileName), S_IRUSR)
   else
     fpchmod(pointer(FileName), S_IRUSR or S_IWUSR);
@@ -1146,7 +1151,7 @@ begin
     begin
       // warning: reported as buggy by Alan on POSIX, and despitable by Linus
       // - from our testing, it gives worse performance than fpnanosleep()
-      ThreadSwitch; // call e.g. pthread's sched_yield API
+      ThreadSwitch; // call e.g. POSIX libc's sched_yield API
       exit;
     end
     else
@@ -1168,7 +1173,7 @@ procedure SwitchToThread;
 var
   timeout: Ttimespec;
 begin
-  // nanosleep() seems better than FPC RTL ThreadSwitch = sched_yield
+  // nanosleep() seems better than FPC RTL ThreadSwitch = POSIX libc sched_yield
   timeout.tv_sec := 0;
   timeout.tv_nsec := 10; // empirically identified on a recent Linux Kernel
   // note: nanosleep() adds a few dozen of microsecs for context switching
@@ -1318,10 +1323,8 @@ procedure TextColor(Color: TConsoleColor);
 const
   TERM_CTRL: string[8] = '04261537';
 begin
-{$ifdef OSPOSIX}
   if not StdOutIsTTY then
     exit;
-{$endif OSPOSIX}
   if ord(Color) = TextAttr then
     exit;
   TextAttr := ord(Color);
@@ -1642,9 +1645,12 @@ end;
 
 procedure XorOSEntropy(var e: THash512Rec);
 var
-  avg: TLoadAvg;
   mem: TMemoryInfo;
-  us: Int64;
+  avg: TLoadAvg absolute mem;
+  us: Int64 absolute mem;
+  {$ifndef OSDARWIN}
+  guid: THash128Rec absolute mem;
+  {$endif OSDARWIN}
 begin
   QueryPerformanceMicroSeconds(us);
   e.i[0] := e.i[0] xor us;
@@ -1652,10 +1658,12 @@ begin
   DefaultHasher128(@e.h1, @avg, SizeOf(avg));
   GetMemoryInfo(mem, {withalloc=}false);
   DefaultHasher128(@e.h2, @mem, SizeOf(mem));
-  {$ifdef OSDARWIN} // FPC CreateGUID calls /dev/urandom which is not advised
+  {$ifdef OSDARWIN} // FPC CreateGuid calls /dev/urandom which is not advised
   e.i[6] := e.i[6] xor mach_absolute_time; // monotonic clock in nanoseconds
   {$else}
-  CreateGuid(TGUID(e.h3)); // use e.g. FreeBSD syscall or /dev/urandom
+  CreateGuid(guid.guid); // use e.g. FreeBSD syscall or /dev/urandom
+  e.r[3].L := e.r[3].L xor guid.L;
+  e.r[3].H := e.r[3].H xor guid.H;
   {$endif OSDARWIN}
   QueryPerformanceMicroSeconds(us); // should have changed in-between
   e.i[7] := e.i[7] xor us;
@@ -2518,54 +2526,6 @@ end;
 
 {$endif OSLINUX}
 
-function Hex2Dec(c: AnsiChar): integer; inline;
-begin
-  result := ord(c);
-  case c of
-    '0'..'9':
-      dec(result, ord('0'));
-    'A'..'Z':
-      dec(result, ord('A') - 10);
-    'a'..'z':
-      dec(result, ord('a') - 10);
-  else
-    result := -1;
-  end;
-end;
-
-function PosixParseHex32(p: PAnsiChar): integer;
-var
-  v0, v1: integer;
-begin
-  result := 0;
-  p := StrScan(p, 'x');
-  if p = nil then
-    exit;
-  repeat
-    inc(p); // points to trailing 'x' at start
-    v0 := Hex2Dec(p^);
-    if v0 < 0 then
-      break; // not in '0'..'9','a'..'f'
-    inc(p);
-    v1 := Hex2Dec(p^);
-    if v1 < 0 then
-    begin
-      result := (result shl 4) or v0; // only one char left
-      break;
-    end;
-    result := (result shl 8) or (v0 shl 4) or v1;
-  until false;
-end;
-
-procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);
-var
-  v: integer;
-begin
-  v := PosixParseHex32(p);
-  if v <> 0 then
-    AddInteger(result, v, {nodup=}true);
-end;
-
 {$ifdef CPUARM3264} // POSIX libc is faster than FPC RTL or our pascal code
 
 function libc_strlen(s: PAnsiChar): SizeInt;
@@ -2622,6 +2582,55 @@ end;
 {$endif OSLINUXANDROID}
 
 {$endif CPUARM3264}
+
+function Hex2Dec(c: AnsiChar): integer; inline;
+begin
+  result := ord(c);
+  case c of
+    '0'..'9':
+      dec(result, ord('0'));
+    'A'..'Z':
+      dec(result, ord('A') - 10);
+    'a'..'z':
+      dec(result, ord('a') - 10);
+  else
+    result := -1;
+  end;
+end;
+
+// this function is published in interface section for mormot.net.sock.posix.inc
+function PosixParseHex32(p: PAnsiChar): integer;
+var
+  v0, v1: integer;
+begin
+  result := 0;
+  p := StrScan(p, 'x');
+  if p = nil then
+    exit;
+  repeat
+    inc(p); // points to trailing 'x' at start
+    v0 := Hex2Dec(p^);
+    if v0 < 0 then
+      break; // not in '0'..'9','a'..'f'
+    inc(p);
+    v1 := Hex2Dec(p^);
+    if v1 < 0 then
+    begin
+      result := (result shl 4) or v0; // only one char left
+      break;
+    end;
+    result := (result shl 8) or (v0 shl 4) or v1;
+  until false;
+end;
+
+procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);
+var
+  v: integer;
+begin
+  v := PosixParseHex32(p);
+  if v <> 0 then
+    AddInteger(result, v, {nodup=}true);
+end;
 
 function ParseLine(P: PUtf8Char): PUtf8Char;
 begin
@@ -2913,7 +2922,6 @@ begin
   mach_timenanosecond := (mach_timeinfo.Numer = 1) and
                          (mach_timeinfo.Denom = 1);
   {$else}
-  {$ifdef OSPOSIX}
   // try Linux kernel 2.6.32+ or FreeBSD 8.1+ fastest clocks
   if clock_gettime(CLOCK_REALTIME_COARSE, @tp) = 0 then
     CLOCK_REALTIME_FAST := CLOCK_REALTIME_COARSE;
@@ -2977,7 +2985,6 @@ begin
   {$endif NOPATCHRTL}
   {$endif OSLINUX}
   {$endif CPUX64}
-  {$endif OSPOSIX}
   {$endif OSDARWIN}
 end;
 

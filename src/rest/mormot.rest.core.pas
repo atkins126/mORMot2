@@ -175,7 +175,7 @@ type
     // e.g. if a callback is run from a thread, and then the callback code try
     // to execute something in the context of the initial thread, protected
     // by a critical section (mutex)
-    procedure AsyncRedirect(const aGuid: TGUID;
+    procedure AsyncRedirect(const aGuid: TGuid;
       const aDestinationInterface: IInvokable; out aCallbackInterface;
       const aOnResult: TOnAsyncRedirectResult = nil); overload;
     /// define asynchronous execution of interface methods in a background thread
@@ -195,7 +195,7 @@ type
     // e.g. if a callback is run from a thread, and then the callback code try
     // to execute something in the context of the initial thread, protected
     // by a critical section (mutex)
-    procedure AsyncRedirect(const aGuid: TGUID;
+    procedure AsyncRedirect(const aGuid: TGuid;
       const aDestinationInstance: TInterfacedObject; out aCallbackInterface;
       const aOnResult: TOnAsyncRedirectResult = nil); overload;
     /// prepare an asynchronous ORM BATCH process, executed in a background thread
@@ -363,7 +363,7 @@ type
     // to execute something in the context of the initial thread, protected
     // by a critical section (mutex)
     // - is a wrapper around BackgroundTimer.AsyncRedirect()
-    procedure AsyncRedirect(const aGuid: TGUID;
+    procedure AsyncRedirect(const aGuid: TGuid;
       const aDestinationInterface: IInvokable; out aCallbackInterface;
       const aOnResult: TOnAsyncRedirectResult = nil); overload;
     /// define asynchronous execution of interface methods in a background thread
@@ -376,7 +376,7 @@ type
     // to execute something in the context of the initial thread, protected
     // by a critical section (mutex)
     // - is a wrapper around BackgroundTimer.AsyncRedirect()
-    procedure AsyncRedirect(const aGuid: TGUID;
+    procedure AsyncRedirect(const aGuid: TGuid;
       const aDestinationInstance: TInterfacedObject; out aCallbackInterface;
       const aOnResult: TOnAsyncRedirectResult = nil); overload;
     /// allows background garbage collection of specified RawUtf8 interning
@@ -409,7 +409,7 @@ type
     // ! ...
     // !   fSharedCallbacks := nil; // will stop redirection
     // !                            // and unregister callbacks, if needed
-    function MultiRedirect(const aGuid: TGUID; out aCallbackInterface;
+    function MultiRedirect(const aGuid: TGuid; out aCallbackInterface;
       aCallBackUnRegisterNeeded: boolean = true): IMultiCallbackRedirect; overload;
     /// low-level access to the associated timer
     // - may contain nil if EnsureBackgroundTimerExists has not yet been called
@@ -433,6 +433,9 @@ type
   TRestObjArray = array of TRest;
 
   /// a generic REpresentational State Transfer (REST) client/server class
+  // - see Orm: IRestOrm, Services: TServiceContainer and Run: TRestRunThreads
+  // main properties for its actual REST-oriented process
+  // - in PUREMORMOT2 mode, all direct ORM or threading methods are hidden
   // - is a TInterfaceResolver so is able to resolve IRestOrm
   TRest = class(TInterfaceResolver)
   protected
@@ -846,15 +849,15 @@ type
     function EnsureBackgroundTimerExists: TRestBackgroundTimer;
     procedure BeginCurrentThread(Sender: TThread); virtual;
     procedure EndCurrentThread(Sender: TThread); virtual;
-    procedure AsyncRedirect(const aGuid: TGUID;
+    procedure AsyncRedirect(const aGuid: TGuid;
       const aDestinationInterface: IInvokable; out aCallbackInterface;
       const aOnResult: TOnAsyncRedirectResult = nil); overload;
-    procedure AsyncRedirect(const aGuid: TGUID;
+    procedure AsyncRedirect(const aGuid: TGuid;
       const aDestinationInstance: TInterfacedObject; out aCallbackInterface;
       const aOnResult: TOnAsyncRedirectResult = nil); overload;
     procedure AsyncInterning(Interning: TRawUtf8Interning;
       InterningMaxRefCount: integer = 2; PeriodMinutes: integer = 5);
-    function MultiRedirect(const aGuid: TGUID; out aCallbackInterface;
+    function MultiRedirect(const aGuid: TGuid; out aCallbackInterface;
       aCallBackUnRegisterNeeded: boolean = true): IMultiCallbackRedirect; overload;
     function BackgroundTimer: TRestBackgroundTimer;
       {$ifdef HASINLINE}inline;{$endif}
@@ -1141,13 +1144,18 @@ type
     // rights management) - making access rights a parameter allows this method
     // to be handled as pure stateless, thread-safe and session-free
     RestAccessRights: POrmAccessRights;
-    /// opaque reference to the connection which made this request
+    /// numerical reference to the connection which made this request
     // - stores mormot.net.http's THttpServerConnectionID, e.g. a http.sys
     // 64-bit ID, or an incremental rolling sequence of 31-bit integers for
     // THttpServer/TWebSocketServer, or maybe a raw PtrInt(self/THandle)
     LowLevelConnectionID: TRestConnectionID;
     /// low-level properties of the current connection
     LowLevelConnectionFlags: TRestUriParamsLowLevelFlags;
+    /// most HTTP servers support a per-connection pointer storage
+    // - may be nil if unsupported, e.g. by the http.sys servers
+    // - see also THttpServerConnectionOpaque as defined in mormot.net.http
+    // - could be used to avoid a lookup to a ConnectionID-indexed dictionary
+    LowLevelConnectionOpaque: PPointer;
     /// pre-parsed Remote IP of the current connection
     LowLevelRemoteIP: RawUtf8;
     /// pre-parsed "Bearer" HTTP header value
@@ -1520,16 +1528,15 @@ type
 type
   {$M+}
   /// a simple TThread for doing some process within the context of a REST instance
-  // - also define a Start method for compatibility with older versions of Delphi
   // - inherited classes should override InternalExecute abstract method
-  TRestThread = class(TThread)
+  TRestThread = class(TThreadAbstract)
   protected
     fRest: TRest;
     fOwnRest: boolean;
+    fExecuting: boolean;
     fLog: TSynLog;
     fSafe: TSynLocker;
     fEvent: TEvent;
-    fExecuting: boolean;
     /// allows customization in overriden Create (before Execute)
     fThreadName: RawUtf8;
     /// will call BeginCurrentThread/EndCurrentThread and catch exceptions
@@ -1541,25 +1548,10 @@ type
     // - if aOwnRest is TRUE, the supplied REST instance will be
     // owned by this thread
     constructor Create(aRest: TRest; aOwnRest, aCreateSuspended: boolean);
-    {$ifndef HASTTHREADSTART}
-    /// method to be called to start the thread
-    // - Resume is deprecated in the newest RTL, since some OS - e.g. Linux -
-    // do not implement this pause/resume feature; we define here this method
-    // for older versions of Delphi
-    procedure Start;
-    {$endif HASTTHREADSTART}
-    {$ifdef HASTTHREADTERMINATESET}
-    /// properly terminate the thread
-    // - called by TThread.Terminate since Delphi XE2
+    /// properly terminate the thread, notifying WaitForNotExecuting
     procedure TerminatedSet; override;
-    {$else}
-    /// properly terminate the thread
-    // - called by reintroduced Terminate
-    procedure TerminatedSet; virtual;
-    /// reintroduced to call TeminatedSet
-    procedure Terminate; reintroduce;
-    {$endif HASTTHREADTERMINATESET}
     /// wait for Execute to be ended (i.e. fExecuting=false)
+    // - will use the internal TEvent so that Terminate will stop it ASAP
     procedure WaitForNotExecuting(maxMS: integer = 500);
     /// finalize the thread
     // - and the associated REST instance if OwnRest is TRUE
@@ -1570,7 +1562,7 @@ type
     function SleepOrTerminated(MS: integer): boolean;
     /// read-only access to the associated REST instance
     property Rest: TRest
-      read FRest;
+      read fRest;
     /// TRUE if the associated REST instance will be owned by this thread
     property OwnRest: boolean
       read fOwnRest;
@@ -1583,10 +1575,10 @@ type
     property Log: TSynLog
       read fLog;
     /// a event associated to this thread
+    // - used mainly by Terminate/WaitForNotExecuting but could be used
+    // for other notification purpose
     property Event: TEvent
       read fEvent;
-    /// publishes the thread running state
-    property Terminated;
     /// publishes the thread executing state (set when Execute leaves)
     property Executing: boolean
       read fExecuting;
@@ -2956,7 +2948,7 @@ begin
     fRun.EndCurrentThread(Sender);
 end;
 
-procedure TRest.AsyncRedirect(const aGuid: TGUID;
+procedure TRest.AsyncRedirect(const aGuid: TGuid;
   const aDestinationInterface: IInvokable; out aCallbackInterface;
   const aOnResult: TOnAsyncRedirectResult);
 begin
@@ -2965,7 +2957,7 @@ begin
       aGuid, aDestinationInterface, aCallbackInterface, aOnResult);
 end;
 
-procedure TRest.AsyncRedirect(const aGuid: TGUID;
+procedure TRest.AsyncRedirect(const aGuid: TGuid;
   const aDestinationInstance: TInterfacedObject; out aCallbackInterface;
   const aOnResult: TOnAsyncRedirectResult);
 begin
@@ -2982,7 +2974,7 @@ begin
       Interning, InterningMaxRefCount, PeriodMinutes);
 end;
 
-function TRest.MultiRedirect(const aGuid: TGUID; out aCallbackInterface;
+function TRest.MultiRedirect(const aGuid: TGuid; out aCallbackInterface;
   aCallBackUnRegisterNeeded: boolean): IMultiCallbackRedirect;
 begin
   if self = nil then
@@ -3258,7 +3250,7 @@ begin
      (fBackgroundBatch = nil) then
     exit;
   log := fRest.fLogClass.Enter('AsyncBatchStop(%)', [Table], self);
-  start := mormot.core.os.GetTickCount64;
+  start := GetTickCount64;
   timeout := start + 5000;
   if Table = nil then
   begin
@@ -3268,7 +3260,7 @@ begin
     repeat
       SleepHiRes(1); // wait for all batchs to be released
     until (fBackgroundBatch = nil) or
-          (mormot.core.os.GetTickCount64 > timeout);
+          (GetTickCount64 > timeout);
     result := Disable(AsyncBatchExecute);
   end
   else
@@ -3417,7 +3409,7 @@ begin
   end;
 end;
 
-procedure TRestBackgroundTimer.AsyncRedirect(const aGuid: TGUID;
+procedure TRestBackgroundTimer.AsyncRedirect(const aGuid: TGuid;
   const aDestinationInterface: IInvokable; out aCallbackInterface;
   const aOnResult: TOnAsyncRedirectResult);
 var
@@ -3436,7 +3428,7 @@ begin
     aCallbackInterface, aOnResult);
 end;
 
-procedure TRestBackgroundTimer.AsyncRedirect(const aGuid: TGUID;
+procedure TRestBackgroundTimer.AsyncRedirect(const aGuid: TGuid;
   const aDestinationInstance: TInterfacedObject; out aCallbackInterface;
   const aOnResult: TOnAsyncRedirectResult);
 var
@@ -3658,6 +3650,7 @@ begin
   RestAccessRights := nil;
   LowLevelConnectionID := 0;
   byte(LowLevelConnectionFlags) := 0;
+  LowLevelConnectionOpaque := nil;
 end;
 
 procedure TRestUriParams.Init(const aUri, aMethod, aInHead, aInBody: RawUtf8);
@@ -3669,7 +3662,8 @@ begin
   InBody := aInBody;
 end;
 
-procedure TRestUriParams.InBodyType(out ContentType: RawUtf8; GuessJsonIfNoneSet: boolean);
+procedure TRestUriParams.InBodyType(out ContentType: RawUtf8;
+  GuessJsonIfNoneSet: boolean);
 begin
   FindNameValue(InHead, HEADER_CONTENT_TYPE_UPPER, ContentType);
   if GuessJsonIfNoneSet and
@@ -3710,8 +3704,8 @@ begin
   begin
     FindNameValue(InHead, UpperName, result);
     if result = '' then
-      Store := NULL_STR_VAR
-    else // ensure header is parsed only once
+      Store := NULL_STR_VAR // flag to ensure header is parsed only once
+    else
       Store := result;
   end
   else if pointer(Store) = pointer(NULL_STR_VAR) then
@@ -3825,8 +3819,13 @@ end;
 
 function TRestUriContext.GetRemoteIPNotLocal: RawUtf8;
 begin
-  result := fCall^.HeaderOnce(fCall^.LowLevelRemoteIP, HEADER_REMOTEIP_UPPER);
-  if result = '127.0.0.1' then
+  if self <> nil then
+  begin
+    result := fCall^.HeaderOnce(fCall^.LowLevelRemoteIP, HEADER_REMOTEIP_UPPER);
+    if result = '127.0.0.1' then
+      result := '';
+  end
+  else
     result := '';
 end;
 
@@ -3844,7 +3843,7 @@ end;
 function TRestUriContext.AuthenticationCheck(jwt: TJwtAbstract): boolean;
 begin
   if fJwtContent = nil then
-    New(fJwtContent);
+    fJwtContent := AllocMem(SizeOf(fJwtContent^));
   if jwt = nil then
     fJwtContent^.result := jwtNoToken
   else
@@ -4339,13 +4338,13 @@ begin
   if (self = nil) or
      Terminated then
     exit;
-  endtix := mormot.core.os.GetTickCount64 + MS;
+  endtix := GetTickCount64 + MS;
   repeat
     fEvent.WaitFor(MS); // warning: can wait up to 15 ms more on Windows
     if Terminated then
       exit;
   until (MS < 32) or
-        (mormot.core.os.GetTickCount64 >= endtix);
+        (GetTickCount64 >= endtix);
   result := false; // normal delay expiration
 end;
 
@@ -4369,21 +4368,6 @@ begin
     fExecuting := false;
   end;
 end;
-
-{$ifndef HASTTHREADSTART}
-procedure TRestThread.Start;
-begin
-  Resume;
-end;
-{$endif HASTTHREADSTART}
-
-{$ifndef HASTTHREADTERMINATESET}
-procedure TRestThread.Terminate;
-begin
-  inherited Terminate; // FTerminated := True
-  TerminatedSet;
-end;
-{$endif HASTTHREADTERMINATESET}
 
 procedure TRestThread.TerminatedSet;
 begin
@@ -4538,7 +4522,7 @@ begin
     fOwner.OnEndCurrentThread(sender);
 end;
 
-procedure TRestRunThreads.AsyncRedirect(const aGuid: TGUID;
+procedure TRestRunThreads.AsyncRedirect(const aGuid: TGuid;
   const aDestinationInterface: IInvokable; out aCallbackInterface;
   const aOnResult: TOnAsyncRedirectResult);
 begin
@@ -4548,7 +4532,7 @@ begin
       aGuid, aDestinationInterface, aCallbackInterface, aOnResult);
 end;
 
-procedure TRestRunThreads.AsyncRedirect(const aGuid: TGUID;
+procedure TRestRunThreads.AsyncRedirect(const aGuid: TGuid;
   const aDestinationInstance: TInterfacedObject; out aCallbackInterface;
   const aOnResult: TOnAsyncRedirectResult);
 begin
@@ -4567,7 +4551,7 @@ begin
       Interning, InterningMaxRefCount, PeriodMinutes);
 end;
 
-function TRestRunThreads.MultiRedirect(const aGuid: TGUID; out aCallbackInterface;
+function TRestRunThreads.MultiRedirect(const aGuid: TGuid; out aCallbackInterface;
   aCallBackUnRegisterNeeded: boolean): IMultiCallbackRedirect;
 var
   factory: TInterfaceFactory;

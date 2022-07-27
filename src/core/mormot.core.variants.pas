@@ -237,7 +237,12 @@ type
     // - will first compare with its own VarType for efficiency
     // - returns true and set the matching CustomType if found, false otherwise
     function FindSynVariantType(aVarType: cardinal;
-      out CustomType: TSynInvokeableVariantType): boolean;
+      out CustomType: TSynInvokeableVariantType): boolean; overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// search of a registered custom variant type from its low-level VarType
+    // - will first compare with its own VarType for efficiency
+    function FindSynVariantType(aVarType: cardinal): TSynInvokeableVariantType; overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// customization of JSON parsing into variants
     // - is enabled only if the sioHasTryJsonToVariant option is set
     // - will be called by e.g. by VariantLoadJson() or GetVariantFromJsonField()
@@ -1060,7 +1065,7 @@ type
       aOptions: TDocVariantOptions; ItemsCount: PInteger = nil); overload;
     /// initialize a variant instance to store some TDynArray content
     procedure InitArrayFrom(const aItems: TDynArray;
-      aOptions: TDocVariantOptions); overload;
+      aOptions: TDocVariantOptions = JSON_FAST_FLOAT); overload;
     /// initialize a variant instance to store a T*ObjArray content
     // - will call internally ObjectToVariant() to make the conversion
     procedure InitArrayFromObjArray(const ObjArray; aOptions: TDocVariantOptions;
@@ -3643,6 +3648,15 @@ begin
   result := ct <> nil;
 end;
 
+function TSynInvokeableVariantType.FindSynVariantType(
+  aVarType: cardinal): TSynInvokeableVariantType;
+begin
+  if aVarType = VarType then
+    result := self
+  else
+    result := mormot.core.variants.FindSynVariantType(aVarType);
+end;
+
 procedure TSynInvokeableVariantType.Lookup(var Dest: TVarData;
   const Instance: TVarData; FullName: PUtf8Char; PathDelim: AnsiChar);
 var
@@ -5098,15 +5112,14 @@ begin
   if (n = 0) or
      (item = nil) then
     exit;
-  if item.Kind in rkRecordOrDynArrayTypes then
+  if item.Kind in (rkRecordOrDynArrayTypes + [rkClass]) then
   begin
-    // use temporary JSON conversion for complex nested content
-    aItems.SaveToJson(json);
+    // use temporary non-expanded JSON conversion for complex nested content
+    aItems.SaveToJson(json, [twoNonExpandedArrays]);
     if (json <> '') and
-       (json[1] = '[') and
-       (PCardinal(@PByteArray(json)[1])^ <> JSON_BASE64_MAGIC_QUOTE_C) then
-      // should be serialized as a true array
-      InitJsonInPlace(pointer(json), aOptions);
+       (json[1] = '{') then
+      // should be a non-expanded array, not JSON_BASE64_MAGIC_QUOTE_C
+      InitArrayFromResults(pointer(json), length(json), aOptions);
   end
   else
   begin

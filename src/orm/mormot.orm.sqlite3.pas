@@ -239,6 +239,9 @@ type
   end;
   PRestOrmServerDBBatch = ^TRestOrmServerDBBatch;
 
+  /// implements TRestServerDB.ORM process for REST server over SQlite3 storage
+  // - the main engine will be SQLite3, but specific classes of the model could
+  // be redirected to other TRestStorage instances, e.g. external SQL/NoSQL
   TRestOrmServerDB = class(TRestOrmServer)
   protected
     /// access to the associated SQLite3 database engine
@@ -328,9 +331,12 @@ type
     procedure InternalBatchStop; override;
     /// internal method called by TRestServer.Batch() to process SIMPLE input
     // - overriden for optimized multi-insert of the supplied JSON array values
-    function InternalBatchDirect(Encoding: TRestBatchEncoding;
-      RunTableIndex: integer; const Fields: TFieldBits;
-      Sent: PUtf8Char): TID; override;
+    function InternalBatchDirectSupport(Encoding: TRestBatchEncoding;
+      RunTableIndex: integer): TRestOrmBatchDirect; override;
+    /// internal method called by TRestServer.Batch() to process SIMPLE input
+    // - overriden for optimized multi-insert of the supplied JSON array values
+    function InternalBatchDirectOne(Encoding: TRestBatchEncoding;
+      RunTableIndex: integer; const Fields: TFieldBits; Sent: PUtf8Char): TID; override;
     /// reset the cache if necessary
     procedure SetNoAjaxJson(const Value: boolean); override;
   public
@@ -414,7 +420,7 @@ type
     destructor Destroy; override;
     /// Missing tables are created if they don't exist yet for every TOrm
     // class of the Database Model
-    // - you must call explicitly this before having called StaticDataCreate()
+    // - you must call explicitly this before calling OrmMapInMemory()
     // - all table description (even Unique feature) is retrieved from the Model
     // - this method also create additional fields, if the TOrm definition
     // has been modified; only field adding is available, field renaming or
@@ -1417,6 +1423,7 @@ function TRestOrmServerDB.MainEngineAdd(TableModelIndex: integer;
 var
   props: TOrmProperties;
   sql: RawUtf8;
+  tmp: TSynTempBuffer;
 begin
   result := 0;
   if TableModelIndex < 0 then
@@ -1441,21 +1448,23 @@ begin
     exit;
   end;
   if TrimU(SentData) = '' then
-    sql := 'INSERT INTO ' + sql + ' DEFAULT VALUES;'
+    sql := 'insert into ' + sql + ' default values;'
   else
   begin
+    tmp.Init(SentData);
     fRest.AcquireExecution[execOrmWrite].Safe.Lock; // protect fJsonDecoder
     try
-      fJsonDecoder.Decode(SentData, nil, pInlined, result, false);
+      fJsonDecoder.Decode(tmp, nil, pInlined, result, false);
       if (fOwner <> nil) and
          (props.RecordVersionField <> nil) then
         fOwner.RecordVersionHandle(ooInsert, TableModelIndex, fJsonDecoder,
           props.RecordVersionField);
       sql := fJsonDecoder.EncodeAsSql(
-        'INSERT INTO ', sql, {update=}false, nil, dSQLite);
+        'insert into ', sql, {update=}false, nil, dSQLite);
       Finalize(fJsonDecoder); // release temp values memory ASAP
     finally
       fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
+      tmp.Done;
     end;
   end;
   if InternalExecute(sql, true, nil, nil, nil, PInt64(@result)) then
@@ -2040,6 +2049,7 @@ function TRestOrmServerDB.MainEngineUpdate(TableModelIndex: integer; ID: TID;
 var
   props: TOrmProperties;
   sql: RawUtf8;
+  tmp: TSynTempBuffer;
 begin
   result := false;
   if (TableModelIndex < 0) or
@@ -2052,9 +2062,10 @@ begin
   begin
     // this sql statement use :(inlined params): for all values
     props := fModel.TableProps[TableModelIndex].Props;
+    tmp.Init(SentData);
     fRest.AcquireExecution[execOrmWrite].Safe.Lock; // protect fJsonDecoder
     try
-      fJsonDecoder.Decode(SentData, nil, pInlined, ID, false);
+      fJsonDecoder.Decode(tmp, nil, pInlined, ID, false);
       if (props.RecordVersionField <> nil) and
          (fOwner <> nil) then
         fOwner.RecordVersionHandle(ooUpdate, TableModelIndex,
@@ -2063,6 +2074,7 @@ begin
       Finalize(fJsonDecoder); // release temp values memory ASAP
     finally
       fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
+      tmp.Done;
     end;
     if sql = '' then
       raise ERestStorage.CreateUtf8('%.MainEngineUpdate: invalid input [%]',
@@ -2329,7 +2341,9 @@ end;
 procedure TRestOrmServerDB.FlushInternalDBCache;
 begin
   inherited;
-  if DB = nil then
+  if (DB = nil) or
+     (DB.Cache = nil) or
+     (DB.Cache.Count = 0) then
     exit;
   DB.Lock;
   try
@@ -2399,11 +2413,11 @@ function TRestOrmServerDB.InternalBatchStart(Encoding: TRestBatchEncoding;
 begin
   if not (Encoding in BATCH_INSERT) then
   begin
-    result := false; // means BATCH mode not supported
+    result := false; // BATCH mode is supported only for INSERT (not UPDATE)
     exit;
   end;
   // encPost: MainEngineAdd() to Values[]
-  // BATCH_DIRECT: InternalBatchDirect() to SimpleFields[]
+  // BATCH_DIRECT: InternalBatchDirectOne() to SimpleFields[]
   if (fBatch^.ValuesCount <> 0) or
      (fBatch^.IDCount <> 0) then
     raise EOrmBatchException.CreateUtf8(
@@ -2445,22 +2459,23 @@ begin
     if b^.ValuesCount = 1 then
     begin
       // handle single record insert (with inlined parameters)
-      case b^.Encoding of
-        encPost:
-          v := b^.Values[0];
-        encSimple,
-        encPostHex,
-        encPostHexID:
-          v := props.SaveFieldsFromJsonArray(
-            b^.Simples[0], b^.SimpleFields, nil, nil, [sfoExtendedJson]);
+      if b^.Encoding = encPost then
+        v := b^.Values[0]
+      else // encSimple, encPostHex, encPostHexID
+        v := props.SaveFieldsFromJsonArray(
+          b^.Simples[0], b^.SimpleFields, nil, nil, [sfoExtendedJson]);
+      b^.Temp.Init(v);
+      try
+        fJsonDecoder.Decode(b^.Temp, nil, pInlined, b^.ID[0]);
+        if (props.RecordVersionField <> nil) and
+           (fOwner <> nil) then
+          fOwner.RecordVersionHandle(
+            ooInsert, b^.TableIndex, fJsonDecoder, props.RecordVersionField);
+        sql := fJsonDecoder.EncodeAsSql(
+          '', props.SqlTableName, {update=}false, @b^.Options, dSQLite);
+      finally
+        b^.Temp.Done;
       end;
-      fJsonDecoder.Decode(v, nil, pInlined, b^.ID[0]);
-      if (props.RecordVersionField <> nil) and
-         (fOwner <> nil) then
-        fOwner.RecordVersionHandle(
-          ooInsert, b^.TableIndex, fJsonDecoder, props.RecordVersionField);
-      sql := fJsonDecoder.EncodeAsSql(
-        '', props.SqlTableName, {update=}false, @b^.Options, dSQLite);
       if not InternalExecute(sql, {cache=}true) then
         // just like ESqlite3Exception below
         raise EOrmBatchException.CreateUtf8(
@@ -2537,7 +2552,7 @@ begin
             end;
             while P^ in [#1..' ', '{', '['] do
               inc(P);
-            fJsonDecoder.Decode(P, nil, pNonQuoted, b^.ID[ndx]);
+            fJsonDecoder.DecodeInPlace(P, nil, pNonQuoted, b^.ID[ndx]);
             inc(ndx);
             decodedsaved := false;
           finally
@@ -2733,7 +2748,7 @@ begin
         DB.fStatement.Bind(arg + 1, id);
       if Sent = nil then
       begin
-        DB.InternalLog('InternalBatchDirect: encPutHexID JSON', sllError);
+        DB.InternalLog('InternalBatchDirectOne: encPutHexID JSON', sllError);
         result := HTTP_BADREQUEST;
         exit;
       end;
@@ -2753,24 +2768,26 @@ begin
   end;
 end;
 
-function TRestOrmServerDB.InternalBatchDirect(Encoding: TRestBatchEncoding;
-  RunTableIndex: integer; const Fields: TFieldBits; Sent: PUtf8Char): TID;
+function TRestOrmServerDB.InternalBatchDirectSupport(
+  Encoding: TRestBatchEncoding; RunTableIndex: integer): TRestOrmBatchDirect;
 begin
-  result := 0; // unsupported
-  if not (Encoding in BATCH_DIRECT) then
-    exit;
-  if Sent = nil then
-  begin
-    // called first with Sent=nil: is it a static or virtual table?
+  result := dirUnsupported;
+  if Encoding in BATCH_DIRECT then
+    // is it a static or virtual table?
     if GetStaticTableIndex(RunTableIndex) = nil then
       // supported (plain SQLite3 table in the main database)
       if (Encoding <> encPutHexID) or
          not InternalUpdateEventNeeded(oeUpdate, RunTableIndex) then
-        result := 1;
-    exit;
-  end;
+        // update notification requires a full JSON object -> not compatible
+        result := dirWriteLock; // fBatch should be protected by the lock
+end;
+
+function TRestOrmServerDB.InternalBatchDirectOne(Encoding: TRestBatchEncoding;
+  RunTableIndex: integer; const Fields: TFieldBits; Sent: PUtf8Char): TID;
+begin
   // called a second time with the proper Sent JSON, returning added ID
   // same logic than MainEngineAdd() but with no memory allocation
+  result := 0;
   case Encoding of
     encPostHexID:
       begin
@@ -2789,16 +2806,15 @@ begin
   end;
   // compute ID from Max(ID) if was not set by encPostHexID
   PrepareBatchAdd(self, RunTableIndex, result);
-  if result <> 0 then
+  if result <= 0 then
+    exit;
+  if fBatch^.SimpleFieldsCount = 0 then
   begin
-    if fBatch^.SimpleFieldsCount = 0 then
-    begin
-      fBatch^.SimpleFields := Fields;
-      fBatch^.SimpleFieldsCount := GetBitsCount(Fields, SizeOf(Fields) shl 3) + 1;
-    end;
-    AddID(fBatch^.ID, fBatch^.IDCount, result);
-    ObjArrayAddCount(fBatch^.Simples, pointer(Sent), fBatch^.ValuesCount);
+    fBatch^.SimpleFields := Fields;
+    fBatch^.SimpleFieldsCount := GetBitsCount(Fields, SizeOf(Fields) shl 3) + 1;
   end;
+  AddID(fBatch^.ID, fBatch^.IDCount, result);
+  ObjArrayAddCount(fBatch^.Simples, pointer(Sent), fBatch^.ValuesCount);
 end;
 
 

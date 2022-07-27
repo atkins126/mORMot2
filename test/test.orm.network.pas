@@ -32,6 +32,7 @@ uses
   mormot.crypt.jwt,
   mormot.net.client,
   mormot.net.server,
+  mormot.net.async,
   mormot.net.relay,
   mormot.net.ws.core,
   mormot.net.ws.client,
@@ -74,6 +75,7 @@ type
     DataBase: TRestServerDB;
     Server: TRestHttpServer;
     Client: TRestClientURI;
+    fHttps: boolean;
     /// perform the tests of the current Client instance
     procedure ClientTest;
     /// release used instances (e.g. http server) and memory
@@ -98,29 +100,29 @@ type
     // - this method keep alive the HTTP connection, so is somewhat faster
     // - it runs 1000 remote SQL queries, and check the JSON data retrieved
     // - the time elapsed for this step is computed, and displayed on the report
-    procedure HTTPClientKeepAlive;
+    procedure HttpClientKeepAlive;
     /// validate the HTTP/1.1 client multi-query implementation with one
     // connection initialized per query
     // - this method don't keep alive the HTTP connection, so is somewhat slower:
     // a new HTTP connection is created for every query
     // - it runs 1000 remote SQL queries, and check the JSON data retrieved
     // - the time elapsed for this step is computed, and displayed on the report
-    procedure HTTPClientMultiConnect;
+    procedure HttpClientMultiConnect;
     {$ifndef PUREMORMOT2}
     /// validate the HTTP/1.1 client multi-query implementation with one
     // connection for the all queries and our proprietary SHA-256 / AES-256-CTR
     // encryption encoding
     // - it runs 1000 remote SQL queries, and check the JSON data retrieved
     // - the time elapsed for this step is computed, and displayed on the report
-    procedure HTTPClientEncrypted;
+    procedure HttpClientEncrypted;
     {$endif PUREMORMOT2}
     {$ifdef HASRESTCUSTOMENCRYPTION} // not fully safe -> not in mORMot 2
     /// validates TRest.SetCustomEncryption process with AES+SHA
-    procedure HTTPClientCustomEncryptionAesSha;
+    procedure HttpClientCustomEncryptionAesSha;
     /// validates TRest.SetCustomEncryption process with only AES
-    procedure HTTPClientCustomEncryptionAes;
+    procedure HttpClientCustomEncryptionAes;
     /// validates TRest.SetCustomEncryption process with only SHA
-    procedure HTTPClientCustomEncryptionSha;
+    procedure HttpClientCustomEncryptionSha;
     {$endif HASRESTCUSTOMENCRYPTION}
     {$ifdef OSWINDOWSTODO}
     /// validate the Named-Pipe client implementation
@@ -133,13 +135,25 @@ type
     // - it then runs 1000 remote SQL queries, and check the JSON data retrieved
     // - the time elapsed for this step is computed, and displayed on the report
     procedure LocalWindowMessages;
+    {$endif OSWINDOWS}
+    /// validate the HTTPS/1.1 server implementation
+    procedure _TRestHttpsServer;
+    /// validate the HTTPS/1.1 client implementation
+    procedure _TRestHttpsClient;
+    /// validate HTTPS/1.1 client over one TLS connection
+    procedure HttpsClientKeepAlive;
+  public
+    /// validate HTTP/1.0 client over multiple short-living TLS connections
+    // - is disabled by default because establishing each TLS handshake is slow
+    // via caaRS256 (400/s) or caaES256 (600/s) in respect to no TLS (13550/s)
+    procedure HttpsClientMultiConnect;
+  published
     /// validate the client implementation, using direct access to the server
     // - it connects directly the client to the server, therefore use the same
     // process and memory during the run: it's the fastest possible way of
     // communicating
     // - it then runs 1000 remote SQL queries, and check the JSON data retrieved
     // - the time elapsed for this step is computed, and displayed on the report
-    {$endif OSWINDOWS}
     procedure DirectInProcessAccess;
     /// validate HTTP/1.1 client-server with multiple TRestServer instances
     procedure HTTPSeveralDBServers;
@@ -150,27 +164,6 @@ type
 implementation
 
 { TTestClientServerAccess }
-
-procedure TTestClientServerAccess._TRestHttpClient;
-var
-  Resp: TOrmTable;
-begin
-  Client := TRestHttpClient.Create('127.0.0.1', HTTP_DEFAULTPORT, Model);
-  fRunConsole := fRunConsole + 'using ' + string(Client.ClassName);
-  (Client as TRestHttpClientGeneric).Compression := [];
-  Resp := Client.Client.List([TOrmPeople], '*');
-  if CheckFailed(Resp <> nil) then
-    exit;
-  try
-    Check(Resp.InheritsFrom(TOrmTableJson));
-    CheckEqual(Resp.RowCount, 11011);
-    CheckHash(TOrmTableJson(Resp).PrivateInternalCopy, 4045204160);
-    //FileFromString(TOrmTableJson(Resp).PrivateInternalCopy, 'internalfull2.parsed');
-    //FileFromString(Resp.GetODSDocument, WorkDir + 'people.ods');
-  finally
-    Resp.Free;
-  end;
-end;
 
 {$ifndef ONLYUSEHTTPSOCKET}
 class function TTestClientServerAccess.RegisterAddUrl(OnlyDelete: boolean): string;
@@ -186,15 +179,13 @@ begin
   Check(Model <> nil);
   Check(Model.GetTableIndex('people') >= 0);
   try
-    DataBase := TRestServerDB.Create(Model, 'test.db3');
+    DataBase := TRestServerDB.Create(Model, WorkDir + 'test.db3');
     DataBase.DB.Synchronous := smOff;
     DataBase.DB.LockingMode := lmExclusive;
     Server := TRestHttpServer.Create(HTTP_DEFAULTPORT, [DataBase], '+',
-      HTTP_DEFAULT_MODE, 16,
-      {$ifdef PUREMORMOT2} secNone {$else} secSynShaAes {$endif},
-      '', '', [rsoLogVerbose]);
-    fRunConsole := FormatString('%using % %',
-      [fRunConsole, Server.HttpServer, Server.HttpServer.APIVersion]);
+      HTTPS_DEFAULT_MODE[fHttps], 16, HTTPS_SECURITY_SELFSIGNED[true, fHttps],
+      '', '', [{rsoLogVerbose}]);
+    AddConsole('using % %', [Server.HttpServer, Server.HttpServer.APIVersion]);
     Database.NoAjaxJson := true; // expect not expanded JSON from now on
   except
     on E: Exception do
@@ -209,6 +200,31 @@ begin
   FreeAndNil(Server);
   FreeAndNil(DataBase);
   FreeAndNil(Model);
+end;
+
+procedure TTestClientServerAccess._TRestHttpClient;
+var
+  Resp: TOrmTable;
+begin
+  Client := TRestHttpClient.Create('127.0.0.1', HTTP_DEFAULTPORT, Model, fHttps);
+  AddConsole('using %', [Client]);
+  (Client as TRestHttpClientGeneric).Compression := [];
+  (Client as TRestHttpClientGeneric).IgnoreTlsCertificateErrors := fHttps;
+  Resp := Client.Client.List([TOrmPeople], '*');
+  if CheckFailed(Resp <> nil) then
+    exit;
+  try
+    Check(Resp.InheritsFrom(TOrmTableJson));
+    CheckEqual(Resp.RowCount, 11011);
+    CheckHash(TOrmTableJson(Resp).PrivateInternalCopy, 4045204160);
+    if fHttps and
+       Client.InheritsFrom(TRestHttpClientSocket) then
+      AddConsole(' %', [TRestHttpClientSocket(Client).Socket.TLS.CipherName]);
+    //FileFromString(TOrmTableJson(Resp).PrivateInternalCopy, 'internalfull2.parsed');
+    //FileFromString(Resp.GetODSDocument, WorkDir + 'people.ods');
+  finally
+    Resp.Free;
+  end;
 end;
 
 {$define WTIME}
@@ -385,7 +401,7 @@ end;
 
 {$ifdef HASRESTCUSTOMENCRYPTION}
 
-procedure TTestClientServerAccess.HTTPClientCustomEncryptionAesSha;
+procedure TTestClientServerAccess.HttpClientCustomEncryptionAesSha;
 var
   rnd: THash256;
   sign: TSynSigner;
@@ -397,7 +413,7 @@ begin
   ClientTest;
 end;
 
-procedure TTestClientServerAccess.HTTPClientCustomEncryptionAes;
+procedure TTestClientServerAccess.HttpClientCustomEncryptionAes;
 var
   rnd: THash256;
 begin
@@ -407,7 +423,7 @@ begin
   ClientTest;
 end;
 
-procedure TTestClientServerAccess.HTTPClientCustomEncryptionSha;
+procedure TTestClientServerAccess.HttpClientCustomEncryptionSha;
 var
   sign: TSynSigner;
 begin
@@ -420,7 +436,32 @@ begin
 end;
 {$endif HASRESTCUSTOMENCRYPTION}
 
-procedure TTestClientServerAccess.HttpSeveralDBServers;
+procedure TTestClientServerAccess._TRestHttpsServer;
+begin
+  CleanUp;
+  fHttps := true;
+  _TRestHttpServer;
+end;
+
+procedure TTestClientServerAccess._TRestHttpsClient;
+begin
+  _TRestHttpClient;
+end;
+
+procedure TTestClientServerAccess.HttpsClientKeepAlive;
+begin
+  HttpClientKeepAlive;
+  fHttps := false;
+end;
+
+procedure TTestClientServerAccess.HttpsClientMultiConnect;
+begin
+  fHttps := true;
+  HttpClientMultiConnect;
+  fHttps := false;
+end;
+
+procedure TTestClientServerAccess.HTTPSeveralDBServers;
 var
   Instance: array[0..2] of record
     Model: TOrmModel;
@@ -438,7 +479,7 @@ begin
     Check(Client = nil);
     Check(Server = nil);
     Check(DataBase = nil);
-    // create 3 TRestServerDB + TRestHttpClient instances (and TOrmModel)
+    // create 3 in-memory TRestServerDB + TRestHttpClient instances (+TOrmModel)
     for i := 0 to high(Instance) do
       with Instance[i] do
       begin

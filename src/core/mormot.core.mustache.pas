@@ -184,7 +184,7 @@ type
     fTempGetValueFromContextHelper: TVariantDynArray;
     fReuse: TLightLock;
     fPathDelim: AnsiChar;
-    procedure PushContext(aDoc: TVarData);
+    procedure PushContext(const aDoc: TVarData);
     procedure PopContext; override;
     procedure AppendValue(const ValueName: RawUtf8; UnEscape: boolean);
       override;
@@ -315,6 +315,7 @@ type
     /// parse a {{mustache}} template, and returns the corresponding
     // TSynMustache instance
     // - an internal cache is maintained by this class function
+    // - don't free the returned instance: it is owned by the cache
     // - this implementation is thread-safe and re-entrant: i.e. the same
     // TSynMustache returned instance can be used by several threads at once
     // - will raise an ESynMustache exception on error
@@ -528,7 +529,7 @@ begin
   fReuse.UnLock;
 end;
 
-procedure TSynMustacheContextVariant.PushContext(aDoc: TVarData);
+procedure TSynMustacheContextVariant.PushContext(const aDoc: TVarData);
 begin
   if fContextCount >= length(fContext) then
     // was roughtly set by SectionMaxCount
@@ -536,7 +537,7 @@ begin
   with fContext[fContextCount] do
   begin
     Document := aDoc;
-    DocumentType := FindSynVariantType(aDoc.VType);
+    DocumentType := DocVariantType.FindSynVariantType(aDoc.VType);
     ListCurrent := -1;
     if DocumentType = nil then
       ListCount := -1
@@ -558,7 +559,7 @@ var
   tmp: TVarData;
 begin
   if (ValueName = '') or
-     (ValueName[1] in ['0'..'9', '"', '{', '[']) or
+     (ValueName[1] in ['-', '0'..'9', '"', '{', '[']) or
      (ValueName = 'true') or
      (ValueName = 'false') or
      (ValueName = 'null') then
@@ -805,7 +806,8 @@ begin
       if ListCurrent >= ListCount then
         exit;
       DocumentType.Iterate(ListCurrentDocument, Document, ListCurrent);
-      ListCurrentDocumentType := FindSynVariantType(ListCurrentDocument.VType);
+      ListCurrentDocumentType := DocVariantType.FindSynVariantType(
+        ListCurrentDocument.VType);
       result := true;
     end;
 end;
@@ -1648,9 +1650,22 @@ end;
 
 class procedure TSynMustache.ToJson(const Value: variant;
   out Result: variant);
+var
+  u, r: RawUtf8;
+  wasstring: boolean;
 begin
-  if not VarIsEmptyOrNull(Value) then
-    RawUtf8ToVariant(JsonReformat(VariantToUtf8(Value)), Result);
+  if VarIsEmptyOrNull(Value) then
+    exit;
+  VariantToUtf8(Value, u, wasstring);
+  if wasstring then
+    if (u <> '') and
+       (GotoNextNotSpace(pointer(u))^ in ['[', '{']) then
+      r := JsonReformat(u)
+    else
+      QuotedStrJson(u, r)
+  else
+    r := u; // false, true, number
+  RawUtf8ToVariant(r, Result);
 end;
 
 class procedure TSynMustache.JsonQuote(const Value: variant;
@@ -1847,7 +1862,7 @@ end;
 class procedure TSynMustache.NewGuid(const Value: variant;
   out Result: variant);
 var
-  g: TGUID;
+  g: TGuid;
 begin
   RandomGuid(g);
   RawUtf8ToVariant(GuidToRawUtf8(g), Result);

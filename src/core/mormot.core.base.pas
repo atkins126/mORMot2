@@ -392,8 +392,8 @@ type
   {$endif HASVARUSTRING}
   TRawJsonDynArray = array of RawJson;
   PRawJsonDynArray = ^TRawJsonDynArray;
-  TGuidDynArray = array of TGUID;
-  PGuidDynArray = array of PGUID;
+  TGuidDynArray = array of TGuid;
+  PGuidDynArray = array of PGuid;
 
   PObject = ^TObject;
   PClass = ^TClass;
@@ -471,6 +471,10 @@ type
 type
   /// stack-allocated ASCII string, used by GuidToShort() function
   TGuidShortString = string[38];
+
+  /// used e.g. by HttpDateNowUtc
+  TShort63 = string[63];
+  PShort63 = ^TShort63;
 
   /// used e.g. for SetThreadName/GetCurrentThreadName
   TShort31 = string[31];
@@ -654,49 +658,49 @@ const
   /// used to mark the end of ASCIIZ buffer, or return a void ShortString
   NULCHAR: AnsiChar = #0;
 
-  /// a TGUID containing '{00000000-0000-0000-0000-00000000000}'
-  GUID_NULL: TGUID = ({%H-});
+  /// a TGuid containing '{00000000-0000-0000-0000-00000000000}'
+  GUID_NULL: TGuid = ({%H-});
 
   NULL_LOW   = ord('n') + ord('u') shl 8 + ord('l') shl 16 + ord('l') shl 24;
   FALSE_LOW  = ord('f') + ord('a') shl 8 + ord('l') shl 16 + ord('s') shl 24;
   FALSE_LOW2 = ord('a') + ord('l') shl 8 + ord('s') shl 16 + ord('e') shl 24;
   TRUE_LOW   = ord('t') + ord('r') shl 8 + ord('u') shl 16 + ord('e') shl 24;
 
-/// fill a GUID with 0
-procedure FillZero(var result: TGUID); overload;
+/// fill a TGuid with 0
+procedure FillZero(var result: TGuid); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// compare two TGUID values
+/// compare two TGuid values
 // - this version is faster than the one supplied by SysUtils
 function IsEqualGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-  guid1, guid2: TGUID): boolean; overload;
+  guid1, guid2: TGuid): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// compare two TGUID values
+/// compare two TGuid values
 // - this version is faster than the one supplied by SysUtils
-function IsEqualGuid(guid1, guid2: PGUID): boolean; overload;
+function IsEqualGuid(guid1, guid2: PGuid): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// returns the index of a matching TGUID in an array
+/// returns the index of a matching TGuid in an array
 // - returns -1 if no item matched
-function IsEqualGuidArray(const guid: TGUID; const guids: array of TGUID): integer;
+function IsEqualGuidArray(const guid: TGuid; const guids: array of TGuid): integer;
 
-/// check if a TGUID value contains only 0 bytes
+/// check if a TGuid value contains only 0 bytes
 // - this version is faster than the one supplied by SysUtils
-function IsNullGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGUID): boolean;
+function IsNullGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// append one TGUID item to a TGUID dynamic array
+/// append one TGuid item to a TGuid dynamic array
 // - returning the newly inserted index in guids[], or an existing index in
-// guids[] if NoDuplicates is TRUE and TGUID already exists
-function AddGuid(var guids: TGuidDynArray; const guid: TGUID;
+// guids[] if NoDuplicates is TRUE and TGuid already exists
+function AddGuid(var guids: TGuidDynArray; const guid: TGuid;
   NoDuplicates: boolean = false): integer;
 
-/// compute a random UUID value from the RandomBytes() generator and RFC 4122
-procedure RandomGuid(out result: TGUID); overload;
+/// compute a random UUid value from the RandomBytes() generator and RFC 4122
+procedure RandomGuid(out result: TGuid); overload;
 
-/// compute a random UUID value from the RandomBytes() generator and RFC 4122
-function RandomGuid: TGUID; overload;
+/// compute a random UUid value from the RandomBytes() generator and RFC 4122
+function RandomGuid: TGuid; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the new capacity when expanding an array of items
@@ -733,6 +737,18 @@ procedure FastAssignNew(var d; s: pointer = nil);
 /// internal function used by FastSetString/FastSetStringCP
 function FastNewString(len, codepage: PtrInt): PAnsiChar;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// internal function which could be used instead of SetLength() if RefCnt = 1
+procedure FakeLength(var s: RawUtf8; len: PtrInt); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// internal function which could be used instead of SetLength() if RefCnt = 1
+procedure FakeLength(var s: RawUtf8; endChar: PUtf8Char); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// internal function which could be used instead of SetLength() if RefCnt = 1
+procedure FakeLength(var s: RawByteString; len: PtrInt); overload;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// initialize a RawByteString, ensuring returned "aligned" pointer
 // is 16-bytes aligned
@@ -1077,7 +1093,12 @@ function GetCardinalW(P: PWideChar): PtrUInt;
 
 /// get a boolean value stored as 'true'/'false' text in P^
 // - would also recognize any non '0' integer as true, or false if P = nil
-function GetBoolean(P: PUtf8Char): boolean;
+function GetBoolean(P: PUtf8Char): boolean; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// get a boolean value stored as 'true'/'false' text in input variable
+// - would also recognize any non '0' integer as true, or false if P is ''
+function GetBoolean(const value: RawUtf8): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// get the 64-bit integer value stored in P^
@@ -1299,7 +1320,7 @@ function CompareQWord(const A, B: QWord): integer;
 // - returns nil if Value was not found
 // - is implemented via IntegerScanIndex() SSE2 asm on i386 and x86_64
 function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
-  {$ifdef CPUINTEL} {$ifdef HASINLINE}inline;{$endif} {$endif}
+  {$ifdef CPUINTEL} {$ifndef HASNOSSE2} {$ifdef HASINLINE}inline;{$endif} {$endif} {$endif}
 
 /// fast search of an unsigned integer position in a 32-bit integer array
 // - Count is the number of integer entries in P^
@@ -1314,7 +1335,7 @@ function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): Pt
 // - returns false if Value was not found
 // - is implemented via IntegerScanIndex() SSE2 asm on i386 and x86_64
 function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): boolean;
-  {$ifdef CPUINTEL} {$ifdef HASINLINE}inline;{$endif} {$endif}
+  {$ifdef CPUINTEL} {$ifndef HASNOSSE2} {$ifdef HASINLINE}inline;{$endif} {$endif} {$endif}
 
 /// fast search of an integer position in a 64-bit integer array
 // - Count is the number of Int64 entries in P^
@@ -1931,6 +1952,8 @@ type
       w: array[0..7] of word);
   7: (
       l64, h64: Int64Rec);
+  8: (
+      guid: TGuid);
   end;
   /// pointer to 128-bit hash map variable record
   PHash128Rec = ^THash128Rec;
@@ -2359,6 +2382,9 @@ var
   CpuFeatures: TArmHwCaps;
 {$endif CPUARM3264}
 
+/// cross-platform wrapper function to check AES HW support on Intel or ARM
+function HasHWAes: boolean;
+
 {$ifdef CPUINTEL}
 
 var
@@ -2482,29 +2508,29 @@ function BSRqword(const q: Qword): cardinal;
 
 type
   /// most common x86_64 CPU abilities, used e.g. by FillCharFast/MoveFast
-  // - cpuERMS is ignored (slower than our movnt code, and not cpuid in VMs)
   // - cpuHaswell identifies Intel/AMD AVX2+BMI support at Haswell level
+  // as expected e.g. by IsValidUtf8Avx2/Base64EncodeAvx2 dedicated asm
+  // - won't include ERMSB flag because it is not propagated within some VMs
   TX64CpuFeatures = set of (
-    cpuAVX, cpuAVX2 {$ifdef WITH_ERMS}, cpuERMS{$endif}, cpuHaswell);
+    cpuAVX, cpuAVX2, cpuHaswell);
 
 var
   /// internal flags used by FillCharFast - easier from asm that CpuFeatures
-  CPUIDX64: TX64CpuFeatures;
+  X64CpuFeatures: TX64CpuFeatures;
 
-{$ifdef ASMX64AVX}
+{$ifdef ASMX64AVXNOCONST}
 /// simdjson asm as used by mormot.core.unicode on Haswell for FPC IsValidUtf8()
 function IsValidUtf8Avx2(source: PUtf8Char; sourcelen: PtrInt):  boolean;
 // avx2 asm as used by mormot.core.buffers for Base64EncodeMain/Base64DecodeMain
 procedure Base64EncodeAvx2(var b: PAnsiChar; var blen: PtrUInt; var b64: PAnsiChar);
 procedure Base64DecodeAvx2(var b64: PAnsiChar; var b64len: PtrInt; var b: PAnsiChar);
-{$endif ASMX64AVX}
+{$endif ASMX64AVXNOCONST}
 
 {$endif ASMX64}
 
 /// our fast version of FillChar()
 // - on Intel i386/x86_64, will use fast SSE2/AVX instructions (if available)
 // - on non-Intel CPUs, it will fallback to the default RTL FillChar()
-// - you could try to define WITH_ERMS conditional but it is usually slower
 // - note: Delphi RTL is far from efficient: on i386 the FPU is slower/unsafe,
 // and on x86_64, ERMS is wrongly used even for small blocks
 // - on ARM/AARCH64 POSIX, mormot.core.os would redirect to optimized libc
@@ -2514,7 +2540,6 @@ procedure FillcharFast(var dst; cnt: PtrInt; value: byte);
 // - on Delphi Intel i386/x86_64, will use fast SSE2 instructions (if available)
 // - FPC i386 has fastmove.inc which is faster than our SSE2/ERMS version
 // - FPC x86_64 RTL is slower than our SSE2/AVX asm
-// - you could try to define WITH_ERMS conditional but it is usually slower
 // - on non-Intel CPUs, it will fallback to the default RTL Move()
 // - on ARM/AARCH64 POSIX, mormot.core.os would redirect to optimized libc
 {$ifdef FPC_X86}
@@ -2524,7 +2549,6 @@ procedure MoveFast(const src; var dst; cnt: PtrInt);
 {$endif FPC_X86}
 
 {$else}
-
 
 // fallback to RTL versions on non-INTEL or PIC platforms by default
 // and mormot.core.os.posix.inc redirects them to libc memset/memmove
@@ -2766,7 +2790,7 @@ function Lecuyer: PLecuyer;
 function Random32: cardinal; overload;
 
 /// fast compute of bounded 32-bit random value, using the gsl_rng_taus2 generator
-// - calls internally the overloaded Random32 function
+// - calls internally the overloaded Random32 function, ensuring Random32(max)<max
 // - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
 // randomness, but is twice slower (even with AES-NI)
 // - thread-safe and non-blocking function using a per-thread TLecuyer engine
@@ -2811,7 +2835,7 @@ procedure Random32Seed(entropy: pointer = nil; entropylen: PtrInt = 0);
 procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 
 /// retrieve 512-bit of entropy, from system time and current execution state
-// - entropy is gathered over several sources like RTL Now(), CreateGUID(),
+// - entropy is gathered over several sources like RTL Now(), CreateGuid(),
 // current gsl_rng_taus2 Lecuyer state, and RdRand32/Rdtsc low-level Intel opcodes
 // - the resulting output is to be hashed - e.g. with DefaultHasher128
 // - execution is fast, but not enough as unique seed for a cryptographic PRNG:
@@ -3828,15 +3852,6 @@ uses
   Windows; // circumvent unexpected warning about inlining (WTF!)
 {$endif ISDELPHI20062007}
 
-{$ifdef FPC_X64MM} // for direct string access to our fpcx64mm Memory Manager
-{$ifdef CPUX64}
-uses
-  mormot.core.fpcx64mm;
-{$else}
-  {$undef FPC_X64MM}
-{$endif CPUX64}
-{$endif FPC_X64MM}
-
 {$ifdef FPC}
   // globally disable some FPC paranoid warnings - rely on x86_64 as reference
   {$WARN 4056 off : Conversion between ordinals and pointers is not portable }
@@ -4044,26 +4059,26 @@ end;
 
 
 function IsEqualGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
-  guid1, guid2: TGUID): boolean;
+  guid1, guid2: TGuid): boolean;
 begin
   result := (PHash128Rec(@guid1).L = PHash128Rec(@guid2).L) and
             (PHash128Rec(@guid1).H = PHash128Rec(@guid2).H);
 end;
 
-function IsEqualGuid(guid1, guid2: PGUID): boolean;
+function IsEqualGuid(guid1, guid2: PGuid): boolean;
 begin
   result := (PHash128Rec(guid1).L = PHash128Rec(guid2).L) and
             (PHash128Rec(guid1).H = PHash128Rec(guid2).H);
 end;
 
-function IsEqualGuidArray(const guid: TGUID; const guids: array of TGUID): integer;
+function IsEqualGuidArray(const guid: TGuid; const guids: array of TGuid): integer;
 begin
   result := Hash128Index(@guids[0], length(guids), @guid);
 end;
 
-function IsNullGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGUID): boolean;
+function IsNullGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: TGuid): boolean;
 var
-  a: TPtrIntArray absolute guid;
+  a: TPtrIntArray absolute Guid;
 begin
   result := (a[0] = 0) and
             (a[1] = 0) {$ifdef CPU32} and
@@ -4071,7 +4086,7 @@ begin
             (a[3] = 0) {$endif CPU32};
 end;
 
-function AddGuid(var guids: TGuidDynArray; const guid: TGUID; NoDuplicates: boolean): integer;
+function AddGuid(var guids: TGuidDynArray; const guid: TGuid; NoDuplicates: boolean): integer;
 begin
   if NoDuplicates then
   begin
@@ -4084,7 +4099,7 @@ begin
   guids[result] := guid;
 end;
 
-procedure FillZero(var result: TGUID);
+procedure FillZero(var result: TGuid);
 var
   d: TInt64Array absolute result;
 begin
@@ -4092,14 +4107,14 @@ begin
   d[1] := 0;
 end;
 
-function RandomGuid: TGUID;
+function RandomGuid: TGuid;
 begin
   RandomGuid(result);
 end;
 
-procedure RandomGuid(out result: TGUID);
+procedure RandomGuid(out result: TGuid);
 begin // see https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
-  RandomBytes(@result, SizeOf(TGUID));
+  RandomBytes(@result, SizeOf(TGuid));
   result.D3 := (result.D3 and $0FFF) + $4000; // version bits 12-15 = 4 (random)
   result.D4[0] := byte(result.D4[0] and $3F) + $80; // reserved bits 6-7 = 1
 end;
@@ -4145,14 +4160,14 @@ begin
   result := nil;
   if len > 0 then
   begin
-    {$ifdef FPC_X64MM}
-    P := _GetMem(len + (_STRRECSIZE + 4));
+    {$ifdef FPC}
+    P := GetMem(len + (_STRRECSIZE + 4));
     result := PAnsiChar(P) + _STRRECSIZE;
     {$else}
     GetMem(result, len + (_STRRECSIZE + 4));
     P := pointer(result);
     inc(PStrRec(result));
-    {$endif FPC_X64MM}
+    {$endif FPC}
     {$ifdef HASCODEPAGE} // also set elemSize := 1
     {$ifdef FPC}
     P^.codePageElemSize := codepage + (1 shl 16);
@@ -4166,6 +4181,24 @@ begin
   end;
 end;
 
+procedure FakeLength(var s: RawUtf8; len: PtrInt);
+begin
+  PStrLen(PAnsiChar(pointer(s)) - _STRLEN)^ := len; // in-place SetLength()
+  PByteArray(s)[len] := 0;
+end;
+
+procedure FakeLength(var s: RawUtf8; endChar: PUtf8Char);
+begin
+  PStrLen(PAnsiChar(pointer(s)) - _STRLEN)^ := endChar - pointer(s);
+  endChar^ := #0;
+end;
+
+procedure FakeLength(var s: RawByteString; len: PtrInt);
+begin
+  PStrLen(PAnsiChar(pointer(s)) - _STRLEN)^ := len; // in-place SetLength()
+  PByteArray(s)[len] := 0;
+end;
+
 procedure FastSetStringCP(var s; p: pointer; len, codepage: PtrInt);
 var
   r: pointer;
@@ -4174,7 +4207,10 @@ begin
   if (p <> nil) and
      (r <> nil) then
     MoveFast(p^, r^, len);
-  FastAssignNew(s, r);
+  if pointer(s) = nil then
+    pointer(s) := r
+  else
+    FastAssignNew(s, r);
 end;
 
 procedure FastSetString(var s: RawUtf8; p: pointer; len: PtrInt);
@@ -4185,7 +4221,10 @@ begin
   if (p <> nil) and
      (r <> nil) then
     MoveFast(p^, r^, len);
-  FastAssignNew(s, r);
+  if s = '' then
+    pointer(s) := r
+  else
+    FastAssignNew(s, r);
 end;
 
 procedure FastSetRawByteString(var s: RawByteString; p: pointer; len: PtrInt);
@@ -4196,11 +4235,14 @@ begin
   if (p <> nil) and
      (r <> nil) then
     MoveFast(p^, r^, len);
-  FastAssignNew(s, r);
+  if pointer(s) = nil then
+    pointer(s) := r
+  else
+    FastAssignNew(s, r);
 end;
 
-procedure GetMemAligned(var holder: RawByteString; fillwith: pointer; len: PtrUInt;
-  out aligned: pointer; alignment: PtrUInt);
+procedure GetMemAligned(var holder: RawByteString; fillwith: pointer;
+  len: PtrUInt; out aligned: pointer; alignment: PtrUInt);
 begin
   dec(alignment); // expected to be a power of two
   FastSetRawByteString(holder, nil, len + alignment);
@@ -4628,6 +4670,11 @@ begin
             (PInteger(P)^ <> FALSE_LOW) and
             ((PInteger(P)^ = TRUE_LOW) or
              ((PInteger(P)^ and $ffff) <> ord('0')));
+end;
+
+function GetBoolean(const value: RawUtf8): boolean;
+begin
+  result := GetBoolean(pointer(value));
 end;
 
 function GetInt64Bool(P: PUtf8Char; out V: Int64): boolean;
@@ -7462,6 +7509,19 @@ end;
 
 { ************ Faster alternative to RTL standard functions }
 
+function HasHWAes: boolean;
+begin
+  {$ifdef CPUINTEL}
+  result := cfAESNI in CpuFeatures;
+  {$else}
+  {$ifdef CPUARM}
+  result := ahcAES in CpuFeatures;
+  {$else}
+  result := false; // unknown CPU architecture
+  {$endif CPUARM}
+  {$endif CPUINTEL}
+end;
+
 {$ifndef CPUX86} // those functions have their own PIC-compatible x86 asm version
 
 function StrLenSafe(S: pointer): PtrInt;
@@ -7504,7 +7564,7 @@ begin
     begin
       dec(PtrUInt(Str1), PtrUInt(Str2));
       if Str1 = nil then
-        exit;
+        exit; // Str1=Str2
       repeat
         c := PByteArray(Str1)[PtrUInt(Str2)];
         if c <> PByte(Str2)^ then
@@ -7828,8 +7888,8 @@ begin
     if (L <> 0) and
        (PStrCnt(PAnsiChar(pointer(S)) - _STRCNT)^ = 1) then
     begin
-      PStrLen(PAnsiChar(pointer(S)) - _STRLEN)^ := L; // just fake length
-      MoveFast(PByteArray(S)[i], pointer(S)^, L + 1); // move in place (with #0)
+      MoveFast(PByteArray(S)[i], pointer(S)^, L); // move in place
+      FakeLength(S, L); // after move
     end
     else
       FastSetString(S, @PByteArray(S)[i], L); // allocate
@@ -8118,13 +8178,13 @@ begin
   result := @_Lecuyer;
 end;
 
-{$ifdef OSDARWIN} // FPC CreateGUID calls /dev/urandom which is not advised
+{$ifdef OSDARWIN} // FPC CreateGuid calls /dev/urandom which is not advised
 function mach_absolute_time: Int64; cdecl external 'c';
 
-procedure CreateGUID(var guid: TGUID);
+procedure CreateGuid(var guid: TGuid);
 begin
-  PInt64(@guid)^ := mach_absolute_time;  // monotonic time in nanoseconds
-  crc128c(@guid, SizeOf(guid), THash128(guid)); // good enough diffusion
+  PInt64(@Guid)^ := mach_absolute_time;  // monotonic time in nanoseconds
+  crc128c(@Guid, SizeOf(Guid), THash128(Guid)); // good enough diffusion
 end;
 {$endif OSDARWIN}
 
@@ -8142,7 +8202,7 @@ var
 begin
   // note: we don't use RTL Random() here because it is not thread-safe
   if _EntropyGlobal.L = 0 then
-    CreateGUID(TGuid(_EntropyGlobal)); // some rich initial value
+    CreateGuid(_EntropyGlobal.guid); // some rich initial value
   e.r[0].L := e.r[0].L xor _EntropyGlobal.L;
   e.r[0].H := e.r[0].H xor _EntropyGlobal.H;
   lec := @_Lecuyer; // lec^.rs#=0 at thread startup, but won't hurt
@@ -8152,7 +8212,7 @@ begin
   e.r[1].c3 := e.r[1].c3 xor PtrUInt(lec); // any threadvar is thread-specific
   // Windows CoCreateGuid, Linux /proc/sys/kernel/random/uuid, FreeBSD syscall,
   // then fallback to /dev/urandom or RTL mtwist_u32rand - may be slow
-  CreateGUID(TGuid(guid));
+  CreateGuid(guid.guid);
   e.r[2].L := e.r[2].L xor guid.L;
   e.r[2].H := e.r[2].H xor guid.H;
   // no mormot.core.os yet, so we can't use QueryPerformanceMicroSeconds()
@@ -8185,7 +8245,7 @@ begin
       e.b[j] := {%H-}e.b[j] xor entropy^[i];
     end;
   repeat
-    XorEntropy(e); // 512-bit from RdRand32 + Rdtsc + Now + CreateGUID
+    XorEntropy(e); // 512-bit from RdRand32 + Rdtsc + Now + CreateGuid
     DefaultHasher128(@h, @e, SizeOf(e)); // may be AesNiHash128
     rs1 := rs1 xor h.c0;
     rs2 := rs2 xor h.c1;
@@ -8451,6 +8511,8 @@ type
 
 // optimized asm for x86 and x86_64 is located in include files
 
+{$ifndef HASNOSSE2}
+
 function IntegerScan(P: PCardinalArray; Count: PtrInt; Value: cardinal): PCardinal;
 begin
   Count := IntegerScanIndex(P, Count, Value); // SSE2 asm on Intel/AMD
@@ -8464,6 +8526,8 @@ function IntegerScanExists(P: PCardinalArray; Count: PtrInt; Value: cardinal): b
 begin
   result := IntegerScanIndex(P, Count, Value) >= 0; // SSE2 asm on Intel/AMD
 end;
+
+{$endif HASNOSSE2}
 
 type
   TIntelRegisters = record
@@ -8528,18 +8592,14 @@ begin
       exclude(CpuFeatures, cfPOPCNT);
     end;
   {$ifdef ASMX64}
-  {$ifdef WITH_ERMS}
-  // actually slower than our movnt code, and not cpuid in VMs -> ignored
-  if cfERMS in CpuFeatures then
-    include(CPUIDX64, cpuERMS);
-  {$endif WITH_ERMS}
+  // note: cfERMS has no cpuid within some VMs -> ignore and assume present
   if cfAVX in CpuFeatures then
   begin
-    include(CPUIDX64, cpuAVX);
+    include(X64CpuFeatures, cpuAVX);
     if cfAVX2 in CpuFeatures then
-      include(CPUIDX64, cpuAVX2);
+      include(X64CpuFeatures, cpuAVX2);
     if CpuFeatures * CPUAVX2HASWELL = CPUAVX2HASWELL then
-      include(CPUIDX64, cpuHaswell);
+      include(X64CpuFeatures, cpuHaswell);
   end;
   {$endif ASMX64}
   // redirect some CPU-aware functions
@@ -8547,11 +8607,17 @@ begin
   {$ifndef HASNOSSE2}
   {$ifdef WITH_ERMS}
   if not (cfSSE2 in CpuFeatures) then
-    ERMSB_MIN_SIZE := 0 // FillCharFast will fallback to rep stosb
+  begin
+    ERMSB_MIN_SIZE_FWD := 0; // FillCharFast fallbacks to rep stosb on older CPU
+    {$ifndef FPC_X86}
+    ERMSB_MIN_SIZE_BWD := 0; // in both directions to bypass the SSE2 code
+    {$endif FPC_X86}
+  end
     // but MoveFast/SynLz are likely to abort -> recompile with HASNOSSE2 conditional
     // note: mormot.core.os.pas InitializeSpecificUnit will notify it on console
   else if cfERMS in CpuFeatures then
-    ERMSB_MIN_SIZE := 4096; // "on 32-bit strings have to be at least 4KB"
+    ERMSB_MIN_SIZE_FWD := 4096; // "on 32-bit strings have to be at least 4KB"
+    // backward rep movsd has no ERMS optimization so degrades performance
   {$endif WITH_ERMS}
   {$endif HASNOSSE2}
   if cfSSE2 in CpuFeatures then
@@ -8559,11 +8625,11 @@ begin
   {$endif ASMX86}
   if cfSSE42 in CpuFeatures then // for both i386 and x86_64
   begin
-    crc32c := @crc32csse42;
-    crc32cby4 := @crc32cby4sse42;
-    crcblock := @crcblocksse42;
-    crcblocks := @crcblockssse42;
-    DefaultHasher := @crc32csse42;
+    crc32c          := @crc32csse42;
+    crc32cby4       := @crc32cby4sse42;
+    crcblock        := @crcblocksse42;
+    crcblocks       := @crcblockssse42;
+    DefaultHasher   := @crc32csse42;
     InterningHasher := @crc32csse42;
   end;
 end;

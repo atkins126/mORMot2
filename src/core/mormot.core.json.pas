@@ -673,9 +673,6 @@ type
     /// append a JSON field name, followed by an escaped UTF-8 JSON String and
     // a comma (',')
     procedure AddPropJsonString(const PropName: ShortString; const Text: RawUtf8);
-    /// append a JSON field name, followed by a number value and a comma (',')
-    procedure AddPropJsonInt64(const PropName: ShortString; Value: Int64;
-      WithQuote: AnsiChar = #0);
     /// append CR+LF (#13#10) chars and #9 indentation
     // - will also flush any fBlockComment
     procedure AddCRAndIndent; override;
@@ -1990,7 +1987,8 @@ var
 // tkVariant kind of content - other kinds would return 'null'
 // - you can override serialization options if needed
 procedure SaveJson(const Value; TypeInfo: PRttiInfo;
-  Options: TTextWriterOptions; var result: RawUtf8); overload;
+  Options: TTextWriterOptions; var result: RawUtf8;
+  ObjectOptions: TTextWriterWriteObjectOptions = []); overload;
 
 /// serialize most kind of content as JSON, using its RTTI
 // - is just a wrapper around TJsonWriter.AddTypedJson()
@@ -2384,6 +2382,8 @@ type
     fFileName: TFileName;
     fLoadedAsIni: boolean;
     fSettingsOptions: TSynJsonFileSettingsOptions;
+    // could be overriden to validate the content coherency and/or clean fields
+    function AfterLoad: boolean; virtual;
   public
     /// read existing settings from a JSON content
     // - if the input is no JSON object, then a .INI structure is tried
@@ -4891,11 +4891,16 @@ end;
 
 procedure _JS_RawByteString(Data: PRawByteString; const Ctxt: TJsonSaveContext);
 begin
-  if (rcfIsRawBlob in Ctxt.Info.Cache.Flags) and
-     not (woRawBlobAsBase64 in Ctxt.Options) then
+  if (Data^ = '') or
+     ((rcfIsRawBlob in Ctxt.Info.Cache.Flags) and
+      not (woRawBlobAsBase64 in Ctxt.Options)) then
     Ctxt.W.AddNull
   else
-    Ctxt.W.WrBase64(pointer(Data^), length(Data^), {withmagic=}true);
+  begin
+    Ctxt.W.Add('"'); // no magic trailer as with mORMot 1
+    Ctxt.W.WrBase64(pointer(Data^), length(Data^), {withmagic=}false);
+    Ctxt.W.Add('"');
+  end;
 end;
 
 procedure _JS_RawJson(Data: PRawJson; const Ctxt: TJsonSaveContext);
@@ -5667,18 +5672,6 @@ begin
   AddComma;
 end;
 
-procedure TJsonWriter.AddPropJsonInt64(const PropName: ShortString;
-  Value: Int64; WithQuote: AnsiChar);
-begin
-  AddProp(@PropName[1], ord(PropName[0]));
-  if WithQuote <> #0 then
-    Add(WithQuote);
-  Add(Value);
-  if WithQuote <> #0 then
-    Add(WithQuote);
-  AddComma;
-end;
-
 procedure TJsonWriter.InternalAddFixedAnsi(Source: PAnsiChar; SourceChars: cardinal;
   AnsiToWide: PWordArray; Escape: TTextWriterKind);
 var
@@ -5873,7 +5866,8 @@ var
 label
   utf8;
 begin
-  if Len > 0 then
+  if (P <> nil) and
+     (Len > 0) then
   begin
     if CodePage = 0 then // CP_UTF8 is very likely on POSIX or LCL
       CodePage := Unicode_CodePage; // = CurrentAnsiConvert.CodePage
@@ -5931,6 +5925,8 @@ procedure TJsonWriter.WrBase64(P: PAnsiChar; Len: PtrUInt; withMagic: boolean);
 var
   trailing, main, n: PtrUInt;
 begin
+  if P = nil then
+    Len := 0;
   if withMagic then
     if Len <= 0 then
     begin
@@ -7364,8 +7360,10 @@ begin
   if Ctxt.ParseNext then
     if Ctxt.Value = nil then // null
       Data^ := ''
-    else
-      Ctxt.Valid := Base64MagicCheckAndDecode(Ctxt.Value, Ctxt.ValueLen, Data^);
+    else if not Ctxt.WasString then
+      Ctxt.Valid := false
+    else if not Base64MagicTryAndDecode(Ctxt.Value, Ctxt.ValueLen, Data^) then
+      FastSetRawByteString(Data^, Ctxt.Value, Ctxt.ValueLen); // allow text
 end;
 
 procedure _JL_RawJson(Data: PRawJson; var Ctxt: TJsonParserContext);
@@ -7433,7 +7431,7 @@ begin
   if Ctxt.ParseNext then
     if Ctxt.WasString then
     begin
-      FillZeroSmall(Data, Ctxt.Info.Size);
+      FillZeroSmall(Data, Ctxt.Info.Size); // BinarySize may be < Size
       if Ctxt.ValueLen > 0 then // "" -> is valid 0
         Ctxt.Valid := (Ctxt.ValueLen = Ctxt.Info.BinarySize * 2) and
           HexDisplayToBin(PAnsiChar(Ctxt.Value), Data, Ctxt.Info.BinarySize);
@@ -10286,14 +10284,14 @@ begin
 end;
 
 procedure SaveJson(const Value; TypeInfo: PRttiInfo; Options: TTextWriterOptions;
-  var result: RawUtf8);
+  var result: RawUtf8; ObjectOptions: TTextWriterWriteObjectOptions);
 var
   temp: TTextWriterStackBuffer;
 begin
   with TJsonWriter.CreateOwnedStream(temp) do
   try
     CustomOptions := CustomOptions + Options;
-    AddTypedJson(@Value, TypeInfo);
+    AddTypedJson(@Value, TypeInfo, ObjectOptions);
     SetText(result);
   finally
     Free;
@@ -10800,6 +10798,11 @@ end;
 
 { TSynJsonFileSettings }
 
+function TSynJsonFileSettings.AfterLoad: boolean;
+begin
+  result := true; // success
+end;
+
 function TSynJsonFileSettings.LoadFromJson(var aJson: RawUtf8): boolean;
 begin
   if fsoReadIni in fSettingsOptions then
@@ -10812,6 +10815,8 @@ begin
     if result then
       include(fSettingsOptions, fsoWriteIni); // save back as INI
   end;
+  if result then
+    result := AfterLoad;
 end;
 
 function TSynJsonFileSettings.LoadFromFile(const aFileName: TFileName): boolean;

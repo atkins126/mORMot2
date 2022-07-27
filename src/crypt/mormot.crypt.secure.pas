@@ -955,7 +955,7 @@ type
   // store some engine-specific context ahead of time, for faster process
   // - inherited classes would dedicated New() factory methods; this parent
   // features the internal registration feature of the known algorithms
-  TCryptAlgo = class(TObject)
+  TCryptAlgo = class(TSynPersistent)
   protected
     fName: RawUtf8;
     // case-insensitive quick lookup of the algorithms into a TCryptAlgo instance
@@ -963,7 +963,7 @@ type
     class function InternalResolve(const name: RawUtf8; CSV: PUtf8Char): integer;
   public
     /// inherited classes should properly initialize this kind of process
-    constructor Create(const name: RawUtf8); virtual;
+    constructor Create(const name: RawUtf8); reintroduce; virtual;
     /// register this class to override one or several identifiers implementation
     // - returns the last instance created for name[]
     class function Implements(const name: array of RawUtf8): pointer; overload;
@@ -975,6 +975,7 @@ type
     /// return all the TCryptAlog instances matching this class type
     // - could be used e.g. as TCryptRandom.Names
     class function Names: TRawUtf8DynArray;
+  published
     /// process-wide case-insensitive identifier for quick lookup of the algorithms
     // - typical values may follow OpenSSL naming, e.g. 'MD5', 'AES-128-GCM' or
     // 'prime256v1'
@@ -1090,7 +1091,7 @@ type
     function Process(const src: RawByteString; out dst: RawByteString;
       const aeadinfo: RawByteString = ''): boolean; overload;
     /// general encryption/decryption method using TBytes buffers
-    // - use use TByteDynArray for aeadinfo because TBytes raise a Delphi XE
+    // - use TByteDynArray for aeadinfo because TBytes raises a Delphi XE
     // compiler bug - it should be assignment compatible with any TBytes value
     function Process(const src: TBytes; out dst: TBytes;
       const aeadinfo: TByteDynArray = nil): boolean; overload;
@@ -1196,10 +1197,20 @@ type
   ECryptCert = class(ESynException);
 
   /// the known asymmetric algorithms, e.g. as published by OpenSSL
-  // - is an exact match of TCryptAsymAlgo enumerate in mormot.crypt.openssl.pas
   // - as implemented e.g. by TJwtAbstractOsl inherited classes, or
   // TCryptAsymOsl/TCryptCertAlgoOpenSsl implementing TCryptAsym/ICryptCert,
   // accessible via CryptAsymOpenSsl[] and CryptCertAlgoOpenSsl[] factories
+  // - caaES256 is our mormot.crypt.ecc256r1 prime256v1/NISTP-256 ECC Curve
+  // - caaES256, caaES384 and caaES512 match OpenSSL EVP_PKEY_EC with
+  // prime256v1, NID_secp384r1 and NID_secp512r1 curves
+  // - caaRS256, caaRS384 and caaRS512 match OpenSSL EVP_PKEY_RSA with
+  // 2048 bits from SHA-256, SHA-384 and SHA-512 digest method
+  // - caaPS256, caaPS384 and caaPS512 match OpenSSL EVP_PKEY_RSA_PSS with
+  // 2048 bits from SHA-256, SHA-384 and SHA-512 digest method
+  // - caaEdDSA match OpenSSL EVP_PKEY_ED25519 curve
+  // - note that caaES256K is NID_secp256k1 which was defined for completeness,
+  // but should appear for special needs only: caaES256 is to be preferred,
+  // and is also significantly faster
   TCryptAsymAlgo = (
     caaES256,
     caaES384,
@@ -1215,7 +1226,7 @@ type
 
   /// the known Key Usages for a given Certificate
   // - is an exact match of TX509Usage enumerate in mormot.lib.openssl11.pas
-  // - stored as a 16-bit memory block, with CERTIFICATE_USAGE_ALL = 65535
+  // - stored as a 16-bit memory block, with CU_ALL = 65535
   TCryptCertUsage = (
     cuCA,
     cuEncipherOnly,
@@ -1255,6 +1266,7 @@ type
 
   /// the Digital Signature results for a given Certificate
   // - is an exact match of TEccValidity enumerate in mormot.crypt.ecc256r1.pas
+  // - see CV_VALIDSIGN constant
   TCryptCertValidity = (
     cvUnknown,
     cvValidSigned,
@@ -1277,7 +1289,10 @@ type
     Locality,
     Organization,
     OrgUnit,
-    CommonName: RawUtf8;
+    CommonName,
+    EmailAddress,
+    SurName,
+    GivenName: RawUtf8;
   end;
   PCryptCertFields = ^TCryptCertFields;
 
@@ -1297,10 +1312,20 @@ type
     ccfBase64,
     ccfBase64Uri);
 
+  /// the ICryptCert.Load/Save content
+  // - cccCertOnly will store the certificate as PEM or DER with its public key
+  // - cccCertWithPrivateKey will include the private key to the output,
+  // possibly protected by a password
+  // - cccPrivateKeyOnly will export the raw private key with no password
+  TCryptCertContent = (
+    cccCertOnly,
+    cccCertWithPrivateKey,
+    cccPrivateKeyOnly);
+
   TCryptCert = class;
 
   /// abstract interface to a Certificate, as returned by Cert() factory
-  // - may be X509 or not, OpenSSL implemented or not
+  // - may be X509 or not, OpenSSL implemented or not, e.g. for syn-es256
   // - note: features and serialization are not fully compatible between engines,
   // but those high-level methods work as expected within each TCryptCertAlgo
   ICryptCert = interface
@@ -1310,9 +1335,11 @@ type
     // will use this Authority private key to sign the certificate
     // - ValidDays and ExpireDays are relative to the current time - ValidDays
     // is -1 by default to avoid most clock synch issues
-    procedure Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8 = '';
+    // - additional information can be passed into Fields (e.g. common name)
+    // - return self to be used as a fluent interface
+    function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8 = '';
       const Authority: ICryptCert = nil; ExpireDays: integer = 365;
-      ValidDays: integer = -1; Fields: PCryptCertFields = nil);
+      ValidDays: integer = -1; Fields: PCryptCertFields = nil): ICryptCert;
     /// the Certificate Genuine Serial Number
     // - e.g. '04:f9:25:39:39:f8:ce:79:1a:a4:0e:b3:fa:72:e3:bc:9e:d6'
     function GetSerial: RawUtf8;
@@ -1327,36 +1354,67 @@ type
     function GetIssuerName: RawUtf8;
     /// the Issuer Key Identifier of this Certificate
     // - e.g. '14:2E:B3:17:B7:58:56:CB:AE:50:09:40:E6:1F:AF:9D:8B:14:C2:C6'
-    function GetIssuerSerial: RawUtf8;
+    // - match the SKID on X509, or the serial number for syn-es256
+    function GetSubjectKey: RawUtf8;
+    /// the signing Authority Key Identifier of this Certificate
+    // - match the AKID on X509 (so may be '' for a self-signed certificate),
+    // or the authority serial number for syn-es256 (so equals GetSubjectKey
+    // for a self-signed certificate)
+    function GetAuthorityKey: RawUtf8;
+    /// check if this certificate has been self-signed
+    function IsSelfSigned: boolean;
     /// the minimum Validity timestamp of this Certificate
     function GetNotBefore: TDateTime;
     /// the maximum Validity timestamp of this Certificate
     function GetNotAfter: TDateTime;
+    /// check GetNotBefore/GetNotAfter validity
+    function IsValidDate: boolean;
+    /// returns true e.g. after TCryptCertAlgo.New but before Generate()
+    function IsVoid: boolean;
     /// the Key Usages of this Certificate
     function GetUsage: TCryptCertUsages;
     /// verbose Certificate information, returned as huge text/JSON blob
     function GetPeerInfo: RawUtf8;
+    /// the signature algorithm as engine-specific plain text
+    // - the first value is the effective security bits of this algorithm
+    // - e.g. '128 ecdsa-with-SHA256', '128 RSA-SHA256' or '128 ED25519' on
+    // OpenSSL, or '128 syn-es256' for our cryptography
+    function GetSignatureInfo: RawUtf8;
     /// compute the hexadecimal fingerprint of this Certificate
     // - is usually the hash of its binary (e.g. DER) serialization
     function GetDigest(Algo: THashAlgo = hfSHA256): RawUtf8;
     /// load a Certificate from a Save() content
-    // - PrivatePassword is needed if the input contains a private key
+    // - PrivatePassword is used for cccCertWithPrivateKey and cccPrivateKeyOnly
     // - will only recognize and support the ccfBinary and ccfPem formats
     function Load(const Saved: RawByteString;
-      const PrivatePassword: RawUtf8 = ''): boolean;
+      Content: TCryptCertContent = cccCertOnly;
+      const PrivatePassword: SpiUtf8 = ''): boolean;
+    /// load a Certificate from a SaveToFile() content
+    // - just a wrapper around the Load() method
+    function LoadFromFile(const Source: TFileName;
+      Content: TCryptCertContent = cccCertOnly;
+      const PrivatePassword: SpiUtf8 = ''): boolean;
     /// serialize the Certificate as reusable content
     // - after Generate, will contain the public and private key, so
-    // PrivatePassword is needed to secure its content - if PrivatePassword is
-    // left to '' then only the generated public key will be serialized
+    // cccCertWithPrivateKey and cccPrivateKeyOnly content could be used, with
+    // an optional PrivatePassword
     // - will use binary by default, but you can export to another formats,
     // depending on the underlying TCryptCertAlgo
-    function Save(const PrivatePassword: RawUtf8 = '';
+    function Save(Content: TCryptCertContent = cccCertOnly;
+      const PrivatePassword: SpiUtf8 = '';
       Format: TCryptCertFormat = ccfBinary): RawByteString;
+    /// serialize the Certificate as reusable file content
+    // - just a wrapper around the Save() method
+    procedure SaveToFile(const Dest: TFileName;
+      Content: TCryptCertContent = cccCertOnly;
+      const PrivatePassword: SpiUtf8 = '';
+      Format: TCryptCertFormat = ccfBinary);
     /// compute a digital signature of some digital content
     // - memory buffer will be hashed then signed using the private secret key
     // of this certificate instance
     // - you could later on verify this text signature according to the public
-    // key of this certificate, using ICryptCert.Verify() or ICertStore.Verify()
+    // key of this certificate, using ICryptCert.Verify() or ICryptStore.Verify()
+    // - this certificate should have the kuDigitalSignature usage
     // - returns '' on failure, e.g. if this Certificate has no private key
     // - returns the binary signature of the Data buffer
     function Sign(Data: pointer; Len: integer): RawByteString; overload;
@@ -1364,68 +1422,145 @@ type
     // - will use the private key of this certificate
     // - just a wrapper around the overloaded Sign() function
     function Sign(const Data: RawByteString): RawByteString; overload;
+    /// sign this certificate with the private key of one CA
+    // - Authority certificate should have the kuKeyCertSign usage
+    procedure Sign(const Authority: ICryptCert); overload;
     /// verify a digital signature of some digital content
     // - will use the public key of this certificate
-    // - see ICertStore.Verify() for a complete CA chain validation
+    // - this certificate should have the kuDigitalSignature usage
+    // - see ICryptStore.Verify() for a complete CA chain validation
     function Verify(Sign, Data: pointer;
       SignLen, DataLen: integer): TCryptCertValidity; overload;
     /// verify a digital signature of some digital content
     // - just a wrapper around the overloaded Verify() function
     function Verify(
       const Signature, Data: RawByteString): TCryptCertValidity; overload;
+    /// verify another certificate signature with this certificate public key
+    // (if self-signed), or a supplied Authority reference
+    // - Authority certificate should have the kuKeyCertSign usage
+    function Verify(const Authority: ICryptCert): TCryptCertValidity; overload;
+    /// compute a new JWT for a given payload using this certificate private key
+    // - will use the private key and Sign() to compute the signature
+    // - this certificate should have the kuDigitalSignature usage
+    // - same signature than the reusable TJwtAbstract.Compute() method
+    // - returns '' on error, e.g. if HasPrivateSecret is false
+    function JwtCompute(const DataNameValue: array of const;
+      const Issuer: RawUtf8 = ''; const Subject: RawUtf8 = '';
+      const Audience: RawUtf8 = ''; NotBefore: TDateTime = 0;
+      ExpirationMinutes: integer = 0; Signature: PRawUtf8 = nil): RawUtf8;
+    /// verify a JWT signature from the public key of this certificate
+    // - this certificate should have the kuDigitalSignature usage
+    // - can optionally return the payload fields
+    function JwtVerify(const Jwt: RawUtf8; Issuer, Subject, Audience: PRawUtf8;
+      Payload: PDocVariantData = nil): TCryptCertValidity;
+    /// encrypt a message using the public key of this certificate
+    // - only RSA and ES256 support this method by now
+    // - 'x509-rs*' and 'x509-ps*' RSA algorithms use OpenSSL Envelope key
+    // transport then our EVP_PKEY.RsaSeal encoding, then both 'x509-es256' and
+    // 'syn-es256' use our EciesSeal ES256 encoding
+    // - returns '' if this feature is not supported
+    function Encrypt(const Message: RawByteString;
+      const Cipher: RawUtf8 = 'aes-128-ctr'): RawByteString;
+    /// decrypt a message using the private key of this certificate
+    // - not all algorithms support key transport, only RSA and ES256 by now
+    // - 'x509-rs*' and 'x509-ps*' RSA algorithms use OpenSSL Envelope key
+    // transport then our EVP_PKEY.RsaOpen decoding, then both 'x509-es256' and
+    // 'syn-es256' use our EciesOpen ES256 decoding
+    // - returns '' if this feature is not supported, or Message is incorrect
+    function Decrypt(const Message: RawByteString;
+      const Cipher: RawUtf8 = 'aes-128-ctr'): RawByteString;
     /// returns true if the Certificate contains a private key secret
     function HasPrivateSecret: boolean;
+    /// retrieve the public key as raw binary
+    function GetPublicKey: RawByteString;
     /// retrieve the private key as raw binary, or '' if none
     function GetPrivateKey: RawByteString;
+    /// include the raw private key as saved by GetPrivateKey
+    // - the private key should match with the public key of the Certificate
+    // - any previously stored private key will first be erased
+    function SetPrivateKey(const saved: RawByteString): boolean;
     /// compare two Certificates, which should share the same algorithm
     // - will compare the internal properties and the public key, not the
     // private key: you could e.g. use it to verify that a ICryptCert with
     // HasPrivateSecret=false matches another with HasPrivateSecret=true
     function IsEqual(const another: ICryptCert): boolean;
+    /// the high-level asymmetric algorithm used for this certificate
+    function AsymAlgo: TCryptAsymAlgo;
     /// access to the low-level implementation class
     function Instance: TCryptCert;
-    /// access to the low-level implementation handle
+    /// access to the low-level implementation handle of the certificate
     // - e.g. PX509 for OpenSsl, or TEccCertificate for mormot.crypt.ecc
+    // - equals nil if there is no associated certificate, e.g. after New
     function Handle: pointer;
+    /// access to the low-level implementation handle of the stored private key
+    // - e.g. PEVP_PKEY for OpenSsl, or PEccPrivateKey for mormot.crypt.ecc
+    // - equals nil if there is no associated private key
+    function PrivateKeyHandle: pointer;
   end;
 
   /// abstract parent class to implement ICryptCert, as returned by Cert() factory
   TCryptCert = class(TCryptInstance, ICryptCert)
   protected
-    procedure RaiseVoid(Instance: pointer; const Msg: shortstring);
     procedure RaiseError(const Msg: shortstring); overload;
     procedure RaiseError(const Fmt: RawUtf8; const Args: array of const); overload;
+    procedure RaiseErrorGenerate(const api: ShortString);
   public
     // ICryptCert methods
-    procedure Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8;
+    function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8;
       const Authority: ICryptCert; ExpireDays, ValidDays: integer;
-      Fields: PCryptCertFields); virtual; abstract;
-    function Load(const Saved: RawByteString;
-      const PrivatePassword: RawUtf8): boolean; virtual; abstract;
+      Fields: PCryptCertFields): ICryptCert; virtual; abstract;
     function GetSerial: RawUtf8; virtual; abstract;
     function GetSubject: RawUtf8; virtual; abstract;
     function GetSubjects: TRawUtf8DynArray; virtual; abstract;
     function GetIssuerName: RawUtf8; virtual; abstract;
-    function GetIssuerSerial: RawUtf8; virtual; abstract;
+    function GetSubjectKey: RawUtf8; virtual; abstract;
+    function GetAuthorityKey: RawUtf8; virtual; abstract;
+    function IsSelfSigned: boolean; virtual; abstract;
     function GetNotBefore: TDateTime; virtual; abstract;
     function GetNotAfter: TDateTime; virtual; abstract;
+    function IsValidDate: boolean; virtual;
+    function IsVoid: boolean; virtual;
     function GetUsage: TCryptCertUsages; virtual; abstract;
     function GetPeerInfo: RawUtf8; virtual; abstract;
+    function GetSignatureInfo: RawUtf8; virtual; abstract;
     function GetDigest(Algo: THashAlgo): RawUtf8; virtual;
-    function Save(const PrivatePassword: RawUtf8;
+    function Load(const Saved: RawByteString; Content: TCryptCertContent;
+      const PrivatePassword: SpiUtf8): boolean; virtual; abstract;
+    function LoadFromFile(const Source: TFileName; Content: TCryptCertContent;
+      const PrivatePassword: SpiUtf8): boolean;
+    function Save(Content: TCryptCertContent;
+      const PrivatePassword: SpiUtf8;
       Format: TCryptCertFormat): RawByteString; virtual;
+    procedure SaveToFile(const Dest: TFileName; Content: TCryptCertContent;
+      const PrivatePassword: SpiUtf8; Format: TCryptCertFormat);
     function HasPrivateSecret: boolean; virtual; abstract;
+    function GetPublicKey: RawByteString; virtual; abstract;
     function GetPrivateKey: RawByteString; virtual; abstract;
+    function SetPrivateKey(const saved: RawByteString): boolean; virtual; abstract;
     function IsEqual(const another: ICryptCert): boolean; virtual;
     function Sign(Data: pointer; Len: integer): RawByteString;
       overload; virtual; abstract;
     function Sign(const Data: RawByteString): RawByteString; overload; virtual;
+    procedure Sign(const Authority: ICryptCert); overload; virtual; abstract;
     function Verify(Sign, Data: pointer; SignLen, DataLen: integer): TCryptCertValidity;
       overload; virtual; abstract;
     function Verify(const Signature, Data: RawByteString): TCryptCertValidity;
       overload; virtual;
+    function Verify(const Authority: ICryptCert): TCryptCertValidity;
+      overload; virtual; abstract;
+    function JwtCompute(const DataNameValue: array of const;
+      const Issuer, Subject, Audience: RawUtf8; NotBefore: TDateTime;
+      ExpirationMinutes: integer; Signature: PRawUtf8): RawUtf8; virtual;
+    function JwtVerify(const Jwt: RawUtf8; Issuer, Subject, Audience: PRawUtf8;
+      Payload: PDocVariantData): TCryptCertValidity; virtual;
+    function Encrypt(const Message: RawByteString;
+      const Cipher: RawUtf8): RawByteString; virtual; abstract;
+    function Decrypt(const Message: RawByteString;
+      const Cipher: RawUtf8): RawByteString; virtual; abstract;
+    function AsymAlgo: TCryptAsymAlgo; virtual;
     function Instance: TCryptCert;
     function Handle: pointer; virtual; abstract;
+    function PrivateKeyHandle: pointer; virtual; abstract;
   end;
 
   /// meta-class of the abstract parent to implement ICryptCert interface
@@ -1433,23 +1568,49 @@ type
 
   /// abstract parent class for ICryptCert factories
   TCryptCertAlgo = class(TCryptAlgo)
+  protected
+    fOsa: TCryptAsymAlgo; // should be set by the overwritten constructor
   public
     /// main factory to create a new Certificate instance with this algorithm
     function New: ICryptCert; virtual; abstract;
+    /// low-level factory directly from the raw implementation handle
+    // - e.g. a PX509 for OpenSsl, or TEccCertificate for mormot.crypt.ecc
+    // - warning: ensure Handle is of the expected type, otherwise it will GPF
+    // - includes the private key for TEccCertificate, or not for OpenSsl
+    // - note that this Handle will be owned by the new ICryptCert instance,
+    // so you should not make FromHandle(another.Handle)
+    function FromHandle(Handle: pointer): ICryptCert; virtual; abstract;
+    /// factory to load a Certificate from a ICryptCert.Save() content
+    // - PrivatePassword is needed if the input contains a private key
+    // - will only recognize and support the ccfBinary and ccfPem formats
+    // - return nil if Saved content was not in the expected format/algorithm
+    function Load(const Saved: RawByteString;
+      Content: TCryptCertContent = cccCertOnly;
+      const PrivatePassword: SpiUtf8 = ''): ICryptCert;
     /// factory to generate a new Certificate instance
     // - just a wrapper around New and ICryptCert.Generate()
-    function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8 = '';
+    // - Subjects is a mandatory field as with X509
+    function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8;
       const Authority: ICryptCert = nil; ExpireDays: integer = 365;
       ValidDays: integer = -1; Fields: PCryptCertFields = nil): ICryptCert;
+    /// return the corresponding JWT algorithm name, computed from AsymAlgo
+    // - e.g. 'ES256' for 'x509-es256' or 'syn-es256-v1'
+    function JwtName: RawUtf8;
+  published
+    /// the asymmetric algorithm used for these certificates
+    property AsymAlgo: TCryptAsymAlgo
+      read fOsa;
   end;
 
   /// abstract interface to a Certificates Store, as returned by Store() factory
   // - may be X509 or not, OpenSSL implemented or not
   ICryptStore = interface
-    /// load a Certificates Store from a ToBinary content
-    function FromBinary(const Binary: RawByteString): boolean;
-    /// serialize the Certificates Store as raw binary
-    function ToBinary: RawByteString;
+    /// load a Certificates Store from a ICryptStore.Save memory buffer content
+    function Load(const Saved: RawByteString): boolean;
+    /// serialize the Certificates Store into a memory buffer
+    // - may be our TEccCertificateChain proprietary binary, or a chain of
+    // X509 Certificates and CRLs in PEM text format
+    function Save: RawByteString;
     /// search for a certificate from its (hexadecimal) identifier
     function GetBySerial(const Serial: RawUtf8): ICryptCert;
     /// quickly check if a given certificate ID is part of the CRL
@@ -1493,22 +1654,25 @@ type
     // - will check internal properties of the certificate (e.g. validity dates),
     // and validate the stored signature according to the public key of
     // the associated signing authority (which should be in this Store)
+    // - warning: only supported by our 'syn-store' algorithm: OpenSSL Store
+    // has no way to lookup the X509 certificate which actually signed the buffer
     function Verify(const Signature: RawByteString;
       Data: pointer; Len: integer): TCryptCertValidity;
     /// how many certificates are currently stored
     function Count: integer;
     /// how many CRLs are currently stored
     function CrlCount: integer;
-    /// call e.g. CertAlgo.New to prepare a new ICryptCert to add to this store
-    function CertAlgo: TCryptCertAlgo;
+    /// return the prefered algo to be used with this store
+    // - call e.g. CertAlgo.New to prepare a new ICryptCert to add to this store
+    function DefaultCertAlgo: TCryptCertAlgo;
   end;
 
   /// abstract parent class to implement ICryptCert, as returned by Cert() factory
   TCryptStore = class(TCryptInstance, ICryptStore)
   public
     // ICryptStore methods
-    function FromBinary(const Binary: RawByteString): boolean; virtual; abstract;
-    function ToBinary: RawByteString; virtual; abstract;
+    function Load(const Saved: RawByteString): boolean; virtual; abstract;
+    function Save: RawByteString; virtual; abstract;
     function GetBySerial(const Serial: RawUtf8): ICryptCert; virtual; abstract;
     function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason;
       overload; virtual; abstract;
@@ -1525,7 +1689,7 @@ type
       Data: pointer; Len: integer): TCryptCertValidity; virtual; abstract;
     function Count: integer; virtual; abstract;
     function CrlCount: integer; virtual; abstract;
-    function CertAlgo: TCryptCertAlgo; virtual; abstract;
+    function DefaultCertAlgo: TCryptCertAlgo; virtual; abstract;
   end;
 
   /// meta-class of the abstract parent to implement ICryptStore interface
@@ -1541,8 +1705,36 @@ type
   end;
 
 const
+  /// the JWT algorithm names according to our known asymmetric algorithms
+  // - as implemented e.g. by TJwtAbstractOsl
+  CAA_JWT: array[TCryptAsymAlgo] of RawUtf8 = (
+    'ES256',  // caaES256
+    'ES384',  // caaES384
+    'ES512',  // caaES512
+    'ES256K', // caaES256K
+    'RS256',  // caaRS256
+    'RS384',  // caaRS384
+    'RS512',  // caaRS512
+    'PS256',  // caaPS256
+    'PS384',  // caaPS384
+    'PS512',  // caaPS512
+    'EdDSA'); // caaEdDSA
+
+  /// the known asymmetric algorithms which implement RSA cryptography
+  CAA_RSA = [caaRS256, caaRS384, caaRS512, caaPS256, caaPS384, caaPS512];
+
   /// such a Certificate could be used for anything
-  CERTIFICATE_USAGE_ALL = [low(TCryptCertUsage) .. high(TCryptCertUsage)];
+  CU_ALL = [low(TCryptCertUsage) .. high(TCryptCertUsage)];
+
+  /// such a Certificate could be used for a TLS server authentication
+  CU_TLS_SERVER = [cuTlsServer, cuKeyAgreement, cuKeyEncipherment];
+
+  /// such a Certificate could be used for a TLS client authentication
+  CU_TLS_CLIENT = [cuTlsClient, cuKeyAgreement, cuKeyEncipherment];
+
+  /// TCryptCertValidity results indicating a valid digital signature
+  CV_VALIDSIGN =
+    [cvValidSigned, cvValidSelfSigned];
 
 function ToText(r: TCryptCertRevocationReason): PShortString; overload;
 function ToText(u: TCryptCertUsage): PShortString; overload;
@@ -1564,8 +1756,8 @@ function Rnd(const name: RawUtf8 = 'rnd-default'): TCryptRandom;
 // to compute a digital signature from a given secret
 // - the shared TCryptHasher of this algorithm is returned: caller should NOT free it
 // - if not nil, you could call New or Full/FullFile methods
-// - this unit supports 'MD5','SHA1','SHA256','SHA384','SHA512','SHA3_256','SHA3_512'
-// and 32-bit non-cryptographic 'CRC32','CRC32C','XXHASH32','ADLER32','FNV32'
+// - this unit supports 'md5','sha1','sha256','sha384','sha512','sha3_256','sha3_512'
+// and 32-bit non-cryptographic 'crc32','crc32c','xxhash32','adler32','fnv32'
 function Hasher(const name: RawUtf8): TCryptHasher;
 
 /// main factory of the hashers instances as returned by Hasher()
@@ -1576,8 +1768,8 @@ function Hash(const name: RawUtf8): ICryptHash;
 // - in respect to Hasher(), will require a secret for safe digital signature
 // - the shared TCryptSigner of this algorithm is returned: caller should NOT free it
 // - if not nil, you could call New or Full/FullFile methods
-// - this unit supports 'HMAC-SHA1','HMAC-SHA256','HMAC-SHA384','HMAC-SHA512',
-// and 'SHA3-224','SHA3-256','SHA3-384','SHA3-512','SHA3-S128','SHA3-S256'
+// - this unit supports 'hmac-sha1','hmac-sha256','hmac-sha384','hmac-sha512',
+// and 'sha3-224','sha3-256','sha3-384','sha3-512','sha3-s128','sha3-s256'
 function Signer(const name: RawUtf8): TCryptSigner;
 
 /// main factory of the signer instances as returned by Signer()
@@ -1662,6 +1854,10 @@ function StoreAlgo(const name: RawUtf8): TCryptStoreAlgo;
 function Store(const name: RawUtf8): ICryptStore;
 
 var
+  /// direct access to the mormot.crypt.ecc.pas 'syn-ecc' algorithm
+  // - may be nil if this unit was not included
+  CryptCertAlgoSyn: TCryptCertAlgo;
+
   /// direct access to the mormot.crypt.ecc.pas 'syn-store' algorithm
   // - may be nil if this unit was not included
   CryptStoreAlgoSyn: TCryptStoreAlgo;
@@ -1679,15 +1875,29 @@ var
   // - may be nil if this unit was not included or if OpenSSL is not available
   CryptAsymOpenSsl: array[TCryptAsymAlgo] of TCryptAsym;
 
-  /// direct access to the mormot.crypt.openssl.pas  ICryptCert factories
+  /// direct access to the mormot.crypt.openssl.pas ICryptCert factories
   // - may be nil if this unit was not included or if OpenSSL is not available
+  // - to return a ICryptCert instance using OpenSSL RSA 2048 key, use e.g.
+  // $ CryptCertAlgoOpenSsl[caaRS256].New
   CryptCertAlgoOpenSsl: array[TCryptAsymAlgo] of TCryptCertAlgo;
+
+  /// the prefered/default algorithm to be used wth OpenSsl X509 certificates
+  // - NISTP-256 seems the new default, even if RSA-2048 (i.e. caaRS256) may
+  // still be used for compatiblity with legacy systems
+  // - as returned e.g. by 'x509-store' for its DefaultCertAlgo method
+  CryptCertAlgoOpenSslDefault: TCryptAsymAlgo = caaES256;
 
 
 
 { ************************** Minimal PEM/DER Encoding/Decoding }
 
 type
+  /// a certificate (typically X509) encoded as PEM / text
+  TCertPem = type RawUtf8;
+
+  /// a certificate (typically X509) encoded as binary
+  TCertDer = type RawByteString;
+
   /// the DerToPem() supported contents of a PEM text instance
   // - pemSynopseSignature, pemSynopseCertificate and
   // pemSynopseCertificateAndPrivateKey follow our proprietary
@@ -1709,6 +1919,8 @@ type
     pemSsh2PublicKey,
     pemSynopseSignature,
     pemSynopseCertificate,
+    pemSynopseUnencryptedPrivateKey,
+    pemSynopseEncryptedPrivateKey,
     pemSynopsePrivateKeyAndCertificate);
   PPemKind = ^TPemKind;
 
@@ -1732,7 +1944,9 @@ const
     '-----BEGIN SSH2 PUBLIC KEY-----'#13#10,
     '-----BEGIN SYNECC SIGNATURE-----'#13#10,
     '-----BEGIN SYNECC CERTIFICATE-----'#13#10,
-    '-----BEGIN SYNECC PRIVATE KEY AND CERTIFICATE-----'#13#10);
+    '-----BEGIN SYNECC PRIVATE KEY-----'#13#10,
+    '-----BEGIN SYNECC ENCRYPTED PRIVATE KEY-----'#13#10,
+    '-----BEGIN SYNECC BOUNDED CERTIFICATE-----'#13#10);
 
   /// the supported ending markers of a PEM text instance
   PEM_END: array[TPemKind] of RawUtf8 = (
@@ -1752,24 +1966,33 @@ const
     '-----END SSH2 PUBLIC KEY-----'#13#10,
     '-----END SYNECC SIGNATURE-----'#13#10,
     '-----END SYNECC CERTIFICATE-----'#13#10,
-    '-----END SYNECC PRIVATE KEY AND CERTIFICATE-----'#13#10);
+    '-----END SYNECC PRIVATE KEY-----'#13#10,
+    '-----END SYNECC ENCRYPTED PRIVATE KEY-----'#13#10,
+    '-----END SYNECC BOUNDED CERTIFICATE-----'#13#10);
+
+  /// our proprietary SYNECC TPemKind formats
+  PEM_SYNECC =  [pemSynopseSignature,
+                 pemSynopseCertificate,
+                 pemSynopseUnencryptedPrivateKey,
+                 pemSynopsePrivateKeyAndCertificate,
+                 pemSynopseEncryptedPrivateKey];
 
 /// convert a binary DER content into a single-instance PEM text
-function DerToPem(der: pointer; len: PtrInt; kind: TPemKind): RawUtf8; overload;
+function DerToPem(der: pointer; len: PtrInt; kind: TPemKind): TCertPem; overload;
 
 /// convert a binary DER content into a single-instance PEM text
-function DerToPem(const der: RawByteString; kind: TPemKind): RawUtf8; overload;
+function DerToPem(const der: TCertDer; kind: TPemKind): TCertPem; overload;
 
 /// convert a single-instance PEM text file into a binary DER
 // - if the supplied buffer doesn't start with '-----BEGIN .... -----'
 // trailer, will expect the input to be plain DER binary and return it
-function PemToDer(const pem: RawUtf8; kind: PPemKind = nil): RawByteString;
+function PemToDer(const pem: TCertPem; kind: PPemKind = nil): TCertDer;
 
 /// parse a multi-PEM text input and return the next PEM content
 // - search and identify any PEM_BEGIN/PEM_END markers
 // - ready to be decoded via PemToDer()
 // - optionally returning the recognized TPemKind (maybe pemUnspecified)
-function NextPem(var P: PUtf8Char; Kind: PPemKind = nil): RawUtf8;
+function NextPem(var P: PUtf8Char; Kind: PPemKind = nil): TCertPem;
 
 /// quickly check the begin/end of a single-instance PEM text
 // - do not validate the internal Base64 encoding, just the trailer/ending lines
@@ -1779,7 +2002,7 @@ function IsPem(const pem: RawUtf8): boolean;
 /// quickcly check if a PEM text is likely to be encrypted
 // - search for a PEM format, with ENCRYPTED keyword
 // - won't decode the Base64 encoded binary, so may return some false negative
-function IsPemEncrypted(const pem: RawUtf8): boolean;
+function IsPemEncrypted(const pem: TCertPem): boolean;
 
 /// low-level binary-to-DER encoder
 function DerAppend(P: PAnsiChar; buf: PByteArray; buflen: PtrUInt): PAnsiChar;
@@ -3293,7 +3516,7 @@ type
       cryptnonce: cardinal; // ctr to cipher following bytes
       crc: cardinal;        // = 32-bit digital signature (CrcAlgo)
       session: integer;     // = jti claim
-      issued: cardinal;     // = iat claim (from UnixTimeUtc-UNIXTIME_MINIMAL)
+      issued: cardinal;     // = iat claim (from UnixTimeMinimalUtc)
       expires: cardinal;    // = exp claim
     end;
     data: array[0..2047] of byte; // optional record binary serialization
@@ -3320,7 +3543,7 @@ begin
     end;
     cc.head.cryptnonce := Random32;
     cc.head.session := result;
-    cc.head.issued := UnixTimeUtc - UNIXTIME_MINIMAL;
+    cc.head.issued := UnixTimeMinimalUtc;
     if TimeOutMinutes = 0 then
       TimeOutMinutes := DefaultTimeOutMinutes;
     if TimeOutMinutes = 0 then
@@ -3370,7 +3593,7 @@ begin
         PExpires^ := cc.head.expires + UNIXTIME_MINIMAL;
       if PIssued <> nil then
         PIssued^ := cc.head.issued + UNIXTIME_MINIMAL;
-      now := UnixTimeUtc - UNIXTIME_MINIMAL;
+      now := UnixTimeMinimalUtc;
       if (cc.head.issued <= now) and
          (cc.head.expires >= now) then
         if (PRecordData = nil) or
@@ -3785,7 +4008,7 @@ type
 
 const
   /// CSV text of TCrc32Algo items
-  CrcAlgosText: PUtf8Char = 'CRC32,CRC32C,XXHASH32,ADLER32,FNV32';
+  CrcAlgosText: PUtf8Char = 'crc32,crc32c,xxhash32,adler32,fnv32';
 
 constructor TCryptCrc32Internal.Create(const name: RawUtf8);
 begin
@@ -3845,7 +4068,7 @@ type
 
 const
   /// CSV text of THashAlgo items, as recognized by Hasher/Hash factories
-  HashAlgosText: PUtf8Char = 'MD5,SHA1,SHA256,SHA384,SHA512,SHA3_256,SHA3_512';
+  HashAlgosText: PUtf8Char = 'md5,sha1,sha256,sha384,sha512,sha3_256,sha3_512';
 
 constructor TCryptHasherInternal.Create(const name: RawUtf8);
 begin
@@ -3942,8 +4165,8 @@ type
 
 const
   /// CSV text of TSignAlgo items, as recognized by Signer/Sign factories
-  SignAlgosText: PUtf8Char = 'HMAC-SHA1,HMAC-SHA256,HMAC-SHA384,HMAC-SHA512,' +
-    'SHA3-224,SHA3-256,SHA3-384,SHA3-512,SHA3-S128,SHA3-S256';
+  SignAlgosText: PUtf8Char = 'hmac-sha1,hmac-sha256,hmac-sha384,hmac-sha512,' +
+    'sha3-224,sha3-256,sha3-384,sha3-512,sha3-s128,sha3-s256';
 
 constructor TCryptSignerInternal.Create(const name: RawUtf8);
 begin
@@ -4286,22 +4509,29 @@ end;
 
 { TCryptCertAlgo }
 
+function TCryptCertAlgo.Load(const Saved: RawByteString;
+  Content: TCryptCertContent; const PrivatePassword: SpiUtf8): ICryptCert;
+begin
+  result := New;
+  if not result.Load(Saved, Content, PrivatePassword) then
+    result := nil;
+end;
+
 function TCryptCertAlgo.Generate(Usages: TCryptCertUsages;
-  const Subjects: RawUtf8; const Authority: ICryptCert;
-  ExpireDays, ValidDays: integer; Fields: PCryptCertFields): ICryptCert;
+  const Subjects: RawUtf8; const Authority: ICryptCert; ExpireDays: integer;
+  ValidDays: integer; Fields: PCryptCertFields): ICryptCert;
 begin
   result := New;
   result.Generate(Usages, Subjects, Authority, ExpireDays, ValidDays, Fields);
 end;
 
+function TCryptCertAlgo.JwtName: RawUtf8;
+begin
+  result := CAA_JWT[fOsa];
+end;
+
 
 { TCryptCert }
-
-procedure TCryptCert.RaiseVoid(Instance: pointer; const Msg: shortstring);
-begin
-  if Instance = nil then
-    RaiseError('% is not set', [Msg]);
-end;
 
 procedure TCryptCert.RaiseError(const Msg: shortstring);
 begin
@@ -4317,15 +4547,44 @@ begin
   RaiseError(msg);
 end;
 
-function TCryptCert.GetDigest(Algo: THashAlgo): RawUtf8;
+procedure TCryptCert.RaiseErrorGenerate(const api: ShortString);
 begin
-  result := HashFull(Algo, Save('', ccfBinary));
+  RaiseError('Generate: % error', [api]); // raise ECryptCert
 end;
 
-function TCryptCert.Save(const PrivatePassword: RawUtf8;
-  Format: TCryptCertFormat): RawByteString;
+function TCryptCert.IsValidDate: boolean;
+var
+  na, nb, now: TDateTime;
 begin
-  result := Save(PrivatePassword, ccfBinary);
+  now := NowUtc;
+  na := GetNotAfter;
+  nb := GetNotBefore;
+  result := (not IsVoid) and
+            ((na <= 0) or (na > now)) and
+            ((nb <= 0) or (nb <= now));
+end;
+
+function TCryptCert.IsVoid: boolean;
+begin
+  result := Handle = nil;
+end;
+
+function TCryptCert.GetDigest(Algo: THashAlgo): RawUtf8;
+begin
+  result := HashFull(Algo, Save(cccCertOnly, '', ccfBinary));
+end;
+
+function TCryptCert.LoadFromFile(const Source: TFileName;
+  Content: TCryptCertContent; const PrivatePassword: SpiUtf8): boolean;
+begin
+  result := Load(StringFromFile(Source), Content, PrivatePassword);
+end;
+
+function TCryptCert.Save(Content: TCryptCertContent;
+  const PrivatePassword: SpiUtf8; Format: TCryptCertFormat): RawByteString;
+begin
+  // overriden call only for ccfHexa, ccfBase64 and ccfBase64Uri encoding
+  result := Save(Content, PrivatePassword, ccfBinary);
   case Format of
     ccfHexa:
       result := BinToHex(result);
@@ -4334,15 +4593,22 @@ begin
     ccfBase64Uri:
       result := BinToBase64uri(result);
   else
-    result := '';
+    raise ECryptCert.CreateUtf8('Unexpected %.Save', [self]); // paranoid
   end;
+end;
+
+procedure TCryptCert.SaveToFile(const Dest: TFileName; Content: TCryptCertContent;
+  const PrivatePassword: SpiUtf8; Format: TCryptCertFormat);
+begin
+  FileFromString(Save(Content, PrivatePassword, Format), Dest);
 end;
 
 function TCryptCert.IsEqual(const another: ICryptCert): boolean;
 begin
   // HasPrivateKey is not part of the comparison
   result := Assigned(another) and
-            (Save('', ccfBinary) = another.Save('', ccfBinary));
+            (Save(cccCertOnly, '', ccfBinary) =
+             another.Save(cccCertOnly, '', ccfBinary));
 end;
 
 function TCryptCert.Sign(const Data: RawByteString): RawByteString;
@@ -4354,6 +4620,97 @@ function TCryptCert.Verify(const Signature, Data: RawByteString): TCryptCertVali
 begin
   result := Verify(pointer(Signature), pointer(Data),
                    length(Signature), length(Data));
+end;
+
+function TCryptCert.JwtCompute(const DataNameValue: array of const;
+  const Issuer, Subject, Audience: RawUtf8; NotBefore: TDateTime;
+  ExpirationMinutes: integer; Signature: PRawUtf8): RawUtf8;
+var
+  payload: TDocVariantData;
+  headpayload, sig: RawUtf8;
+begin
+  result := '';
+  if not HasPrivateSecret then
+    exit;
+  // cut-down version of TJwtAbstract.PayloadToJson
+  payload.InitObject(DataNameValue, JSON_FAST);
+  if Issuer <> '' then
+    payload.AddValueFromText('iss', Issuer);
+  if Subject <> '' then
+    payload.AddValueFromText('sub', Subject);
+  if Audience <> '' then
+    payload.AddValueFromText('aud', Audience);
+  if NotBefore > 0 then
+    payload.AddValue('nbf', DateTimeToUnixTime(NotBefore));
+  if ExpirationMinutes > 0 then
+    payload.AddValue('exp', UnixTimeUtc + ExpirationMinutes * 60);
+  if payload.Count = 0 then
+    exit; // we need something to sign
+  // see TJwtAbstract.Compute
+  headpayload := BinToBase64Uri(FormatUtf8('{"alg":"%"}',
+                   [(fCryptAlgo as TCryptCertAlgo).JwtName])) + '.' +
+                 BinToBase64Uri(payload.ToJson);
+  sig := BinToBase64Uri(Sign(headpayload));
+  if sig = '' then
+    exit;
+  if Signature <> nil then
+    Signature^ := sig;
+  result := headpayload + '.' + sig;
+end;
+
+function TCryptCert.JwtVerify(const Jwt: RawUtf8;
+  Issuer, Subject, Audience: PRawUtf8;
+  Payload: PDocVariantData): TCryptCertValidity;
+var
+  P, S: PUtf8Char;
+  pl: TDocVariantData;
+  ms: Int64;
+  head, payl, sig: RawUtf8;
+begin
+  // same logic than TJwtAbstract.Verify, but (slower and) with no cache
+  // -> TJwtAbstract is to be preferred if the ICryptCert is reused
+  result := cvWrongUsage;
+  P := PosChar(pointer(Jwt), '.');
+  if P = nil then
+    exit;
+  S := PosChar(P + 1, '.');
+  if S = nil then
+    exit;
+  head := Base64UriToBin(pointer(Jwt), P - pointer(Jwt));
+  if JsonDecode(head, 'alg') <> (fCryptAlgo as TCryptCertAlgo).JwtName then
+    exit;
+  inc(P);
+  payl := Base64UriToBin(pointer(P), S - P);
+  inc(S);
+  sig := Base64UriToBin(PAnsiChar(S), StrLen(S));
+  if (payl = '') or
+     (sig = '') then
+    exit;
+  if pl.InitJsonInPlace(pointer(payl), JSON_FAST) = nil then
+    exit;
+  result := cvInvalidDate;
+  if pl.GetAsInt64('exp', ms) and
+     (UnixTimeUtc > ms) then
+    exit;
+  if pl.GetAsInt64('nbf', ms) and
+     (UnixTimeUtc + 15 < ms) then
+    exit;
+  result := Verify(pointer(sig), pointer(Jwt), length(sig), S - 1 - pointer(Jwt));
+  if not (result in CV_VALIDSIGN) then
+    exit;
+  if Issuer <> nil then
+    Issuer^ := pl.U['iss'];
+  if Subject <> nil then
+    Subject^ := pl.U['sub'];
+  if Audience <> nil then
+    Audience^ := pl.U['aud'];
+  if Payload <> nil then
+    Payload^ := pl;
+end;
+
+function TCryptCert.AsymAlgo: TCryptAsymAlgo;
+begin
+  result := (fCryptAlgo as TCryptCertAlgo).AsymAlgo;
 end;
 
 function TCryptCert.Instance: TCryptCert;
@@ -4425,7 +4782,7 @@ end;
 function TCryptStoreAlgo.NewFrom(const Binary: RawByteString): ICryptStore;
 begin
   result := New;
-  if not result.FromBinary(Binary) then
+  if not result.Load(Binary) then
     result := nil;
 end;
 
@@ -4482,7 +4839,8 @@ begin
         bits := 128 + b * 64;
         n := AesAlgoNameEncode(m, bits);
         TCryptAesInternal.Create(n, m, bits, TAesFast); // fastest
-        TCryptAesInternal.Create(n + '-int', m, bits, TAesInternal); // internal
+        if not (m in AES_INTERNAL) then // if exists as OpenSSL standard
+          TCryptAesInternal.Create(n + '-int', m, bits, TAesInternal);
       end;
   finally
    GlobalUnlock;
@@ -4641,12 +4999,12 @@ end;
 
 { ************************** Minimal PEM/DER Encoding/Decoding }
 
-function DerToPem(der: pointer; len: PtrInt; kind: TPemKind): RawUtf8;
+function DerToPem(der: pointer; len: PtrInt; kind: TPemKind): TCertPem;
 begin
   result := BinToBase64Line(der, len, PEM_BEGIN[kind], PEM_END[kind]);
 end;
 
-function DerToPem(const der: RawByteString; kind: TPemKind): RawUtf8;
+function DerToPem(const der: TCertDer; kind: TPemKind): TCertPem;
 begin
   result := DerToPem(pointer(der), length(der), kind);
 end;
@@ -4660,7 +5018,7 @@ begin
             (PosEx('-----END', pem, i + 10) <> 0);
 end;
 
-function IsPemEncrypted(const pem: RawUtf8): boolean;
+function IsPemEncrypted(const pem: TCertPem): boolean;
 begin
   result := IsPem(pem) and
             (PosEx('ENCRYPTED', pem) <> 0);
@@ -4733,7 +5091,7 @@ begin
   result := d;
 end;
 
-function PemToDer(const pem: RawUtf8; kind: PPemKind): RawByteString;
+function PemToDer(const pem: TCertPem; kind: PPemKind): TCertDer;
 var
   P: PUtf8Char;
   len: PtrInt;
@@ -4753,7 +5111,7 @@ begin
   result := pem;
 end;
 
-function NextPem(var P: PUtf8Char; Kind: PPemKind): RawUtf8;
+function NextPem(var P: PUtf8Char; Kind: PPemKind): TCertPem;
 var
   len: PtrInt;
   pem: PUtf8Char;
@@ -4762,7 +5120,7 @@ begin
   if pem = nil then
     result := ''
   else
-    FastSetString(result, pem, len);
+    FastSetString(RawUtf8(result), pem, len);
 end;
 
 const

@@ -90,13 +90,13 @@ type
   // the standard request/answer RESTful mode: will use one thread per client
   // so won't scale
   // - useHttpAsync will use the Sockets library in event-driven mode,
-  // with a thread poll for both HTTP/1.0 single shot and HTTP/1.1 kept alive
-  // connections, so would scale much better than older useHttpSocket
+  // with a thread poll for HTTP/1.1 kept alive connections, so would scale
+  // much better than older useHttpSocket - which is preferred for HTTP/1.0
   // - useBidirAsync will use TWebSocketAsyncServerRest in event-driven mode,
   // using its thread poll for all its HTTP or WebSockets process, , so would
   // scale much better than older useBidirSocket
   // - in practice, useHttpSocket is good behind a reverse proxy defined in
-  // HTTP/1.0 mode, but useHttpAsync  may scale much better in case of
+  // HTTP/1.0 mode, but useHttpAsync may scale much better in case of
   // a lot of concurrent connections, especially kept-alive connections
   // - useBidirSocket may be used for legacy reasons, if one thread per client
   // is a good idea - but useBidirAsync may be preferred for proper scaling
@@ -117,6 +117,8 @@ type
   /// available security options for TRestHttpServer.Create() constructor
   // - default secNone will use plain HTTP connection
   // - secTLS will use HTTPS secure connection
+  // - secTLSSelfSigned will use HTTPS secure connection with a (temporary)
+  // self-signed certificate - so clients should set IgnoreTlsCertificateErrors
   // - secSynShaAes will use our proprietary SHA-256 / AES-256-CTR encryption
   // identified as 'synshaaes' as ACCEPT-ENCODING: header parameter - but since
   // encodings are optional in HTTP, it is not possible to rely on it for securing
@@ -124,7 +126,8 @@ type
   // encrypted WebSockets instead
   TRestHttpServerSecurity = (
     secNone,
-    secTLS
+    secTLS,
+    secTLSSelfSigned
     {$ifndef PUREMORMOT2} ,
     secSynShaAes
     {$endif PUREMORMOT2}
@@ -134,6 +137,9 @@ type
 const
   /// the default access rights used by the HTTP server if none is specified
   HTTP_DEFAULT_ACCESS_RIGHTS: POrmAccessRights = @SUPERVISOR_ACCESS_RIGHTS;
+
+  /// the TRestHttpServerSecurity which implies TLS/HTTPS
+  SEC_TLS = [secTLS, secTLSSelfSigned];
 
   /// the kind of HTTP server to be used by default
   // - will define the best available server class, depending on the platform
@@ -152,9 +158,16 @@ const
   // - older useHttpSocket focuses on HTTP/1.0 or a small number of short-living
   // connections - creating one thread per HTTP/1.1 connection - so is a good
   // idea behind a nginx reverse proxy using HTTP/1.0, whereas our new
-  // useHttpAsync server scales much better with high number of connections
+  // useHttpAsync server scales better with high number of HTTP/1.1 connections
   HTTP_DEFAULT_MODE = useHttpAsync;
   {$endif USEHTTPSYS}
+
+  /// the kind of HTTP server to be used by default with/without TLS
+  // - only our socket-based servers do allow setting certificates at runtime
+  // - see also HTTPS_SECURITY[]
+  HTTPS_DEFAULT_MODE: array[{tls=}boolean] of TRestHttpServerUse = (
+    HTTP_DEFAULT_MODE,
+    useHttpAsync);
 
   /// the kind of HTTP server to be used by default for WebSockets support
   // - will define the best available server class, depending on the platform
@@ -167,9 +180,20 @@ const
   HTTP_BIDIR = [useBidirSocket, useBidirAsync];
 
   /// HTTP/HTTPS security flags for TRestHttpServer.Create() constructor
-  HTTPS_SECURITY: array[boolean] of TRestHttpServerSecurity = (
+  // - see also HTTPS_DEFAULT_MODE[]
+  HTTPS_SECURITY: array[{tls=}boolean] of TRestHttpServerSecurity = (
     secNone,
     secTLS);
+
+  /// HTTP/HTTPS security flags for TRestHttpServer.Create() constructor
+  // with an optional self-signed server certificate (if supported)
+  // - see also HTTPS_DEFAULT_MODE[]
+  HTTPS_SECURITY_SELFSIGNED: array[{selfsigned=}boolean, {tls=}boolean] of
+      TRestHttpServerSecurity = (
+    (secNone,
+     secTLS),
+    (secNone,
+     secTLSSelfSigned));
 
 type
   TRestHttpOneServer = record
@@ -187,20 +211,14 @@ type
   TOnRestHttpServerRequest = function(var Call: TRestUriParams): boolean of object;
 
   /// HTTP/1.1 and WebSockets RESTFUL JSON mORMot Server class
-  // - this server is multi-threaded and not blocking
-  // - under Windows, it will first try to use fastest http.sys kernel-mode
-  // server (i.e. create a THttpApiServer instance); it should work OK under XP
-  // or WS 2K3 - but you need to have administrator rights under Vista or Seven:
-  // if http.sys fails to initialize, it will use the socket-based THttpServer;
-  // a solution is to call the THttpApiServer.AddUrlAuthorize class method during
-  // program setup for the desired port, or define a useHttpApiRegisteringURI
-  // kind of server, in order to allow it for every user
-  // - under Linux, only THttpServer/THttpAsyncServer are available
-  // - you can specify WEBSOCKETS_DEFAULT_MODE (= useBidirAsync) kind of server
-  // to allow WebSockets upgrades and server-side notif callbacks
-  // - just create it and it will serve SQL statements as UTF-8 JSON
-  // - for a true AJAX server, expanded data is prefered - your code may contain:
-  // ! DBServer.NoAjaxJson := false;
+  // - this HTTP/HTTPS server is multi-threaded and not blocking, shared between
+  // one or several TRestServer instances, identified via their TOrmModel.Root
+  // - depending on the constructor, one TRestHttpServerUse kind is used,
+  // which may be over http.sys or blocking sockets, or asynchronous sockets,
+  // able to upgrade to WebSockets or not - note that http.sys requires a
+  // proper URI registration with administrator rights
+  // - for a true AJAX server, see AccessControlAllowOrigin property and
+  // consider TRestServer.NoAjaxJson := false for non-extended JSON transmission
   TRestHttpServer = class(TSynPersistent)
   protected
     fShutdownInProgress: boolean;
@@ -244,24 +262,44 @@ type
       aConnectionID: THttpServerConnectionID;
       aFakeCallID: integer; aResult, aErrorMsg: PRawUtf8): boolean;
   public
-    /// create a Server instance, binded and listening on a TCP port to HTTP requests
-    // - raise a ERestHttpServer exception if binding failed
-    // - specify one or more TRestServer server class to be used: each
+    /// create a HTTP/HTTPS Server instance, to serve REST requests
+    // - this is the easiest constructor to publish TRestServer(s) over HTTP/HTTPS
+    // - will create a TWebSocketAsyncServerRest, i.e. our useBidirAsync server
+    // which is available on all platforms, and supports TLS and WebSockets
+    // - specify one or several TRestServer server class(es) to be used: each
     // class must have an unique Model.Root value, to identify which TRestServer
     // instance must handle a particular request from its URI
+    // - port should specify the public server name or address to bind to: e.g.
+    // 'domainname:1234', '0.0.0.0:1234' for all addresses, '127.0.0.1:1234' for
+    // the TCP loopback, or 'unix:/path/to/myapp.socket' for the Unix domain
+    // sockets loopback - raises a ERestHttpServer exception if binding failed
+    // - the aThreadPoolCount parameter will set the number of threads
+    // to be initialized to handle incoming connections (default is a good 32)
+    // - for a HTTPS server, use secTLS and set CertificateFile, PrivateKeyFile,
+    // and PrivateKeyPassword expected values, or specify secTLSSelfSigned
+    // - see the overloaded constructors as alternatives with more options,
+    // e.g. if you want to use http.sys on Windows or TLS mutual auth callbacks
+    constructor Create(const aServers: array of TRestServer; const aPort: RawUtf8;
+      aThreadPoolCount: Integer = 32; aSecurity: TRestHttpServerSecurity = secNone;
+      aOptions: TRestHttpServerOptions = HTTPSERVER_DEFAULT_OPTIONS;
+      const CertificateFile: TFileName = ''; const PrivateKeyFile: TFileName = '';
+      const PrivateKeyPassword: RawUtf8 = ''; const CACertificatesFile: TFileName = '');
+        reintroduce; overload;
+    /// create a Server instance, binded and listening on a TCP port to REST requests
+    // - raise a ERestHttpServer exception if binding failed
     // - port is an RawUtf8/AnsiString, as expected by the WinSock API - in case
     // of useHttpSocket, useBidirSocket or useHttpAsync, useBidirAsync servers,
     // specify the public server address to bind to: e.g. '1.2.3.4:1234' - even
     // for http.sys, the public address could be used for TRestServer.SetPublicUri()
-    // - aDomainName is the Urlprefix to be used for HttpAddUrl API call:
+    // - aDomainName is the Urlprefix to be used for http.sys HttpAddUrl API call:
     // it could be either a fully qualified case-insensitive domain name
     // an IPv4 or IPv6 literal string, or a wildcard ('+' will bound
     // to all domain names for the specified port, '*' will accept the request
     // when no other listening hostnames match the request for that port) - this
     // parameter is ignored by the TRestHttpApiServer instance
-    // - aHttpServerKind defines how the HTTP server itself will be implemented:
-    // it will use by default optimized kernel-based http.sys server (useHttpApi),
-    // optionally registering the URI (useHttpApiRegisteringURI) if needed,
+    // - aUse defines how the HTTP server itself will be implemented: on Windows
+    // by default the optimized kernel-based http.sys server (useHttpApi),
+    // optionally registering the URI (useHttpApiRegisteringURI),
     // or using the standard Sockets library (useHttpSocket), possibly in its
     // WebSockets-friendly version (useBidirSocket - then call the
     // WebSocketsEnable method to initialize the available protocols), or
@@ -270,12 +308,12 @@ type
     // - the aThreadPoolCount parameter will set the number of threads
     // to be initialized to handle incoming connections (default is 32, which
     // may be sufficient for most cases, maximum is 256)
-    // - the aHttpServerSecurity can be set to secTLS to initialize a HTTPS
-    // instance (after proper certificate installation as explained in the SAD pdf)
+    // - the aSecurity can be set to secTLS to initialize a HTTPS server (via
+    // the TLS param for sockets, or after proper http.sys cert installation
+    // as regularly done on Windows) or secTLSSelfSigned for a self-signed cert
     // - optional aAdditionalUrl parameter can be used e.g. to registry an URI
     // to server static file content, by overriding TRestHttpServer.Request
     // - for THttpApiServer, you can specify an optional name for the HTTP queue
-    // - for THttpServer, you can force aHeadersUnFiltered flag
     constructor Create(const aPort: RawUtf8;
       const aServers: array of TRestServer; const aDomainName: RawUtf8 = '+';
       aUse: TRestHttpServerUse = HTTP_DEFAULT_MODE;
@@ -283,35 +321,20 @@ type
       aSecurity: TRestHttpServerSecurity = secNone;
       const aAdditionalUrl: RawUtf8 = ''; const aQueueName: SynUnicode = '';
       aOptions: TRestHttpServerOptions = HTTPSERVER_DEFAULT_OPTIONS;
-      const CertificateFile: TFileName = '';
-      const PrivateKeyFile: TFileName = '';
-      const PrivateKeyPassword: RawUtf8 = '');
-        reintroduce; overload;
+      TLS: PNetTlsContext = nil); reintroduce; overload;
     /// create a Server instance, binded and listening on a TCP port to HTTP requests
-    // - raise a ERestHttpServer exception if binding failed
-    // - specify one TRestServer server class to be used
-    // - port is an RawUtf8, as expected by the WinSock API - in case of
-    // of useHttpSocket, useBidirSocket or useHttpAsync, useBidirAsync servers,
-    // specify the public server address to bind to: e.g. '1.2.3.4:1234' - even
-    // for http.sys, the public address could be used for TRestServer.SetPublicUri()
-    // - aDomainName is the Urlprefix to be used for HttpAddUrl API call
-    // - the aHttpServerSecurity can be set to secTLS to initialize a HTTPS
-    // instance (after proper certificate installation as explained in the SAD pdf)
-    // - optional aAdditionalUrl parameter can be used e.g. to registry an URI
-    // to server static file content, by overriding TRestHttpServer.Request
-    // - for THttpApiServer, you can specify an optional name for the HTTP queue
-    constructor Create(const aPort: RawUtf8; aServer: TRestServer;
-      const aDomainName: RawUtf8 = '+';
+    // - overloaded function allowing to specify the expected POrmAccessRights
+    // for the supplied TRestServer server instance
+    constructor Create(const aPort: RawUtf8;
+      aServer: TRestServer; const aDomainName: RawUtf8 = '+';
       aUse: TRestHttpServerUse = HTTP_DEFAULT_MODE;
       aRestAccessRights: POrmAccessRights = nil;
       aThreadPoolCount: Integer = 32;
       aSecurity: TRestHttpServerSecurity = secNone;
-      const aAdditionalUrl: RawUtf8 = '';
-      const aQueueName: SynUnicode = '';
+      const aAdditionalUrl: RawUtf8 = ''; const aQueueName: SynUnicode = '';
       aOptions: TRestHttpServerOptions = HTTPSERVER_DEFAULT_OPTIONS);
         reintroduce; overload;
     /// create a Server instance, binded and listening on a TCP port to HTTP requests
-    // - raise a ERestHttpServer exception if binding failed
     // - specify one TRestServer instance to be published, and the associated
     // transmission definition; other parameters would be the standard one
     // - only the supplied aDefinition.Authentication will be defined
@@ -390,18 +413,19 @@ type
     // - this method raise an EHttpServer if the associated server class does not
     // support WebSockets, i.e. this instance isn't useBidirSocket/useBidirAsync
     function WebSocketsEnable(
-      const aWebSocketsURI, aWebSocketsEncryptionKey: RawUtf8;
-      aWebSocketsAjax: boolean = false;
-      aWebSocketsBinaryOptions: TWebSocketProtocolBinaryOptions =
-        [pboSynLzCompress]): PWebSocketProcessSettings; overload;
+      const aWSURI, aWSEncryptionKey: RawUtf8; aWSAjax: boolean = false;
+      aWSBinaryOptions: TWebSocketProtocolBinaryOptions = [pboSynLzCompress];
+      const aOnWSUpgraded: TOnWebSocketProtocolUpgraded = nil): PWebSocketProcessSettings;
+        overload;
     /// defines the WebSockets protocols used by useBidirSocket/useBidirAsync
     // - same as the overloaded WebSocketsEnable() method, but the URI will be
     // forced to match the aServer.Model.Root value, as expected on the client
     // side by TRestHttpClientWebsockets.WebSocketsUpgrade()
     function WebSocketsEnable(aServer: TRestServer;
-      const aWebSocketsEncryptionKey: RawUtf8; aWebSocketsAjax: boolean = false;
-      aWebSocketsBinaryOptions: TWebSocketProtocolBinaryOptions =
-        [pboSynLzCompress]): PWebSocketProcessSettings; overload;
+      const aWSEncryptionKey: RawUtf8; aWSAjax: boolean = false;
+      aWSBinaryOptions: TWebSocketProtocolBinaryOptions = [pboSynLzCompress];
+      const aOnWSUpgraded: TOnWebSocketProtocolUpgraded = nil): PWebSocketProcessSettings;
+        overload;
     /// the TCP/IP (address and) port on which this server is listening to
     // - may contain the public server address to bind to: e.g. '1.2.3.4:1234'
     // - see PublicAddress and PublicPort properties if you want to get the
@@ -611,14 +635,14 @@ begin
     for i := n downto 0 do // may appear several times, with another Security
       if fDBServers[i].Server = aServer then
       begin
-      {$ifdef USEHTTPSYS}
+        {$ifdef USEHTTPSYS}
         if fHttpServer.InheritsFrom(THttpApiServer) then
           if THttpApiServer(fHttpServer).RemoveUrl(aServer.Model.Root,
-             fPublicPort, fDBServers[i].Security = secTLS,
+             fPublicPort, fDBServers[i].Security in SEC_TLS,
              fDomainName) <> NO_ERROR then
             log.Log(sllLastError, '%.RemoveUrl(%)',
               [self, aServer.Model.Root], self);
-      {$endif USEHTTPSYS}
+        {$endif USEHTTPSYS}
         for j := i to n - 1 do
           fDBServers[j] := fDBServers[j + 1];
         SetLength(fDBServers, n);
@@ -655,6 +679,19 @@ begin
     fHosts.Add(aDomain, aUri);
 end;
 
+constructor TRestHttpServer.Create(const aServers: array of TRestServer;
+  const aPort: RawUtf8; aThreadPoolCount: Integer; aSecurity: TRestHttpServerSecurity;
+  aOptions: TRestHttpServerOptions; const CertificateFile, PrivateKeyFile: TFileName;
+  const PrivateKeyPassword: RawUtf8; const CACertificatesFile: TFileName);
+var
+  tls: TNetTlsContext;
+begin
+  InitNetTlsContext(tls, {server=}true,
+    CertificateFile, PrivateKeyFile, PrivateKeyPassword, CACertificatesFile);
+  Create(aPort, aServers, '+', useBidirAsync, aThreadPoolCount,
+    aSecurity, '', '', aOptions, @tls);
+end;
+
 const
   HTTPSERVERSOCKETCLASS: array[
       useHttpSocket .. high(TRestHttpServerUse)] of THttpServerSocketGenericClass = (
@@ -668,15 +705,14 @@ constructor TRestHttpServer.Create(const aPort: RawUtf8;
   aUse: TRestHttpServerUse; aThreadPoolCount: Integer;
   aSecurity: TRestHttpServerSecurity; const aAdditionalUrl: RawUtf8;
   const aQueueName: SynUnicode; aOptions: TRestHttpServerOptions;
-  const CertificateFile, PrivateKeyFile: TFileName;
-  const PrivateKeyPassword: RawUtf8);
+  TLS: PNetTlsContext);
 var
   i, j: PtrInt;
   hso: THttpServerOptions;
   ErrMsg: RawUtf8;
+  net: TNetTlsContext;
   log: ISynLog;
 begin
-  inherited Create; // may have been overriden
   // prepare the running parameters
   if high(aServers) < 0 then
     fLog := TSynLog
@@ -685,7 +721,7 @@ begin
   log := fLog.Enter('Create % (%) on port %',
     [ToText(aUse)^, ToText(aSecurity)^, aPort], self);
   fOptions := aOptions;
-  inherited Create;
+  inherited Create; // may have been overriden
   SetAccessControlAllowOrigin(''); // deny CORS by default
   fHosts.Init(false);
   fDomainName := aDomainName;
@@ -723,7 +759,8 @@ begin
                 [Root, aServers[j].Model.Root], ErrMsg);
         end;
     if ErrMsg <> '' then
-      raise ERestHttpServer.CreateUtf8('%.Create(% ): %', [self, fDBServerNames, ErrMsg]);
+      raise ERestHttpServer.CreateUtf8(
+        '%.Create(% ): %', [self, fDBServerNames, ErrMsg]);
     TrimSelf(fDBServerNames);
     // associate before HTTP server is started, for TRestServer.BeginCurrentThread
     SetLength(fDBServers, length(aServers));
@@ -740,36 +777,40 @@ begin
     include(hso, hsoIncludeDateHeader);
   if rsoNoXPoweredHeader in fOptions then
     include(hso, hsoNoXPoweredHeader);
-  if aSecurity = secTLS then
+  if aSecurity in SEC_TLS then
     include(hso, hsoEnableTls);
+  //include(hso, hsoHeadersInterning);
   {$ifdef USEHTTPSYS}
   if aUse in HTTP_API_MODES then
-  try
     if PosEx('Wine', OSVersionInfoEx) > 0 then
-      log.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
-        'try useHttpSocket/useHttpAsync',
-        [ToText(aUse)^, OSVersionInfoEx], self);
-    // first try to use fastest http.sys
-    fHttpServer := THttpApiServer.Create(aQueueName, HttpThreadStart,
-      HttpThreadTerminate, TrimU(fDBServerNames), hso);
-    for i := 0 to high(aServers) do
-      HttpApiAddUri(aServers[i].Model.Root, fDomainName, aSecurity,
-        fUse in HTTP_API_REGISTERING_MODES, true);
-    if aAdditionalUrl <> '' then
-      HttpApiAddUri(aAdditionalUrl, fDomainName, aSecurity,
-        fUse in HTTP_API_REGISTERING_MODES, true);
-  except
-    on E: Exception do
     begin
-      log.Log(sllError, '% for % % at%  -> fallback to socket-based server',
-        [E, ToText(aUse)^, fHttpServer, fDBServerNames], self);
-      FreeAndNilSafe(fHttpServer); // if http.sys initialization failed
-      if fUse in [useHttpApiOnly, useHttpApiRegisteringURIOnly] then
-        // propagate fatal exception with no fallback to the sockets HTTP server
-        raise;
-      aUse := useHttpSocket; // conservative: useHttpAsync is less mature on Win
+      log.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
+        'fallback to useHttpAsync', [ToText(aUse)^, OSVersionInfoEx], self);
+      aUse := useHttpAsync; // the closest server we have using sockets
+    end
+    else
+    try
+      // first try to use fastest http.sys
+      fHttpServer := THttpApiServer.Create(aQueueName, HttpThreadStart,
+        HttpThreadTerminate, TrimU(fDBServerNames), hso);
+      for i := 0 to high(aServers) do
+        HttpApiAddUri(aServers[i].Model.Root, fDomainName, aSecurity,
+          fUse in HTTP_API_REGISTERING_MODES, true);
+      if aAdditionalUrl <> '' then
+        HttpApiAddUri(aAdditionalUrl, fDomainName, aSecurity,
+          fUse in HTTP_API_REGISTERING_MODES, true);
+    except
+      on E: Exception do
+      begin
+        log.Log(sllError, '% for % % at%  -> fallback to socket-based server',
+          [E, ToText(aUse)^, fHttpServer, fDBServerNames], self);
+        FreeAndNilSafe(fHttpServer); // if http.sys initialization failed
+        if fUse in [useHttpApiOnly, useHttpApiRegisteringURIOnly] then
+          // propagate fatal exception with no fallback to the sockets server
+          raise;
+        aUse := useHttpSocket; // conservative: useHttpAsync less mature on Win
+      end;
     end;
-  end;
   {$endif USEHTTPSYS}
   if fHttpServer = nil then
   begin
@@ -781,8 +822,20 @@ begin
     else
       raise ERestHttpServer.CreateUtf8('%.Create(% ): unsupported %',
         [self, fDBServerNames, ToText(aUse)^]);
-    THttpServerSocketGeneric(fHttpServer).WaitStarted(
-      30, CertificateFile, PrivateKeyFile, PrivateKeyPassword);
+    if aSecurity = secTLSSelfSigned then
+    begin
+      InitNetTlsContextSelfSignedServer(net {, caaES256}); // RSA is more common
+      tls := @net;
+    end;
+    try
+      THttpServerSocketGeneric(fHttpServer).WaitStarted({sec=}30, tls);
+    finally
+      if aSecurity = secTLSSelfSigned then
+      begin
+        DeleteFile(Utf8ToString(net.CertificateFile));
+        DeleteFile(Utf8ToString(net.PrivateKeyFile));
+      end;
+    end;
   end;
   // setup the newly created server instance
   fHttpServer.OnRequest := Request;
@@ -949,7 +1002,7 @@ begin
   result := '';
   if not fHttpServer.InheritsFrom(THttpApiServer) then
     exit;
-  https := aSecurity = secTLS;
+  https := aSecurity in SEC_TLS;
   fLog.Add.Log(sllHttp, 'http.sys registration of http%://%:%/%',
     [HTTPS_TEXT[https], aDomainName, fPublicPort, aRoot], self);
   // try to register the URL to http.sys
@@ -1043,11 +1096,20 @@ begin
            not IdemPChar(pointer(Ctxt.InContentType), JSON_CONTENT_TYPE_UPPER)) then
     // wrong Input parameters or not JSON request: 400 BAD REQUEST
     result := HTTP_BADREQUEST
+  else if (Ctxt.InContent <> '') and
+          (rsoOnlyValidUtf8 in fOptions) and
+          (IdemPChar(pointer(Ctxt.InContentType), JSON_CONTENT_TYPE_UPPER) or
+           IdemPChar(pointer(Ctxt.InContentType), 'TEXT/')) and
+          not IsValidUtf8(Ctxt.InContent) then // may use AVX2
+    result := HTTP_NOTACCEPTABLE
   else
   begin
     // compute URI
-    call.Init;
+    call.OutStatus := 0; // see call.Init
+    call.OutInternalState := 0;
+    call.RestAccessRights := nil;
     call.LowLevelConnectionID := Ctxt.ConnectionID;
+    call.LowLevelConnectionOpaque := pointer(Ctxt.ConnectionOpaque);
     call.LowLevelConnectionFlags := TRestUriParamsLowLevelFlags(Ctxt.ConnectionFlags);
     call.LowLevelRemoteIP := Ctxt.RemoteIP;
     call.LowLevelBearerToken := Ctxt.AuthBearer;
@@ -1079,7 +1141,7 @@ begin
         // optimized for the most common case of a single DB server
         with fDBSingleServer^ do
         begin
-          if (Security = secTLS) = tls then
+          if (Security in SEC_TLS) = tls then
           begin
             match := Server.Model.UriMatch(call.Url, matchcase);
             if match = rmNoMatch then
@@ -1101,7 +1163,7 @@ begin
         try
           for i := 0 to length(fDBServers) - 1 do
             with fDBServers[i] do
-              if (Security = secTLS) = tls then
+              if (Security in SEC_TLS) = tls then
               begin
                 // registered for http or https
                 match := Server.Model.UriMatch(call.Url, matchcase);
@@ -1258,27 +1320,31 @@ begin
         HostUrl := HostUrl + '/' + Ctxt.Url;
 end;
 
-function TRestHttpServer.WebSocketsEnable(
-  const aWebSocketsURI, aWebSocketsEncryptionKey: RawUtf8;
-  aWebSocketsAjax: boolean;
-  aWebSocketsBinaryOptions: TWebSocketProtocolBinaryOptions): PWebSocketProcessSettings;
+function TRestHttpServer.WebSocketsEnable(const aWSURI, aWSEncryptionKey: RawUtf8;
+  aWSAjax: boolean; aWSBinaryOptions: TWebSocketProtocolBinaryOptions;
+  const aOnWSUpgraded: TOnWebSocketProtocolUpgraded): PWebSocketProcessSettings;
 begin
   // will raise an EHttpServer exception if not supported
   result := (fHttpServer as THttpServerSocketGeneric).WebSocketsEnable(
-    aWebSocketsURI, aWebSocketsEncryptionKey, aWebSocketsAjax,
-    aWebSocketsBinaryOptions);
+    aWSURI, aWSEncryptionKey, aWSAjax, aWSBinaryOptions);
+  if Assigned(aOnWSUpgraded) then
+    if fHttpServer is TWebSocketAsyncServer then
+      TWebSocketAsyncServer(fHttpServer).OnWebSocketUpgraded := aOnWSUpgraded
+    else if fHttpServer is TWebSocketServer then
+      TWebSocketServer(fHttpServer).OnWebSocketUpgraded := aOnWSUpgraded;
 end;
 
 function TRestHttpServer.WebSocketsEnable(aServer: TRestServer;
-  const aWebSocketsEncryptionKey: RawUtf8; aWebSocketsAjax: boolean;
-  aWebSocketsBinaryOptions: TWebSocketProtocolBinaryOptions): PWebSocketProcessSettings;
+  const aWSEncryptionKey: RawUtf8; aWSAjax: boolean;
+  aWSBinaryOptions: TWebSocketProtocolBinaryOptions;
+  const aOnWSUpgraded: TOnWebSocketProtocolUpgraded): PWebSocketProcessSettings;
 begin
   if (aServer = nil) or
      (DBServerFind(aServer) < 0) then
     raise EWebSockets.CreateUtf8(
       '%.WebSocketEnable(aServer=%?)', [self, aServer]);
-  result := WebSocketsEnable(aServer.Model.Root, aWebSocketsEncryptionKey,
-    aWebSocketsAjax, aWebSocketsBinaryOptions);
+  result := WebSocketsEnable(aServer.Model.Root, aWSEncryptionKey,
+    aWSAjax, aWSBinaryOptions, aOnWSUpgraded);
 end;
 
 function TRestHttpServer.NotifyCallback(aSender: TRestServer;
@@ -1298,7 +1364,7 @@ begin
     begin
       // aConnection.InheritsFrom(TSynThread) may raise an exception
       // -> checked in WebSocketsCallback/IsActiveWebSocket
-      ctxt := THttpServerRequest.Create(nil, aConnectionID, nil, []);
+      ctxt := THttpServerRequest.Create(nil, aConnectionID, nil, [], nil);
       try
         FormatUtf8('%/%/%',
           [aSender.Model.Root, aInterfaceDotMethodName, aFakeCallID], url);

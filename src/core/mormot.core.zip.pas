@@ -409,7 +409,8 @@ type
     property OnLog: TSynLogProc
       read fInfo.OnLog write fInfo.OnLog;
     /// optional TOnInfoProgress callback triggered during Zip/Unzip
-    // - at least at process startup and finish, and every ReportDelay ms
+    // - at least at process startup and finish, and following ReportDelay ms
+    // for the methods supporting it, i.e. if streams are used, not libdeflate
     property OnProgress: TOnInfoProgress
       read fInfo.OnProgress write fInfo.OnProgress;
     /// number of milliseconds between each OnLog/OnProgress notification
@@ -806,8 +807,8 @@ begin
   if not fInitialized then
     result := 0
   else if (Offset = 0) and
-          (Origin = soCurrent) then
-    // for TStream.Position on Delphi
+          (Origin in [soCurrent, soEnd]) then
+    // for TStream.Position/GetSize on Delphi
     result := fSizeIn
   else
   begin
@@ -2963,7 +2964,7 @@ begin
       inc(P, 4);
       PCardinal(P)^ := L;
       inc(P, 4);
-      PStrLen(PAnsiChar(pointer(tmp)) - _STRLEN)^ := P - pointer(tmp); // no realloc
+      FakeLength(tmp, P - pointer(tmp)); // no realloc
       Data := tmp;
     end;
   end
@@ -2987,7 +2988,7 @@ begin
     if L <= 0 then
       Data := ''
     else
-      PStrLen(PAnsiChar(pointer(Data)) - _STRLEN)^ := L; // fake len: no realloc
+      FakeLength(Data, L);
   end
   else
     Data := UnCompressZipString(pointer(src), L, nil, ZLib, 0);

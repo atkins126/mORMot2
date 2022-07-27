@@ -301,6 +301,9 @@ const
   rkOrdinalTypes =
     rkHasRttiOrdTypes + [ {$ifdef FPC} rkQWord, {$endif} rkInt64 ];
 
+  /// maps integer and floating point types in TRttiKind RTTI enumerates
+  rkNumberTypes = rkOrdinalTypes + [ rkFloat ];
+
   /// maps values which expect TRttiProp.GetOrdProp/SetOrdProp
   // - includes 32-bit ordinals and pointers
   rkGetOrdPropTypes =
@@ -599,8 +602,8 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// interface abilities - not inlined to avoid random trouble on FPC trunk
     function IntfFlags: TRttiIntfFlags;
-    /// interface 128-bit GUID
-    function IntfGuid: PGUID;
+    /// interface 128-bit Guid
+    function IntfGuid: PGuid;
       {$ifdef HASINLINE}inline;{$endif}
     /// where the interface has been defined
     function IntfUnit: PShortString;
@@ -644,7 +647,8 @@ type
     rcfGetOrdProp,
     rcfGetInt64Prop,
     rcfIsRawBlob,
-    rcfIsCurrency);
+    rcfIsCurrency,
+    rcfIsNumber);
 
   /// as used by TRttiCache.Flags
   // - rcfQWord/rcfBoolean map Info^.IsQWord/IsBoolean
@@ -862,9 +866,9 @@ type
     /// for rkInterface: get the interface type information
     function InterfaceType: PRttiInterfaceTypeData;
       {$ifdef HASINLINE}inline;{$endif}
-    /// for rkInterface: get the TGUID of a given interface type information
+    /// for rkInterface: get the TGuid of a given interface type information
     // - returns nil if this type is not an interface
-    function InterfaceGuid: PGUID;
+    function InterfaceGuid: PGuid;
     /// for rkInterface: get the unit name of a given interface type information
     // - returns '' if this type is not an interface
     function InterfaceUnitName: PShortString;
@@ -872,7 +876,7 @@ type
     // - returns nil if this type has no parent
     function InterfaceAncestor: PRttiInfo;
     /// for rkInterface: get all ancestors/parents of a given interface type information
-    // - only ancestors with an associated TGUID will be added
+    // - only ancestors with an associated TGuid will be added
     // - if OnlyImplementedBy is not nil, only the interface explicitly
     // implemented by this class will be added, and AncestorsImplementedEntry[]
     // will contain the corresponding PInterfaceEntry values
@@ -923,7 +927,7 @@ type
     /// raw assignment of rkLString
     procedure SetLongStrProp(Instance: TObject; const Value: RawByteString);
     /// raw copy of rkLString
-    procedure CopyLongStrProp(Source,Dest: TObject);
+    procedure CopyLongStrProp(Source, Dest: TObject);
     /// raw retrieval of rkString into an Ansi7String
     procedure GetShortStrProp(Instance: TObject; var Value: RawUtf8);
     /// raw retrieval of rkWString
@@ -1464,13 +1468,12 @@ function GetCaptionFromEnum(aTypeInfo: PRttiInfo; aIndex: integer): string;
 procedure GetCaptionFromTrimmed(PS: PShortString; var result: string);
 
 /// will get a class name as UTF-8
-// - will trim 'T', 'TSyn', 'TSql' or 'TOrm' left side of the class name
+// - will trim 'T', 'TSyn' or 'TOrm' left side of the class name
 // - will encode the class name as UTF-8 (for Unicode Delphi versions)
 // - is used e.g. to extract the SQL table name for a TOrm class
 function GetDisplayNameFromClass(C: TClass): RawUtf8;
 
-///  UnCamelCase and translate the class name, triming any left 'T', 'TSyn',
-// 'TSql' or 'TOrm'
+/// UnCamelCase and translate the class name, triming any left 'T' 'TSyn' 'TOrm'
 // - return generic VCL string type, i.e. UnicodeString for Delphi 2009+
 function GetCaptionFromClass(C: TClass): string;
 
@@ -1527,7 +1530,7 @@ type
     /// the unit where the interface was defined
     UnitName: RawUtf8;
     /// the associated GUID of this interface
-    Guid: TGUID;
+    Guid: TGuid;
     /// the interface methods
     Methods: array of TRttiMethod;
   end;
@@ -1548,7 +1551,7 @@ function GetRttiInterface(aTypeInfo: PRttiInfo;
 function GetInterfaceFromEntry(Instance: TObject; Entry: PInterfaceEntry;
   out Obj): boolean;
 
-/// returns all TGUID implemented by a given class
+/// returns all TGuid implemented by a given class
 // - TObject.GetInterfaceTable is not consistent on Delphi and FPC
 function GetRttiClassGuid(aClass: TClass): PGuidDynArray;
 
@@ -1789,7 +1792,7 @@ var
   // requering additional PRttiInfo (rkRecord, rkDynArray, rkArray...)
   // - you can use PT_INFO[] for types with no RTTI before Delphi 2010, for
   // instance PT_INFO[ptGuid], PT_INFO[ptHash128], PT_INFO[ptHash256] and
-  // PT_INFO[ptHash512] since oldest compilers refuse to compile TypeInfo(TGUID),
+  // PT_INFO[ptHash512] since oldest compilers refuse to compile TypeInfo(TGuid),
   // TypeInfo(THash128), TypeInfo(THash256) and TypeInfo(THash512)
   PT_INFO: array[TRttiParserType] of PRttiInfo;
 
@@ -1865,7 +1868,7 @@ const
     'SynUnicode',     //  ptSynUnicode
     'TDateTime',      //  ptDateTime
     'TDateTimeMS',    //  ptDateTimeMS
-    'TGUID',          //  ptGuid
+    'TGuid',          //  ptGuid
     'THash128',       //  ptHash128
     'THash256',       //  ptHash256
     'THash512',       //  ptHash512
@@ -1907,21 +1910,22 @@ function ParserTypeToTypeInfo(pt: TRttiParserType;
   pct: TRttiParserComplexType): PRttiInfo;
 
 /// recognize a simple value type from a supplied type name
-// - from known ('byte', 'string', 'RawUtf8', 'TGUID'...) type names
+// - from known ('byte', 'string', 'RawUtf8', 'TGuid'...) type names
 // - will return ptNone for any unknown type
 // - for ptOrm and ptTimeLog, optional Complex will contain the specific type found
 function TypeNameToStandardParserType(Name: PUtf8Char; NameLen: integer;
-  Complex: PRttiParserComplexType = nil): TRttiParserType; overload;
+  Complex: PRttiParserComplexType = nil;
+  Kind: TRttiKind = rkUnknown): TRttiParserType; overload;
 
 /// recognize a simple value type from a supplied type name
-// - from known ('byte', 'string', 'RawUtf8', 'TGUID'...) type names
+// - from known ('byte', 'string', 'RawUtf8', 'TGuid'...) type names
 // - will return ptNone for any unknown type
 function TypeNameToStandardParserType(Name: PShortString;
   Complex: PRttiParserComplexType = nil): TRttiParserType; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// recognize a simple value type from a supplied type name
-// - from known ('byte', 'string', 'RawUtf8', 'TGUID'...) type names, then
+// - from known ('byte', 'string', 'RawUtf8', 'TGuid'...) type names, then
 // calling Rtti.Find() if CheckRttiCustomTypes=true
 // - will return ptNone for any unknown type
 function TypeNameToStandardParserType(const Name: RawUtf8;
@@ -2639,7 +2643,7 @@ type
     // same format as any pascal record:
     // ! 'A,B,C: integer; D: RawUtf8; E: record E1,E2: double;'
     // ! 'A,B,C: integer; D: RawUtf8; E: array of record E1,E2: double;'
-    // ! 'A,B,C: integer; D: RawUtf8; E: array of SynUnicode; F: array of TGUID'
+    // ! 'A,B,C: integer; D: RawUtf8; E: array of SynUnicode; F: array of TGuid'
     // or a shorter alternative syntax for records and arrays:
     // ! 'A,B,C: integer; D: RawUtf8; E: {E1,E2: double}'
     // ! 'A,B,C: integer; D: RawUtf8; E: [E1,E2: double]'
@@ -2802,15 +2806,6 @@ function TObjectWithIDDynArrayHashOne(const Elem; Hasher: THasher): cardinal;
 
 
 implementation
-
-{$ifdef FPC_X64MM}
-{$ifdef CPUX64}
-uses
-  mormot.core.fpcx64mm; // for direct call of _getmem/_freemem in x86_64 asm
-{$else}
-  {$undef FPC_X64MM}
-{$endif CPUX64}
-{$endif FPC_X64MM}
 
 
 { some inlined definitions which should be declared before $include code }
@@ -3472,6 +3467,8 @@ begin
       include(Cache.Flags, rcfBoolean);
     end;
   end;
+  if Kind in rkNumberTypes then
+    include(Cache.Flags, rcfIsNumber);
   if Kind in rkGetOrdPropTypes then
     include(Cache.Flags, rcfGetOrdProp)
   else if Kind in rkGetInt64PropTypes then
@@ -3593,7 +3590,7 @@ begin
   end;
 end;
 
-function TRttiInfo.InterfaceGuid: PGUID;
+function TRttiInfo.InterfaceGuid: PGuid;
 begin
   if (@self = nil) or
      (Kind <> rkInterface) then
@@ -5072,6 +5069,7 @@ begin
   if name^[0] > #4 then
     // fast case-insensitive compare
     case PInteger(@name^[1])^ and $DFDFDFDF of
+      {$ifndef PUREMORMOT2}
       // backward compatibility trim of left-sided TSql* or TSqlRecord*
       ord('T') + ord('S') shl 8 + ord('Q') shl 16 + ord('L') shl 24:
         if (name^[0] <= #10) or
@@ -5081,6 +5079,7 @@ begin
           totrim := 4
         else
           totrim := 10;
+      {$endif PUREMORMOT2}
       // trim left-sided TOrm* and TSyn* naming conventions
       ord('T') + ord('O') shl 8 + ord('R') shl 16 + ord('M') shl 24,
       ord('T') + ord('S') shl 8 + ord('Y') shl 16 + ord('N') shl 24:
@@ -5314,6 +5313,7 @@ begin
   end;
 end;
 
+
 procedure StringClearSeveral(v: PPointer; n: PtrInt);
 var
   p: PStrRec;
@@ -5326,11 +5326,7 @@ begin
       dec(p);
       if (p^.refCnt >= 0) and
          StrCntDecFree(p^.refCnt) then
-        {$ifdef FPC_X64MM}
-        _Freemem(p); // works for both rkLString + rkUString
-        {$else}
-        Freemem(p);
-        {$endif FPC_X64MM}
+        Freemem(p); // works for both rkLString + rkUString
     end;
     inc(v);
     dec(n);
@@ -6039,11 +6035,12 @@ begin
     {$ifdef FPC}
     rkLStringOld,
     {$endif FPC}
-    {$ifdef HASVARUSTRING}
-    rkUString,
-    {$endif HASVARUSTRING}
     rkLString:
       FillZero(RawByteString(Value));
+    {$ifdef HASVARUSTRING}
+    rkUString:
+      FillZero(UnicodeString(Value));
+    {$endif HASVARUSTRING}
     rkVariant:
       if TVarData(Value).VType = varString then
         FillZero(RawByteString(TVarData(Value).VAny));
@@ -6079,12 +6076,16 @@ begin
   if nfo <> nil then
   begin
     p := pointer(nfo.Props.List); // for both records and classes
-    v := PPointer(Value)^;
-    for i := 0 to nfo.Props.Count - 1 do
+    if Info^.Kind = rkClass then
+      v := PPointer(Value)^ // classes are passed by reference
+    else
+      v := @Value;          // records are passed by value
+    for i := 1 to nfo.Props.Count do
     begin
       if (p^.OffsetSet >= 0) and
          (p^.Value <> nil) and
-         (p^.Value.Info <> nil) then
+         (p^.Value.Info <> nil) and
+         not (rcfIsNumber in p^.Value.Cache.Flags) then
         FillZero(p^.Value.Info, v[p^.OffsetSet]); // process nested fields
       inc(p);
     end;
@@ -6252,7 +6253,7 @@ const
     pctNone);                      // btWORD
 
 function TypeNameToStandardParserType(Name: PUtf8Char; NameLen: integer;
-  Complex: PRttiParserComplexType): TRttiParserType;
+  Complex: PRttiParserComplexType; Kind: TRttiKind): TRttiParserType;
 var
   ndx: PtrInt;
   up: PUtf8Char;
@@ -6269,7 +6270,8 @@ begin
     result := BT_TYPES[TBasicType(ndx)];
     c := BT_COMPLEX[TBasicType(ndx)];
   end
-  else if (NameLen < 200) and
+  else if (Kind = rkInt64) and
+          (NameLen < 200) and
           (tmp[0] = 'T') and // T...ID pattern in name?
           (PWord(@tmp[NameLen - 2])^ = ord('I') + ord('D') shl 8) then
   begin
@@ -6310,14 +6312,9 @@ begin
   if FirstSearchByName then
   begin
     result := TypeNameToStandardParserType(
-      @Info^.RawName[1], ord(Info^.RawName[0]), Complex);
+      @Info^.RawName[1], ord(Info^.RawName[0]), Complex, Info^.Kind);
     if result <> ptNone then
-      if (result = ptOrm) and
-         (Info^.Kind <> rkInt64) then
-        // paranoid check e.g. for T...ID false positives
-        result := ptNone
-      else
-        exit;
+      exit; // found by name
   end;
   case Info^.Kind of
     // FPC and Delphi will use a fast jmp table
@@ -7454,7 +7451,7 @@ begin
         item := fCache.ItemInfo;
         if item = nil then // unmanaged types
         begin
-          // try to guess the actual type, e.g. a TGUID or an integer
+          // try to guess the actual type, e.g. a TGuid or an integer
           item := aInfo^.DynArrayItemTypeExtended; // FPC or Delphi 2010+
           if item = nil then
           begin
@@ -9026,7 +9023,7 @@ begin
   PT_INFO[ptHash256]       := @_THASH256;
   PT_INFO[ptHash512]       := @_THASH512;
   {$else}
-  PT_INFO[ptGuid]          := TypeInfo(TGUID);
+  PT_INFO[ptGuid]          := TypeInfo(TGuid);
   PT_INFO[ptHash128]       := TypeInfo(THash128);
   PT_INFO[ptHash256]       := TypeInfo(THash256);
   PT_INFO[ptHash512]       := TypeInfo(THash512);

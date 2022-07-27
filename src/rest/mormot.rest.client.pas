@@ -623,7 +623,7 @@ type
     destructor Destroy; override;
     /// called by TRestOrm.Create overriden constructor to set fOrm from IRestOrm
     procedure SetOrmInstance(aORM: TRestOrmParent); override;
-    /// save the TSqlRestClientUri properties into a persistent storage object
+    /// save the TRestClientUri properties into a persistent storage object
     // - CreateFrom() will expect Definition.UserName/Password to store the
     // credentials which will be used by SetUser()
     procedure DefinitionTo(Definition: TSynConnectionDefinition); override;
@@ -724,20 +724,20 @@ type
     /// register one or several Services on the client side via their interfaces
     // - this method expects the interface(s) to have been registered previously:
     // ! TInterfaceFactory.RegisterInterfaces([TypeInfo(IMyInterface),...]);
-    function ServiceDefine(const aInterfaces: array of TGUID;
+    function ServiceDefine(const aInterfaces: array of TGuid;
       aInstanceCreation: TServiceInstanceImplementation = sicSingle;
       const aContractExpected: RawUtf8 = ''): boolean; overload;
     /// register a Service on the client side via its interface
     // - this method expects the interface to have been registered previously:
     // ! TInterfaceFactory.RegisterInterfaces([TypeInfo(IMyInterface),...]);
-    function ServiceDefine(const aInterface: TGUID;
+    function ServiceDefine(const aInterface: TGuid;
       aInstanceCreation: TServiceInstanceImplementation = sicSingle;
       const aContractExpected: RawUtf8 = '';
       aIgnoreAnyException: boolean = true): TServiceFactoryClient; overload;
     /// register and retrieve the sicClientDriven Service instance
     // - this method expects the interface to have been registered previously:
     // ! TInterfaceFactory.RegisterInterfaces([TypeInfo(IMyInterface),...]);
-    function ServiceDefineClientDriven(const aInterface: TGUID; out Obj;
+    function ServiceDefineClientDriven(const aInterface: TGuid; out Obj;
       const aContractExpected: RawUtf8 = ''): boolean;
     /// register a sicShared Service instance communicating via JSON objects
     // - will force SERVICE_CONTRACT_NONE_EXPECTED, ParamsAsJsonObject=true and
@@ -748,7 +748,7 @@ type
     // ! TInterfaceFactory.RegisterInterfaces([TypeInfo(IMyInterface),...]);
     // - aIgnoreAnyException may be set to TRUE if the server is likely
     // to not propose this service, and any exception is to be catched
-    function ServiceDefineSharedApi(const aInterface: TGUID;
+    function ServiceDefineSharedApi(const aInterface: TGuid;
       const aContractExpected: RawUtf8 = SERVICE_CONTRACT_NONE_EXPECTED;
       aIgnoreAnyException: boolean = false): TServiceFactoryClient;
     /// allow to notify a server the services this client may be actually capable
@@ -770,14 +770,14 @@ type
     function ServiceRetrieveAssociated(const aServiceName: RawUtf8;
       out URI: TRestServerURIDynArray): boolean; overload;
     /// return all REST server URI associated to this client, for a given service
-    // - here the service is specified as its TGUID, e.g. IMyInterface
+    // - here the service is specified as its TGuid, e.g. IMyInterface
     // - this method expects the interface to have been registered previously:
     // ! TInterfaceFactory.RegisterInterfaces([TypeInfo(IMyInterface),...]);
     // - the URI[] output array contains the matching server URIs, the latest
     // registered in first position
     // - this methods is the reverse from ServicePublishOwnInterfaces: it allows
     // to guess an associated REST server which may implement a given service
-    function ServiceRetrieveAssociated(const aInterface: TGUID;
+    function ServiceRetrieveAssociated(const aInterface: TGuid;
       out URI: TRestServerUriDynArray): boolean; overload;
     /// the routing class of the service remote request on client side
     // - by default, contains TRestClientRoutingRest, i.e. an URI-based
@@ -1088,10 +1088,10 @@ type
   TInterfacedCallback = class(TInterfacedObjectLocked)
   protected
     fRest: TRest;
-    fInterface: TGUID;
+    fInterface: TGuid;
   public
     /// initialize the instance for a given REST client and callback interface
-    constructor Create(aRest: TRest; const aGuid: TGUID); reintroduce;
+    constructor Create(aRest: TRest; const aGuid: TGuid); reintroduce;
     /// notify the associated TRestServer that the callback is disconnnected
     // - i.e. will call TRestServer's TServiceContainer.CallBackUnRegister()
     // - this method will process the unsubscription only once
@@ -1105,7 +1105,7 @@ type
     property Rest: TRest
       read fRest;
     /// the interface type, implemented by this callback class
-    property RestInterface: TGUID
+    property RestInterface: TGuid
       read fInterface write fInterface;
   end;
 
@@ -1123,7 +1123,7 @@ type
     // - you can optionally set a REST and callback interface for automatic
     // notification when this TInterfacedCallback will be released
     constructor Create(aTimeOutMs: integer;
-      aRest: TRest; const aGuid: TGUID); reintroduce;
+      aRest: TRest; const aGuid: TGuid); reintroduce;
     /// finalize the callback instance
     destructor Destroy; override;
     /// called to wait for the callback to be processed, or trigger timeout
@@ -2104,7 +2104,7 @@ begin
       if elapsed >= max then
         exit;
       inc(retry);
-      if elapsed < 500 then
+      if elapsed < 500 then // retry in pace of 100-200ms, 1-2s, 5-10s
         wait := 100
       else if elapsed < 10000 then
         wait := 1000
@@ -2120,9 +2120,10 @@ begin
       fLogClass.Add.Log(sllTrace, 'IsOpen: % after % -> wait % and ' +
         'retry #% up to % seconds - %',
         [exc, MilliSecToString(elapsed), MilliSecToString(wait), retry,
-         fConnectRetrySeconds, self],
-        self);
+         fConnectRetrySeconds, self], self);
       SleepHiRes(wait);
+      if isDestroying in fInternalState then
+        exit;
     until InternalIsOpen;
   finally
     fSafe.Leave;
@@ -2643,7 +2644,7 @@ begin
     result := false;
 end;
 
-function TRestClientUri.ServiceDefine(const aInterfaces: array of TGUID;
+function TRestClientUri.ServiceDefine(const aInterfaces: array of TGuid;
   aInstanceCreation: TServiceInstanceImplementation;
   const aContractExpected: RawUtf8): boolean;
 begin
@@ -2654,7 +2655,7 @@ begin
     result := false;
 end;
 
-function TRestClientUri.ServiceDefine(const aInterface: TGUID;
+function TRestClientUri.ServiceDefine(const aInterface: TGuid;
   aInstanceCreation: TServiceInstanceImplementation;
   const aContractExpected: RawUtf8; aIgnoreAnyException: boolean): TServiceFactoryClient;
 begin
@@ -2663,14 +2664,14 @@ begin
      aInstanceCreation, aContractExpected, aIgnoreAnyException));
 end;
 
-function TRestClientUri.ServiceDefineClientDriven(const aInterface: TGUID;
+function TRestClientUri.ServiceDefineClientDriven(const aInterface: TGuid;
   out Obj; const aContractExpected: RawUtf8): boolean;
 begin
   result := ServiceRegisterClientDriven(
     TInterfaceFactory.Guid2TypeInfo(aInterface), Obj, aContractExpected);
 end;
 
-function TRestClientUri.ServiceDefineSharedApi(const aInterface: TGUID;
+function TRestClientUri.ServiceDefineSharedApi(const aInterface: TGuid;
   const aContractExpected: RawUtf8; aIgnoreAnyException: boolean): TServiceFactoryClient;
 begin
   try
@@ -2698,7 +2699,7 @@ begin
     (DynArrayLoadJson(URI, pointer({%H-}json), TypeInfo(TRestServerUriDynArray)) <> nil);
 end;
 
-function TRestClientUri.ServiceRetrieveAssociated(const aInterface: TGUID;
+function TRestClientUri.ServiceRetrieveAssociated(const aInterface: TGuid;
   out URI: TRestServerUriDynArray): boolean;
 var
   fact: TInterfaceFactory;
@@ -2981,7 +2982,7 @@ end;
 
 { TInterfacedCallback }
 
-constructor TInterfacedCallback.Create(aRest: TRest; const aGuid: TGUID);
+constructor TInterfacedCallback.Create(aRest: TRest; const aGuid: TGuid);
 begin
   inherited Create;
   fRest := aRest;
@@ -3013,7 +3014,7 @@ end;
 { TBlockingCallback }
 
 constructor TBlockingCallback.Create(aTimeOutMs: integer; aRest: TRest;
-  const aGuid: TGUID);
+  const aGuid: TGuid);
 begin
   inherited Create(aRest, aGuid);
   fProcess := TBlockingProcess.Create(aTimeOutMs, fSafe);

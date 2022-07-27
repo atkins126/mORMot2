@@ -133,7 +133,10 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// initialize and start the high resolution timer
     // - similar to Init + Resume
-    procedure Start;
+    procedure Start; overload;
+    /// initialize and start the high resolution timer with a supplied timestamp
+    // - if CurrentMicroSeconds is 0, will call QueryPerformanceMicroSeconds()
+    procedure Start(CurrentMicroSeconds: Int64); overload;
     /// stop the timer, returning the total time elapsed as text
     // - with appended time resolution (us,ms,s) - from MicroSecToString()
     // - is just a wrapper around Pause + Time
@@ -720,6 +723,10 @@ type
   PSynMonitorUsageTrackProp = ^TSynMonitorUsageTrackProp;
   PSynMonitorUsageTrack = ^TSynMonitorUsageTrack;
 
+  /// define all known information about a given time
+  // - may be the current time, or a former time
+  TSynMonitorUsageLoad = array[mugHour..mugYear] of variant;
+
   /// abstract class to track, compute and store TSynMonitor detailed statistics
   // - you should inherit from this class to implement proper data persistence,
   // e.g. using TSynMonitorUsageRest for ORM-based storage
@@ -728,7 +735,7 @@ type
   protected
     fLog: TSynLogFamily;
     fTracked: array of TSynMonitorUsageTrack;
-    fValues: array[mugHour..mugYear] of variant;
+    fValues: TSynMonitorUsageLoad;
     fCustomWritePropGranularity: TSynMonitorUsageGranularity;
     fLastInstance: TObject;
     fLastTrack: PSynMonitorUsageTrack;
@@ -1166,6 +1173,15 @@ begin
   QueryPerformanceMicroSeconds(fStart);
 end;
 
+procedure TPrecisionTimer.Start(CurrentMicroSeconds: Int64);
+begin
+  FillCharFast(self, SizeOf(self), 0);
+  if CurrentMicroSeconds = 0 then
+    QueryPerformanceMicroSeconds(fStart)
+  else
+    fStart := CurrentMicroSeconds;
+end;
+
 function TPrecisionTimer.Started: boolean;
 begin
   result := (fStart <> 0) or
@@ -1428,7 +1444,6 @@ begin
   fTotalTime.Free;
   inherited Destroy;
 end;
-
 
 function TSynMonitor.RttiBeforeWriteObject(W: TTextWriter;
   var Options: TTextWriterWriteObjectOptions): boolean;

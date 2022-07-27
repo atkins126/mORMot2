@@ -410,6 +410,12 @@ type
     // a local ShortString variable, e.g. for logging/debug purposes
     class function CallbackReleasedOnClientSide(const callback: IInterface;
       callbacktext: PShortString = nil): boolean; overload;
+    /// class method able to associate an Opaque pointer to a fake callback
+    // - allow to avoid a lookup in an array e.g. when a callback is released
+    class procedure CallbackSetOpaque(const callback: IInterface;
+      Opaque: pointer);
+    /// class method able to associate an Opaque pointer to a fake callback
+    class function CallbackGetOpaque(const callback: IInterface): pointer;
     /// replace the connection ID of callbacks after a reconnection
     // - returns the number of callbacks changed
     function FakeCallbackReplaceConnectionID(
@@ -961,7 +967,7 @@ begin
       sicPerSession:
         begin
           inst.InstanceID := aSessionID;
-          RetrieveInstance(nil, inst, ord(imFree), aSessionID);
+          RetrieveInstance(nil, inst, ord(imFree), aSessionID); // O(log(n))
         end;
       sicClientDriven:
         // release ASAP if was not notified by client
@@ -1058,7 +1064,7 @@ begin
         if integer(tix) > 0 then // tix<0 when booted sooner than the timeout
           for i := fInstances.Count - 1 downto 0 do // downto for proper Delete
           begin
-            P := @fInstance[i];
+            P := @fInstance[i]; // fInstance[i] due to Delete(i) below
             if tix > P^.LastAccess then
             begin
               fRestServer.InternalLog('%.RetrieveInstance: deleted I% % ' +
@@ -1110,7 +1116,7 @@ begin
       AddNew;
     exit;
   end;
-  // O(log(n)) search of the instance corresponding to Inst.InstanceID
+  // O(log(n)) binary search of the instance corresponding to Inst.InstanceID
   if fInstances.Count > 0 then
   begin
     // non-blocking regular retrieval of any existing TInterfacedObject
@@ -1344,6 +1350,7 @@ begin
     sicPerGroup,
     sicPerThread:
       begin
+        // identify which Inst.InstanceID is to be retrieved
         case InstanceCreation of
           sicClientDriven:
             Inst.InstanceID := Ctxt.ServiceInstanceID;
@@ -1367,6 +1374,7 @@ begin
             exit;
           end;
         end;
+        // O(log(n)) binary search of Inst.Instance from Inst.InstanceID
         case RetrieveInstance(Ctxt, Inst, Ctxt.ServiceMethodIndex, Ctxt.Session) of
           ord(imFree):
             begin
@@ -1581,6 +1589,7 @@ type
     fService: TServiceFactoryServer;
     fReleasedOnClientSide: boolean;
     fFakeInterface: Pointer;
+    fOpaque: Pointer;
     fRaiseExceptionOnInvokeError: boolean;
     function CallbackInvoke(const aMethod: TInterfaceMethod;
       const aParams: RawUtf8; aResult, aErrorMsg: PRawUtf8;
@@ -1704,7 +1713,7 @@ function TServiceContainerServer.AddImplementation(
   const aContractExpected: RawUtf8): TServiceFactoryServer;
 var
   i, j: PtrInt;
-  UID, implemented: PGuidDynArray;
+  uid, implemented: PGuidDynArray;
   F: TServiceFactoryServer;
 begin
   result := nil;
@@ -1719,32 +1728,32 @@ begin
       raise EServiceException.CreateUtf8('%.AddImplementation: invalid % class',
         [self, aSharedImplementation]);
   CheckInterface(aInterfaces);
-  SetLength(UID, length(aInterfaces));
+  SetLength(uid, length(aInterfaces));
   for j := 0 to high(aInterfaces) do
-    UID[j] := pointer(aInterfaces[j]^.InterfaceGuid);
+    uid[j] := pointer(aInterfaces[j]^.InterfaceGuid);
   // check all interfaces available in aSharedImplementation/aImplementationClass
   if (aSharedImplementation <> nil) and
      aSharedImplementation.InheritsFrom(TInterfacedObjectFake) then
   begin
     // TInterfacedObjectFake has no RTTI
-    if IsEqualGuid(UID[0],
+    if IsEqualGuid(uid[0],
         @TInterfacedObjectFake(aSharedImplementation).Factory.InterfaceIID) then
-      UID[0] := nil; // mark TGUID implemented by this fake interface
+      uid[0] := nil; // mark TGuid implemented by this fake interface
   end
   else
   begin
-    // search all implemented TGUID for this class
+    // search all implemented TGuid for this class
     implemented := GetRttiClassGuid(aImplementationClass);
-    for j := 0 to high(UID) do
+    for j := 0 to high(uid) do
       for i := 0 to high(implemented) do
-        if IsEqualGuid(UID[j], implemented[i]) then
+        if IsEqualGuid(uid[j], implemented[i]) then
         begin
-          UID[j] := nil; // mark TGUID found
+          uid[j] := nil; // mark TGuid found
           break;
         end;
   end;
-  for j := 0 to high(UID) do
-    if UID[j] <> nil then
+  for j := 0 to high(uid) do
+    if uid[j] <> nil then
       raise EServiceException.CreateUtf8('%.AddImplementation: % not found in %',
         [self, aInterfaces[j]^.RawName, aImplementationClass]);
   // register this implementation class
@@ -1883,6 +1892,7 @@ var
   connectionID: TRestConnectionID;
   fakeID: TInterfacedObjectFakeID;
   Values: TNameValuePUtf8CharDynArray;
+  params: RawUtf8;
   withLog: boolean; // avoid stack overflow
 begin
   if (self = nil) or
@@ -1929,8 +1939,9 @@ begin
         Ctxt.ServiceMethodIndex := Ctxt.ServiceMethodIndex +
           Length(SERVICE_PSEUDO_METHOD);
         fake._AddRef; // IInvokable=pointer in Ctxt.ExecuteCallback
-        Ctxt.ServiceParameters := pointer(FormatUtf8('[%,"%"]',
-          [PtrInt(PtrUInt(fake.fFakeInterface)), Values[0].Name.Text]));
+        FormatUtf8('[%,"%"]',
+          [PtrInt(PtrUInt(fake.fFakeInterface)), Values[0].Name.Text], params);
+        Ctxt.ServiceParameters := pointer(params);
         fake.fService.ExecuteMethod(Ctxt);
         if withLog then
           fRestServer.InternalLog('I%() returned %',
@@ -2014,6 +2025,30 @@ begin
     result := (instance.ClassType = TInterfacedObjectFakeServer) and
               TInterfacedObjectFakeServer(instance).fReleasedOnClientSide;
   end;
+end;
+
+class procedure TServiceContainerServer.CallbackSetOpaque(
+  const callback: IInterface; Opaque: pointer);
+var
+  instance: TObject;
+begin
+  instance := ObjectFromInterface(callback);
+  if (instance <> nil) and
+     (instance.ClassType = TInterfacedObjectFakeServer) then
+    TInterfacedObjectFakeServer(instance).fOpaque := Opaque;
+end;
+
+class function TServiceContainerServer.CallbackGetOpaque(
+  const callback: IInterface): pointer;
+var
+  instance: TObject;
+begin
+  instance := ObjectFromInterface(callback);
+  if (instance <> nil) and
+     (instance.ClassType = TInterfacedObjectFakeServer) then
+    result := TInterfacedObjectFakeServer(instance).fOpaque
+  else
+    result := nil;
 end;
 
 function FakeCallbackReplaceID(list: PPointer; n: integer;

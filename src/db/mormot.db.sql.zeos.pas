@@ -166,7 +166,7 @@ type
     // - PostgreSQL note: it was reported that some table names expects to be
     // quoted for this DB engine - and ZDBC won't do it for yourself - please
     // ensure you specify the correct quoted table name e.g. when you register
-    // the external PostgreSQL table via function VirtualTableExternalRegister()
+    // the external PostgreSQL table via function OrmMapExternal()
     procedure GetTableNames(out Tables: TRawUtf8DynArray); override;
     /// access to the database metadata, as retrieved by ZEOS
     // - returns TRUE if metadata interface has been retrieved
@@ -1387,12 +1387,14 @@ begin
             if fDbms = dMSSQL then
             begin
               P := Pointer(fResultSet.GetPWideChar(col + FirstDbcIndex, Len));
-              WR.AddJsonEscapeW(Pointer(P), Len);
+              if Len > 0 then // ZDBC returns P<>nil but Len=0 for ""
+                WR.AddJsonEscapeW(Pointer(P), Len);
             end
             else
             begin
               P := fResultSet.GetPAnsiChar(col + FirstDbcIndex, Len);
-              WR.AddJsonEscape(P, Len);
+              if Len > 0 then
+                WR.AddJsonEscape(P, Len);
             end;
             WR.Add('"');
           end;

@@ -270,7 +270,7 @@ function StaticMongoDBRegisterAll(aServer: TRestOrmServer;
 // of this kind will be created and returned
 // - if aDefinition.Kind is 'MongoDB' or 'MongoDBS', it will instantiate an
 // in-memory TRestServerDB or a TRestServerFullMemory instance (calling
-// CreateInMemoryServerForAllVirtualTables), then StaticMongoDBRegisterAll()
+// CreateInMemoryServer), then StaticMongoDBRegisterAll()
 // with a TMongoClient initialized from aDefinition.ServerName
 // ('server' or 'server:port') - optionally with TLS enabled if Kind equals
 // 'MongoDBS' - and a TMongoDatabase created from aDefinition.DatabaseName,
@@ -318,7 +318,7 @@ var
   temp: TTextWriterStackBuffer; // shared fTempBuffer is not protected now
 begin
   sf := length(SubFields);
-  W := TBsonWriter.Create(temp);
+  W := TBsonWriter.Create(temp{%H-});
   try
     W.BsonDocumentBegin;
     if WithID then
@@ -476,7 +476,7 @@ begin
   if (fEngineAddCompute = eacSynUniqueIdentifier) and
      (fEngineGenerator <> nil) then
   begin
-    result := fEngineGenerator.ComputeNew;
+    result := fEngineGenerator.ComputeNew; // this is preferred if several nodes
     fEngineLastID := result;
     exit;
   end;
@@ -1732,8 +1732,7 @@ begin
         end
         else
           database := client.Open(DatabaseName);
-      result := CreateInMemoryServerForAllVirtualTables(
-        aModel, aHandleAuthentication);
+      result := CreateInMemoryServer(aModel, aHandleAuthentication);
       StaticMongoDBRegisterAll(
         (result as TRestServer).OrmInstance as TRestOrmServer,
         database, aOptions, aMongoDBIdentifier);

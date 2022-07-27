@@ -1024,6 +1024,12 @@ procedure Base64MagicDecode(var ParamValue: RawUtf8);
 // JSON_BASE64_MAGIC_C pattern, decode and set Blob and return TRUE
 function Base64MagicCheckAndDecode(Value: PUtf8Char; var Blob: RawByteString): boolean; overload;
 
+/// decode '\uFFF0base64encodedbinary' or 'base64encodedbinary' into binary
+// - same as Base64MagicCheckAndDecode(), but will detect and ignore the magic
+// and not require it
+function Base64MagicTryAndDecode(Value: PUtf8Char; ValueLen: integer;
+  var Blob: RawByteString): boolean;
+
 /// check and decode '\uFFF0base64encodedbinary' content into binary
 // - this method will check the supplied value to match the expected
 // JSON_BASE64_MAGIC_C pattern, decode and set Blob and return TRUE
@@ -1421,14 +1427,14 @@ function AsciiToBaudot(const Text: RawUtf8): RawByteString; overload;
 /// convert some Baudot code binary, into ASCII-7 text
 // - reverse of the AsciiToBaudot() function
 // - any uppercase character would be decoded as lowercase - and some characters
-// may have disapeared
+// may have disapeared outside of a-z 0-9 - ' , ! : ( + ) $ ? @ . / ; range
 // - the "baud" symbol rate measurement comes from Emile's name ;)
 function BaudotToAscii(Baudot: PByteArray; len: PtrInt): RawUtf8; overload;
 
 /// convert some Baudot code binary, into ASCII-7 text
 // - reverse of the AsciiToBaudot() function
 // - any uppercase character would be decoded as lowercase - and some characters
-// may have disapeared
+// may have disapeared outside of a-z 0-9 - ' , ! : ( + ) $ ? @ . / ; range
 // - the "baud" symbol rate measurement comes from Emile's name ;)
 function BaudotToAscii(const Baudot: RawByteString): RawUtf8; overload;
 
@@ -1931,7 +1937,7 @@ function AnyTextFileToRawUtf8(const FileName: TFileName;
 // ! const
 // !   // Comment
 // !   ConstName: array[0..2] of byte = (
-// !     $01,$02,$03);
+// !     $01, $02, $03);
 procedure BinToSource(Dest: TTextWriter; const ConstName, Comment: RawUtf8;
   Data: pointer; Len: integer; PerLine: integer = 16); overload;
 
@@ -1941,9 +1947,13 @@ procedure BinToSource(Dest: TTextWriter; const ConstName, Comment: RawUtf8;
 // ! const
 // !   // Comment
 // !   ConstName: array[0..2] of byte = (
-// !     $01,$02,$03);
+// !     $01, $02, $03);
 function BinToSource(const ConstName, Comment: RawUtf8; Data: pointer;
   Len: integer; PerLine: integer = 16; const Suffix: RawUtf8 = ''): RawUtf8; overload;
+
+/// generate some pascal source code holding some data binary as constant
+function BinToSource(const ConstName, Comment: RawUtf8; const Data: RawByteString;
+  PerLine: integer = 16; const Suffix: RawUtf8 = ''): RawUtf8; overload;
 
 
 { *************************** TStreamRedirect and other Hash process }
@@ -2549,8 +2559,7 @@ type
     /// the actual storage, with length(Buffer) as Capacity
     fBuffer: RawByteString;
     fLen: PtrInt;
-    function GetCapacity: PtrInt;
-      {$ifdef HASINLINE}inline;{$endif}
+    fCapacity: PtrInt; // may not be length(fBuffer) after AsText(UseMainBuffer)
   public
     /// set Len to 0, but doesn't clear/free the Buffer itself
     procedure Reset;
@@ -2565,12 +2574,15 @@ type
       read fLen write fLen;
     /// how many bytes are currently allocated in the Buffer
     property Capacity: PtrInt
-      read GetCapacity;
-    /// add some content to the Buffer, resizing it if needed
+      read fCapacity;
+    /// add some UTF-8 buffer content to the Buffer, resizing it if needed
     // - could optionally include a #13#10 end of line
     procedure Append(P: pointer; PLen: PtrInt; CRLF: boolean = false); overload;
-    /// add some content to the Buffer, resizing it if needed
+    /// add some UTF-8 string content to the Buffer, resizing it if needed
     procedure Append(const Text: RawUtf8; CRLF: boolean = false); overload;
+      {$ifdef HASINLINE}inline;{$endif}
+      /// add some UTF-8 shortstring content to the Buffer, resizing it if needed
+    procedure AppendShort(const Text: ShortString; CRLF: boolean = false);
       {$ifdef HASINLINE}inline;{$endif}
     /// add some values as text to the Buffer, resizing it if needed
     procedure Append(const Args: array of const; CRLF: boolean = false); overload;
@@ -2598,7 +2610,9 @@ type
     /// retrieve the current Buffer/Len content as RawUtf8 text
     // - with some optional overhead for faster reallocmem at concatenation
     // - won't force Len to 0: caller should call Reset if done with it
-    procedure AsText(out Text: RawUtf8; Overhead: PtrInt = 0);
+    // - UseMainBuffer=true will return a copy of fBuffer into Text
+    procedure AsText(out Text: RawUtf8; Overhead: PtrInt = 0;
+      UseMainBuffer: boolean = false);
   end;
 
   /// pointer reference to a TRawByteStringBuffer
@@ -3198,7 +3212,7 @@ end;
 
 function FromVarString(var Source: PByte): RawUtf8;
 begin
-  FromVarString(Source, result);
+  FromVarString(Source, result{%H-});
 end;
 
 procedure FromVarString(var Source: PByte; var Value: RawUtf8);
@@ -3218,7 +3232,7 @@ begin
   if (Source = nil) or
       (PAnsiChar(Source) + len > PAnsiChar(SourceMax)) then
     len := 0;
-  FastSetString(result, Source, len);
+  FastSetString(result{%H-}, Source, len);
   inc(Source, len);
 end;
 
@@ -3767,13 +3781,13 @@ end;
 function TFastReader.VarString: RawByteString;
 begin
   with VarBlob do
-    FastSetRawByteString(result, Ptr, Len);
+    FastSetRawByteString(result{%H-}, Ptr, Len);
 end;
 
 function TFastReader.VarString(CodePage: integer): RawByteString;
 begin
   with VarBlob do
-    FastSetStringCP(result, Ptr, Len, CodePage)
+    FastSetStringCP(result{%H-}, Ptr, Len, CodePage)
 end;
 
 procedure TFastReader.VarUtf8(out result: RawUtf8);
@@ -5119,9 +5133,7 @@ begin
     if R = @tmp[BufferOffset] then
       FastSetRawByteString(result, @tmp, len)
     else
-      if result {%H-}<> '' then
-        // don't call the MM which may move the data: just adjust length()
-        PStrLen(R - _STRLEN)^ := len;
+      FakeLength(result, len);
   end;
 end;
 
@@ -5338,9 +5350,9 @@ function TAlgoCompress.StreamCompress(Source, Dest: TStream; Magic: cardinal;
 var
   count: Int64;
   S, D: pointer;
-  Head: TAlgoCompressHead;
-  Trailer: TAlgoCompressTrailer;
-  src, dst: RawByteString;
+  head: TAlgoCompressHead;
+  trail: TAlgoCompressTrailer;
+  tmps, tmpd: RawByteString;
 begin
   result := 0;
   if (Dest = nil) or
@@ -5350,48 +5362,50 @@ begin
   if count = 0 then
     exit;
   S := GetStreamBuffer(Source);
-  Head.Magic := Magic;
+  head.Magic := Magic;
   repeat
     // compress Source into Dest with proper chunking
     if count > ChunkBytes then
-      Head.UnCompressedSize := ChunkBytes
+      head.UnCompressedSize := ChunkBytes
     else
-      Head.UnCompressedSize := count;
+      head.UnCompressedSize := count;
     if S = nil then
     begin
-      FastSetRawByteString(src, nil, Head.UnCompressedSize);
-      S := pointer(src);
+      FastSetRawByteString(tmps, nil, head.UnCompressedSize);
+      S := pointer(tmps); // here S is a temporary buffer
     end;
-    if {%H-}dst = '' then
-      FastSetRawByteString(dst, nil, AlgoCompressDestLen(Head.UnCompressedSize));
-    dec(count, Head.UnCompressedSize); // supports premature end of input
-    if S = pointer(src) then
-      Head.UnCompressedSize := Source.Read(S^, Head.UnCompressedSize);
-    if Head.UnCompressedSize <= 0 then
+    if {%H-}tmpd = '' then
+      FastSetRawByteString(tmpd, nil, AlgoCompressDestLen(head.UnCompressedSize));
+    dec(count, head.UnCompressedSize); // supports premature end of input
+    if S = pointer(tmps) then
+      head.UnCompressedSize := Source.Read(S^, head.UnCompressedSize);
+    if head.UnCompressedSize <= 0 then
       exit; // read error
-    Head.UncompressedHash := AlgoHash(ForceHash32, S, Head.UnCompressedSize);
-    D := pointer(dst);
-    Head.CompressedSize := AlgoCompress(S, Head.UnCompressedSize, D);
-    if Head.CompressedSize >= Head.UnCompressedSize then
+    head.UncompressedHash := AlgoHash(ForceHash32, S, head.UnCompressedSize);
+    D := pointer(tmpd);
+    head.CompressedSize := AlgoCompress(S, head.UnCompressedSize, D);
+    if head.CompressedSize >= head.UnCompressedSize then
     begin
       D := S; // compression is not worth it -> store
-      Head.CompressedSize := Head.UnCompressedSize;
-      Head.CompressedHash := Head.UncompressedHash;
+      head.CompressedSize := head.UnCompressedSize;
+      head.CompressedHash := head.UncompressedHash;
     end
     else
-      Head.CompressedHash := AlgoHash(ForceHash32, D, Head.CompressedSize);
-    Dest.WriteBuffer(Head, SizeOf(Head));
-    Dest.WriteBuffer(D^, Head.CompressedSize);
-    inc(result, SizeOf(Head) + Head.CompressedSize);
+      head.CompressedHash := AlgoHash(ForceHash32, D, head.CompressedSize);
+    Dest.WriteBuffer(head, SizeOf(head));
+    Dest.WriteBuffer(D^, head.CompressedSize);
+    if S <> pointer(tmps) then
+      inc(PByte(S), head.UnCompressedSize); // move ahead to next chunk
+    inc(result, SizeOf(head) + head.CompressedSize);
   until count = 0;
   if WithTrailer then
   begin
-    inc(result, SizeOf(Trailer));
-    Trailer.Magic := Magic;
-    Trailer.HeaderRelativeOffset := result;        // Int64 into cardinal
-    if Trailer.HeaderRelativeOffset <> result then // max 4GB compressed size
-      RaiseStreamError(self, 'StreamCompress trailer overflow');
-    Dest.WriteBuffer(Trailer, SizeOf(Trailer));
+    inc(result, SizeOf(trail));
+    trail.Magic := Magic;
+    trail.HeaderRelativeOffset := result;        // Int64 into cardinal
+    if trail.HeaderRelativeOffset <> result then // max 4GB compressed size
+      RaiseStreamError(self, 'StreamCompress trail overflow');
+    Dest.WriteBuffer(trail, SizeOf(trail));
   end;
 end;
 
@@ -5448,7 +5462,7 @@ var
       Source.Position := sourceSize - tmplen;
       if Source.Read(tmp, tmplen) <> tmplen then
         exit;
-      dec(tmplen, SizeOf(t^));
+      dec(tmplen, SizeOf(TAlgoCompressTrailer));
       t := @tmp[tmplen];
       repeat
         dec(PByte(t)); // search backward
@@ -5936,7 +5950,7 @@ begin
   L := 0;
   for i := 0 to high(Values) do
     inc(L, length(Values[i]));
-  FastSetRawByteString(result, nil, L);
+  FastSetRawByteString(result{%H-}, nil, L);
   P := pointer(result);
   for i := 0 to high(Values) do
   begin
@@ -6211,11 +6225,11 @@ begin
       dec(len)
   else
     dec(len, 2); // Base64AnyDecode() algorithm ignores the trailing '='
-  {$ifdef ASMX64AVX}
+  {$ifdef ASMX64AVXNOCONST}
   result := Base64DecodeMain(sp, rp, len); // may be Base64DecodeMainAvx2
   {$else}
   result := Base64AnyDecode(tab^, sp, rp, len);
-  {$endif ASMX64AVX}
+  {$endif ASMX64AVXNOCONST}
 end;
 
 procedure Base64EncodeLoop(rp, sp: PAnsiChar; len: cardinal; enc: PBase64Enc);
@@ -6235,7 +6249,7 @@ begin // this loop is faster than mORMot 1 manual x86 asm, even on Delphi 7
   until len = 0;
 end;
 
-{$ifdef ASMX64AVX} // AVX2 ASM not available on Delphi < 11
+{$ifdef ASMX64AVXNOCONST} // AVX2 ASM not available on Delphi < 11
 function Base64EncodeMainAvx2(rp, sp: PAnsiChar; len: cardinal): integer;
 var
   blen: PtrUInt;
@@ -6254,7 +6268,7 @@ begin
   // on error, AVX2 code let sp point to the faulty input so result=false
   result := Base64AnyDecode(ConvertBase64ToBin, sp, rp, len);
 end;
-{$endif ASMX64AVX}
+{$endif ASMX64AVXNOCONST}
 
 function Base64EncodeMainPas(rp, sp: PAnsiChar; len: cardinal): integer;
 var
@@ -6339,7 +6353,7 @@ var
 begin
   outlen := BinToBase64Length(len);
   inc(outlen, 2 * (outlen shr 6) + 2); // one CRLF per line
-  FastSetString(result, nil, PtrInt(outlen) + length(Prefix) + length(Suffix));
+  FastSetString(result{%H-}, nil, PtrInt(outlen) + length(Prefix) + length(Suffix));
   p := pointer(result);
   if Prefix <> '' then
   begin
@@ -6348,7 +6362,7 @@ begin
   end;
   while len >= PERLINE do
   begin
-    Base64EncodeMain(p, sp, PERLINE); // may use AVX2 on FPC x86_64
+    Base64EncodeLoop(p, sp, PERLINE, @b64enc); // better inlining than AVX2 here
     inc(sp, PERLINE);
     PWord(p + 64)^ := $0a0d; // on all systems for safety
     inc(p, 66);
@@ -6356,7 +6370,9 @@ begin
   end;
   if len > 0 then
   begin
-    last := Base64EncodeMain(p, sp, len);
+    last := len div 3;
+    if last <> 0 then
+      Base64EncodeLoop(p, sp, last * 3, @b64enc);
     inc(p, last * 4);
     last := last * 3;
     inc(sp, last);
@@ -6374,8 +6390,7 @@ begin
     MoveFast(pointer(Suffix)^, p^, PStrLen(PAnsiChar(pointer(Suffix)) - _STRLEN)^);
     inc(p, PStrLen(PAnsiChar(pointer(Suffix)) - _STRLEN)^);
   end;
-  p^ := #0;
-  PStrLen(PAnsiChar(pointer(result)) - _STRLEN)^ := p - pointer(result); // trim
+  FakeLength(result, pointer(p));
 end;
 
 function BinToBase64Short(const s: RawByteString): ShortString;
@@ -6421,12 +6436,12 @@ end;
 
 function BinToBase64WithMagic(const data: RawByteString): RawUtf8;
 begin
-  BinToBase64WithMagic(pointer(data), length(data), result);
+  BinToBase64WithMagic(pointer(data), length(data), result{%H-});
 end;
 
 function BinToBase64WithMagic(Data: pointer; DataLen: integer): RawUtf8;
 begin
-  BinToBase64WithMagic(Data, DataLen, result);
+  BinToBase64WithMagic(Data, DataLen, result{%H-});
 end;
 
 procedure BinToBase64WithMagic(Data: pointer; DataLen: integer;
@@ -6470,35 +6485,13 @@ begin
   result := IsBase64Internal(pointer(s), length(s), @ConvertBase64ToBin);
 end;
 
-function Base64ToBinLengthSafe(sp: PAnsiChar; len: PtrInt): PtrInt;
-var
-  dec: PBase64Dec;
-begin
-  dec := @ConvertBase64ToBin;
-  if IsBase64Internal(sp, len, dec) then
-  begin
-    if dec[sp[len - 2]] >= 0 then
-      if dec[sp[len - 1]] >= 0 then
-        result := 0
-      else
-        result := 1
-    else
-      result := 2;
-    result := (len shr 2) * 3 - result;
-  end
-  else
-    result := 0;
-end;
-
-function Base64ToBinLength(sp: PAnsiChar; len: PtrInt): PtrInt;
-var
-  dec: PBase64Dec;
+function Base64Length(sp: PAnsiChar; len: PtrInt; dec: PBase64Dec): PtrInt;
+  {$ifdef HASINLINE} inline; {$endif}
 begin
   result := 0;
   if (len = 0) or
      (len and 3 <> 0) then
     exit;
-  dec := @ConvertBase64ToBin;
   if dec[sp[len - 2]] >= 0 then
     if dec[sp[len - 1]] >= 0 then
       result := 0
@@ -6509,14 +6502,30 @@ begin
   result := (len shr 2) * 3 - result;
 end;
 
+function Base64ToBinLengthSafe(sp: PAnsiChar; len: PtrInt): PtrInt;
+var
+  dec: PBase64Dec;
+begin
+  dec := @ConvertBase64ToBin;
+  if IsBase64Internal(sp, len, dec) then
+    result := Base64Length(sp, len, dec)
+  else
+    result := 0;
+end;
+
+function Base64ToBinLength(sp: PAnsiChar; len: PtrInt): PtrInt;
+begin
+  result := Base64Length(sp, len, @ConvertBase64ToBin);
+end;
+
 function Base64ToBin(const s: RawByteString): RawByteString;
 begin
-  Base64ToBinSafe(pointer(s), length(s), result);
+  Base64ToBinSafe(pointer(s), length(s), result{%H-});
 end;
 
 function Base64ToBin(sp: PAnsiChar; len: PtrInt): RawByteString;
 begin
-  Base64ToBinSafe(sp, len, result);
+  Base64ToBinSafe(sp, len, result{%H-});
 end;
 
 function Base64ToBin(sp: PAnsiChar; len: PtrInt; var data: RawByteString): boolean;
@@ -6534,24 +6543,42 @@ end;
 
 function Base64ToBinSafe(sp: PAnsiChar; len: PtrInt): RawByteString;
 begin
-  Base64ToBinSafe(sp, len, result);
+  Base64ToBinSafe(sp, len, result{%H-});
+end;
+
+function Base64LengthAdjust(sp: PAnsiChar; var len: PtrInt): PtrInt;
+  {$ifdef HASINLINE} inline; {$endif}
+var
+  tab: PBase64Dec;
+begin
+  result := len; // for better code generation
+  if (result = 0) or
+     (result and 3 <> 0) then
+  begin
+    result := 0;
+    exit;
+  end;
+  tab := @ConvertBase64ToBin;
+  if tab[sp[result - 2]] >= 0 then
+    if tab[sp[result - 1]] >= 0 then
+      result := 0
+    else
+      result := 1
+  else
+    result := 2;
+  sp := pointer(result);
+  result := (len shr 2) * 3 - result;
+  dec(len, PtrInt(sp)); // adjust for Base64AnyDecode() algorithm
 end;
 
 function Base64ToBinSafe(sp: PAnsiChar; len: PtrInt; var data: RawByteString): boolean;
 var
   resultLen: PtrInt;
 begin
-  resultLen := Base64ToBinLength(sp, len);
+  resultLen := Base64LengthAdjust(sp, len);
   if resultLen <> 0 then
   begin
     FastSetRawByteString(data, nil, resultLen);
-    if ConvertBase64ToBin[sp[len - 2]] >= 0 then
-      if ConvertBase64ToBin[sp[len - 1]] >= 0 then
-        // keep len as it is
-      else
-        dec(len)
-    else
-      dec(len, 2); // adjust for Base64AnyDecode() algorithm
     result := Base64DecodeMain(sp, pointer(data), len); // may use AVX2
     if not result then
       data := '';
@@ -6567,17 +6594,10 @@ function Base64ToBinSafe(sp: PAnsiChar; len: PtrInt; out data: TBytes): boolean;
 var
   resultLen: PtrInt;
 begin
-  resultLen := Base64ToBinLength(sp, len);
+  resultLen := Base64LengthAdjust(sp, len);
   if resultLen <> 0 then
   begin
     SetLength(data, resultLen);
-    if ConvertBase64ToBin[sp[len - 2]] >= 0 then
-      if ConvertBase64ToBin[sp[len - 1]] >= 0 then
-        // keep len as it is
-      else
-        dec(len)
-    else
-      dec(len, 2); // adjust for Base64AnyDecode() algorithm
     result := Base64DecodeMain(sp, pointer(data), len); // may use AVX2
     if not result then
       data := nil;
@@ -6720,12 +6740,12 @@ end;
 
 function Base64uriToBin(sp: PAnsiChar; len: PtrInt): RawByteString;
 begin
-  Base64uriToBin(sp, len, result);
+  Base64uriToBin(sp, len, result{%H-});
 end;
 
 function Base64uriToBin(const s: RawByteString): RawByteString;
 begin
-  Base64uriToBin(pointer(s), length(s), result);
+  Base64uriToBin(pointer(s), length(s), result{%H-});
 end;
 
 procedure Base64uriToBin(sp: PAnsiChar; len: PtrInt; var result: RawByteString);
@@ -6839,6 +6859,18 @@ begin
   end;
 end;
 
+function Base64MagicTryAndDecode(Value: PUtf8Char; ValueLen: integer;
+  var Blob: RawByteString): boolean;
+begin
+  if (ValueLen >= 4) and
+     (PCardinal(Value)^ and $ffffff = JSON_BASE64_MAGIC_C) then
+  begin
+    inc(Value, 3); // just ignore the magic trailer
+    dec(ValueLen, 3);
+  end;
+  result := Base64ToBinSafe(PAnsiChar(Value), ValueLen, Blob);
+end;
+
 function Base64MagicCheckAndDecode(Value: PUtf8Char; ValueLen: integer;
   var Blob: RawByteString): boolean;
 begin
@@ -6936,7 +6968,7 @@ var
   len: integer;
 begin
   len := BinToBase58(Bin, BinLen, temp);
-  FastSetString(result, temp.buf, len);
+  FastSetString(result{%H-}, temp.buf, len);
   temp.Done;
 end;
 
@@ -7007,7 +7039,7 @@ var
   len: integer;
 begin
   len := Base58ToBin(B58, B58Len, temp);
-  FastSetRawByteString(result, temp.buf, len);
+  FastSetRawByteString(result{%H-}, temp.buf, len);
   temp.Done;
 end;
 
@@ -7018,7 +7050,7 @@ end;
 
 function BlobToRawBlob(P: PUtf8Char; Len: integer): RawBlob;
 begin
-  BlobToRawBlob(P, result, Len);
+  BlobToRawBlob(P, result{%H-}, Len);
 end;
 
 procedure BlobToRawBlob(P: PUtf8Char; var result: RawBlob; Len: integer);
@@ -8795,13 +8827,10 @@ end;
 
 function LogEscapeFull(source: PAnsiChar; sourcelen: integer): RawUtf8;
 begin
-  FastSetString(result, nil, sourcelen * 3); // worse case
-  if sourcelen = 0 then
-    exit;
-  sourcelen := EscapeBuffer(source, sourcelen,
-    pointer(result), sourcelen * 3) - pointer(result);
-  // don't call the MM which may move the data -> just adjust length()
-  PStrLen(PAnsiChar(pointer(result)) - _STRLEN)^ := sourcelen;
+  FastSetString(result{%H-}, nil, sourcelen * 3); // worse case
+  if sourcelen <> 0 then
+    FakeLength(result, pointer(EscapeBuffer(
+      pointer(result), sourcelen, pointer(result), sourcelen * 3)));
 end;
 
 function EscapeToShort(source: PAnsiChar; sourcelen: integer): ShortString;
@@ -8908,7 +8937,6 @@ begin
   end;
 end;
 
-
 function BinToSource(const ConstName, Comment: RawUtf8;
   Data: pointer; Len, PerLine: integer; const Suffix: RawUtf8): RawUtf8;
 var
@@ -8937,6 +8965,12 @@ begin
   end;
 end;
 
+function BinToSource(const ConstName, Comment: RawUtf8;
+  const Data: RawByteString; PerLine: integer; const Suffix: RawUtf8): RawUtf8;
+begin
+  result := BinToSource(ConstName, Comment, pointer(Data), length(Data), PerLine, Suffix);
+end;
+
 procedure BinToSource(Dest: TTextWriter; const ConstName, Comment: RawUtf8;
   Data: pointer; Len, PerLine: integer);
 var
@@ -8958,10 +8992,10 @@ begin
       line := PerLine
     else
       line := Len;
-    Dest.AddShorter(#13#10'    ');
+    Dest.AddShorter(#13#10'   ');
     for i := 1 to line do
     begin
-      Dest.Add('$');
+      Dest.Add(' ', '$');
       Dest.AddByteToHex(P^);
       inc(P);
       Dest.AddComma;
@@ -8971,7 +9005,6 @@ begin
   Dest.CancelLastComma;
   Dest.Add(');'#13#10'  %_LEN = SizeOf(%);'#13#10, [ConstName, ConstName]);
 end;
-
 
 { *************************** TStreamRedirect and other Hash process }
 
@@ -10590,11 +10623,6 @@ end;
 
 { TRawByteStringBuffer }
 
-function TRawByteStringBuffer.GetCapacity: PtrInt;
-begin
-  result := length(fBuffer);
-end;
-
 procedure TRawByteStringBuffer.Reset;
 begin
   fLen := 0;
@@ -10603,7 +10631,10 @@ end;
 procedure TRawByteStringBuffer.Clear;
 begin
   fLen := 0;
+  if fBuffer = '' then
+    exit;
   fBuffer := '';
+  fCapacity := 0;
 end;
 
 function TRawByteStringBuffer.Buffer: pointer;
@@ -10613,19 +10644,24 @@ end;
 
 procedure TRawByteStringBuffer.Append(P: pointer; PLen: PtrInt; CRLF: boolean);
 var
-  cap, needed: PtrInt;
+  needed: PtrInt;
 begin
   if (PLen <= 0) and
      not CRLF then
     exit;
-  cap := Length(fBuffer);
-  if cap = 0 then
-    SetLength(fBuffer, PLen + 128) // small overhead at first
+  if fCapacity = 0 then
+  begin
+    fCapacity := PLen + 128; // small overhead at first
+    SetLength(fBuffer, fCapacity);
+  end
   else
   begin
     needed := fLen + PLen + 2;
-    if needed > cap then
-      SetLength(fBuffer, needed + needed shr 3 + 2048); // generous overhead
+    if needed > fCapacity then
+    begin
+      fCapacity := needed + needed shr 3 + 2048; // generous overhead
+      SetLength(fBuffer, fCapacity);
+    end;
   end;
   if PLen > 0 then
   begin
@@ -10642,6 +10678,11 @@ end;
 procedure TRawByteStringBuffer.Append(const Text: RawUtf8; CRLF: boolean);
 begin
   Append(pointer(Text), length(Text), CRLF);
+end;
+
+procedure TRawByteStringBuffer.AppendShort(const Text: ShortString; CRLF: boolean);
+begin
+  Append(@Text[1], length(Text), CRLF);
 end;
 
 procedure TRawByteStringBuffer.Append(const Args: array of const; CRLF: boolean);
@@ -10663,14 +10704,17 @@ end;
 function TRawByteStringBuffer.CanAppend(Bytes: PtrInt): boolean;
 begin
   result := (Bytes = 0) or
-            (fLen + Bytes <= length(fBuffer));
+            (fLen + Bytes <= fCapacity);
 end;
 
 function TRawByteStringBuffer.Reserve(MaxSize: PtrInt): pointer;
 begin
   fLen := 0;
-  if MaxSize > length(fBuffer) then
-    FastSetRawByteString(fBuffer, nil, MaxSize); // no realloc -> not SetLength()
+  if MaxSize > fCapacity then
+  begin
+    fCapacity := MaxSize;
+    FastSetRawByteString(fBuffer, nil, MaxSize); // no realloc -> no SetLength()
+  end;
   result := pointer(fBuffer);
 end;
 
@@ -10723,8 +10767,11 @@ procedure TRawByteStringBuffer.Insert(P: pointer; PLen: PtrInt;
   Position: PtrInt; CRLF: boolean);
 begin
   inc(PLen, 2 * ord(CRLF));
-  if PLen + fLen > length(fBuffer) then
-    SetLength(fBuffer, PLen + fLen + fLen shr 3);
+  if PLen + fLen > fCapacity then
+  begin
+    fCapacity := PLen + fLen + fLen shr 3;
+    SetLength(fBuffer, fCapacity);
+  end;
   MoveFast(pointer(fBuffer)^, PByteArray(fBuffer)[PLen], fLen);
   dec(PLen, 2 * ord(CRLF));
   MoveFast(P^, pointer(fBuffer)^, PLen);
@@ -10732,18 +10779,25 @@ begin
     PWord(@PByteArray(fBuffer)[PLen])^ := $0a0d;
 end;
 
-procedure TRawByteStringBuffer.AsText(out Text: RawUtf8; Overhead: PtrInt);
+procedure TRawByteStringBuffer.AsText(out Text: RawUtf8; Overhead: PtrInt;
+  UseMainBuffer: boolean);
 begin
   if (Len = 0) or
+     (fBuffer = '') or
      (OverHead < 0) then
     exit;
-  FastSetString(Text, nil, Len + Overhead);
-  MoveFast(pointer(fBuffer)^, pointer(Text)^, Len);
-  if OverHead <> 0 then
+  if UseMainBuffer and
+     (PStrCnt(PAnsiChar(pointer(fBuffer)) - _STRCNT)^ = 1) and
+     (Len + Overhead <= fCapacity) then
+    Text := fBuffer // fast COW
+  else
   begin
-    PAnsiChar(pointer(Text))[Len] := #0;
-    PStrLen(PAnsiChar(pointer(Text)) - _STRLEN)^ := Len; // fake length
+    FastSetString(Text, nil, Len + Overhead);
+    MoveFast(pointer(fBuffer)^, pointer(Text)^, Len);
+    if OverHead = 0 then
+      exit;
   end;
+  FakeLength(Text, Len);
 end;
 
 
@@ -10796,13 +10850,13 @@ begin
   AlgoRle := TAlgoRle.Create;
   Base64EncodeMain := @Base64EncodeMainPas;
   Base64DecodeMain := @Base64DecodeMainPas;
-  {$ifdef ASMX64AVX} // focus on FPC x86_64 server performance
+  {$ifdef ASMX64AVXNOCONST} // focus on x86_64 server performance
   if cfAVX2 in CpuFeatures then
   begin // our AVX2 asm code is almost 10x faster than the pascal version
     Base64EncodeMain := @Base64EncodeMainAvx2; // 11.5 GB/s vs 1.3 GB/s
     Base64DecodeMain := @Base64DecodeMainAvx2; //  8.7 GB/s vs 0.9 GB/s
   end;
-  {$endif ASMX64AVX}
+  {$endif ASMX64AVXNOCONST}
 end;
 
 

@@ -2031,7 +2031,7 @@ var
     until len >= length(buf);
     // benchmark FillChar/FillCharFast
     {$ifdef ASMX64}
-    cputxt := GetSetName(TypeInfo(TX64CpuFeatures), CPUIDX64);
+    cputxt := GetSetName(TypeInfo(TX64CpuFeatures), X64CpuFeatures);
     {$endif ASMX64}
     if rtl then
       msg := 'FillChar'
@@ -2155,18 +2155,18 @@ var
 begin
   SetLength(buf, 16 shl 20); // 16MB
   {$ifdef ASMX64} // activate and validate SSE2 + AVX branches
-  bak := CPUIDX64;
+  bak := X64CpuFeatures;
   cpu := bak - [cpuHaswell, cpuAvx2];
-  CPUIDX64 := []; // default SSE2 128-bit process
+  X64CpuFeatures := []; // default SSE2 128-bit process
   Validate({rtl=}false);
-  {$ifdef FPC} // Delphi doesn't support AVX asm
+  {$ifdef ASMX64AVXNOCONST} // oldest Delphi doesn't support AVX asm
   if cpuAvx in cpu then
   begin
-    CPUIDX64 := [cpuAvx]; // AVX 256-bit process
+    X64CpuFeatures := [cpuAvx]; // AVX 256-bit process
     Validate(false);
   end;
-  {$endif FPC}
-  CPUIDX64 := bak; // there is no AVX2 move/fillchar (still 256-bit wide)
+  {$endif ASMX64AVXNOCONST}
+  X64CpuFeatures := bak; // there is no AVX move/fillchar (still 256-bit wide)
   if (cpu <> []) and
      (cpu <> [cpuAvx]) then
     Validate(false);
@@ -2191,10 +2191,24 @@ type
     Dyn: array of integer;
     Bulk: array[0..19] of byte;
   end;
+  TLicenseData = record
+    CustomerNum: Integer;
+    CustomerName: RawUtf8;
+    CustomerAddress: RawUtf8;
+    LicenceDate: TDate;
+    ProductName: RawUtf8;
+  end;
 var
   A, B, C: TR;
   i, j: PtrInt;
+  lic: TLicenseData;
 begin
+  CheckEqual(lic.CustomerName, '');
+  FillZero(TypeInfo(TLicenseData), lic);
+  CheckEqual(lic.CustomerName, '');
+  lic.CustomerName := '1234';
+  FillZero(TypeInfo(TLicenseData), lic);
+  CheckEqual(lic.CustomerName, '');
   FillCharFast(A, SizeOf(A), 0);
   FillCharFast(B, SizeOf(B), 0);
   FillCharFast(C, SizeOf(C), 0);
@@ -2273,10 +2287,10 @@ var
   name, value, utf: RawUtf8;
   str: string;
   P: PUtf8Char;
-  Guid2: TGUID;
+  Guid2: TGuid;
   U: TUri;
 const
-  GUID: TGUID = '{c9a646d3-9c61-4cb7-bfcd-ee2522c8f633}';
+  guid: TGuid = '{c9a646d3-9c61-4cb7-bfcd-ee2522c8f633}';
 
   procedure Test(const decoded, encoded: RawUtf8);
   begin
@@ -2327,12 +2341,12 @@ begin
     s := RandomUtf8(j);
     CheckEqual(UrlDecode(UrlEncode(s)), s, s);
   end;
-  utf := BinToBase64Uri(@GUID, SizeOf(GUID));
+  utf := BinToBase64Uri(@Guid, SizeOf(Guid));
   Check(utf = '00amyWGct0y_ze4lIsj2Mw');
   FillCharFast(Guid2, SizeOf(Guid2), 0);
   Check(Base64uriToBin(utf, @Guid2, SizeOf(Guid2)));
-  Check(IsEqualGuid(Guid2, GUID));
-  Check(IsEqualGuid(@Guid2, @GUID));
+  Check(IsEqualGuid(Guid2, Guid));
+  Check(IsEqualGuid(@Guid2, @Guid));
   Check(U.From('toto.com'));
   Check(U.Uri = 'http://toto.com/');
   Check(not U.Https);
@@ -2363,28 +2377,62 @@ end;
 procedure TTestCoreBase._GUID;
 var
   i: integer;
-  s: RawByteString;
-  st: string;
-  g, g2: TGUID;
+  s: RawUtf8;
+  st, st2: string;
+  g, g2: TGuid;
   h, h2: THash512Rec;
   pt: TRttiParserType;
 const
-  GUID: TGUID = '{c9a646d3-9c61-4cb7-bfcd-ee2522c8f633}';
+  Guid: TGuid = '{c9a646d3-9c61-4cb7-bfcd-ee2522c8f633}';
 begin
-  s := GuidToRawUtf8(GUID);
+  s := GuidToRawUtf8(Guid);
   Check(s = '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
   Check(TextToGuid(@s[2], @g2)^ = '}');
-  Check(IsEqualGuid(g2, GUID));
-  Check(GuidToString(GUID) = '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
-  Check(IsEqualGuid(RawUtf8ToGuid(s), GUID));
+  Check(IsEqualGuid(g2, Guid));
+  Check(GuidToString(Guid) = '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
+  Check(IsEqualGuid(RawUtf8ToGuid(s), Guid));
+  Check(TrimGuid(s));
+  CheckEqual(s, 'c9a646d39c614cb7bfcdee2522c8f633');
+  CheckEqual(MacTextFromHex(''), '');
+  CheckEqual(MacTextFromHex('1'), '');
+  CheckEqual(MacTextFromHex('12'), '12');
+  CheckEqual(MacTextFromHex('123'), '');
+  CheckEqual(MacTextFromHex('1234'), '12:34');
+  CheckEqual(MacTextFromHex('12345'), '');
+  CheckEqual(MacTextFromHex(s), 'c9:a6:46:d3:9c:61:4c:b7:bf:cd:ee:25:22:c8:f6:33');
+  CheckEqual(MacTextFromHex(UpperCase(s)), 'c9:a6:46:d3:9c:61:4c:b7:bf:cd:ee:25:22:c8:f6:33');
+  s := s + s;
+  repeat
+    delete(s, Random32(length(s)) + 1, 1);
+    Check(TrimGuid(s) = (length(s) = 32));
+  until s = '';
+  s := '   ';
+  Check(not TrimGuid(s));
+  CheckEqual(s, '');
+  Check(not TrimGuid(s));
+  CheckEqual(s, '');
+  s := 'C9A646D3-9C61-4CB7-BFCD-EE2522C8F633';
+  Check(IsEqualGuid(RawUtf8ToGuid(s), Guid));
+  Check(TrimGuid(s));
+  CheckEqual(s, 'c9a646d39c614cb7bfcdee2522c8f633');
+  s := 'C9A646D39C614CB7BFCDEE2522C8F633';
+  Check(IsEqualGuid(RawUtf8ToGuid(s), Guid));
+  Check(TrimGuid(s));
+  CheckEqual(s, 'c9a646d39c614cb7bfcdee2522c8f633');
+  Check(TrimGuid(s));
+  CheckEqual(s, 'c9a646d39c614cb7bfcdee2522c8f633');
+  s[3] := 'Z';
+  Check(not TrimGuid(s));
+  CheckEqual(s, 'c9Z646d39c614cb7bfcdee2522c8f633');
+  s := '   1234 678 --';
+  Check(not TrimGuid(s));
+  CheckEqual(s, '1234678');
   for i := 1 to 1000 do
   begin
-    g.D1 := Random32;
-    g.D2 := Random32(65535);
-    g.D3 := Random32(65535);
-    Int64(g.D4) := Random64;
+    RandomGuid(g);
     st := GuidToString(g);
-    Check(st = SysUtils.GuidToString(g));
+    st2 := SysUtils.GuidToString(g);
+    Check(st = st2);
     Check(IsEqualGuid(StringToGuid(st), g));
     s := GuidToRawUtf8(g);
     Check(st = mormot.core.unicode.Utf8ToString(s));
@@ -2394,12 +2442,14 @@ begin
     Check(TextToGuid(@s[2], @g2)^ = '}');
     Check(IsEqualGuid(g2, g));
     Check(IsEqualGuid(@g2, @g));
+    Check(TrimGuid(s));
+    CheckEqual(length(s), 32);
     Check(IsEqualGuid(RawUtf8ToGuid(s), g));
     inc(g.D1);
     Check(not IsEqualGuid(g2, g));
     Check(not IsEqualGuid(RawUtf8ToGuid(s), g));
   end;
-  // oldest Delphi can't compile TypeInfo(TGUID) -> use PT_INFO[ptGuid]
+  // oldest Delphi can't compile TypeInfo(TGuid) -> use PT_INFO[ptGuid]
   s := RecordSaveJson(g, PT_INFO[ptGuid]);
   FillCharFast(g2, SizeOf(g2), 0);
   Check(RecordLoadJson(g2, pointer(s), PT_INFO[ptGuid]) <> nil);
@@ -6068,7 +6118,7 @@ begin
         i2.From(i1.Value);
         check(i1.Equal(i2));
         json := VariantSaveJson(i1.AsVariant);
-        check(VariantSaveJson(i2.AsVariant) = json);
+        checkEqual(VariantSaveJson(i2.AsVariant), json);
         CheckEqual(json, FormatUtf8(
           '{"Created":"%","Identifier":%,"Counter":%,"Value":%,"Hex":"%"}',
           [DateTimeToIso8601Text(i1.CreateDateTime), i1.ProcessID, i1.Counter,
@@ -6081,7 +6131,7 @@ begin
         else
           check(Length(obfusc) = 24);
         inc(obfusc[12]);
-        check(not gen.FromObfuscated(obfusc, i3), 'tampered text');
+        check(not gen.FromObfuscated(obfusc, i3), 'tempered text');
         dec(obfusc[12]);
       end;
       //writeln('LastUnixCreateTime=', gen.LastUnixCreateTime);

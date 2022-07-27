@@ -56,8 +56,7 @@ type
     constructor Create; override;
     /// define the log information into the supplied TSynLog class
     // - if you don't call this method, the logging won't be initiated
-    // - is to be called typically in the overriden Create constructor of the
-    // associated TSynDaemon class, just after "inherited Create"
+    // - called by default in TSynDaemon.AfterCreate if RunFromSynTests=false
     procedure SetLog(aLogClass: TSynLogClass);
     /// returns user-friendly description of the service, including version
     // information and company copyright (if available)
@@ -157,6 +156,7 @@ type
     fConsoleMode: boolean;
     fWorkFolderName: TFileName;
     fSettings: TSynDaemonAbstractSettings;
+    procedure AfterCreate; virtual; // call fSettings.SetLog() if not from tests
     function CustomCommandLineSyntax: string; virtual;
     {$ifdef OSWINDOWS}
     procedure DoStart(Sender: TService);
@@ -170,7 +170,8 @@ type
     constructor Create(aSettingsClass: TSynDaemonSettingsClass;
       const aWorkFolder, aSettingsFolder, aLogFolder: TFileName;
       const aSettingsExt: TFileName = '.settings';
-      const aSettingsName: TFileName = ''); reintroduce;
+      const aSettingsName: TFileName = '';
+      aSettingsOptions: TSynJsonFileSettingsOptions = []); reintroduce;
     /// main entry point of the daemon, to process the command line switches
     // - aAutoStart is used only under Windows
     procedure CommandLine(aAutoStart: boolean = true);
@@ -259,7 +260,8 @@ end;
 
 constructor TSynDaemon.Create(aSettingsClass: TSynDaemonSettingsClass;
   const aWorkFolder, aSettingsFolder, aLogFolder,
-        aSettingsExt, aSettingsName: TFileName);
+        aSettingsExt, aSettingsName: TFileName;
+        aSettingsOptions: TSynJsonFileSettingsOptions);
 var
   fn: TFileName;
 begin
@@ -271,6 +273,7 @@ begin
   if aSettingsClass = nil then
     aSettingsClass := TSynDaemonSettings;
   fSettings := aSettingsClass.Create;
+  fSettings.SettingsOptions := aSettingsOptions;
   fn := aSettingsFolder;
   if fn = '' then
     fn := {$ifdef OSWINDOWS}fWorkFolderName{$else}'/etc/'{$endif};
@@ -279,13 +282,22 @@ begin
     fn := fn + Utf8ToString(Executable.ProgramName)
   else
     fn := fn + aSettingsName;
-  fSettings.LoadFromFile(fn + aSettingsExt);
+  fSettings.LoadFromFile(fn + aSettingsExt); // now loads the settings file
   if fSettings.LogPath = '' then
     if aLogFolder = '' then
       fSettings.LogPath :=
         {$ifdef OSWINDOWS}fWorkFolderName{$else}GetSystemPath(spLog){$endif}
     else
       fSettings.LogPath := EnsureDirectoryExists(aLogFolder);
+  AfterCreate;
+end;
+
+procedure TSynDaemon.AfterCreate;
+begin
+  if RunFromSynTests then
+    fSettings.fLogClass := TSynLog // don't overwrite
+  else
+    fSettings.SetLog(TSynLog);
 end;
 
 destructor TSynDaemon.Destroy;

@@ -163,10 +163,11 @@ const
 
   /// MIME content type used for JSON communication (as used by the Microsoft
   // WCF framework and the YUI framework)
-  JSON_CONTENT_TYPE = 'application/json; charset=UTF-8';
+  // - no 'charset=UTF-8' encoding is necessary, as by specified by RFC 7159
+  JSON_CONTENT_TYPE = 'application/json';
 
   /// HTTP header for MIME content type used for plain JSON
-  // - i.e. 'Content-Type: application/json; charset=UTF-8'
+  // - i.e. 'Content-Type: application/json'
   JSON_CONTENT_TYPE_HEADER = HEADER_CONTENT_TYPE + JSON_CONTENT_TYPE;
 
   /// MIME content type used for plain JSON, in upper case
@@ -256,7 +257,7 @@ const
 
 var
   /// MIME content type used for JSON communication
-  // - i.e. 'application/json; charset=UTF-8'
+  // - i.e. 'application/json' as stated by datatracker.ietf.org/doc/html/rfc7159
   // - this global will be initialized with JSON_CONTENT_TYPE constant, to
   // avoid a memory allocation each time it is assigned to a variable
   JSON_CONTENT_TYPE_VAR: RawUtf8;
@@ -1025,7 +1026,7 @@ var
 // - by default, the version numbers will be retrieved at startup from the
 // executable itself (if it was included at build time)
 // - but you can use this function to set any custom version numbers
-procedure SetExecutableVersion(aMajor,aMinor,aRelease,aBuild: integer); overload;
+procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer); overload;
 
 /// initialize Executable global variable, supplying the version as text
 // - e.g. SetExecutableVersion('7.1.2.512');
@@ -1042,7 +1043,7 @@ var
 
 
 type
-  /// identify an operating system folder
+  /// identify an operating system folder for GetSystemPath()
   TSystemPath = (
     spCommonData,
     spUserData,
@@ -2136,13 +2137,12 @@ function WindowsFileTime64ToDateTime(WinTime: QWord): TDateTime;
 // - returns 0 if the conversion failed
 function DateTimeToWindowsFileTime(DateTime: TDateTime): integer;
 
-/// reduce the visibility of a given file by setting its read/write attributes
+/// reduce the visibility of a given file, and set its read/write attributes
 // - on POSIX, change attributes for the the owner, and reset group/world flags
-// - if Secret=false, will have normal file attributes, with read/write access
-// - if Secret=true, will have read-only attributes (and hidden on Windows -
-// under POSIX, there is no "hidden" file attribute, but you should define a
-// FileName starting by '.')
-procedure FileSetAttributes(const FileName: TFileName; Secret: boolean);
+// so that it is accessible by the current user only; under POSIX, there is
+// no "hidden" file attribute, but you should define a FileName starting by '.'
+// - on Windows, will set the "hidden" file attribue
+procedure FileSetHidden(const FileName: TFileName; ReadOnly: boolean);
 
 /// get a file size, from its name
 // - returns 0 if file doesn't exist
@@ -2308,6 +2308,11 @@ function TemporaryFileName: TFileName;
 // - may optionally return the extracted extension, as '.ext'
 function GetFileNameWithoutExt(const FileName: TFileName;
   Extension: PFileName = nil): TFileName;
+
+/// extract the file name without any path nor extension, as UTF-8
+// - e.g. GetFileNameWithoutExt('/var/toto.ext') = 'toto'
+// - used e.g. to compute Executable.ProgramName
+function GetFileNameWithoutExtOrPath(const FileName: TFileName): RawUtf8;
 
 /// compare two "array of TFileName" elements, grouped by file extension
 // - i.e. with no case sensitivity on Windows
@@ -2626,8 +2631,13 @@ var
   StdOut: THandle;
 
   {$ifdef OSPOSIX}
+  /// set at initialization if StdOut has the TTY flag and env has a known TERM
   StdOutIsTTY: boolean;
   {$endif OSPOSIX}
+
+  /// global flag to modify the code behavior at runtime when run from TSynTests
+  // - e.g. TSynDaemon.AfterCreate won't overwrite TSynTests.RunAsConsole logs
+  RunFromSynTests: boolean;
 
 /// similar to Windows AllocConsole API call, to be truly cross-platform
 // - do nothing on Linux/POSIX, but set StdOut propertly from StdOutputHandle
@@ -2817,7 +2827,8 @@ type
   // - calls SwitchToThread after some spinning, but don't use any R/W OS API
   // - warning: ReadLocks are reentrant and allow concurrent acccess, but calling
   // WriteLock within a ReadLock, or within another WriteLock, would deadlock
-  // - consider TRWLock is you need an upgradable lock
+  // - consider TRWLock is you need an upgradable lock - but if you mostly read,
+  // then a TRWLightLock.ReadLock/ReadUnLock/WriteLock is faster than upgrading
   // - light locks are expected to be kept a very small amount of time: use
   // TSynLocker or TRTLCriticalSection if the lock may block too long
   // - several lightlocks, each protecting a few variables (e.g. a list), may
@@ -3272,7 +3283,7 @@ var
   SharedRandom: TLecuyerThreadSafe;
 
 {$ifdef OSPOSIX}
-  /// could be set to TRUE to force SleepHiRes(0) to call the sched_yield API
+  /// could be set to TRUE to force SleepHiRes(0) to call the POSIX sched_yield
   // - in practice, it has been reported as buggy under POSIX systems
   // - even Linus Torvald himself raged against its usage - see e.g.
   // https://www.realworldtech.com/forum/?threadid=189711&curpostid=189752
@@ -4864,6 +4875,11 @@ begin
   end;
 end;
 
+function GetFileNameWithoutExtOrPath(const FileName: TFileName): RawUtf8;
+begin
+  result := RawUtf8(GetFileNameWithoutExt(ExtractFileName(FileName)));
+end;
+
 {$ifdef ISDELPHI20062007} // circumvent Delphi 2007 RTL inlining issue
 function AnsiCompareFileName(const S1, S2 : TFileName): integer;
 begin
@@ -5614,8 +5630,9 @@ begin
   begin
     if fUserAgent = '' then
     begin
-      fUserAgent := RawUtf8(Format('%s/%s%s', [GetFileNameWithoutExt(
-        ExtractFileName(fFileName)), DetailedOrVoid, OS_INITIAL[OS_KIND]]));
+      fUserAgent := RawUtf8(Format('%s/%s%s', [
+        GetFileNameWithoutExtOrPath(fFileName), DetailedOrVoid,
+        OS_INITIAL[OS_KIND]]));
       {$ifdef OSWINDOWS}
       if OSVersion in WINDOWS_32 then
         fUserAgent := fUserAgent + '32';
@@ -5696,7 +5713,7 @@ begin
         InstanceFileName := GetModuleName(HInstance)
       else
         InstanceFileName := ProgramFileName;
-      ProgramName := RawUtf8(GetFileNameWithoutExt(ExtractFileName(ProgramFileName)));
+      ProgramName := GetFileNameWithoutExtOrPath(ProgramFileName);
       GetUserHost(User, Host);
       if Host = '' then
         Host := 'unknown';

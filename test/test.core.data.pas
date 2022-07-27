@@ -557,7 +557,7 @@ var
   doc: variant;
   html: RawUtf8;
   helpers: TSynMustacheHelpers;
-  guid: TGUID;
+  guid: TGuid;
   spec, i: integer;
 begin
   // manual tests
@@ -720,7 +720,7 @@ begin
     '{{newguid}}');
   html := mustache.RenderJson('{}', nil, TSynMustache.HelpersGetStandardList);
   check((html <> '') and
-        (TextToGuid(@html[2], @guid) <> nil));
+        (TextToGuid(@html[2], @Guid) <> nil));
   mustache := TSynMustache.Parse(
     '<h1>{{header}}</h1>'#$D#$A'{{#items}}'#$D#$A'{{#first}}'#$D#$A +
     '<li><strong>{{name}}</strong></li>'#$D#$A'{{/first}}'#$D#$A +
@@ -1048,7 +1048,7 @@ type
 
   TTestCustomJsonArraySimple = packed record
     A, B: Int64;
-    C: array of TGUID;
+    C: array of TGuid;
     D: RawUtf8;
     E: array of TTestCustomJsonArraySimpleArray;
     H: RawUtf8;
@@ -1184,7 +1184,7 @@ const
   __TTestCustomJsonArray: RawUtf8 =
       'A,B,C byte D RawByteString E[E1 double E2 string] F TDateTime';
   __TTestCustomJsonArraySimple =
-      'A,B Int64 C array of TGUID D RawUtf8 E [F RawUtf8 G array of RawUtf8] H RawUtf8';
+      'A,B Int64 C array of TGuid D RawUtf8 E [F RawUtf8 G array of RawUtf8] H RawUtf8';
   __TTestCustomJsonArrayVariant =
       'A,B Int64 C array of variant D RawUtf8';
   __TTestCustomJsonGitHub =
@@ -2253,7 +2253,7 @@ begin
   J := GetJsonObjectAsSql('{"ID":  1 ,"Name":"Alice","Role":"User","Last Login":null,'+
     '"First Login" :   null  ,  "Department"  :  ' +
     '"{\"relPath\":\"317\\\\\",\"revision\":1}" } ]', false, true);
-  U := ' (ID,Name,Role,Last Login,First Login,Department) VALUES ' +
+  U := ' (ID,Name,Role,Last Login,First Login,Department) values ' +
     '(:(1):,:(''Alice''):,:(''User''):,:(null):,:(null):,' +
     ':(''{"relPath":"317\\","revision":1}''):)';
   CheckEqual(J, U);
@@ -4014,7 +4014,10 @@ begin
   Check(Bson('{%:[?,?,?]}', ['BSON'], ['awesome', 5.05, 1986]) = BSONAWESOMEBIN);
   Check(Bson('{%:?}', ['BSON'], [_Arr(['awesome', 5.05, 1986])]) = BSONAWESOMEBIN);
   Check(Bson(['BSON', '[', 'awesome', 5.05, 1986, ']']) = BSONAWESOMEBIN);
-  Check(Bson(['BSON', '[', 'awesome', 5.05, 1986]) = BSONAWESOMEBIN);
+  temp := Bson(['BSON', '[', 'awesome', 5.05, 1986]);
+  Check(temp = BSONAWESOMEBIN);
+  temp := Bson(['BSON', '[', 'awesome', 5.05, 1986]);
+  Check(temp = BSONAWESOMEBIN);
   o2 := BsonVariantType[bsonDat];
   Check(VariantSaveJson(o2) = u);
   _Json('{BSON: ["test", 5.05, 1986]}', o);

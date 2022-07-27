@@ -513,15 +513,11 @@ function HttpDateToDateTime(const httpdate: RawUtf8; var datetime: TDateTime;
 function HttpDateToDateTime(const httpdate: RawUtf8;
   tolocaltime: boolean = false): TDateTime; overload;
 
-var
-  /// contains the current UTC timestamp as the full 'Date' HTTP header line
-  // - e.g. 'Date: Tue, 15 Nov 1994 12:45:26 GMT'#13#10
-  // - needs to be refreshed by an explicit SetHttpDateNowUtcCache() call
-  HttpDateNowUtcCache: RawUtf8;
-
-/// refresh HttpDateNowUtcCache if needed
-// - won't overwrite the current value when called more than once per second
-procedure SetHttpDateNowUtcCache(tix: Int64 = 0);
+/// returns the current UTC timestamp as the full 'Date' HTTP header line
+// - e.g. 'Date: Tue, 15 Nov 1994 12:45:26 GMT'#13#10
+// - returns as a shortstring to avoid a memory allocation by caller
+// - use an internal cache for every second refresh
+function HttpDateNowUtc: TShort63;
 
 /// convert some TDateTime to a small text layout, perfect e.g. for naming a local file
 // - use 'YYMMDDHHMMSS' format so year is truncated to last 2 digits, expecting
@@ -558,6 +554,10 @@ const
   // - may be used to check for a valid just-generated Unix timestamp value
   // - or used to store a timestamp without any 32-bit "Year 2038" overflow
   UNIXTIME_MINIMAL = 1481187020;
+
+/// returns UnixTimeUtc - UNIXTIME_MINIMAL so has no "Year 2038" overflow issue
+function UnixTimeMinimalUtc: cardinal;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a second-based c-encoded time as TDateTime
 //  - i.e. number of seconds elapsed since Unix epoch 1/1/1970 into TDateTime
@@ -2319,21 +2319,33 @@ begin
 end;
 
 var
+  _HttpDateNowUtc: TShort63;
+  _HttpDateNowUtcLock: TLightLock;
   _HttpDateNowUtcTix: cardinal; // = GetTickCount64 div 1024 (every second)
 
-procedure SetHttpDateNowUtcCache(tix: Int64);
+procedure SetHttpDateNowUtc(tix: cardinal);
 var
   T: TSynSystemTime;
+  now: RawUtf8; // use a temp variable for _HttpDateNowUtc atomic set
+begin
+  _HttpDateNowUtcLock.UnLock;
+  T.FromNowUtc;
+  T.ToHttpDate(now, 'GMT'#13#10, 'Date: ');
+  _HttpDateNowUtcLock.Lock;
+  _HttpDateNowUtcTix := tix;
+  SetString(_HttpDateNowUtc, PAnsiChar(pointer(now)), length(now));
+end;
+
+function HttpDateNowUtc: TShort63;
+var
   c: cardinal;
 begin
-  if tix = 0 then
-    tix := GetTickCount64;
-  c := tix shr 10;
-  if c = _HttpDateNowUtcTix then
-    exit;
-  T.FromNowUtc;
-  T.ToHttpDate(HttpDateNowUtcCache, 'GMT'#13#10, 'Date: ');
-  _HttpDateNowUtcTix := c; // should be the last assignment
+  c := GetTickCount64 shr 10;
+  _HttpDateNowUtcLock.Lock;
+  if c <> _HttpDateNowUtcTix then
+    SetHttpDateNowUtc(c);
+  result := _HttpDateNowUtc; // true atomic copy
+  _HttpDateNowUtcLock.UnLock;
 end;
 
 function TimeToString: RawUtf8;
@@ -2375,6 +2387,11 @@ end;
 
 
 { ************ TUnixTime / TUnixMSTime POSIX Epoch Compatible 64-bit date/time }
+
+function UnixTimeMinimalUtc: cardinal;
+begin
+  result := UnixTimeUtc - UNIXTIME_MINIMAL;
+end;
 
 function UnixTimeToDateTime(const UnixTime: TUnixTime): TDateTime;
 begin

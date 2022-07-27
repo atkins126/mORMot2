@@ -27,6 +27,7 @@ uses
   mormot.core.os,
   mormot.core.unicode, // for efficient UTF-8 text process within HTTP
   mormot.core.text,
+  mormot.core.data,
   mormot.core.buffers,
   mormot.core.zip,
   mormot.core.threads,
@@ -81,9 +82,9 @@ type
 /// adjust HTTP body compression according to the supplied 'CONTENT-TYPE'
 // - will detect most used compressible content (like 'text/*' or
 // 'application/json') from OutContentType
-function CompressContent(Accepted: THttpSocketCompressSet;
+procedure CompressContent(Accepted: THttpSocketCompressSet;
   const Handled: THttpSocketCompressRecDynArray; const OutContentType: RawUtf8;
-  var OutContent: RawByteString): RawUtf8;
+  var OutContent: RawByteString; var OutContentEncoding: RawUtf8);
 
 /// enable a give compression function for a HTTP link
 function RegisterCompressFunc(var Comp: THttpSocketCompressRecDynArray;
@@ -196,7 +197,14 @@ type
   private
     ContentLeft: Int64;
     ContentPos: PByte;
-    ContentEncoding: RawUtf8;
+    ContentEncoding, CommandUriInstance: RawUtf8;
+    CommandUriInstanceLen: PtrInt;
+    procedure SetRawUtf8(var res: RawUtf8; P: pointer; PLen: PtrInt;
+      nointern: boolean);
+    function ProcessParseLine(var st: TProcessParseLine;
+      setCommandUri: boolean = false): boolean;
+    procedure GetTrimmed(P: PUtf8Char; var result: RawUtf8;
+      nointern: boolean = false);
   public
     // reusable buffers for internal process - do not use
     Head, Process: TRawByteStringBuffer;
@@ -206,13 +214,15 @@ type
     HeaderFlags: THttpRequestHeaderFlags;
     /// customize the HTTP process
     Options: THttpRequestOptions;
-    /// will contain the first header line:
-    // - 'GET /path HTTP/1.1' for a GET request with THttpServer, e.g.
+    /// could be set so that ParseHeader/GetTrimmed will intern RawUtf8 values
+    Interning: PRawUtf8InterningSlot;
+    /// will contain the first header line on client side
     // - 'HTTP/1.0 200 OK' for a GET response after Get() e.g.
-    Command: RawUtf8;
-    /// the HTTP method parsed from Command, e.g. 'GET'
+    // - THttpServerSocket will use it, but THttpAsyncServer won't
+    CommandResp: RawUtf8;
+    /// the HTTP method parsed from first header line, e.g. 'GET'
     CommandMethod: RawUtf8;
-    /// the HTTP URI parsed from Command, e.g. '/path/to/resource'
+    /// the HTTP URI parsed from first header line, e.g. '/path/to/resource'
     CommandUri: RawUtf8;
     /// will contain all header lines after all ParseHeader
     // - use HeaderGetValue() to get one HTTP header item value by name
@@ -266,9 +276,8 @@ type
     // - also set CompressContentEncoding/CompressAcceptHeader from Compress[]
     // and Content-Encoding header value
     procedure ParseHeaderFinalize;
-    /// parse Command and Head into Headers and CommandMethod/CommandUri fields
-    // - calls ParseHeaderFinalize() and server-side process the Command
-    function ParseCommandAndHeader: boolean;
+    /// parse Command into CommandMethod/CommandUri fields
+    function ParseCommand: boolean;
     /// search a value from the internal parsed Headers
     // - supplied aUpperName should be already uppercased:
     // HeaderGetValue('CONTENT-TYPE')='text/html', e.g.
@@ -405,6 +414,13 @@ type
   /// a dynamic array of client connection identifiers, e.g. for broadcasting
   THttpServerConnectionIDDynArray = array of THttpServerConnectionID;
 
+  /// an opaque connection-specific pointer identifier with a strong type
+  THttpServerConnectionOpaque = record
+    Value: pointer;
+  end;
+  /// reference to an opaque connection-specific pointer identifier
+  PHttpServerConnectionOpaque = ^THttpServerConnectionOpaque;
+
   /// event handler used by THttpServerGeneric.OnRequest property
   // - Ctxt defines both input and output parameters
   // - result of the function is the HTTP error code (200 if OK, e.g.)
@@ -498,6 +514,7 @@ type
     fAuthenticationStatus: THttpServerRequestAuthentication;
     fRespStatus: integer;
     fConnectionThread: TSynThread;
+    fConnectionOpaque: PHttpServerConnectionOpaque;
   public
     /// prepare an incoming request from explicit values
     // - will set input parameters URL/Method/InHeaders/InContent/InContentType
@@ -519,6 +536,16 @@ type
     /// output parameter to be set to the response message body
     property OutContent: RawByteString
       read fOutContent write fOutContent;
+    /// the thread which owns the connection of this execution context
+    // - may be nil, depending on the HTTP server used
+    // - depending on the HTTP server used, may not follow ConnectionID
+    property ConnectionThread: TSynThread
+      read fConnectionThread;
+    /// some HTTP servers support a per-connection pointer storage
+    // - may be nil if unsupported, e.g. by the http.sys servers
+    // - could be used to avoid a lookup to a ConnectionID-indexed dictionary
+    property ConnectionOpaque: PHttpServerConnectionOpaque
+      read fConnectionOpaque;
   published
     /// input parameter containing the caller URI
     property Url: RawUtf8
@@ -574,10 +601,6 @@ type
     /// define how the client is connected
     property ConnectionFlags: THttpServerRequestFlags
       read fConnectionFlags write fConnectionFlags;
-    /// the thread which owns the connection of this execution context
-    // - depending on the HTTP server used, may not follow ConnectionID
-    property ConnectionThread: TSynThread
-      read fConnectionThread;
     /// contains the THttpServer-side authentication status
     // - e.g. when using http.sys authentication with HTTP API 2.0
     property AuthenticationStatus: THttpServerRequestAuthentication
@@ -806,9 +829,9 @@ const
     'JAVASCRIPT',
     nil);
 
-function CompressContent(Accepted: THttpSocketCompressSet;
+procedure CompressContent(Accepted: THttpSocketCompressSet;
   const Handled: THttpSocketCompressRecDynArray; const OutContentType: RawUtf8;
-  var OutContent: RawByteString): RawUtf8;
+  var OutContent: RawByteString; var OutContentEncoding: RawUtf8);
 var
   i, OutContentLen: integer;
   compressible: boolean;
@@ -837,11 +860,11 @@ begin
               (OutContentLen >= CompressMinSize)) then
           begin
             // compression of the OutContent + update header
-            result := Func(OutContent, true);
+            OutContentEncoding := Func(OutContent, true);
             exit; // first in fCompress[] is prefered
           end;
   end;
-  result := '';
+  OutContentEncoding := '';
 end;
 
 function ComputeContentEncoding(const Compress: THttpSocketCompressRecDynArray;
@@ -875,21 +898,6 @@ begin
     if @Compress[result].Func = @CompFunction then
       exit;
   result := -1;
-end;
-
-procedure GetTrimmed(P: PUtf8Char; var result: RawUtf8);
-var
-  B: PUtf8Char;
-begin
-  while (P^ > #0) and
-        (P^ <= ' ') do
-    inc(P); // trim left
-  B := P;
-  P := GotoNextControlChar(P);
-  while (P > B) and
-        (P[-1] <= ' ') do
-    dec(P); // trim right
-  FastSetString(result, B, P - B);
 end;
 
 function HttpChunkToHex32(p: PAnsiChar): integer;
@@ -943,6 +951,22 @@ begin
   ServerInternalState := 0;
   CompressContentEncoding := -1;
   integer(CompressAcceptHeader) := 0;
+end;
+
+procedure THttpRequestContext.GetTrimmed(P: PUtf8Char; var result: RawUtf8;
+  nointern: boolean);
+var
+  B: PUtf8Char;
+begin
+  while (P^ > #0) and
+        (P^ <= ' ') do
+    inc(P); // trim left
+  B := P;
+  P := GotoNextControlChar(P);
+  while (P > B) and
+        (P[-1] <= ' ') do
+    dec(P); // trim right
+  SetRawUtf8(result, B, P - B, nointern);
 end;
 
 const
@@ -1085,7 +1109,7 @@ begin
       begin
         // 'AUTHORIZATION: BEARER '
         inc(P, 22);
-        GetTrimmed(P, BearerToken);
+        GetTrimmed(P, BearerToken, {nointern=}true);
         if BearerToken <> '' then
           // always allow FindNameValue(..., HEADER_BEARER_UPPER, ...) search
           HeadersUnFiltered := true;
@@ -1122,7 +1146,7 @@ begin
   if nfHeadersParsed in HeaderFlags then
     exit;
   include(HeaderFlags, nfHeadersParsed);
-  Head.AsText(Headers, {OverheadForRemoteIP=}40);
+  Head.AsText(Headers, {ForRemoteIP=}40, {usemainbuffer=}Interning <> nil);
   Head.Reset;
   if Compress <> nil then
     if AcceptEncoding <> '' then
@@ -1130,25 +1154,45 @@ begin
         ComputeContentEncoding(Compress, pointer(AcceptEncoding));
 end;
 
-function THttpRequestContext.ParseCommandAndHeader: boolean;
+function THttpRequestContext.ParseCommand: boolean;
 var
-  P: PUtf8Char;
+  P, B: PUtf8Char;
+  L: PtrInt;
 begin
   result := false;
   if nfHeadersParsed in HeaderFlags then
     exit;
-  P := pointer(Command);
+  P := pointer(CommandUri);
   if P = nil then
     exit;
-  GetNextItem(P, ' ', CommandMethod); // GET
-  GetNextItem(P, ' ', CommandUri);    // /path/to/resource
+  B := P;
+  while true do
+    if P^ = ' ' then
+      break
+    else if P^ = #0 then
+      exit
+    else
+      inc(P);
+  SetRawUtf8(CommandMethod, B, P - B, {nointern=}false);
+  inc(P);
+  B := P;
+  while true do
+    if P^ = ' ' then
+      break
+    else if P^ = #0 then
+      exit
+    else
+      inc(P);
+  L := P - B;
+  MoveFast(B^, pointer(CommandUri)^, L); // in-place extract URI from Command
+  FakeLength(CommandUri, L);
+  inc(P);
   if not IdemPChar(P, 'HTTP/1.') then
     exit;
   if not (hfConnectionClose in HeaderFlags) then
     if not (hfConnectionKeepAlive in HeaderFlags) and
        (P[7] <> '1') then
       include(HeaderFlags, hfConnectionClose);
-  ParseHeaderFinalize;
   result := true;
 end;
 
@@ -1172,7 +1216,18 @@ begin
   State := hrsGetCommand;
 end;
 
-function ProcessParseLine(var st: TProcessParseLine; line: PRawUtf8): boolean;
+procedure THttpRequestContext.SetRawUtf8(var res: RawUtf8;
+  P: pointer; PLen: PtrInt; nointern: boolean);
+begin
+  if (Interning <> nil) and
+     not nointern then
+    Interning^.UniqueFromBuffer(res, P, PLen, InterningHasher(0, P, PLen))
+  else
+    FastSetString(res, P, PLen);
+end;
+
+function THttpRequestContext.ProcessParseLine(var st: TProcessParseLine;
+  setCommandUri: boolean): boolean;
 var
   P: PUtf8Char;
   Len: PtrInt;
@@ -1214,8 +1269,20 @@ begin
   // here P^ <= #13: we found a whole text line
   st.Line := st.P;
   st.LineLen := P - st.P;
-  if line <> nil then
-    FastSetString(line^, st.Line, st.LineLen);
+  if setCommandUri then
+    if Interning = nil then
+      FastSetString(CommandUri, st.Line, st.LineLen)
+    else
+    begin // no real interning, but CommandUriInstance buffer reuse
+      if st.LineLen > CommandUriInstanceLen then
+      begin
+        CommandUriInstanceLen := st.LineLen + 256;
+        FastSetString(CommandUriInstance, nil, CommandUriInstanceLen);
+      end;
+      CommandUri := CommandUriInstance; // COW memory buffer reuse
+      MoveFast(st.Line^, pointer(CommandUri)^, st.LineLen);
+      FakeLength(CommandUri, st.LineLen);
+    end;
   result := true;
   st.P := P; // will ensure below that st.line ends with #0
   // go to beginning of next line
@@ -1244,12 +1311,12 @@ begin
   repeat
     case State of
       hrsGetCommand:
-        if ProcessParseLine(st, @Command) then
+        if ProcessParseLine(st, {SetCommandUri=}true) then
           State := hrsGetHeaders
         else
           exit; // not enough input
       hrsGetHeaders:
-        if ProcessParseLine(st, nil) then
+        if ProcessParseLine(st) then
           if st.LineLen <> 0 then
             // Headers end with a void line
             ParseHeader(st.Line, hroHeadersUnfiltered in Options)
@@ -1270,7 +1337,7 @@ begin
           exit;
       hrsGetBodyChunkedHexFirst,
       hrsGetBodyChunkedHexNext:
-        if ProcessParseLine(st, nil) then
+        if ProcessParseLine(st) then
         begin
           ContentLeft := HttpChunkToHex32(PAnsiChar(st.Line));
           if ContentLeft <> 0 then
@@ -1309,12 +1376,12 @@ begin
             exit;
         end;
       hrsGetBodyChunkedDataVoidLine:
-        if ProcessParseLine(st, nil) then // chunks end with a void line
+        if ProcessParseLine(st) then // chunks end with a void line
           State := hrsGetBodyChunkedHexNext
         else
           exit;
       hrsGetBodyChunkedDataLastLine:
-        if ProcessParseLine(st, nil) then // last chunk
+        if ProcessParseLine(st) then // last chunk
           if st.Len <> 0 then
             State := hrsErrorUnsupportedFormat // should be no further input
           else
@@ -1373,8 +1440,8 @@ begin
   // same logic than THttpSocket.CompressDataAndWriteHeaders below
   if (integer(CompressAcceptHeader) <> 0) and
      (ContentStream = nil) then // no stream compression (yet)
-    ContentEncoding := CompressContent(
-      CompressAcceptHeader, Compress, ContentType, Content);
+    CompressContent(CompressAcceptHeader, Compress, ContentType,
+      Content, ContentEncoding);
   if ContentEncoding <> '' then
     Head.Append(['Content-Encoding: ', ContentEncoding], {crlf=}true);
   if ContentStream = nil then
@@ -1387,14 +1454,17 @@ begin
   Head.Append(['Content-Length: ', ContentLength], {crlf=}true);
   if (ContentType <> '') and
      (ContentType <> STATICFILE_CONTENT_TYPE) then
-    Head.Append(['Content-Type: ', ContentType], {crlf=}true);
+  begin
+    Head.AppendShort('Content-Type: ');
+    Head.Append(ContentType, {crlf=}true);
+  end;
   if hfConnectionClose in HeaderFlags then
-    Head.Append('Connection: Close', {crlf=}true)
+    Head.AppendShort('Connection: Close', {crlf=}true)
   else
   begin
     if CompressAcceptEncoding <> '' then
       Head.Append(CompressAcceptEncoding, {crlf=}true);
-    Head.Append('Connection: Keep-Alive', {crlf=}true);
+    Head.AppendShort('Connection: Keep-Alive', {crlf=}true);
   end;
   Head.Append(nil, 0, {crlf=}true); // headers always end with a void line
   result := @Head;
@@ -1532,8 +1602,8 @@ begin
   if (integer(Http.CompressAcceptHeader) <> 0) and
      (OutStream = nil) then // no stream compression (yet)
   begin
-    OutContentEncoding := CompressContent(
-      Http.CompressAcceptHeader, Http.Compress, OutContentType, OutContent);
+    CompressContent(Http.CompressAcceptHeader, Http.Compress, OutContentType,
+      OutContent, OutContentEncoding);
     if OutContentEncoding <> '' then
       SockSend(['Content-Encoding: ', OutContentEncoding]);
   end;
@@ -1605,8 +1675,9 @@ begin
   // finalize the headers
   Http.ParseHeaderFinalize; // compute all meaningful headers
   if Assigned(OnLog) then
-    OnLog(sllTrace, 'GetHeader % flags=% len=% %', [Http.Command,
-      ToText(Http.HeaderFlags), Http.ContentLength, Http.ContentType], self);
+    OnLog(sllTrace, 'GetHeader % % flags=% len=% %', [Http.CommandMethod,
+      Http.CommandUri, ToText(Http.HeaderFlags), Http.ContentLength,
+      Http.ContentType], self);
 end;
 
 procedure THttpSocket.GetBody(DestStream: TStream);

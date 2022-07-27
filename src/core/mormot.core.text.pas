@@ -54,6 +54,13 @@ type
 function GetNextLine(source: PUtf8Char; out next: PUtf8Char;
   andtrim: boolean = false): RawUtf8;
 
+/// returns n leading characters
+function LeftU(const S: RawUtf8; n: PtrInt): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// returns n trailing characters
+function RightU(const S: RawUtf8; n: PtrInt): RawUtf8;
+
 /// trims leading whitespace characters from the string by removing
 // new line, space, and tab characters
 function TrimLeft(const S: RawUtf8): RawUtf8;
@@ -75,7 +82,11 @@ procedure TrimChars(var S: RawUtf8; Left, Right: PtrInt);
 
 /// returns the supplied text content, without any specified char
 // - specify a custom char set to be excluded, e.g. as [#0 .. ' ']
-function TrimChar(const text: RawUtf8; const chars: TSynAnsicharSet): RawUtf8;
+function TrimChar(const text: RawUtf8; const exclude: TSynAnsicharSet): RawUtf8;
+
+/// returns the supplied text content, without any other char than specified
+// - specify a custom char set to be included, e.g. as ['A'..'Z']
+function OnlyChar(const text: RawUtf8; only: TSynAnsicharSet): RawUtf8;
 
 /// returns the supplied text content, without any control char
 // - here control chars have an ASCII code in [#0 .. ' '], i.e. text[] <= ' '
@@ -144,6 +155,11 @@ procedure FillZero(var secret: SpiUtf8); overload;
 // - will write the memory buffer directly, if this array instance is not shared
 // (i.e. has refcount = 1), to avoid zeroing still-used values
 procedure FillZero(var secret: TBytes); overload;
+
+{$ifdef HASVARUSTRING}
+/// fill all bytes of this UTF-16 string with zeros, i.e. 'toto' -> #0#0#0#0
+procedure FillZero(var secret: UnicodeString); overload;
+{$endif HASVARUSTRING}
 
 /// actual replacement function called by StringReplaceAll() on first match
 // - not to be called as such, but defined globally for proper inlining
@@ -909,7 +925,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// append a GUID value, encoded as text without any {}
     // - will store e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301'
-    procedure Add(Value: PGUID; QuotedChar: AnsiChar = #0); overload;
+    procedure Add(Value: PGuid; QuotedChar: AnsiChar = #0); overload;
     /// append a floating-point Value as a String
     // - write "Infinity", "-Infinity", and "NaN" for corresponding IEEE values
     // - noexp=true will call ExtendedToShortNoExp() to avoid any scientific
@@ -958,6 +974,7 @@ type
     // - input length is calculated from zero-ended char
     // - don't escapes chars according to the JSON RFC
     procedure AddNoJsonEscape(P: Pointer); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// append some UTF-8 chars to the buffer
     // - don't escapes chars according to the JSON RFC
     procedure AddNoJsonEscape(P: Pointer; Len: PtrInt); overload;
@@ -1056,7 +1073,11 @@ type
     // and only ASCII 7-bit characters)
     // - if twoForceJsonExtended is defined in CustomOptions, it would append
     // 'PropName:' without the double quotes
-    procedure AddProp(PropName: PUtf8Char; PropNameLen: PtrInt);
+    procedure AddProp(PropName: PUtf8Char; PropNameLen: PtrInt); overload;
+    /// append a property name, as '"PropName":'
+    // - just a wrapper around AddProp(PropName, StrLen(PropName))
+    procedure AddProp(PropName: PUtf8Char); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// append a ShortString property name, as '"PropName":'
     // - PropName content should not need to be JSON escaped (e.g. no " within,
     // and only ASCII 7-bit characters)
@@ -1065,6 +1086,9 @@ type
     // - is a wrapper around AddProp()
     procedure AddPropName(const PropName: ShortString);
       {$ifdef HASINLINE}inline;{$endif}
+    /// append a JSON field name, followed by a number value and a comma (',')
+    procedure AddPropInt64(const PropName: ShortString; Value: Int64;
+      WithQuote: AnsiChar = #0);
     /// append a RawUtf8 property name, as '"FieldName":'
     // - FieldName content should not need to be JSON escaped (e.g. no " within)
     // - if twoForceJsonExtended is defined in CustomOptions, it would append
@@ -1256,6 +1280,16 @@ const
   TEXTWRITEROPTIONS_SETASTEXT: array[boolean] of TTextWriterOptions = (
     [twoFullSetsAsStar],
     [twoFullSetsAsStar, twoEnumSetsAsTextInRecord]);
+
+  /// TTextWriter JSON serialization options including twoEnumSetsAsTextInRecord
+  TEXTWRITEROPTIONS_ENUMASTEXT: array[boolean] of TTextWriterOptions = (
+    [],
+    [twoEnumSetsAsTextInRecord]);
+
+  /// TTextWriter JSON serialization options including woEnumSetsAsText
+  TEXTWRITEROBJECTOPTIONS_ENUMASTEXT: array[boolean] of TTextWriterWriteObjectOptions = (
+    [],
+    [woEnumSetsAsText]);
 
   /// TTextWriter JSON serialization options which should be preserved
   // - used e.g. by TTextWriter.CancelAllAsNew to reset its CustomOptions
@@ -2032,10 +2066,16 @@ procedure K(value: Int64; out result: TShort16); overload;
 function K(value: Int64): TShort16; overload;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
+/// convert a seconds elapsed time into a human readable value
+// - append 's', 'm', 'h' and 'd' symbol for the given value range,
+// with two fractional digits
+function SecToString(S: QWord): TShort16;
+  {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
+
 /// convert a milliseconds elapsed time into a human readable value
 // - append 'ms', 's', 'm', 'h' and 'd' symbol for the given value range,
 // with two fractional digits
-function MilliSecToString(MS: QWord): TShort16; overload;
+function MilliSecToString(MS: QWord): TShort16;
   {$ifdef FPC_OR_UNICODE}inline;{$endif} // Delphi 2007 is buggy as hell
 
 /// convert a micro seconds elapsed time into a human readable value
@@ -2471,64 +2511,78 @@ function IPToCardinal(const aIP: RawUtf8; out aValue: cardinal): boolean; overlo
 function IPToCardinal(const aIP: RawUtf8): cardinal; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// append a TGUID binary content as text
+/// append a TGuid binary content as text
 // - will store e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without any {})
 // - this will be the format used for JSON encoding, e.g.
 // $ { "UID": "C9A646D3-9C61-4CB7-BFCD-EE2522C8F633" }
 function GuidToText(P: PUtf8Char; guid: PByteArray): PUtf8Char;
 
-/// convert a TGUID into UTF-8 encoded { text }
+/// convert a TGuid into UTF-8 encoded { text }
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - if you do not need the embracing { }, use ToUtf8() overloaded function
-function GuidToRawUtf8(const guid: TGUID): RawUtf8;
+function GuidToRawUtf8(const guid: TGuid): RawUtf8;
 
-/// convert a TGUID into UTF-8 encoded text
+/// convert a TGuid into UTF-8 encoded text
 // - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
 // - if you need the embracing { }, use GuidToRawUtf8() function instead
-function ToUtf8(const guid: TGUID): RawUtf8; overload;
+function ToUtf8(const guid: TGuid): RawUtf8; overload;
 
-/// convert a TGUID into text
+/// convert a TGuid into text
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - this version is faster than the one supplied by SysUtils
-function GuidToString(const guid: TGUID): string;
+function GuidToString(const guid: TGuid): string;
 
 type
   /// stack-allocated ASCII string, used by GuidToShort() function
   TGuidShortString = string[38];
   PGuidShortString = ^TGuidShortString;
 
-/// convert a TGUID into text
+/// convert a TGuid into text
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - using a ShortString will allow fast allocation on the stack, so is
-// preferred e.g. when providing a GUID to a ESynException.CreateUtf8()
-function GuidToShort(const guid: TGUID): TGuidShortString; overload;
+// preferred e.g. when providing a Guid to a ESynException.CreateUtf8()
+function GuidToShort(const guid: TGuid): TGuidShortString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// convert a TGUID into text
+/// convert a TGuid into text
 // - will return e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - using a ShortString will allow fast allocation on the stack, so is
-// preferred e.g. when providing a GUID to a ESynException.CreateUtf8()
+// preferred e.g. when providing a Guid to a ESynException.CreateUtf8()
 procedure GuidToShort(const
-  guid: TGUID; out dest: TGuidShortString); overload;
+  guid: TGuid; out dest: TGuidShortString); overload;
 
-/// convert some text into its TGUID binary value
-// - expect e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without any {})
-// - return nil if the supplied text buffer is not a valid TGUID
+/// convert some text into its TGuid binary value
+// - expect e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without any {}) but
+// will ignore internal '-' so '3F2504E04F8911D39A0C0305E82C3301' is also fine
+// - note: TGuid binary order does not follow plain HexToBin or HexDisplayToBin
+// - return nil if the supplied text buffer is not a valid TGuid
 // - this will be the format used for JSON encoding, e.g.
-// $ { "UID": "C9A646D3-9C61-4CB7-BFCD-EE2522C8F633" }
-function TextToGuid(P: PUtf8Char; guid: PByteArray): PUtf8Char;
+// $ { "Uid": "C9A646D3-9C61-4CB7-BFCD-EE2522C8F633" }
+function TextToGuid(P: PUtf8Char; Guid: PByteArray): PUtf8Char;
 
-/// convert some VCL text into a TGUID
+/// convert some VCL text into a TGuid
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
 // - return {00000000-0000-0000-0000-000000000000} if the supplied text buffer
-// is not a valid TGUID
-function StringToGuid(const text: string): TGUID;
+// is not a valid TGuid
+function StringToGuid(const text: string): TGuid;
 
-/// convert some UTF-8 encoded text into a TGUID
+/// convert some UTF-8 encoded text into a TGuid
 // - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
+// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
+// '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
 // - return {00000000-0000-0000-0000-000000000000} if the supplied text buffer
-// is not a valid TGUID
-function RawUtf8ToGuid(const text: RawByteString): TGUID;
+// is not a valid TGuid
+function RawUtf8ToGuid(const text: RawByteString): TGuid; overload;
+
+/// convert some UTF-8 encoded text into a TGuid
+// - expect e.g. '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' (with the {})
+// or '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {}) or even
+// '3F2504E04F8911D39A0C0305E82C3301' following TGuid order (not HexToBin)
+function RawUtf8ToGuid(const text: RawByteString; out guid: TGuid): boolean; overload;
+
+/// trim any space and '{' '-' '}' chars from input to get a 32-char TGuid hexa
+// - and return true if the result is actually a 128-bit lowercase hexadecimal
+function TrimGuid(var text: RawUtf8): boolean;
 
 /// read a TStream content into a String
 // - it will read binary or text content from the current position until the
@@ -2633,6 +2687,21 @@ begin
   until false;
 end;
 
+function LeftU(const S: RawUtf8; n: PtrInt): RawUtf8;
+begin
+  result := Copy(S, 1, n);
+end;
+
+function RightU(const S: RawUtf8; n: PtrInt): RawUtf8;
+var
+  L: PtrInt;
+begin
+  L := length(S);
+  if n > L then
+    n := L;
+  result := Copy(S, L + 1 - n, n);
+end;
+
 function TrimLeft(const S: RawUtf8): RawUtf8;
 var
   i, l: PtrInt;
@@ -2668,7 +2737,9 @@ begin
   P := UniqueRawUtf8(S);
   D := P; // in-place process
   repeat
-    P := GotoNextNotSpace(P);
+    while (P^ <= ' ') and
+          (P^ <> #0) do
+      inc(P);
     while not (P^ in [#0, #10, #13]) do
     begin
       D^ := P^;
@@ -2683,7 +2754,7 @@ begin
   if D = pointer(S) then
     S := ''
   else
-    PStrLen(PtrUInt(S) - _STRLEN)^ := D - pointer(S); // no SetLength needed
+    FakeLength(S, D); // no SetLength needed
 end;
 
 procedure TrimChars(var S: RawUtf8; Left, Right: PtrInt);
@@ -2863,28 +2934,31 @@ begin
       if n = 0 then
         result := ''
       else
-        PStrLen(PtrUInt(result) - _STRLEN)^ := n; // in-place truncation
+      begin
+        PStrLen(P - _STRLEN)^ := n; // in-place truncation
+        P[n] := #0;
+      end;
       exit;
     end;
   result := text; // no control char found
 end;
 
-function TrimChar(const text: RawUtf8; const chars: TSynAnsicharSet): RawUtf8;
+function TrimChar(const text: RawUtf8; const exclude: TSynAnsicharSet): RawUtf8;
 var
   len, i, j, n: PtrInt;
   P: PAnsiChar;
 begin
   len := length(text);
   for i := 1 to len do
-    if text[i] in chars then
+    if text[i] in exclude then
     begin
       n := i - 1;
-      FastSetString(result, nil, len);
+      FastSetString(result, nil, len - 1);
       P := pointer(result);
       if n > 0 then
         MoveFast(pointer(text)^, P^, n);
       for j := i + 1 to len do
-        if not (text[j] in chars) then
+        if not (text[j] in exclude) then
         begin
           P[n] := text[j];
           inc(n);
@@ -2892,10 +2966,22 @@ begin
       if n = 0 then
         result := ''
       else
-        PStrLen(PtrUInt(result) - _STRLEN)^ := n; // in-place truncation
+      begin
+        PStrLen(P - _STRLEN)^ := n; // in-place truncation
+        P[n] := #0;
+      end;
       exit;
     end;
-  result := text; // no control char found
+  result := text; // no exclude char found
+end;
+
+function OnlyChar(const text: RawUtf8; only: TSynAnsicharSet): RawUtf8;
+var
+  i: PtrInt;
+begin
+  for i := 0 to SizeOf(only) do
+    PByteArray(@only)[i] := not PByteArray(@only)[i]; // reverse bits
+  result := TrimChar(text, only);
 end;
 
 procedure FillZero(var secret: RawByteString);
@@ -2915,6 +3001,16 @@ procedure FillZero(var secret: SpiUtf8);
 begin
   FillZero(RawByteString(secret));
 end;
+
+{$ifdef HASVARUSTRING}
+procedure FillZero(var secret: UnicodeString);
+begin
+  if secret <> '' then
+    with PStrRec(Pointer(PtrInt(secret) - _STRRECSIZE))^ do
+      if refCnt = 1 then // avoid GPF if const
+        FillCharFast(pointer(secret)^, length * SizeOf(WideChar), 0);
+end;
+{$endif HASVARUSTRING}
 
 procedure FillZero(var secret: TBytes);
 begin
@@ -5438,7 +5534,7 @@ begin
     B^ := '0';
 end;
 
-procedure TTextWriter.Add(Value: PGUID; QuotedChar: AnsiChar);
+procedure TTextWriter.Add(Value: PGuid; QuotedChar: AnsiChar);
 begin
   if BEnd - B <= 38 then
     FlushToStream;
@@ -5766,6 +5862,11 @@ begin
   end;
 end;
 
+procedure TTextWriter.AddProp(PropName: PUtf8Char);
+begin
+  AddProp(PropName, StrLen(PropName));
+end;
+
 procedure TTextWriter.AddProp(PropName: PUtf8Char; PropNameLen: PtrInt);
 begin
   if PropNameLen <= 0 then
@@ -5791,6 +5892,18 @@ end;
 procedure TTextWriter.AddPropName(const PropName: ShortString);
 begin
   AddProp(@PropName[1], ord(PropName[0]));
+end;
+
+procedure TTextWriter.AddPropInt64(const PropName: ShortString;
+  Value: Int64; WithQuote: AnsiChar);
+begin
+  AddProp(@PropName[1], ord(PropName[0]));
+  if WithQuote <> #0 then
+    Add(WithQuote);
+  Add(Value);
+  if WithQuote <> #0 then
+    Add(WithQuote);
+  AddComma;
 end;
 
 procedure TTextWriter.AddFieldName(const FieldName: RawUtf8);
@@ -6238,6 +6351,8 @@ end;
 
 var
   HTML_ESC: array[hfAnyWhere..hfWithinAttributes] of TAnsiCharToByte;
+  HTML_ESCAPED: array[1..4] of string[7] = (
+    '&lt;', '&gt;', '&amp;', '&quot;');
 
 procedure TTextWriter.AddHtmlEscape(Text: PUtf8Char; Fmt: TTextWriterHtmlFormat);
 var
@@ -6257,18 +6372,10 @@ begin
     while esc[Text^] = 0 do
       inc(Text);
     AddNoJsonEscape(B, Text - B);
-    case Text^ of
-      #0:
-        exit;
-      '<':
-        AddShorter('&lt;');
-      '>':
-        AddShorter('&gt;');
-      '&':
-        AddShorter('&amp;');
-      '"':
-        AddShorter('&quot;');
-    end;
+    if Text^ = #0 then
+      exit
+    else
+      AddShorter(HTML_ESCAPED[esc[Text^]]);
     inc(Text);
   until Text^ = #0;
 end;
@@ -6325,18 +6432,10 @@ begin
     AddNoJsonEscape(B, Text - B);
     if PtrUInt(Text) = PtrUInt(TextLen) then
       exit;
-    case Text^ of
-      #0:
-        exit;
-      '<':
-        AddShorter('&lt;');
-      '>':
-        AddShorter('&gt;');
-      '&':
-        AddShorter('&amp;');
-      '"':
-        AddShorter('&quot;');
-    end;
+    if Text^ = #0 then
+      exit
+    else
+      AddShorter(HTML_ESCAPED[esc[Text^]]);
     inc(Text);
   until false;
 end;
@@ -6369,9 +6468,9 @@ begin
   esc := @XML_ESC;
   i := 0;
   repeat
-    beg := i;
     if esc[Text[i]] = 0 then
     begin
+      beg := i;
       repeat // it is faster to handle all not-escaped chars at once
         inc(i);
       until esc[Text[i]] <> 0;
@@ -10032,6 +10131,11 @@ begin
     insert(ThousandSep, result, Len - i * 3);
 end;
 
+function SecToString(S: QWord): TShort16;
+begin
+  MicroSecToString(S * 1000000, result);
+end;
+
 function MilliSecToString(MS: QWord): TShort16;
 begin
   MicroSecToString(MS * 1000, result);
@@ -10488,12 +10592,13 @@ begin
   {$endif CPUX86NOTPIC}
   if BinBytes > 0 then
   begin
-    inc(Bin, BinBytes - 1);
+    inc(Bin, BinBytes - 1); // display = reverse order
     repeat
       b := tab[Ord(Hex[0]) + 256]; // + 256 for shl 4
+      if b = 255 then
+        exit;
       c := tab[Ord(Hex[1])];
-      if (b = 255) or
-         (c = 255) then
+      if c = 255 then
         exit;
       Bin^ := b or c;
       dec(Bin);
@@ -10543,9 +10648,10 @@ begin
     if Bin <> nil then
       repeat
         b := tab[Ord(Hex[0]) + 256]; // + 256 for shl 4
+        if b = 255 then
+          exit;
         c := tab[Ord(Hex[1])];
-        if (b = 255) or
-           (c = 255) then
+        if c = 255 then
           exit;
         inc(Hex, 2);
         Bin^ := b or c;
@@ -10935,7 +11041,7 @@ begin
   result := P;
 end;
 
-function GuidToRawUtf8(const guid: TGUID): RawUtf8;
+function GuidToRawUtf8(const guid: TGuid): RawUtf8;
 var
   P: PUtf8Char;
 begin
@@ -10945,18 +11051,18 @@ begin
   GuidToText(P + 1, @guid)^ := '}';
 end;
 
-function ToUtf8(const guid: TGUID): RawUtf8;
+function ToUtf8(const guid: TGuid): RawUtf8;
 begin
   FastSetString(result, nil, 36);
-  GuidToText(pointer(result), @guid);
+  GuidToText(pointer(result), @Guid);
 end;
 
-function GuidToShort(const guid: TGUID): TGuidShortString;
+function GuidToShort(const guid: TGuid): TGuidShortString;
 begin
-  GuidToShort(guid, result);
+  GuidToShort(Guid, result);
 end;
 
-procedure GuidToShort(const guid: TGUID; out dest: TGuidShortString);
+procedure GuidToShort(const guid: TGuid; out dest: TGuidShortString);
 begin
   dest[0] := #38;
   dest[1] := '{';
@@ -10965,7 +11071,7 @@ begin
 end;
 
 {$ifdef UNICODE}
-function GuidToString(const guid: TGUID): string;
+function GuidToString(const guid: TGuid): string;
 var
   tmp: array[0..35] of AnsiChar;
   i: integer;
@@ -10978,24 +11084,25 @@ begin
   PWordArray(result)[37] := ord('}');
 end;
 {$else}
-function GuidToString(const guid: TGUID): string;
+function GuidToString(const guid: TGuid): string;
 begin
   result := GuidToRawUtf8(guid);
 end;
 {$endif UNICODE}
 
-function HexaToByte(P: PUtf8Char; var Dest: byte): boolean;
+function HexaToByte(P: PUtf8Char; var Dest: byte; tab: PByteArray): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 var
   b, c: byte;
 begin
-  b := ConvertHexToBin[Ord(P[0]) + 256]; // + 256 for shl 4
+  b := tab[Ord(P[0]) + 256]; // + 256 for shl 4
   if b <> 255 then
   begin
-    c := ConvertHexToBin[Ord(P[1])];
+    c := tab[Ord(P[1])];
     if c <> 255 then
     begin
-      Dest := b + c;
+      inc(b, c);
+      Dest := b;
       result := true;
       exit;
     end;
@@ -11006,41 +11113,46 @@ end;
 function TextToGuid(P: PUtf8Char; guid: PByteArray): PUtf8Char;
 var
   i: PtrInt;
+  tab: PByteArray;
 begin
   // decode from '3F2504E0-4F89-11D3-9A0C-0305E82C3301'
   result := nil;
+  tab := @ConvertHexToBin;
   for i := 3 downto 0 do
   begin
-    if not HexaToByte(P, guid[i]) then
+    if not HexaToByte(P, guid[i], tab) then
       exit;
     inc(P, 2);
   end;
   inc(PByte(guid), 4);
   for i := 1 to 2 do
   begin
-    if (P^ <> '-') or
-       not HexaToByte(P + 1, guid[1]) or
-       not HexaToByte(P + 3, guid[0]) then
+    if P^ = '-' then // '-' separators are optional
+      inc(P);
+    if not HexaToByte(P, guid[1], tab) or
+       not HexaToByte(P + 2, guid[0], tab) then
       exit;
-    inc(P, 5);
+    inc(P, 4);
     inc(PByte(guid), 2);
   end;
-  if (P[0] <> '-') or
-     (P[5] <> '-') or
-     not HexaToByte(P + 1, guid[0]) or
-     not HexaToByte(P + 3, guid[1]) then
+  if P^ = '-' then
+    inc(P);
+  if not HexaToByte(P, guid[0], tab) or // in reverse order than the previous loop
+     not HexaToByte(P + 2, guid[1], tab) then
     exit;
+  inc(P, 4);
   inc(PByte(guid), 2);
-  inc(P, 6);
+  if P^ = '-' then
+    inc(P);
   for i := 0 to 5 do
-    if HexaToByte(P, guid[i]) then
+    if HexaToByte(P, guid[i], tab) then
       inc(P, 2)
     else
       exit;
   result := P;
 end;
 
-function StringToGuid(const text: string): TGUID;
+function StringToGuid(const text: string): TGuid;
 {$ifdef UNICODE}
 var
   tmp: array[0..35] of byte;
@@ -11063,14 +11175,72 @@ begin
   FillZero(PHash128(@result)^);
 end;
 
-function RawUtf8ToGuid(const text: RawByteString): TGUID;
+function RawUtf8ToGuid(const text: RawByteString): TGuid;
 begin
-  // decode from '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}'
-  if (length(text) <> 38) or
-     (text[1] <> '{') or
-     (text[38] <> '}') or
-     (TextToGuid(@text[2], @result) = nil) then
-   FillZero(PHash128(@result)^);
+  if not RawUtf8ToGuid(text, result) then
+    FillZero(PHash128(@result)^);
+end;
+
+function RawUtf8ToGuid(const text: RawByteString; out guid: TGuid): boolean;
+begin
+  result := true;
+  case length(text) of
+    32, // '3F2504E04F8911D39A0C0305E82C3301' TextToGuid() order, not HexToBin()
+    36: // '3F2504E0-4F89-11D3-9A0C-0305E82C3301' JSON compatible layout
+      if TextToGuid(pointer(text), @guid) <> nil then
+        exit;
+    38: // '{3F2504E0-4F89-11D3-9A0C-0305E82C3301}' regular layout
+      if (text[1] <> '{') or
+         (text[38] <> '}') or
+         (TextToGuid(@text[2], @guid) <> nil) then
+        exit;
+  end;
+  result := false;
+end;
+
+function TrimGuid(var text: RawUtf8): boolean;
+var
+  s, d: PUtf8Char;
+  L: PtrInt;
+  c: AnsiChar;
+begin
+  s := UniqueRawUtf8(text);
+  if s = nil then
+  begin
+    result := false;
+    exit;
+  end;
+  result := true;
+  d := s;
+  repeat
+    c := s^;
+    inc(s);
+    case c of
+      #0:
+        break;
+      #1..' ', '-', '{', '}': // trim spaces and GUID/UUID separators
+        continue;
+      'A'..'F':
+        inc(c, 32);
+      'a'..'f', '0'..'9':
+        ;
+    else
+      result := false; // not a true hexadecimal content
+    end;
+    d^ := c;
+    inc(d);
+  until false;
+  L := d - pointer(text);
+  if L = 0 then
+  begin
+    FastAssignNew(text);
+    result := false;
+  end
+  else
+  begin
+    FakeLength(text, L);
+    result := result and (L = 32);
+  end;
 end;
 
 function StreamToRawByteString(aStream: TStream): RawByteString;
@@ -11210,13 +11380,29 @@ begin
   for c := #0 to #127 do
   begin
     XML_ESC[c] := ord(c in [#0..#31, '<', '>', '&', '"', '''']);
-    HTML_ESC[hfAnyWhere, c] := ord(c in [#0, '&', '"', '<', '>']);
-    HTML_ESC[hfOutsideAttributes, c] := ord(c in [#0, '&', '<', '>']);
-    HTML_ESC[hfWithinAttributes, c] := ord(c in [#0, '&', '"']);
+    case c of // HTML_ESCAPED: array[1..4] = '&lt;', '&gt;', '&amp;', '&quot;'
+      #0,
+      '<':
+        v := 1;
+      '>':
+        v := 2;
+      '&':
+        v := 3;
+      '"':
+        v := 4;
+    else
+      v := 0;
+    end;
+    HTML_ESC[hfAnyWhere, c] := v;
+    if c in [#0, '&', '<', '>'] then
+      HTML_ESC[hfOutsideAttributes, c] := v;
+    if c in [#0, '&', '"'] then
+      HTML_ESC[hfWithinAttributes, c] := v;
   end;
   _VariantToUtf8DateTimeToIso8601 := __VariantToUtf8DateTimeToIso8601;
   _VariantSaveJson := __VariantSaveJson;
 end;
+
 
 
 initialization

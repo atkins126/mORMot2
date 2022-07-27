@@ -724,7 +724,7 @@ type
     Luid: Int64;
     Dhcpv4Server: SOCKET_ADDRESS;
     CompartmentId: DWORD;
-    NetworkGuid: TGUID;
+    NetworkGuid: TGuid;
     ConnectionType: DWORD;
     TunnelType: DWORD;
     // DHCP v6 Info following (not used by our code)
@@ -1004,6 +1004,7 @@ type
     procedure AfterAccept(Socket: TNetSocket; const BoundContext: TNetTlsContext;
       LastError, CipherName: PRawUtf8);
     function GetCipherName: RawUtf8;
+    function GetRawTls: pointer;
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     function Send(Buffer: pointer; var Length: integer): TNetResult;
   end;
@@ -1062,9 +1063,24 @@ begin
   buf.buf[4].BufferType := SECBUFFER_EMPTY;
 end;
 
+procedure CredInit(var cred: TSChannelCred; AllowDeprecatedTLS: boolean);
+begin
+  FillCharFast(cred, SizeOf(cred), 0);
+  cred.dwVersion := SCHANNEL_CRED_VERSION;
+  cred.grbitEnabledProtocols :=
+     SP_PROT_TLS1_2_CLIENT or SP_PROT_TLS1_3_CLIENT or
+     SP_PROT_TLS1_2_SERVER or SP_PROT_TLS1_3_SERVER;
+  if (OSVersion < wSeven) or // XP and Vista only support TLS 1.0 anyway :(
+     AllowDeprecatedTls then
+    cred.grbitEnabledProtocols := cred.grbitEnabledProtocols or
+     SP_PROT_TLS1_CLIENT or SP_PROT_TLS1_1_CLIENT or
+     SP_PROT_TLS1_SERVER or SP_PROT_TLS1_1_SERVER;
+end;
+
 procedure TSChannelNetTls.AfterConnection(Socket: TNetSocket;
   var Context: TNetTlsContext; const ServerAddress: RawUtf8);
 var
+  cred: TSChannelCred;
   buf: THandshakeBuf;
   res, f: cardinal;
 begin
@@ -1072,8 +1088,9 @@ begin
   fSocket := Socket;
   fServerAddressW := SynUnicode(ServerAddress);
   fAccept := false;
+  CredInit(cred, Context.AllowDeprecatedTLS);
   CheckSEC_E_OK(AcquireCredentialsHandleW(
-    nil, UNISP_NAME, SECPKG_CRED_OUTBOUND, nil, nil, nil, nil, @fCred, nil));
+    nil, UNISP_NAME, SECPKG_CRED_OUTBOUND, nil, @cred, nil, nil, @fCred, nil));
   fDataPos := 0;
   fDataCount := 0;
   fFlags := ISC_REQ_FLAGS;
@@ -1107,7 +1124,7 @@ var
   flags: integer;
 begin
   if Context.CertificateFile = '' then
-    // Load certificate from Windows certificate store
+    // Load certificate and private key from Windows certificate store
     fAcceptCertStore := CertOpenSystemStoreW(nil, 'MY')
   else
   begin
@@ -1118,7 +1135,7 @@ begin
     // converted to PFX:
     //   openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
     // or using mormot.core.secure on OpenSSL:
-    //   c := Cert('x509-es256');
+    //   c := Cert('x509-rs256');
     //   c.Generate([cuTlsServer], '127.0.0.1', nil, 3650);
     //   FileFromString(c.Save('pass', ccfBinary), WorkDir + 'privkeycert.pfx');
     pass := SynUnicode(Context.PrivatePassword);
@@ -1127,7 +1144,7 @@ begin
       flags := 0;
     fAcceptCertStore := PFXImportCertStore(@blob, pointer(pass), flags);
     if pass <> '' then
-      FillCharFast(pointer(pass)^, length(pass), 0); // anti forensic
+      FillCharFast(pointer(pass)^, length(pass) * 2, 0); // anti forensic
     if fAcceptCertStore = nil then
       ESChannelRaiseLastError(SEC_E_CERT_UNKNOWN);
   end;
@@ -1151,8 +1168,7 @@ begin
   // prepare TLS connection properties from AfterBind() global certificate
   if BoundContext.AcceptCert = nil then
     raise ESChannel.Create('AfterAccept: missing AfterBind');
-  FillCharFast(cred, SizeOf(cred), 0);
-  cred.dwVersion := SCHANNEL_CRED_VERSION;
+  CredInit(cred, BoundContext.AllowDeprecatedTls);
   cred.cCreds := 1;
   cred.paCred := @BoundContext.AcceptCert;
   CheckSEC_E_OK(AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
@@ -1172,6 +1188,11 @@ begin
   if fCipherName = '' then
     fCipherName := TlsConnectionInfo(fCtxt);
   result := fCipherName;
+end;
+
+function TSChannelNetTls.GetRawTls: pointer;
+begin
+  result := @fCtxt; // return as PCtxtHandle
 end;
 
 procedure TSChannelNetTls.HandshakeLoop;

@@ -26,6 +26,7 @@ unit mormot.crypt.core;
    with (deep) refactoring (other routines are our own coding):
    - aes_pascal, keccak_pascal: (c) Wolfgang Ehrhardt under zlib license
    - KeccakPermutationKernel MMX/i386: (c) Eric Grange
+   - Andy Polyakov's keccak1600-avx2.pl from the CRYPTOGAMS project
    - MD5_386.asm: (c) Maxim Masiutin - Ritlabs, SRL
    - sha512-x86: (c) Project Nayuki under MIT license
    - sha512-x64sse4, sha256-sse4, crc32c64: (c) Intel Corporation w/ OS licence
@@ -844,7 +845,8 @@ type
   // to use this TAesC64 class which behaves the same as the old TAESCTR
   // - the CTR will use a counter in bytes 7..0 - which is not standard, and
   // can be changed via the ComposeIV() methods
-  // - this class will use AES-NI hardware instructions, if available
+  // - this class will use AES-NI hardware instructions, if available, but
+  // does not benefit from the optimized x86_64 of TAesCtr which is much faster
   // - expect IV to be set before process, or IVAtBeginning=true
   TAesC64 = class(TAesAbstractEncryptOnly)
   protected
@@ -1320,6 +1322,16 @@ type
     function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
+/// cypher/decypher any buffer using AES and PKCS7 padding, from a key buffer
+function AesPkcs7(const src: RawByteString; encrypt: boolean; const key;
+  keySizeBits: cardinal; aesMode: TAesMode = mCtr; IV: PAesBlock = nil): RawByteString; overload;
+
+/// cypher/decypher any buffer using AES and PKCS7 padding, from a key buffer
+// - will derivate the password using PBKDF2 over HMAC-SHA256, using lower
+// 128-bit as AES-CTR-128 key, and the upper 128-bit as IV
+function AesPkcs7(const src: RawByteString; encrypt: boolean;
+  const password: RawUtf8; const salt: RawByteString = '';
+  rounds: cardinal = 1000; aesMode: TAesMode = mCtr): RawByteString; overload;
 
 /// cypher/decypher any file using AES and PKCS7 padding, from a key buffer
 // - just a wrapper around TAesPkcs7Writer/TAesPkcs7Reader and TFileStream
@@ -1362,6 +1374,9 @@ const
   /// the AES chaining modes which supports AEAD process
   AES_AEAD = [mCfc, mOfc, mCtc, mGcm];
 
+  /// our non standard chaining modes, which do not exist e.g. on OpenSSL
+  AES_INTERNAL = [mC64, mCfc, mOfc, mCtc];
+
   /// the AES chaining modes supported by TAesPkcs7Writer/TAesPkcs7Reader
   // - ECB is unsafe and has no IV, and AEAD modes are out of context
   // because we don't handle the additional AEAD information yet
@@ -1388,7 +1403,7 @@ function AesAlgoNameDecode(AesAlgoName: PUtf8Char;
   out Mode: TAesMode; out KeyBits: integer): boolean; overload;
 
 /// OpenSSL-like Cipher name decoding into a mormot.crypt.core TAesAbstract class
-// - decode e.g. 'aes-128-cfb' into Mode=mCfb and KeyBits=128
+// - decode e.g. 'aes-256-cfb' into TAesFast[mCfb] and KeyBits=256
 function AesAlgoNameDecode(const AesAlgoName: RawUtf8;
   out KeyBits: integer): TAesAbstractClass; overload;
 
@@ -1406,7 +1421,7 @@ type
   /// BREAKING CHANGE since mORMOt 1.18: our 64-bit CTR was not standard, so
   // SynCrypto.pas' TAESCTR class was wrongly named and TAesCtr in this unit
   // refers to the standard NIST implementation (also much faster on x86_64)
-  // - so you need to renamed any TAESCTR class as TAesC64
+  // - so you need to rename any mORMot 1 TAESCTR class into TAesC64
   TAesCtrAny = TAesC64;
   TAesCtrNist = TAesCtr;
 
@@ -1564,6 +1579,7 @@ type
     // - this method is thread-safe, but you may use your own TAesPrng instance
     // if you need some custom entropy level
     class procedure Fill(out Block: TAesBlock); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// just a wrapper around TAesPrngAbstract.Main.FillRandom() function
     // - this method is thread-safe, but you may use your own TAesPrng instance
     // if you need some custom entropy level
@@ -1775,10 +1791,10 @@ function CryptDataForCurrentUser(const Data, AppSecret: RawByteString;
 { ****************** SHA-2 SHA-3 Secure Hashing }
 
 const
-  /// hide all SHA-1/SHA-2 complex code by storing the context as buffer
+  /// hide TSha1/TSha256 complex code by storing the SHA-1/SHA-2 context as buffer
   SHAContextSize = 108;
 
-  /// hide all SHA-3 complex code by storing the Keccak Sponge as buffer
+  /// hide TSha3Context complex code by storing the Keccak/SHA-3 Sponge as buffer
   SHA3ContextSize = 412;
 
 type
@@ -1918,6 +1934,8 @@ type
 
 type
   /// SHA-3 instances, as defined by NIST Standard for Keccak sponge construction
+  // - SHA3_224..SHA3_512 output 224, 256, 384 and 512 bits of cryptographic hash
+  // - SHAKE_128 and SHAKE_256 implements a XOF/cipher generator
   TSha3Algo = (
     SHA3_224,
     SHA3_256,
@@ -1933,7 +1951,7 @@ type
   // - by design, SHA-3 doesn't need to be encapsulated into a HMAC algorithm,
   // since it already includes proper padding, so keys could be concatenated
   // - this implementation is based on Wolfgang Ehrhardt's and Eric Grange's,
-  // with our own manually optimized x64 assembly
+  // with manually optimized x64 assembly, with AVX2 runtime detection
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. after InitCypher
   // - see TSynHasher if you expect to support more than one algorithm at runtime
@@ -5165,10 +5183,7 @@ begin
     if InputLen = 0 then
       result := ''
     else
-    begin
-      P[InputLen] := #0; // as SetString - needed if parsed e.g. as text/JSON
-      PStrLen(P - _STRLEN)^ := InputLen; // fake length with no realloc
-    end;
+      FakeLength(result, InputLen);
   end;
 end;
 
@@ -6727,6 +6742,43 @@ begin
   result := RaiseStreamError(self, 'Write');
 end;
 
+function AesPkcs7(const src: RawByteString; encrypt: boolean; const key;
+  keySizeBits: cardinal; aesMode: TAesMode; IV: PAesBlock): RawByteString;
+var
+  aes: TAesAbstract;
+begin
+  if src = '' then
+    result := ''
+  else
+  begin
+    aes := TAesFast[aesMode].Create(key, keySizeBits);
+    try
+      if IV <> nil then
+        aes.IV := IV^;
+      if encrypt then
+        result := aes.EncryptPkcs7(src, IV = nil)
+      else
+        result := aes.DecryptPkcs7(src, IV = nil);
+    finally
+      aes.Free;
+    end;
+  end;
+end;
+
+function AesPkcs7(const src: RawByteString; encrypt: boolean;
+  const password: RawUtf8; const salt: RawByteString; rounds: cardinal;
+  aesMode: TAesMode): RawByteString;
+var
+  dig: THash256Rec; // see AesPkcs7File() and TAesPkcs7Abstract.Create overload
+begin
+  Pbkdf2HmacSha256(password, salt, rounds, dig.b, TAESPKCS7WRITER_SALT);
+  try
+    result := AesPkcs7(src, encrypt, dig.Lo, 128, aesMode, @dig.Hi);
+  finally
+    FillZero(dig.b);
+  end;
+end;
+
 function AesPkcs7File(const src, dst: TFileName; encrypt: boolean; const key;
   keySizeBits: cardinal; aesMode: TAesMode; IV: PAesBlock): Int64;
 var
@@ -7274,7 +7326,7 @@ begin
     // randomness and entropy from mormot.core.base
     RandomBytes(@data, SizeOf(data)); // XOR stack data from gsl_rng_taus2
     sha3.Update(@data, SizeOf(data));
-    XorEntropy(data); // 512-bit from RdRand32 + Rdtsc + Now + CreateGUID
+    XorEntropy(data); // 512-bit from RdRand32 + Rdtsc + Now + CreateGuid
     sha3.Update(@data, SizeOf(data));
     // include some official system-derivated entropy source
     if IsZero(_OSEntropySeed) then
@@ -7603,7 +7655,7 @@ begin
     // persist the new private user key into local hidden file
     if FileExists(fn) then
       // allow rewrite of an invalid local file
-      FileSetAttributes(fn, {secret=}false);
+      FileSetHidden(fn, {ReadOnly=}false);
     TAesPrng.Main.FillRandom(__h);
     key := TAesPrng.Main.AFSplit(__h, SizeOf(__h), 126);
     {$ifdef OSWINDOWS}
@@ -7617,7 +7669,7 @@ begin
     key := TAesCfb.SimpleEncrypt(key2, k256, 256, true, true);
     if not FileFromString(key, fn) then
       ESynCrypto.CreateUtf8('Unable to write %', [fn]);
-    FileSetAttributes(fn, {secret=}true); // chmod 400
+    FileSetHidden(fn, {ReadOnly=}true); // chmod 400
   finally
     FillZero(key);
     FillZero(key2);
@@ -8143,7 +8195,8 @@ end;
 const
   cKeccakPermutationSize = 1600;
   cKeccakMaximumRate = 1536;
-  cKeccakPermutationSizeInBytes = cKeccakPermutationSize div 8;
+  cKeccakPermutationSizeInByte = cKeccakPermutationSize div 8;
+  cKeccakPermutationSizeInQWord = cKeccakPermutationSize div 64;
   cKeccakMaximumRateInBytes = cKeccakMaximumRate div 8;
   cKeccakNumberOfRounds = 24;
   cRoundConstants: array[0..cKeccakNumberOfRounds - 1] of QWord = (
@@ -8164,11 +8217,69 @@ var
   C: array[0..4] of QWord;
   i: PtrInt;
 begin
-  for i := 0 to 23 do
+  {$ifdef ASMX64AVXNOCONST}
+  if cpuAVX2 in X64CpuFeatures then
   begin
-    KeccakPermutationKernel(@B, A, @C);
-    A[00] := A[00] xor cRoundConstants[i];
-  end;
+    B[0] := A[0]; // AVX2 asm has a diverse state order to perform its rotations
+    B[1] := A[1];
+    B[2] := A[2];
+    B[3] := A[3];
+    B[4] := A[4];
+    B[7] := A[5];
+    B[21] := A[6];
+    B[10] := A[7];
+    B[15] := A[8];
+    B[20] := A[9];
+    B[5] := A[10];
+    B[13] := A[11];
+    B[22] := A[12];
+    B[19] := A[13];
+    B[12] := A[14];
+    B[8] := A[15];
+    B[9] := A[16];
+    B[18] := A[17];
+    B[23] := A[18];
+    B[16] := A[19];
+    B[6] := A[20];
+    B[17] := A[21];
+    B[14] := A[22];
+    B[11] := A[23];
+    B[24] := A[24];
+    KeccakPermutationAvx2(@B);
+    A[0] := B[0];
+    A[1] := B[1];
+    A[2] := B[2];
+    A[3] := B[3];
+    A[4] := B[4];
+    A[5] := B[7];
+    A[6] := B[21];
+    A[7] := B[10];
+    A[8] := B[15];
+    A[9] := B[20];
+    A[10] := B[5];
+    A[11] := B[13];
+    A[12] := B[22];
+    A[13] := B[19];
+    A[14] := B[12];
+    A[15] := B[8];
+    A[16] := B[9];
+    A[17] := B[18];
+    A[18] := B[23];
+    A[19] := B[16];
+    A[20] := B[6];
+    A[21] := B[17];
+    A[22] := B[14];
+    A[23] := B[11];
+    A[24] := B[24];
+  end
+  else
+  {$endif ASMX64AVXNOCONST}
+    // regular pascal/IntelAsm code
+    for i := 0 to high(cRoundConstants) do
+    begin
+      KeccakPermutationKernel(@B, A, @C);
+      A[00] := A[00] xor cRoundConstants[i];
+    end;
   {$ifdef CPUX86}
   asm
      emms // reset MMX state after use
@@ -8212,7 +8323,7 @@ var
   C0, C1, C2, C3, C4, D0, D1, D2, D3, D4: QWord;
   i: PtrInt;
 begin
-  for i := 0 to 23 do
+  for i := 0 to high(cRoundConstants) do
   begin
     C0 := A[00] xor A[05] xor A[10] xor A[15] xor A[20];
     C1 := A[01] xor A[06] xor A[11] xor A[16] xor A[21];
@@ -8285,7 +8396,7 @@ end;
 type
   TSha3Context = object
   public
-    State: packed array[0..cKeccakPermutationSizeInBytes - 1] of byte;
+    State: packed array[0..cKeccakPermutationSizeInQWord - 1] of QWord;
     DataQueue: packed array[0..cKeccakMaximumRateInBytes - 1] of byte;
     Algo: TSha3Algo;
     Squeezing: boolean;

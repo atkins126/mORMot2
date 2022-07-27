@@ -305,11 +305,19 @@ procedure IP4Text(ip4addr: PByteArray; var result: RawUtf8);
 /// convert an IPv6 full address into a ShortString text
 procedure IP6Short(psockaddr: pointer; var s: ShortString; withport: boolean);
 
-/// convert a MAC address value into a RawUtf8 text
+/// convert a MAC address value into its standard RawUtf8 text representation
 // - returns e.g. '12:50:b6:1e:c6:aa'
 // - could be used to convert some binary buffer into human-friendly hexadecimal
 // string, e.g. by asn1_string_st.ToHex() in our mormot.lib.openssl11 wrapper
 function MacToText(mac: PByteArray; maclen: PtrInt = 6): RawUtf8;
+
+/// convert a MAC address value from its standard hexadecimal text representation
+// - returns e.g. '12:50:b6:1e:c6:aa' from '1250b61ec6aa' or '1250B61EC6AA'
+function MacTextFromHex(const Hex: RawUtf8): RawUtf8;
+
+/// convert a MAC address value into a RawUtf8 hexadecimal text with no ':'
+// - returns e.g. '1250b61ec6aa'
+function MacToHex(mac: PByteArray; maclen: PtrInt = 6): RawUtf8;
 
 /// enumerate all IP addresses of the current computer
 // - may be used to enumerate all adapters
@@ -400,10 +408,15 @@ type
   // $ finally
   // $   Free;
   // $ end;
+  // - for passing a PNetTlsContext, use InitNetTlsContext for initialization
   TNetTlsContext = record
     /// output: set by TCrtSocket.OpenBind() method once TLS is established
     Enabled: boolean;
     /// input: let HTTPS be less paranoid about TLS certificates
+    // - on client: will avoid checking the server certificate, so will
+    // allow to connect and encrypt e.g. with secTLSSelfSigned servers
+    // - on OpenSSL server, should be true if no mutual authentication is done,
+    // i.e. if OnPeerValidate/OnEachPeerVerify callbacks are not set
     IgnoreCertificateErrors: boolean;
     /// input: if PeerInfo field should be retrieved once connected
     // - ignored on SChannel
@@ -416,7 +429,8 @@ type
     // - on OpenSSL client or server, calls SSL_CTX_use_certificate_file() API
     // - not used on SChannel client
     // - on SChannel server, expects a .pfx / PKCS#12 file format including
-    // the certificate and the private key:
+    // the certificate and the private key, e.g. generated from
+    // ICryptCert.SaveToFile(FileName, cccCertWithPrivateKey, ', ccfBinary) or
     // openssl pkcs12 -inkey privkey.pem -in cert.pem -export -out mycert.pfx
     CertificateFile: RawUtf8;
     /// input: PEM file name containing a private key to be loaded
@@ -504,6 +518,10 @@ type
       LastError, CipherName: PRawUtf8);
     /// retrieve the textual name of the cipher used following AfterAccept()
     function GetCipherName: RawUtf8;
+    /// return the low-level TLS instance used, depending on the engine
+    // - typically a PSSL on OpenSSL, so you can use e.g. PSSL().PeerCertificate,
+    // or a PCtxtHandle on SChannel
+    function GetRawTls: pointer;
     /// receive some data from the TLS layer
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
     /// send some data from the TLS layer
@@ -512,6 +530,12 @@ type
 
   /// signature of a factory for a new TLS encrypted layer
   TOnNewNetTls = function: INetTls;
+
+
+/// initialize a stack-allocated TNetTlsContext instance
+procedure InitNetTlsContext(var TLS: TNetTlsContext; Server: boolean = false;
+  const CertificateFile: TFileName = ''; const PrivateKeyFile: TFileName = '';
+  const PrivateKeyPassword: RawUtf8 = ''; const CACertificatesFile: TFileName = '');
 
 var
   /// global factory for a new TLS encrypted layer for TCrtSocket
@@ -534,13 +558,17 @@ type
   /// set of events monitored by TPollSocketAbstract
   TPollSocketEvents = set of TPollSocketEvent;
 
-  /// some opaque value (which may be a pointer) associated with a polling event
+  /// some opaque value (typically a pointer) associated with a polling event
   TPollSocketTag = type PtrInt;
   PPollSocketTag = ^TPollSocketTag;
   TPollSocketTagDynArray = TPtrUIntDynArray;
 
   /// modifications notified by TPollSocketAbstract.WaitForModified
-  TPollSocketResult = record
+  {$ifdef CPUINTEL}
+  TPollSocketResult =  packed record
+  {$else}
+  TPollSocketResult =  record // ARM uslaly prefers aligned data
+  {$endif CPUINTEL}
     /// opaque value as defined by TPollSocketAbstract.Subscribe
     // - holds typically a TPollAsyncConnection instance
     tag: TPollSocketTag;
@@ -661,14 +689,12 @@ type
     fPendingSafe: TLightLock;
     fPollIndex: integer;
     fGettingOne: integer;
-    fLastUnsubscribeTagCount: integer;
     fTerminated: boolean;
     fEpollGettingOne: boolean;
     fUnsubscribeShouldShutdownSocket: boolean;
     fPollClass: TPollSocketClass;
     fOnLog: TSynLogProc;
     fOnGetOneIdle: TOnPollSocketsIdle;
-    fLastUnsubscribeTag: TPollSocketTagDynArray; // protected by fPendingSafe
     // used for select/poll (FollowEpoll=false) with multiple thread-unsafe fPoll[]
     fSubscription: TPollSocketsSubscription;
     fSubscriptionSafe: TLightLock; // dedicated not to block Accept()
@@ -724,6 +750,14 @@ type
     // - ready to be retrieved by GetOnePending
     procedure AddOnePending(aTag: TPollSocketTag; aEvents: TPollSocketEvents;
       aNoSearch: boolean);
+    /// disable any pending notification associated with a given connection tag
+    // - can be called when a connection is removed from the main logic
+    // to ensure function IsValidPending() never raise any GPF, if the
+    // connection has been set via AddOnePending() but not via Subscribe()
+    function DeleteOnePending(aTag: TPollSocketTag): boolean;
+    /// disable any pending notification associated with several connection tags
+    // - note that aTag array will be sorted during the process
+    function DeleteSeveralPending(aTag: PPollSocketTag; aTagCount: integer): integer;
     /// notify any GetOne waiting method to stop its polling loop
     procedure Terminate; override;
     /// indicates that Unsubscribe() should also call ShutdownAndClose(socket)
@@ -2066,7 +2100,7 @@ var
   i: PtrInt;
   tab: PAnsichar;
 begin
-  SetLength(result, (maclen * 3) - 1);
+  FastSetString(result, nil, (maclen * 3) - 1);
   dec(maclen);
   tab := @HexCharsLower;
   P := pointer(result);
@@ -2078,6 +2112,59 @@ begin
       break;
     P[2] := ':'; // as in Linux
     inc(P, 3);
+    inc(i);
+  until false;
+end;
+
+function MacTextFromHex(const Hex: RawUtf8): RawUtf8;
+var
+  L: PtrInt;
+  h, m: PAnsiChar;
+begin
+  L := length(Hex);
+  if (L = 0) or
+     (L and 1 <> 0) then
+  begin
+    result := '';
+    exit;
+  end;
+  L := L shr 1;
+  FastSetString(result, nil, (L * 3) - 1);
+  h := pointer(Hex);
+  m := pointer(result);
+  repeat
+    m[0] := h[0];
+    if h[0] in ['A'..'Z'] then
+      inc(m[0], 32);
+    m[1] := h[1];
+    if h[1] in ['A'..'Z'] then
+      inc(m[1], 32);
+    dec(L);
+    if L = 0 then
+      break;
+    m[2] := ':';
+    inc(h, 2);
+    inc(m, 3);
+  until false;
+end;
+
+function MacToHex(mac: PByteArray; maclen: PtrInt): RawUtf8;
+var
+  P: PAnsiChar;
+  i: PtrInt;
+  tab: PAnsichar;
+begin
+  FastSetString(result, nil, maclen * 2);
+  dec(maclen);
+  tab := @HexCharsLower;
+  P := pointer(result);
+  i := 0;
+  repeat
+    P[0] := tab[mac[i] shr 4];
+    P[1] := tab[mac[i] and $F];
+    if i = maclen then
+      break;
+    inc(P, 2);
     inc(i);
   until false;
 end;
@@ -2178,6 +2265,21 @@ begin
     Text[true] := wo;
     result := Text[WithoutName];
   end;
+end;
+
+
+{ ******************** TLS / HTTPS Encryption Abstract Layer }
+
+procedure InitNetTlsContext(var TLS: TNetTlsContext; Server: boolean;
+  const CertificateFile, PrivateKeyFile: TFileName;
+  const PrivateKeyPassword: RawUtf8; const CACertificatesFile: TFileName);
+begin
+  FillCharFast(TLS, SizeOf(TLS), 0);
+  TLS.IgnoreCertificateErrors := Server; // needed if no mutual auth is done
+  TLS.CertificateFile := RawUtf8(CertificateFile);
+  TLS.PrivateKeyFile := RawUtf8(PrivateKeyFile);
+  TLS.PrivatePassword := PrivateKeyPassword;
+  TLS.CACertificatesFile := RawUtf8(CACertificatesFile);
 end;
 
 
@@ -2345,42 +2447,14 @@ begin
 end;
 
 procedure TPollSockets.Unsubscribe(socket: TNetSocket; tag: TPollSocketTag);
-var
-  fnd: PPollSocketResult;
-  ndx, n: PtrInt;
-const
-  FOUND: array[boolean] of string[10] = ('', 'events:=0 ');
 begin
-  // first check if there is any pending notification about this socket
-  fnd := nil;
-  if fPending.Count <> 0 then
-  begin
-    fPendingSafe.Lock;
-    try
-      ndx := fPendingIndex;
-      n := fPending.Count;
-      if n <> 0 then
-      begin
-        fnd := FindPendingFromTag(@fPending.Events[ndx], n - ndx, tag);
-        if fnd <> nil then
-          byte(fnd^.events) := 0; // GetOnePending() will ignore it
-      end;
-      AddPtrUInt(fLastUnsubscribeTag, fLastUnsubscribeTagCount, tag);
-    finally
-      fPendingSafe.UnLock;
-    end;
-    if Assigned(fOnLog) and
-       (n <> 0) then // log outside fPendingSafe
-      fOnLog(sllTrace, 'Unsubscribe(%) count=% %pending #%/%',
-        [pointer(tag), fCount, FOUND[fnd <> nil], ndx, n], self);
-  end;
   // actually unsubscribe from the sockets monitoring API
   {$ifdef POLLSOCKETEPOLL}
   // epoll_ctl() is thread-safe and let epoll_wait() work in the background
   if fPoll[0].Unsubscribe(socket) then
   begin
     LockedDec32(@fCount);
-    if Assigned(fOnLog) then // log outside fPendingSafe
+    if Assigned(fOnLog) then
       fOnLog(sllTrace, 'Unsubscribe(%) count=%', [pointer(socket), fCount], self);
   end;
   {$else}
@@ -2420,8 +2494,6 @@ function TPollSockets.GetOnePending(out notif: TPollSocketResult;
   const call: RawUtf8): boolean;
 var
   n, ndx: PtrInt;
-label
-  ok;
 begin
   result := false;
   if fTerminated or
@@ -2429,38 +2501,32 @@ begin
     exit;
   fPendingSafe.Lock;
   {$ifdef HASFASTTRYFINALLY} // make a huge performance difference
-  try
+  try                        // and IsValidPending() should be secured
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
     n := fPending.Count;
     ndx := fPendingIndex;
     if ndx < n then
-    begin
       repeat
         // retrieve next notified event
         notif := fPending.Events[ndx];
         // move forward
         inc(ndx);
-        if (byte(notif.events) <> 0) and // Unsubscribe() may have reset to 0
-           IsValidPending(notif.tag) and // e.g. TPollAsyncReadSockets
-           ((fLastUnsubscribeTagCount = 0) or
-            not PtrUIntScanExists(pointer(fLastUnsubscribeTag),
-              fLastUnsubscribeTagCount, notif.tag)) then
+        if (byte(notif.events) <> 0) and  // DeleteOnePending() may reset to 0
+           IsValidPending(notif.tag) then // e.g. TPollAsyncReadSockets
         begin
           // there is a non-void event to return
           result := true;
           fPendingIndex := ndx; // continue with next event
-          // quick exit with one notified event
-          if ndx = n then
-            break; // reset fPending list
-          goto ok;
+          break;
         end;
       until ndx >= n;
+    if ndx >= n then
+    begin
       fPending.Count := 0; // reuse shared fPending.Events[] memory
       fPendingIndex := 0;
-      fLastUnsubscribeTagCount := 0;
-ok: end;
+    end;
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
@@ -2497,7 +2563,7 @@ begin
       // new event to process
       if n >= cap then
       begin
-        cap := n + newCount + 16;
+        cap := NextGrow(n + newCount);
         SetLength(res.Events, cap); // seldom needed
       end;
       res.Events[n] := new^;
@@ -2707,8 +2773,7 @@ begin
       fPendingSafe.UnLock;
     end;
     new.Events := nil;
-    //if result = 0 then {$i-} write('!'); {$i+}
-    if {(result > 0) and}
+    if (result > 0) and
        Assigned(fOnLog) then
     begin
       QueryPerformanceMicroSeconds(stop);
@@ -2734,8 +2799,8 @@ begin
     n := fPending.Count;
     if aNoSearch or
        (n = 0) or
-       (FindPendingFromTag(@fPending.Events[fPendingIndex],
-          n - fPendingIndex, aTag) = nil) then
+       (FindPendingFromTag( // fast O(n) search in L1 cache
+          @fPending.Events[fPendingIndex], n - fPendingIndex, aTag) = nil) then
     begin
       if n >= length(fPending.Events) then
         SetLength(fPending.Events, NextGrow(n));
@@ -2746,6 +2811,70 @@ begin
       end;
       fPending.Count := n + 1;
     end;
+  finally
+    fPendingSafe.UnLock;
+  end;
+end;
+
+function TPollSockets.DeleteOnePending(aTag: TPollSocketTag): boolean;
+var
+  fnd: PPollSocketResult;
+begin
+  result := false;
+  if (fPending.Count = 0) or
+     (aTag = 0) then
+    exit;
+  fPendingSafe.Lock;
+  try
+    if fPending.Count <> 0 then
+    begin
+      fnd := FindPendingFromTag( // fast O(n) search in L1 cache
+        @fPending.Events[fPendingIndex], fPending.Count - fPendingIndex, aTag);
+      if fnd <> nil then
+      begin
+        byte(fnd^.events) := 0; // GetOnePending() will just ignore it
+        result := true;
+      end;
+    end;
+  finally
+    fPendingSafe.UnLock;
+  end;
+end;
+
+function TPollSockets.DeleteSeveralPending(
+  aTag: PPollSocketTag; aTagCount: integer): integer;
+var
+  p: PPollSocketResult;
+  n: integer;
+begin
+  result := 0;
+  if (fPending.Count = 0) or
+     (aTagCount = 0) then
+    exit;
+  dec(aTagCount);
+  if aTagCount = 0 then
+  begin
+    result := ord(DeleteOnePending(aTag^));
+    exit;
+  end;
+  QuickSortPtrInt(pointer(aTag), 0, aTagCount);
+  fPendingSafe.Lock;
+  try
+    n := fPending.Count;
+    if n = 0 then
+      exit;
+    dec(n, fPendingIndex);
+    p := @fPending.Events[fPendingIndex];
+    if n > 0 then
+      repeat
+        if FastFindPtrIntSorted(pointer(aTag), aTagCount, p^.tag) >= 0 then
+        begin
+          byte(p^.events) := 0; // GetOnePending() will just ignore it
+          inc(result);
+        end;
+        inc(p);
+        dec(n)
+      until n = 0;
   finally
     fPendingSafe.UnLock;
   end;

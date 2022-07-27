@@ -2737,7 +2737,6 @@ procedure TSynAnsiConvert.Utf8BufferToAnsi(Source: PUtf8Char; SourceChars: cardi
 var
   tmp: array[word] of AnsiChar;
   max: PtrInt;
-  buf: PAnsiChar;
 begin
   if (Source = nil) or
      (SourceChars = 0) then
@@ -2753,9 +2752,8 @@ begin
     begin
       // huge strings will be allocated once and truncated, not resized
       FastSetStringCP(result, nil, max, fCodePage);
-      buf := Utf8BufferToAnsi(pointer(result), Source, SourceChars);
-      buf^ := #0; // mandatory to emulate a regular string
-      PStrLen(PAnsiChar(pointer(result)) - _STRLEN)^ := buf - pointer(result);
+      FakeLength(result,
+        Utf8BufferToAnsi(pointer(result), Source, SourceChars) - pointer(result));
     end;
   end;
 end;
@@ -7048,11 +7046,11 @@ begin
   RawByteStringConvert := TSynAnsiConvert.Engine(CP_RAWBYTESTRING) as TSynAnsiFixedWidth;
   // setup optimized ASM functions
   IsValidUtf8Buffer := @IsValidUtf8Pas;
-  {$ifdef ASMX64AVX}
-  if cpuHaswell in CPUIDX64 then
+  {$ifdef ASMX64AVXNOCONST}
+  if cpuHaswell in X64CpuFeatures then
     // Haswell CPUs can use simdjson AVX2 asm for IsValidUtf8()
     IsValidUtf8Buffer := @IsValidUtf8Avx2;
-  {$endif ASMX64AVX}
+  {$endif ASMX64AVXNOCONST}
 end;
 
 

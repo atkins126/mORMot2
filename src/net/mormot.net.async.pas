@@ -53,6 +53,21 @@ type
     soContinue,
     soClose);
 
+  /// low-level flags used by the state machine about one TPollAsyncConnection
+  // - fWasActive is set by TAsyncConnections.IdleEverySecond to purge rd/wr
+  // unused buffers, to avoid calling GetTickCount64 for every activity
+  // - fClosed is set by OnClose virtual method
+  // - fFirstRead is set once TPollAsyncSockets.OnFirstRead is called
+  // - fSubRead/fSubWrite flags are set when Subscribe() has been called
+  // - fInList indicates that the connection was Added to the list
+  TPollAsyncConnectionFlags = set of (
+    fWasActive,
+    fClosed,
+    fFirstRead,
+    fSubRead,
+    fSubWrite,
+    fInList);
+
   /// abstract parent to store information aboout one TPollAsyncSockets connection
   TPollAsyncConnection = class(TSynPersistent)
   protected
@@ -67,14 +82,7 @@ type
     /// false for a single lock (default), true to separate read/write locks
     fLockMax: boolean;
     /// low-level flags used by the state machine about this connection
-    // - fWasActive is set by TAsyncConnections.IdleEverySecond to purge rd/wr
-    // unused buffers, to avoid calling GetTickCount64 for every activity
-    // - fClosed is set by OnClose virtual method
-    // - fFirstRead is set once TPollAsyncSockets.OnFirstRead is called
-    fFlags: set of (fWasActive, fClosed, fFirstRead);
-    /// pseRead/pseWrite flags set when Subscribe() has been called
-    // - pseClosed indicates that the connection was Added to the list
-    fSubscribed: TPollSocketEvents;
+    fFlags: TPollAsyncConnectionFlags;
     /// the current (reusable) read data buffer of this connection
     fRd: TRawByteStringBuffer;
     /// the current (reusable) write data buffer of this connection
@@ -294,8 +302,9 @@ type
     property WriteBytes: Int64
       read fWriteBytes;
     // enable WaitFor() during recv() in ProcessRead
-    // - enhance responsiveness especially on HTTP/1.0 connections
-    // - equals 50 ms by default, but could be tuned e.g. via acoNoReadWait
+    // - may enhance responsiveness especially on HTTP/1.0 connections
+    // - equals 0 ms by default, but could be tuned e.g. to 50 or 100 if needed
+    // - use with care: performance degrades with highly concurrent HTTP/1.1
     property ReadWaitMs: integer
       read fReadWaitMs write fReadWaitMs;
   end;
@@ -425,7 +434,6 @@ type
   // - acoDebugReadWriteLog would make low-level send/receive logging
   // - acoNoConnectionTrack would force to by-pass the internal Connections list
   // if it is not needed - not used by now
-  // - acoNoReadWait will set ReadWaitMs = 0 instead of 50 ms
   // - acoEnableTls flag for TLS support, via Windows SChannel or OpenSSL 1.1/3.x
   TAsyncConnectionsOptions = set of (
     acoOnErrorContinue,
@@ -435,7 +443,6 @@ type
     acoWritePollOnly,
     acoDebugReadWriteLog,
     acoNoConnectionTrack,
-    acoNoReadWait,
     acoEnableTls);
 
   /// implements an abstract thread-pooled high-performance TCP clients or server
@@ -737,6 +744,7 @@ type
     fKeepAliveSec: TAsyncConnectionSec;
     fHeadersSec: TAsyncConnectionSec;
     fRespStatus: integer;
+    fConnectionOpaque: THttpServerConnectionOpaque;
     procedure AfterCreate; override;
     procedure BeforeDestroy; override;
     procedure HttpInit;
@@ -754,6 +762,7 @@ type
   THttpAsyncConnections = class(TAsyncServer)
   protected
     fAsyncServer: THttpAsyncServer;
+    procedure IdleEverySecond; override;
     procedure SetExecuteState(State: THttpServerExecuteState); override;
     procedure Execute; override;
   end;
@@ -768,9 +777,12 @@ type
     fHeadersDefaultBufferSize: integer;
     fConnectionClass: TAsyncConnectionClass;
     fConnectionsClass: THttpAsyncConnectionsClass;
+    fInterning: PRawUtf8InterningSlot;
+    fInterningTix: cardinal;
     function GetHttpQueueLength: cardinal; override;
     procedure SetHttpQueueLength(aValue: cardinal); override;
     function GetExecuteState: THttpServerExecuteState; override;
+    procedure IdleEverySecond; virtual;
     // the main thread will Send output packets in the background
     procedure Execute; override;
   public
@@ -981,13 +993,30 @@ end;
 
 function TPollConnectionSockets.IsValidPending(tag: TPollSocketTag): boolean;
 begin
-  // same logic than TPollAsyncConnection IsDangling() + TryLock()
-  result := (tag <> 0) and
-            // avoid dangling pointer
-            (TPollAsyncConnection(tag).fHandle <> 0) and
-            // another atpReadPending thread may currently own this connection
-            // (occurs if PollForPendingEvents was called in between)
-            (TPollAsyncConnection(tag).fRW[{write=}false].RentrantCount = 0);
+  try
+    // same logic than TPollAsyncConnection IsDangling() + TryLock()
+    result := (tag <> 0) and
+              // avoid dangling pointer
+              (TPollAsyncConnection(tag).fHandle <> 0) and
+              // another atpReadPending thread may currently own this connection
+              // (occurs if PollForPendingEvents was called in between)
+              (TPollAsyncConnection(tag).fRW[{write=}false].RentrantCount = 0);
+  except
+    on E: Exception do
+    begin
+      // this GPF has been seen on very rare occasions on wrk -c 16384
+      // -> has a slight performance impact, but is mandatory for proper
+      // TPollSockets.GetOnePending fPendingSafe.Lock release
+      // -> perhaps KeepConnectionInstanceMS may be set to a higher value
+      try
+        if Assigned(fOnlog) then
+          fOnLog(sllError, 'IsValidPending(%) raised %',
+            [pointer(tag), E.ClassType], self);
+      except // paranoid
+      end;
+      result := false;
+    end;
+  end;
 end;
 
 procedure TPollConnectionSockets.PendingLogDebug(const caller: shortstring);
@@ -1016,7 +1045,6 @@ begin
   fRead := TPollConnectionSockets.Create;
   fRead.UnsubscribeShouldShutdownSocket := true;
   fWrite := TPollSockets.Create;
-  fReadWaitMs := 50; // is mandatary e.g. for apache bench process
 end;
 
 destructor TPollAsyncSockets.Destroy;
@@ -1063,6 +1091,9 @@ begin
   end;
 end;
 
+const
+  _SUB: array[boolean] of AnsiChar = '-+';
+
 function TPollAsyncSockets.Stop(connection: TPollAsyncConnection): boolean;
 var
   sock: TNetSocket;
@@ -1076,15 +1107,16 @@ begin
     // retrieve the raw information of this abstract connection
     sock := connection.fSocket;
     if fDebugLog <> nil then
-      DoLog('Stop sock=% handle=% r=% w=% sub=%',
+      DoLog('Stop sock=% handle=% r=%% w=%%',
         [pointer(sock), connection.Handle, connection.fRW[false].RentrantCount,
-         connection.fRW[true].RentrantCount, ToText(connection.fSubscribed)]);
+         _SUB[fSubRead in connection.fFlags], connection.fRW[true].RentrantCount,
+         _SUB[fSubWrite in connection.fFlags]]);
     if sock <> nil then
     begin
       // notify ProcessRead/ProcessWrite to abort
       connection.fSocket := nil;
       // unsubscribe and close the socket
-      if pseWrite in connection.fSubscribed then
+      if fSubWrite in connection.fFlags then
         // write first because of fRead.UnsubscribeShouldShutdownSocket
         fWrite.Unsubscribe(sock, TPollSocketTag(connection));
       if connection.fSecure <> nil then
@@ -1093,7 +1125,7 @@ begin
         except
           pointer(connection.fSecure) := nil; // leak is better than GPF
         end;
-      if pseRead in connection.fSubscribed then
+      if fSubRead in connection.fFlags then
         // note: fRead.UnsubscribeShouldShutdownSocket=true, so ShutdownAndClose
         // is done now on Epoll, or at next PollForPendingEvents()
         fRead.Unsubscribe(sock, TPollSocketTag(connection))
@@ -1264,7 +1296,7 @@ begin
   // first unlock (if needed)
   c.UnLockFinal(writer);
   // optional process - e.g. TWebSocketAsyncConnection = focConnectionClose
-  c.OnClose; // called before slot/socket closing
+  c.OnClose; // called before slot/socket closing - set fClosed flag
   // Stop() will try to acquire this lock -> notify no need to wait
   CloseConnection(c);
 end;
@@ -1274,20 +1306,24 @@ function TPollAsyncSockets.SubscribeConnection(const caller: shortstring;
 var
   poll: TPollSockets;
 begin
-  if not (pseClosed in connection.fSubscribed) then // not already registered
+  if not (fInList in connection.fFlags) then // not already registered
     RegisterConnection(connection);
-  if sub in connection.fSubscribed then
-  begin
-    result := false;
-    exit;
-  end;
+  result := false;
   if sub = pseRead then
-    poll := fRead
-  else
-    poll := fWrite;
+    if fSubRead in connection.fFlags then
+      exit
+    else
+      poll := fRead
+  else if fSubWrite in connection.fFlags then
+      exit
+    else
+      poll := fWrite;
   result := poll.Subscribe(connection.fSocket, [sub], TPollSocketTag(connection));
   if result then
-    include(connection.fSubscribed, sub);
+     if sub = pseRead then
+       include(connection.fFlags, fSubRead)
+     else
+       include(connection.fFlags, fSubWrite);
   if fDebugLog <> nil then
     DoLog('Subscribe(%)=% % handle=% % cnt=%', [pointer(connection.fSocket),
       BOOL_STR[result], caller, connection.Handle, ToText(sub)^, poll.Count]);
@@ -1315,7 +1351,7 @@ var
   connection: TPollAsyncConnection;
   recved, added: integer;
   res: TNetResult;
-  timer: TPrecisionTimer;
+  start, stop: Int64;
   wf: string[3];
   temp: array[0..$7fff] of byte; // up to 32KB moved to small reusable fRd.Buffer
 begin
@@ -1367,7 +1403,7 @@ begin
              (connection.fSocket = nil) then
             exit;
           if fDebugLog <> nil then
-            timer.Start;
+            QueryPerformanceMicroSeconds(start);
           recved := SizeOf(temp);
           res := connection.Recv(@temp, recved); // no need of RecvPending()
           if (res = nrRetry) and
@@ -1382,8 +1418,11 @@ begin
           else
             wf[0] := #0;
           if fDebugLog <> nil then
+          begin
+            QueryPerformanceMicroSeconds(stop);
             DoLog('ProcessRead recv(%)=% len=% %in % %', [pointer(connection.Socket),
-              ToText(res)^, recved, wf, timer.Stop, fRead]);
+              ToText(res)^, recved, wf, MicroSecToString(stop - start), fRead]);
+          end;
           if connection.fSocket = nil then
             exit; // Stop() called
           if res = nrRetry then
@@ -1416,7 +1455,7 @@ begin
           connection.UnLock(false); // UnlockSlotAndCloseConnection set slot=nil
           if (connection.fSocket <> nil) and
              not (fClosed in connection.fFlags) and
-             not (pseRead in connection.fSubscribed) then
+             not (fSubRead in connection.fFlags) then
             // it is time to subscribe for any future read on this connection
             if not SubscribeConnection('read', connection, pseRead) then
               if fDebugLog <> nil then
@@ -1442,7 +1481,7 @@ var
   buf: PByte;
   buflen, bufsent, sent: integer;
   res: TNetResult;
-  timer: TPrecisionTimer;
+  start, stop: Int64;
 begin
   connection := TPollAsyncConnection(notif.tag);
   if (self = nil) or
@@ -1465,7 +1504,7 @@ begin
       buf := connection.fWr.Buffer;
       repeat
         if fDebugLog <> nil then
-          timer.Start;
+          QueryPerformanceMicroSeconds(start);
         if fWrite.Terminated or
            (connection.fSocket = nil) then
           exit;
@@ -1473,9 +1512,12 @@ begin
         //DoLog('ProcessWrite: before Send buflen=%', [bufsent]);
         res := connection.Send(buf, bufsent);
         if fDebugLog <> nil then
+        begin
+          QueryPerformanceMicroSeconds(stop);
           DoLog('ProcessWrite send(%)=% %/%B in % % fProcessingWrite=%',
-            [pointer(connection.fSocket), ToText(res)^,
-             bufsent, buflen, timer.Stop, fWrite, fProcessingWrite]);
+            [pointer(connection.fSocket), ToText(res)^, bufsent, buflen,
+             MicroSecToString(stop - start), fWrite, fProcessingWrite]);
+        end;
         if connection.fSocket = nil then
           exit; // Stop() called
         if res = nrRetry then
@@ -1483,7 +1525,7 @@ begin
         else if res <> nrOk then
         begin
           fWrite.Unsubscribe(connection.fSocket, notif.tag);
-          exclude(connection.fSubscribed, pseWrite);
+          exclude(connection.fFlags, fSubWrite);
           if fDebugLog <> nil then
             DoLog('Write failed as % -> Unsubscribe(%,%) %', [ToText(res)^,
               pointer(connection.fSocket), connection.Handle, fWrite]);
@@ -1515,7 +1557,7 @@ begin
         begin
           // no further ProcessWrite unless slot.fWr contains pending data
           fWrite.Unsubscribe(connection.fSocket, notif.tag);
-          exclude(connection.fSubscribed, pseWrite);
+          exclude(connection.fFlags, fSubWrite);
           if fDebugLog <> nil then
             DoLog('Write Unsubscribe(sock=%,handle=%)=% %',
              [pointer(connection.fSocket), connection.Handle, fWrite]);
@@ -1764,7 +1806,7 @@ begin
   if aThreadPoolCount <= 0 then
     aThreadPoolCount := 1;
   fLastOperationReleaseMemorySeconds := 60;
-  fLastOperationSec := Qword(mormot.core.os.GetTickCount64) div 1000; // ASAP
+  fLastOperationSec := Qword(GetTickCount64) div 1000; // ASAP
   fKeepConnectionInstanceMS := 100;
   fLog := aLog;
   fConnectionClass := aConnectionClass;
@@ -1775,8 +1817,6 @@ begin
     include(opt, paoWritePollOnly);
   fClients := TAsyncConnectionsSockets.Create(opt);
   fClients.fOwner := self;
-  if acoNoReadWait in aOptions then
-    fClients.ReadWaitMs := 0;
   fClientsEpoll := fClients.fRead.PollClass.FollowEpoll;
   fClients.OnStart := ProcessClientStart;
   fClients.fWrite.OnGetOneIdle := ProcessIdleTix;
@@ -1802,12 +1842,12 @@ begin
     for i := 1 to aThreadPoolCount - 1 do
       fThreads[i] := TAsyncConnectionsThread.Create(self, atpReadPending, i);
   end;
-  tix := mormot.core.os.GetTickCount64 + 7000;
+  tix := GetTickCount64 + 7000;
   repeat
      if AllThreadsStarted then
        break;
      SleepHiRes(1);
-  until mormot.core.os.GetTickCount64 > tix;
+  until GetTickCount64 > tix;
   // caller will start the main thread
   log.Log(sllTrace, 'Create: started % threads', [fThreadPoolCount + 1], self);
 end;
@@ -1835,7 +1875,7 @@ end;
 
 procedure TAsyncConnections.DoGC;
 var
-  gc: TObjectDynArray; // local copy for Free outside fGCSafe
+  gc: TAsyncConnectionDynArray; // local copy for Free outside fGCSafe
   i, ngc, nkept: PtrInt;
   c: TAsyncConnection;
   oldenough: TAsyncConnectionSec;
@@ -1843,33 +1883,45 @@ begin
   if Terminated or
      (fGCCount = 0) then
     exit;
-  oldenough := fLastOperationMS - fKeepConnectionInstanceMS; // keep for 100 ms
+  if fClients.fRead.PendingCount <> 0 then
+    oldenough := 2000 // wait 2 seconds until no pending event is in queue
+  else
+    oldenough := fKeepConnectionInstanceMS; // keep for 100 ms by default
+  oldenough := fLastOperationMS - oldenough;
   ngc := 0;
   nkept := 0;
   fGCSafe.Lock;
-  if fGCCount <> 0 then
-  begin
-    SetLength(gc, fGCCount);
-    for i := 0 to fGCCount - 1 do
+  try
+    if fGCCount <> 0 then
     begin
-      c := fGC[i];
-      if (c.fLastOperation <= oldenough) or         // timeout
-         (c.fLastOperation > fLastOperationMS) then // or 42 days overflow
+      for i := 0 to fGCCount - 1 do
       begin
-        gc[ngc] := c;
-        inc(ngc);
-      end
-      else
-      begin
-        fGC[nkept] := c; // keep if not fKeepConnectionInstanceMS old
-        inc(nkept);
+        c := fGC[i];
+        if c.fLastOperation <= oldenough then
+        begin
+          // release after timeout
+          if gc = nil then
+            SetLength(gc, fGCCount - i);
+          gc[ngc] := c;
+          inc(ngc);
+        end
+        else
+        begin
+          if c.fLastOperation > fLastOperationMS then
+            // reset time flag after 42 days overflow
+            c.fLastOperation := fLastOperationMS;
+          fGC[nkept] := c; // keep if not fKeepConnectionInstanceMS old
+          inc(nkept);
+        end;
       end;
+      fGCCount := nkept; // don't resize fGC[] to avoid realloc
     end;
-    fGCCount := nkept; // don't resize fGC[] to avoid realloc
+  finally
+    fGCSafe.UnLock;
   end;
-  fGCSafe.UnLock;
   if ngc = 0 then
     exit;
+  // np := fClients.fRead.DeleteSeveralPending(pointer(gc), ngc); always 0
   if Assigned(fLog) then
     fLog.Add.Log(sllTrace,  'DoGC=% kept=%', [ngc, nkept], self);
   ObjArrayClear(gc, {continueonexc=}true, @ngc);
@@ -1896,7 +1948,7 @@ begin
     for i := 0 to high(fThreads) do
       fThreads[i].Terminate;
     p := 0;
-    endtix := mormot.core.os.GetTickCount64 + 10000;
+    endtix := GetTickCount64 + 10000;
     repeat
       n := 0;
       for i := 0 to high(fThreads) do
@@ -1913,7 +1965,7 @@ begin
         break;
       SleepHiRes(1);
       inc(p);
-    until mormot.core.os.GetTickCount64 > endtix;
+    until GetTickCount64 > endtix;
     FreeAndNilSafe(fClients); // FreeAndNil() sets nil before which is incorrect
     ObjArrayClear(fThreads, {continueonexception=}true);
   end;
@@ -2063,10 +2115,11 @@ begin
   aConnection.fHandle := InterlockedIncrement(fLastHandle);
   if acoNoConnectionTrack in fOptions then
   begin
-    include(aConnection.fSubscribed, pseClosed);
+    include(aConnection.fFlags, fInList);
     LockedInc32(@fConnectionCount);
-  end else if (fThreadReadPoll = nil) or
-              aAddAndSubscribe then
+  end
+  else if (fThreadReadPoll = nil) or
+          aAddAndSubscribe then
     // ProcessClientStart() won't delay SuscribeConnection + RegisterConnection
     ConnectionAdd(aConnection);
   aConnection.AfterCreate; // Handle has been computed
@@ -2094,8 +2147,8 @@ begin
     if acoVerboseLog in fOptions then
     begin
       QueryPerformanceMicroSeconds(stop); // a few us at most
-      DoLog(sllTrace, 'ConnectionDelete % count=% %us',
-        [aConnection, n, stop - start], self);
+      DoLog(sllTrace, 'ConnectionDelete % ndx=% count=% %us',
+        [aConnection, aIndex, n, stop - start], self);
     end;
     aConnection.fSocket := nil;   // ensure is known as disabled
     AddGC(aConnection); // will be released once processed
@@ -2110,7 +2163,7 @@ var
   c: ^TPollAsyncConnection;
   i, n: PtrInt;
 begin
-  include(conn.fSubscribed, pseClosed); // mark as registered
+  include(conn.fFlags, fInList); // mark as registered
   fConnectionLock.WriteLock;
   try
     n := fConnectionCount;
@@ -2150,7 +2203,7 @@ begin
      (aConnection = nil) or
      (aConnection.Handle <= 0) then
     exit;
-  if not (pseClosed in aConnection.fSubscribed) then
+  if not (fInList in aConnection.fFlags) then
   begin
     // this connection was not part of fConnection[] list nor subscribed
     // e.g. HTTP/1.0 short request -> explicit GC - Free is unstable here
@@ -2158,7 +2211,7 @@ begin
     result := true;
     exit;
   end;
-  exclude(aConnection.fSubscribed, pseClosed);
+  exclude(aConnection.fFlags, fInList);
   conn := ConnectionFindAndLock(aConnection.Handle, cWrite, @i);
   if conn <> nil then
     try
@@ -2500,7 +2553,7 @@ constructor TAsyncServer.Create(const aPort: RawUtf8;
 begin
   fSockPort := aPort;
   fMaxConnections := 7777777; // huge number for sure
-  fMaxPending := 10000;        // fair enough for pending requests
+  fMaxPending := 10000;       // fair enough for pending requests
   inherited Create(OnStart, OnStop, aConnectionClass, ProcessName, aLog,
     aOptions, aThreadPoolCount);
   if acoEnableTls in aOptions then
@@ -2515,7 +2568,7 @@ begin
   if self = nil then
     raise EAsyncConnections.CreateUtf8(
       'TAsyncServer.WaitStarted(%) with self=nil', [seconds]);
-  tix := mormot.core.os.GetTickCount64 + seconds * 1000; // never wait forever
+  tix := GetTickCount64 + seconds * 1000; // never wait forever
   repeat
     if Terminated then
       exit;
@@ -2527,7 +2580,7 @@ begin
           [self, fExecuteMessage]);
     end;
     SleepHiRes(1); // warning: waits typically 1-15 ms on Windows
-    if mormot.core.os.GetTickCount64 > tix then
+    if GetTickCount64 > tix then
       raise EAsyncConnections.CreateUtf8(
         '%.WaitStarted timeout after % seconds', [self, seconds]);
   until false;
@@ -2581,7 +2634,7 @@ destructor TAsyncServer.Destroy;
 var
   endtix: Int64;
 begin
-  endtix := mormot.core.os.GetTickCount64 + 10000;
+  endtix := GetTickCount64 + 10000;
   Shutdown;
   //DoLog(sllTrace, 'Destroy before inherited', [], self);
   inherited Destroy;
@@ -2591,7 +2644,7 @@ begin
     repeat
       SleepHiRes(1); // wait for Execute to be finalized (unlikely)
     until (fExecuteState <> esRunning) or
-          (mormot.core.os.GetTickCount64 > endtix);
+          (GetTickCount64 > endtix);
   end;
   FreeAndNilSafe(fServer);
   DoLog(sllTrace, 'Destroy finished', [], self);
@@ -2614,7 +2667,6 @@ begin
   end;
   // TAsyncServer.Execute made Accept(async=false) from acoEnableTls
   Sender.fSecure := NewNetTls;  // should work since DoTlsAfter() was fine
-  Sender.fSocket.MakeBlocking;
   Sender.fSecure.AfterAccept(Sender.fSocket, fServer.TLS, nil, nil);
   Sender.fSocket.MakeAsync;     // as expected by our asynchronous code
 end;
@@ -2713,9 +2765,8 @@ begin
             // failure (too many clients?) -> wait and retry
             DoLog(sllWarning, 'Execute: Accept(%) failed as %',
               [fServer.Port, ToText(res)^], self);
-            if res <> nrTooManyConnections then
-              // progressive wait (if not load-balancing, but socket error)
-              SleepStep(start);
+            // progressive wait on socket error, including nrTooManyConnections
+            SleepStep(start);
             break;
           end;
           if Terminated then
@@ -2813,6 +2864,7 @@ begin
   if fServer <> nil then
   begin
     HttpInit;
+    fHttp.Interning := fServer.fInterning;
     fHttp.Compress := fServer.fCompress;
     fHttp.CompressAcceptEncoding := fServer.fCompressAcceptEncoding;
     if fServer.fServerKeepAliveTimeOutSec <> 0 then
@@ -2941,14 +2993,14 @@ begin
     except
       include(fHttp.HeaderFlags, hfConnectionClose);
     end;
+  fHttp.ProcessDone;   // ContentStream.Free
+  fHttp.Process.Clear; // CompressContentAndFinalizeHead may have set it
   if hfConnectionClose in fHttp.HeaderFlags then
     // connection: close -> shutdown and clear the connection
     result := soClose
   else
   begin
     // kept alive connection -> reset the HTTP parser and continue
-    fHttp.ProcessDone;   // ContentStream.Free
-    fHttp.Process.Clear; // CompressContentAndFinalizeHead may have set it
     HttpInit;
     result := soContinue;
   end;
@@ -2985,20 +3037,22 @@ begin
   // finalize the headers
   result := soClose;
   if (nfHeadersParsed in fHttp.HeaderFlags) or
-     not fHttp.ParseCommandAndHeader then
+     not fHttp.ParseCommand then
     exit;
+  fHttp.ParseHeaderFinalize;
   fServer.ParseRemoteIPConnID(fHttp.Headers, fRemoteIP, fRemoteConnID);
   // immediate reject of clearly invalid requests
   status := DecodeHeaders; // may handle hfConnectionUpgrade when overriden
   if status <> HTTP_SUCCESS then
   begin
     // on fatal error direct reject and close the connection
-    StatusCodeToReason(status, fHttp.Command);
-    // (use fHttp.Command(Uri) as temp var to avoid local RawUtf8 allocation)
-    FormatUtf8('HTTP/1.0 % %'#13#10#13#10'Server Rejected Request as % %',
-      [status, fHttp.Command, status, fHttp.Command],
-      fHttp.CommandUri);
-    fServer.fAsync.fClients.WriteString(self, fHttp.CommandUri); // no polling
+    StatusCodeToReason(status, fHttp.CommandResp);
+    // (use fHttp.CommandResp/Uri as temp var to avoid local RawUtf8 allocation)
+    FormatUtf8('HTTP/1.0 % %'#13#10 + TEXT_CONTENT_TYPE_HEADER + #13#10#13#10 +
+      '% Server rejected % request as % %', [status, fHttp.CommandResp,
+      fHttp.Host, fHttp.CommandUri, status, fHttp.CommandResp], fHttp.Headers);
+    fHttp.State := hrsResponseDone; // as expected by ProcessWrite
+    fServer.fAsync.fClients.WriteString(self, fHttp.Headers); // no polling
     fServer.IncStat(grRejected);
     exit;
   end;
@@ -3040,7 +3094,8 @@ begin
     fHttp.UncompressData;
   // compute the HTTP/REST process
   result := soClose;
-  req := THttpServerRequest.Create(fServer, fRemoteConnID, {thread=}nil, []);
+  req := THttpServerRequest.Create(fServer, fRemoteConnID, {thread=}nil,
+    HTTPREMOTEFLAGS[Assigned(fSecure)], @fConnectionOpaque);
   try
     // let the associated THttpAsyncServer execute the request
     req.Prepare(fHttp, fRemoteIP);
@@ -3079,6 +3134,13 @@ begin
   inherited Execute;
 end;
 
+procedure THttpAsyncConnections.IdleEverySecond;
+begin
+  inherited IdleEverySecond;
+  if fAsyncServer <> nil then
+    fAsyncServer.IdleEverySecond;
+end;
+
 procedure THttpAsyncConnections.SetExecuteState(State: THttpServerExecuteState);
 begin
   if (State = esRunning) and
@@ -3108,9 +3170,13 @@ begin
     aco := ASYNC_OPTION_VERBOSE // for server debugging
   else
     aco := ASYNC_OPTION_PROD;   // default is to log only errors/warnings
+  if hsoHeadersInterning in ProcessOptions then
+  begin
+    fInterning := AllocMem(SizeOf(fInterning^));
+    fInterning.Init;
+  end;
   //include(aco, acoNoConnectionTrack);
   //include(aco, acoWritePollOnly);
-  //include(aco, acoNoReadWait);
   if hsoEnableTls in ProcessOptions then
     include(aco, acoEnableTls);
   if fConnectionClass = nil then
@@ -3121,7 +3187,7 @@ begin
   fAsync := fConnectionsClass.Create(aPort, OnStart, OnStop,
     fConnectionClass, fProcessName, TSynLog, aco, ServerThreadPoolCount);
   fAsync.fAsyncServer := self;
-  // launch this TThread instance, but as suspended since Execute is void
+  // launch this TThread instance
   inherited Create(aPort, OnStart, OnStop, fProcessName, ServerThreadPoolCount,
     KeepAliveTimeOut, ProcessOptions);
 end;
@@ -3137,12 +3203,37 @@ begin
   inherited Destroy;
   // finalize all thread-pooled connections
   FreeAndNilSafe(fAsync);
+  if fInterning <> nil then
+  begin
+    Dispose(fInterning);
+    fInterning := nil;
+  end;
 end;
 
 function THttpAsyncServer.GetExecuteState: THttpServerExecuteState;
 begin
   result := fAsync.fExecuteState; // state comes from THttpAsyncConnections
   fExecuteMessage := fAsync.fExecuteMessage;
+end;
+
+procedure THttpAsyncServer.IdleEverySecond;
+var
+  tix, cleaned: cardinal;
+begin
+  if fInterning <> nil then
+  begin
+    tix := GetTickCount64 shr 14; // clean every 16 secs
+    if (fInterning^.Count > 1000) or   // or if the slot is highly used (DDos?)
+       (fInterningTix <> tix) then
+    begin
+      cleaned := fInterning^.Clean(1);
+      if (cleaned > 500) or
+         ((cleaned <> 0) and
+          (hsoLogVerbose in Options)) then
+        fAsync.DoLog(sllTrace, 'IdleEverySecond: cleaned % headers', [cleaned], self);
+      fInterningTix := tix;
+    end;
+  end;
 end;
 
 function THttpAsyncServer.GetHttpQueueLength: cardinal;
@@ -3170,7 +3261,7 @@ begin
     try
       fSock := fAsync.fServer;
       fAsync.DoLog(sllTrace, 'Execute: main W loop', [], self);
-      tix := mormot.core.os.GetTickCount64 shr 16; // delay=500 after 1 min idle
+      tix := GetTickCount64 shr 16; // delay=500 after 1 min idle
       lasttix := tix;
       ms := 1000; // fine if OnGetOneIdle is called in-between
       if fAsync.fClientsEpoll then
@@ -3191,7 +3282,7 @@ begin
             msidle := fAsync.fKeepConnectionInstanceMS shr 1; // follow GC pace
           SleepHiRes(msidle);
           // periodic trigger of IdleEverySecond and ProcessIdleTixSendFrames
-          tix64 := mormot.core.os.GetTickCount64;
+          tix64 := GetTickCount64;
           tix := tix64 shr 16;
           fAsync.ProcessIdleTix(self, tix64);
           if (fCallbackSendDelay <> nil) and
@@ -3206,7 +3297,7 @@ begin
             fAsync.fClients.ProcessWrite(notif);
           if fCallbackSendDelay <> nil then
           begin
-            tix := mormot.core.os.GetTickCount64 shr 16;
+            tix := GetTickCount64 shr 16;
             lasttix := tix;
           end;
         end;
