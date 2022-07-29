@@ -1909,9 +1909,9 @@ function GetDesktopWindow: PtrInt;
 
 /// returns the curent system code page for AnsiString types
 // - as used to initialize CurrentAnsiConvert in mormot.core.unicode unit
-// - initialized at startup: contains GetACP() Win32 API value on Delphi,
-// or DefaultSystemCodePage on FPC - i.e. GetSystemCodePage() on POSIX (likely
-// to be UTF-8) or the value used by the LCL for its "string" types
+// - calls GetACP() Win32 API value on Delphi, or DefaultSystemCodePage on FPC -
+// i.e. GetSystemCodePage() on POSIX (likely to be UTF-8) or the value used
+// by the LCL for its "string" types (also typically UTF-8 even on Windows)
 function Unicode_CodePage: integer;
   {$ifdef FPC} inline; {$endif}
 
@@ -3227,6 +3227,36 @@ type
     destructor Destroy; override;
   end;
 
+  /// our light cross-platform TEvent-like component
+  // - on POSIX, FPC will use PRTLEvent which is lighter than TEvent BasicEvent
+  // - only limitation is that we don't know if WaitFor is signaled or timeout,
+  // but this is not a real one in practice since most code don't need it
+  // or has already its own flag in its implementation logic
+  TSynEvent = class
+  protected
+    fHandle: pointer; // Windows THandle or FPC PRTLEvent
+  public
+    /// initialize an instance of cross-platform event
+    constructor Create;
+    /// finalize this instance of cross-platform event
+    destructor Destroy; override;
+    /// ignore any pending events, so that WaitFor will be set on next SetEvent
+    procedure ResetEvent;
+      {$ifdef OSPOSIX} inline; {$endif}
+    /// trigger any pending event, releasing the WaitFor/WaitForEver methods
+    procedure SetEvent;
+      {$ifdef OSPOSIX} inline; {$endif}
+    /// wait until SetEvent is called from another thread, with a maximum time
+    // - does not return if it was signaled or timeout
+    procedure WaitFor(TimeoutMS: integer);
+      {$ifdef OSPOSIX} inline; {$endif}
+    /// wait until SetEvent is called from another thread, with no maximum time
+    procedure WaitForEver;
+      {$ifdef OSPOSIX} inline; {$endif}
+    /// calls SleepHiRes() in steps while checking terminated flag and this event
+    function SleepStep(var start: Int64; terminated: PBoolean): Int64;
+  end;
+
 
 /// initialize a TSynLocker instance from heap
 // - call DoneandFreeMem to release the associated memory and OS mutex
@@ -3260,7 +3290,7 @@ type
   TSynLockedClass = class of TSynLocked;
 
   /// a thread-safe Pierre L'Ecuyer software random generator
-  // - just wrap TLecuyer with a LighLock()
+  // - just wrap TLecuyer with a TLighLock
   // - should not be used, unless may be slightly faster than a threadvar
   TLecuyerThreadSafe = object
     Safe: TLightLock;
@@ -5968,14 +5998,16 @@ const
 
 function DoSpin(spin: PtrUInt): PtrUInt;
   {$ifdef CPUINTEL} {$ifdef HASINLINE} inline; {$endif} {$endif}
+  // on Intel, the pause CPU instruction would relax the core
+  // on ARM/AARCH64, the not-inlined function call makes a small delay
 begin
-  {$ifdef CPUINTEL} // on ARM/AARCH64, the not-inlined function call makes delay
+  {$ifdef CPUINTEL}
   DoPause;
   {$endif CPUINTEL}
   dec(spin);
   if spin = 0 then
   begin
-    SwitchToThread;
+    SwitchToThread; // fpnanosleep on POSIX
     spin := SPIN_COUNT;
   end;
   result := spin;
@@ -6124,7 +6156,8 @@ var
   f: PtrUInt;
 begin
   f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock
-  result := LockedExc(Flags, f + 1, f);
+  result := (Flags = f) and
+            LockedExc(Flags, f + 1, f);
 end;
 
 procedure TRWLightLock.WriteUnLock;
@@ -6730,6 +6763,31 @@ begin
   inherited Destroy;
   fSafe^.DoneAndFreeMem;
 end;
+
+
+{ TSynEvent }
+
+function TSynEvent.SleepStep(var start: Int64; terminated: PBoolean): Int64;
+var
+  ms: integer;
+  endtix: Int64;
+begin
+  ms := SleepStepTime(start, result, @endtix);
+  if (ms < 10) or
+     (terminated = nil) then
+    if ms = 0 then
+      SleepHiRes(0) // < 16 ms is a pious wish on Windows anyway
+    else
+      WaitFor(ms)
+  else
+    repeat
+      WaitFor(10);
+      if terminated^ then
+        exit;
+      result := GetTickCount64;
+    until result >= endtix;
+end;
+
 
 { TLecuyerThreadSafe }
 

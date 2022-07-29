@@ -750,6 +750,12 @@ procedure FakeLength(var s: RawUtf8; endChar: PUtf8Char); overload;
 procedure FakeLength(var s: RawByteString; len: PtrInt); overload;
   {$ifdef HASINLINE} inline; {$endif}
 
+{$ifdef HASCODEPAGE}
+/// retrieve the code page of a non void string
+// - caller should have ensure that s <> ''
+function GetCodePage(const s: RawByteString): cardinal; inline;
+{$endif HASCODEPAGE}
+
 /// initialize a RawByteString, ensuring returned "aligned" pointer
 // is 16-bytes aligned
 // - to be used e.g. for proper SIMD process
@@ -2405,12 +2411,14 @@ function RdRand32: cardinal;
 function Rdtsc: Int64;
 
 /// compatibility function, to be implemented according to the running CPU
-// - expect the same result as the homonymous Win32 API function
+// - expect the same result as the homonymous Win32 API function, i.e.
+// returns I + 1, and store I + 1 within I in an atomic/tread-safe way
 // - FPC will define this function as intrinsic for non-Intel CPUs
 function InterlockedIncrement(var I: integer): integer;
 
 /// compatibility function, to be implemented according to the running CPU
-// - expect the same result as the homonymous Win32 API function
+// - expect the same result as the homonymous Win32 API function, i.e.
+// returns I - 1, and store I - 1 within I in an atomic/tread-safe way
 // - FPC will define this function as intrinsic for non-Intel CPUs
 function InterlockedDecrement(var I: integer): integer;
 
@@ -4181,22 +4189,38 @@ begin
   end;
 end;
 
-procedure FakeLength(var s: RawUtf8; len: PtrInt);
+{$ifdef HASCODEPAGE}
+function GetCodePage(const s: RawByteString): cardinal;
 begin
-  PStrLen(PAnsiChar(pointer(s)) - _STRLEN)^ := len; // in-place SetLength()
-  PByteArray(s)[len] := 0;
+  result := PStrRec(PAnsiChar(pointer(s)) - _STRRECSIZE)^.CodePage;
+end;
+{$endif HASCODEPAGE}
+
+procedure FakeLength(var s: RawUtf8; len: PtrInt);
+var
+  p: PAnsiChar; // faster with a temp variable
+begin
+  p := pointer(s);
+  p[len] := #0;
+  PStrLen(p - _STRLEN)^ := len; // in-place SetLength()
 end;
 
 procedure FakeLength(var s: RawUtf8; endChar: PUtf8Char);
+var
+  p: PAnsiChar;
 begin
-  PStrLen(PAnsiChar(pointer(s)) - _STRLEN)^ := endChar - pointer(s);
+  p := pointer(s);
   endChar^ := #0;
+  PStrLen(p - _STRLEN)^ := endChar - p;
 end;
 
 procedure FakeLength(var s: RawByteString; len: PtrInt);
+var
+  p: PAnsiChar;
 begin
-  PStrLen(PAnsiChar(pointer(s)) - _STRLEN)^ := len; // in-place SetLength()
-  PByteArray(s)[len] := 0;
+  p := pointer(s);
+  p[len] := #0;
+  PStrLen(p - _STRLEN)^ := len; // in-place SetLength()
 end;
 
 procedure FastSetStringCP(var s; p: pointer; len, codepage: PtrInt);
