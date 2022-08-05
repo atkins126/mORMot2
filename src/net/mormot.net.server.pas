@@ -99,6 +99,7 @@ type
   // - hsoHeadersUnfiltered will store all headers, not only relevant (i.e.
   // include raw Content-Length, Content-Type and Content-Encoding entries)
   // - hsoHeadersInterning triggers TRawUtf8Interning to reduce memory usage
+  // - hsoNoStats will disable low-level statistic counters
   // - hsoNoXPoweredHeader excludes 'X-Powered-By: mORMot 2 synopse.info' header
   // - hsoCreateSuspended won't start the server thread immediately
   // - hsoLogVerbose could be used to debug a server in production
@@ -109,6 +110,7 @@ type
     hsoHeadersUnfiltered,
     hsoHeadersInterning,
     hsoNoXPoweredHeader,
+    hsoNoStats,
     hsoCreateSuspended,
     hsoLogVerbose,
     hsoIncludeDateHeader,
@@ -160,6 +162,7 @@ type
     function NextConnectionID: integer; // 31-bit internal sequence
     procedure ParseRemoteIPConnID(const Headers: RawUtf8;
       var RemoteIP: RawUtf8; var RemoteConnID: THttpServerConnectionID);
+    procedure AppendHttpDate(var Dest: TRawByteStringBuffer); virtual;
   public
     /// initialize the server instance
     constructor Create(const OnStart, OnStop: TOnNotifyThread;
@@ -517,14 +520,14 @@ type
   protected
     fServerKeepAliveTimeOut: cardinal;
     fServerKeepAliveTimeOutSec: cardinal;
+    fHeaderRetrieveAbortDelay: cardinal;
+    fCompressGz: integer;
     fSockPort: RawUtf8;
     fSock: TCrtSocket;
     fSafe: TLightLock;
     fExecuteMessage: RawUtf8;
-    fHeaderRetrieveAbortDelay: cardinal;
     fNginxSendFileFrom: array of TFileName;
     fStats: array[THttpServerSocketGetRequestResult] of integer;
-    fCompressGz: integer;
     function DoRequest(Ctxt: THttpServerRequest): boolean;
     procedure SetServerKeepAliveTimeOut(Value: cardinal);
     function GetStat(one: THttpServerSocketGetRequestResult): integer;
@@ -1401,8 +1404,16 @@ begin
       len := BufferLineLength(P, PEnd);
       if len > 0 then // no void line (means headers ending)
       begin
-        if IdemPChar(P, 'CONTENT-ENCODING:') then
-          // custom encoding: don't compress
+        if (PCardinal(P)^ or $20202020 =
+             ord('c') + ord('o') shl 8 + ord('n') shl 16 + ord('t') shl 24) and
+           (PCardinal(P + 4)^ or $20202020 =
+             ord('e') + ord('n') shl 8 + ord('t') shl 16 + ord('-') shl 24) and
+           (PCardinal(P + 8)^ or $20202020 =
+             ord('e') + ord('n') shl 8 + ord('c') shl 16 + ord('o') shl 24) and
+           (PCardinal(P + 12)^ or $20202020 =
+             ord('d') + ord('i') shl 8 + ord('n') shl 16 + ord('g') shl 24) and
+           (P[16] = ':') then
+          // custom CONTENT-ENCODING: don't compress
           integer(Context.CompressAcceptHeader) := 0;
         h^.Append(P, len); // normalize CR/LF endings
         h^.AppendCRLF;
@@ -1417,7 +1428,7 @@ begin
   h^.Append(fServer.ServerName);
   h^.AppendCRLF;
   if hsoIncludeDateHeader in fServer.Options then
-    h^.AppendShort(HttpDateNowUtc);
+    fServer.AppendHttpDate(h^);
   if not (hsoNoXPoweredHeader in fServer.Options) then
     h^.AppendShort(XPOWEREDNAME + ': ' + XPOWEREDVALUE + #13#10);
   Context.Content := OutContent;
@@ -1515,6 +1526,11 @@ begin
   if RemoteConnID = 0 then
     // fallback to 31-bit sequence
     RemoteConnID := NextConnectionID;
+end;
+
+procedure THttpServerGeneric.AppendHttpDate(var Dest: TRawByteStringBuffer);
+begin
+  Dest.AppendShort(HttpDateNowUtc);
 end;
 
 function THttpServerGeneric.CanNotifyCallback: boolean;
@@ -1890,6 +1906,19 @@ begin
   end;
 end;
 
+function THttpServerSocketGeneric.GetStat(
+  one: THttpServerSocketGetRequestResult): integer;
+begin
+  result := fStats[one];
+end;
+
+procedure THttpServerSocketGeneric.IncStat(
+  one: THttpServerSocketGetRequestResult);
+begin
+  if not (hsoNoStats in fOptions) then
+    LockedInc32(@fStats[one]);
+end;
+
 function THttpServerSocketGeneric.DoRequest(Ctxt: THttpServerRequest): boolean;
 var
   cod: integer;
@@ -1928,18 +1957,6 @@ procedure THttpServerSocketGeneric.SetServerKeepAliveTimeOut(Value: cardinal);
 begin
   fServerKeepAliveTimeOut := Value;
   fServerKeepAliveTimeOutSec := Value div 1000;
-end;
-
-function THttpServerSocketGeneric.GetStat(
-  one: THttpServerSocketGetRequestResult): integer;
-begin
-  result := fStats[one];
-end;
-
-procedure THttpServerSocketGeneric.IncStat(
-  one: THttpServerSocketGetRequestResult);
-begin
-  LockedInc32(@fStats[one]);
 end;
 
 function THttpServerSocketGeneric.OnNginxAllowSend(

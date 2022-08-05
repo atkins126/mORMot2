@@ -88,10 +88,6 @@ type
       MaxRevisionJson: integer;
       MaxUncompressedBlobSize: integer;
     end;
-    function GetStaticDataServer(aClass: TOrmClass): TRestOrm;
-    function GetVirtualTable(aClass: TOrmClass): TRestOrm;
-    function GetStaticTable(aClass: TOrmClass): TRestOrm;
-      {$ifdef HASINLINE}inline;{$endif}
     function MaxUncompressedBlobSize(Table: TOrmClass): integer;
     /// will retrieve the monotonic value of a TRecordVersion field from the DB
     procedure InternalRecordVersionMaxFromExisting(RetrieveNext: PID); virtual;
@@ -247,8 +243,8 @@ type
     /// called from STATE remote HTTP method
     procedure RefreshInternalStateFromStatic;
     /// assign a TRestOrm instance for a given slot
-    // - called e.g. by TOrmVirtualTable.Create, StaticMongoDBRegister(),
-    // OrmMapInMemory() or TRestOrmServer.RemoteDataCreate
+    // - called e.g. by TOrmVirtualTable.Create, OrmMapMongoDB(), OrmMapInMemory()
+    // TRestStorageShardDB.Create or TRestOrmServer.RemoteDataCreate
     procedure StaticTableSetup(aTableIndex: integer; aStatic: TRestOrm;
       aKind: TRestServerKind);
     /// fast get the associated static server or virtual table from its index, if any
@@ -279,9 +275,6 @@ type
     // - returns a newly created TRestStorageRemote instance
     function RemoteDataCreate(aClass: TOrmClass;
       aRemoteRest: TRestOrmParent): TRestOrmParent; virtual;
-    /// fast get the associated TRestStorageRemote from its index, if any
-    // - returns nil if aTableIndex is invalid or is not assigned to a TRestStorageRemote
-    function GetRemoteTable(TableIndex: integer): TRestOrmParent;
     /// initialize change tracking for the given tables
     // - by default, it will use the TOrmHistory table to store the
     // changes - you can specify a dedicated class as aTableHistory parameter
@@ -357,33 +350,31 @@ type
     function RecordVersionSynchronizeSlaveToBatch(Table: TOrmClass;
       const Master: IRestOrm; var RecordVersion: TRecordVersion; MaxRowLimit: integer = 0;
       const OnWrite: TOnBatchWrite = nil): TRestBatch; virtual;
+    /// retrieve the associated static server or virtual table, if any
+    // - same as a dual call to GetStaticStorage() + GetStaticVirtualTable()
+    function GetStorage(aClass: TOrmClass): TRestOrmParent;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// retrieve the TRestStorage instance used to store and manage
+    // a specified TOrmClass in memory
+    // - raise an EModelException if aClass is not part of the database Model
+    // - returns nil if this TOrmClass is handled by the main engine
+    function GetStaticStorage(aClass: TOrmClass): TRestOrmParent;
+    /// retrieve a running TRestStorage virtual table
+    // - associated e.g. to a 'JSON' or 'Binary' virtual table module, or may
+    // return a TRestStorageExternal instance (as defined in mormot.orm.sql)
+    // - this property will return nil if there is no Virtual Table associated
+    // or if the corresponding module is not a TOrmVirtualTable; i.e.
+    // "pure" static tables registered by OrmMapInMemory() will be
+    // accessible only via GetStaticStorage(), not via GetVirtualStorage()
+    // - has been associated by the TOrmModel.VirtualTableRegister method or
+    // the OrmMapExternal() global function
+    function GetVirtualStorage(aClass: TOrmClass): TRestOrmParent;
     /// access to the associated TRestServer main instance
     property Owner: TRestServer
       read fOwner;
     /// low-level value access to process TRecordVersion field
     property RecordVersionMax: TRecordVersion
       read fRecordVersionMax write fRecordVersionMax;
-    /// retrieve the TRestStorage instance used to store and manage
-    // a specified TOrmClass in memory
-    // - raise an EModelException if aClass is not part of the database Model
-    // - returns nil if this TOrmClass is handled by the main engine
-    property StaticDataServer[aClass: TOrmClass]: TRestOrm
-      read GetStaticDataServer;
-    /// retrieve a running TRestStorage virtual table
-    // - associated e.g. to a 'JSON' or 'Binary' virtual table module, or may
-    // return a TRestStorageExternal instance (as defined in mormot.orm.sql)
-    // - this property will return nil if there is no Virtual Table associated
-    // or if the corresponding module is not a TOrmVirtualTable
-    // (e.g. "pure" static tables registered by OrmMapInMemory() will be
-    // accessible only via StaticDataServer[], not via StaticVirtualTable[])
-    // - has been associated by the TOrmModel.VirtualTableRegister method or
-    // the OrmMapExternal() global function
-    property StaticVirtualTable[aClass: TOrmClass]: TRestOrm
-      read GetVirtualTable;
-    /// fast get the associated static server or virtual table, if any
-    // - same as a dual call to StaticDataServer[aClass] + StaticVirtualTable[aClass]
-    property StaticTable[aClass: TOrmClass]: TRestOrm
-      read GetStaticTable;
     /// you can force this property to TRUE so that any Delete() will not
     // write to the TOrmTableDelete table for TRecordVersion tables
     // - to be used when applying a TRestBatch instance as returned by
@@ -512,6 +503,7 @@ type
     fValueDirectFields: TFieldBits;
     fCounts: array[TRestBatchEncoding] of cardinal;
     fTimer: TPrecisionTimer;
+    fErrorMessage: RawUtf8;
     procedure AutomaticTransactionBegin;
     procedure AutomaticCommit;
     procedure ExecuteValueCheckIfRestChange;
@@ -649,7 +641,7 @@ begin
   // do nothing at this level
 end;
 
-function TRestOrmServer.GetStaticDataServer(aClass: TOrmClass): TRestOrm;
+function TRestOrmServer.GetStaticStorage(aClass: TOrmClass): TRestOrmParent;
 var
   i: cardinal;
 begin
@@ -666,7 +658,7 @@ begin
     result := nil;
 end;
 
-function TRestOrmServer.GetVirtualTable(aClass: TOrmClass): TRestOrm;
+function TRestOrmServer.GetVirtualStorage(aClass: TOrmClass): TRestOrmParent;
 var
   i: PtrInt;
 begin
@@ -680,7 +672,7 @@ begin
   end;
 end;
 
-function TRestOrmServer.GetStaticTable(aClass: TOrmClass): TRestOrm;
+function TRestOrmServer.GetStorage(aClass: TOrmClass): TRestOrmParent;
 begin
   if (aClass = nil) or
      ((fStaticData = nil) and
@@ -743,16 +735,6 @@ begin
       [self, aClass, existing]);
   result := TRestStorageRemote.Create(aClass, self, aRemoteRest as TRestOrm);
   StaticTableSetup(t, result as TRestOrm, sStaticDataTable);
-end;
-
-function TRestOrmServer.GetRemoteTable(TableIndex: integer): TRestOrmParent;
-begin
-  if (cardinal(TableIndex) >= cardinal(length(fStaticData))) or
-     (fStaticData[TableIndex] = nil) or
-     not fStaticData[TableIndex].InheritsFrom(TRestStorageRemote) then
-    result := nil
-  else
-    result := TRestStorageRemote(fStaticData[TableIndex]).RemoteRest;
 end;
 
 function TRestOrmServer.MaxUncompressedBlobSize(Table: TOrmClass): integer;
@@ -1845,7 +1827,7 @@ function TRestOrmServer.TableRowCount(Table: TOrmClass): Int64;
 var
   rest: TRestOrm;
 begin
-  rest := GetStaticTable(Table);
+  rest := pointer(GetStorage(Table));
   if rest <> nil then
     // faster direct call
     result := rest.TableRowCount(Table)
@@ -1857,7 +1839,7 @@ function TRestOrmServer.TableHasRows(Table: TOrmClass): boolean;
 var
   rest: TRestOrm;
 begin
-  rest := GetStaticTable(Table);
+  rest := pointer(GetStorage(Table));
   if rest <> nil then
     // faster direct call
     result := rest.TableHasRows(Table)
@@ -1869,7 +1851,7 @@ function TRestOrmServer.MemberExists(Table: TOrmClass; ID: TID): boolean;
 var
   rest: TRestOrm;
 begin
-  rest := GetStaticTable(Table);
+  rest := pointer(GetStorage(Table));
   if rest <> nil then
     // faster direct call (External, MongoDB, IsMemory)
     result := rest.MemberExists(Table, ID)
@@ -1887,7 +1869,7 @@ begin
     result := false
   else
   begin
-    rest := GetStaticTable(POrmClass(Value)^);
+    rest := pointer(GetStorage(POrmClass(Value)^));
     if rest <> nil then
       // faster direct call
       result := rest.UpdateBlobFields(Value)
@@ -1905,7 +1887,7 @@ begin
     result := false
   else
   begin
-    rest := GetStaticTable(POrmClass(Value)^);
+    rest := pointer(GetStorage(POrmClass(Value)^));
     if rest <> nil then
       // faster direct call
       result := rest.RetrieveBlobFields(Value)
@@ -2116,8 +2098,6 @@ begin
 end;
 
 procedure TRestOrmServerBatchSend.ParseValue;
-var
-  errmsg: RawUtf8;
 begin
   // retrieve next fValue/fValueID/fValueDirect content
   fValueID := 0; // no id is never transmitted with "SIMPLE" fields e.g.
@@ -2125,7 +2105,7 @@ begin
     encPost:
       begin
         // {"Table":[...,"POST",{object},...]} or [...,"POST@Table",{object},...]
-        fValue := JsonGetObject(fParse.Json, @fValueID, fParse.EndOfObject, true);
+        JsonGetObject(fParse.Json, @fValueID, fParse.EndOfObject, true, fValue);
         if (fParse.Json = nil) or
            (fValue = '') then
           raise EOrmBatchException.CreateUtf8(
@@ -2134,14 +2114,14 @@ begin
           raise EOrmBatchException.CreateUtf8(
             '%.EngineBatchSend: POST/Add not allowed on %',
             [self, fRunTable]);
-        if not fOrm.RecordCanBeUpdated(fRunTable, fValueID, oeAdd, @errmsg) then
+        if not fOrm.RecordCanBeUpdated(fRunTable, fValueID, oeAdd, @fErrorMessage) then
           raise EOrmBatchException.CreateUtf8(
-            '%.EngineBatchSend: POST impossible: %', [self, errmsg]);
+            '%.EngineBatchSend: POST impossible: %', [self, fErrorMessage]);
       end;
     encPut:
       begin
         // {"Table":[...,"PUT",{object},...]} or [...,"PUT@Table",{object},...]
-        fValue := JsonGetObject(fParse.Json, @fValueID, fParse.EndOfObject, false);
+        JsonGetObject(fParse.Json, @fValueID, fParse.EndOfObject, false, fValue);
         if (fParse.Json = nil) or
            (fValue = '') or
            (fValueID <= 0) then
@@ -2164,9 +2144,9 @@ begin
           raise EOrmBatchException.CreateUtf8(
             '%.EngineBatchSend: DELETE not allowed on %',
             [self, fRunTable]);
-        if not fOrm.RecordCanBeUpdated(fRunTable, fValueID, oeDelete, @errmsg) then
+        if not fOrm.RecordCanBeUpdated(fRunTable, fValueID, oeDelete, @fErrorMessage) then
           raise EOrmBatchException.CreateUtf8(
-            '%.EngineBatchSend: DELETE impossible [%]', [self, errmsg]);
+            '%.EngineBatchSend: DELETE impossible [%]', [self, fErrorMessage]);
       end;
   else
     // encSimple/encPostHex/encPostHexID/encPutHexID = BATCH_DIRECT
@@ -2192,9 +2172,9 @@ begin
           fEncoding := encPut
         else
           fEncoding := encPost;
-        fValue := fOrm.Model.TableProps[fRunTableIndex].Props.
+        fOrm.Model.TableProps[fRunTableIndex].Props.
           SaveFieldsFromJsonArray(fParse.Json, fValueDirectFields,
-            @fValueID, @fParse.EndOfObject, fCommandDirectFormat);
+            @fValueID, @fParse.EndOfObject, fCommandDirectFormat, fValue);
         if (fParse.Json = nil) or
            (fValue = '') then
           raise EOrmBatchException.CreateUtf8(
@@ -2203,9 +2183,9 @@ begin
       if IsNotAllowed then
         raise EOrmBatchException.CreateUtf8(
           '%.EngineBatchSend: % not allowed on %', [self, fCommand, fRunTable]);
-      if not fOrm.RecordCanBeUpdated(fRunTable, 0, BATCH_EVENT[fEncoding], @errmsg) then
+      if not fOrm.RecordCanBeUpdated(fRunTable, 0, BATCH_EVENT[fEncoding], @fErrorMessage) then
         raise EOrmBatchException.CreateUtf8(
-          '%.EngineBatchSend: % impossible: %', [self, fCommand, errmsg]);
+          '%.EngineBatchSend: % impossible: %', [self, fCommand, fErrorMessage]);
     end;
   end;
 end;
@@ -2239,9 +2219,9 @@ begin
     if fEncoding in BATCH_DIRECT then
     begin
       // InternalBatchDirectOne format requires JSON object fallback
-      fValue := fOrm.Model.TableProps[fRunTableIndex].Props.
+      fOrm.Model.TableProps[fRunTableIndex].Props.
         SaveFieldsFromJsonArray(fValueDirect, fValueDirectFields, @fValueID,
-          nil, fCommandDirectFormat);
+          nil, fCommandDirectFormat, fValue);
       if fEncoding = encPutHexID then
         fEncoding := encPut
       else

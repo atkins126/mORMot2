@@ -364,7 +364,7 @@ function GotoNextJsonItem(P: PUtf8Char; NumberOfItemsToJump: cardinal = 1;
 /// reach the position of the next JSON item in the supplied UTF-8 buffer
 // - similar to the GotoNextJsonItem() with NumberOfItemsToJump=1
 function GotoNextJsonItem(P: PUtf8Char; var EndOfObject: AnsiChar): PUtf8Char; overload;
-  {$ifdef FPC}inline;{$endif}
+  {don't inline to reduce the stack size of the caller function}
 
 /// search the EndOfObject of a JSON buffer, just like GetJsonField() does
 function ParseEndOfObject(P: PUtf8Char; out EndOfObject: AnsiChar): PUtf8Char;
@@ -2062,14 +2062,22 @@ function ObjectToJsonDebug(Value: TObject;
 
 /// unserialize most kind of content as JSON, using its RTTI, as saved by
 // TJsonWriter.AddRecordJson / RecordSaveJson
-// - is just a wrapper around GetDataFromJson() global low-level function
+// - same implementation than GetDataFromJson() global low-level function
 // - returns nil on error, or the end of buffer on success
 // - warning: the JSON buffer will be modified in-place during process - use
 // a temporary copy if you need to access it later or if the string comes from
 // a constant (refcount=-1) - see e.g. the overloaded RecordLoadJson()
 function LoadJson(var Value; Json: PUtf8Char; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char = nil; CustomVariantOptions: PDocVariantOptions = nil;
-  Tolerant: boolean = true): PUtf8Char;
+  Tolerant: boolean = true): PUtf8Char; overload;
+
+/// unserialize most kind of content as JSON, using its RTTI, as saved by
+// TJsonWriter.AddRecordJson / RecordSaveJson
+// - this overloaded function will make a private copy before parsing it,
+// so is safe with a read/only or shared string - but slightly slower
+function LoadJson(var Value; const Json: RawUtf8; TypeInfo: PRttiInfo;
+  EndOfObject: PUtf8Char = nil; CustomVariantOptions: PDocVariantOptions = nil;
+  Tolerant: boolean = true): boolean; overload;
 
 /// fill a record content from a JSON serialization as saved by
 // TJsonWriter.AddRecordJson / RecordSaveJson
@@ -2088,9 +2096,6 @@ function RecordLoadJson(var Rec; Json: PUtf8Char; TypeInfo: PRttiInfo;
 // TJsonWriter.AddRecordJson / RecordSaveJson
 // - this overloaded function will make a private copy before parsing it,
 // so is safe with a read/only or shared string - but slightly slower
-// - will use default Base64 encoding over RecordSave() binary - or custom
-// JSON format (as set by Rtti.RegisterFromText/TRttiJson.RegisterCustomSerializer
-// or via enhanced RTTI), if available
 function RecordLoadJson(var Rec; const Json: RawUtf8; TypeInfo: PRttiInfo;
   CustomVariantOptions: PDocVariantOptions = nil;
   Tolerant: boolean = true): boolean; overload;
@@ -4449,8 +4454,10 @@ var
   Lp, Ls: PtrInt;
   D: PUtf8Char;
 begin
-  if (P = nil) or
-     (PLen <= 0) then
+  if ((P = nil) or
+      (PLen <= 0)) and
+     (aPrefix = '') and
+     (aSuffix = '') then
     result := '""'
   else if (pointer(result) = pointer(P)) or
           NeedsJsonEscape(P, PLen) then
@@ -5115,7 +5122,7 @@ begin
   begin
     // standard serialization as unsigned integer (up to 64 items)
     v := 0;
-    MoveSmall(Data, @v, Ctxt.Info.Size);
+    MoveFast(Data^, v, Ctxt.Info.Size);
     Ctxt.W.AddQ(v);
   end;
 end;
@@ -7279,8 +7286,6 @@ begin
   result := Valid;
 end;
 
-
-
 procedure _JL_Boolean(Data: PBoolean; var Ctxt: TJsonParserContext);
 begin
   if Ctxt.ParseNext then
@@ -7439,7 +7444,7 @@ begin
     else
     begin
       SetQWord(Ctxt.Value, v{%H-});
-      MoveSmall(@v, Data, Ctxt.Info.Size);
+      MoveFast(v, Data^, Ctxt.Info.Size);
     end;
 end;
 
@@ -7531,7 +7536,7 @@ begin
         v := 0
       else
         Ctxt.Valid := false;
-    MoveSmall(@v, Data, Ctxt.Info.Size);
+    MoveFast(v, Data^, Ctxt.Info.Size);
   end;
 end;
 
@@ -7542,26 +7547,26 @@ begin
   with Ctxt.Info.Cache do
     v := GetSetNameValue(EnumList, EnumMin, EnumMax, Ctxt.Json, Ctxt.EndOfObject);
   Ctxt.Valid := Ctxt.Json <> nil;
-  MoveSmall(@v, Data, Ctxt.Info.Size);
+  MoveFast(v, Data^, Ctxt.Info.Size);
 end;
 
-function JsonLoadProp(Data: PAnsiChar; const Prop: TRttiCustomProp;
+function JsonLoadProp(Data: PAnsiChar; Prop: PRttiCustomProp;
   var Ctxt: TJsonParserContext): boolean; {$ifdef HASINLINE} inline; {$endif}
 var
   load: TRttiJsonLoad;
 begin
-  Ctxt.Info := Prop.Value; // caller will restore it afterwards
-  Ctxt.Prop := @Prop;
+  Ctxt.Info := Prop^.Value; // caller will restore it afterwards
+  Ctxt.Prop := Prop;
   load := Ctxt.Info.JsonLoad;
   if not Assigned(load) then
     Ctxt.Valid := false
-  else if Prop.OffsetSet >= 0 then
+  else if Prop^.OffsetSet >= 0 then
     if (rcfHookReadProperty in Ctxt.Info.Flags) and
-       TCCHook(Data).RttiBeforeReadPropertyValue(@Ctxt, @Prop) then
+       TCCHook(Data).RttiBeforeReadPropertyValue(@Ctxt, Prop) then
       // custom parsing method (e.g. TOrm nested TOrm properties)
     else
       // default fast parsing into the property/field memory
-      load(Data + Prop.OffsetSet, Ctxt)
+      load(Data + Prop^.OffsetSet, Ctxt)
   else
     // we need to call a setter
     Ctxt.ParsePropComplex(Data);
@@ -7573,10 +7578,9 @@ procedure _JL_RttiCustomProps(Data: PAnsiChar; var Ctxt: TJsonParserContext);
 var
   j: PUtf8Char;
   root: TRttiJson;
-  p: integer;
   prop: PRttiCustomProp;
   propname: PUtf8Char;
-  propnamelen: integer;
+  p, propnamelen: integer;
 label
   no, nxt, any;
 begin
@@ -7587,7 +7591,9 @@ begin
 no: Ctxt.Valid := false;
     exit;
   end;
-  j := GotoNextNotSpace(j + 1);
+  repeat
+    inc(j);
+  until not (j^ in [#1..' ']);
   if j^ <> '}' then
   begin
     Ctxt.Json := j;
@@ -7601,7 +7607,7 @@ nxt:  propname := GetJsonPropName(Ctxt.Json, @propnamelen);
         goto no;
       // O(1) optimistic process of the property name, following RTTI order
       if prop^.NameMatch(propname, propnamelen) then
-        if JsonLoadProp(Data, prop^, Ctxt) then
+        if JsonLoadProp(Data, prop, Ctxt) then
           if Ctxt.EndOfObject = '}' then
             break
           else
@@ -7609,9 +7615,14 @@ nxt:  propname := GetJsonPropName(Ctxt.Json, @propnamelen);
         else
           break
       else if (Ctxt.Info.Kind = rkClass) and
-              IdemPropName('ClassName', propname, propnamelen) then
+              (propnamelen = 9) and // fast "ClassName" case sensitive match
+              (PIntegerArray(propname)[0] =
+                ord('C') + ord('l') shl 8 + ord('a') shl 16 + ord('s') shl 24) and
+              (PIntegerArray(propname)[1] =
+                ord('s') + ord('N') shl 8 + ord('a') shl 16 + ord('m') shl 24) and
+              (propname[8] = 'e') then
+      // woStoreClassName was used -> just ignore the class name
       begin
-        // woStoreClassName was used -> just ignore the class name
         Ctxt.Json := GotoNextJsonItem(Ctxt.Json, Ctxt.EndOfObject);
         if Ctxt.Json <> nil then
           goto nxt;
@@ -7621,7 +7632,8 @@ nxt:  propname := GetJsonPropName(Ctxt.Json, @propnamelen);
       begin
         // we didn't find the property in its natural place -> full lookup
         repeat
-          prop := root.Props.Find(propname, propnamelen);
+          prop := FindCustomProp(pointer(root.Props.List),
+            propname, propnamelen, root.Props.Count);
           if prop = nil then
             // unexpected "prop": value
             if (rcfReadIgnoreUnknownFields in root.Flags) or
@@ -7633,7 +7645,7 @@ nxt:  propname := GetJsonPropName(Ctxt.Json, @propnamelen);
             end
             else
               goto no
-          else if not JsonLoadProp(Data, prop^, Ctxt) then
+          else if not JsonLoadProp(Data, prop, Ctxt) then
             goto no;
           if Ctxt.EndOfObject = '}' then
              break;
@@ -7822,13 +7834,18 @@ begin
     if not Ctxt.ParseNext or
        not Ctxt.WasString then
       exit; // should start with field names
-    prop := iteminfo.props.Find(Ctxt.Value, Ctxt.ValueLen);
-    if (prop = nil) and
-       (itemInfo.ValueRtlClass = vcObjectWithID) and
-       (PInteger(Ctxt.Value)^ and $dfdfdfdf =
-         ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
-       (PWord(Ctxt.Value + 4)^ and $ffdf = ord('D')) then
-      prop := @iteminfo.Props.List[0]; // 'RowID' = first TObjectWithID field
+    prop := nil;
+    if Ctxt.ValueLen <> 0 then
+    begin
+      prop := FindCustomProp(pointer(iteminfo.props.List),
+        Ctxt.Value, Ctxt.ValueLen, iteminfo.props.Count);
+      if (prop = nil) and
+         (itemInfo.ValueRtlClass = vcObjectWithID) and
+         (PInteger(Ctxt.Value)^ and $dfdfdfdf =
+           ord('R') + ord('O') shl 8 + ord('W') shl 16 + ord('I') shl 24) and
+         (PWord(Ctxt.Value + 4)^ and $ffdf = ord('D')) then
+        prop := @iteminfo.Props.List[0]; // 'RowID' = first TObjectWithID field
+    end;
     if (prop = nil) and
        not (jpoIgnoreUnknownProperty in Ctxt.Options) then
       exit;
@@ -7858,7 +7875,7 @@ begin
     for f := 0 to fieldcount - 1 do
       if props[f] = nil then // skip jpoIgnoreUnknownProperty
         Ctxt.Json := GotoNextJsonItem(Ctxt.Json, Ctxt.EndOfObject)
-      else if not JsonLoadProp(item, props[f]^, Ctxt) then
+      else if not JsonLoadProp(item, props[f], Ctxt) then
       begin
         Ctxt.Json := nil;
         break;
@@ -10440,6 +10457,21 @@ begin
   result := Json;
 end;
 
+function LoadJson(var Value; const Json: RawUtf8; TypeInfo: PRttiInfo;
+  EndOfObject: PUtf8Char; CustomVariantOptions: PDocVariantOptions;
+  Tolerant: boolean): boolean;
+var
+  tmp: TSynTempBuffer;
+begin
+  tmp.Init(Json); // make private copy before in-place decoding
+  try
+    result := LoadJson(Value, tmp.buf, TypeInfo, EndOfObject,
+      CustomVariantOptions, Tolerant) <> nil;
+  finally
+    tmp.Done;
+  end;
+end;
+
 function RecordLoadJson(var Rec; Json: PUtf8Char; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char; CustomVariantOptions: PDocVariantOptions;
   Tolerant: boolean): PUtf8Char;
@@ -10564,7 +10596,7 @@ begin
      (Instance = nil) then
     exit;
   ctxt.Init(From, Prop^.Value, Options, nil, nil);
-  if not JsonLoadProp(pointer(Instance), Prop^, ctxt) then
+  if not JsonLoadProp(pointer(Instance), Prop, ctxt) then
     exit;
   Valid := true;
   result := ctxt.Json;

@@ -1518,9 +1518,16 @@ type
     // - returns a newly created TRestStorageRemote instance
     function RemoteDataCreate(aClass: TOrmClass;
       aRemoteRest: TRestOrmParent): TRestOrmParent; 
-    /// fast get the associated TRestStorageRemote from its index, if any
-    // - returns nil if aTableIndex is invalid or is not assigned to a TRestStorageRemote
-    function GetRemoteTable(TableIndex: integer): TRestOrmParent;
+    /// get the non-virtual TRestStorage instance for one TOrm class
+    // - set e.g. after OrmMapMongoDB(), OrmMapInMemory(),
+    // TRestStorageShardDB.Create or TRestOrmServer.RemoteDataCreate
+    function GetStaticStorage(aClass: TOrmClass): TRestOrmParent;
+    /// get the virtual TRestStorage instance for one TOrm class
+    // - i.e. in-memory or external SQL tables declared as SQLite3 virtual tables
+    function GetVirtualStorage(aClass: TOrmClass): TRestOrmParent;
+    /// get the in-memory or virtual TRestStorage instance for one TOrm class
+    // - will also follow TRestOrmServer.StaticVirtualTableDirect property
+    function GetStorage(aClass: TOrmClass): TRestOrmParent;
   end;
 
 
@@ -3758,7 +3765,7 @@ type
     // dependency to other units, e.g. mormot.db.* or mormot.rest.*
     // - in practice, will be assigned by VirtualTableExternalRegister() to
     // a TSqlDBConnectionProperties instance in mormot.orm.sql.pas, or by
-    // StaticMongoDBRegister() to a TMongoCollection instance, or by
+    // OrmMapMongoDB() to a TMongoCollection instance, or by
     // TDDDRepositoryRestObjectMapping.Create to its associated TRest
     // - in ORM context, equals nil if the table is internal to SQLite3:
     // ! if Server.Model.Props[TOrmArticle].ExternalDB.ConnectionProperties = nil then
@@ -4261,6 +4268,12 @@ type
     // - this will flush the stored JSON content for this record (and table
     // settings will be kept)
     procedure Flush(aTable: TOrmClass; aID: TID); overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// flush the cache for a given record
+    // - this will flush the stored JSON content for this record (and table
+    // settings will be kept)
+    procedure Flush(aTableIndex: PtrInt; aID: TID); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// flush the cache for a set of specified records
     // - this will flush the stored JSON content for these record (and table
     // settings will be kept)
@@ -4344,6 +4357,7 @@ type
     // - this method is dedicated for a record deletion
     // - TOrmClass to be specified as its index in Rest.Model.Tables[]
     procedure NotifyDeletion(aTableIndex: integer; aID: TID); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// TRest instance shall call this method when records are deleted
     // - TOrmClass to be specified as its index in Rest.Model.Tables[]
     procedure NotifyDeletions(aTableIndex: integer; const aIDs: array of TID); overload;
@@ -6682,7 +6696,8 @@ begin
       info.GetJsonFieldOrObjectOrArray;
       FillValue(j, F[0], info.Value, L[0], info.ValueLen,
         info.WasString, FieldBits); // parse value
-    until info.Json = nil;
+    until (info.Json = nil) or
+          (info.Json^ = #0);
   end;
 end;
 
@@ -10586,14 +10601,6 @@ end;
 
 { ------------ TRestCache Definition }
 
-/// update/refresh the cached JSON serialization of a supplied Record
-procedure CacheSetJson(var Entry: TRestCacheEntry; aRecord: TOrm);
-  {$ifdef HASINLINE} inline; {$endif}
-begin  // ooInsert = include all fields
-  if Entry.CacheEnable then
-    Entry.SetJson(aRecord.fID, aRecord.GetJsonValues(true, false, ooInsert));
-end;
-
 /// unserialize a JSON cached record of a given ID
 function CacheRetrieveJson(var Entry: TRestCacheEntry; aID: TID; aValue: TOrm;
   aTag: PCardinal = nil): boolean;
@@ -10776,8 +10783,8 @@ begin
   rec := aTable.CreateAndFillPrepare(fRest, FormatSqlWhere, BoundsSqlWhere);
   try
     while rec.FillOne do
-    begin
-      CacheSetJson(cache^, rec);
+    begin // expand=true (JSON object), withid=false (not in JSON), ooInsert=all
+      cache^.SetJson(rec.fID, rec.GetJsonValues(true, false, ooInsert));
       inc(result);
     end;
   finally
@@ -10803,7 +10810,15 @@ end;
 procedure TRestCache.Flush(aTable: TOrmClass; aID: TID);
 begin
   if self <> nil then
-    fCache[fModel.GetTableIndexExisting(aTable)].FlushCacheEntries([aID]);
+    fCache[fModel.GetTableIndexExisting(aTable)].FlushCacheEntry(aID);
+end;
+
+procedure TRestCache.Flush(aTableIndex: PtrInt; aID: TID);
+begin
+  if self <> nil then
+    with fCache[aTableIndex] do
+      if CacheEnable then
+        FlushCacheEntry(aID);
 end;
 
 procedure TRestCache.Flush(aTable: TOrmClass; const aIDs: array of TID);
@@ -10833,7 +10848,9 @@ begin
     exit;
   aTableIndex := fModel.GetTableIndex(POrmClass(aRecord)^);
   if aTableIndex < cardinal(Length(fCache)) then
-    CacheSetJson(fCache[aTableIndex], aRecord);
+    with fCache[aTableIndex] do
+      if CacheEnable then // expand=true, withid=false, ooInsert=all
+        SetJson(aRecord.fID, aRecord.GetJsonValues(true, false, ooInsert));
 end;
 
 procedure TRestCache.Notify(aTableIndex: integer; aID: TID;
@@ -10854,7 +10871,9 @@ begin
   if (self <> nil) and
      (aID > 0) and
      (cardinal(aTableIndex) < cardinal(Length(fCache))) then
-    fCache[aTableIndex].FlushCacheEntries([aID]);
+    with fCache[aTableIndex] do
+      if CacheEnable then
+        FlushCacheEntry(aID);
 end;
 
 procedure TRestCache.NotifyDeletions(aTableIndex: integer;
@@ -10863,7 +10882,9 @@ begin
   if (self <> nil) and
      (high(aIDs) >= 0) and
      (cardinal(aTableIndex) < cardinal(Length(fCache))) then
-    fCache[aTableIndex].FlushCacheEntries(aIDs);
+     with fCache[aTableIndex] do
+       if CacheEnable then
+         FlushCacheEntries(aIDs);
 end;
 
 procedure TRestCache.NotifyDeletion(aTable: TOrmClass; aID: TID);

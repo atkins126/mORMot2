@@ -262,13 +262,13 @@ type
     function ComputeSql(var Prepared: TOrmVirtualTablePrepared): RawUtf8;
 
     /// retrieve the REST server instance corresponding to an external TOrm
-    // - just map aServer.StaticVirtualTable[] and will return nil if not
+    // - just map aServer.GetVirtualStorage(aClass) and will return nil if not
     // a TRestStorageExternal
     // - you can use it e.g. to call MapField() method in a fluent interface
     class function Instance(aClass: TOrmClass;
       aServer: TRestOrmServer): TRestStorageExternal;
     /// retrieve the external database connection associated to a TOrm
-    // - just map aServer.StaticVirtualTable[] and will return nil if not
+    // - just map aServer.GetVirtualStorage(aClass) and will return nil if not
     // a TRestStorageExternal
     class function ConnectionProperties(aClass: TOrmClass;
       aServer: TRestOrmServer): TSqlDBConnectionProperties; overload;
@@ -1022,7 +1022,7 @@ procedure TRestStorageExternal.InternalBatchStop;
 var
   i, j, n, max, BatchBegin, BatchEnd, ValuesMax: PtrInt;
   Query: ISqlDBStatement;
-  NotifySQLEvent: TOrmEvent;
+  ev: TOrmEvent;
   SQL: RawUtf8;
   P: PUtf8Char;
   Fields, ExternalFields: TRawUtf8DynArray;
@@ -1077,7 +1077,8 @@ begin
                     // mPut=UPDATE with the supplied fields and ID set appart
                     Decode.DecodeInPlace(P, nil, pQuoted, 0, true);
                 end;
-                RecordVersionFieldHandle(Occasion, Decode);
+                if fStoredClassRecordProps.RecordVersionField <> nil then
+                  RecordVersionFieldHandle(Occasion, Decode);
                 if {%H-}Fields = nil then
                 begin
                   Decode.AssignFieldNamesTo(Fields);
@@ -1179,12 +1180,13 @@ begin
       if fBatchMethod in [mPost, mPut] then
       begin
         if fBatchMethod = mPost then
-          NotifySQLEvent := oeAdd
+          ev := oeAdd
         else
-          NotifySQLEvent := oeUpdate;
-        for i := 0 to fBatchCount - 1 do
-          Owner.InternalUpdateEvent(NotifySQLEvent,
-            fStoredClassProps.TableIndex, fBatchIDs[i], fBatchValues[i], nil, nil);
+          ev := oeUpdate;
+        if Owner.InternalUpdateEventNeeded(ev, fStoredClassProps.TableIndex) then
+          for i := 0 to fBatchCount - 1 do
+            Owner.InternalUpdateEvent(ev, fStoredClassProps.TableIndex,
+              fBatchIDs[i], fBatchValues[i], nil, nil);
       end;
       Owner.FlushInternalDBCache;
     end;
@@ -1388,23 +1390,27 @@ function TRestStorageExternal.EngineRetrieve(TableModelIndex: integer;
   ID: TID): RawUtf8;
 var
   stmt: ISqlDBStatement;
+  w: TJsonWriter;
 begin
   // TableModelIndex is not useful here
   result := '';
   if (self = nil) or
      (ID <= 0) then
     exit;
-  stmt := PrepareDirectForRows(pointer(fSelectOneDirectSQL), [], [ID]);
-  if stmt <> nil then
   try
-    // Expanded=true -> '[{"ID":10,...}]'#10
-    stmt.ExecutePreparedAndFetchAllAsJson(true, result);
-    if IsNotAjaxJson(pointer(result)) then
-      // '{"fieldCount":2,"values":["ID","FirstName"]}'#$A -> ID not found
-      result := ''
-    else
-      // list '[{...}]'#10 -> object '{...}'
-      TrimChars(result, 1, 2);
+    stmt := fProperties.NewThreadSafeStatementPrepared(
+      fSelectOneDirectSQL, {results=}true, {except=}true);
+    if stmt = nil then
+      exit;
+    stmt.Bind(1, ID);
+    stmt.ExecutePrepared;
+    w := AcquireJsonWriter;
+    try
+      stmt.StepToJson(w);
+      w.SetText(result);
+    finally
+      ReleaseJsonWriter(w);
+    end;
   except
     stmt := nil;
     HandleClearPoolOnConnectionIssue;
@@ -1976,7 +1982,7 @@ begin
     result := nil
   else
   begin
-    result := TRestStorageExternal(aServer.StaticVirtualTable[aClass]);
+    result := TRestStorageExternal(aServer.GetVirtualStorage(aClass));
     if result <> nil then
       if not result.InheritsFrom(TRestStorageExternal) then
         result := nil;
@@ -2067,7 +2073,8 @@ begin
         result := UpdatedID;
         exit;
       end;
-      RecordVersionFieldHandle(Occasion, Decoder);
+      if fStoredClassRecordProps.RecordVersionField <> nil then
+        RecordVersionFieldHandle(Occasion, Decoder);
       // compute SQL statement and associated bound parameters
       SQL := JsonDecodedPrepareToSql(
         Decoder, ExternalFields, Types, Occasion, [], {array=}false);

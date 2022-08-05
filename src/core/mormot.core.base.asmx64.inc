@@ -18,14 +18,13 @@
 {
  FillCharFast/MoveFast implementation notes:
  - assume ERBMS is available (cpuid flag may not be propagated within VMs)
- - use dedicated branchless sub-functions for small buffers of 0..32 bytes
- - use simple SSE2 loop for 33..255 bytes
+ - use branchless sub-functions for smallest buffers, then SSE2 up to 255 bytes
  - use "rep movsb" for 256..512K input (should work on all CPUs, even oldest)
- - use non volatile SSE2 or AVX loop >= 512KB (to not pollute the CPU cache)
- - will check X64CpuFeatures global to adjust the algorithm if cpuAVX is set
  - don't use backward "std rep movsb" since it is not involved by ERMBS (slow)
+ - use non-temporal SSE2 or AVX loop >= 512KB (to not pollute the CPU cache)
+ - will check X64CpuFeatures global to adjust the algorithm if cpuAVX is set
  - regarding benchmark, run TTestLowLevelCommon.CustomRTL on x86_64
-  -> FillCharFast/MoveFast are faster, especially for small lengths (strings)
+  -> FillCharFast/MoveFast seems faster, especially for small lengths (strings)
   -> Delphi RTL is slower than FPC's, and it does not support AVX assembly yet
 }
 
@@ -43,8 +42,8 @@ const
   {$endif NO_ERMS}
 
   // minimum size triggering ASMX64AVXNOCONST or WITH_ERMS optimized asm
-  // - pre-ERMS expects at least 256 bytes, IvyBridge+ with ERMS is good from 64
-  // (copy_user_enhanced_fast_string() in recent Linux kernel uses 64)
+  // - pre-ERMS expects at least 144/256 bytes, IvyBridge+ with ERMS is good
+  // from 64 - copy_user_enhanced_fast_string() in recent Linux kernel uses 64
   // see https://stackoverflow.com/a/43837564/458259 for explanations and timing
   // - see also mormot.core.fpcx64mm.pas as reference
   SSE2MAXSIZE = 256;
@@ -55,58 +54,80 @@ const
 procedure MoveFast(const src; var dst; cnt: PtrInt);
 {$ifdef FPC}nostackframe; assembler;
 asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
-        {$ifdef WIN64ABI}
-        mov     rax, r8
+        mov     rax, cnt             // rax=r8/rdx=cnt
+        lea     r10, [rip + @jmptab] // 0..16 dedicated sub-functions
+        sub     rax, 16
+        jg      @up16                // >16 or <0
+        {$ifdef WIN64ABI}    // circumvent FPC asm bug and adapt to xmm ABI
+        jmp     qword ptr [r10 + r8 * 8]
+@up16:  movups  xmm0, oword ptr [src + rax]    // last 16   = xmm0
+        movups  xmm1, oword ptr [src]          // first 16  = xmm1
+        cmp     rax, 96 - 16
         {$else}
-        mov     rax, rdx                     // rax=r8=cnt
+        jmp     qword ptr [r10 + rdx * 8]
+@up16:  // >16 or <0
         mov     r8, rdx
+        movups  xmm0, oword ptr [src + rax]    // last 16   = xmm0
+        movups  xmm1, oword ptr [src]          // first 16  = xmm1
+        cmp     rdx, 144  // more volatile xmm registers on SystemV ABI
         {$endif WIN64ABI}
-        lea     r10, [rip + @jmptab]
-        cmp     cnt, 32
-        ja      @lrg                           // >32 or <0
-        sub     rax, 8
-        jg      @sml                           // 9..32
-        jmp     qword ptr [r10 + 64 + rax * 8] // 0..8
-{$ifdef FPC} align 8 {$else} .align 8 {$endif}
-@jmptab:dq      @exit, @01, @02, @03, @04, @05, @06, @07, @08
-@sml:   // cnt = 9..32
-        mov     r8, qword ptr [src + rax]    // last 8
-        mov     r9, qword ptr [src]          // first 8
-        cmp     al, 8
-        jle     @sml16
-        mov     r10, qword ptr [src + 8]     // second 8
-        cmp     al, 16
-        jle     @sml24
-        mov     r11, qword ptr [src + 16]    // third 8
-        mov     qword ptr [dst + 16], r11    // third 8
-@sml24: mov     qword ptr [dst + 8], r10     // second 8
-@sml16: mov     qword ptr [dst], r9          // first 8
-        mov     qword ptr [dst + rax], r8    // last 8 (may be overlapping)
-        ret
-@04:    mov     eax, dword ptr [src] // use small size moves as code alignment
-        mov     dword ptr [dst], eax
-        ret
-@08:    mov     rax, qword ptr [src]
-        mov     [dst], rax
-        ret
-@02:    movzx   eax, word ptr [src]
-        mov     word ptr [dst], ax
-@exit:  ret
-@lrg:   // cnt > 32 or cnt < 0
-        jng     @exit                        // cnt < 0
-        sub     dst, src
-        jz      @exit                        // src=dst
-        cmp     dst, cnt
-        lea     dst, [dst + src]
-        jb      @lrgbwd    // move backwards if unsigned(dst-src) < cnt
-@lrgfwd:// forward SSE2/ERMSB/AVX move for cnt > 32 bytes
-        mov     r9, dst
-        cmp     rax, SSE2MAXSIZE
-        jb      @fsse2     // 33..255 bytes is not enough for ERMSB nor AVX
+        ja      @lrg         // >96/144 or <0
+        // cnt = 17..96/144
+        cmp     al, $10
+        jbe     @sml10
+        movups  xmm2, oword ptr [src + $10]    // second 16
+        cmp     al, $20
+        jbe     @sml20
+        movups  xmm3, oword ptr [src + $20]    // third 16
+        cmp     al, $30
+        jbe     @sml30
+        movups  xmm4, oword ptr [src + $30]    // fourth 16
+        cmp     al, $40
+        jbe     @sml40
+        movups  xmm5, oword ptr [src + $40]    // fifth 16
+        // xmm0..xmm5 are volatile on both Win64 and SystemV ABI
+        // xmm6 and up are also volatile on SystemV ABI so allow more bytes
+        {$ifdef SYSVABI}
+        // more registers increases code size ([dst+$80]) so are not used
+        cmp     al, $50
+        jbe     @sml50
+        movups  xmm6, oword ptr [src + $50]
+        cmp     al, $60
+        jbe     @sml60
+        movups  xmm7, oword ptr [src + $60]
+        cmp     al, $70
+        jbe     @sml70
+        movups  xmm8, oword ptr [src + $70]
+        movups  oword ptr [dst + $70], xmm8
+@sml70: movups  oword ptr [dst + $60], xmm7
+@sml60: movups  oword ptr [dst + $50], xmm6
+@sml50: {$endif SYSVABI}
+        movups  oword ptr [dst + $40], xmm5    // fifth 16
+@sml40: movups  oword ptr [dst + $30], xmm4    // fourth 16
+@sml30: movups  oword ptr [dst + $20], xmm3    // third 16
+@sml20: movups  oword ptr [dst + $10], xmm2    // second 16
+@sml10: movups  oword ptr [dst],       xmm1    // first 16
+        movups  oword ptr [dst + rax], xmm0    // last 16 (may be overlapping)
+@z:     ret
+@lrg:   // cnt > 96/144 or cnt < 0
+        mov     r11d, NONTEMPORALSIZE
+        mov     r10, dst
+        add     rax, 16       // restore rax=cnt as expected below
+        jl      @z            // cnt < 0
+        sub     r10, src
+        jz      @z            // src=dst
+        cmp     r10, cnt      // move backwards if unsigned(dst-src) < cnt
+        jb      @lrgbwd
+        // forward ERMSB/SSE2/AVX move for cnt > 96/144 bytes
+        mov     r9, dst       // dst will be 16/32 bytes aligned for writes
         {$ifdef WITH_ERMS}
-        cmp     rax, NONTEMPORALSIZE
-        jae     @fnt       // non-temporal move > 512KB is better than rep ERMSB
-        // 256..512K could use the "rep movsb" ERMSB pattern on all CPUs
+        {$ifdef WIN64ABI}   // 145 bytes seems good enough for ERMSB on a server
+        cmp     rax, SSE2MAXSIZE
+        jb      @fsse2      // 97..255 bytes may be not enough for ERMSB nor AVX
+        {$endif WIN64ABI}
+        cmp     rax, r11
+        jae     @lrgfwd       // non-temporal move > 512KB is better than ERMSB
+        // 256/145..512K could use the "rep movsb" ERMSB pattern on all CPUs
         cld
         {$ifdef WIN64ABI}
         push    rsi
@@ -118,46 +139,63 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         pop     rdi
         pop     rsi
         {$else}
-        mov     rax, dst // dst=rsi and src=rdi -> rax to swap
-        mov     rsi, src
-        mov     rdi, rax
+        xchg    rsi, rdi // dst=rsi and src=rdi -> swap
         mov     rcx, r8
         rep movsb
         {$endif WIN64ABI}
         ret
-@fnt:   {$endif WITH_ERMS}
+        {$else}
+        jmp     @lrgfwd
+        {$endif WITH_ERMS}
         {$ifdef ASMX64AVXNOCONST} // limited AVX asm on Delphi 11
+@lrgbwd:// backward SSE2/AVX move
+        cmp     rax, SSE2MAXSIZE
+        jb      @bsse2 // 97/129..255 bytes is not worth AVX context transition
         test    byte ptr [rip + X64CpuFeatures], 1 shl cpuAVX
-        jnz     @fwdavx
-        {$endif ASMX64AVXNOCONST}
-@fsse2: // forward move using SSE2 registers
-        movups  xmm2, oword ptr [src]        // first 16
+        jz      @bsse2
+        jmp     @bavx
+@lrgfwd:// forward SSE2/AVX move
+        test    byte ptr [rip + X64CpuFeatures], 1 shl cpuAVX
+        jnz     @favx
+        {$else}
+@lrgfwd:{$endif ASMX64AVXNOCONST}
+@fsse2: // forward SSE2 move
         lea     src, [src + rax - 16]
         lea     rax, [rax + dst - 16]
-        movups  xmm1, oword ptr [src]        // last 16
         mov     r10, rax
         neg     rax
         and     dst,  -16                    // 16-byte aligned writes
         lea     rax, [rax + dst + 16]
-        cmp     r8, NONTEMPORALSIZE
-        jae     @fwdnv                       // bypass cache for cnt>512KB
-{$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@fwd:   movups  xmm0, oword ptr [src + rax]  // regular loop
-        movaps  [r10 + rax], xmm0
-        add     rax, 16
-        jl      @fwd
-@fwdend:movups  [r10], xmm1                  // last 16
-        movups  [r9], xmm2                   // first 16
-        ret
-{$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@fwdnv: movdqu  xmm0, oword ptr [src + rax]  // non-temporal loop
-        movntdq [r10 + rax], xmm0
-        add     rax, 16
-        jl      @fwdnv
-        sfence
-        jmp     @fwdend
+        cmp     r8, r11
+        jb      @fwd                         // bypass cache for cnt>512KB
+        jmp     @fwdnt
+        // backward SSE2/AVX move for cnt > 96/144 bytes
+        // note: ERMSB is not available on "std rep move" which is slower
+        {$ifndef ASMX64AVXNOCONST}
+@lrgbwd:{$endif ASMX64AVXNOCONST}
+@bsse2: // backward SSE2 move
+        sub     rax, 16
+        mov     r9, rax
+        add     rax, dst
+        and     rax, -16                     // 16-byte aligned writes
+        sub     rax, dst
+        cmp     r8, r11
+        jae     @bwdnt                       // bypass cache for cnt>512KB
+        jmp     @bwd
         {$ifdef ASMX64AVXNOCONST}
-@fwdavx:vmovups ymm2, yword ptr [src]        // first 32
+@bavx:  // backward AVX move
+        sub     rax, 32
+        mov     r9, rax
+        vmovups ymm2, yword ptr [src + rax]  // last 32
+        vmovups ymm1, yword ptr [src]        // first 32
+        add     rax, dst
+        and     rax, -32                     // 32-byte aligned writes
+        sub     rax, dst
+        cmp     r8, r11
+        jae     @bavxn                       // bypass cache for cnt>512KB
+        jmp     @bavxr
+@favx:  // forward AVX move
+        vmovups ymm2, yword ptr [src]        // first 32
         lea     src, [src + rax - 32]
         lea     dst, [dst + rax - 32]
         vmovups ymm1, yword ptr [src]        // last 32
@@ -166,10 +204,12 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         and     rax,  -32                    // 32-byte aligned writes
         sub     rax, dst
         add     rax, 64
-        cmp     r8, NONTEMPORALSIZE
-        jae     @favxn                       // bypass cache for cnt>512KB
+        cmp     r8, r11
+        jb      @favxr                       // bypass cache for cnt>512KB
+        jmp     @favxn
+        // forward temporal AVX loop
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@favxr: vmovups ymm0, yword ptr [src + rax]  // regular loop
+@favxr: vmovups ymm0, yword ptr [src + rax]
         vmovaps yword ptr [dst + rax], ymm0  // most CPUs have one store unit
         add     rax, 32
         jl      @favxr
@@ -178,8 +218,9 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
 // https://software.intel.com/en-us/articles/avoiding-avx-sse-transition-penalties
         vzeroupper
         ret
+        // forward non-temporal AVX loop
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@favxn: vmovups ymm0, yword ptr [src + rax]  // non-temporal loop
+@favxn: vmovups ymm0, yword ptr [src + rax]
         // circumvent FPC inline asm bug with vmovntps [dst + rax], ymm0
         {$ifdef WIN64ABI}
         vmovntps [rdx + rax], ymm0           // rdx=dst on Win64
@@ -191,53 +232,48 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         sfence
         jmp     @favxe
         {$endif ASMX64AVXNOCONST}
-@lrgbwd:// backward SSE2/AVX move for cnt > 32 bytes
-        // note: ERMSB is not available on "std rep move" which is slower
-        {$ifdef ASMX64AVXNOCONST}
-        cmp     rax, SSE2MAXSIZE
-        jb      @bsse2 // 33..255 bytes is not worth AVX context transition
-        test    byte ptr [rip + X64CpuFeatures], 1 shl cpuAVX
-        jnz     @bwdavx
-        {$endif ASMX64AVXNOCONST}
-@bsse2: sub     rax, 16
-        mov     r9, rax
-        movups  xmm2, oword ptr [src + rax]  // last 16
-        movups  xmm1, oword ptr [src]        // first 16
-        add     rax, dst
-        and     rax, -16                     // 16-byte aligned writes
-        sub     rax, dst
-        cmp     r8, NONTEMPORALSIZE
-        jae     @bwdnv                       // bypass cache for cnt>512KB
+        // forward temporal SSE2 loop
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@bwd:   movups  xmm0, oword ptr [src + rax]  // regular loop
-        movaps  oword ptr [dst + rax], xmm0
+@fwd:   movups  xmm2, oword ptr [src + rax]
+        movaps  [r10 + rax], xmm2
+        add     rax, 16
+        jl      @fwd
+        movups  oword ptr [r10], xmm0        // last 16
+        movups  oword ptr [r9], xmm1         // first 16
+        ret
+        // forward non-temporal SSE2 loop
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+@fwdnt: movups  xmm2, oword ptr [src + rax]
+        movntdq [r10 + rax], xmm2
+        add     rax, 16
+        jl      @fwdnt
+        sfence
+        movups  oword ptr [r10], xmm0        // last 16
+        movups  oword ptr [r9], xmm1         // first 16
+        ret
+        // backward temporal SSE2 loop
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+@bwd:   movups  xmm2, oword ptr [src + rax]
+        movaps  oword ptr [dst + rax], xmm2
         sub     rax, 16
         jg      @bwd
-@bwdend:movups  oword ptr [dst], xmm1        // first 16
-        movups  oword ptr [dst + r9], xmm2   // last 16
+        movups  oword ptr [dst], xmm1        // first 16
+        movups  oword ptr [dst + r9], xmm0   // last 16
         ret
-@01:    mov     al, byte ptr [src]
-        mov     byte ptr [dst], al
-        ret
+        // backward non-temporal SSE2 loop
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@bwdnv: movdqu  xmm0, oword ptr [src + rax]  // non-temporal loop
-        movntdq oword ptr [dst + rax], xmm0
+@bwdnt: movups  xmm2, oword ptr [src + rax]
+        movntdq oword ptr [dst + rax], xmm2
         sub     rax, 16
-        jg      @bwdnv
+        jg      @bwdnt
         sfence
-        jmp     @bwdend
+        movups  oword ptr [dst], xmm1        // first 16
+        movups  oword ptr [dst + r9], xmm0   // last 16
+        ret
         {$ifdef ASMX64AVXNOCONST}
-@bwdavx:sub     rax, 32
-        mov     r9, rax
-        vmovups ymm2, yword ptr [src + rax]  // last 32
-        vmovups ymm1, yword ptr [src]        // first 32
-        add     rax, dst
-        and     rax, -32                     // 32-byte aligned writes
-        sub     rax, dst
-        cmp     r8, NONTEMPORALSIZE
-        jae     @bavxn                       // bypass cache for cnt>512KB
+        // backward temporal AVX loop
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@bavxr: vmovups ymm0, yword ptr [src + rax]  // regular loop
+@bavxr: vmovups ymm0, yword ptr [src + rax]
         vmovaps yword ptr [dst + rax], ymm0
         sub     rax, 32
         jg      @bavxr
@@ -245,8 +281,9 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         vmovups yword ptr [dst + r9], ymm2   // last 32
         vzeroupper
         ret
+        // backward non-temporal AVX loop
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@bavxn: vmovups ymm0, yword ptr [src + rax]  // non-temporal loop
+@bavxn: vmovups ymm0, yword ptr [src + rax]
         // circumvent FPC inline asm bug with vmovntps [dst + rax], ymm0
         {$ifdef WIN64ABI}
         vmovntps [rdx + rax], ymm0           // rdx=dst on Win64
@@ -258,10 +295,23 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         sfence
         jmp     @bavxe
         {$endif ASMX64AVXNOCONST}
+        // dedicated branchless sub-functions for 0..16 bytes
+{$ifdef FPC} align 8 {$else} .align 8 {$endif}
+@jmptab:dq      @00, @01, @02, @03, @04, @05, @06, @07
+        dq      @08, @09, @10, @11, @12, @13, @14, @15, @16
+@01:    mov     al, byte ptr [src]
+        mov     byte ptr [dst], al
+@00:    ret
+@02:    movzx   eax, word ptr [src]
+        mov     word ptr [dst], ax
+        ret
 @03:    movzx   eax, word ptr [src]
         mov     cl, byte ptr [src + 2]
         mov     word ptr [dst], ax
         mov     byte ptr [dst + 2], cl
+        ret
+@04:    mov     eax, dword ptr [src]
+        mov     dword ptr [dst], eax
         ret
 @05:    mov     eax, dword ptr [src]
         mov     cl, byte ptr [src + 4]
@@ -269,16 +319,63 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         mov     byte ptr [dst + 4], cl
         ret
 @06:    mov     eax, dword ptr [src]
-        mov     cx, word ptr [src + 4]
+        movzx   ecx, word ptr [src + 4]
         mov     dword ptr [dst], eax
         mov     word ptr [dst + 4], cx
         ret
 @07:    mov     r8d, dword ptr [src]         // faster with no overlapping
-        mov     ax, word ptr [src + 4]
+        movzx   eax, word ptr [src + 4]
         mov     cl, byte ptr [src + 6]
         mov     dword ptr [dst], r8d
         mov     word ptr [dst + 4], ax
         mov     byte ptr [dst + 6], cl
+        ret
+@08:    mov     rax, qword ptr [src]
+        mov     [dst], rax
+        ret
+@09:    mov     rax, qword ptr [src]
+        mov     cl, byte ptr [src + 8]
+        mov     [dst], rax
+        mov     byte ptr [dst + 8], cl
+        ret
+@10:    mov     rax, qword ptr [src]
+        movzx   ecx, word ptr [src + 8]
+        mov     [dst], rax
+        mov     word ptr [dst + 8], cx
+        ret
+@11:    mov     r8, qword ptr [src]
+        movzx   eax, word ptr [src + 8]
+        mov     cl, byte ptr [src + 10]
+        mov     [dst], r8
+        mov     word ptr [dst + 8], ax
+        mov     byte ptr [dst + 10], cl
+        ret
+@12:    mov     rax, qword ptr [src]
+        mov     ecx, dword ptr [src + 8]
+        mov     [dst], rax
+        mov     dword ptr [dst + 8], ecx
+        ret
+@13:    mov     r8, qword ptr [src]
+        mov     eax, dword ptr [src + 8]
+        mov     cl, byte ptr [src + 12]
+        mov     [dst], r8
+        mov     dword ptr [dst + 8], eax
+        mov     byte ptr [dst + 12], cl
+        ret
+@14:    mov     r8, qword ptr [src]
+        mov     eax, dword ptr [src + 8]
+        movzx   ecx, word ptr [src + 12]
+        mov     [dst], r8
+        mov     dword ptr [dst + 8], eax
+        mov     word ptr [dst + 12], cx
+        ret
+@15:    mov     r8, qword ptr [src]
+        mov     rax, qword ptr [src + 7] // overlap is the easiest solution
+        mov     [dst], r8
+        mov     [dst + 7], rax
+        ret
+@16:    movups  xmm0, oword ptr [src]
+        movups  oword [dst], xmm0
 end;
 
 procedure FillCharFast(var dst; cnt: PtrInt; value: byte);
@@ -298,8 +395,6 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=dst rdx/rsi=cnt r8b/dl=val
         sub     rdx, 8
         jg      @sml32   // 9..32
         jmp     qword ptr [r10 + 64 + rdx * 8] // tinest 0..8 bytes
-{$ifdef FPC} align 8 {$else} .align 8 {$endif}
-@jmptab:dq @00, @01, @02, @03, @04, @05, @06, @07, @08
 @sml32: cmp     dl, 8  // 9..32 bytes
         jle     @sml16
         cmp     dl, 16
@@ -309,49 +404,46 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=dst rdx/rsi=cnt r8b/dl=val
 @sml16: mov     qword ptr [dst + rdx], rax // last 8 (may be overlapping)
 @08:    mov     qword ptr [dst], rax
 @00:    ret
-@07:    mov     dword ptr [dst + 3], eax
-@03:    mov     word ptr [dst + 1], ax
-@01:    mov     byte ptr [dst], al
-        ret
-@06:    mov     dword ptr [dst + 2], eax
-@02:    mov     word ptr [dst], ax
-        ret
-@05:    mov     byte ptr [dst + 4], al
-@04:    mov     dword ptr [dst], eax
-        ret
-{$ifdef FPC} align 8 {$else} .align 8{$endif}
 @abv32: jng     @00  // < 0
         // cnt > 32 bytes
         movd    xmm0, eax
         lea     r8, [dst + cnt]        // r8 point to end
+        mov     r9d, NONTEMPORALSIZE
         pshufd  xmm0, xmm0, 0          // broadcast value into all bytes of xmm0
         mov     r10, rdx               // save rdx=cnt
-        cmp     rdx, SSE2MAXSIZE
-        jae     @abv256            // 33..255 bytes is not good for ERMSB or AVX
-@sse2:  movups  oword ptr [dst], xmm0  // first unaligned 16 bytes
-        lea     rdx, [dst + rdx - 1]
-        and     rdx, -16
-        add     dst, 16
-        and     dst, -16               // dst is 16-bytes aligned
-        sub     dst, rdx
-        jnb     @last
-        cmp     r10, NONTEMPORALSIZE
-        jae     @sse2nv                // bypass cache for cnt>512KB
-{$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@reg:   movaps  oword ptr [rdx + dst], xmm0  // regular loop
-        add     dst, 16
-        jnz     @reg
-@last:  movups  oword ptr [r8 - 16], xmm0 // last unaligned 16 bytes
+        cmp     rdx, 255 // = SSE2MAXSIZE-1, but hardcoded in move below
+        ja      @abv255
+        // 33..255 bytes is not good for ERMSB or AVX, and need no alignment
+        test    dl, $80
+        jz      @sml80
+        movups  oword ptr [dst], xmm0
+        movups  oword ptr [dst + $10], xmm0
+        movups  oword ptr [dst + $20], xmm0
+        movups  oword ptr [dst + $30], xmm0
+        movups  oword ptr [dst + $40], xmm0
+        movups  oword ptr [dst + $50], xmm0
+        movups  oword ptr [dst + $60], xmm0
+        movups  oword ptr [dst + $70], xmm0
+        add     dst, $80
+@sml80: test    dl, $40
+        jz      @sml40
+        movups  oword ptr [dst], xmm0
+        movups  oword ptr [dst + $10], xmm0
+        movups  oword ptr [dst + $20], xmm0
+        movups  oword ptr [dst + $30], xmm0
+        add     dst, $40
+@sml40: test    dl, $20
+        jz      @sml20
+        movups  oword ptr [dst], xmm0
+        movups  oword ptr [dst + $10], xmm0
+        add     dst, $20
+@sml20: test    dl, $10
+        jz      @sml10
+        movups  oword ptr [dst], xmm0
+@sml10: movups  oword ptr [r8 - 16], xmm0 // last 16 bytes (may be overlapping)
         ret
-{$ifdef FPC} align 16 {$else} .align 16 {$endif}
-@sse2nv:movntdq [rdx + dst], xmm0      // non-temporal loop
-        add     dst, 16
-        jnz     @sse2nv
-        sfence
-        movups  oword ptr [r8 - 16], xmm0
-        ret
-@abv256:{$ifdef WITH_ERMS}
-        cmp     rax, NONTEMPORALSIZE // non-temporal move > 512KB
+@abv255:{$ifdef WITH_ERMS}
+        cmp     rax, r9                   // non-temporal move > 512KB
         {$ifdef ASMX64AVXNOCONST}
         jae     @avx
         {$else}
@@ -371,6 +463,16 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=dst rdx/rsi=cnt r8b/dl=val
         {$endif WIN64ABI}
         ret
         {$endif WITH_ERMS}
+@sse2:  movups  oword ptr [dst], xmm0  // first unaligned 16 bytes
+        lea     rdx, [dst + rdx - 1]
+        and     rdx, -16
+        add     dst, 16
+        and     dst, -16               // dst is 16-bytes aligned
+        sub     dst, rdx
+        jnb     @last
+        cmp     r10, r9
+        jae     @sse2nt                // bypass cache for cnt>512KB
+        jmp     @reg
         {$ifdef ASMX64AVXNOCONST}
 @avx:   test    byte ptr [rip + X64CpuFeatures], 1 shl cpuAVX
         jz      @sse2
@@ -384,8 +486,27 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=dst rdx/rsi=cnt r8b/dl=val
         mov     rdx, r8
         and     rdx, -32
         sub     dst, rdx
-        cmp     r10, NONTEMPORALSIZE
-        jae     @avxnv
+        cmp     r10, r9
+        jb      @avxreg
+        jmp     @avxnt
+        {$endif ASMX64AVXNOCONST}
+        // temporal SSE2 loop
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+@reg:   movaps  oword ptr [rdx + dst], xmm0  // regular loop
+        add     dst, 16
+        jnz     @reg
+@last:  movups  oword ptr [r8 - 16], xmm0 // last unaligned 16 bytes
+        ret
+        // non-temporal SSE2 loop
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+@sse2nt:movntdq [rdx + dst], xmm0      // non-temporal loop
+        add     dst, 16
+        jnz     @sse2nt
+        sfence
+        movups  oword ptr [r8 - 16], xmm0
+        ret
+        {$ifdef ASMX64AVXNOCONST}
+        // temporal AVX loop
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
 @avxreg:vmovaps yword ptr [rdx + dst], ymm0  // regular loop
         add     dst, 32
@@ -393,17 +514,30 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=dst rdx/rsi=cnt r8b/dl=val
 @avxok: vmovups yword ptr [r8 - 32], ymm0    // last unaligned 32 bytes
         vzeroupper
         ret
+        // non-temporal AVX loop
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
         {$ifdef WIN64}
-@avxnv: vmovntps [rdx + rcx], ymm0 // non-temporal loop - rcx=dst on Win64
+@avxnt: vmovntps [rdx + rcx], ymm0 // non-temporal loop - rcx=dst on Win64
         {$else}
-@avxnv: vmovntps [rdx + rdi], ymm0 // non-temporal loop - rdi=dst on POSIX
+@avxnt: vmovntps [rdx + rdi], ymm0 // non-temporal loop - rdi=dst on POSIX
         {$endif WIN64}
         add      dst, 32
-        jnz      @avxnv
+        jnz      @avxnt
         sfence
         jmp      @avxok
         {$endif ASMX64AVXNOCONST}
+        // dedicated branchless sub-functions for 0..8 bytes
+{$ifdef FPC} align 8 {$else} .align 8 {$endif}
+@jmptab:dq @00, @01, @02, @03, @04, @05, @06, @07, @08
+@07:    mov     dword ptr [dst + 3], eax
+@03:    mov     word ptr [dst + 1], ax
+@01:    mov     byte ptr [dst], al
+        ret
+@06:    mov     dword ptr [dst + 2], eax
+@02:    mov     word ptr [dst], ax
+        ret
+@05:    mov     byte ptr [dst + 4], al
+@04:    mov     dword ptr [dst], eax
 end;
 
 function crc32cfast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
@@ -2303,50 +2437,44 @@ end;
 function crc32csse42(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
         mov     eax, crc
-        not     eax
         test    len, len
-        jz      @0
+        jz      @z
         test    buf, buf
-        jz      @0
-        jmp     @align
-@7:     crc32   eax, byte ptr [buf]
-        add     buf, 1
-        sub     len, 1
-        jz      @0
-@align: test    buf, 7
-        jnz     @7
+        jz      @z
+        not     eax
         mov     ecx, len
         shr     len, 3
-        jnz     @s
-@2:     test    cl, 4
-        jz      @3
+        jnz     @by8 // we don't care for read alignment
+@0:     test    cl, 4
+        jz      @4
         crc32   eax, dword ptr [buf]
         add     buf, 4
-@3:     test    cl, 2
-        jz      @1
+@4:     test    cl, 2
+        jz      @2
         crc32   eax, word ptr [buf]
         add     buf, 2
-@1:     test    cl, 1
-        jz      @0
+@2:     test    cl, 1
+        jz      @1
         crc32   eax, byte ptr [buf]
-@0:     not     eax
-        ret
+@1:     not     eax
+@z:     ret
         {$ifdef FPC}
         align 16
-@s:     crc32   rax, qword ptr [buf] // hash 8 bytes per loop
+@by8:   crc32   rax, qword ptr [buf] // hash 8 bytes per loop
         {$else}
-       .align 16
-@s:     db $F2,$48,$0F,$38,$F1,$02 // circumvent Delphi inline asm compiler bug
+        .align 16
+@by8:   db $F2,$48,$0F,$38,$F1,$02 // circumvent Delphi inline asm compiler bug
         {$endif FPC}
         add     buf, 8
         sub     len, 1
-        jnz     @s
-        jmp     @2
+        jnz     @by8
+        jmp     @0
 end;
 
 function SynLZcompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): integer;
-var off: TOffsets;
-    cache: array[0..4095] of cardinal; // uses 32KB+16KB=48KB on stack
+var
+  off: TOffsets;
+  cache: array[0..4095] of cardinal; // uses 32KB+16KB=48KB on stack
 asm // rcx=src, edx=size, r8=dest
         {$ifdef WIN64ABI} // additional registers to preserve
         push    rdi
@@ -2501,7 +2629,8 @@ asm // rcx=src, edx=size, r8=dest
 end;
 
 function SynLZdecompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): integer;
-var off: TOffsets;
+var
+  off: TOffsets;
 asm     // rcx=src, edx=size, r8=dest
         {$ifdef WIN64ABI} // additional registers to preserve
         push    rsi

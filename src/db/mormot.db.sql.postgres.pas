@@ -194,9 +194,8 @@ type
     function ColumnUtf8(Col: integer): RawUtf8; override;
     /// return a Column as a blob value of the current Row, first Col is 0
     function ColumnBlob(Col: integer): RawByteString; override;
-    /// append all columns values of the current Row to a JSON stream
-    // - overriden method to avoid temporary memory allocation or conversion
-    procedure ColumnsToJson(WR: TResultsWriter); override;
+    /// return one column value into JSON content
+    procedure ColumnToJson(Col: integer; W: TJsonWriter); override;
     /// how many parameters founded during prepare stage
     property PreparedParamsCount: integer
       read fPreparedParamsCount;
@@ -526,15 +525,16 @@ procedure TSqlDBPostgresStatement.BindColumns;
 var
   nCols, c: integer;
   cName: RawUtf8;
+  p: PUtf8Char;
 begin
-  fColumn.Clear;
-  fColumn.ForceReHash;
+  ClearColumns;
   nCols := PQ.nfields(fRes);
   fColumn.Capacity := nCols;
   for c := 0 to nCols - 1 do
   begin
-    cName := PQ.fname(fRes, c);
-    with PSqlDBColumnProperty(fColumn.AddAndMakeUniqueName(cName))^ do
+    p := PQ.fname(fRes, c);
+    FastSetString(cName, p, StrLen(p));
+    with AddColumn(cName)^ do
     begin
       ColumnAttr := PQ.ftype(fRes, c);
       ColumnType := TSqlDBPostgresConnectionProperties(Connection.Properties).
@@ -767,10 +767,12 @@ begin
 end;
 
 function TSqlDBPostgresStatement.ColumnDateTime(Col: integer): TDateTime;
+var
+  P: PUtf8Char;
 begin
   CheckColAndRowset(Col);
-  Iso8601ToDateTimePUtf8CharVar(PQ.GetValue(fRes, fCurrentRow, Col),
-    PQ.GetLength(fRes, fCurrentRow, Col), result);
+  P := PQ.GetValue(fRes, fCurrentRow, Col);
+  Iso8601ToDateTimePUtf8CharVar(P, StrLen(P), result);
 end;
 
 function TSqlDBPostgresStatement.ColumnCurrency(Col: integer): currency;
@@ -796,69 +798,61 @@ begin
     BlobInPlaceDecode(P, PQ.GetLength(fRes, fCurrentRow, col)));
 end;
 
-procedure TSqlDBPostgresStatement.ColumnsToJson(WR: TResultsWriter);
+procedure TSqlDBPostgresStatement.ColumnToJson(Col: integer; W: TJsonWriter);
 var
-  col: integer;
   P: pointer;
 begin
   if (fRes = nil) or
      (fResStatus <> PGRES_TUPLES_OK) or
      (fCurrentRow < 0) then
     raise ESqlDBPostgres.CreateUtf8('%.ColumnToJson unexpected', [self]);
-  if WR.Expand then
-    WR.Add('{');
-  for col := 0 to fColumnCount - 1 do
-  with fColumns[col] do
+  with fColumns[Col] do
   begin
-    if WR.Expand then
-      WR.AddFieldName(ColumnName); // add '"ColumnName":'
-    if PQ.GetIsNull(fRes, fCurrentRow, col) = 1 then
-      WR.AddNull
+    P := PQ.GetValue(fRes, fCurrentRow, Col);
+    if (PUtf8Char(P)^ = #0) and
+       (PQ.GetIsNull(fRes, fCurrentRow, Col) = 1) then
+      W.AddNull
     else
     begin
-      P := PQ.GetValue(fRes, fCurrentRow, col);
       case ColumnType of
         ftNull:
-          WR.AddNull;
+          W.AddNull;
         ftInt64,
         ftDouble,
         ftCurrency:
-          WR.AddNoJsonEscape(P, PQ.GetLength(fRes, fCurrentRow, col));
+          // note: StrLen is slightly faster than PQ.GetLength for small content
+          W.AddNoJsonEscape(P, StrLen(P));
         ftUtf8:
           if (ColumnAttr = JSONOID) or
              (ColumnAttr = JSONBOID) then
-            WR.AddNoJsonEscape(P, PQ.GetLength(fRes, fCurrentRow, col))
+            W.AddNoJsonEscape(P, PQ.GetLength(fRes, fCurrentRow, Col))
           else
           begin
-            WR.Add('"');
-            WR.AddJsonEscape(P);
-            WR.Add('"');
+            W.Add('"');
+            W.AddJsonEscape(P, 0); // Len=0 is faster than StrLen/GetLength
+            W.Add('"');
           end;
         ftDate:
           begin
-            WR.Add('"');
-            if (PQ.GetLength(fRes, fCurrentRow, col) > 10) and
+            W.Add('"');
+            if (StrLen(P) > 10) and
                (PAnsiChar(P)[10] = ' ') then
               PAnsiChar(P)[10] := 'T'; // ensure strict ISO-8601 encoding
-            WR.AddJsonEscape(P);
-            WR.Add('"');
+            W.AddJsonEscape(P);
+            W.Add('"');
           end;
         ftBlob:
           if fForceBlobAsNull then
-            WR.AddNull
+            W.AddNull
           else
-            WR.WrBase64(P, BlobInPlaceDecode(P,
-              PQ.GetLength(fRes, fCurrentRow, col)), {withmagic=}true);
-        else
-          raise ESqlDBPostgres.CreateUtf8('%.ColumnsToJson: %?',
-            [self, ToText(ColumnType)^]);
+            W.WrBase64(P, BlobInPlaceDecode(P,
+              PQ.GetLength(fRes, fCurrentRow, Col)), {withmagic=}true);
+      else
+        raise ESqlDBPostgres.CreateUtf8('%.ColumnToJson: ColumnType=%?',
+          [self, ord(ColumnType)]);
       end;
     end;
-    WR.AddComma;
   end;
-  WR.CancelLastComma; // cancel last ','
-  if WR.Expand then
-    WR.Add('}');
 end;
 
 

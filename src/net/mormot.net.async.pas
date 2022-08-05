@@ -28,6 +28,7 @@ uses
   mormot.core.text,
   mormot.core.unicode,
   mormot.core.buffers,
+  mormot.core.datetime,
   mormot.core.threads,
   mormot.core.log,
   mormot.core.rtti,
@@ -765,6 +766,7 @@ type
     // redirect to fHttp.ProcessWrite()
     function AfterWrite: TPollAsyncSocketOnReadWrite; override;
     // quickly reject incorrect requests (payload/timeout/OnBeforeBody)
+    procedure DoReject(status: integer);
     function DecodeHeaders: integer; virtual;
     function DoHeaders: TPollAsyncSocketOnReadWrite;
     function DoRequest: TPollAsyncSocketOnReadWrite;
@@ -790,14 +792,17 @@ type
   protected
     fAsync: THttpAsyncConnections;
     fHeadersDefaultBufferSize: integer;
+    fHeadersMaximumSize: integer;
     fConnectionClass: TAsyncConnectionClass;
     fConnectionsClass: THttpAsyncConnectionsClass;
     fInterning: PRawUtf8InterningSlot;
     fInterningTix: cardinal;
+    fHttpDateNowUtc: string[39]; // consume 37 chars
     function GetHttpQueueLength: cardinal; override;
     procedure SetHttpQueueLength(aValue: cardinal); override;
     function GetExecuteState: THttpServerExecuteState; override;
     procedure IdleEverySecond; virtual;
+    procedure AppendHttpDate(var Dest: TRawByteStringBuffer); override;
     // the main thread will Send output packets in the background
     procedure Execute; override;
   public
@@ -814,6 +819,10 @@ type
     // so will use up to 3 locks before contention
     property HeadersDefaultBufferSize: integer
       read fHeadersDefaultBufferSize write fHeadersDefaultBufferSize;
+    /// maximum allowed size in bytes of incoming headers
+    // - is set to 64KB by default, which seems conservative enough
+    property HeadersMaximumSize: integer
+      read fHeadersMaximumSize write fHeadersMaximumSize;
     /// direct access to the internal high-performance TCP server
     // - you could set e.g. Async.MaxConnections
     property Async: THttpAsyncConnections
@@ -1457,7 +1466,7 @@ begin
         until recved < SizeOf(temp);
         if added > 0 then
         begin
-          inc(fReadCount);
+          inc(fReadCount); // no lock since informationaly only
           inc(fReadBytes, added);
           try
             // process connection.fRd incoming data (outside of the lock)
@@ -2976,11 +2985,14 @@ begin
   begin
     // use the HTTP state machine to asynchronously parse fRd input
     result := soContinue;
-    st.P := fRd.Buffer;
-    st.Len := fRd.Len;
-    if fHttp.Process.Len <> 0 then
+    if fHttp.Process.Len = 0 then
     begin
-      fHttp.Process.Append(st.P, st.Len);
+      st.P := fRd.Buffer;
+      st.Len := fRd.Len;
+    end
+    else
+    begin
+      fHttp.Process.Append(fRd.Buffer, fRd.Len);
       st.P := fHttp.Process.Buffer;
       st.Len := fHttp.Process.Len;
     end;
@@ -3007,12 +3019,28 @@ begin
          (fHttp.State = hrsUpgraded) then
         break; // rejected or upgraded
     end;
-    if (fHttp.State = hrsGetHeaders) and
-       (fHeadersSec = 0) and
-       (fServer.HeaderRetrieveAbortDelay >= 1000) then
-      // start measuring time for receiving the headers
-      fHeadersSec := fServer.Async.fLastOperationSec +
-                     fServer.HeaderRetrieveAbortDelay div 1000;
+    if fHttp.State = hrsGetHeaders then
+      if (fHeadersSec = 0) and
+         (fServer.HeaderRetrieveAbortDelay >= 1000) then
+        // start measuring time for receiving the headers
+        fHeadersSec := fServer.Async.fLastOperationSec +
+                       fServer.HeaderRetrieveAbortDelay div 1000
+      else if (fHeadersSec > 0) and
+              (fServer.Async.fLastOperationSec > fHeadersSec) then
+      begin
+        // 408 HTTP error after Server.HeaderRetrieveAbortDelay ms
+        fOwner.DoLog(sllWarning, 'OnRead: Header TimeOut', [], self);
+        DoReject(HTTP_TIMEOUT);
+        fServer.IncStat(grTimeout);
+        result := soClose;
+      end
+      else if fHttp.Head.Len > fServer.HeadersMaximumSize then
+      begin
+        // 413 HTTP error when headers > Server.HeadersMaximumSize
+        fOwner.DoLog(sllWarning, 'OnRead: Head.Len=%', [fHttp.Head.Len], self);
+        DoReject(HTTP_PAYLOADTOOLARGE);
+        result := soClose;
+      end;
     {fOwner.DoLog(sllCustom2, 'OnRead % result=%', [ToText(fHttp.State)^, ord(result)], self);}
     // finalize the memory buffers
     if st.Len = 0 then
@@ -3086,19 +3114,28 @@ begin
     result := HTTP_PAYLOADTOOLARGE;
     fServer.IncStat(grOversizedPayload);
   end
-  else if (fHeadersSec > 0) and
-          (fServer.Async.fLastOperationSec > fHeadersSec) then
-  begin
-    // 408 HTTP error after Server.HeaderRetrieveAbortDelay ms
-    result := HTTP_TIMEOUT;
-    fServer.IncStat(grTimeout);
-  end
   else if Assigned(fServer.OnBeforeBody) then
     // custom validation (e.g. banned IP or missing/invalid BearerToken)
     result := fServer.OnBeforeBody(
       fHttp.CommandUri, fHttp.CommandMethod, fHttp.Headers, fHttp.ContentType,
       fRemoteIP, fHttp.BearerToken, fHttp.ContentLength,
       HTTPREMOTEFLAGS[fServer.Sock.TLS.Enabled]);
+end;
+
+procedure THttpAsyncConnection.DoReject(status: integer);
+var
+  reason, resp: RawUtf8;
+  len: integer;
+begin
+  StatusCodeToReason(status, reason);
+  // (use fHttp.CommandResp/Uri as temp var to avoid local RawUtf8 allocation)
+  FormatUtf8('HTTP/1.0 % %'#13#10 + TEXT_CONTENT_TYPE_HEADER + #13#10#13#10 +
+    '% Server rejected % request as % %',
+      [reason, fHttp.Host, fHttp.CommandUri, status, reason], resp);
+  len := length(resp);
+  Send(pointer(resp), len); // no polling nor ProcessWrite
+  fServer.IncStat(grRejected);
+  fHttp.State := hrsErrorRejected;
 end;
 
 function THttpAsyncConnection.DoHeaders: TPollAsyncSocketOnReadWrite;
@@ -3115,15 +3152,8 @@ begin
   status := DecodeHeaders; // may handle hfConnectionUpgrade when overriden
   if status <> HTTP_SUCCESS then
   begin
-    // on fatal error direct reject and close the connection
-    StatusCodeToReason(status, fHttp.CommandResp);
-    // (use fHttp.CommandResp/Uri as temp var to avoid local RawUtf8 allocation)
-    FormatUtf8('HTTP/1.0 % %'#13#10 + TEXT_CONTENT_TYPE_HEADER + #13#10#13#10 +
-      '% Server rejected % request as % %', [status, fHttp.CommandResp,
-      fHttp.Host, fHttp.CommandUri, status, fHttp.CommandResp], fHttp.Headers);
-    fHttp.State := hrsResponseDone; // as expected by ProcessWrite
-    fServer.fAsync.fClients.WriteString(self, fHttp.Headers); // no polling
-    fServer.IncStat(grRejected);
+    // on fatal error (e.g. OnBeforeBody) direct reject and close the connection
+    DoReject(status);
     exit;
   end;
   // now THttpAsyncConnection.OnRead can get the body
@@ -3243,6 +3273,7 @@ begin
     fProcessName := aPort;
   // initialize HTTP parsing
   fHeadersDefaultBufferSize := 2048; // one fpcx64mm small block
+  fHeadersMaximumSize := 65535;
   // setup connections
   if hsoLogVerbose in ProcessOptions then
     aco := ASYNC_OPTION_VERBOSE // for server debugging
@@ -3297,11 +3328,21 @@ end;
 procedure THttpAsyncServer.IdleEverySecond;
 var
   tix, cleaned: cardinal;
+  T: TSynSystemTime;
+  tmp: shortstring;
 begin
-  // clean interned HTTP headers every 16 secs
-  if fInterning <> nil then
+  // no need to use the global HttpDateNowUtc and its GetTickCount64 API call
+  if hsoIncludeDateHeader in fOptions then
   begin
-    tix := GetTickCount64 shr 14;
+    T.FromNowUtc;
+    T.ToHttpDateShort(tmp, 'GMT'#13#10, 'Date: ');
+    fHttpDateNowUtc := tmp; // (almost) atomic set
+  end;
+  // clean interned HTTP headers every 16 secs
+  if (fInterning <> nil) and
+     (fAsync <> nil) then
+  begin
+    tix := fAsync.LastOperationSec shr 4;
     if (fInterning^.Count > 1000) or // is the slot highly used (DDos?)
        (fInterningTix <> tix) then
     begin
@@ -3314,6 +3355,11 @@ begin
       fInterningTix := tix;
     end;
   end;
+end;
+
+procedure THttpAsyncServer.AppendHttpDate(var Dest: TRawByteStringBuffer);
+begin
+  Dest.AppendShort(fHttpDateNowUtc); // set by IdleEverySecond
 end;
 
 function THttpAsyncServer.GetHttpQueueLength: cardinal;
@@ -3341,6 +3387,7 @@ begin
     try
       fSock := fAsync.fServer;
       fAsync.DoLog(sllTrace, 'Execute: main W loop', [], self);
+      IdleEverySecond; // initialize idle process (e.g. fHttpDateNowUtc)
       tix := GetTickCount64 shr 16; // delay=500 after 1 min idle
       lasttix := tix;
       ms := 1000; // fine if OnGetOneIdle is called in-between

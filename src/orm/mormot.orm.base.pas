@@ -2822,6 +2822,8 @@ type
     // - note: caller should have made Mutex.Lock
     procedure LockedFlushCacheEntry(Index: integer);
     /// flush cache for a given Value[]
+    procedure FlushCacheEntry(aID: TID);
+    /// flush cache for a given Value[]
     procedure FlushCacheEntries(const aID: array of TID);
     /// flush cache for all Value[]
     procedure FlushCacheAllEntries;
@@ -3050,8 +3052,9 @@ type
       EndOfObject: PAnsiChar; Format: TSaveFieldsAsObject): RawUtf8;
       {$ifdef HASINLINE} inline; {$endif}
     /// convert a JSON array of simple field values into a matching JSON object
-    function SaveFieldsFromJsonArray(var P: PUtf8Char; const Bits: TFieldBits;
-      ID: PID; EndOfObject: PAnsiChar; Format: TSaveFieldsAsObject): RawUtf8;
+    procedure SaveFieldsFromJsonArray(var P: PUtf8Char; const Bits: TFieldBits;
+      ID: PID; EndOfObject: PAnsiChar; Format: TSaveFieldsAsObject;
+      out JsonObject: RawUtf8);
 
     /// add a custom unmanaged fixed-size record property
     // - simple kind of records (i.e. those not containing reference-counted
@@ -8702,7 +8705,7 @@ begin
       break;
     if SepLen = 0 then
       continue;
-    MoveFast(pointer(Sep)^, P^, SepLen); // MoveSmall() won't be inlined anyway
+    MoveFast(pointer(Sep)^, P^, SepLen); // MoveByOne() won't be inlined anyway
     inc(P, SepLen);
   until false;
 end;
@@ -8772,7 +8775,7 @@ begin
           ftDouble,
           ftCurrency:
 nostr:      {$ifdef NOTORMTABLELEN}
-            W.AddNoJsonEscape(U, StrLen(U));
+            W.AddNoJsonEscape(U, StrLen(U)); // StrLen() is fast enough
             {$else}
             W.AddNoJsonEscape(U, fLen[o]);
             {$endif NOTORMTABLELEN}
@@ -9199,6 +9202,9 @@ type
   TUtf8QuickSort = object
   public
     Data: TOrmTableDataArray;
+    {$ifndef NOTORMTABLELEN}
+    Len: PIntegerArray;
+    {$endif NOTORMTABLELEN}
     {$ifndef NOPOINTEROFFSET}
     DataStart: PUtf8Char;
     {$endif NOPOINTEROFFSET}
@@ -9259,7 +9265,7 @@ begin
 end;
 
 {$ifdef CPUX86}
-procedure ExchgData(P1, P2: TOrmTableDataArray; FieldCount: PtrUInt);
+procedure ExchgData(P1, P2: TOrmTableDataArray; FieldCount: integer);
 {$ifdef FPC} nostackframe; assembler; {$endif}
 asm     // eax=P1 edx=P2 ecx=FieldCount
         push    esi
@@ -9276,22 +9282,38 @@ asm     // eax=P1 edx=P2 ecx=FieldCount
         pop     esi
 end;
 {$else}
-procedure ExchgData(P1, P2: TOrmTableDataArray; FieldCount: PtrUInt); inline;
+procedure ExchgData(P1, P2: POrmTableData; FieldCount: integer); inline;
 var
   p: TOrmTableData; // Data[] = 32/64-bit pointer or 32-bit offset
 begin
   repeat
+    p := P1^;
+    P1^ := P2^;
+    P2^ := p;
+    inc(p1);
+    inc(p2);
     dec(FieldCount);
-    p := P1[FieldCount];
-    P1[FieldCount] := P2[FieldCount];
-    P2[FieldCount] := p;
+  until FieldCount = 0;
+end;
+
+procedure ExchgLen(P1, P2: PInteger; FieldCount: integer); inline;
+var
+  p: integer;
+begin
+  repeat
+    p := P1^;
+    P1^ := P2^;
+    P2^ := p;
+    inc(p1);
+    inc(p2);
+    dec(FieldCount);
   until FieldCount = 0;
 end;
 {$endif CPUX86}
 
 procedure TUtf8QuickSort.Sort(L, R: integer);
 var
-  P: integer;
+  P, f: integer;
 begin
   if @Params.Comp <> nil then
     repeat
@@ -9339,8 +9361,17 @@ begin
               CurrentRow := i
             else if CurrentRow = i then
               CurrentRow := j;
-            ExchgData(@Data[OI - Params.FieldIndex],
-                      @Data[OJ - Params.FieldIndex], Params.FieldCount);
+            f := Params.FieldIndex;
+            dec(OI, f);
+            dec(OJ, f);
+            ExchgData(@Data[OI], @Data[OJ], Params.FieldCount);
+            {$ifndef NOTORMTABLELEN}
+            {$ifdef CPUX86}ExchgData{$else}ExchgLen{$endif}(
+              @Len[OI], @Len[OJ], Params.FieldCount);
+            {$endif NOTORMTABLELEN}
+            f := Params.FieldIndex;
+            inc(OI, f);
+            inc(OJ, f);
           end;
           if P = I then
             SetPivot(OJ)
@@ -9404,6 +9435,9 @@ begin
   // this sort routine is very fast, thanks to the dedicated static object
   quicksort.Params := fSortParams;
   quicksort.Data := fData;
+  {$ifndef NOTORMTABLELEN}
+  quicksort.Len := pointer(fLen);
+  {$endif NOTORMTABLELEN}
   {$ifndef NOPOINTEROFFSET}
   quicksort.DataStart := fDataStart;
   {$endif NOPOINTEROFFSET}
@@ -9467,6 +9501,9 @@ type
   TUtf8QuickSortMulti = object
   public
     Data: TOrmTableDataArray;
+    {$ifndef NOTORMTABLELEN}
+    Len: PIntegerArray;
+    {$endif NOTORMTABLELEN}
     {$ifndef NOPOINTEROFFSET}
     DataStart: PUtf8Char;
     {$endif NOPOINTEROFFSET}
@@ -9529,9 +9566,15 @@ begin
           dec(j);
         if i <= j then
         begin
-          if i <> j then // swap elements (PUtf8Char or offset)
+          if i <> j then
+          begin // swap elements (PUtf8Char or offset)
             ExchgData(@Data[i * FieldCount],
                       @Data[j * FieldCount], FieldCount);
+            {$ifndef NOTORMTABLELEN}
+            {$ifdef CPUX86}ExchgData{$else}ExchgLen{$endif}(
+              @Len[i * FieldCount], @Len[j * FieldCount], FieldCount);
+            {$endif NOTORMTABLELEN}
+          end;
           if p = i then
             p := j
           else if p = j then
@@ -9568,6 +9611,9 @@ begin
      (length(Fields) = 0) then
     exit;
   quicksort.Data := fData;
+  {$ifndef NOTORMTABLELEN}
+  quicksort.Len := pointer(fLen);
+  {$endif NOTORMTABLELEN}
   {$ifndef NOPOINTEROFFSET}
   quicksort.DataStart := fDataStart;
   {$endif NOPOINTEROFFSET}
@@ -10396,6 +10442,18 @@ begin
       end;
 end;
 
+procedure TRestCacheEntry.FlushCacheEntry(aID: TID);
+begin
+  if not CacheEnable then
+    exit;
+  Mutex.Lock;
+  try
+    LockedFlushCacheEntry(Value.Find(aID));
+  finally
+    Mutex.UnLock;
+  end;
+end;
+
 procedure TRestCacheEntry.FlushCacheEntries(const aID: array of TID);
 var
   i: PtrInt;
@@ -10763,13 +10821,13 @@ end;
 function TOrmPropertiesAbstract.SaveSimpleFieldsFromJsonArray(var P: PUtf8Char;
   ID: PID; EndOfObject: PAnsiChar; Format: TSaveFieldsAsObject): RawUtf8;
 begin
-  result := SaveFieldsFromJsonArray(P, SimpleFieldsBits[ooInsert],
-    ID, EndOfObject, Format);
+  SaveFieldsFromJsonArray(P, SimpleFieldsBits[ooInsert],
+    ID, EndOfObject, Format, result);
 end;
 
-function TOrmPropertiesAbstract.SaveFieldsFromJsonArray(var P: PUtf8Char;
+procedure TOrmPropertiesAbstract.SaveFieldsFromJsonArray(var P: PUtf8Char;
   const Bits: TFieldBits; ID: PID; EndOfObject: PAnsiChar;
-  Format: TSaveFieldsAsObject): RawUtf8;
+  Format: TSaveFieldsAsObject; out JsonObject: RawUtf8);
 var
   i: PtrInt;
   decoded: TID;
@@ -10778,7 +10836,6 @@ var
   info: TGetJsonField;
   temp: TTextWriterStackBuffer;
 begin
-  result := '';
   info.Json := P;
   if info.Json = nil then
     exit;
@@ -10828,7 +10885,7 @@ begin
       W.AddPropInt64('ID', decoded);
     W.CancelLastComma;
     W.Add('}');
-    W.SetText(result);
+    W.SetText(JsonObject);
   finally
     W.Free;
   end;
