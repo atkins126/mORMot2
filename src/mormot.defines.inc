@@ -57,7 +57,7 @@
 {.$define NOSYNDBIBX}
 // make mormot.db.sql.ibx.pas a "void" unit - defined for FPC/Lazarus packages only
 
-{$define MONGO_OLDPROTOCOL}
+{.$define MONGO_OLDPROTOCOL}
 // may be used with old MongoDB instances < 3.6 with no OP_MSG in Wire protocol
 
 {.$define DISABLEAPPSQL}
@@ -324,6 +324,9 @@
     {$define STRCNT32}         // 32-bit TAnsiRec.Ref
     {$define DACNT32}          // 32-bit TDynArrayRec.refCnt
   {$endif CPU64}
+  {$ifndef CPUX64}
+    {$undef FPC_X64MM}         // x86_64 only unit
+  {$endif CPUX64}
 
 
   // -----------
@@ -406,6 +409,7 @@
   {$define ISDELPHI}
   {$define CPUINTEL}          // Delphi only for Intel by now
   {$define ASMINTEL}          // either ASMX86 or ASMX64
+  {$undef FPC_X64MM}          // FPC only unit
   {$ifdef CPUX64}
     {$undef CPU32}
     {$define CPU64}           // Delphi compiler for 64 bit CPU

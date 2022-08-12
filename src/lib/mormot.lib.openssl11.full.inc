@@ -3930,28 +3930,6 @@ const
   ASN1_PKEY_CTRL_SET1_TLS_ENCPT = $9;
   ASN1_PKEY_CTRL_GET1_TLS_ENCPT = $a;
   
-  EVP_PKEY_OP_UNDEFINED = 0;
-  EVP_PKEY_OP_SIGN = 1 shl 3;
-  EVP_PKEY_OP_VERIFY = 1 shl 4;
-  EVP_PKEY_OP_VERIFYRECOVER = 1 shl 5;
-  EVP_PKEY_OP_SIGNCTX = 1 shl 6;
-  EVP_PKEY_OP_VERIFYCTX = 1 shl 7;
-  EVP_PKEY_OP_ENCRYPT = 1 shl 8;
-  EVP_PKEY_OP_DECRYPT = 1 shl 9;
-  EVP_PKEY_OP_DERIVE = 1 shl 10;
-  EVP_PKEY_OP_TYPE_SIG = EVP_PKEY_OP_SIGN or
-                         EVP_PKEY_OP_VERIFY or
-                         EVP_PKEY_OP_VERIFYRECOVER or
-                         EVP_PKEY_OP_SIGNCTX or
-                         EVP_PKEY_OP_VERIFYCTX;
-  EVP_PKEY_OP_TYPE_CRYPT = EVP_PKEY_OP_ENCRYPT or
-                           EVP_PKEY_OP_DECRYPT;
-  EVP_PKEY_OP_TYPE_NOGEN = EVP_PKEY_OP_TYPE_SIG or
-                           EVP_PKEY_OP_TYPE_CRYPT or
-                           EVP_PKEY_OP_DERIVE;
-  EVP_PKEY_OP_TYPE_GEN = EVP_PKEY_OP_PARAMGEN or
-                         EVP_PKEY_OP_KEYGEN;
-  
   EVP_PKEY_CTRL_MD = 1;
   EVP_PKEY_CTRL_PEER_KEY = 2;
   EVP_PKEY_CTRL_PKCS7_ENCRYPT = 3;
@@ -4403,17 +4381,6 @@ const
   RSA_PSS_SALTLEN_AUTO = -2;
   RSA_PSS_SALTLEN_MAX = -3;
   RSA_PSS_SALTLEN_MAX_SIGN = -2;
-  
-  RSA_PKCS1_PADDING = 1;
-  RSA_SSLV23_PADDING = 2;
-  RSA_NO_PADDING = 3;
-  RSA_PKCS1_OAEP_PADDING = 4;
-  RSA_X931_PADDING = 5;
-  RSA_PKCS1_PSS_PADDING = 6;
-  RSA_PKCS1_PADDING_SIZE = 11;
-  RSA_FLAG_FIPS_METHOD = $0400;
-  RSA_FLAG_NON_FIPS_ALLOW = $0400;
-  RSA_FLAG_CHECKED = $0800;
   
   DH_F_COMPUTE_KEY = 102;
   DH_F_DHPARAMS_PRINT_FP = 101;
@@ -14915,18 +14882,6 @@ function EVP_PKEY_verify_recover_init(ctx: PEVP_PKEY_CTX): integer; cdecl;
 function EVP_PKEY_verify_recover(ctx: PEVP_PKEY_CTX; rout: PByte; routlen: PPtrUInt; sig: PByte; siglen: PtrUInt): integer; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_PKEY_verify_recover';
 
-function EVP_PKEY_encrypt_init(ctx: PEVP_PKEY_CTX): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'EVP_PKEY_encrypt_init';
-
-function EVP_PKEY_encrypt(ctx: PEVP_PKEY_CTX; _out: PByte; outlen: PPtrUInt; _in: PByte; inlen: PtrUInt): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'EVP_PKEY_encrypt';
-
-function EVP_PKEY_decrypt_init(ctx: PEVP_PKEY_CTX): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'EVP_PKEY_decrypt_init';
-
-function EVP_PKEY_decrypt(ctx: PEVP_PKEY_CTX; _out: PByte; outlen: PPtrUInt; _in: PByte; inlen: PtrUInt): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'EVP_PKEY_decrypt';
-
 function EVP_PKEY_check(ctx: PEVP_PKEY_CTX): integer; cdecl;
   external LIB_CRYPTO name _PU + 'EVP_PKEY_check';
 
@@ -15683,18 +15638,6 @@ function RSA_check_key(p1: PRSA): integer; cdecl;
 function RSA_check_key_ex(p1: PRSA; cb: PBN_GENCB): integer; cdecl;
   external LIB_CRYPTO name _PU + 'RSA_check_key_ex';
 
-function RSA_public_encrypt(flen: integer; from: PByte; _to: PByte; rsa: PRSA; padding: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'RSA_public_encrypt';
-
-function RSA_private_encrypt(flen: integer; from: PByte; _to: PByte; rsa: PRSA; padding: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'RSA_private_encrypt';
-
-function RSA_public_decrypt(flen: integer; from: PByte; _to: PByte; rsa: PRSA; padding: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'RSA_public_decrypt';
-
-function RSA_private_decrypt(flen: integer; from: PByte; _to: PByte; rsa: PRSA; padding: integer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'RSA_private_decrypt';
-
 procedure RSA_free(r: PRSA); cdecl;
   external LIB_CRYPTO name _PU + 'RSA_free';
 
@@ -15721,9 +15664,6 @@ function RSA_set_method(rsa: PRSA; meth: PRSA_METHOD): integer; cdecl;
 
 function RSA_PKCS1_OpenSSL(): PRSA_METHOD; cdecl;
   external LIB_CRYPTO name _PU + 'RSA_PKCS1_OpenSSL';
-
-function RSA_pkey_ctx_ctrl(ctx: PEVP_PKEY_CTX; optype: integer; cmd: integer; p1: integer; p2: pointer): integer; cdecl;
-  external LIB_CRYPTO name _PU + 'RSA_pkey_ctx_ctrl';
 
 function d2i_RSAPublicKey(a: PPRSA; _in: PPByte; len: integer): PRSA; cdecl;
   external LIB_CRYPTO name _PU + 'd2i_RSAPublicKey';
