@@ -429,6 +429,7 @@ type
     procedure RenderContext(Context: TSynMustacheContext;
       TagStart, TagEnd: integer; Partials: TSynMustachePartials;
       NeverFreePartials: boolean);
+
     /// renders the {{mustache}} template from a variant defined context
     // - the context is given via a custom variant type implementing
     // TSynInvokeableVariantType.Lookup, e.g. TDocVariant or TSMVariant
@@ -487,6 +488,7 @@ type
       Helpers: TSynMustacheHelpers = nil;
       const OnTranslate: TOnStringTranslate = nil;
       EscapeInvert: boolean = false): RawUtf8; overload;
+
     /// renders the {{mustache}} template from a variable defined context
     // - the context is given via a local variable and RTTI, which may be
     // a record, a class, a variant, or a dynamic array instance
@@ -495,6 +497,29 @@ type
     // - set EscapeInvert = true to force {{value}} NOT to escape HTML chars
     // and {{{value}} escaping chars (may be useful e.g. for code generation)
     function RenderData(const Value; ValueTypeInfo: PRttiInfo;
+      Partials: TSynMustachePartials = nil;
+      Helpers: TSynMustacheHelpers = nil;
+      const OnTranslate: TOnStringTranslate = nil;
+      EscapeInvert: boolean = false): RawUtf8;
+    /// renders the {{mustache}} template from a variable defined context
+    // - the context is given via a local variable and RTTI, which may be
+    // a record, a class, a variant, or a dynamic array instance
+    // - you can specify a list of partials via TSynMustachePartials.CreateOwned,
+    // a list of Expression Helpers, or a custom {{"English text}} callback
+    // - set EscapeInvert = true to force {{value}} NOT to escape HTML chars
+    // and {{{value}} escaping chars (may be useful e.g. for code generation)
+    function RenderDataRtti(Value: pointer; ValueRtti: TRttiCustom;
+      Partials: TSynMustachePartials = nil;
+      Helpers: TSynMustacheHelpers = nil;
+      const OnTranslate: TOnStringTranslate = nil;
+      EscapeInvert: boolean = false): RawUtf8;
+    /// renders the {{mustache}} template from a dynamic array variable
+    // - the supplied array is available within a {{..}} main section
+    // - you can specify a list of partials via TSynMustachePartials.CreateOwned,
+    // a list of Expression Helpers, or a custom {{"English text}} callback
+    // - set EscapeInvert = true to force {{value}} NOT to escape HTML chars
+    // and {{{value}} escaping chars (may be useful e.g. for code generation)
+    function RenderDataArray(const Value: TDynArray;
       Partials: TSynMustachePartials = nil;
       Helpers: TSynMustacheHelpers = nil;
       const OnTranslate: TOnStringTranslate = nil;
@@ -813,7 +838,8 @@ begin
           if Value.VType >= varNull then
             exit;
         end
-        else if IdemPChar(pointer(ValueName), '-INDEX') then
+        else if PCardinal(ValueName)^ and $dfdfdfdf = (ord('-') and $df) +
+               ord('I') shl 8 + ord('N') shl 16 + ord('D') shl 24 then
         begin
           // {{-index}}
           Value.VType := varInteger;
@@ -919,9 +945,9 @@ begin
   begin
     Data := Value;
     Info := Rtti;
-    ListCurrent := -1;
     if Rtti <> nil then
       ListCount := Rtti.ValueIterateCount(Value);
+    ListCurrent := -1;
   end;
   inc(fContextCount);
 end;
@@ -955,14 +981,6 @@ begin
     begin
       d := Data;
       rc := Info;
-      if (d <> nil) and
-         (ListCount > 0) then
-      begin
-        d := rc.ValueIterate(d, ListCurrent, rc);
-        if (d <> nil) and
-           (rc.Kind in [rkClass, rkLString]) then
-          d := @d; // as expected by ValueToVariant()
-      end;
       exit;
     end;
   // recursive search of {{value}}
@@ -974,7 +992,8 @@ begin
       if (d <> nil) and
          (ListCount >= 0) then
         // within a list
-        if IdemPChar(pointer(ValueName), '-INDEX') then
+        if PCardinal(ValueName)^ and $dfdfdfdf = (ord('-') and $df) +
+             ord('I') shl 8 + ord('N') shl 16 + ord('D') shl 24 then
         begin
           // {{-index}}
           d := @Temp.Data.VInteger;
@@ -1008,7 +1027,7 @@ begin
           // search property name in rkRecord/rkObject or rkClass
           p := rc.PropFindByPath(d, pointer(ValueName), fPathDelim);
           if (p <> nil) and
-             (p^.OffsetGet >= 0)  then
+             (p^.OffsetGet >= 0) then // we don't support getters yet
           begin
             rc := p^.Value;
             inc(PAnsiChar(d), p^.OffsetGet);
@@ -1051,13 +1070,16 @@ begin
       UnEscape := not UnEscape;
     if UnEscape or
        (rc.Kind in rkNumberTypes) then
+      // no HTML escape needed for numbers
       fWriter.AddRttiCustomJson(d, rc, twNone, [])
+    // try direct UTF-8 and UTF-16 strings rendering
     else if rc.Kind = rkLString then
-      fWriter.AddHtmlEscape(PPointer(d)^, length(PRawUtf8(d)^))
+      fWriter.AddHtmlEscape(PPointer(d)^) // faster with no length
     else if rc.Kind in rkWideStringTypes then
       fWriter.AddHtmlEscapeW(PPointer(d)^)
     else
     begin
+      // use a temporary variant for any complex content (including JSON)
       rc.ValueToVariant(d, tmp, @JSON_[mFastFloat]);
       if fEscapeInvert then
         UnEscape := not UnEscape;
@@ -1776,21 +1798,27 @@ end;
 function TSynMustache.RenderData(const Value; ValueTypeInfo: PRttiInfo;
   Partials: TSynMustachePartials; Helpers: TSynMustacheHelpers;
   const OnTranslate: TOnStringTranslate; EscapeInvert: boolean): RawUtf8;
+begin
+  result := RenderDataRtti(
+    @Value, Rtti.RegisterType(ValueTypeInfo), Partials, Helpers, OnTranslate, EscapeInvert);
+end;
+
+function TSynMustache.RenderDataRtti(Value: pointer; ValueRtti: TRttiCustom;
+  Partials: TSynMustachePartials; Helpers: TSynMustacheHelpers;
+  const OnTranslate: TOnStringTranslate; EscapeInvert: boolean): RawUtf8;
 var
-  rc: TRttiCustom;
   ctx: TSynMustacheContextData;
   tmp: TTextWriterStackBuffer;
 begin
-  rc := Rtti.RegisterType(ValueTypeInfo);
-  if rc = nil then
+  if ValueRtti = nil then
     raise ESynMustache.CreateUtf8('%.RenderData: invalid TypeInfo', [self]);
   ctx := fCachedContextData; // thread-safe reuse of shared rendering context
   if ctx.fReuse.TryLock then
-    ctx.PushContext(@Value, rc)
+    ctx.PushContext(Value, ValueRtti)
   else
     ctx := TSynMustacheContextData.Create(
       self, TJsonWriter.CreateOwnedStream(tmp), SectionMaxCount,
-      @Value, rc, true);
+      Value, ValueRtti, true);
   try
     ctx.Helpers := Helpers;
     ctx.OnStringTranslate := OnTranslate;
@@ -1803,6 +1831,19 @@ begin
     else
       ctx.Free;
   end;
+end;
+
+function TSynMustache.RenderDataArray(const Value: TDynArray;
+  Partials: TSynMustachePartials; Helpers: TSynMustacheHelpers;
+  const OnTranslate: TOnStringTranslate; EscapeInvert: boolean): RawUtf8;
+var
+  n: PtrInt;
+begin
+  n := Value.Count;
+  if n <> 0 then
+    DynArrayFakeLength(Value.Value^, n); // as RenderDataRtti() expects
+  result := RenderDataRtti(
+    Value.Value, Value.Info, Partials, Helpers, OnTranslate, EscapeInvert);
 end;
 
 destructor TSynMustache.Destroy;

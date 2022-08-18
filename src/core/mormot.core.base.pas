@@ -633,7 +633,7 @@ const
   // - even if a dynamic array can handle PtrInt length, consider other patterns
   _DAMAXSIZE = $5fffffff;
 
-/// same as SetLength() but without any memory resize - len should be > 0
+/// like SetLength() but without any memory resize - WARNING: len should be > 0
 procedure DynArrayFakeLength(var arr; len: TDALen);
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -2675,7 +2675,7 @@ procedure TrimCopy(const S: RawUtf8; start, count: PtrInt;
 // - if SepStr is not found, returns Str
 function Split(const Str, SepStr: RawUtf8; StartPos: PtrInt = 1): RawUtf8; overload;
 
-/// buffer-safe version of StrComp(), to be used with PUtf8Char/PAnsiChar
+/// buffer-overflow safe version of StrComp(), to be used with PUtf8Char/PAnsiChar
 function StrComp(Str1, Str2: pointer): PtrInt;
   {$ifndef CPUX86}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
@@ -8231,7 +8231,7 @@ var
 begin
   // note: we don't use RTL Random() here because it is not thread-safe
   if _EntropyGlobal.L = 0 then
-    CreateGuid(_EntropyGlobal.guid); // some rich initial value
+    sysutils.CreateGuid(_EntropyGlobal.guid); // some rich initial value
   e.r[0].L := e.r[0].L xor _EntropyGlobal.L;
   e.r[0].H := e.r[0].H xor _EntropyGlobal.H;
   lec := @_Lecuyer; // lec^.rs#=0 at thread startup, but won't hurt

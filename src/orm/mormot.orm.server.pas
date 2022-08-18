@@ -487,7 +487,8 @@ type
     fCommandDirectSupport: TRestOrmBatchDirect;
     fCommandDirectFormat: TSaveFieldsAsObject;
     fFlags: set of (
-      fNeedAcquireExecutionWrite, fAcquiredExecutionWrite,
+      fNeedAcquireExecutionWrite,
+      fAcquiredExecutionWrite,
       fRunMainTrans);
     fRunningBatchRest: TRestOrm;
     fRunningRest: TRestOrm;
@@ -2214,20 +2215,26 @@ begin
   if (fCount = 0) and
      (fParse.EndOfObject = ']') then
   begin
-    // single op do not need a transaction nor InternalBatchStart/Stop
-    fRowCountPerTrans := 0;
+    // optimize a single op batch
+    fRowCountPerTrans := 0;        // no transaction needed
     SetLength(fResults, 1);
-    if fEncoding in BATCH_DIRECT then
-    begin
-      // InternalBatchDirectOne format requires JSON object fallback
-      fOrm.Model.TableProps[fRunTableIndex].Props.
-        SaveFieldsFromJsonArray(fValueDirect, fValueDirectFields, @fValueID,
-          nil, fCommandDirectFormat, fValue);
-      if fEncoding = encPutHexID then
-        fEncoding := encPut
-      else
-        fEncoding := encPost;
-    end;
+    if (fEncoding in BATCH_INSERT) and
+       (fBatchOptions * [boInsertOrIgnore, boInsertOrReplace] <> []) then
+      // single op which requires special INSERT syntax
+      ExecuteValueCheckIfRestChange // InternalBatchStart(fBatchOptions)
+    else
+      // single op which does not need a transaction nor InternalBatchStart/Stop
+      if fEncoding in BATCH_DIRECT then
+      begin
+        // InternalBatchDirectOne format requires JSON object fallback
+        fOrm.Model.TableProps[fRunTableIndex].Props.
+          SaveFieldsFromJsonArray(fValueDirect, fValueDirectFields, @fValueID,
+            nil, fCommandDirectFormat, fValue);
+        if fEncoding = encPutHexID then
+          fEncoding := encPut
+        else
+          fEncoding := encPost;
+      end;
   end
   else
   begin
