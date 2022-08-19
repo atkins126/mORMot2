@@ -1933,13 +1933,6 @@ begin
   aTotalBytes := QWord(fs.blocks) * QWord(fs.bsize);
 end;
 
-const
-  {$ifdef OSBSDDARWIN}
-  POSIXMOUNTPOINTS = '/etc/mtab';
-  {$else}
-  POSIXMOUNTPOINTS = '/proc/self/mounts';
-  {$endif OSBSDDARWIN}
-
 function GetDiskPartitions: TDiskPartitions;
 var
   mounts, fs, mnt, typ: RawUtf8;
@@ -1949,10 +1942,14 @@ var
   av, fr, tot: QWord;
 begin
   // see https://github.com/gagern/gnulib/blob/master/lib/mountlist.c
-  mounts := StringFromFile(POSIXMOUNTPOINTS, {hasnosize=}true);
+  {$ifdef OSLINUXANDROID}
+  mounts := StringFromFile('/proc/self/mounts', {hasnosize=}true);
+  if mounts = '' then
+  {$endif OSLINUXANDROID}
+    mounts := StringFromFile('/etc/mtab', {hasnosize=}true);
   n := 0;
   p := pointer(mounts);
-  if p <> nil then
+  if p <> nil then // e.g. Darwin has no /etc/mtab :(
   repeat
     fs :=  GetNextItem(p);
     mnt := GetNextItem(p);
@@ -1976,6 +1973,8 @@ begin
   //writeln('fs=',fs,' mnt=',mnt,' typ=',typ, ' av=',av,' fr=',fr,' tot=',tot);
         if n = length(result) then
           SetLength(result, NextGrow(n));
+        if length(fs) > 24 then
+          fs := copy(fs, 1, 24) + '..';
         result[n].name := fs;
         result[n].mounted := fn;
         result[n].size := tot;
