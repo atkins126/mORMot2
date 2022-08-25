@@ -837,7 +837,8 @@ type
   // and another for decryption, with PKCS7 padding and no MAC/AEAD validation
   TProtocolAes = class(TInterfacedObject, IProtocol)
   protected
-    fSafe: TRTLCriticalSection; // no need of TSynLocker padding
+    fSafe: TLightLock; // no need of whole TRTLCriticalSection
+    fAheadMode: boolean;
     fAes: array[boolean] of TAesAbstract; // [false]=decrypt [true]=encrypt
   public
     /// initialize this encryption protocol with the given AES settings
@@ -1443,12 +1444,12 @@ type
     function JwtCompute(const DataNameValue: array of const;
       const Issuer: RawUtf8 = ''; const Subject: RawUtf8 = '';
       const Audience: RawUtf8 = ''; NotBefore: TDateTime = 0;
-      ExpirationMinutes: integer = 0; Signature: PRawUtf8 = nil): RawUtf8;
+      ExpirationMinutes: integer = 0; Signature: PRawByteString = nil): RawUtf8;
     /// verify a JWT signature from the public key of this certificate
     // - this certificate should have the cuDigitalSignature usage
-    // - can optionally return the payload fields
+    // - can optionally return the payload fields and/or the signature
     function JwtVerify(const Jwt: RawUtf8; Issuer, Subject, Audience: PRawUtf8;
-      Payload: PDocVariantData = nil): TCryptCertValidity;
+      Payload: PDocVariantData = nil; Signature: PRawByteString = nil): TCryptCertValidity;
     /// encrypt a message using the public key of this certificate
     // - only RSA and ES256 support this method by now
     // - 'x509-rs*' and 'x509-ps*' RSA algorithms use OpenSSL Envelope key
@@ -1555,9 +1556,9 @@ type
       overload; virtual; abstract;
     function JwtCompute(const DataNameValue: array of const;
       const Issuer, Subject, Audience: RawUtf8; NotBefore: TDateTime;
-      ExpirationMinutes: integer; Signature: PRawUtf8): RawUtf8; virtual;
+      ExpirationMinutes: integer; Signature: PRawByteString): RawUtf8; virtual;
     function JwtVerify(const Jwt: RawUtf8; Issuer, Subject, Audience: PRawUtf8;
-      Payload: PDocVariantData): TCryptCertValidity; virtual;
+      Payload: PDocVariantData; Signature: PRawByteString): TCryptCertValidity; virtual;
     function Encrypt(const Message: RawByteString;
       const Cipher: RawUtf8): RawByteString; virtual; abstract;
     function Decrypt(const Message: RawByteString;
@@ -1708,6 +1709,54 @@ type
     function New: ICryptStore; virtual; abstract;
     /// main factory to create a new Store instance from saved Binary
     function NewFrom(const Binary: RawByteString): ICryptStore; virtual;
+  end;
+
+  /// maintains a list of ICryptCert, easily reachable per TCryptCertUsage
+  // - could be seen as a certificates store of the poor (tm)
+  // - per usage lookup is in O(1) so faster than iterative ICryptCert.GetUsage
+  // - also features simple PEM / binary serialization methods
+  // - should be initialized by Clear at startup, or set as a TObject field
+  {$ifdef USERECORDWITHMETHODS}
+  TCryptCertPerUsage = record
+  {$else}
+  TCryptCertPerUsage = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    /// the stored ICryptCert Instances
+    List: array of ICryptCert;
+    /// all usages currently stored in this list
+    Usages: TCryptCertUsages;
+    /// lookup table used by GetUsage()/PerUsage()
+    // - 0 means no certificate, or store the index in Cert[] + 1
+    CertPerUsage: array[TCryptCertUsage] of byte;
+    /// reset all storage and indexes
+    procedure Clear;
+    /// register the certificate to the internal list
+    // - returns the duplicated usages
+    // - if no usage(s) was already set as in the added one, returns []
+    // - if another certificate has already an usage, it is overwritten and
+    // the duplicated usage(s) are returned
+    // - so the typical pattern is to add the certificate in inverse order of
+    // authority, i.e. first the CA as root cuKeyCertSign, then the less
+    // specialized cuKeyCertSign certificates - so that the weaker certificate
+    // is returned by PerUsage/GetUsage for the actual process
+    function Add(const cert: ICryptCert): TCryptCertUsages;
+    /// fast lookup of a certificate per its usage
+    function GetUsage(u: TCryptCertUsage; out cert: ICryptCert): boolean;
+    /// fast lookup of a certificate per its usage
+    function PerUsage(u: TCryptCertUsage): ICryptCert;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// save all items as a CRLF separated list of cccCertOnly PEM certificates
+    function AsPem: RawUtf8;
+    /// clear and load a CRLF separated list of PEM certificates
+    // - returns the duplicated usages found during adding certificates
+    function FromPem(algo: TCryptCertAlgo; const pem: RawUtf8): TCryptCertUsages;
+    /// save all items as a single binary blob of cccCertOnly certificates
+    // - binary layout is just 32-bit length followed by the DER serialization
+    function AsBinary: RawByteString;
+    /// clear and load a binary blob of certificates saved by AsBinary
+    // - returns the duplicated usages found during adding certificates
+    function FromBinary(algo: TCryptCertAlgo; const bin: RawByteString): TCryptCertUsages;
   end;
 
 const
@@ -3397,20 +3446,16 @@ constructor TProtocolAes.Create(aClass: TAesAbstractClass;
   const aKey; aKeySize: cardinal);
 begin
   inherited Create;
-  InitializeCriticalSection(fSafe);
   if aClass = nil then
     aClass := TAesFast[mCtr]; // fastest on x86_64 or OpenSSL - server friendly
   fAes[false] := aClass.Create(aKey, aKeySize);
-  if fAes[false].AlgoMode in [mCfc, mOfc, mCtc, mGcm] then
-    raise ESynCrypto.CreateUtf8('%.Create: incompatible % AEAD mode',
-      [self, fAes[false].AlgoName]);
+  fAheadMode := fAes[false].AlgoMode in [mCfc, mOfc, mCtc, mGcm];
   fAes[true] := fAes[false].CloneEncryptDecrypt;
 end;
 
 constructor TProtocolAes.CreateFrom(aAnother: TProtocolAes);
 begin
   inherited Create;
-  InitializeCriticalSection(fSafe);
   fAes[false] := aAnother.fAes[false].Clone;
   fAes[true] := fAes[false].CloneEncryptDecrypt;
 end;
@@ -3420,7 +3465,6 @@ begin
   fAes[false].Free;
   if fAes[true] <> fAes[false] then
     fAes[true].Free; // fAes[false].CloneEncryptDecrypt may return self
-  DeleteCriticalSection(fSafe);
   inherited Destroy;
 end;
 
@@ -3433,10 +3477,13 @@ end;
 function TProtocolAes.Decrypt(const aEncrypted: RawByteString;
   out aPlain: RawByteString): TProtocolResult;
 begin
-  EnterCriticalSection(fSafe);
+  fSafe.Lock;
   try
     try
-      aPlain := fAes[false].DecryptPkcs7(aEncrypted, {iv=}true, {raise=}false);
+      if fAheadMode then
+        aPlain := fAes[false].MacAndCrypt(aEncrypted, {enc=}false, {iv=}true, '')
+      else
+        aPlain := fAes[false].DecryptPkcs7(aEncrypted, {iv=}true, {raise=}false);
       if aPlain = '' then
         result := sprBadRequest
       else
@@ -3445,18 +3492,21 @@ begin
       result := sprInvalidMAC;
     end;
   finally
-    LeaveCriticalSection(fSafe);
+    fSafe.UnLock;
   end;
 end;
 
 procedure TProtocolAes.Encrypt(const aPlain: RawByteString;
   out aEncrypted: RawByteString);
 begin
-  EnterCriticalSection(fSafe);
+  fSafe.Lock;
   try
-    aEncrypted := fAes[true].EncryptPkcs7(aPlain, {iv=}true);
+    if fAheadMode then
+      aEncrypted := fAes[true].MacAndCrypt(aPlain, {enc=}true, {iv=}true, '')
+    else
+      aEncrypted := fAes[true].EncryptPkcs7(aPlain, {iv=}true);
   finally
-    LeaveCriticalSection(fSafe);
+    fSafe.UnLock;
   end;
 end;
 
@@ -4330,9 +4380,9 @@ begin
   if encrypt then
     include(fFlags, fEncrypt);
   if algo.fMode = mGcm then
-    include(fFlags, fAesGcm)
-  else if algo.fMode in AES_AEAD then
-    include(fFlags, fAesAead);
+    include(fFlags, fAesGcm);
+  if algo.fMode in AES_AEAD then
+    include(fFlags, fAesAead); // mCfc,mOfc,mCtc,mGcm
 end;
 
 destructor TCryptAesCipher.Destroy;
@@ -4359,36 +4409,9 @@ begin
   result := false;
   if src = '' then
     exit;
-  if fAesGcm in fFlags then
-  begin
-    // standard GCM algorithm with trailing 128-bit GMAC
-    if (aeadinfo <> '') and
-       not fAes.InheritsFrom(TAesGcm) then
-      raise ECrypt.CreateUtf8('% does not properly support AEAD information: ' +
-        'use AES-%-GCM-INT instead', [fAes, TCryptAesInternal(fCryptAlgo).fBits]);
-    if fEncrypt in fFlags then
-    begin
-      dst := fAes.EncryptPkcs7(src, fIVAtBeg in fFlags, GMAC_SIZE);
-      if aeadinfo <> '' then
-        TAesGcmAbstract(fAes).AesGcmAad(pointer(aeadinfo), length(aeadinfo));
-      result := (dst <> '') and
-                TAesGcmAbstract(fAes).AesGcmFinal( // append GMAC to dst
-                   PAesBlock(@PByteArray(dst)[length(dst) - GMAC_SIZE])^)
-    end
-    else
-    begin
-      dst := fAes.DecryptPkcs7(src, fIVAtBeg in fFlags, false, GMAC_SIZE);
-      if aeadinfo <> '' then
-        TAesGcmAbstract(fAes).AesGcmAad(pointer(aeadinfo), length(aeadinfo));
-      result := (dst <> '') and
-                TAesGcmAbstract(fAes).AesGcmFinal( // validate GMAC from src
-                  PAesBlock(@PByteArray(src)[length(src) - GMAC_SIZE])^);
-    end;
-    exit;
-  end
-  else if fAesAead in fFlags then
-    // our proprietary mCfc,mOfc,mCtc AEAD algorithms using 256-bit crc32c
-    dst := fAes.MacAndCrypt(src, fEncrypt in fFlags, aeadinfo)
+  if fAesAead in fFlags then
+    // mCfc/mOfc/mCtc/mGcm AEAD algorithms using 128-bit GMAC or 256-bit crc32c
+    dst := fAes.MacAndCrypt(src, fEncrypt in fFlags, fIVAtBeg in fFlags, aeadinfo)
   // standard encryption with no AEAD/checksum
   else if fEncrypt in fFlags then
     dst := fAes.EncryptPkcs7(src, fIVAtBeg in fFlags)
@@ -4403,9 +4426,6 @@ begin
   result := false;
   if src = nil then
     exit;
-  if fAesAead in fFlags then
-    raise ECrypt.CreateUtf8('%.Process(TBytes) is unsupported for %',
-      [self, fCryptAlgo.AlgoName]); // MacAndCrypt() requires RawByteString
   if fAesGcm in fFlags then
   begin
     // standard GCM algorithm with trailing 128-bit GMAC
@@ -4427,6 +4447,9 @@ begin
     end;
     exit;
   end
+  else if fAesAead in fFlags then
+    raise ECrypt.CreateUtf8('%.Process(TBytes) is unsupported for %',
+      [self, fCryptAlgo.AlgoName]) // MacAndCrypt() requires RawByteString
   // standard encryption with no AEAD/checksum
   else if fEncrypt in fFlags then
     dst := fAes.EncryptPkcs7(src, fIVAtBeg in fFlags)
@@ -4625,10 +4648,11 @@ end;
 
 function TCryptCert.JwtCompute(const DataNameValue: array of const;
   const Issuer, Subject, Audience: RawUtf8; NotBefore: TDateTime;
-  ExpirationMinutes: integer; Signature: PRawUtf8): RawUtf8;
+  ExpirationMinutes: integer; Signature: PRawByteString): RawUtf8;
 var
   payload: TDocVariantData;
-  headpayload, sig: RawUtf8;
+  headpayload: RawUtf8;
+  sig: RawByteString;
 begin
   result := '';
   if not HasPrivateSecret then
@@ -4651,17 +4675,17 @@ begin
   headpayload := BinToBase64Uri(FormatUtf8('{"alg":"%"}',
                    [(fCryptAlgo as TCryptCertAlgo).JwtName])) + '.' +
                  BinToBase64Uri(payload.ToJson);
-  sig := BinToBase64Uri(Sign(headpayload));
+  sig := self.Sign(headpayload);
   if sig = '' then
     exit;
   if Signature <> nil then
     Signature^ := sig;
-  result := headpayload + '.' + sig;
+  result := headpayload + '.' + BinToBase64Uri(sig);
 end;
 
 function TCryptCert.JwtVerify(const Jwt: RawUtf8;
   Issuer, Subject, Audience: PRawUtf8;
-  Payload: PDocVariantData): TCryptCertValidity;
+  Payload: PDocVariantData; Signature: PRawByteString): TCryptCertValidity;
 var
   P, S: PUtf8Char;
   pl: TDocVariantData;
@@ -4687,6 +4711,8 @@ begin
   if (payl = '') or
      (sig = '') then
     exit;
+  if Signature <> nil then
+    Signature^ := sig;
   if pl.InitJsonInPlace(pointer(payl), JSON_FAST) = nil then
     exit;
   result := cvInvalidDate;
@@ -4790,6 +4816,131 @@ begin
   result := New;
   if not result.Load(Binary) then
     result := nil;
+end;
+
+
+{ TCryptCertPerUsage }
+
+procedure TCryptCertPerUsage.Clear;
+begin
+  List := nil;
+  FillCharFast(self, SizeOf(self), 0);
+end;
+
+function TCryptCertPerUsage.Add(const cert: ICryptCert): TCryptCertUsages;
+var
+  u: TCryptCertUsage;
+  n: PtrInt;
+begin
+  n := length(List);
+  if n = 255 then
+    raise ECryptCert.Create('TCryptCertPerUsage.Add overflow'); // paranoid
+  SetLength(List, n + 1);
+  List[n] := cert;
+  inc(n); // CertPerUsage[u] stores index + 1
+  result := cert.GetUsage;
+  for u := low(u) to high(u) do
+    if u in result then
+    begin
+      include(Usages, u);
+      if CertPerUsage[u] = 0 then
+        exclude(result, u);
+      CertPerUsage[u] := n; // replace any existing certificate
+    end;
+end;
+
+function TCryptCertPerUsage.GetUsage(u: TCryptCertUsage;
+  out cert: ICryptCert): boolean;
+var
+  i: PtrInt;
+begin
+  i := CertPerUsage[u];
+  if i = 0 then
+    result := false
+  else
+  begin
+    cert := List[i - 1];
+    result := true;
+  end;
+end;
+
+function TCryptCertPerUsage.PerUsage(u: TCryptCertUsage): ICryptCert;
+begin
+  GetUsage(u, result);
+end;
+
+function TCryptCertPerUsage.AsPem: RawUtf8;
+var
+  i: PtrInt;
+begin
+  result := '';
+  for i := 0 to length(List) - 1 do
+    result  := result + List[i].Save(cccCertOnly, '', ccfPem) + (CRLF + CRLF);
+end;
+
+function TCryptCertPerUsage.FromPem(
+  algo: TCryptCertAlgo; const pem: RawUtf8): TCryptCertUsages;
+var
+  P: PUtf8Char;
+  one: RawUtf8;
+  c: ICryptCert;
+begin
+  Clear;
+  result := [];
+  if algo = nil then
+    exit;
+  P := pointer(pem);
+  while P <> nil do
+  begin
+    one := NextPem(P);
+    if one = '' then
+      break;
+    c := algo.Load(one);
+    if c <> nil then
+      result := result + Add(c);
+  end;
+end;
+
+function TCryptCertPerUsage.AsBinary: RawByteString;
+var
+  i: PtrInt;
+  s: TRawByteStringStream;
+begin
+  s := TRawByteStringStream.Create;
+  try
+    for i := 0 to length(List) - 1 do
+      WriteStringToStream(s, List[i].Save(cccCertOnly, '', ccfBinary));
+    result := s.DataString;
+  finally
+    s.Free;
+  end;
+end;
+
+function TCryptCertPerUsage.FromBinary(algo: TCryptCertAlgo;
+  const bin: RawByteString): TCryptCertUsages;
+var
+  s: TRawByteStringStream;
+  one: RawByteString;
+  c: ICryptCert;
+begin
+  Clear;
+  result := [];
+  if (algo = nil) or
+     (bin = '') then
+    exit;
+  s := TRawByteStringStream.Create(bin);
+  try
+    repeat
+      one := ReadStringFromStream(s, 65536);
+      if one = '' then
+        break;
+      c := algo.Load(one);
+      if c <> nil then
+        result := result + Add(c);
+    until false;
+  finally
+    s.Free;
+  end;
 end;
 
 

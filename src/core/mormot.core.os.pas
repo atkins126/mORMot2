@@ -1808,6 +1808,9 @@ procedure LibraryClose(Lib: TLibHandle);
 function LibraryResolve(Lib: TLibHandle; ProcName: PAnsiChar): pointer;
   {$ifdef OSWINDOWS} stdcall; {$endif}
 
+/// raw cross-platform library resolution error, e.g. after LibraryOpen
+function LibraryError: string;
+
 
 const
   /// redefined here to avoid dependency to the Windows or SyncObjs units
@@ -2695,6 +2698,7 @@ type
   protected
     fHandle: TLibHandle;
     fLibraryPath: TFileName;
+    fTryFromExecutableFolder: boolean;
     {$ifdef OSPOSIX}
     fLibraryPathTested: boolean;
     {$endif OSPOSIX}
@@ -2728,6 +2732,9 @@ type
     // - on POSIX, contains the full path (via dladdr) once Resolve() is called
     property LibraryPath: TFileName
       read fLibraryPath;
+    /// if set, and no path is specified, will try from Executable.ProgramFilePath
+    property TryFromExecutableFolder: boolean
+      read fTryFromExecutableFolder write fTryFromExecutableFolder;
   end;
 
 
@@ -5549,13 +5556,15 @@ function TSynLibrary.TryLoadLibrary(const aLibrary: array of TFileName;
   aRaiseExceptionOnFailure: ExceptionClass): boolean;
 var
   i, j: PtrInt;
-  lib, libs: TFileName;
   {$ifdef OSWINDOWS}
-  nwd, cwd: TFileName;
+  cwd,
   {$endif OSWINDOWS}
+  lib, libs, nwd: TFileName;
+  err: string;
 begin
   for i := 0 to high(aLibrary) do
   begin
+    // check library name
     lib := aLibrary[i];
     if lib = '' then
       continue;
@@ -5568,8 +5577,16 @@ begin
       end;
     if not result then
       continue; // don't try twice the same library name
-    {$ifdef OSWINDOWS}
+    // open the library
     nwd := ExtractFilePath(lib);
+    if fTryFromExecutableFolder  and
+       (nwd = '') and
+       FileExists(Executable.ProgramFilePath + lib) then
+    begin
+      lib := Executable.ProgramFilePath + lib;
+      nwd := Executable.ProgramFilePath;
+    end;
+    {$ifdef OSWINDOWS}
     if nwd <> '' then
     begin
       cwd := GetCurrentDir;
@@ -5590,10 +5607,14 @@ begin
         fLibraryPath := lib;
       exit;
     end;
+    // handle any error
     if {%H-}libs = '' then
       libs := lib
     else
       libs := libs + ', ' + lib;
+    err := LibraryError;
+    if err <> '' then
+      libs := libs + ' [' + err + ']';
   end;
   result := false;
   if aRaiseExceptionOnFailure <> nil then
