@@ -2193,7 +2193,7 @@ var
   a, i: PtrInt;
   c32, cprev: cardinal;
   d, dprev: double;
-  n, h, nprev, aead, pub, priv, pub2, priv2, jwt, iss, sub: RawUtf8;
+  n, h, nprev, aead, pub, priv, pub2, priv2, jwt, iss, sub, s2, s3: RawUtf8;
   r, s: RawByteString;
   aes: TAesAbstract;
   key: THash256;
@@ -2204,12 +2204,15 @@ var
   asy: TCryptAsym;
   en, de: ICryptCipher;
   crt: TCryptCertAlgo;
-  c1, c2, c3: ICryptCert;
+  c1, c2, c3, c4: ICryptCert;
+  fields: TCryptCertFields;
   str: TCryptStoreAlgo;
   st1, st2, st3: ICryptStore;
+  cpe: TCryptCertPerUsage;
   alg: TCryptAlgos;
   fmt: TCryptCertFormat;
   cv: TCryptCertValidity;
+  u: TCryptCertUsage;
   namelen: integer;
   names: RawUtf8;
 
@@ -2482,11 +2485,15 @@ begin
     end;
     checkEqual(c1.SharedSecret(nil), '', 'shared(nil)');
     // validate signed certificate with c1 as CA
+    s3 := GuidToRawUtf8(RandomGuid);
+    Check(TrimGuid(s3));
     c3 := crt.New;
-    c3.Generate([cuDataEncipherment, cuKeyAgreement], 'signed', c1);
+    c3.Generate([cuDataEncipherment, cuKeyAgreement], s3, c1);
     Check(not c3.IsEqual(c1));
     Check(not c3.IsEqual(c2));
     Check(not c3.IsSelfSigned);
+    if crt.AlgoName <> 'syn-es256-v1' then
+      CheckEqual(c3.GetSubject, s3);
     Check(c3.HasPrivateSecret);
     CheckEqual(c3.GetAuthorityKey, c1.GetSubjectKey);
     Check(c3.Verify(nil) = cvUnknownAuthority, 'Verify(nil)');
@@ -2501,9 +2508,14 @@ begin
       r := c3.Encrypt(n, 'aes-128-cbc');
       CheckEqual(c3.Decrypt(r, 'aes-128-cbc'), n, 'another padding');
     end;
+    s2 := GuidToRawUtf8(RandomGuid);
+    Check(TrimGuid(s2));
     c2 := crt.New;
-    c2.Generate([cuDigitalSignature, cuKeyAgreement], 'self.signed', nil);
+    fields.CommonName := s2;
+    c2.Generate([cuDigitalSignature, cuKeyAgreement], '', nil, 30, -1, @fields);
     Check(c2.IsSelfSigned);
+    if crt.AlgoName <> 'syn-es256-v1' then
+      CheckEqual(c2.GetSubject, s2);
     if c2.GetAuthorityKey <> c2.GetSubjectKey then
       CheckEqual(c2.GetAuthorityKey, '', 'X509 self-sign has no auth');
     if crt.AlgoName <> 'syn-es256-v1' then
@@ -2524,6 +2536,108 @@ begin
     s := c2.SharedSecret(c3);
     check(c3.SharedSecret(c2) = s, 'sharedsecret');
     check( (s <> '') = (crt.AsymAlgo = caaES256), 'caaES256=sharedsecret');
+    // c1 has [cuCA, cuDigitalSignature, cuKeyCertSign]
+    // c2 has [cuDigitalSignature, cuKeyAgreement]
+    // c3 has [cuDataEncipherment, cuKeyAgreement]
+    cpe.Clear;
+    check(cpe.Usages = []);
+    check(not cpe.GetUsage(cuCA, c4));
+    check(c4 = nil);
+    check(cpe.Add(nil) = []);
+    check(cpe.Usages = []);
+    for u := low(u) to high(u) do
+    begin
+      check(not cpe.GetUsage(u, c4));
+      check(c4 = nil);
+    end;
+    check(cpe.Add(c1) = []);
+    check(cpe.Usages = c1.GetUsage);
+    for u := low(u) to high(u) do
+      if u in cpe.Usages then
+      begin
+        check(cpe.GetUsage(u, c4));
+        check(c4 = c1);
+      end
+      else
+      begin
+        check(not cpe.GetUsage(u, c4));
+        check(c4 = nil);
+      end;
+    if cpe.Usages = CU_ALL then // 'syn-es256-v1'
+    begin
+      check(cpe.Add(c2) = CU_ALL);
+      check(cpe.Usages = CU_ALL);
+      for u := low(u) to high(u) do
+      begin
+        check(cpe.GetUsage(u, c4));
+        check(c4 = c2);
+      end;
+      check(cpe.Add(c3) = CU_ALL);
+      check(cpe.Usages = CU_ALL);
+      for u := low(u) to high(u) do
+      begin
+        check(cpe.GetUsage(u, c4));
+        check(c4 = c3);
+      end;
+    end
+    else
+    begin
+      check(cpe.GetUsage(cuCA, c4));
+      check(c4 = c1);
+      check(not cpe.GetUsage(cuKeyAgreement, c4));
+      check(c4 = nil);
+      check(cpe.GetUsage(cuDigitalSignature, c4));
+      check(c4 = c1);
+      check(not cpe.GetUsage(cuDataEncipherment, c4));
+      check(c4 = nil);
+      check(cpe.Add(c2) = [cuDigitalSignature]);
+      check(cpe.Usages = [cuCA, cuDigitalSignature, cuKeyCertSign,
+        cuKeyAgreement]);
+      for u := low(u) to high(u) do
+        check(cpe.GetUsage(u, c4) = (u in cpe.Usages));
+      check(cpe.GetUsage(cuCA, c4));
+      check(c4 = c1);
+      check(cpe.GetUsage(cuKeyAgreement, c4));
+      check(c4 = c2);
+      check(cpe.GetUsage(cuDigitalSignature, c4));
+      check(c4 = c2);
+      check(not cpe.GetUsage(cuDataEncipherment, c4));
+      check(c4 = nil);
+      check(cpe.Add(c3) = [cuKeyAgreement]);
+      check(cpe.Usages = [cuCA, cuDigitalSignature, cuKeyCertSign,
+        cuKeyAgreement, cuDataEncipherment]);
+      for u := low(u) to high(u) do
+        check(cpe.GetUsage(u, c4) = (u in cpe.Usages));
+      check(cpe.GetUsage(cuCA, c4));
+      check(c4 = c1);
+      check(cpe.GetUsage(cuKeyAgreement, c4));
+      check(c4 = c3);
+      check(cpe.GetUsage(cuDigitalSignature, c4));
+      check(c4 = c2);
+      check(cpe.GetUsage(cuDataEncipherment, c4));
+      check(c4 = c3);
+    end;
+    s := cpe.AsBinary;
+    check(s <> '');
+    cpe.Clear;
+    check(cpe.Usages = []);
+    check(cpe.AsBinary = '');
+    if crt.AlgoName = 'syn-es256-v1' then
+    begin
+      check(cpe.FromBinary(crt, s) = CU_ALL);
+      check(cpe.Usages = CU_ALL);
+    end
+    else
+    begin
+      check(cpe.FromBinary(crt, s) = [cuDigitalSignature, cuKeyAgreement]);
+      check(cpe.Usages = [cuCA, cuDigitalSignature, cuKeyCertSign,
+        cuKeyAgreement, cuDataEncipherment]);
+    end;
+    for u := low(u) to high(u) do
+    begin
+      check(cpe.GetUsage(u, c4) = (u in cpe.Usages));
+      check((c4 <> nil) = (u in cpe.Usages));
+    end;
   end;
   // validate Store High-Level Algorithms Factory
   r := RandomAnsi7(100);

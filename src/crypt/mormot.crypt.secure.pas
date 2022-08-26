@@ -1728,7 +1728,7 @@ type
     Usages: TCryptCertUsages;
     /// lookup table used by GetUsage()/PerUsage()
     // - 0 means no certificate, or store the index in Cert[] + 1
-    CertPerUsage: array[TCryptCertUsage] of byte;
+    Index: array[TCryptCertUsage] of byte;
     /// reset all storage and indexes
     procedure Clear;
     /// register the certificate to the internal list
@@ -1752,7 +1752,7 @@ type
     // - returns the duplicated usages found during adding certificates
     function FromPem(algo: TCryptCertAlgo; const pem: RawUtf8): TCryptCertUsages;
     /// save all items as a single binary blob of cccCertOnly certificates
-    // - binary layout is just 32-bit length followed by the DER serialization
+    // - binary layout is TBufferWriter.WriteVar() of all DER serialization
     function AsBinary: RawByteString;
     /// clear and load a binary blob of certificates saved by AsBinary
     // - returns the duplicated usages found during adding certificates
@@ -1791,9 +1791,29 @@ const
   CV_VALIDSIGN =
     [cvValidSigned, cvValidSelfSigned];
 
+  /// a two-char identifier of Certificate usage
+  // - as used by ToText(u: TCryptCertUsages, from_cu_text=true)
+  CU_TEXT: array[TCryptCertUsage, 0..1] of AnsiChar = (
+    'ca',  //  cuCA
+    'eo',  //  cuEncipherOnly
+    'rs',  //  cuCrlSign
+    'ks',  //  cuKeyCertSign
+    'ka',  //  cuKeyAgreement
+    'de',  //  cuDataEncipherment
+    'ke',  //  cuKeyEncipherment
+    'nr',  //  cuNonRepudiation
+    'ds',  //  cuDigitalSignature
+    'do',  //  cuDecipherOnly
+    'ts',  //  cuTlsServer
+    'tc',  //  cuTlsClient
+    'em',  //  cuEmail
+    'cs',  //  cuCodeSign
+    'os',  //  cuOcspSign
+    'tm'); //  cuTimestamp
+
 function ToText(r: TCryptCertRevocationReason): PShortString; overload;
 function ToText(u: TCryptCertUsage): PShortString; overload;
-function ToText(u: TCryptCertUsages): ShortString; overload;
+function ToText(u: TCryptCertUsages; from_cu_text: boolean = false): ShortString; overload;
 function ToText(v: TCryptCertValidity): PShortString; overload;
 
 /// main resolver of the randomness generators
@@ -4623,8 +4643,12 @@ end;
 
 procedure TCryptCert.SaveToFile(const Dest: TFileName; Content: TCryptCertContent;
   const PrivatePassword: SpiUtf8; Format: TCryptCertFormat);
+var
+  s: RawByteString;
 begin
-  FileFromString(Save(Content, PrivatePassword, Format), Dest);
+  s := Save(Content, PrivatePassword, Format);
+  FileFromString(s, Dest);
+  FillZero(s); // may be a private key with no password :(
 end;
 
 function TCryptCert.IsEqual(const another: ICryptCert): boolean;
@@ -4832,20 +4856,25 @@ var
   u: TCryptCertUsage;
   n: PtrInt;
 begin
+  result := [];
+  if cert = nil then
+    exit;
+  result := cert.GetUsage;
+  if result = [] then
+    exit;
   n := length(List);
   if n = 255 then
     raise ECryptCert.Create('TCryptCertPerUsage.Add overflow'); // paranoid
   SetLength(List, n + 1);
   List[n] := cert;
   inc(n); // CertPerUsage[u] stores index + 1
-  result := cert.GetUsage;
   for u := low(u) to high(u) do
     if u in result then
     begin
       include(Usages, u);
-      if CertPerUsage[u] = 0 then
+      if Index[u] = 0 then
         exclude(result, u);
-      CertPerUsage[u] := n; // replace any existing certificate
+      Index[u] := n; // replace any existing certificate
     end;
 end;
 
@@ -4854,7 +4883,7 @@ function TCryptCertPerUsage.GetUsage(u: TCryptCertUsage;
 var
   i: PtrInt;
 begin
-  i := CertPerUsage[u];
+  i := Index[u]; // contains index + 1
   if i = 0 then
     result := false
   else
@@ -4904,13 +4933,14 @@ end;
 function TCryptCertPerUsage.AsBinary: RawByteString;
 var
   i: PtrInt;
-  s: TRawByteStringStream;
+  tmp: TTextWriterStackBuffer; // no allocation for a few certificates
+  s: TBufferWriter;
 begin
-  s := TRawByteStringStream.Create;
+  s := TBufferWriter.Create(tmp);
   try
     for i := 0 to length(List) - 1 do
-      WriteStringToStream(s, List[i].Save(cccCertOnly, '', ccfBinary));
-    result := s.DataString;
+      s.Write(List[i].Save(cccCertOnly, '', ccfBinary));
+    result := s.FlushTo;
   finally
     s.Free;
   end;
@@ -4919,8 +4949,7 @@ end;
 function TCryptCertPerUsage.FromBinary(algo: TCryptCertAlgo;
   const bin: RawByteString): TCryptCertUsages;
 var
-  s: TRawByteStringStream;
-  one: RawByteString;
+  s: TFastReader;
   c: ICryptCert;
 begin
   Clear;
@@ -4928,18 +4957,12 @@ begin
   if (algo = nil) or
      (bin = '') then
     exit;
-  s := TRawByteStringStream.Create(bin);
-  try
-    repeat
-      one := ReadStringFromStream(s, 65536);
-      if one = '' then
-        break;
-      c := algo.Load(one);
-      if c <> nil then
-        result := result + Add(c);
-    until false;
-  finally
-    s.Free;
+  s.Init(bin);
+  while not s.EOF do
+  begin
+    c := algo.Load(s.VarString);
+    if c <> nil then
+      result := result + Add(c);
   end;
 end;
 
@@ -4955,9 +4978,19 @@ begin
   result := GetEnumName(TypeInfo(TCryptCertUsage), ord(u));
 end;
 
-function ToText(u: TCryptCertUsages): ShortString;
+function ToText(u: TCryptCertUsages; from_cu_text: boolean): ShortString;
+var
+  cu: TCryptCertUsage;
 begin
-  GetSetNameShort(TypeInfo(TCryptCertUsages), u, result, {trim=}true);
+  if from_cu_text then
+  begin
+    result := '';
+    for cu := low(cu) to high(cu) do
+      if cu in u then
+        AppendShortBuffer(@CU_TEXT[cu], 2, result);
+  end
+  else
+    GetSetNameShort(TypeInfo(TCryptCertUsages), u, result, {trim=}true);
 end;
 
 function ToText(v: TCryptCertValidity): PShortString;

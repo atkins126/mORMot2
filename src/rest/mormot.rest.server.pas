@@ -2422,8 +2422,9 @@ function ServiceRunningContext: PServiceRunningContext;
 /// returns a safe 256-bit hexadecimal nonce, changing every 5 minutes
 // - as used e.g. by TRestServerAuthenticationDefault.Auth
 // - this function is very fast, even if cryptographically-level SHA-3 secure
-function CurrentNonce(Ctxt: TRestServerUriContext; Previous: boolean = false): RawUtf8;
-  overload;
+function CurrentNonce(Ctxt: TRestServerUriContext;
+  Previous: boolean = false): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// returns a safe 256-bit nonce, changing every 5 minutes
 // - can return the (may be cached) value as hexadecimal text or THash256 binary
@@ -4991,7 +4992,7 @@ end;
 var
   ServerNonceSafe: TLightLock;
   ServerNonceHasher: TSha3; // faster than THmacSha256 on small input
-  ServerNonceCache: array[boolean] of record
+  ServerNonceCache: array[{previous=}boolean] of record
     tix: cardinal;
     res: RawUtf8;
     hash: THash256;
@@ -5006,9 +5007,9 @@ var
 begin
   if ServerNonceHasher.Algorithm <> SHA3_256 then
   begin
-    // first time used: initialize the private secret for this process lifetime
-    TAesPrng.Fill(tmp); // random seed
+    // first time used: initialize the private secret
     sha3.Init(SHA3_256);
+    TAesPrng.Fill(tmp); // random seed for this process lifetime
     sha3.Update(@tmp, SizeOf(tmp));
     ServerNonceSafe.Lock;
     if ServerNonceHasher.Algorithm <> SHA3_256 then // atomic init
@@ -5019,16 +5020,18 @@ begin
   sha3 := ServerNonceHasher; // thread-safe SHA-3 sponge reuse
   sha3.Update(@ticks, SizeOf(ticks));
   sha3.Final(tmp, true);
-  hex := BinToHexLower(@tmp, SizeOf(tmp));
+  BinToHexLower(@tmp, SizeOf(tmp), hex);
   if nonce <> nil then
     nonce^ := hex;
   if nonce256 <> nil then
     nonce256^ := tmp;
   with ServerNonceCache[previous] do
   begin
+    ServerNonceSafe.Lock;
     tix := ticks;
     hash := tmp;
     res := hex;
+    ServerNonceSafe.UnLock;
   end;
 end;
 
@@ -5041,18 +5044,23 @@ begin
   if Previous then
     dec(ticks);
   with ServerNonceCache[Previous] do
+  begin
+    ServerNonceSafe.Lock;
     if (ticks = tix) and
        (res <> '') then  // check for res='' since ticks may be 0 at startup
     begin
-      // very efficiently retrieval from cache
+      // fast retrieval from cache as binary or hexadecimal
       if Nonce256 <> nil then
         Nonce256^ := hash;
       if Nonce <> nil then
         Nonce^ := res;
-    end
-    else
-      // we need to (re)compute this value
-      CurrentServerNonceCompute(ticks, Previous, Nonce, Nonce256);
+      ServerNonceSafe.UnLock;
+      exit;
+    end;
+    ServerNonceSafe.UnLock;
+    // we need to (re)compute this value
+    CurrentServerNonceCompute(ticks, Previous, Nonce, Nonce256);
+  end;
 end;
 
 function CurrentNonce(Ctxt: TRestServerUriContext; Previous: boolean): RawUtf8;
