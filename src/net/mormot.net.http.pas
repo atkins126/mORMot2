@@ -119,6 +119,18 @@ function HttpMethodWithNoBody(const method: RawUtf8): boolean;
 // - see https://tools.ietf.org/html/rfc2047
 function MimeHeaderEncode(const header: RawUtf8): RawUtf8;
 
+/// quick check for case-sensitive 'GET' HTTP method name
+function IsGet(const method: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// quick check for case-sensitive 'POST' HTTP method name
+function IsPost(const method: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// could be used e.g. in OnBeforeBody() callback to allow a GET /favicon.ico
+function IsUrlFavicon(P: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
 const
   /// pseudo-header containing the current Synopse mORMot framework version
   XPOWEREDNAME = 'X-Powered-By';
@@ -616,6 +628,65 @@ type
   end;
   {$M-}
 
+  /// store a list of IPv4 which should be rejected at connection
+  // - more tuned than TIPBan for checking just after accept()
+  // - used e.g. for hsoBan40xIP
+  THttpAcceptBan = class(TSynPersistent)
+  protected
+    fLock: TLightLock; // may block only in IdleEverySecond
+    fCount, fCurrent: integer;
+    fIP: array of TCardinalDynArray; // one list per second
+    fSeconds, fMax, fWhiteIP: cardinal;
+    fRejected, fTotal: Int64;
+    procedure SetMax(const Value: cardinal);
+    procedure SetSeconds(const Value: cardinal);
+    procedure SetIP;
+  public
+    /// initialize the thread-safe storage process
+    // - banseconds should be a power-of-two <= 128
+    // - maxpersecond is the maximum number of banned IPs remembered per second
+    constructor Create(banseconds: cardinal = 4; maxpersecond: cardinal = 1024;
+      banwhiteip: cardinal = cLocalhost32); reintroduce;
+    /// register an IP4 to be rejected
+    function BanIP(ip4: cardinal): boolean; overload;
+    /// register an IP4 to be rejected
+    procedure BanIP(const ip4: RawUtf8); overload;
+    /// fast check if this IP4 is to be rejected
+    function IsBanned(const addr: TNetAddr): boolean;
+    /// register an IP4 if status in >= 400 (but not 401/403)
+    function ShouldBan(status, ip4: cardinal): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// to be called every second to remove deprecated bans from the list
+    // - implemented via a round-robin list of per-second banned IPs
+    procedure IdleEverySecond;
+    /// a 32-bit IP4 which should never be banned
+    // - is set to cLocalhost32, i.e. 127.0.0.1, by default
+    property WhiteIP: cardinal
+      read fWhiteIP write fWhiteIP;
+  published
+    /// total number of accept() rejected by IsBanned()
+    property Rejected: Int64
+      read fRejected;
+    /// total number of banned IP4 since the beginning
+    property Total: Int64
+      read fTotal;
+    /// current number of banned IP4
+    property Count: integer
+      read fCount;
+    /// how many seconds a banned IP4 should be rejected
+    // - should be a power of two, with a default of 4
+    // - if set, any previous banned IP will be flushed
+    property Seconds: cardinal
+      read fSeconds write SetSeconds;
+    /// how many IP can be banned per second
+    // - used to reduce memory allocation and O(n) search speed
+    // - over this limit, BanIP() will store and replace at the last position
+    // - assign 0 to disable the banning feature
+    // - if set, any previous banned IP will be flushed
+    property Max: cardinal
+      read fMax write SetMax;
+  end;
+
 
 implementation
 
@@ -774,6 +845,29 @@ begin
                      ord('D') shl 24)) and $dfdfdfdf) = 0) or
             (((c xor cardinal(ord('O') + ord('P') shl 8 + ord('T') shl 16 +
                      ord('I') shl 24)) and $dfdfdfdf) = 0);
+end;
+
+function IsGet(const method: RawUtf8): boolean;
+begin
+  result := PCardinal(method)^ = ord('G') + ord('E') shl 8 + ord('T') shl 16;
+end;
+
+function IsPost(const method: RawUtf8): boolean;
+begin
+  result := PCardinal(method)^ =
+    ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24;
+end;
+
+function IsUrlFavicon(P: PUtf8Char): boolean;
+begin
+  result := (P <> nil) and
+        (PCardinalArray(P)[0] =
+           ord('/') + ord('f') shl 8 + ord('a') shl 16 + ord('v') shl 24) and
+        (PCardinalArray(P)[1] =
+           ord('i') + ord('c') shl 8 + ord('o') shl 16 + ord('n') shl 24) and
+        (PCardinalArray(P)[2] =
+           ord('.') + ord('i') shl 8 + ord('c') shl 16 + ord('o') shl 24) and
+        (P[12] = #0);
 end;
 
 function RegisterCompressFunc(var Comp: THttpSocketCompressRecDynArray;
@@ -1913,6 +2007,165 @@ end;
 procedure THttpServerRequestAbstract.AddOutHeader(const Values: array of const);
 begin
   AppendLine(fOutCustomHeaders, Values);
+end;
+
+
+{ THttpAcceptBan }
+
+constructor THttpAcceptBan.Create(banseconds, maxpersecond, banwhiteip: cardinal);
+begin
+  fMax := maxpersecond;
+  SetSeconds(banseconds);
+  fWhiteIP := banwhiteip;
+end;
+
+procedure THttpAcceptBan.SetMax(const Value: cardinal);
+begin
+  fLock.Lock;
+  fMax := Value;
+  SetIP;
+  fLock.UnLock;
+end;
+
+procedure THttpAcceptBan.SetSeconds(const Value: cardinal);
+begin
+  if not (Value in [1, 2, 4, 8, 16, 32, 64, 128]) then
+    raise EHttpSocket.CreateFmt(
+      'Invalid %.SetSeconds(%): should be a small power of two',
+      [ClassNameShort(self)^, Value]);
+  fLock.Lock;
+  fSeconds := Value;
+  SetIP;
+  fLock.UnLock;
+end;
+
+procedure THttpAcceptBan.SetIP;
+var
+  i: PtrInt;
+begin
+  fCount := 0;
+  fCurrent := 0;
+  fIP := nil;
+  if fMax = 0 then
+    exit;
+  SetLength(fIP, fSeconds);
+  for i := 0 to fSeconds - 1 do
+    SetLength(fIP[i], fMax + 1); // 1st item is the count
+end;
+
+function THttpAcceptBan.BanIP(ip4: cardinal): boolean;
+var
+  P: PCardinalArray;
+begin
+  if (self = nil) or
+     (ip4 = 0) or
+     (ip4 = fWhiteIP) then
+   result := false
+  else
+  begin
+    fLock.Lock;
+    if fMax <> 0 then
+      {$ifdef HASFASTTRYFINALLY}
+      try
+      {$else}
+      begin
+      {$endif HASFASTTRYFINALLY}
+        P := pointer(fIP[fCurrent]); // 1st item is the count
+        if P[0] < fMax then
+        begin
+          inc(P[0]);
+          inc(fCount);
+        end;
+        P[P[0]] := ip4;
+        inc(fTotal);
+      {$ifdef HASFASTTRYFINALLY}
+      finally
+      {$endif HASFASTTRYFINALLY}
+        fLock.UnLock;
+      end;
+    result := true;
+  end;
+end;
+
+procedure THttpAcceptBan.BanIP(const ip4: RawUtf8);
+var
+  c: cardinal;
+begin
+  if IPToCardinal(pointer(ip4), c) then
+    BanIP(c);
+end;
+
+function THttpAcceptBan.IsBanned(const addr: TNetAddr): boolean;
+var
+  s: ^PCardinalArray;
+  P: PCardinalArray;
+  ip4, n: cardinal;
+begin
+  result := false;
+  if (self = nil) or
+     (fCount = 0) then
+    exit;
+  ip4 := addr.IP4;
+  if ip4 = 0 then
+    exit;
+  fLock.Lock;
+  {$ifdef HASFASTTRYFINALLY}
+  try
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    s := pointer(fIP);
+    n := fMax;
+    if n <> 0 then
+      repeat
+        P := s^;
+        inc(s);
+        if (P[0] <> 0) and // 1st item is the count
+           IntegerScanExists(@P[1], P[0], ip4) then // O(n) SSE2 asm on Intel
+        begin
+          inc(fRejected);
+          result := true;
+          break;
+        end;
+        dec(n);
+      until n = 0;
+  {$ifdef HASFASTTRYFINALLY}
+  finally
+  {$endif HASFASTTRYFINALLY}
+    fLock.UnLock;
+  end;
+end;
+
+function THttpAcceptBan.ShouldBan(status, ip4: cardinal): boolean;
+begin
+  result := (self <> nil) and
+            ((status = HTTP_BADREQUEST) or  // naive heuristic
+             (status > HTTP_FORBIDDEN)) and // allow 401/403 retry
+            BanIP(ip4)
+end;
+
+procedure THttpAcceptBan.IdleEverySecond;
+var
+  n: PtrInt;
+  p: PCardinal;
+begin
+  if (self = nil) or
+     (fCount = 0) then
+    exit;
+  fLock.Lock;
+  try
+    if fCount <> 0 then
+    begin
+      n := fSeconds - 1;         // power of two bitmask
+      n := (fCurrent + 1) and n; // per-second round robin
+      fCurrent := n;
+      p := @fIP[n][0]; // 1st item is the count
+      dec(fCount, p^);
+      p^ := 0;         // the oldest slot becomes the current (no memory move)
+    end;
+  finally
+    fLock.UnLock;
+  end;
 end;
 
 

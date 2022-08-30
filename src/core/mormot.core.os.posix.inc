@@ -1607,12 +1607,44 @@ begin
   end;
 end;
 
+function GetRawSmbiosFromMem(var info: TRawSmbiosInfo): boolean; forward;
+
+function GetRawSmbios(out info: TRawSmbiosInfo): boolean;
+begin
+  result := GetRawSmbiosFromMem(info);
+end;
+
 function SeemsRealPointer(p: pointer): boolean;
 begin
   // let the GPF happen silently in the kernel (validated on Linux only)
   result := (PtrUInt(p) > 65535) and
             (fpaccess(p, F_OK) <> 0) and
             (fpgeterrno <> ESysEFAULT);
+end;
+
+function ReadSystemMemory(address, size: PtrUInt): RawByteString;
+var
+  mem: cInt;
+  map: pointer;
+begin
+  result := '';
+  if size > 4 shl 20 then
+    exit; // map up to 4MB
+  mem := FpOpen('/dev/mem', O_RDONLY, 0);
+  {$ifdef OSDARWIN}
+  if mem <= 0 then
+    // may work as alternative if "sudo pmset hibernatemode 1" has been set
+    mem := FpOpen('/private/var/vm/sleepimage', O_RDONLY, 0);
+  {$endif OSDARWIN}
+  if mem <= 0 then
+    exit;
+  map := Fpmmap(nil, size, PROT_READ, MAP_SHARED, mem, address);
+  if map <> MAP_FAILED then
+  begin
+    FastSetRawByteString(result, map, size);
+    Fpmunmap(map, size);
+  end;
+  FpClose(mem);
 end;
 
 {$ifdef OSBSDDARWIN}
@@ -1671,6 +1703,37 @@ begin
   else
     result := '';
 end;
+
+{$ifdef OSFREEBSD}
+
+const
+  KENV_GET = 0;
+  KENV_SET = 1;
+
+function kenv(action: integer; name, value: PAnsiChar; len: integer): integer;
+  cdecl external clib name 'kenv';
+
+function GetSmbEfiMem: RawByteString;
+var
+  tmp: array[byte] of AnsiChar;
+  xaddr: PtrUInt;
+begin
+  result := '';
+  if kenv(KENV_GET, 'hint.smbios.0.mem', @tmp, SizeOf(tmp)) < 0 then
+    exit;
+  xaddr := PosixParseHex32(@tmp); // typical value is '0xf05b0'
+  if xaddr <> 0 then
+    result := ReadSystemMemory(xaddr, 1024); // 32 bytes is enough
+end;
+
+{$else}
+
+function GetSmbEfiMem: RawByteString;
+begin
+  result := '';
+end;
+
+{$endif OSFREEBSD}
 
 function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
 begin
@@ -2562,6 +2625,25 @@ function gettimeofday_c(tp: ptimeval; tzp: ptimezone): cint;
 begin
   // it is much faster to not use the Linux syscall but the libc vDSO call
   result := gettimeofday(tp, tzp);
+end;
+
+function GetSmbEfiMem: RawByteString;
+var
+  efi, addr: RawUtf8;
+  xaddr: cardinal;
+begin
+  // retrieve raw EFI information from systab
+  result := '';
+  xaddr := 0;
+  efi := StringFromFile('/sys/firmware/efi/systab', {nosize=}true);
+  if efi = '' then
+    efi := StringFromFile('/proc/efi/systab'{nosize=}); // old Linux up to 2.6.6
+  if efi = '' then
+    exit;
+  FindNameValue(efi, 'SMBIOS', addr);
+  xaddr := PosixParseHex32(pointer(addr));
+  if xaddr <> 0 then
+    result := ReadSystemMemory(xaddr, 1024); // 32 bytes is enough
 end;
 
 {$endif OSLINUX}

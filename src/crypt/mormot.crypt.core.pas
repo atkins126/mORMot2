@@ -1685,7 +1685,7 @@ type
     // and system information, mormot.core.base XorEntropy)
     // - Source will mix one or both of those entropy sources - note that
     // gesSystemAndUser is the default, but gesUserOnly is the fastest, and
-    // also derivated from 512-bit of OS entropy at least once at startup
+    // also derivated from 512-bit of OS entropy retrieved once at startup
     // - to gather randomness, use TAesPrng.Main.FillRandom() or TAesPrng.Fill()
     // methods, NOT this class function (which will be much slower, BTW)
     class function GetEntropy(Len: integer;
@@ -7344,7 +7344,11 @@ end;
 
 var
   // 512-bit of system-derivated forward-secure seed for TAesPrng.GetEntropy
-  _OSEntropySeed: THash512Rec;
+  _OSEntropySeed: record
+    safe: TLightLock;
+    bits: THash512Rec;  // retrieved once at startup
+    aes: TAes;          // in-place AES-CTR diffusion at each GetEntropy() call
+  end;
 
 class function TAesPrng.GetEntropy(
   Len: integer; Source: TAesPrngGetEntropySource): RawByteString;
@@ -7354,7 +7358,7 @@ var
   sha3: TSha3;
 begin
   try
-    // retrieve some initial entropy from OS
+    // retrieve some initial entropy from OS (but for gesUserOnly)
     SetLength(fromos, Len);
     if Source <> gesUserOnly then
       FillSystemRandom(pointer(fromos), Len, Source = gesSystemOnlyMayBlock);
@@ -7378,14 +7382,26 @@ begin
     // 512-bit from RdRand32 + Rdtsc + Now + CreateGuid
     XorEntropy(data);
     sha3.Update(@data, SizeOf(data));
-    // 512-bit of official system-derivated entropy source
-    if IsZero(_OSEntropySeed.b) then
-      // retrieve 512-bit of kernel randomness once - even in gesUserOnly mode
-      FillSystemRandom(@_OSEntropySeed, SizeOf(_OSEntropySeed), {block=}false)
-    else
-      // 128-bit of forward security - may be using AesNiHash128
-      DefaultHasher128(@_OSEntropySeed, @data, SizeOf(data));
-    sha3.Update(@_OSEntropySeed, SizeOf(_OSEntropySeed));
+    // 512-bit from /dev/urandom or CryptGenRandom system entropy source
+    with _OSEntropySeed do
+      if IsZero(bits.b) then
+      begin
+        // retrieve 512-bit of kernel randomness once - even in gesUserOnly mode
+        FillSystemRandom(@data, SizeOf(data), {block=}false);
+        safe.Lock;
+        aes.EncryptInit(data, 128); // for in-place diffusion of those 512-bit
+        bits := data;
+        safe.UnLock;
+      end
+      else
+      begin
+        // 512-bit of perfect forward security using AES-CTR diffusion
+        safe.Lock;
+        aes.DoBlocksCtr({iv=}@data, @bits, @bits, SizeOf(bits) shr AesBlockShift);
+        data := bits;
+        safe.UnLock;
+      end;
+    sha3.Update(@data, SizeOf(data));
     // 512-bit of low-level Operating System entropy from mormot.core.os
     XorOSEntropy(data); // detailed system cpu and memory info + system random
     sha3.Update(@data, SizeOf(data));

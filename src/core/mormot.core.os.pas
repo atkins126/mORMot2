@@ -244,6 +244,13 @@ const
   // response from the other endpoint
   NORESPONSE_CONTENT_TYPE = '!NORESPONSE';
 
+  /// HTTP body following RFC 2324 standard e.g. for banned IP
+  HTTP_BANIP_RESPONSE: string[195] =
+    'HTTP/1.0 418 I''m a teapot'#13#10 +
+    TEXT_CONTENT_TYPE_HEADER + #13#10#13#10 +
+    'Server refuses to brew coffee because it is currently a teapot.'#13#10 +
+    'Do not mess with it and retry from this IP in a few seconds.';
+
   /// JSON compatible representation of a boolean value, i.e. 'false' and 'true'
   // - can be used e.g. in logs, or anything accepting a ShortString
   BOOL_STR: array[boolean] of string[7] = (
@@ -285,7 +292,7 @@ type
   /// Exception types raised by this mormot.core.os unit
   EOSException = class(ExceptionWithProps);
 
-  /// the recognized operating systems
+  /// the known operating systems
   // - it will also recognize most Linux distributions
   TOperatingSystem = (
     osUnknown,
@@ -633,8 +640,8 @@ function ToText(const osv: TOperatingSystemVersion): RawUtf8; overload;
 function ToTextShort(const osv: TOperatingSystemVersion): RawUtf8;
 
 /// convert a 32-bit Operating System type into its full text representation
-// including the kernel revision (not the distribution version) on POSIX systems
-// - returns e.g. 'Windows Vista', 'Windows 11 64-bit 22000' or 'Ubuntu 5.4.0'
+// - including the kernel revision (not the distribution version) on POSIX systems
+// - returns e.g. 'Windows Vista', 'Windows 11 64-bit 22000' or 'Ubuntu Linux 5.4.0'
 function ToTextOS(osint32: integer): RawUtf8;
 
 type
@@ -1106,6 +1113,34 @@ function GetSystemStoreAsPem(
 // - an internal cache is refreshed every 4 minutes unless FlushCache is set
 function GetSystemStoreAsPem(CertStore: TSystemCertificateStore;
   FlushCache: boolean = false; now: cardinal = 0): RawUtf8; overload;
+
+type
+  /// the raw SMBIOS information as retrieved by GetRawSmbios()
+  TRawSmbiosInfo = record
+    /// some flag only set by GetSystemFirmwareTable() Windows API
+    Reserved: byte;
+    /// typically 2-3
+    SmbMajorVersion: byte;
+    /// typically 0-1
+    SmbMinorVersion: byte;
+    /// typically 0 for SMBIOS 2.1, 1 for SMBIOS 3.0
+    DmiRevision: byte;
+    /// the (maximum) length of encoded binary in data
+    Length: DWORD;
+    /// low-level binary of the SMBIOS Structure Table
+    Data: RawByteString;
+  end;
+
+/// retrieve the SMBIOS raw information as a single binary blob
+// - will try the Windows API if available, or search and parse the main system
+// memory with UEFI redirection if needed - via /systab system file on Linux, or
+// kenv() on FreeBSD (only fully tested to work on Windows XP+ and Linux)
+// - follow DSP0134 3.6.0 System Management BIOS (SMBIOS) Reference Specification
+// with both SMBIOS 2.1 (32-bit) or SMBIOS 3.0 (64-bit) entry points
+// - the current user should have enough rights to read the main system memory,
+// which means it should be root on most Operating Systems - so it could be
+// a good idea to read it once, and persist the information on disk
+function GetRawSmbios(out info: TRawSmbiosInfo): boolean;
 
 
 { ****************** Operating System Specific Types (e.g. TWinRegistry) }
@@ -1795,7 +1830,10 @@ type
 {$endif OSWINDOWS}
 
 /// raw cross-platform library loading function
-// - alternative to LoadLibrary() Windows API and FPC RTL
+// - alternative to LoadLibrary() and SafeLoadLibrary() Windows API and RTL
+// - on Windows, set the SEM_NOOPENFILEERRORBOX and SEM_FAILCRITICALERRORS flags
+// to avoid unexpected message boxes (which should not happen e.g. on a service)
+// - on Win32, reset the FPU flags after load as required with some libraries
 // - consider inheriting TSynLibrary if you want to map a set of API functions
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
 
@@ -2545,6 +2583,13 @@ procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
 // - will call slow but safe VirtualQuery API on Windows, or try a fpaccess()
 // syscall on POSIX systems (validated on Linux only)
 function SeemsRealPointer(p: pointer): boolean;
+
+/// fill a buffer with a copy of some low-level system memory
+// - used e.g. by GetRawSmbios() on XP or Linux/POSIX
+// - will allow to read up to 4MB of memory
+// - use low-level ntdll.dll API on Windows, or reading /dev/mem on POSIX - so
+// expect sudo/root rights on most systems
+function ReadSystemMemory(address, size: PtrUInt): RawByteString;
 
 /// return the PIDs of all running processes
 // - under Windows, is a wrapper around EnumProcesses() PsAPI call
@@ -4236,8 +4281,8 @@ begin
     result := RawUtf8(Format('%s %d', [result, osv.winbuild]));
   if (osv.os >= osLinux) and
      (osv.utsrelease[2] <> 0) then
-    // include the kernel number to the distribution name, e.g. 'Ubuntu 5.4.0'
-    result := RawUtf8(Format('%s %d.%d.%d', [result, osv.utsrelease[2],
+    // include kernel number to the distribution name, e.g. 'Ubuntu Linux 5.4.0'
+    result := RawUtf8(Format('%s Linux %d.%d.%d', [result, osv.utsrelease[2],
       osv.utsrelease[1], osv.utsrelease[0]]));
 end;
 
@@ -5592,7 +5637,7 @@ begin
       cwd := GetCurrentDir;
       SetCurrentDir(nwd); // change the current folder at loading on Windows
     end;
-    fHandle := SafeLoadLibrary(lib);
+    fHandle := LibraryOpen(lib); // preserve x87 flags and prevent msg box 
     if nwd <> '' then
       SetCurrentDir(cwd{%H-});
     {$else}
@@ -5889,6 +5934,143 @@ notfound:
         if v <> '' then
           result := result + #13#10 + v;
       end;
+end;
+
+// from DSP0134 3.6.0 System Management BIOS (SMBIOS) Reference Specification
+const
+  SMB_START  = $000f0000;
+  SMB_STOP   = $00100000;
+  SMB_ANCHOR = $5f4d535f;  // _SM_
+  SMB_INT4   = $494d445f;  // _DMI
+  SMB_INT5   = $5f;        // _
+  SMB_ANCHOR4 = $334d535f; // _SM3
+  SMB_ANCHOR5 = $5f;       // _
+
+type
+  TSmbEntryPoint32 = packed record
+    Anchor: cardinal;  // = SMB_ANCHOR
+    Checksum: byte;
+    Length: byte;
+    MajVers: byte;
+    MinVers: byte;
+    MaxSize: word;
+    Revision: byte;
+    PadTo16: array[1..5] of byte;
+    IntAnch4: cardinal; // = SMB_INT4
+    IntAnch5: byte;     // = SMB_INT5
+    IntChecksum: byte;
+    StructLength: word;
+    StructAddr: cardinal;
+    NumStruct: word;
+    BcdRevision: byte;
+  end;
+  PSmbEntryPoint32 = ^TSmbEntryPoint32;
+
+  TSmbEntryPoint64 = packed record
+    Anch4: cardinal; // = SMB_ANCHOR4
+    Anch5: byte;     // = SMB_ANCHOR5
+    Checksum: byte;
+    Length: byte;
+    MajVers: byte;
+    MinVers: byte;
+    DocRev: byte;
+    Revision: byte;
+    Reserved: byte;
+    StructMaxLength: cardinal;
+    StructAddr: QWord;
+  end;
+  PSmbEntryPoint64 = ^TSmbEntryPoint64;
+
+function GetRawSmbios32(p: PSmbEntryPoint32; var info: TRawSmbiosInfo): PtrUInt;
+var
+  cs: byte;
+  i: PtrInt;
+begin
+  cs := 0;
+  for i := 0 to p^.Length - 1 do
+    inc(cs, PByteArray(p)[i]);
+  if cs <> 0 then
+  begin
+    result := 0;
+    exit;
+  end;
+  result := p^.StructAddr;
+  info.SmbMajorVersion := p^.MajVers;
+  info.SmbMinorVersion := p^.MinVers;
+  info.DmiRevision := p^.Revision; // 0 = SMBIOS 2.1
+  info.Length := p^.StructLength;
+end;
+
+function GetRawSmbios64(p: PSmbEntryPoint64; var info: TRawSmbiosInfo): PtrUInt;
+var
+  cs: byte;
+  i: PtrInt;
+begin
+  cs := 0;
+  for i := 0 to p^.Length - 1 do
+    inc(cs, PByteArray(p)[i]);
+  if cs <> 0 then
+  begin
+    result := 0;
+    exit;
+  end;
+  result := p^.StructAddr;
+  info.SmbMajorVersion := p^.MajVers;
+  info.SmbMinorVersion := p^.MinVers;
+  info.DmiRevision := p^.Revision; // 1 = SMBIOS 3.0
+  info.Length := p^.StructMaxLength;
+end;
+
+// caller should then try to decode SMB from pointer(result) + Info.Len
+function SearchSmbios(const mem: RawByteString; var info: TRawSmbiosInfo): QWord;
+var
+  p, pend: PSmbEntryPoint32;
+begin
+  result := 0;
+  if mem = '' then
+    exit;
+  p := pointer(mem);
+  pend := @PByteArray(mem)[length(mem) - SizeOf(p^)];
+  repeat
+    if (p^.Anchor = SMB_ANCHOR) and
+       (p^.IntAnch4 = SMB_INT4) and
+       (p^.IntAnch5 = SMB_INT5) then
+    begin
+      result := GetRawSmbios32(p, info);
+      if result <> 0 then
+        exit;
+    end
+    else if (p^.Anchor = SMB_ANCHOR4) and
+            (p^.Checksum = SMB_ANCHOR5) then
+    begin
+      result := GetRawSmbios64(pointer(p), info);
+      if result <> 0 then
+        exit; // here info.Length = max length
+    end;
+    inc(PHash128(p)); // search on 16-byte (paragraph) boundaries
+  until PtrUInt(p) >= PtrUInt(pend);
+end;
+
+function GetRawSmbiosFromMem(var info: TRawSmbiosInfo): boolean;
+var
+  mem: RawByteString;
+  addr: QWord;
+begin
+  result := false;
+  Finalize(info.Data);
+  FillCharFast(info, SizeOf(info), 0);
+  // first try to read system EFI entries
+  mem := GetSmbEfiMem;
+  if mem = '' then
+    // fallback to raw memory reading (won't work on modern/EFI systems)
+    mem := ReadSystemMemory(SMB_START, SMB_STOP - SMB_START);
+  if mem = '' then
+    exit;
+  addr := SearchSmbios(mem, info);
+  if addr = 0 then
+    exit;
+  info.data := ReadSystemMemory(addr, info.Length);
+  result := info.data <> '';
 end;
 
 
