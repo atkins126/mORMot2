@@ -11,6 +11,7 @@ unit mormot.core.perf;
     - TSynMonitor Process Information Classes
     - TSynMonitorUsage Process Information Database Storage
     - Operating System Monitoring
+    - DMI/SMBIOS Binary Decoder
     - TSynFpuException Wrapper for FPU Flags Preservation
 
   *****************************************************************************
@@ -1110,6 +1111,874 @@ function SystemInfoJson: RawUtf8;
 // - defined in this unit to have TDocVariant at hand
 function GetLastExceptions(Depth: integer = 0): variant; overload;
 
+
+{ ************ DMI/SMBIOS Binary Decoder }
+
+type
+  TSmbiosBiosFlags = set of (
+    sbfReserved0,
+    sbfReserved1,
+    sbfUnknonwn,
+    sbfUnsupported,
+    sbfIsa,
+    sbfMca,
+    sbfEisa,
+    sbfPci,
+    sbfPcmcia,
+    sbfPlugAndPlay,
+    sbfApm,
+    sbfUpgradable,
+    sbfShadowable,
+    sbfVesa,
+    sbfEscd,
+    sbfBootCd,
+    sbfBootSelectable,
+    sbfRomSocketed,
+    sbfBootPcmcia,
+    sbfEdd,
+    sbfNec12,
+    sbfToshiba12,
+    sbf525i360,
+    sbf525i12,
+    sbf35i720,
+    sbf35i288,
+    sbfInt5,
+    sbfInt9,
+    sbfInt14,
+    sbfInt17,
+    sbfInt10,
+    sbfNecPc98,
+    sbfAcpi,
+    sbfUsbLegacy,
+    sbfAgp,
+    sbfBootI2O,
+    sbfBootLS120,
+    sbfBootZip,
+    sbfBoot1394,
+    sbfSmartBattery,
+    sbfBootBiosSpecification,
+    sbfBootKeyInitiatedNetwork,
+    sbfTargetDistrib,
+    sbfUefi,
+    sbfVirtualMachine,
+    sbfManufacturingModeSupported,
+    sbfManufacturingModeEnabled
+  );
+
+  TSmbiosSystemWakeup = (
+    sswReserved,
+    sswOther,
+    sswUnknown,
+    sswApmTimer,
+    sswModemRing,
+    sswLanRemote,
+    sswPowerSwitch,
+    sswPciPme,
+    sswAcPowerRestored
+  );
+
+  TSmbiosBoardFeatures = set of (
+    sbfHostingBoard,
+    sbfRequiresDaugtherBoard,
+    sbfRemovable,
+    sbfReplaceable,
+    sbfSwappable
+  );
+
+  TSmbiosBoardType = (
+    sbtUnknown,
+    sbtOther,
+    sbtServerBlade,
+    sbtConnectivitySwitch,
+    sbtSystemManagementModule,
+    sbtProcessorModule,
+    sbtIOModule,
+    sbtMemoryModule,
+    sbtDaugtherBoard,
+    sbtMotherBoard,
+    sbtProcessorMemoryModule,
+    sbtProcessorIOModule,
+    sbtInterconnectBoard
+  );
+
+  /// BIOS Information (Type 0) structure
+  TSmbiosBios = packed record
+    /// 2.0+ BIOS Vendor's Name (n)
+    VendorName: RawUtf8;
+    /// 2.0+ BIOS Version text (v)
+    Version: RawUtf8;
+    /// 2.0+ BIOS Release Date (b)
+    BuildDate: RawUtf8;
+    /// 2.0/2.4+ ROM Size as text (s)
+    RomSize: RawUtf8;
+    /// 2.4+ release version of the BIOS as text (r)
+    Release: RawUtf8;
+    /// 2.4+ release version of the embedded controller firmware (c)
+    Controller: RawUtf8;
+    /// general features identified by this BIOS (f)
+    Flags: TSmbiosBiosFlags;
+  end;
+
+  /// System Information (Type 1) structure
+  TSmbiosSystem = packed record
+    /// 2.0+ Manufacturer (m)
+    Manufacturer: RawUtf8;
+    /// 2.0+ Product Name (p)
+    ProductName: RawUtf8;
+    /// 2.0+ Version (v)
+    Version: RawUtf8;
+    /// 2.0+ Serial Number (s)
+    Serial: RawUtf8;
+    /// 2.1+ Universal Unique Identifier (u)
+    UUID: RawUtf8;
+    /// 2.4+ Product ID or Purchase Order Number, i.e. Sale identifier (s)
+    SKU: RawUtf8;
+    /// 2.4+ Computer Family, with similar branding and cosmetic features (f)
+    Family: RawUtf8;
+    /// 2.1+ Identifies the event that caused the system to power up (w)
+    WakupType: TSmbiosSystemWakeup;
+  end;
+
+  /// Baseboard (or Module) Information (Type 2) structure (m)
+  TSmbiosBoard = packed record
+    /// Manufacturer (m)
+    Manufacturer: RawUtf8;
+    /// Product (p)
+    Product: RawUtf8;
+    /// Version (v)
+    Version: RawUtf8;
+    /// Serial Number (s)
+    Serial: RawUtf8;
+    /// Asset Tag (a)
+    AssetTag: RawUtf8;
+    /// Location within the BaseBoard Chassis (l)
+    Location: RawUtf8;
+    /// Feature flags (f)
+    Features: TSmbiosBoardFeatures;
+    /// Type of Board (t)
+    BoardType: TSmbiosBoardType;
+    /// Other structures contained in this Baseboard (c)
+    //Contains: array of TSmbiosHandle;
+  end;
+
+  TSmbiosChassisType = (
+    sctUnknown,
+    sctDesktop,
+    sctLowProfileDesktop,
+    sctPizzaBox,
+    sctMiniTower,
+    sctTower,
+    sctPortable,
+    sctLaptop,
+    sctNotebook,
+    sctHandHeld,
+    sctDockingStation,
+    sctAllInOne,
+    sctSubNotebook,
+    sctSpaceSaving,
+    sctLunchBox,
+    sctMainServer,
+    sctExpansion,
+    sctSubChassis,
+    sctBusExpansion,
+    sctPeripheral,
+    sctRaid,
+    sctRackMount,
+    sctSealedCase,
+    sctMultiSystem,
+    sctCompactPci,
+    sctAdvancedTca,
+    sctBlade,
+    sctBladeEnclosure,
+    sctTablet,
+    sctConvertible,
+    sctDetachable,
+    sctIoTGateway,
+    sctEmbeddedPC,
+    sctMiniPC,
+    sctStickPC
+  );
+
+  TSmbiosChassisState = (
+    scsOther,
+    scsUnknown,
+    scsSafe,
+    scsWarning,
+    scsCritical,
+    scsNonRecoverable
+  );
+
+  TSmbiosChassisSecurityState = (
+    scssOther,
+    scssUnknown,
+    scssNone,
+    scssExternalInterfaceLockedOut,
+    scssExternalInterfaceEnabled
+  );
+
+  /// System Enclosure or Chassis (Type 3) structure
+  TSmbiosChassis = packed record
+    /// 2.0+ Chassis Lock (l)
+    Lock: boolean;
+    /// 2.0+ Chassis Type (t)
+    ChassisType: TSmbiosChassisType;
+    /// 2.0+ Manufacturer (m)
+    Manufacturer: RawUtf8;
+    /// 2.0+ Version (v)
+    Version: RawUtf8;
+    /// 2.0+ Serial Number (s)
+    Serial: RawUtf8;
+    /// 2.0+ Asset Tag (a)
+    AssetTag: RawUtf8;
+    /// 2.1+ State of the Chassis when it was last booted (b)
+    BootUpState: TSmbiosChassisState;
+    /// 2.1+ State of the Power Supply when the Chassis was last booted (w)
+    PowerState: TSmbiosChassisState;
+    /// 2.1+ Thermal State of the Chassis when it was last booted (h)
+    ThermalState: TSmbiosChassisState;
+    /// 2.1+ Physical Security Status (p)
+    Security: TSmbiosChassisSecurityState;
+    /// 2.3+ OEM-defined vendor-specific 32-bit information (o)
+    OEM: cardinal;
+    /// 2.3+ Height of the enclosure, in "U" units, 0 means unspecified (h)
+    Height: byte;
+    /// 2.3+ Number of associated power cords, 0 means unspecified (c)
+    PowerCords: byte;
+  end;
+
+  TSmbiosProcessorType = (
+    sptOther,
+    sptUnknown,
+    sptCentral,
+    sptMath,
+    sptDsp,
+    sptVideo
+  );
+
+  TSmbiosProcessorStatus = (
+    spsUnknown,
+    spsEnabled,
+    spsDisabledByUserInBios,
+    spsDisabledByBiosOnError,
+    spsIdle
+  );
+
+  TSmbiosProcessorFlags = set of (
+    spfReserved,
+    spfUnknown,
+    spf64Bit,
+    spfMultiCore,
+    spfHardwareThread,
+    spfNXSupport,
+    spfVirtSupport,
+    spfPowerControl,
+    spf128Bit,
+    spfArm64SocID
+  );
+
+  TSmbiosProcessorUpgrade = (
+    spuReserved,
+    spuOther,
+    spuUnknown,
+    spuDaughterBoard,
+    spuZIF,
+    spuReplaceablePiggyBack,
+    spuNone,
+    spuLIF,
+    spuSlot1,
+    spuSlot2,
+    spu370pin,
+    spuSlotA,
+    spuSlotM,
+    spu423,
+    spuA462,
+    spu478,
+    spu754,
+    spu940,
+    spu939,
+    spumPGA604,
+    spuLGA771,
+    spuLGA775,
+    spuS1,
+    spuAM2,
+    spuF1207,
+    spuLGA1366,
+    spuG34,
+    spuAM3,
+    spuC32,
+    spuLGA1156,
+    spuLGA1567,
+    spuPGA988A,
+    spuBGA1288,
+    spurPGA988B,
+    spuBGA1023,
+    spuBGA1224,
+    spuBGA1155,
+    spuLGA1356,
+    spuLGA2011,
+    spuFS1,
+    spuFS2,
+    spuFM1,
+    spuFM2,
+    spuLGA2011_3,
+    spuLGA1356_3,
+    spuLGA1150,
+    spuBGA1168,
+    spuBGA1234,
+    spuBGA1364,
+    spuAM4,
+    spuLGA1151,
+    spuBGA1356,
+    spuBGA1440,
+    spuBGA1515,
+    spuLGA3647_1,
+    spuSP3,
+    spuSP3r2,
+    spuLGA2066,
+    spuBGA1392,
+    spuBGA1510,
+    spuBGA1528,
+    spuLGA4189,
+    spuLGA1200,
+    spuLGA4677,
+    spuLGA1700,
+    spuBGA1744,
+    spuBGA1781,
+    spuBGA1211,
+    spuBGA2422,
+    spuLGA1211,
+    spuLGA2422,
+    spuLGA5773,
+    spuBGA5773
+  );
+
+  TSmbiosCacheLocation = (
+    sclInternal,
+    sclExternal,
+    sclReserved,
+    sclUnknown
+  );
+
+  TSmbiosCacheMode = (
+    scmWriteThrough,
+    scmWriteBack,
+    scmVariesWithAddress,
+    scmUnknown
+  );
+
+  TSmbiosCacheSramType = set of (
+    sstSramOther,
+    sstSramUnknown,
+    sstBurst,
+    sstPipelineBurst,
+    sstSynchronous,
+    sstAsynchronous
+  );
+
+  TSmbiosCacheEcc = (
+    sceUnknown,
+    sceOther,
+    sceNone,
+    sceParity,
+    sceSingleBitEcc,
+    sceMultiBitEcc
+  );
+
+  TSmbiosCacheType = (
+    sctOther,
+    sctNotKnown,
+    sctInstruction,
+    sctData,
+    sctUnified
+  );
+
+  TSmbiosCacheAssociativity = (
+    scaUndefined,
+    scaOther,
+    scaUnknown,
+    scaDirectMapped,
+    sca2way,
+    sca4way,
+    scaFully,
+    sca8way,
+    sca16way,
+    sca12way,
+    sca24way,
+    sca32way,
+    sca48way,
+    sca64way,
+    sca20way
+  );
+
+  /// Cache Information (Type 7) structure
+  TSmbiosCache = packed record
+    /// low-level handle used for linking into TSmbiosProcessor
+    Handle: word;
+    /// 2.0+  Reference Designation of this Socket (d)
+    SocketDesignation: RawUtf8;
+    /// 2.0+ Cache Level 1-8 (v)
+    Level: byte;
+    /// 2.0+ if Cache is Enabled (b)
+    Enabled: boolean;
+    /// 2.0+ if Cache is Socketed (k)
+    Socketed: boolean;
+    /// 2.0+ Location, relative to the CPU module (l)
+    Location: TSmbiosCacheLocation;
+    /// 2.0+ Operational Mode (o)
+    OperationalMode: TSmbiosCacheMode;
+    /// 2.0+/3.1+ Installed Size in bytes (s)
+    Size: cardinal;
+    /// 2.0+/3.1+ Maxium Size in bytes (m)
+    MaxSize: cardinal;
+    /// 2.0+ Current SRAM type (c)
+    Sram: TSmbiosCacheSramType;
+    /// 2.0+ Supported SRAM type (r)
+    SuportedSram: TSmbiosCacheSramType;
+    /// 2.1+ Speed in nanoseconds (n)
+    Speed: byte;
+    /// 2.1+ Error Correction Type (e)
+    Ecc: TSmbiosCacheEcc;
+    /// 2.1+ System Cache Type (t)
+    CacheType: TSmbiosCacheType;
+    /// 2.1+ Associativity (a)
+    Associativity: TSmbiosCacheAssociativity;
+  end;
+
+  /// Processor Information (Type 4) structure
+  TSmbiosProcessor = packed record
+    /// 2.0+  Reference Designation of this Socket (d)
+    SocketDesignation: RawUtf8;
+    /// 2.0+ Processor type (t)
+    ProcessorType: TSmbiosProcessorType;
+    /// 2.0+/2.6+ Processor family (f)
+    // - we use an ordinal and not an enumerate because there are too much types
+    Family: cardinal;
+    /// 2.0+ Processor 64-bit ID (i)
+    ID: QWord;
+    /// 2.0+ Manufacturer (m)
+    Manufacturer: RawUtf8;
+    /// 2.0+ Version (v)
+    Version: RawUtf8;
+    /// 2.0+ Voltage (g)
+    Voltage: RawUtf8;
+    /// 2.0+ CPU Status
+    Status: TSmbiosProcessorStatus;
+    /// 2.0+ CPU socket populated
+    Populated: boolean;
+    /// 2.0+ Socket Upgrade
+    Upgrade: TSmbiosProcessorUpgrade;
+    /// 2.1+ L1 Cache (1)
+    L1Cache: TSmbiosCache;
+    /// 2.1+ L2 Cache (2)
+    L2Cache: TSmbiosCache;
+    /// 2.1+ L3 Cache (3)
+    L3Cache: TSmbiosCache;
+    /// 2.3+ Serial Number (s)
+    Serial: RawUtf8;
+    /// 2.3+ Asset Tag (a)
+    AssetTag: RawUtf8;
+    /// 2.3+ Part Number (p)
+    PartNumber: RawUtf8;
+    /// 2.5+/3.0+ Number of Core per Socket (c)
+    CoreCount: cardinal;
+    /// 2.5+/3.0+ Number of Enabled Cores per Socket (e)
+    CoreEnabled: cardinal;
+    /// 2.5+/3.0+ Number of Thread Count per Socket (t)
+    ThreadCount: cardinal;
+    /// 3.6+ Number of Enabled Threads per Socket ()
+    ThreadEnabled: cardinal;
+    /// 2.5+ Processor Characteristics (h)
+    Flags: TSmbiosProcessorFlags;
+  end;
+
+  TSmbiosConnectorType = (
+    sctNone,
+    sctCentronics,
+    sctMiniCentronics,
+    sctProprietary,
+    sctDB25M,
+    sctDB25F,
+    sctDB15M,
+    sctDB15F,
+    sctDB9M,
+    sctDB9F,
+    sctRJ11,
+    sctRJ45,
+    sct50pinMiniScsi,
+    sctMiniDin,
+    sctMicroDin,
+    sctPS2,
+    sctInfrared,
+    sctHPHIL,
+    sctAccessBusUsb,
+    sctSsaScsi,
+    sctCircularDin8M,
+    sctCircularDin8F,
+    sctOnBoardIDE,
+    sctOnBoardFloppy,
+    sct9pinDualInline,
+    sct25pinDualInline,
+    sct50pinDualInline,
+    sct68pinDualInline,
+    sctCdromSoundInput,
+    sctMiniCentronicsType14,
+    sctMiniCentronicsType26,
+    sctMinijackHeadphones,
+    sctBnc,
+    sct1394,
+    sctSasSataPlug,
+    sctUsbC,
+    sctPC98,
+    sctPC98Hireso,
+    sctPCH98,
+    sctPC98Note,
+    sctPC98Full
+  );
+
+  TSmbiosConnectorPort = (
+    scpNone,
+    scpParallelXTAT,
+    scpParallelPS2,
+    scpParallelECP,
+    scpParallelEPP,
+    scpParallelECPEPP,
+    scpSerialXTAT,
+    scpSerial16450,
+    scpSerial16550,
+    scpSerial16550A,
+    scpScsi,
+    scpMidi,
+    scpJoyStick,
+    scpKeyboard,
+    scpMouse,
+    scpSsaScsi,
+    scpUsb,
+    scpFireWire,
+    scpPcmcia1,
+    scpPcmcia2,
+    scpPcmcia3,
+    scpCardBus,
+    scpAccessBus,
+    scpScsi2,
+    scpScsiWide,
+    scpPC98,
+    scpPC98Hireso,
+    scpPCH98,
+    scpVideo,
+    scpAudio,
+    scpModem,
+    scpNetwork,
+    scpSata,
+    scpSas,
+    scpMultiFunctionDisplayPort,
+    scpThunderbolt
+  );
+
+  /// Port Connector Information (Type 8) structure
+  TSmbiosConnector = packed record
+    /// 2.0+ Internal Reference Designator (i)
+    InternalName: RawUtf8;
+    /// 2.0+ Internal Connector Type (j)
+    InternalType: TSmbiosConnectorType;
+    /// 2.0+ External Reference Designator (e)
+    ExternalName: RawUtf8;
+    /// 2.0+ External Connector Type (f)
+    ExternalType: TSmbiosConnectorType;
+    /// 2.0+ Describes the function of the Port (p)
+    PortType: TSmbiosConnectorPort;
+  end;
+
+  // sstPC98C20 = A0H
+  TSmbiosSlotType = (
+    sstUndefined,
+    sstOther,
+    sstUnknown,
+    sstIsa,
+    sstMca,
+    sstEisa,
+    sstPci,
+    sstPcmcia,
+    sstVlVesa,
+    sstProprietary,
+    sstProcessorCard,
+    sstProprietaryMemoryCard,
+    sstIORiserCard,
+    sstNuBus,
+    sstPci66Mhz,
+    sstAgp,
+    sstAgp2X,
+    sstAgp4X,
+    sstPciX,
+    sstAgp8X,
+    sstM2Socket1DP_A,
+    sstM2Socket1SD_E,
+    sstM2Socket2_B,
+    sstM2Socket3_M,
+    sstMxm1,
+    sstMxm2,
+    sstMxm3,
+    sstMxm3He,
+    sstMxm4,
+    sstMxm3A,
+    sstMxm3B,
+    sstPcieGen2,
+    sstPcieGen3,
+    sstPcieMini52pin_A,
+    sstPcieMini52pin_B,
+    sstPcieMini76pin,
+    sstPcieGen4,
+    sstPcieGen5,
+    sstOcpNic3SFF,
+    sstOcpNic3LFF,
+    sstOcpNic,
+    sstPC98C20,
+    sstPC98C24,
+    sstPC98E,
+    sstPC98LocalBus,
+    sstPC98Card,
+    sstPcie,
+    sstPcieX1,
+    sstPcieX2,
+    sstPcieX4,
+    sstPcieX8,
+    sstPcieX16,
+    sstPcieGen2x,
+    sstPcieGen2x1,
+    sstPcieGen2x2 ,
+    sstPcieGen2x4,
+    sstPcieGen2x8 ,
+    sstPcieGen2x16,
+    sstPcieGen3x,
+    sstPcieGen3x1,
+    sstPcieGen3x2,
+    sstPcieGen3x4,
+    sstPcieGen3x8,
+    sstPcieGen3x16,
+    sstPcieGen4x,
+    sstPcieGen4x1,
+    sstPcieGen4x2,
+    sstPcieGen4x4,
+    sstPcieGen4x8,
+    sstPcieGen4x16,
+    sstPcieGen5x,
+    sstPcieGen5x1,
+    sstPcieGen5x2,
+    sstPcieGen5x4,
+    sstPcieGen5x8,
+    sstPcieGen5x16,
+    sstPcieGen6,
+    sst1UE1FormFactor,
+    sst3UE3FormFactor
+  );
+
+  TSmbiosSlotWidth = (
+    sswUndefinedSlotWidth,
+    sswOtherSlotWidth,
+    sswUnknownSlotWidth,
+    ssw8bit,
+    ssw16bit,
+    ssw32bit,
+    ssw64bit,
+    ssw128bit,
+    sswx1,
+    sswx2,
+    sswx4,
+    sswx8,
+    sswx12,
+    sswx16,
+    sswx32
+  );
+
+  /// System Slot (Type 9) structure
+  TSmbiosSlot = packed record
+    /// 2.0+ Slot Designation
+    Designation: RawUtf8;
+    /// 2.0+ Slot Type
+    SlotType: TSmbiosSlotType;
+    /// 2.0+ Data Bus Width
+    Width: TSmbiosSlotWidth;
+  end;
+
+  TSmbiosMemoryFormFactor = (
+    smfUndefined,
+    smfOther,
+    smfUnknown,
+    smfSimm,
+    smfSip,
+    smfChip,
+    smfDip,
+    smfZip,
+    smfProprietaryCard,
+    smfDimm,
+    smfTsop,
+    smfRowOfCips,
+    smfRimm,
+    smfSodimm,
+    smfSrimm,
+    smfFbDimm,
+    smfDie
+  );
+
+  TSmbiosMemoryType = (
+    smtUndefined,
+    smtOther,
+    smtUnknown,
+    smtDRAM,
+    smtEDRAM,
+    smtVRAM,
+    smtSRAM,
+    smtRAM,
+    smtROM,
+    smtFLASH,
+    smtEEPROM,
+    smtFEPROM,
+    smtEPROM,
+    smtCDRAM,
+    smt3DRAM,
+    smtSDRAM,
+    smtSGRAM ,
+    smtRDRAM,
+    smtDDR,
+    smtDDR2,
+    smtDDR2FBDIMM,
+    smt17h,
+    smtDDR3,
+    smtFBD2,
+    smtDDR4,
+    smtLPDDR,
+    smtLPDDR2,
+    smtLPDDR3,
+    smtLPDDR4,
+    smtLogicalNonVolatileDevice,
+    smtHBM,
+    smtHBM2,
+    smtDDR5,
+    smtLPDDR5,
+    smtHBM3
+  );
+
+  TSmbiosMemoryDetails = set of (
+    smdReserved,
+    smdOther,
+    smdUnknown,
+    smdFastPaged,
+    smdStaticColumn,
+    smdPseudoStatic,
+    smdRambus,
+    smdSynchronous,
+    smdCmos,
+    smdEdo,
+    smdWindowDram,
+    smdCacheDram,
+    smdNonVolatile,
+    smdRegisteredBuffered,
+    smdUnbufferedUnRegistered,
+    smdLrdimm
+  );
+
+  /// Memory Device (Type 17) structure
+  TSmbiosMemory = packed record
+    /// 2.1+ Total width, in bits
+    // - equal DataWidth if there is no memory correction (w)
+    TotalWidth: word;
+    /// 2.1+ Data width, in bits (d)
+    DataWidth: word;
+    /// 2.1+/2.7+ Size of the memory device, in Bytes (s)
+    Size: QWord;
+    /// 2.1+ Implementation form factor (f)
+    FormFactor: TSmbiosMemoryFormFactor;
+    /// 2.6+ Rank Attribute
+    Rank: byte;
+    /// 2.1+ Type of Memory used by this Device (t)
+    MemoryType: TSmbiosMemoryType;
+    /// 2.1+ Features of this Memory Type (f)
+    Details: TSmbiosMemoryDetails;
+    /// 2.1+ Device Locator (l)
+    Locator: RawUtf8;
+    /// 2.1+ Bank Locator (b)
+    Bank: RawUtf8;
+    /// 2.3+ Manufacturer (m)
+    Manufacturer: RawUtf8;
+    /// 2.3+ Serial Number (s)
+    Serial: RawUtf8;
+    /// 2.3+ Asset Tag (a)
+    AssetTag: RawUtf8;
+    /// 2.3+ Part Number (p)
+    PartNumber: RawUtf8;
+    /// 2.3+/3.3+ Maximum Capable Speed, in Megatransfers per Seconds (c)
+    MtPerSec: cardinal;
+  end;
+
+  /// Portable Battery (Type 22) structure
+  TSmbiosBattery = packed record
+    /// 2.1+ Location (l)
+    Location: RawUtf8;
+    /// 2.1+ Manufacturer (m)
+    Manufacturer: RawUtf8;
+    /// 2.1+ Serial Number (s)
+    Serial: RawUtf8;
+    /// 2.1+ Name (n)
+    Name: RawUtf8;
+    /// 2.1+ Version (v)
+    Version: RawUtf8;
+    /// 2.2+ Identifies the battery chemistry (c)
+    Chemistry: RawUtf8;
+  end;
+
+  TSmbiosSecurityStatus = (
+    sssDisabled,
+    sssEnabled,
+    sssNotImplemented,
+    sssUnknown
+  );
+
+  /// Hardware Security (Type 24) structure
+  TSmbiosSecurity = packed record
+    /// 2.2+ Front Panel Reset status
+    FrontPanelReset: TSmbiosSecurityStatus;
+    /// 2.2+ Administrator Password status
+    AdministratorPassword: TSmbiosSecurityStatus;
+    /// 2.2+ Keyboard Password status
+    KeyboardPassword: TSmbiosSecurityStatus;
+    /// 2.2+ Power-on Password status
+    PoweronPassword: TSmbiosSecurityStatus;
+  end;
+
+  /// SMBIOS High-Level Information
+  // - low-level DMI structures are decoded into ready-to-be-used text and sets
+  // - when serialized as JSON, fields have very short identifiers
+  // (e.g. "b":{"n:"...});
+  TSmbiosInfo = packed record
+    /// decoded BIOS Information (Type 0) structure (b)
+    Bios: TSmbiosBios;
+    /// decoded System Information (Type 1) structure (s)
+    System: TSmbiosSystem;
+    /// decoded Hardware Security (Type 24) structure (h)
+    Security: TSmbiosSecurity;
+    /// decoded Baseboard (or Module) Information (Type 2) structure (m)
+    Board: array of TSmbiosBoard;
+    /// decoded System Enclosure or Chassis (Type 3) structure (e)
+    Chassis: array of TSmbiosChassis;
+    /// decoded Processors Information (Type 4) structure (p)
+    Processor: array of TSmbiosProcessor;
+    /// decoded Port Connectors Information (Type 8) structure (c)
+    Connector: array of TSmbiosConnector;
+    /// decoded System Slots (Type 9) structure (p)
+    Slot: array of TSmbiosSlot;
+    /// decoded Memory Device (Type 17) structure (r)
+    Memory: array of TSmbiosMemory;
+    /// decoded Portable Battery (Type 22) structure (b)
+    Battery: array of TSmbiosBattery;
+  end;
+
+/// retrieve and decode SMBIOS data into high-level usable information
+// - on POSIX, requires root to access full SMBIOS information
+// - see also mormot.core.os.pas GetSmbios() more limited function
+function GetSmbiosInfo(out info: TSmbiosInfo): boolean;
+
+/// decode SMBIOS raw binary into high-level usable information
+// - see also mormot.core.os.pas DecodeSmbios() more limited function
+function DecodeSmbiosInfo(const raw: TRawSmbiosInfo; out info: TSmbiosInfo): boolean;
 
 
 { ************ TSynFpuException Wrapper for FPU Flags Preservation }
@@ -3025,6 +3894,345 @@ begin
     GetDiskInfo(fName, PQWord(@fAvailableSize.Bytes)^, PQWord(@fFreeSize.Bytes)^,
       PQWord(@fTotalSize.Bytes)^ {$ifdef OSWINDOWS}, @fVolumeName{$endif});
   end;
+end;
+
+
+{ ************ DMI/SMBIOS Binary Decoder }
+
+const
+  _ROMSIZ: array[0..3] of string[2] = ('MB', 'GB', '??', '??');
+  _VOLT:   array[0..3] of string[3] = ('5', '3.3', '2.9', '?');
+
+function CacheSize8(b: PtrUInt): PtrUInt;
+begin
+  result := b and $7fff;
+  if (b and $8000) <> 0 then
+    result := result shl 16   // 64K granularity
+  else
+    result := result shl 10;  // 1K granularity
+end;
+
+function GetSmbiosInfo(out info: TSmbiosInfo): boolean;
+var
+  raw: TRawSmbiosInfo;
+begin
+  result := GetRawSmbios(raw) and
+            DecodeSmbiosInfo(raw, info);
+end;
+
+function DecodeSmbiosInfo(const raw: TRawSmbiosInfo; out info: TSmbiosInfo): boolean;
+var
+  s: PByteArray;
+  cur: PPRawUtf8;
+  n, ver: cardinal;
+  len, i: PtrInt;
+  lines: array[byte] of PRawUtf8; // efficient string decoding
+  cache: array of TSmbiosCache; // linked in 2nd pass
+
+  procedure FillCache(var dest: TSmbiosCache);
+  var
+    i: PtrInt;
+  begin
+    for i := 0 to high(cache) do
+      if cache[i].Handle = dest.Handle then
+      begin
+        dest := cache[i];
+        break;
+      end;
+  end;
+
+begin
+  Finalize(info);
+  result := false;
+  s := pointer(raw.Data);
+  if s = nil then
+    exit;
+  ver := raw.SmbMajorVersion shl 8 + raw.SmbMinorVersion;
+  // first pass will fill the main info structures
+  FillCharFast(lines, SizeOf(lines), 0);
+  repeat
+    if (s[0] = 127) or // type (127=EOT)
+       (s[1] < 4) then // length
+      break;
+    case s[0] of
+      0: // Bios Information (type 0)
+        begin
+          lines[s[4]] := @info.Bios.VendorName;
+          lines[s[5]] := @info.Bios.Version;
+          lines[s[8]] := @info.Bios.BuildDate;
+          if (s[9] = $ff) and
+             (s[1] > $18) then // 3.1+
+          begin
+            n := PWord(@s[$18])^;
+            FormatUtf8('% %', [n and $3fff, _ROMSIZ[n shr 14]], info.Bios.RomSize);
+          end
+          else
+            UInt32ToUtf8((PtrUInt(s[9]) + 1) shl 10, info.Bios.RomSize);
+          PCardinal(@info.Bios.Flags)^ := PCardinal(@s[$0a])^; // characteristics
+          if s[1] >= $17 then // 2.4+
+          begin
+            PCardinalArray(@info.Bios.Flags)^[1] := PWord(@s[$12])^;
+            FormatUtf8('%.%', [s[$14], s[$15]], info.Bios.Release);
+            FormatUtf8('%.%', [s[$16], s[$17]], info.Bios.Controller);
+          end;
+        end;
+      1: // System Information (type 1)
+        begin
+          lines[s[4]] := @info.System.Manufacturer;
+          lines[s[5]] := @info.System.ProductName;
+          lines[s[6]] := @info.System.Version;
+          lines[s[7]] := @info.System.Serial;
+          if s[1] >= $18 then // 2.1+
+          begin
+            DecodeSmbiosUuid(@s[8], info.System.UUID, ver);
+            info.System.WakupType := TSmbiosSystemWakeup(s[$18]);
+            if s[1] >= $1a then // 2.4+
+            begin
+              lines[s[$19]] := @info.System.Sku;
+              lines[s[$1a]] := @info.System.Family;
+            end;
+          end;
+        end;
+      2: // Baseboard (or Module) Information (type 2)
+        begin
+          SetLength(info.Board, length(info.Board) + 1);
+          with info.Board[high(info.Board)] do
+          begin
+            lines[s[4]] := @Manufacturer;
+            lines[s[5]] := @Product;
+            lines[s[6]] := @Version;
+            lines[s[7]] := @Serial;
+            lines[s[8]] := @AssetTag;
+            lines[s[10]] := @Location;
+            Features := TSmbiosBoardFeatures(s[9]);
+            BoardType := TSmbiosBoardType(s[$0D]);
+          end;
+        end;
+      3: // System Enclosure or Chassis (type 3)
+        begin
+          SetLength(info.Chassis, length(info.Chassis) + 1);
+          with info.Chassis[high(info.Chassis)] do
+          begin
+            lines[s[4]] := @Manufacturer;
+            lines[s[6]] := @Version;
+            lines[s[7]] := @Serial;
+            lines[s[8]] := @AssetTag;
+            Lock := s[5] and 128 <> 0;
+            ChassisType := TSmbiosChassisType(s[5] and 127);
+            if s[1] >= $0c then // 2.1+
+            begin
+              BootUpState := TSmbiosChassisState(s[$09]);
+              PowerState  := TSmbiosChassisState(s[$0a]);
+              ThermalState := TSmbiosChassisState(s[$0b]);
+              Security := TSmbiosChassisSecurityState(s[$0c]);
+              if s[1] >= $12 then // 2.3+
+              begin
+                OEM := PCardinal(@s[$0d])^;
+                Height := s[$11];
+                PowerCords := s[$12];
+              end;
+            end;
+          end;
+        end;
+      4: // Processor Information (type 4)
+        begin
+          SetLength(info.Processor, length(info.Processor) + 1);
+          with info.Processor[high(info.Processor)] do
+          begin
+            lines[s[4]] := @SocketDesignation;
+            lines[s[7]] := @Manufacturer;
+            lines[s[$10]] := @Version;
+            if s[1] >= $22 then // 2.3+
+            begin
+              lines[s[$20]] := @Serial;
+              lines[s[$21]] := @AssetTag;
+              lines[s[$22]] := @PartNumber;
+            end;
+            ProcessorType := TSmbiosProcessorType(s[5]);
+            Family := s[6];
+            ID := PQWord(@s[8])^;
+            n := s[$11];
+            if n and 128 = 0 then
+            begin
+              for i := 0 to 3 do
+                if (1 shl i) and n <> 0 then
+                  Voltage := FormatUtf8('%%V ', [Voltage, _VOLT[i]]);
+            end
+            else
+            begin
+              n := n and 127;
+              FormatUtf8('%.%V', [n div 10, n mod 10], Voltage);
+            end;
+            Status := TSmbiosProcessorStatus(s[$18] and 7);
+            Populated := s[$18] and 64 <> 0;
+            Upgrade := TSmbiosProcessorUpgrade(s[$19]);
+            if s[1] >= $1e then // 2.1+
+            begin
+              L1Cache.Handle := PWord(@s[$1a])^;
+              L2Cache.Handle := PWord(@s[$1c])^;
+              L3Cache.Handle := PWord(@s[$1e])^;
+              if s[1] >= $26 then // 2.5+
+              begin
+                CoreCount := s[$23];
+                CoreEnabled := s[$24];
+                Threadcount := s[$25];
+                Flags := TSmbiosProcessorFlags(PWord(@s[$26])^);
+                if s[1] >= $29 then // 2.6+
+                begin
+                  Family := PWord(@s[$28])^;
+                  if s[1] >= $2f then // 3.0+
+                  begin
+                    CoreCount := PWord(@s[$2a])^;
+                    CoreEnabled := PWord(@s[$2c])^;
+                    Threadcount := PWord(@s[$2e])^;
+                    if s[1] >= $31 then // 3.6+
+                      ThreadEnabled := PWord(@s[$30])^;
+                  end;
+                end;
+              end;
+            end;
+          end;
+        end;
+      // type 5 and 6 are obsolete
+      7: // Cache Information (type 7)
+        begin
+          SetLength(cache, length(cache) + 1);
+          with cache[high(cache)] do
+          begin
+            Handle := PWord(@s[2])^; // for late binding within info.Processor[]
+            lines[s[4]] := @SocketDesignation;
+            Level := (s[5] and 7) + 1;
+            Socketed := (s[5] and 8) <> 0;
+            Location := TSmbiosCacheLocation((s[5] shr 6) and 3);
+            Enabled := (s[5] and 128) <> 0;
+            OperationalMode := TSmbiosCacheMode(s[6] and 3);
+            Size := CacheSize8(PWord(@s[$09])^);
+            MaxSize := CacheSize8(PWord(@s[$07])^);
+            PWord(@Sram)^ := PWord(@s[$0d])^;
+            PWord(@SuportedSram)^ := PWord(@s[$0b])^;
+            if s[1] >= $12 then // 2.1+
+            begin
+              Speed := s[$0f];
+              Ecc := TSmbiosCacheEcc(s[$10]);
+              CacheType := TSmbiosCacheType(s[$11]);
+              Associativity := TSmbiosCacheAssociativity(s[$12]);
+            end;
+          end;
+        end;
+      8: // Port Connector Information (type 8)
+        begin
+          SetLength(info.Connector, length(info.Connector) + 1);
+          with info.Connector[high(info.Connector)] do
+          begin
+            lines[s[4]] := @InternalName;
+            InternalType := TSmbiosConnectorType(s[5]);
+            lines[s[6]] := @ExternalName;
+            ExternalType := TSmbiosConnectorType(s[7]);
+            PortType := TSmbiosConnectorPort(s[8]);
+          end;
+        end;
+      9: // System Slot (type 9)
+        begin
+          SetLength(info.Slot, length(info.Slot) + 1);
+          with info.Slot[high(info.Slot)] do
+          begin
+            lines[s[4]] := @Designation;
+            SlotType := TSmbiosSlotType(s[5]);
+            Width := TSmbiosSlotWidth(s[6]);
+          end;
+        end;
+      // types 10 to 16 are not decoded yet
+      17: // Memory Device (type 17)
+        begin
+          SetLength(info.Memory, length(info.Memory) + 1);
+          with info.Memory[high(info.Memory)] do
+          begin
+            TotalWidth := PWord(@s[8])^;
+            DataWidth := PWord(@s[$0a])^;;
+            n := PWord(@s[$0c])^;
+            if n <> $ffff then
+            begin
+              Size := n and $7fff;
+              if (n and $8000) = 0 then
+                Size := Size shl 20  // MB units
+              else
+                Size := Size shl 10; // GB units
+            end;
+            FormFactor := TSmbiosMemoryFormFactor(s[$0e]);
+            lines[s[$10]] := @Locator;
+            lines[s[$11]] := @Bank;
+            MemoryType := TSmbiosMemoryType(s[$12]);
+            Details := TSmbiosMemoryDetails(PWord(@s[$13])^);
+            if s[1] >= $1A then // 2.3+
+            begin
+              MtPerSec := PWord(@s[$15])^;
+              lines[s[$17]] := @Manufacturer;
+              lines[s[$18]] := @Serial;
+              lines[s[$19]] := @AssetTag;
+              lines[s[$1a]] := @PartNumber;
+              if s[1] >= $1f then // 2.7+
+              begin
+                Rank := s[$1b] and 7;
+                Size := QWord(PCardinal(@s[$1c])^) shl 20; // in MB
+                if s[1] >= $5b then // 3.3+
+                  MtPerSec := PCardinal(@s[$58])^;
+              end;
+            end;
+          end;
+        end;
+      // types 18 to 21 are not decoded yet
+      22: // Portable Battery (type 22)
+        begin
+          SetLength(info.Battery, length(info.Battery) + 1);
+          with info.Battery[high(info.Battery)] do
+          begin
+            if s[1] >= $0f then // 2.1+
+            begin
+              lines[s[4]] := @Location;
+              lines[s[5]] := @Manufacturer;
+              lines[s[7]] := @Serial;
+              lines[s[8]] := @Name;
+              lines[s[$0e]] := @Version;
+              if s[1] >= $14 then // 2.2+
+                lines[s[$14]] := @Chemistry;
+            end;
+          end;
+        end;
+      24: // Hardware Security (Type 24)
+        with info.Security do
+        begin
+          FrontPanelReset := TSmbiosSecurityStatus(s[4] and 3);
+          AdministratorPassword := TSmbiosSecurityStatus((s[4] shr 4) and 3);
+          KeyboardPassword := TSmbiosSecurityStatus((s[4] shr 8) and 3);
+          PoweronPassword := TSmbiosSecurityStatus((s[4] shr 12) and 3);
+        end;
+    end;
+    s := @s[s[1]]; // go to string table
+    cur := @lines[1];
+    if s[0] = 0 then
+      inc(PByte(s)) // no string table
+    else
+      repeat
+        len := StrLen(s);
+        if cur^ <> nil then
+        begin
+          FastSetString(cur^^, s, len);
+          cur^ := nil; // reset slot in lines[]
+        end;
+        s := @s[len + 1]; // next string
+        inc(cur);
+      until s[0] = 0; // end of string table
+    inc(PByte(s)); // go to next scruture
+  until false;
+  // 2nd pass will link all cache[] to info.Processor[]
+  for i := 0 to high(info.Processor) do
+    with info.Processor[i] do
+    begin
+      FillCache(L1Cache);
+      FillCache(L2Cache);
+      FillCache(L3Cache);
+    end;
+  result := info.Bios.VendorName <> '';
 end;
 
 

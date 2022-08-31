@@ -1142,6 +1142,59 @@ type
 // a good idea to read it once, and persist the information on disk
 function GetRawSmbios(out info: TRawSmbiosInfo): boolean;
 
+type
+  /// the basic SMBIOS fields supported by GetSmbios/DecodeSmbios functions
+  // - only include the first occurence for board/cpu/battery types
+  TSmbiosBasicInfo = (
+    sbiUndefined,
+    sbiBiosVendor,
+    sbiBiosVersion,
+    sbiBiosDate,
+    sbiManufacturer,
+    sbiProductName,
+    sbiVersion,
+    sbiSerial,
+    sbiUuid,
+    sbiSku,
+    sbiFamily,
+    sbiBoardManufacturer,
+    sbiBoardProductName,
+    sbiBoardVersion,
+    sbiBoardSerial,
+    sbiBoardAssetTag,
+    sbiBoardLocation,
+    sbiCpuManufacturer,
+    sbiCpuVersion,
+    sbiCpuSerial,
+    sbiCpuAssetTag,
+    sbiCpuPartNumber,
+    sbiBatteryLocation,
+    sbiBatteryManufacturer,
+    sbiBatteryName,
+    sbiBatteryVersion,
+    sbiBatteryChemistry);
+
+  /// the text fields stored by GetSmbios/DecodeSmbios functions
+  TSmbiosBasicInfos = array[TSmbiosBasicInfo] of RawUtf8;
+
+/// decode basic SMBIOS information as text from a GetRawSmbios() binary blob
+function DecodeSmbios(const raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): boolean;
+
+// some global definitions for proper caching and inlining of GetSmbios()
+procedure ComputeGetSmbios;
+procedure DecodeSmbiosUuid(src: PGuid; out dest: RawUtf8; ver: cardinal);
+var
+  _Smbios: TSmbiosBasicInfos;
+  _SmbiosRetrieved: boolean;
+
+/// retrieve SMBIOS information as text
+// - only the main values are decoded - see mormot.core.perf for a more complete
+// DMI/SMBIOS decoder
+// - on POSIX, requires root to access full SMBIOS information - will fallback
+// reading /sys/class/dmi/id/* on Linux or kenv() on FreeBSD for most entries
+function GetSmbios(info: TSmbiosBasicInfo): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
 
 { ****************** Operating System Specific Types (e.g. TWinRegistry) }
 
@@ -6071,6 +6124,150 @@ begin
     exit;
   info.data := ReadSystemMemory(addr, info.Length);
   result := info.data <> '';
+end;
+
+procedure ComputeGetSmbios;
+var
+  raw: TRawSmbiosInfo;
+begin
+  GlobalLock; // thread-safe retrieval
+  try
+    if not _SmbiosRetrieved then
+    begin
+       _SmbiosRetrieved := true;
+      if not GetRawSmbios(raw) or
+         not DecodeSmbios(raw, _Smbios) then
+        // if not root on POSIX SMBIOS is not available
+        // -> try to get what the OS exposes (Linux or FreeBSD)
+        DirectSmbiosInfo(_Smbios);
+    end;
+  finally
+    GlobalUnLock;
+  end;
+end;
+
+function GetSmbios(info: TSmbiosBasicInfo): RawUtf8;
+begin
+  if not _SmbiosRetrieved then
+    ComputeGetSmbios;
+  result := _Smbios[info];
+end;
+
+{.$define SMB_UUID_SWAP4} // seems not needed on Windows or Linux :(
+
+procedure DecodeSmbiosUuid(src: PGuid; out dest: RawUtf8; ver: cardinal);
+var
+  uid: TGuid;
+begin
+  uid := src^;
+  if not IsZero(@uid, SizeOf(uid)) and // 0 means not supported
+     ((PCardinalArray(@uid)[0] <> $ffffffff) or // ff means not set
+      (PCardinalArray(@uid)[1] <> $ffffffff) or
+      (PCardinalArray(@uid)[2] <> $ffffffff) or
+      (PCardinalArray(@uid)[3] <> $ffffffff)) then
+  begin
+    {$ifdef SMB_UUID_SWAP4} // "wmic csproduct get uuid" don't swap
+    if ver >= $0206 then // see dmi_system_uuid() in dmidecode.c
+      uid.D1 := bswap32(uid.D1); // swap endian as of version 2.6
+    {$endif SMB_UUID_SWAP4}
+    dest := RawUtf8(UpperCase(copy(GUIDToString(uid), 2, 36)));
+  end;
+end;
+
+function DecodeSmbios(const raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): boolean;
+var
+  lines: array[byte] of TSmbiosBasicInfo; // single pass efficient decoding
+  ver: cardinal;
+  len: PtrInt;
+  cur: ^TSmbiosBasicInfo;
+  s: PByteArray;
+begin
+  result := false;
+  Finalize(info);
+  s := pointer(raw.Data);
+  if s = nil then
+    exit;
+  ver := raw.SmbMajorVersion shl 8 + raw.SmbMinorVersion;
+  FillCharFast(lines, SizeOf(lines), 0);
+  repeat
+    //writeln('type=',s[0], ' length=', s[1]);
+    if (s[0] = 127) or // type (127=EOT)
+       (s[1] < 4) then // length
+      break;
+    case s[0] of
+      0: // Bios Information (type 0)
+        begin
+          lines[s[4]] := sbiBiosVendor;
+          lines[s[5]] := sbiBiosVersion;
+          lines[s[8]] := sbiBiosDate;
+        end;
+      1: // System Information (type 1)
+        begin
+          lines[s[4]] := sbiManufacturer;
+          lines[s[5]] := sbiProductName;
+          lines[s[6]] := sbiVersion;
+          lines[s[7]] := sbiSerial;
+          if s[1] >= $18 then // 2.1+
+          begin
+            DecodeSmbiosUuid(@s[8], info[sbiUuid], ver);
+            if s[1] >= $1a then // 2.4+
+            begin
+              lines[s[$19]] := sbiSku;
+              lines[s[$1a]] := sbiFamily;
+            end;
+          end;
+        end;
+      2: // Baseboard (or Module) Information (type 2) - keep only the first
+        begin
+          lines[s[4]] := sbiBoardManufacturer;
+          lines[s[5]] := sbiBoardProductName;
+          lines[s[6]] := sbiBoardVersion;
+          lines[s[7]] := sbiBoardSerial;
+          lines[s[8]] := sbiBoardAssetTag;
+          lines[s[10]] := sbiBoardLocation;
+        end;
+      4: // Processor Information (type 4) - keep only the first
+        begin
+          lines[s[7]] := sbiCpuManufacturer;
+          lines[s[$10]] := sbiCpuVersion;
+          if s[1] >= $22 then // 2.3+
+          begin
+            lines[s[$20]] := sbiCpuSerial;
+            lines[s[$21]] := sbiCpuAssetTag;
+            lines[s[$22]] := sbiCpuPartNumber;
+          end;
+        end;
+      22: // Portable Battery (type 22) - keep only the first
+        if s[1] >= $0f then // 2.1+
+        begin
+          lines[s[4]] := sbiBatteryLocation;
+          lines[s[5]] := sbiBatteryManufacturer;
+          lines[s[8]] := sbiBatteryName;
+          lines[s[$0e]] := sbiBatteryVersion;
+          if s[1] >= $14 then // 2.2+
+            lines[s[$14]] := sbiBatteryChemistry;
+        end;
+    end;
+    s := @s[s[1]]; // go to string table
+    cur := @lines[1];
+    if s[0] = 0 then
+      inc(PByte(s)) // no string table
+    else
+      repeat
+        len := StrLen(s);
+        if cur^ <> sbiUndefined then
+        begin
+          if info[cur^] = '' then // only set the first occurence if multiple
+            FastSetString(info[cur^], s, len);
+          //writeln(ord(cur^), ' = ', info[cur^]);
+          cur^ := sbiUndefined; // reset slot in lines[]
+        end;
+        s := @s[len + 1]; // next string
+        inc(cur);
+      until s[0] = 0; // end of string table
+    inc(PByte(s)); // go to next structure
+  until false;
+  result := info[sbiBiosVendor] <> '';
 end;
 
 
