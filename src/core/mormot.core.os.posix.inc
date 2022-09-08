@@ -141,6 +141,11 @@ begin
   FastSetString(result, S, P - S);
 end;
 
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
+begin
+  result := RawUtf8(format(Fmt, Args));
+end;
+
 
 { ****************** Unicode, Time, File process }
 var
@@ -931,6 +936,11 @@ begin
     fpchmod(pointer(FileName), S_IRUSR or S_IWUSR);
 end;
 
+procedure FileSetSticky(const FileName: TFileName);
+begin
+  fpchmod(FileName, S_IRUSR or S_IWUSR or S_IRGRP or S_IROTH or S_ISVTX);
+end;
+
 function FileSize(const FileName: TFileName): Int64;
 var
   st: TStat;
@@ -1454,7 +1464,7 @@ begin
       // detect translation
       if VI.VarFileInfo.Count > 0 then
         with VI.VarFileInfo.Items[0] do
-          LanguageInfo := Format('%.4x%.4x', [language, codepage]);
+          LanguageInfo := _fmt('%.4x%.4x', [language, codepage]);
       if LanguageInfo = '' then
       begin
         // take first language
@@ -1609,9 +1619,45 @@ end;
 
 function GetRawSmbiosFromMem(var info: TRawSmbiosInfo): boolean; forward;
 
-function GetRawSmbios(out info: TRawSmbiosInfo): boolean;
+const
+  // on POSIX, we store the SMBIOS data in a local cache for non-root users
+  SMB_CACHE = '/var/tmp/.synopse.smb';
+  SMB_FLAGS = $010003ff; // assume 3.0 SMB is good enough
+  // local storage of fallback UUID
+  UUID_CACHE = '/var/tmp/.synopse.uid';
+  // note: /var/tmp is cleaned up by systemd after 30 days so we set S_ISVTX
+  //   see https://systemd.io/TEMPORARY_DIRECTORIES
+
+function _GetRawSmbios(out info: TRawSmbiosInfo): boolean;
 begin
   result := GetRawSmbiosFromMem(info);
+  if result then
+    exit;
+  info.Data := StringFromFile(SMB_CACHE);
+  if info.Data = '' then
+    exit;
+  if CompressSynLZ(info.Data, false) = '' then
+    info.Data := ''; // tampered file
+  if info.Data = '' then
+    exit;
+  PCardinal(@info)^ := SMB_FLAGS; // mark as retrieved from cache
+  info.Length := length(info.Data);
+  result := true;
+end;
+
+procedure _AfterDecodeSmbios(const info: TRawSmbiosInfo);
+var
+  s: RawByteString;
+begin
+  if (PCardinal(@info)^ = SMB_FLAGS) or
+     (CompressSynLZGetHash32(StringFromFile(SMB_CACHE)) = Hash32(info.Data)) then
+    exit;
+  // cache raw SMBIOS data for non-root users
+  s := info.Data;
+  CompressSynLZ(s, true); // SynLZ + Hash32 to avoid tampered file
+  FileFromString(s, SMB_CACHE);
+  FileSetSticky(SMB_CACHE);
+  DeleteFile(UUID_CACHE); // this file is now superfluous and maybe inconsistent
 end;
 
 function SeemsRealPointer(p: pointer): boolean;
@@ -1702,7 +1748,7 @@ var
   avg: TLoadAvg;
 begin
   if getloadavg(avg, 3) = 3 then
-    result := Format('%g %g %g', [avg[0], avg[1], avg[2]])
+    result := _fmt('%g %g %g', [avg[0], avg[1], avg[2]])
   else
     result := '';
 end;
@@ -1774,6 +1820,7 @@ end;
 
 procedure DirectSmbiosInfo(out info: TSmbiosBasicInfos);
 begin
+  // on MAC: call  system_profiler SPHardwareDataType
   info[sbiCpuVersion] := CpuInfoText;
 end;
 
@@ -2268,7 +2315,7 @@ procedure DoShutDown(Sig: integer; Info: PSigInfo; Context: PSigContext); cdecl;
 var
   level: TSynLogInfo;
   si_code: integer;
-  text: ShortString; // code below has no memory allocation
+  text: string[4]; // code below has no memory allocation
 begin
   if Assigned(SynDaemonInterceptLog) then
   begin
@@ -2282,7 +2329,7 @@ begin
       SIGABRT:
         text := 'ABRT';
     else
-      str(Sig, text);
+      text := 'SIG';
     end;
     if Sig = SIGTERM then
       // polite quit
@@ -2656,7 +2703,19 @@ end;
 
 { ****************** Gather Operating System Information }
 
-{$ifndef OSANDROID}
+{$ifdef OSANDROID}
+
+function GetSmbEfiMem: RawByteString;
+begin
+  result := '';
+end;
+
+function getpagesize: integer;
+begin
+  result := 4096;
+end;
+
+{$else}
 function getpagesize: integer; cdecl; external clib;
 {$endif OSANDROID}
 
@@ -2720,6 +2779,38 @@ begin
   xaddr := PosixParseHex32(pointer(addr));
   if xaddr <> 0 then
     result := ReadSystemMemory(xaddr, 32); // 32 bytes is enough
+end;
+
+// on Android, /sys/class/net is not readable from the standard user :(
+function _GetSystemMacAddress: TRawUtf8DynArray;
+var
+  SR: TSearchRec;
+  fn: TFileName;
+  f: RawUtf8;
+begin
+  result := nil;
+  if FindFirst('/sys/class/net/*', faDirectory, SR) <> 0 then
+    exit;
+  repeat
+    if (SR.Name <> 'lo') and
+       not IdemPChar(pointer(SR.Name), 'DOCKER') and
+       SearchRecValidFolder(SR) then
+    begin
+      fn := '/sys/class/net/' + SR.Name;
+      f := StringFromFile(fn + '/flags', {nosize=}true);
+      if (length(f) > 2) and // e.g. '0x40' or '0x1043'
+         (PosixParseHex32(pointer(f)) and {IFF_LOOPBACK:}8 = 0) then
+      begin
+        f := TrimU(StringFromFile(fn + '/address', {nosize=}true));
+        if f <> '' then
+        begin
+          SetLength(result, length(result) + 1);
+          result[high(result)] := f;
+        end;
+      end;
+    end;
+  until FindNext(SR) <> 0;
+  FindClose(SR);
 end;
 
 {$endif OSLINUX}
@@ -2867,25 +2958,6 @@ procedure crc32blocksarm64(crc128, data128: PBlock128; count: integer); external
 {$endif OSLINUXANDROID}
 {$endif CPUAARCH64}
 
-function KB(Size: cardinal): shortstring;
-begin
-  if Size >= 1 shl 30 then
-  begin
-    str(Size shr 30, result);
-    result := result + 'GB';
-  end
-  else if Size >= 1 shl 20 then
-  begin
-    str(Size shr 20, result);
-    result := result + 'MB';
-  end
-  else
-  begin
-    str(Size shr 10, result);
-    result := result + 'KB';
-  end
-end;
-
 procedure InitializeSpecificUnit;
 var
   P: PAnsiChar;
@@ -2916,12 +2988,9 @@ begin
                    'XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']);
   modname := nil;
   fpuname(uts);
-  {$ifdef OSANDROID}
-  SystemInfo.dwPageSize := 4096;
-  {$else}
   SystemInfo.dwPageSize := getpagesize; // call libc API
-  {$endif OSANDROID}
   {$ifdef OSBSDDARWIN}
+  // pure FreeBSD NetBSD MacOS branch
   SystemInfo.dwNumberOfProcessors := fpsysctlhwint(HW_NCPU);
   beg := fpsysctlhwstr(HW_MACHINE, temp);
   FastSetString(BiosInfoText, beg, StrLen(beg));
@@ -2929,6 +2998,7 @@ begin
   with uts do
     OSVersionText := sysname + '-' + release + ' ' + version;
   {$ifdef OSDARWIN}
+  // pure MACOS branch
   CpuCache[1].LineSize := fpsysctlhwint(HW_CACHELINE);
   CpuCache[1].Size := fpsysctlhwint(HW_L1DCACHESIZE);
   CpuCache[2].LineSize := fpsysctlhwint(HW_CACHELINE);
@@ -2937,15 +3007,19 @@ begin
   if CpuCacheSize = 0 then
     CpuCacheSize := CpuCache[1].Size;
   if CpuCacheSize <> 0 then
-    CpuCacheText := 'L1=' + KB(CpuCache[1].Size) + ' L2=' + KB(CpuCache[2].Size);
+    CpuCacheText := 'L1=' + _oskb(CpuCache[1].Size) +
+                   ' L2=' + _oskb(CpuCache[2].Size);
   {$endif OSDARWIN}
   {$else}
   {$ifdef OSANDROID}
+  // pure ANDROID branch
   release := GetSystemProperty('ro.build.version.release');
   prod := TrimU(RawUtf8(GetSystemProperty('ro.product.brand') + ' ' +
                         GetSystemProperty('ro.product.name') + ' ' +
                         GetSystemProperty('ro.product.device')));
   {$else}
+  // pure LINUX branch
+  GetSystemMacAddress := _GetSystemMacAddress;
   prod := TrimU(TrimU(StringFromFile('/sys/class/dmi/id/sys_vendor', true)) +
     ' ' + StringFromFile('/sys/class/dmi/id/product_name', true));
   if prod <> '' then
@@ -3075,7 +3149,7 @@ begin
   SystemInfo.release := release;
   {$endif OSBSDDARWIN}
   if CpuCacheSize <> 0 then
-    CpuInfoText := KB(CpuCacheSize) + ' cache';
+    CpuInfoText := _oskb(CpuCacheSize) + ' cache';
   SystemInfo.uts.release := uts.Release;
   SystemInfo.uts.sysname := uts.Sysname;
   SystemInfo.uts.version := uts.Version;
@@ -3100,10 +3174,10 @@ begin
   if SystemInfo.dwNumberOfProcessors = 0 then
     SystemInfo.dwNumberOfProcessors := 1;
   if modname = nil then
-    CpuInfoText := Format('%d x generic ' + CPU_ARCH_TEXT + ' cpu %s',
+    CpuInfoText := _fmt('%d x generic ' + CPU_ARCH_TEXT + ' cpu %s',
       [SystemInfo.dwNumberOfProcessors, CpuInfoText])
   else
-    CpuInfoText := Format('%d x %s %s (' + CPU_ARCH_TEXT + ')',
+    CpuInfoText := _fmt('%d x %s %s (' + CPU_ARCH_TEXT + ')',
       [SystemInfo.dwNumberOfProcessors, modname, CpuInfoText]);
   if CpuInfoText = '' then
     CpuInfoText := CPU_ARCH_TEXT;

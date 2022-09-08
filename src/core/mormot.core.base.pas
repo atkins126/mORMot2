@@ -785,8 +785,8 @@ procedure ShortStringToAnsi7String(const source: ShortString; var result: RawUtf
 procedure Ansi7StringToShortString(const source: RawUtf8; var result: ShortString);
   {$ifdef FPC}inline;{$endif}
 
-/// simple concatenation of a 32-bit integer as text into a shorstring
-procedure AppendShortInteger(value: integer; var dest: ShortString);
+/// simple concatenation of a 32-bit unsigned integer as text into a shorstring
+procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
 
 /// simple concatenation of a 64-bit integer as text into a shorstring
 procedure AppendShortInt64(value: Int64; var dest: ShortString);
@@ -2311,11 +2311,11 @@ type
    cfCLFLUSH, cfCLWB, cfIPT, cfAVX512PF, cfAVX512ER, cfAVX512CD, cfSHA,
    cfAVX512BW, cfAVX512VL, cfPREFW1, cfAVX512VBMI, cfUMIP, cfPKU, cfOSPKE,
    cf_c05, cfAVX512VBMI2, cfCETSS, cfGFNI, cfVAES, cfVCLMUL, cfAVX512NNI,
-   cfAVX512BITALG, cfTMEEN, cfAVX512VPC, cf_c15, cfFLP, cf_c17, cf_c18,
-   cf_c19, cf_c20, cf_c21, cfRDPID, cfKL, cf_c24, cfCLDEMOTE, cf_c26,
+   cfAVX512BITALG, cfTMEEN, cfAVX512VPC, cf_c15, cfFLP, cfMPX0, cfMPX1,
+   cfMPX2, cfMPX3, cfMPX4, cfRDPID, cfKL, cf_c24, cfCLDEMOTE, cf_c26,
    cfMOVDIRI, cfMOVDIR64B, cfENQCMD, cfSGXLC, cfPKS, cf_d0, cf_d1,
    cfAVX512NNIW, cfAVX512MAPS, cfFSRM, cf_d5, cf_d6, cf_d7, cfAVX512VP2I,
-   cfSRBDS, cfMDCLR, cf_d11, cf_d12, cfTSXFA, cfSER, cfHYBRID,
+   cfSRBDS, cfMDCLR, cfTSXABRT, cf_d12, cfTSXFA, cfSER, cfHYBRID,
    cfTSXLDTRK, cf_d17, cfPCFG, cfLBR, cfIBT, cf_d21, cfAMXBF16, cfAVX512FP16,
    cfAMXTILE, cfAMXINT8, cfIBRSPB, cfSTIBP, cfL1DFL, cfARCAB, cfCORCAB, cfSSBD);
 
@@ -3308,6 +3308,11 @@ function SynLZdecompress1(src: PAnsiChar; size: integer; dst: PAnsiChar): intege
 // - will store a hash of both compressed and uncompressed stream: if the
 // data is corrupted during transmission, will instantly return ''
 function CompressSynLZ(var Data: RawByteString; Compress: boolean): RawUtf8;
+
+/// return the Hash32() 32-bit CRC of CompressSynLZ() uncompressed data
+// - will first check the CRC of the supplied compressed Data
+// - returns 0 if the CRC of the compressed Data is not correct
+function CompressSynLZGetHash32(const Data: RawByteString): cardinal;
 
 /// simple Run-Length-Encoding compression of a memory buffer
 // - SynLZ is not good with input of a lot of redundant bytes, e.g. chunks of
@@ -4370,20 +4375,32 @@ begin
   dest[ord(dest[0])] := chr;
 end;
 
-procedure AppendShortInteger(value: integer; var dest: ShortString);
+procedure AppendShortTemp24(value, temp: PAnsiChar; dest: PAnsiChar);
+  {$ifdef HASINLINE} inline; {$endif}
 var
-  temp: ShortString;
+  valuelen, destlen, newlen: PtrInt;
 begin
-  str(value, temp); // fast enough for our purpose
-  AppendShort(temp, dest);
+  valuelen := temp - value;
+  destlen := ord(dest[0]);
+  newlen := valuelen + destlen;
+  if newlen > 255 then
+    exit;
+  dest[0] := AnsiChar(newlen);
+  MoveFast(value^, dest[destlen + 1], valuelen);
+end;
+
+procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
+var
+  tmp: array[0..23] of AnsiChar;
+begin
+  AppendShortTemp24(StrUInt32(@tmp[23], value), @tmp[23], @dest);
 end;
 
 procedure AppendShortInt64(value: Int64; var dest: ShortString);
 var
-  temp: ShortString;
+  tmp: array[0..23] of AnsiChar;
 begin
-  str(value, temp);
-  AppendShort(temp, dest);
+  AppendShortTemp24(StrInt64(@tmp[23], value), @tmp[23], @dest);
 end;
 
 procedure AppendShortBuffer(buf: PAnsiChar; len: integer; var dest: ShortString);
@@ -5771,7 +5788,7 @@ begin
   high := len - 1;
 end;
 
-procedure Div100(Y: cardinal; var res: TDiv100Rec); // Delphi=asm, FPC=inlinedS
+procedure Div100(Y: cardinal; var res: TDiv100Rec); // Delphi=asm, FPC=inlined
 var
   Y100: cardinal;
 begin
@@ -9684,6 +9701,20 @@ begin
       {%H-}tmp.Done;
     end;
   result := 'synlz';
+end;
+
+function CompressSynLZGetHash32(const Data: RawByteString): cardinal;
+var
+  DataLen: integer;
+  P: PAnsiChar;
+begin
+  DataLen := length(Data);
+  P := pointer(Data);
+  if (DataLen <= 8) or
+     (Hash32(pointer(P + 8), DataLen - 8) <> PCardinal(P + 4)^) then
+    result := 0
+  else
+    result := PCardinal(P)^;
 end;
 
 const

@@ -2241,19 +2241,19 @@ type
     fCache: TRttiCache;
     fParser: TRttiParserType;
     fParserComplex: TRttiParserComplexType;
+    fValueRtlClass: TRttiValueClass;
+    fArrayFirstField: TRttiParserType;
     fFlags: TRttiCustomFlags;
     fPrivateSlot: pointer;
-    fPrivateSlots: TObjectDynArray;
-    fPrivateSlotsSafe: TLightLock;
     fArrayRtti: TRttiCustom;
     fFinalize: TRttiFinalizer;
     fCopy: TRttiCopier;
-    fSetRandom: TRttiCustomRandom;
     fName: RawUtf8;
     fProps: TRttiCustomProps;
     fOwnedRtti: array of TRttiCustom; // for SetPropsFromText(NoRegister=true)
-    fValueRtlClass: TRttiValueClass;
-    fArrayFirstField: TRttiParserType;
+    fSetRandom: TRttiCustomRandom;
+    fPrivateSlots: TObjectDynArray;
+    fPrivateSlotsSafe: TLightLock;
     // used by mormot.core.json.pas
     fBinarySize: integer;
     fJsonLoad: pointer; // contains a TRttiJsonLoad - used if fJsonReader=nil
@@ -2350,6 +2350,14 @@ type
     // - implemented in TRttiJson for proper knowledge of TSynList/TRawUtf8List
     function ValueIterate(Data: pointer; Index: PtrUInt;
       out ResultRtti: TRttiCustom): pointer; virtual;
+    /// lookup a value by a path name e.g. 'one.two.three' nested values
+    // - for a record/class, will search for a property name
+    // - for a TDocVariant/TBsonVariant, calls TSynInvokeableVariantType.IntGet
+    // - for an enumeration or set, will return true/false about the enum name
+    // - for a string, Data^ will be compared to the name
+    // - implemented in TRttiJson for proper knowledge of our variants
+    function ValueByPath(var Data: pointer; Path: PUtf8Char; var Temp: TVarData;
+      PathDelim: AnsiChar = '.'): TRttiCustom; virtual;
     /// create a new TObject instance of this rkClass
     // - not implemented here (raise an ERttiException) but in TRttiJson,
     // so that mormot.core.rtti has no dependency to TSynPersistent and such
@@ -7107,7 +7115,8 @@ var
   rc: PRttiClass;
   rp: PRttiProp;
   rs: PRttiProps;
-  n, p: PtrInt;
+  p: PRttiCustomProp;
+  n, c: PtrInt;
 begin
   if (ClassInfo = nil) or
      (ClassInfo^.Kind <> rkClass) then
@@ -7117,19 +7126,32 @@ begin
     // put parent properties first
     AddFromClass(rc^.ParentInfo, true);
   rs := rc^.RttiProps;
-  p := rs^.PropCount;
-  if p = 0 then
+  n := rs^.PropCount;
+  if n = 0 then
     exit;
-  n := Count;
-  NotInheritedIndex := n;
-  inc(Count, p);
-  SetLength(List, Count);
+  c := Count;
+  NotInheritedIndex := c;
+  SetLength(List, c + n);
   rp := rs^.PropList;
   repeat
-    inc(Size, List[n].InitFrom(rp));
+    if c = 0 then
+      p := nil
+    else
+      p := FindCustomProp(pointer(List), @rp^.Name^[1], ord(rp^.Name^[0]), c);
+    if p = nil then
+    begin // first time we encounter this property
+      inc(Size, List[c].InitFrom(rp));
+      inc(c)
+    end
+    else // this property has been redefined in a sub-class
+      p^.InitFrom(rp);
     rp := rp^.Next;
-    inc(n)
-  until n = Count;
+    dec(n);
+  until n = 0;
+  if c = Count then
+    exit;
+  Count := c;
+  DynArrayFakeLength(List, c);
 end;
 
 procedure TRttiCustomProps.SetFromRecordExtendedRtti(RecordInfo: PRttiInfo);
@@ -7652,6 +7674,12 @@ begin
   result := nil;
 end;
 
+function TRttiCustom.ValueByPath(var Data: pointer; Path: PUtf8Char;
+  var Temp: TVarData; PathDelim: AnsiChar): TRttiCustom;
+begin
+  result := nil;
+end;
+
 function TRttiCustom.ClassNewInstance: pointer;
 begin
   result := fClassNewInstance(self);
@@ -7679,7 +7707,7 @@ begin
     GetNextItemShortString(FullName, @n, PathDelim);
     if n[0] in [#0, #254] then
       exit;
-    result := Props.Find(@n[1], ord(n[0]));
+    result := FindCustomProp(pointer(Props.List), @n[1], ord(n[0]), Props.Count);
     if (result = nil) or
        (FullName = nil) then
       exit;

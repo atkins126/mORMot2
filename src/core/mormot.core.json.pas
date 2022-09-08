@@ -1873,6 +1873,13 @@ type
     // temporary string variable for their getter method
     function ValueIterate(Data: pointer; Index: PtrUInt;
       out ResultRtti: TRttiCustom): pointer; override;
+    /// lookup a value by a path name e.g. 'one.two.three' nested values
+    // - for a record/class, will search for a property name
+    // - for a TDocVariant/TBsonVariant, calls TSynInvokeableVariantType.IntGet
+    // - for an enumeration or set, will return true/false about the enum name
+    // - for a string, Data^ will be compared to the name
+    function ValueByPath(var Data: pointer; Path: PUtf8Char; var Temp: TVarData;
+      PathDelim: AnsiChar = '.'): TRttiCustom; override;
     /// efficient search of TRttiJson from a given RTTI TypeInfo()
     // - to be used instead of Rtti.Find() to return directly the TRttiJson instance
     class function Find(Info: PRttiInfo): TRttiJson;
@@ -2022,6 +2029,20 @@ function SaveJson(const Value; TypeInfo: PRttiInfo;
 // - returns '' if TypeName is not recognized
 function SaveJson(const Value; const TypeName: RawUtf8;
   Options: TTextWriterOptions = []): RawUtf8; overload;
+
+{$ifdef FPC}
+/// special global function exported to Lazarus for runtime evaluation, within
+// latest trunk fpdebug, of any variable as JSON, using mORMot RTTI
+// - the "JsonForDebug" function name is recognized by recent fpdebug, and
+// called and try to serialize a variable as JSON in Lazarus debug windows - see
+// https://wiki.freepascal.org/IDE_Window:_Ide_Options_-_Backend_Value_Converter
+// - this function will recognize 1) all type names registered to mORMot RTTI
+// (using Rtti.Register*() methods), 2) T* class types guessing from their VMT,
+// 3) I* types recognized as interface, and their associated "as TObject" class
+// instance will be serialized
+procedure JsonForDebug(Value: pointer; var TypeName: RawUtf8;
+  out JsonResultText: RawUtf8);
+{$endif FPC}
 
 /// save record into its JSON serialization as saved by TJsonWriter.AddRecordJson
 // - will use default Base64 encoding over RecordSave() binary - or custom true
@@ -5122,9 +5143,8 @@ begin
         if (i >= Ctxt.Info.Cache.EnumMin) and
            GetBitPtr(Data, i) then
         begin
-          Ctxt.W.Add('"');
-          Ctxt.W.AddShort(PS^);
-          Ctxt.W.Add('"', ',');
+          Ctxt.AddShort(PS);
+          Ctxt.W.Add(',');
         end;
         inc(PByte(PS), PByte(PS)^ + 1); // next
       end;
@@ -5415,7 +5435,8 @@ begin
             (p^.OrdinalDefault = NO_DEFAULT) or
             not p^.ValueIsDefault(Data)) and
            // detect 0 numeric values and empty strings
-           (not (woDontStoreVoid in c.Options) or
+           (not ((woDontStoreVoid in c.Options) or
+                 (twoIgnoreDefaultInRecord in c.W.CustomOptions)) or
             not p^.ValueIsVoid(Data)) then
         begin
           // if we reached here, we should serialize this property
@@ -10188,6 +10209,141 @@ begin
     end;
 end;
 
+function StrEquA(n, str: PByte): boolean;
+var
+  c: byte;
+begin
+  result := false;
+  if str = nil then
+    exit;
+  repeat
+    c := n^;
+    if c <> str^ then // UTF-8 case-sensitive search
+      exit
+    else if c = 0 then
+      break; // n = str
+    inc(n);
+    inc(str);
+  until false;
+  result := true;
+end;
+
+
+function StrEquAW(n: PByte; str: PWord): boolean;
+var
+  c: cardinal;
+begin
+  result := false;
+  if str = nil then
+    exit;
+  repeat
+    c := n^;
+    if c <> str^ then // 7-bit ASCII case-sensitive search
+      exit
+    else if c = 0 then
+      break; // n = str
+    inc(n);
+    inc(str);
+  until false;
+  result := true;
+end;
+
+function TRttiJson.ValueByPath(var Data: pointer; Path: PUtf8Char;
+  var Temp: TVarData; PathDelim: AnsiChar): TRttiCustom;
+var
+  vt: TSynInvokeableVariantType;
+  p: PRttiCustomProp;
+  v: TVarData;
+  i: PtrInt;
+  n: ShortString;
+begin
+  if (self = nil) or
+     (Data = nil) then
+  begin
+    result := nil;
+    exit;
+  end;
+  result := self;
+  repeat
+    GetNextItemShortString(Path, @n, PathDelim);
+    if not (n[0] in [#0, #254]) then
+      case result.Kind of
+        rkVariant:
+          // try TDocVariant/TBsonVariant name lookup
+          if DocVariantType.FindSynVariantType(PVarData(Data)^.VType, vt) then
+          begin
+            TRttiVarData(v).VType := varEmpty; // or IntGet() would clear it
+            vt.IntGet(v, PVarData(Data)^, @n[1], ord(n[0]), {noexc=}true);
+            if v.VType <> varEmpty then
+            begin
+              Temp := v;
+              Data := @Temp;
+              result := PT_RTTI[ptVariant];
+              if Path = nil then
+                exit;
+              continue;
+            end;
+          end;
+        rkEnumeration,
+        rkSet:
+          // check enumeration/set name against the stored value
+          if Path = nil then // last path only
+          begin
+            i := result.Cache.EnumInfo^.GetEnumNameValue(@n[1], ord(n[0]));
+            if i >= 0 then
+            begin
+              // enum name match: return a boolean to stop searching
+              if result.Kind = rkEnumeration then
+              begin
+                // true = enum name matches the stored enum value
+                result.ValueToVariant(Data, v); // calls FromRttiOrd()
+                PBoolean(@Temp)^ := v.VInt64 = i;
+              end
+              else
+                // true = enum name is part of the set value
+                PBoolean(@Temp)^ := GetBitPtr(Data, i);
+              Data := @Temp;
+              result := PT_RTTI[ptBoolean]; // true/false if enum name found
+              exit;
+            end;
+          end;
+        rkLString:
+          // compare a RawUtf8 value with the name
+          if Path = nil then // last path only
+            if StrEquA(@n[1], PPByte(Data)^) then // n[1] ends with #0
+              exit; // return self as non nil value
+        {$ifdef HASVARUSTRING}
+        rkUstring,
+        {$endif HASVARUSTRING}
+        rkWString:
+          // compare a UnicodeString/WideString value with the name
+          if Path = nil then // last path only
+            if StrEquAW(@n[1], PPWord(Data)^) then
+              exit;
+      else
+        if result.Props.Count <> 0 then
+        begin
+          // search name in rkRecord/rkObject or rkClass properties
+          p := FindCustomProp(
+            pointer(result.Props.List), @n[1], ord(n[0]), result.Props.Count);
+          if (p <> nil) and
+             (p^.OffsetGet >= 0) then // we don't support getters yet
+          begin
+            result := p^.Value;
+            inc(PAnsiChar(Data), p.OffsetGet);
+            if Path = nil then
+              exit;
+            if result.Kind = rkClass then // stored by reference
+              Data := PPointer(PAnsiChar(Data) + p.OffsetGet)^;
+            continue;
+          end;
+        end;
+      end;
+    result := nil; // path not found
+    exit;
+  until false;
+end;
+
 procedure TRttiJson.RawSaveJson(Data: pointer; const Ctxt: TJsonSaveContext);
 begin
   TRttiJsonSave(fJsonSave)(Data, Ctxt);
@@ -10428,6 +10584,46 @@ begin
   else
     SaveJson(Value, nfo.Cache.Info, Options, result);
 end;
+
+{$ifdef FPC}
+procedure JsonForDebug(Value: pointer; var TypeName: RawUtf8;
+  out JsonResultText: RawUtf8);
+var
+  nfo: TRttiCustom;
+  vmt: PAnsiChar;
+begin
+  if (TypeName <> '') and
+     (Value <> nil) then
+  try
+    nfo := Rtti.RegisterTypeFromName(TypeName); // from Rtti.Register*() functions
+    {$ifdef HASINTERFACEASTOBJECT} // we target FPC/Lazarus anyway
+    if (nfo = nil) and
+       (TypeName[1] = 'I') then // guess class instance from interface variable
+      nfo := Rtti.RegisterClass(PInterface(Value)^ as TObject);
+    {$endif HASINTERFACEASTOBJECT}
+    if (nfo = nil) and
+       (TypeName[1] = 'T') then
+    begin
+      vmt := PPointer(Value)^; // guess if seems to be a real TObject instance
+      if (vmt <> nil) and
+         SeemsRealPointer(vmt) and
+         (PPtrInt(vmt + vmtInstanceSize)^ >= sizeof(vmt)) and
+         SeemsRealPointer(PPointer(vmt + vmtClassName)^) and
+         IdemPropName(PShortString(vmt + vmtClassName)^,
+           pointer(TypeName), length(TypeName)) then
+        nfo := Rtti.RegisterClass(TClass(pointer(vmt)));
+    end;
+    if nfo <> nil then
+    begin
+      SaveJson(Value^, nfo.Cache.Info, [twoEnumSetsAsBooleanInRecord],
+        JsonResultText, [woEnumSetsAsText]);
+      exit;
+    end;
+  except // especially if Value is no class
+    JsonResultText := ''; // impossible to serialization this value
+  end;
+end;
+{$endif FPC}
 
 function RecordSaveJson(const Rec; TypeInfo: PRttiInfo;
   EnumSetsAsText: boolean): RawUtf8;
@@ -10988,6 +11184,7 @@ procedure InitializeUnit;
 var
   i: integer; // not PtrInt since has just been overriden
   c: AnsiChar;
+  {$ifdef FPC} dummy: RawUtf8; {$endif}
 begin
   // branchless JSON escaping - JSON_ESCAPE_NONE=0 if no JSON escape needed
   JSON_ESCAPE[0]   := JSON_ESCAPE_ENDINGZERO; // 1 for #0 end of input
@@ -11052,6 +11249,9 @@ begin
   // now we can register some local type alias to be found by name
   Rtti.RegisterTypes([TypeInfo(RawUtf8), TypeInfo(PtrInt), TypeInfo(PtrUInt)]);
   GetDataFromJson := _GetDataFromJson;
+  {$ifdef FPC} // we need to call it once so that it is linked to the executable
+  JsonForDebug(nil, dummy, dummy);
+  {$endif FPC}
 end;
 
 

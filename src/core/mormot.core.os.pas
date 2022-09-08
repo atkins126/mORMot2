@@ -1048,6 +1048,13 @@ procedure SetExecutableVersion(const aVersionText: RawUtf8); overload;
 var
   GetExecutableLocation: function(aAddress: pointer): ShortString;
 
+var
+  /// retrieve the MAC addresses of all hardware network adapters
+  // - mormot.net.sock.pas will inject here its own cross-platform version
+  // - this unit will include a simple parser of /sys/class/net/* for Linux only
+  // - as used by GetComputerUuid()
+  GetSystemMacAddress: function: TRawUtf8DynArray;
+
 
 type
   /// identify an operating system folder for GetSystemPath()
@@ -1115,7 +1122,8 @@ function GetSystemStoreAsPem(CertStore: TSystemCertificateStore;
   FlushCache: boolean = false; now: cardinal = 0): RawUtf8; overload;
 
 type
-  /// the raw SMBIOS information as retrieved by GetRawSmbios()
+  /// the raw SMBIOS information as filled by GetRawSmbios
+  // - first 4 bytes are $010003ff on POSIX if read from /var/tmp/.synopse.smb
   TRawSmbiosInfo = record
     /// some flag only set by GetSystemFirmwareTable() Windows API
     Reserved: byte;
@@ -1125,30 +1133,37 @@ type
     SmbMinorVersion: byte;
     /// typically 0 for SMBIOS 2.1, 1 for SMBIOS 3.0
     DmiRevision: byte;
-    /// the (maximum) length of encoded binary in data
+    /// the length of encoded binary in data
     Length: DWORD;
     /// low-level binary of the SMBIOS Structure Table
     Data: RawByteString;
   end;
 
-/// retrieve the SMBIOS raw information as a single binary blob
+var
+  /// global variable filled by GetRawSmbios from SMBIOS binary information
+  RawSmbios: TRawSmbiosInfo;
+
+/// retrieve the SMBIOS raw information as a single RawSmbios gloabl binary blob
 // - will try the Windows API if available, or search and parse the main system
 // memory with UEFI redirection if needed - via /systab system file on Linux, or
 // kenv() on FreeBSD (only fully tested to work on Windows XP+ and Linux)
 // - follow DSP0134 3.6.0 System Management BIOS (SMBIOS) Reference Specification
 // with both SMBIOS 2.1 (32-bit) or SMBIOS 3.0 (64-bit) entry points
 // - the current user should have enough rights to read the main system memory,
-// which means it should be root on most Operating Systems - so it could be
-// a good idea to read it once, and persist the information on disk
-function GetRawSmbios(out info: TRawSmbiosInfo): boolean;
+// which means it should be root on most POSIX Operating Systems - so we persist
+// this raw binary in /var/tmp/.synopse.smb to retrieve it from non-root user
+function GetRawSmbios: boolean;
 
 type
   /// the basic SMBIOS fields supported by GetSmbios/DecodeSmbios functions
   // - only include the first occurence for board/cpu/battery types
+  // - see TSmbiosInfo in mormot.core.perf.pas for more complete decoding
   TSmbiosBasicInfo = (
     sbiUndefined,
     sbiBiosVendor,
     sbiBiosVersion,
+    sbiBiosFirmware,
+    sbiBiosRelease,
     sbiBiosDate,
     sbiManufacturer,
     sbiProductName,
@@ -1172,28 +1187,42 @@ type
     sbiBatteryManufacturer,
     sbiBatteryName,
     sbiBatteryVersion,
-    sbiBatteryChemistry);
+    sbiBatteryChemistry,
+    sbiOem
+  );
 
   /// the text fields stored by GetSmbios/DecodeSmbios functions
   TSmbiosBasicInfos = array[TSmbiosBasicInfo] of RawUtf8;
 
-/// decode basic SMBIOS information as text from a GetRawSmbios() binary blob
-function DecodeSmbios(const raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): boolean;
+/// decode basic SMBIOS information as text from a TRawSmbiosInfo binary blob
+// - see DecodeSmbiosInfo() in mormot.core.perf.pas for a more complete decoder
+// - returns the total size of DMI/SMBIOS information in raw.data (may be lower)
+// - will also adjust raw.Length and truncate raw.Data to the actual useful size
+function DecodeSmbios(var raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): PtrInt;
 
 // some global definitions for proper caching and inlining of GetSmbios()
 procedure ComputeGetSmbios;
-procedure DecodeSmbiosUuid(src: PGuid; out dest: RawUtf8; ver: cardinal);
+procedure DecodeSmbiosUuid(src: PGuid; out dest: RawUtf8; const raw: TRawSmbiosInfo);
 var
   _Smbios: TSmbiosBasicInfos;
   _SmbiosRetrieved: boolean;
 
 /// retrieve SMBIOS information as text
-// - only the main values are decoded - see mormot.core.perf for a more complete
-// DMI/SMBIOS decoder
+// - only the main values are decoded - see GetSmbiosInfo in mormot.core.perf
+// for a more complete DMI/SMBIOS decoder
 // - on POSIX, requires root to access full SMBIOS information - will fallback
 // reading /sys/class/dmi/id/* on Linux or kenv() on FreeBSD for most entries
+// if we found no previous root-retrieved cache in local /var/tmp/.synopse.smb
 function GetSmbios(info: TSmbiosBasicInfo): RawUtf8;
   {$ifdef HASINLINE} inline; {$endif}
+
+/// retrieve a genuine 128-bit UUID identifier for this computer
+// - first try GetSmbios(sbiUuid), i.e. the SMBIOS System UUID
+// - otherwise, will compute a genuine hash from known hardware information
+// (CPU, Bios, MAC) and store it in a local file for the next access, e.g. into
+// '/var/tmp/.synopse.uid' on POSIX
+// - note: some BIOS have no UUID, so we fallback to our hardware hash on those
+procedure GetComputerUuid(out uuid: TGuid);
 
 
 { ****************** Operating System Specific Types (e.g. TWinRegistry) }
@@ -2238,6 +2267,13 @@ function DateTimeToWindowsFileTime(DateTime: TDateTime): integer;
 // - on Windows, will set the "hidden" file attribue
 procedure FileSetHidden(const FileName: TFileName; ReadOnly: boolean);
 
+/// set the "sticky bit" on a file or directory
+// - on POSIX, a "sticky" folder will ensure that its nested files will be
+// deleted by their owner; and a "sticky" file will ensure e.g. that no
+// /var/tmp file is deleted by systemd during its clean up phases
+// - on Windows, will set the Hidden and System file attributes
+procedure FileSetSticky(const FileName: TFileName);
+
 /// get a file size, from its name
 // - returns 0 if file doesn't exist
 // - under Windows, will use GetFileAttributesEx fast API
@@ -2392,6 +2428,9 @@ function StringFromFolders(const Folders: array of TFileName;
 // - uses RawByteString for byte storage, whatever the codepage is
 function FileFromString(const Content: RawByteString; const FileName: TFileName;
   FlushOnDisk: boolean = false; FileDate: TDateTime = 0): boolean;
+
+/// create a File from a memory buffer content
+function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName): boolean;
 
 /// compute an unique temporary file name
 // - following 'exename_123.tmp' pattern, in the system temporary folder
@@ -2638,7 +2677,7 @@ procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
 function SeemsRealPointer(p: pointer): boolean;
 
 /// fill a buffer with a copy of some low-level system memory
-// - used e.g. by GetRawSmbios() on XP or Linux/POSIX
+// - used e.g. by GetRawSmbios on XP or Linux/POSIX
 // - will allow to read up to 4MB of memory
 // - use low-level ntdll.dll API on Windows, or reading /dev/mem on POSIX - so
 // expect sudo/root rights on most systems
@@ -2782,6 +2821,9 @@ procedure Win32PWideCharToUtf8(P: PWideChar; Len: integer; out res: RawUtf8);
 function PosixParseHex32(p: PAnsiChar): integer;
 
 {$endif OSWINDOWS}
+
+// internal function to avoid linking mormot.core.buffers.pas
+function _oskb(Size: cardinal): string;
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded string
 // - under Windows, will use the CP_OEMCP encoding
@@ -4299,6 +4341,27 @@ begin
   result := false;
 end;
 
+function _oskb(Size: cardinal): string;
+const
+  _U: array[0..2] of string[3] = ('GB', 'MB', 'KB');
+var
+  u, v: cardinal;
+begin
+  u := 0;
+  v := Size shr 30;
+  if v = 0 then
+  begin
+    inc(u);
+    v := Size shr 20;
+    if v = 0 then
+    begin
+      inc(u);
+      v := Size shr 10;
+    end;
+  end;
+  result := format('%d%s', [v, _U[u]]);
+end;
+
 
 { ****************** Gather Operating System Information }
 
@@ -4331,12 +4394,12 @@ begin
   if (osv.os = osWindows) and
      (osv.winbuild <> 0) then
     // include the Windows build number, e.g. 'Windows 11 64-bit 22000'
-    result := RawUtf8(Format('%s %d', [result, osv.winbuild]));
+    result := _fmt('%s %d', [result, osv.winbuild]);
   if (osv.os >= osLinux) and
      (osv.utsrelease[2] <> 0) then
     // include kernel number to the distribution name, e.g. 'Ubuntu Linux 5.4.0'
-    result := RawUtf8(Format('%s Linux %d.%d.%d', [result, osv.utsrelease[2],
-      osv.utsrelease[1], osv.utsrelease[0]]));
+    result := _fmt('%s Linux %d.%d.%d', [result, osv.utsrelease[2],
+      osv.utsrelease[1], osv.utsrelease[0]]);
 end;
 
 const
@@ -4959,6 +5022,32 @@ begin
     FileSetDate(FileName, DateTimeToFileDate(FileDate));
   {$endif OSWINDOWS}
   result := true;
+end;
+
+function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName): boolean;
+var
+  F: THandle;
+  written: PtrInt;
+begin
+  result := false;
+  if FileName = '' then
+    exit;
+  F := FileCreate(FileName);
+  if PtrInt(F) < 0 then
+    exit;
+  result := true;
+  while Len > 0 do
+  begin
+    written := FileWrite(F, Buf^, Len);
+    if written <= 0 then
+    begin
+      result := false;
+      break;
+    end;
+    dec(Len, written);
+    inc(PByte(Buf), written);
+  end;
+  FileClose(F);
 end;
 
 var
@@ -5767,8 +5856,8 @@ begin
   else
   begin
     if fVersionInfo = '' then
-      fVersionInfo := RawUtf8(Format('%s %s (%s)', [ExtractFileName(fFileName),
-        DetailedOrVoid, BuildDateTimeString]));
+      fVersionInfo := _fmt('%s %s (%s)', [ExtractFileName(fFileName),
+        DetailedOrVoid, BuildDateTimeString]);
     result := fVersionInfo;
   end;
 end;
@@ -5781,9 +5870,9 @@ begin
   begin
     if fUserAgent = '' then
     begin
-      fUserAgent := RawUtf8(Format('%s/%s%s', [
+      fUserAgent := _fmt('%s/%s%s', [
         GetFileNameWithoutExtOrPath(fFileName), DetailedOrVoid,
-        OS_INITIAL[OS_KIND]]));
+        OS_INITIAL[OS_KIND]]);
       {$ifdef OSWINDOWS}
       if OSVersion in WINDOWS_32 then
         fUserAgent := fUserAgent + '32';
@@ -5875,8 +5964,8 @@ begin
     end
     else
       Version.SetVersion(aMajor, aMinor, aRelease, aBuild);
-    ProgramFullSpec := RawUtf8(Format('%s %s (%s)', [ProgramFileName,
-      Version.Detailed, Version.BuildDateTimeString]));
+    ProgramFullSpec := _fmt('%s %s (%s)', [ProgramFileName,
+      Version.Detailed, Version.BuildDateTimeString]);
     Hash.c0 := Version.Version32;
     {$ifdef OSLINUXANDROID}
     Hash.c0 := crc32c(Hash.c0, pointer(CpuInfoFeatures), length(CpuInfoFeatures));
@@ -6127,35 +6216,116 @@ begin
 end;
 
 procedure ComputeGetSmbios;
-var
-  raw: TRawSmbiosInfo;
 begin
   GlobalLock; // thread-safe retrieval
   try
     if not _SmbiosRetrieved then
     begin
        _SmbiosRetrieved := true;
-      if not GetRawSmbios(raw) or
-         not DecodeSmbios(raw, _Smbios) then
-        // if not root on POSIX SMBIOS is not available
-        // -> try to get what the OS exposes (Linux or FreeBSD)
-        DirectSmbiosInfo(_Smbios);
+      if _GetRawSmbios(RawSmbios) then // OS specific call
+         if DecodeSmbios(RawSmbios, _Smbios) <> 0 then
+         begin
+           // we were able to retrieve and decode SMBIOS information
+           {$ifdef OSPOSIX}
+           _AfterDecodeSmbios(RawSmbios); // persist in SMB_CACHE for non-root
+           {$endif OSPOSIX}
+           exit;
+         end;
+      // if not root on POSIX, SMBIOS is not available
+      // -> try to get what the OS exposes (Linux or FreeBSD)
+      DirectSmbiosInfo(_Smbios);
     end;
   finally
     GlobalUnLock;
   end;
 end;
 
+function GetRawSmbios: boolean;
+begin
+  if not _SmbiosRetrieved then
+    ComputeGetSmbios; // fill both RawSmbios and _Smbios[]
+  result := RawSmbios.Data <> '';
+end;
+
 function GetSmbios(info: TSmbiosBasicInfo): RawUtf8;
 begin
   if not _SmbiosRetrieved then
-    ComputeGetSmbios;
+    ComputeGetSmbios; // fill both RawSmbios and _Smbios[]
   result := _Smbios[info];
 end;
 
-{.$define SMB_UUID_SWAP4} // seems not needed on Windows or Linux :(
+{$ifndef FPC} // missing convenient RTL function in Delphi
+function TryStringToGUID(const s: string; var uuid: TGuid): boolean;
+begin
+  try
+    uuid := StringToGUID(s);
+    result := true;
+  except
+    result := false;
+  end;
+end;
+{$endif FPC}
 
-procedure DecodeSmbiosUuid(src: PGuid; out dest: RawUtf8; ver: cardinal);
+procedure GetComputerUuid(out uuid: TGuid);
+var
+  n, i: PtrInt;
+  u: THash128Rec absolute uuid;
+  s: RawByteString;
+  fn: TFileName;
+  mac: TRawUtf8DynArray;
+
+  procedure crctext(const s: RawUtf8);
+  begin
+    if s = '' then
+      exit;
+    u.c[n] := crc32c(u.c[n], pointer(s), length(s));
+    n := (n + 1) and 3;
+  end;
+
+begin
+  // first try to retrieve the Machine BIOS UUID
+  if not _SmbiosRetrieved then
+    ComputeGetSmbios; // maybe from local SMB_CACHE file for non-root
+  if (_Smbios[sbiUuid] <> '') and
+     TryStringToGUID('{' + string(_Smbios[sbiUuid]) + '}', uuid) then
+    exit;
+  // did we already compute this UUID?
+  fn := UUID_CACHE;
+  s := StringFromFile(fn);
+  if length(s) = SizeOf(u) then
+  begin
+    uuid := PGuid(s)^;
+    exit;
+  end;
+  // no known UUID: compute and store a 128-bit hash from hardware information
+  {$ifdef CPUINTELARM}
+  crc128c(@CpuFeatures, SizeOf(CpuFeatures), u.b);
+  {$else}
+  FillZero(u.b);
+  {$endif CPUINTELARM}
+  if RawSmbios.Data <> '' then // some bios have no uuid
+    crc32c128(@u.b, pointer(RawSmbios.Data), length(RawSmbios.Data));
+  n := 0;
+  for i := 0 to length(_Smbios) - 1 do // some of _Smbios[] may be set
+    crctext(PRawUtf8Array(@_Smbios)[i]);
+  crctext(CpuCacheText);
+  crctext(BiosInfoText);
+  crctext(CpuInfoText);
+  if Assigned(GetSystemMacAddress) then
+  begin
+    // from mormot.net.sock or mormot.core.os.posix.inc for Linux only
+    mac := GetSystemMacAddress;
+    for i := 0 to high(mac) do
+      crctext(mac[i]);
+  end
+  else
+    // fallback if mormot.net.sock is not included (very unlikely)
+    crctext(Executable.Host);
+  if FileFromBuffer(@u, SizeOf(u), fn) then
+    FileSetSticky(fn); // use S_ISVTX so that file is not removed from /var/tmp
+end;
+
+procedure DecodeSmbiosUuid(src: PGuid; out dest: RawUtf8; const raw: TRawSmbiosInfo);
 var
   uid: TGuid;
 begin
@@ -6166,40 +6336,51 @@ begin
       (PCardinalArray(@uid)[2] <> $ffffffff) or
       (PCardinalArray(@uid)[3] <> $ffffffff)) then
   begin
-    {$ifdef SMB_UUID_SWAP4} // "wmic csproduct get uuid" don't swap
-    if ver >= $0206 then // see dmi_system_uuid() in dmidecode.c
+    // GUIDToString() already displays the first 4 bytes as little-endian
+    // so we don't need to swap those bytes as dmi_system_uuid() in dmidecode.c
+    // - without those 2 lines, result matches "wmic csproduct get uuid"
+    // on Windows XP or 10, and "dmidecode" output on both Delphi and FPC
+    {$ifdef SMB_UUID_SWAP4}
+    if raw.SmbMajorVersion shl 8 + raw.SmbMinorVersion < $0206 then
       uid.D1 := bswap32(uid.D1); // swap endian as of version 2.6
     {$endif SMB_UUID_SWAP4}
     dest := RawUtf8(UpperCase(copy(GUIDToString(uid), 2, 36)));
   end;
 end;
 
-function DecodeSmbios(const raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): boolean;
+function DecodeSmbios(var raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): PtrInt;
 var
   lines: array[byte] of TSmbiosBasicInfo; // single pass efficient decoding
-  ver: cardinal;
   len: PtrInt;
   cur: ^TSmbiosBasicInfo;
-  s: PByteArray;
+  s, sEnd: PByteArray;
 begin
-  result := false;
+  result := 0;
   Finalize(info);
   s := pointer(raw.Data);
   if s = nil then
     exit;
-  ver := raw.SmbMajorVersion shl 8 + raw.SmbMinorVersion;
+  sEnd := @s[length(raw.Data)];
   FillCharFast(lines, SizeOf(lines), 0);
   repeat
-    //writeln('type=',s[0], ' length=', s[1]);
     if (s[0] = 127) or // type (127=EOT)
-       (s[1] < 4) then // length
+       (s[1] < 4) or   // length
+       (PtrUInt(@s[s[1]]) > PtrUInt(sEnd)) then
+    begin
+      s := @s[2]; // truncate to the exact end of DMI/SMBIOS input
       break;
+    end;
     case s[0] of
       0: // Bios Information (type 0)
         begin
           lines[s[4]] := sbiBiosVendor;
           lines[s[5]] := sbiBiosVersion;
           lines[s[8]] := sbiBiosDate;
+          if s[1] >= $17 then // 2.4+
+          begin
+            info[sbiBiosRelease]  := _fmt('%d.%d', [s[$14], s[$15]]);
+            info[sbiBiosFirmware] := _fmt('%d.%d', [s[$16], s[$17]]);
+          end;
         end;
       1: // System Information (type 1)
         begin
@@ -6209,7 +6390,7 @@ begin
           lines[s[7]] := sbiSerial;
           if s[1] >= $18 then // 2.1+
           begin
-            DecodeSmbiosUuid(@s[8], info[sbiUuid], ver);
+            DecodeSmbiosUuid(@s[8], info[sbiUuid], raw);
             if s[1] >= $1a then // 2.4+
             begin
               lines[s[$19]] := sbiSku;
@@ -6237,6 +6418,9 @@ begin
             lines[s[$22]] := sbiCpuPartNumber;
           end;
         end;
+      11: // OEM Strings (Type 11) - keep only the first
+        if s[4] <> 0 then
+          lines[1] := sbiOem; // e.g. 'vboxVer_6.1.36'
       22: // Portable Battery (type 22) - keep only the first
         if s[1] >= $0f then // 2.1+
         begin
@@ -6259,7 +6443,6 @@ begin
         begin
           if info[cur^] = '' then // only set the first occurence if multiple
             FastSetString(info[cur^], s, len);
-          //writeln(ord(cur^), ' = ', info[cur^]);
           cur^ := sbiUndefined; // reset slot in lines[]
         end;
         s := @s[len + 1]; // next string
@@ -6267,7 +6450,11 @@ begin
       until s[0] = 0; // end of string table
     inc(PByte(s)); // go to next structure
   until false;
-  result := info[sbiBiosVendor] <> '';
+  // compute the exact DMI/SMBIOS size, and adjust the raw.Data length
+  result := PtrUInt(s) - PtrUInt(raw.Data);
+  raw.Length := result;
+  if length(raw.Data) <> result then
+    FakeLength(raw.Data, result);
 end;
 
 
