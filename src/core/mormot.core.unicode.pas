@@ -561,6 +561,18 @@ var
 // - could allow logging of parsed input e.g. after an exception
 procedure UniqueRawUtf8ZeroToTilde(var u: RawUtf8; MaxSize: PtrInt = maxInt);
 
+/// convert a binary buffer into a fake ASCII/UTF-8 content without any #0 input
+// - will use ~ char to escape any #0 as ~0 pair (and plain ~ as ~~ pair)
+// - output is just a bunch of non 0 bytes, so not trully valid UTF-8 content
+// - may be used as an alternative to Base64 encoding if 8-bit chars are allowed
+// - call ZeroedRawUtf8() as reverse function
+function UnZeroed(const bin: RawByteString): RawUtf8;
+
+/// convert a fake UTF-8 buffer without any #0 input back into its original binary
+// - may be used as an alternative to Base64 decoding if 8-bit chars are allowed
+// - call UnZeroedRawUtf8() as reverse function
+function Zeroed(const u: RawUtf8): RawByteString;
+
 /// conversion of a wide char into a WinAnsi (CodePage 1252) char
 // - return '?' for an unknown WideChar in code page 1252
 function WideCharToWinAnsiChar(wc: cardinal): AnsiChar;
@@ -4109,6 +4121,98 @@ begin
   for i := 0 to MaxSize - 1 do
     if PByteArray(u)[i] = 0 then
       PByteArray(u)[i] := ord('~');
+end;
+
+const
+  ZEROED_CW = '~'; // any byte would do - followed by ~ or 0
+
+function UnZeroed(const bin: RawByteString): RawUtf8;
+var
+  len, z, c: PtrInt;
+  a: AnsiChar;
+  s, d: PAnsiChar;
+begin
+  result := '';
+  len := length(bin);
+  if len = 0 then
+    exit;
+  s := pointer(bin);
+  z := StrLen(s);
+  c := ByteScanIndex(pointer(s), len, ord(ZEROED_CW));
+  if (z = len) and
+     (c < 0) then
+  begin
+    result := bin; // nothing to convert
+    exit;
+  end;
+  if (c < 0) or
+     (z < c) then
+    c := z;
+  FastSetString(result, nil, len shl 1);
+  d := pointer(result);
+  MoveFast(s^, d^, c);
+  inc(s, c);
+  inc(d, c);
+  dec(len, c);
+  repeat
+    a := s^;
+    if a = #0 then
+    begin
+      d^ := ZEROED_CW;
+      inc(d);
+      a := '0';
+    end
+    else if a = ZEROED_CW then
+    begin
+      d^ := ZEROED_CW;
+      inc(d);
+    end;
+    d^ := a;
+    inc(d);
+    inc(s);
+    dec(len);
+  until len = 0;
+  FakeLength(result, d - pointer(result));
+end;
+
+function Zeroed(const u: RawUtf8): RawByteString;
+var
+  len, c: PtrInt;
+  a: AnsiChar;
+  s, d: PAnsiChar;
+begin
+  result := '';
+  len := length(u);
+  if len = 0 then
+    exit;
+  s := pointer(u);
+  c := ByteScanIndex(pointer(s), len, ord(ZEROED_CW));
+  if c < 0 then
+  begin
+    result := u;
+    exit;
+  end;
+  FastSetRawByteString(result, nil, len);
+  d := pointer(result);
+  MoveFast(s^, d^, c);
+  inc(s, c);
+  inc(d, c);
+  dec(len, c);
+  repeat
+    a := s^;
+    if a = ZEROED_CW then
+    begin
+      inc(s);
+      dec(len);
+      if s^ = '0' then
+        a := #0;
+    end;
+    d^ := a;
+    inc(d);
+    inc(s);
+    dec(len);
+  until len = 0;
+  FakeLength(result, d - pointer(result));
 end;
 
 procedure Utf8ToWideString(const Text: RawUtf8; var result: WideString);

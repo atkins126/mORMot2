@@ -1983,7 +1983,7 @@ begin
         fX509 := x; // as expected by next line
         Sign(Authority);
       except
-        fX509 := nil; // on erorr, rollback (and call x.Free)
+        fX509 := nil; // on error, rollback (and call x.Free)
       end;
     //writeln('IsSelfSigned=',x.IsSelfSigned);
     // the certificate was generated so can be stored within this instance
@@ -2730,6 +2730,36 @@ begin
     raise EOpenSslCert.Create('Unexpected X509Algo()');
 end;
 
+function _CreateDummyCertificate(const Stuff: RawUtf8;
+  const CertName: RawUtf8; Marker: cardinal): RawByteString;
+const
+  EXPIRED_DATE = '20000101000000Z'; // won't be taken into account anyway
+var
+  x: PX509;
+  key: PEVP_PKEY;
+  len: integer;
+  value: RawUtf8;
+begin
+  x := NewCertificate;
+  x.SetBasic(true);
+  x.SetUsage([kuKeyCertSign]);
+  X509_get_subject_name(x)^.AddEntry('CN', CertName);
+  key := OpenSslGenerateKeys(EVP_PKEY_EC, NID_X9_62_prime256v1); // smaller
+  X509_set_pubkey(x, key);
+  X509_set_issuer_name(x, X509_get_subject_name(x));
+  ASN1_TIME_set_string_X509(X509_get0_notAfter(x),  EXPIRED_DATE);
+  ASN1_TIME_set_string_X509(X509_get0_notBefore(x), EXPIRED_DATE);
+  len := length(Stuff);
+  SetLength(value, len + 8);
+  PCardinalArray(value)[0] := Marker;
+  BinToHex(@len, @PCardinalArray(value)[1], 2);
+  MoveFast(pointer(Stuff)^, PCardinalArray(value)[2], len);
+  x.SetExtension(NID_netscape_comment, value); // free-form text comment
+  x.Sign(key, EVP_sha1); // self-signed
+  result := x.ToBinary;  // DER format is a proper SEQ $30 ASN1 block
+  x.Free;
+end;
+
 
 procedure RegisterOpenSsl;
 var
@@ -2738,7 +2768,7 @@ begin
   if (TAesFast[mGcm] = TAesGcmOsl) or
      not OpenSslIsAvailable then
     exit;
-  // set the fastest AES implementation classes
+  // set the fastest AES implementation classes according to the actual platform
   TAesFast[mGcm] := TAesGcmOsl;
   {$ifdef HASAESNI}
     // mormot.crypt.core x86_64 asm is faster than OpenSSL - but GCM
@@ -2754,12 +2784,13 @@ begin
   TAesFast[mOfb] := TAesOfbOsl;
   TAesFast[mCtr] := TAesCtrOsl;
   {$endif HASAESNI}
-  // redirects raw mormot.crypt.ecc256r1 functions to the much faster OpenSSL
+  // redirects raw mormot.crypt.ecc256r1 functions to faster OpenSSL wrappers
   @Ecc256r1MakeKey := @ecc_make_key_osl;
   @Ecc256r1Sign := @ecdsa_sign_osl;
   @Ecc256r1Verify := @ecdsa_verify_osl;
   @Ecc256r1SharedSecret := @ecdh_shared_secret_osl;
   TEcc256r1Verify := TEcc256r1VerifyOsl;
+  // register OpenSSL methods to our high-level cryptographic catalog
   TCryptAsymOsl.Implements('secp256r1,NISTP-256,prime256v1'); // with caaES256
   for osa := low(osa) to high(osa) do
   begin
@@ -2767,6 +2798,8 @@ begin
     CryptCertAlgoOpenSsl[osa] := TCryptCertAlgoOpenSsl.Create(osa);
   end;
   CryptStoreAlgoOpenSsl := TCryptStoreAlgoOpenSsl.Implements(['x509-store']);
+  // we can use OpenSSL for StuffExeCertificate() stuffed certificate generation
+  CreateDummyCertificate := _CreateDummyCertificate;
 end;
 
 procedure FinalizeUnit;

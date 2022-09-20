@@ -1544,12 +1544,26 @@ begin
       Check(k = TPemKind(i and 7));
       CheckEqual(NextPem(P, @k), '');
     end;
+    b64 := UnZeroed(tmp);
+    Check(StrLen(pointer(b64)) = length(b64), 'unz');
+    Check(Zeroed(b64) = tmp, 'UnZeroed');
     tmp := tmp + AnsiChar(Random32(255));
   end;
+  Check(Zeroed(UnZeroed(#0)) = #0, 'unz0');
+  Check(Zeroed(UnZeroed(#0#0)) = #0#0, 'unz1');
+  Check(Zeroed(UnZeroed(#0'~'#0)) = #0'~'#0, 'unz2');
+  Check(Zeroed(UnZeroed(#0#0'~~')) = #0#0'~~', 'unz3');
+  Check(Zeroed(UnZeroed('~'#0#0'~~')) = '~'#0#0'~~', 'unz4');
   enc.Init;
   dec.Init;
   tmp := RandomString(1 shl 20);
+  tmp2 := Zeroed(UnZeroed(tmp));
+  {$ifdef FPC}
+  SetCodePage(tmp2, StringCodePage(tmp)); // circumvent FPC inconsistency/bug
+  {$endif FPC}
+  Check(tmp2 = tmp, 'unz1MB');
   b64 := '';
+  tmp2 := '';
   SetLength(b64, BinToBase64Length(length(tmp)));
   SetLength(tmp2, length(tmp));
   L := 0;

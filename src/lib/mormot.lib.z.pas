@@ -585,7 +585,7 @@ end;
     {$L ..\..\static\i386-win32\inftrees.o}
     {$L ..\..\static\i386-win32\adler32.o}
     {$L ..\..\static\i386-win32\crc32.o}
-  {$endif}
+  {$endif WIN32}
 
   {$ifdef WIN64}
     {$L ..\..\static\x86_64-win64\inffast.o}  
@@ -596,7 +596,7 @@ end;
     {$L ..\..\static\x86_64-win64\zutil.o}
     {$L ..\..\static\x86_64-win64\adler32.o}
     {$L ..\..\static\x86_64-win64\crc32.o}
-  {$endif}
+  {$endif WIN64}
 
 {$else} // for Delphi Win32 - Delphi 7 has no reliable zlib.pas
 
@@ -1177,9 +1177,9 @@ end;
 // we need some wrappers to fix any parameter or ABI issue
 {$ifdef LIBDEFLATESTATIC}
 
-function crc(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
+function crc(input: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
 begin
-  result := libdeflate_crc32(crc, buf, len);
+  result := libdeflate_crc32(input, buf, len);
 end;
 
 function adler(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
