@@ -44,6 +44,8 @@ uses
 { ************ Shared Database Fields and Values Definitions }
 
 const
+  {$undef MAX_SQLFIELDS_64}
+
   /// maximum number of fields in a database Table
   // - default is 64, but can be set to 64, 128, 192 or 256
   // adding MAX_SQLFIELDS_128, MAX_SQLFIELDS_192 or MAX_SQLFIELDS_256
@@ -62,6 +64,7 @@ const
   MAX_SQLFIELDS = 256;
   {$else}
   MAX_SQLFIELDS = 64;
+  {$define MAX_SQLFIELDS_64}
   {$endif MAX_SQLFIELDS_256}
   {$endif MAX_SQLFIELDS_192}
   {$endif MAX_SQLFIELDS_128}
@@ -216,6 +219,25 @@ function IsZero(const Fields: TFieldBits): boolean; overload;
 function IsEqual(const A, B: TFieldBits): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// return TRUE if Fields equals ALL_FIELDS constant
+function IsAllFields(const Fields: TFieldBits): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// faster alternative to "byte(Index) in Fields" expression
+// - warning: no Index range check is done
+// - similar to GetBitPtr(), but optimized for default MAX_SQLFIELDS=64
+function FieldBitGet(const Fields: TFieldBits; Index: PtrUInt): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// faster alternative to "include(Fields, Index)" expression
+// - warning: no Index range check is done
+procedure FieldBitSet(var Fields: TFieldBits; Index: PtrUInt);
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// faster alternative to "GetBitsCount(Fields, MaxFIelds)" expression
+function FieldBitCount(const Fields: TFieldBits; MaxFields: integer = MAX_SQLFIELDS): PtrInt;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// fast initialize a TFieldBits with 0
 // - is optimized for 64, 128, 192 and 256 max bits count (i.e. MAX_SQLFIELDS)
 // - will work also with any other value
@@ -304,6 +326,7 @@ type
 
 const
   /// special TFieldBits value containing all field bits set to 1
+  // - see also IsAllFields() wrapper function
   ALL_FIELDS: TFieldBits = [0 .. MAX_SQLFIELDS - 1];
 
   /// convert identified field types into high-level ORM types
@@ -758,7 +781,7 @@ function SqlWhereIsEndClause(const Where: RawUtf8): boolean;
 /// get the order table name from a SQL statement
 // - return the word following any 'ORDER BY' statement
 // - return 'RowID' if none found
-function SqlGetOrder(const Sql: RawUTF8): RawUTF8;
+function SqlGetOrder(const Sql: RawUtf8): RawUtf8;
 
 /// compute 'PropName in (...)' where clause for a SQL statement
 // - if Values has no value, returns ''
@@ -1463,6 +1486,53 @@ begin
   {$endif CPU64}
 end;
 
+function IsAllFields(const Fields: TFieldBits): boolean;
+begin
+  {$ifdef MAX_SQLFIELDS_64}
+  result := PInt64(@Fields)^ = -1;
+  {$else}
+  result := IsEqual(Fields, ALL_FIELDS);
+  {$endif MAX_SQLFIELDS_64}
+end;
+
+function FieldBitGet(const Fields: TFieldBits; Index: PtrUInt): boolean;
+begin
+  {$if defined(MAX_SQLFIELDS_64) and defined(CPU64)}
+  result := PInt64(@Fields)^ and (Int64(1) shl Index) <> 0;
+  {$else}
+  result := PIntegerArray(@Fields)[Index shr 5] and (1 shl (Index and 31)) <> 0;
+  {$ifend MAX_SQLFIELDS_64 and CPU64}
+end;
+
+{$if defined(MAX_SQLFIELDS_64) and defined(CPU64)}
+procedure FieldBitSet(var Fields: TFieldBits; Index: PtrUInt);
+begin
+  PInt64(@Fields)^ := PInt64(@Fields)^ or (Int64(1) shl Index);
+end;
+{$else}
+procedure FieldBitSet(var Fields: TFieldBits; Index: PtrUInt);
+var
+  p: PInteger;
+begin
+  p := @PIntegerArray(@Fields)[Index shr 5];
+  p^ := p^ or (1 shl (Index and 31));
+end;
+{$ifend MAX_SQLFIELDS_64 and CPU64}
+
+function FieldBitCount(const Fields: TFieldBits; MaxFields: integer): PtrInt;
+begin
+  {$ifdef MAX_SQLFIELDS_64}
+  {$ifdef CPU64}
+  result := GetBitsCountPtrInt(PtrInt(Fields));
+  {$else}
+  result := GetBitsCountPtrInt(PIntegerArray(@Fields)[0]) +
+            GetBitsCountPtrInt(PIntegerArray(@Fields)[1]);
+  {$endif CPU64}
+  {$else}
+  result := GetBitsCount(Fields, MaxFields);
+  {$endif MAX_SQLFIELDS_64}
+end;
+
 procedure FillZero(var Fields: TFieldBits);
 begin
   {$ifdef MAX_SQLFIELDS_128}
@@ -1489,15 +1559,19 @@ end;
 procedure FieldBitsToIndex(const Fields: TFieldBits;
   out Index: TFieldIndexDynArray; MaxLength: PtrInt);
 var
-  i: PtrInt;
+  i, n: PtrInt;
   p: ^TFieldIndex;
 begin
   if MaxLength > MAX_SQLFIELDS then
     raise ESynDBException.CreateUtf8('FieldBitsToIndex(MaxLength=%)', [MaxLength]);
-  SetLength(Index, GetBitsCount(Fields, MaxLength));
+  if IsAllFields(Fields) then
+    n := MaxLength
+  else
+    n := FieldBitCount(Fields, MaxLength);
+  SetLength(Index, n);
   p := pointer(Index);
   for i := 0 to MaxLength - 1 do
-    if byte(i) in Fields then
+    if FieldBitGet(Fields, i) then
     begin
       p^ := i;
       inc(p);
@@ -1528,12 +1602,12 @@ end;
 procedure FieldIndexToBits(const Index: TFieldIndexDynArray;
   out Fields: TFieldBits);
 var
-  i: integer;
+  i: PtrInt;
 begin
   FillZero(Fields{%H-});
   for i := 0 to Length(Index) - 1 do
     if Index[i] >= 0 then
-      include(Fields, Index[i]);
+      FieldBitSet(Fields, Index[i]);
 end;
 
 function FieldIndexToBits(const Index: TFieldIndexDynArray): TFieldBits;
@@ -2184,7 +2258,7 @@ begin
   result := 'SELECT ' + result + ' FROM ' + TableName + SqlFromWhere(Where);
 end;
 
-function SqlGetOrder(const Sql: RawUTF8): RawUTF8;
+function SqlGetOrder(const Sql: RawUtf8): RawUtf8;
 var
   P: PUtf8Char;
   i: integer;
@@ -3242,7 +3316,7 @@ begin
     if f^.Field = 0 then
       withID := true
     else
-      include(Fields, f^.Field - 1);
+      FieldBitSet(Fields, f^.Field - 1);
     if (SubFields <> nil) and
        fHasSelectSubFields then
       SubFields^[f^.Field] := f^.SubField;

@@ -1390,13 +1390,20 @@ begin
   // not implemented yet - but not needed either
 end;
 
-function UnixKeyPending: boolean;
+function WaitReadPending(fd, timeout: integer): boolean;
 var
-  fdsin: tfdSet;
+  p: TPollFD; // select() limits process to 1024 sockets in POSIX -> use poll()
+  // https://moythreads.com/wordpress/2009/12/22/select-system-call-limitation
 begin
-  fpFD_ZERO(fdsin);
-  fpFD_SET(StdInputHandle, fdsin);
-  result := fpSelect(StdInputHandle + 1, @fdsin, nil, nil, 0) > 0;
+  p.fd := fd;
+  p.events := POLLIN or POLLPRI;
+  p.revents := 0;
+  result := FpPoll(@p, 1, timeout) > 0;
+end;
+
+function UnixKeyPending: boolean;
+begin
+  result := WaitReadPending(StdInputHandle, 0);
 end;
 
 procedure ConsoleWaitForEnterKey;
@@ -1430,6 +1437,11 @@ begin
 end;
 
 function Utf8ToConsole(const S: RawUtf8): RawByteString;
+begin
+  result := S; // expect a UTF-8 console under Linux/BSD
+end;
+
+function ConsoleToUtf8(const S: RawByteString): RawUtf8;
 begin
   result := S; // expect a UTF-8 console under Linux/BSD
 end;
@@ -1633,22 +1645,42 @@ begin
   result := GetRawSmbiosFromMem(info);
   if result then
     exit;
-  info.Data := StringFromFile(SMB_CACHE);
-  if info.Data = '' then
-    exit;
-  if CompressSynLZ(info.Data, false) = '' then
+  PCardinal(@info)^ := SMB_FLAGS; // mark as retrieved from cache
+  info.Data := StringFromFile(SMB_CACHE); // cache is better than PosixInject
+  if (info.Data <> '') and
+     (CompressSynLZ(info.Data, false) = '') then
     info.Data := ''; // tampered file
   if info.Data = '' then
+    if Assigned(PosixInject.GetSmbiosData) then
+    begin
+      info.Data := PosixInject.GetSmbiosData; // e.g. from mormot.core.os.mac
+      if info.Data <> '' then
+        PCardinal(@info)^ := SMB_FLAGS - 1; // mark retrieved from PosixInject
+    end;
+  if info.Data = '' then
     exit;
-  PCardinal(@info)^ := SMB_FLAGS; // mark as retrieved from cache
   info.Length := length(info.Data);
   result := true;
 end;
 
-procedure _AfterDecodeSmbios(const info: TRawSmbiosInfo);
+procedure PosInjectSmbiosInfo(var info: TSmbiosBasicInfos);
+var
+  i: TSmbiosBasicInfo;
+begin
+  if Assigned(PosixInject.GetSmbios) then // e.g. from mormot.core.os.mac
+    for i := succ(low(i)) to high(i) do
+      if info[i] = '' then
+        info[i] := PosixInject.GetSmbios(i);
+end;
+
+procedure _AfterDecodeSmbios(var info: TRawSmbiosInfo);
 var
   s: RawByteString;
 begin
+  // complete information e.g. from mormot.core.os.mac
+  if Assigned(PosixInject.GetSmbios) then
+    PosInjectSmbiosInfo(_Smbios);
+  // check if require persistence after some HW changes
   if (PCardinal(@info)^ = SMB_FLAGS) or
      (CompressSynLZGetHash32(StringFromFile(SMB_CACHE)) = Hash32(info.Data)) then
     exit;
@@ -1666,37 +1698,6 @@ begin
   result := (PtrUInt(p) > 65535) and
             (fpaccess(p, F_OK) <> 0) and
             (fpgeterrno <> ESysEFAULT);
-end;
-
-function ReadSystemMemory(address, size: PtrUInt): RawByteString;
-var
-  mem: cInt;
-  map: PAnsiChar;
-  off: PtrUInt;
-begin
-  result := '';
-  if size > 4 shl 20 then
-    exit; // read up to 4MB
-  mem := FpOpen('/dev/mem', O_RDONLY, 0);
-  {$ifdef OSDARWIN}
-  if mem <= 0 then
-    // may work as alternative if "sudo pmset hibernatemode 1" has been set
-    mem := FpOpen('/private/var/vm/sleepimage', O_RDONLY, 0);
-  // see also low-level reading SMBIOS from I/O Registry on macOS:
-  // https://github.com/cavaliercoder/dmidecode-osx/commit/b181bb57c2494c52a2c
-  // but https://github.com/acidanthera/dmidecode/blob/master/util.c#L163 fails
-  {$endif OSDARWIN}
-  if mem <= 0 then
-    exit;
-  // Fpmmap() is more complex but works around problems using plain read() calls
-  off := address mod SystemInfo.dwPageSize;
-  map := Fpmmap(nil, off + size, PROT_READ, MAP_SHARED, mem, address - off);
-  if map <> MAP_FAILED then
-  begin
-    FastSetRawByteString(result, map + off, size);
-    Fpmunmap(map, off + size);
-  end;
-  FpClose(mem);
 end;
 
 {$ifdef OSBSDDARWIN}
@@ -1781,7 +1782,7 @@ end;
 const
   _KNOWN: array[0..14] of record
     id: TSmbiosBasicInfo;
-    fn: string;
+    fn: RawUtf8;
   end = (
     (id: sbiBiosVendor;        fn: 'bios.vendor'),
     (id: sbiBiosVersion;       fn: 'bios.version'),
@@ -1800,7 +1801,7 @@ const
     (id: sbiBoardAssetTag;     fn: 'planar.tag')
   );
 
-procedure DirectSmbiosInfo(out info: TSmbiosBasicInfos);
+procedure _DirectSmbiosInfo(out info: TSmbiosBasicInfos);
 var
   i: PtrInt;
   tmp: array[byte] of AnsiChar;
@@ -1809,22 +1810,25 @@ begin
     with _KNOWN[i] do
       if kenv(KENV_GET, PAnsiChar('smbios.' + fn), @tmp, SizeOf(tmp)) >= 0 then
         info[id] := TrimU(tmp);
-  info[sbiCpuVersion] := CpuInfoText;
 end;
 
 {$else}
 
-// I don't know how to implement those on buggy Mac OS
+// help is needed to implement those on buggy Mac OS
+// may fallback to PosixInject wrappers from mormot.core.os.mac
 
 function GetSmbEfiMem: RawByteString;
 begin
   result := '';
 end;
 
-procedure DirectSmbiosInfo(out info: TSmbiosBasicInfos);
+function ReadSystemMemory(address, size: PtrUInt): RawByteString;
 begin
-  // on MAC: call  system_profiler SPHardwareDataType
-  info[sbiCpuVersion] := CpuInfoText;
+  result := '';
+end;
+
+procedure _DirectSmbiosInfo(out info: TSmbiosBasicInfos);
+begin
 end;
 
 {$endif OSFREEBSD}
@@ -1866,7 +1870,7 @@ begin
   e.i[7] := e.i[7] xor us;
 end;
 
-{$else}
+{$else} // Linux-specific code
 
 const
   // function DirectoryFileNames(const Folder: TFileName): TFileNameDynArray; ?
@@ -2001,7 +2005,16 @@ begin
   DefaultHasher128(@e.h3, @rt, SizeOf(rt));
 end;
 
+{$ifdef OSANDROID}
+
+procedure _DirectSmbiosInfo(out info: TSmbiosBasicInfos);
+begin
+end;
+
+{$else} // pure Linux
+
 const
+  // note: reading /sys/class/dmi/id/* is likely to require root access
   _KNOWN: array[0..14] of record
     id: TSmbiosBasicInfo;
     fn: string;
@@ -2023,17 +2036,59 @@ const
     (id: sbiBoardAssetTag;     fn: 'board_asset_tag')
   );
 
-procedure DirectSmbiosInfo(out info: TSmbiosBasicInfos);
+procedure ParseHex(p: PAnsiChar; b: PByte; n: integer); forward;
+
+procedure _DirectSmbiosInfo(out info: TSmbiosBasicInfos);
 var
   i: PtrInt;
 begin
   for i := 0 to high(_KNOWN) do
     with _KNOWN[i] do
       info[id] := TrimU(StringFromFile('/sys/class/dmi/id/' + fn, {nosize=}true));
-  info[sbiCpuVersion] := CpuInfoText;
+  // note: /var/lib/dbus/machine-id and /etc/machine-id are SW generated from
+  // random at system install so do NOT match sbiUuid HW DMI value - see
+  // https://www.freedesktop.org/software/systemd/man/machine-id.html
 end;
 
+{$endif OSANDROID}
+
 {$endif OSBSDDARWIN}
+
+{$ifndef OSDARWIN} // on POSIX systems, /dev/mem may be available from root
+function ReadSystemMemory(address, size: PtrUInt): RawByteString;
+var
+  mem: cInt;
+  map: PAnsiChar;
+  off: PtrUInt;
+begin
+  result := '';
+  if size > 4 shl 20 then
+    exit; // read up to 4MB
+  mem := FpOpen('/dev/mem', O_RDONLY, 0);
+  if mem <= 0 then
+    exit;
+  // Fpmmap() is more complex but works around problems using plain read() calls
+  off := address mod SystemInfo.dwPageSize;
+  map := Fpmmap(nil, off + size, PROT_READ, MAP_SHARED, mem, address - off);
+  if map <> MAP_FAILED then
+  begin
+    FastSetRawByteString(result, map + off, size);
+    Fpmunmap(map, off + size);
+  end;
+  FpClose(mem);
+end;
+{$endif OSDARWIN}
+
+procedure DirectSmbiosInfo(out info: TSmbiosBasicInfos);
+begin
+  _DirectSmbiosInfo(info);
+  // from this very same .inc file
+  if info[sbiCpuVersion] = '' then
+    info[sbiCpuVersion] := CpuInfoText;
+  // e.g. from mormot.core.os.mac
+  if Assigned(PosixInject.GetSmbios) then
+    PosInjectSmbiosInfo(info);
+end;
 
 function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean;
 begin
@@ -2703,6 +2758,69 @@ begin
   end;
 end;
 
+function RunRedirect(const cmd: TFileName; exitcode: PInteger;
+  const onoutput: TOnRedirect; waitfordelayms: cardinal): RawUtf8;
+var
+  // note: FPC popen(file) allows access to the pid whereas clib popen() won't
+  f: file;
+  fd: THandle;
+  pid, res: cint;
+  u: RawUtf8;
+  n, l: TSsize;
+  wait: cardinal;
+  endtix: Int64;
+  tmp: array[word] of byte; // 64KB stack buffer
+begin
+  result := '';
+  if popen(f, cmd, 'r') <> 0 then
+    exit;
+  fd := TFileRec(f).Handle;
+  pid := pcint(@TFileRec(f).userdata[2])^; // see popen() from Unix.pp
+  wait := 200;
+  if waitfordelayms = INFINITE then
+    endtix := 0
+  else
+  begin
+    endtix := GetTickCount64 + waitfordelayms;
+    if waitfordelayms < wait then
+      wait := waitfordelayms;
+  end;
+  l := 0;
+  repeat
+    if WaitReadPending(fd, wait) then
+    begin
+      n := fpread(fd, tmp, SizeOf(tmp));
+      if n <= 0 then
+        break; // pipe closed = execution finished
+      SetLength(result, l + n);
+      MoveFast(tmp, PByteArray(result)[l], n);
+      inc(l, n);
+      if Assigned(onoutput) then
+      begin
+        FastSetString(u, @tmp, n);
+        if onoutput(u) then
+          endtix := 1; // force kill() on abort
+      end;
+    end
+    else if Assigned(onoutput) and // idle
+            onoutput('') then
+      endtix := 1; // returned true to abort -> kill()
+    if (endtix <> 0) and
+       (GetTickCount64 > endtix) then
+    begin
+      fpkill(pid, SIGKILL); // abort process execution after timeout
+      pid := 0;
+      break;
+    end;
+  until false;
+  res := pclose(f);
+  if exitcode <> nil then
+    if pid = 0 then
+      exitcode^ := -1
+    else
+      exitcode^ := res;
+end;
+
 
 { ****************** Gather Operating System Information }
 
@@ -2913,6 +3031,25 @@ begin
     end;
     result := (result shl 8) or (v0 shl 4) or v1;
   until false;
+end;
+
+procedure ParseHex(p: PAnsiChar; b: PByte; n: integer);
+var
+  v0, v1: integer;
+begin
+  repeat // caller ensured p<>nil and b<>nil and n>0
+    v0 := Hex2Dec(p^);
+    if v0 < 0 then
+      break; // not in '0'..'9','a'..'f'
+    inc(p);
+    v1 := Hex2Dec(p^);
+    if v1 < 0 then
+      break;
+    inc(p);
+    b^ := (v0 shl 4) or v1;
+    inc(b);
+    dec(n);
+  until n = 0;
 end;
 
 procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);

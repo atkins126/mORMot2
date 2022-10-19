@@ -42,7 +42,6 @@ uses
   mormot.core.json,
   mormot.core.threads,
   mormot.core.perf,
-  mormot.core.search,
   mormot.crypt.secure,
   mormot.core.log,
   mormot.core.interfaces,
@@ -571,7 +570,7 @@ type
       Call: PRestUriParams = nil);
     function InternalRemoteLogSend(const aText: RawUtf8): boolean;
     procedure InternalNotificationMethodExecute(var Ctxt: TRestUriParams); virtual;
-    /// will call timestamp/info if the session has currently not been retrieved
+    // will call timestamp/info if the session has currently not been retrieved
     function GetSessionVersion: RawUtf8;
     // register the user session to the TRestClientUri instance
     function SessionCreate(aAuth: TRestClientAuthenticationClass;

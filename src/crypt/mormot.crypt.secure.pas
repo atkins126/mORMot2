@@ -1321,6 +1321,7 @@ type
     cccPrivateKeyOnly);
 
   TCryptCert = class;
+  TCryptCertAlgo = class;
 
   /// abstract interface to a Certificate, as returned by Cert() factory
   // - may be X509 or not, OpenSSL implemented or not, e.g. for syn-es256
@@ -1493,6 +1494,8 @@ type
     function IsEqual(const another: ICryptCert): boolean;
     /// the high-level asymmetric algorithm used for this certificate
     function AsymAlgo: TCryptAsymAlgo;
+    /// the high-level asymmetric algorithm class used for this certificate
+    function CertAlgo: TCryptCertAlgo;
     /// access to the low-level implementation class
     function Instance: TCryptCert;
     /// access to the low-level implementation handle of the certificate
@@ -1566,6 +1569,7 @@ type
       const Cipher: RawUtf8): RawByteString; virtual; abstract;
     function SharedSecret(const pub: ICryptCert): RawByteString; virtual;
     function AsymAlgo: TCryptAsymAlgo; virtual;
+    function CertAlgo: TCryptCertAlgo;
     function Instance: TCryptCert;
     function Handle: pointer; virtual; abstract;
     function PrivateKeyHandle: pointer; virtual; abstract;
@@ -1601,6 +1605,14 @@ type
     function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8;
       const Authority: ICryptCert = nil; ExpireDays: integer = 365;
       ValidDays: integer = -1; Fields: PCryptCertFields = nil): ICryptCert;
+    /// factory for a new Certificate Signing Request over a set of (DNS) names
+    // - will generate a new public/private key pair, then forge a request with
+    // the public key, self-signing the request using the new PrivateKeyPem
+    // - implemented only as PKCS#10 by the X509/OpenSSL engine by now, in
+    // a Let's Encrypt compatible way
+    function CreateSelfSignedCsr(const Subjects: TRawUtf8DynArray;
+      const PrivateKeyPassword: SpiUtf8;
+      out PrivateKeyPem: RawUtf8): RawByteString; virtual;
     /// return the corresponding JWT algorithm name, computed from AsymAlgo
     // - e.g. 'ES256' for 'x509-es256' or 'syn-es256-v1'
     function JwtName: RawUtf8;
@@ -1775,6 +1787,9 @@ const
     'PS384',  // caaPS384
     'PS512',  // caaPS512
     'EdDSA'); // caaEdDSA
+
+  /// the known asymmetric algorithms which implement ECC cryptography
+  CAA_ECC = [caaES256, caaES384, caaES512, caaES256K, caaEdDSA];
 
   /// the known asymmetric algorithms which implement RSA cryptography
   CAA_RSA = [caaRS256, caaRS384, caaRS512, caaPS256, caaPS384, caaPS512];
@@ -4603,6 +4618,12 @@ begin
   result.Generate(Usages, Subjects, Authority, ExpireDays, ValidDays, Fields);
 end;
 
+function TCryptCertAlgo.CreateSelfSignedCsr(const Subjects: TRawUtf8DynArray;
+  const PrivateKeyPassword: SpiUtf8; out PrivateKeyPem: RawUtf8): RawByteString;
+begin
+  result := ''; // unsupported by default
+end;
+
 function TCryptCertAlgo.JwtName: RawUtf8;
 begin
   result := CAA_JWT[fOsa];
@@ -4792,7 +4813,6 @@ begin
   if Payload <> nil then
     Payload^ := pl;
 end;
-
 function TCryptCert.SharedSecret(const pub: ICryptCert): RawByteString;
 begin
   result := ''; // unsupported by default
@@ -4801,6 +4821,11 @@ end;
 function TCryptCert.AsymAlgo: TCryptAsymAlgo;
 begin
   result := (fCryptAlgo as TCryptCertAlgo).AsymAlgo;
+end;
+
+function TCryptCert.CertAlgo: TCryptCertAlgo;
+begin
+  result := fCryptAlgo as TCryptCertAlgo;
 end;
 
 function TCryptCert.Instance: TCryptCert;
@@ -5666,7 +5691,7 @@ const
     $18, $65, $d9, $ef, $f5, $88, $62, $fd, $14, $85, $d7, $14, $ad, $93, $e2,
     $46);
   _DUMMYLEN = 702;
-  _DUMMYSTUFFLEN = 300; // > 255 so that Asn1FixMe() has $82 lengths
+  _DUMMYSTUFFLEN = 300; // > 255 since Asn1FixMe() expects $82 lengths
 
 function _CreateDummyCertificate(const Stuff: RawUtf8;
   const CertName: RawUtf8; Marker: cardinal): RawByteString;

@@ -223,8 +223,8 @@ function TSqlDBPostgresConnection.PrepareCached(
 begin
   if fPrepared = nil then
   begin
-    fPrepared :=
-      TRawUtf8List.CreateEx([fCaseSensitive, fNoDuplicate, fNoThreadLock]);
+    fPrepared := TRawUtf8List.CreateEx(
+      [fCaseSensitive, fNoDuplicate, fNoThreadLock]);
     result := -1;
   end
   else
@@ -440,7 +440,7 @@ begin
   // see pg_type.h (most used first)
   MapOid(INT4OID, ftInt64);
   MapOid(INT8OID, ftInt64);
-  MapOid(TEXTOID, ftUtf8);
+  MapOid(TEXTOID, ftUtf8); // other char types will be ftUtf8 as fallback
   MapOid(FLOAT8OID, ftDouble);
   MapOid(TIMESTAMPOID, ftDate);
   MapOid(BYTEAOID, ftBlob);
@@ -578,7 +578,7 @@ begin
     include(fCache, scOnServer);
     TSqlDBPostgresConnection(fConnection).PrepareCached(
       fSqlPrepared, fPreparedParamsCount, fPreparedStmtName);
-    SqlLogEnd(' cached as %', [fPreparedStmtName]);
+    SqlLogEnd(' c=%', [fPreparedStmtName]);
   end
   else
     SqlLogEnd;
@@ -687,10 +687,10 @@ begin
     fCurrentRow := -1;
     if fColumn.Count = 0 then // if columns exist then statement is already cached
       BindColumns;
-    SqlLogEnd(' % rows=%', [fPreparedStmtName, fTotalRowsRetrieved]);
+    SqlLogEnd(' c=% r=%', [fPreparedStmtName, fTotalRowsRetrieved]);
   end
   else
-    SqlLogEnd(' %', [fPreparedStmtName]);
+    SqlLogEnd(' c=%', [fPreparedStmtName]);
 end;
 
 procedure TSqlDBPostgresStatement.BindArrayJson(Param: integer;

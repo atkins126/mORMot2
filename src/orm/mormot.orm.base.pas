@@ -43,7 +43,6 @@ uses
   mormot.core.json,
   mormot.core.threads,
   mormot.core.perf,
-  mormot.core.search,
   mormot.core.zip,     // for ODS export
   mormot.crypt.secure, // for TSynUniqueIdentifierBits
   mormot.db.core;
@@ -2936,6 +2935,8 @@ type
     function FieldBitsFromBlobField(aBlobField: PRttiProp;
       var Bits: TFieldBits): boolean;
     /// compute the CSV field names text from a set of bits
+    function CsvTextFromFieldBits(const Bits: TFieldBits): RawUtf8;
+    /// compute the CSV field names text from a set of bits with optional prefix/suffix
     procedure CsvFromFieldBits(const Prefix: array of const;
       const Bits: TFieldBits; const BitsSuffix: ShortString;
       const Suffix: array of const; out Result: RawUtf8);
@@ -10667,8 +10668,8 @@ begin
   result := nil;
 end;
 
-function TOrmPropertiesAbstract.BlobFieldPropFromUtf8(PropName: PUtf8Char;
-  PropNameLen: integer): PRttiProp;
+function TOrmPropertiesAbstract.BlobFieldPropFromUtf8(
+  PropName: PUtf8Char; PropNameLen: integer): PRttiProp;
 var
   i: PtrInt;
 begin
@@ -11015,7 +11016,7 @@ begin
     for f := 0 to high(BlobFields) do
       if BlobFields[f].PropInfo = aBlobField then
       begin
-        Include(Bits, BlobFields[f].PropertyIndex);
+        FieldBitSet(Bits, BlobFields[f].PropertyIndex);
         result := true;
         exit;
       end;
@@ -11040,7 +11041,7 @@ begin
     ndx := Fields.IndexByName(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
-    include(Bits, ndx);
+    FieldBitSet(Bits, ndx);
   end;
   result := true;
 end;
@@ -11077,7 +11078,7 @@ begin
     ndx := Fields.IndexByName(@n[1]);
     if ndx < 0 then
       exit; // invalid field name
-    include(Bits, ndx);
+    FieldBitSet(Bits, ndx);
   end;
   result := true;
 end;
@@ -11112,7 +11113,7 @@ begin
     ndx := Fields.IndexByName(aFields[f]);
     if ndx < 0 then
       exit; // invalid field name
-    include(Bits, ndx);
+    FieldBitSet(Bits, ndx);
   end;
   result := true;
 end;
@@ -11146,25 +11147,53 @@ begin
     ndx := Fields.IndexByName(pointer(aFields[f]));
     if ndx < 0 then
       exit; // invalid field name
-    include(Bits, ndx);
+    FieldBitSet(Bits, ndx);
   end;
   result := true;
 end;
 {$endif PUREMORMOT2}
+
+function TOrmPropertiesAbstract.CsvTextFromFieldBits(const Bits: TFieldBits): RawUtf8;
+var
+  l, f: PtrInt;
+  p: PUtf8Char;
+begin
+  l := 0;
+  for f := 0 to Fields.Count - 1 do
+    if FieldBitGet(Bits, f) then
+      inc(l, length(Fields.List[f].Name) + 1);
+  if l = 0 then
+  begin
+    result := '';
+    exit;
+  end;
+  FastSetString(result, nil, l - 1); // allocate once for all
+  p := pointer(result);
+  for f := 0 to Fields.Count - 1 do
+    if FieldBitGet(Bits, f) then
+    begin
+      l := length(Fields.List[f].Name);
+      MoveFast(pointer(Fields.List[f].Name)^, p^, l);
+      inc(p, l);
+      p^ := ',';
+      inc(p);
+    end;
+  p[-1] := #0; // overwrite last ','
+end;
 
 procedure TOrmPropertiesAbstract.CsvFromFieldBits(const Prefix: array of const;
   const Bits: TFieldBits; const BitsSuffix: ShortString;
   const Suffix: array of const; out Result: RawUtf8);
 var
   f: PtrInt;
-  W: TJsonWriter;
+  W: TJsonWriter; // TJsonWriter.Add(Prefix) so TTextWriter is not enough
   temp: TTextWriterStackBuffer;
 begin
   W := TJsonWriter.CreateOwnedStream(temp);
   try
     W.Add(Prefix, twNone);
     for f := 0 to Fields.Count - 1 do
-      if byte(f) in Bits then
+      if FieldBitGet(Bits, f) then
       begin
         W.AddString(Fields.List[f].Name);
         if BitsSuffix <> '' then

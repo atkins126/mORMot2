@@ -218,7 +218,7 @@ type
     /// AES-GCM pure alternative to MacEncryptGetTag/MacDecryptCheckTag
     // - after Encrypt, fill tag with the GCM value of the data and return true
     // - after Decrypt, return true only if the GCM value of the data match tag
-    function AesGcmFinal(var tag: TAesBlock): boolean; override;
+    function AesGcmFinal(var Tag: TAesBlock; TagLen: integer): boolean; override;
   end;
 
 
@@ -714,10 +714,6 @@ var
 var
   c: PEVP_CIPHER_CTX;
 begin
-  if (BufOut <> nil) and
-     (Count and AesBlockMod <> 0) then
-    raise ESynCrypto.CreateUtf8('%.%: Count=% is not a multiple of 16',
-      [Owner, 'UpdEvp', Count]);
   outl := 0;
   c := Ctx[DoEncrypt];
   EOpenSslCrypto.Check(Owner, 'UpdEvp',
@@ -912,30 +908,33 @@ begin
   fAes.UpdEvp(fStarted = stEnc, Buf, nil, Len);
 end;
 
-function TAesGcmOsl.AesGcmFinal(var tag: TAesBlock): boolean;
+function TAesGcmOsl.AesGcmFinal(var Tag: TAesBlock; TagLen: integer): boolean;
 var
   outl: integer;
   dummy: TAesBlock;
 begin
+  result := false;
+  if (fStarted = stNone) or
+     (cardinal(TagLen) > 16) then
+    exit;
   case fStarted of
     stEnc:
       begin
         EOpenSslCrypto.Check(self, 'AesGcmFinal enc',
           EVP_CipherFinal_ex(fAes.Ctx[true], @dummy, @outl));
+        FillZero(Tag);
         EOpenSslCrypto.Check(self, 'AesGcmFinal enctag',
-          EVP_CIPHER_CTX_ctrl(fAes.Ctx[true], EVP_CTRL_GCM_GET_TAG, 16, @tag));
+          EVP_CIPHER_CTX_ctrl(fAes.Ctx[true], EVP_CTRL_GCM_GET_TAG, TagLen, @Tag));
         result := true;
       end;
     stDec:
       begin
         EOpenSslCrypto.Check(self, 'AesGcmFinal dectag',
-          EVP_CIPHER_CTX_ctrl(fAes.Ctx[false], EVP_CTRL_GCM_SET_TAG, 16, @tag));
+          EVP_CIPHER_CTX_ctrl(fAes.Ctx[false], EVP_CTRL_GCM_SET_TAG, TagLen, @Tag));
         outl := 16;
         result := (EVP_CipherFinal_ex(fAes.Ctx[false], @dummy, @outl) > 0) and
                   (outl = 0);
       end
-  else
-    result := false;
   end;
   fStarted := stNone; // allow reuse of this fAes instance
 end;
@@ -1344,8 +1343,7 @@ begin
   if k = nil then
     exit;
   pub := nil;
-  publen := EC_POINT_point2buf(prime256v1grp,
-    EC_KEY_get0_public_key(k), POINT_CONVERSION_COMPRESSED, @pub, nil);
+  publen := EC_KEY_key2buf(k, POINT_CONVERSION_COMPRESSED, @pub, nil);
   if publen = SizeOf(PublicKey) then
   begin
     MoveFast(pub^, PublicKey, SizeOf(PublicKey));
@@ -1364,11 +1362,11 @@ begin
   if k = nil then
     exit;
   priv := EC_KEY_get0_private_key(k);
-  privlen := BN_num_bytes(priv);
+  privlen := priv.Size;
   if (privlen <= 0) or
      (privlen > SizeOf(PrivateKey)) then
     exit;
-  BN_bn2bin(priv, @PrivateKey[SizeOf(PrivateKey) - privlen]);
+  priv.ToBin(@PrivateKey[SizeOf(PrivateKey) - privlen]);
   result := true;
 end;
 
@@ -1775,6 +1773,9 @@ type
     function NewPrivateKey: PEVP_PKEY;
     function New: ICryptCert; override; // = TCryptCertOpenSsl.Create(self)
     function FromHandle(Handle: pointer): ICryptCert; override;
+    function CreateSelfSignedCsr(const Subjects: TRawUtf8DynArray;
+      const PrivateKeyPassword: SpiUtf8;
+      out PrivateKeyPem: RawUtf8): RawByteString; override;
   end;
 
   /// class implementing ICryptCert using OpenSSL X509
@@ -1889,6 +1890,25 @@ begin
     instance.fX509 := Handle;
   end;
   result := instance;
+end;
+
+function TCryptCertAlgoOpenSsl.CreateSelfSignedCsr(const Subjects: TRawUtf8DynArray;
+  const PrivateKeyPassword: SpiUtf8; out PrivateKeyPem: RawUtf8): RawByteString;
+var
+  key: PEVP_PKEY;
+begin
+  if Subjects = nil then
+    raise EOpenSslCert.Create('CreateSelfSignedCsr: void DnsCsv');
+  key := NewPrivateKey;
+  if key = nil then
+    raise EOpenSslCert.Create('CreateSelfSignedCsr: NewPrivateKey');
+  try
+    result := key.CreateSelfSignedCsr(fHash, Subjects);
+    if result <> '' then
+      PrivateKeyPem := key.PrivateToPem(PrivateKeyPassword);
+  finally
+    key.Free;
+  end;
 end;
 
 
@@ -2116,6 +2136,7 @@ begin
   begin
     // input only include the private key as DER or PEM
     fPrivKey.Free;
+    fPrivKey := nil;
     fPrivKey := LoadPrivateKey(saved, PrivatePassword);
     if fPrivKey <> nil then
       if (fX509 = nil) or // can load just the privkey

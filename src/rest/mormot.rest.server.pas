@@ -41,7 +41,6 @@ uses
   mormot.core.json,
   mormot.core.threads,
   mormot.core.perf,
-  mormot.core.search,
   mormot.crypt.core,
   mormot.crypt.jwt,
   mormot.crypt.secure,
@@ -4147,7 +4146,8 @@ function TRestServerUriContext.InputEnum(const ParamName: RawUtf8;
   EnumType: PRttiInfo; out ValueEnum; DefaultEnumOrd: integer): boolean;
 var
   value: RawUtf8;
-  int, err: integer;
+  int: PtrInt;
+  err: integer;
 begin
   result := false;
   if (EnumType = nil) or
@@ -5102,8 +5102,8 @@ begin
       pwd := Ctxt.InputUtf8OrVoid['Password'];
       if CheckPassword(Ctxt, usr, nonce, pwd) then
         // setup a new TAuthSession
-        SessionCreate(Ctxt, usr)
         // SessionCreate would call Ctxt.AuthenticationFailed on error
+        SessionCreate(Ctxt, usr)
       else
         Ctxt.AuthenticationFailed(afInvalidPassword);
     finally
@@ -6042,7 +6042,7 @@ function TRestServer.RecordVersionSynchronizeSlaveStart(Table: TOrmClass;
   MasterRemoteAccess: TRestClientUri; const OnNotify: TOnBatchWrite): boolean;
 var
   current, previous: TRecordVersion;
-  tableindex: integer;
+  tableindex: PtrInt;
   tablename: RawUtf8;
   service: IServiceRecordVersion;
   callback: IServiceRecordVersionCallback;
@@ -6112,7 +6112,7 @@ end;
 function TRestServer.RecordVersionSynchronizeSlaveStop(
   Table: TOrmClass): boolean;
 var
-  tableindex: integer;
+  tableindex: PtrInt;
 begin
   result := false;
   if self = nil then

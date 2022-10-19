@@ -2003,7 +2003,8 @@ type
   // - rcfIsManaged is set if a value of this type expects finalization
   // - rcfObjArray is for T*ObjArray dynamic arrays
   // - rcfBinary is for hexadecimal serialization of integers
-  // - rcfJsonString when is to be serialized as text (ptStringTypes or rcfBinary)
+  // - rcfJsonString when is to be serialized as text and properly JSON-escaped
+  // (ptStringTypes or rcfBinary, but excluding ptRawJson)
   // - rcfWithoutRtti is set if was created purely by text, and uses fake RTTI
   // - rcfSpi identifies types containing Sensitive Personal Information
   // (e.g. a bank card number or a plain password) which should be hidden
@@ -2557,13 +2558,17 @@ type
     // - match mORMot 1.18 TTextWriter.RegisterCustomJSONSerializerFromTextSimpleType
     procedure RegisterTypes(const Info: array of PRttiInfo);
     /// recognize (and register if needed) a standard simple type
-    // - returns a new (or existing if it was already registered) TRttiCustom if
-    // the supplied name matches a known type - returns nil if nothing was found
+    // - calls Find() to return already registered TRttiCustom instance, and
+    // also recognize "array" or "record" keywords as expected by our parser
+    // - returns nil if nothing was found
+    // - will truncate any 'unitname.typename' into plain 'typename' before Find()
     function RegisterTypeFromName(Name: PUtf8Char; NameLen: PtrInt;
       ParserType: PRttiParserType = nil): TRttiCustom; overload;
     /// recognize (and register if needed) a standard simple type
-    // - returns a new (or existing if it was already registered) TRttiCustom if
-    // the supplied name matches a known type - returns nil if nothing was found
+    // - calls Find() to return already registered TRttiCustom instance, and
+    // also recognize "array" or "record" keywords as expected by our parser
+    // - returns nil if nothing was found
+    // - will truncate any 'unitname.typename' into plain 'typename' before Find()
     function RegisterTypeFromName(const Name: RawUtf8;
       ParserType: PRttiParserType = nil): TRttiCustom; overload;
       {$ifdef HASINLINE}inline;{$endif}
@@ -7555,7 +7560,7 @@ begin
   if (fArrayRtti <> nil) and
      (rcfIsManaged in fArrayRtti.Flags) then
     include(fFlags, rcfArrayItemManaged);
-  if aParser in ptStringTypes then
+  if aParser in (ptStringTypes - [ptRawJson]) then
     include(fFlags, rcfJsonString);
   fClassNewInstance := @_New_NotImplemented;
   result := self;
@@ -7884,35 +7889,42 @@ begin
           // record ... end
           ee := eeEndKeyWord;
         ptNone:
-          // unknown type name -> try from T*DynArray/T*s pattern
+          // unknown type name -> try from TArray<*>/T*DynArray/T*s patterns
           begin
-            aname := pointer(typname);
-            alen := length(typname);
-            if (alen > 12) and
-               (IdemPropName('DynArray', aname + alen - 8, 8) or
-                IdemPropName('ObjArray', aname + alen - 8, 8)) then
-              dec(alen, 8)
-            else if (alen > 3) and
-                    (aname[aLen] in ['s', 'S']) then
-              dec(alen)
+            if IdemPropNameU(typname, 'TArray') and
+               (P^ = '<') then
+            begin
+              // try generic syntax TArray<##>
+              inc(P);
+              if GetNextFieldProp(P, typname) and
+                 (P^ = '>') then
+              begin
+                inc(P);
+                ac := Rtti.RegisterTypeFromName(typname);
+              end;
+            end
             else
             begin
-              {$ifdef HASGENERICSSYNTAX}
-              if (alen > 7) and
-                 (aname[alen] = '>') and
-                 IdemPropName('TArray<', aname, 7) then
-                // try TArray<T> -> T
-                ac := Rtti.RegisterTypeFromName(aname + 7, alen - 8);
-              {$endif HASGENERICSSYNTAX}
-              alen := 0;
-            end;
-            if alen > 0 then
-            begin
-              // try TIntegerDynArray/TIntegers -> integer
-              ac := Rtti.RegisterTypeFromName(@PByteArray(typname)[1], alen - 1);
-              if ac = nil then
-                // try TMyTypeDynArray/TMyTypes -> TMyType
-                ac := Rtti.RegisterTypeFromName(pointer(typname), alen);
+              // try T##DynArray/T##s patterns
+              aname := pointer(typname);
+              alen := length(typname);
+              if (alen > 10) and
+                 (IdemPropName('DynArray', aname + alen - 8, 8) or
+                  IdemPropName('ObjArray', aname + alen - 8, 8)) then
+                dec(alen, 8)
+              else if (alen > 3) and
+                      (aname[aLen] in ['s', 'S']) then
+                dec(alen)
+              else
+                alen := 0;
+              if alen > 0 then
+              begin
+                // try TIntegerDynArray/TIntegers -> integer
+                ac := Rtti.RegisterTypeFromName(@PByteArray(typname)[1], alen - 1);
+                if ac = nil then
+                  // try TMyTypeObjArray/TMyTypes -> TMyType
+                  ac := Rtti.RegisterTypeFromName(pointer(typname), alen);
+              end;
             end;
             if ac = nil then
               raise ERttiException.CreateUtf8(
@@ -8443,13 +8455,28 @@ function TRttiCustomList.RegisterTypeFromName(Name: PUtf8Char;
   NameLen: PtrInt; ParserType: PRttiParserType): TRttiCustom;
 var
   pt: TRttiParserType;
+  i: PtrInt;
 begin
   if ParserType <> nil then
     ParserType^ := ptNone;
+  if (Name = nil) or
+     (NameLen <= 0) then
+  begin
+    result := nil;
+    exit;
+  end;
+  repeat
+    i := ByteScanIndex(pointer(Name), NameLen, ord('.'));
+    if i < 0 then
+      break;
+    inc(i); // truncate 'unitname.typename' into 'typename'
+    inc(Name, i);
+    dec(NameLen, i);
+  until false;
   result := Find(Name, NameLen);
   if result = nil then
   begin
-    // array/record keywords, integer/cardinal FPC types
+    // array/record keywords, integer/cardinal FPC types not available by Find()
     pt := AlternateTypeNameToRttiParserType(Name, NameLen);
     if ParserType <> nil then
       ParserType^ := pt;

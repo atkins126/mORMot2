@@ -202,6 +202,9 @@ type
   end;
 
   /// low-level reusable State Machine to parse and process any HTTP content
+  // - shared e.g. by all our (web)socket-based HTTP client and server classes
+  // - reduce memory allocations as much as possible, and parse the most used
+  // headers in explicit fields
   {$ifdef USERECORDWITHMETHODS}
   THttpRequestContext = record
   {$else}
@@ -1013,7 +1016,7 @@ begin
       inc(p);
       if v1 = 255 then
       begin
-        result := (result shl 4) or v0; // odd number of hexa chars supplied
+        result := (result shl 4) or v0; // odd number of hexa chars input
         break;
       end;
       result := (result shl 8) or (integer(v0) shl 4) or v1;
@@ -1076,7 +1079,8 @@ begin
   P2 := P;
   // standard headers are expected to be pure A-Z chars: fast lowercase search
   // - or $20 makes conversion to a-z lowercase, but won't affect - / : chars
-  // - the worse case may be some false positive, which won't hurt
+  // - the worse case may be some false positive, which won't hurt unless
+  // your network architecture suffers from HTTP request smuggling
   // - much less readable than cascaded IdemPPChar(), but slightly faster ;)
   case PCardinal(P)^ or $20202020 of
     ord('c') + ord('o') shl 8 + ord('n') shl 16 + ord('t') shl 24:
@@ -1809,7 +1813,7 @@ begin
   // direct read bytes, as indicated by Content-Length or Chunked
   if hfTransferChunked in Http.HeaderFlags then
   begin
-    // supplied Content-Length header should be ignored when chunked
+    // Content-Length header should be ignored when chunked by RFC 2616 #4.4.3
     Http.ContentLength := 0;
     repeat // chunks decoding loop
       if SockIn <> nil then

@@ -347,6 +347,10 @@ function GetIPAddresses(Kind: TIPAddress = tiaIPv4): TRawUtf8DynArray;
 function GetIPAddressesText(const Sep: RawUtf8 = ' ';
   Kind: TIPAddress = tiaIPv4): RawUtf8;
 
+/// flush the GetIPAddresses/GetMacAddresses internal cache
+// - may be set to force detection after HW configuration change
+procedure MacIPAddressFlush;
+
 
 type
   /// interface name/address pairs as returned by GetMacAddresses
@@ -409,6 +413,16 @@ type
   // - TLS and Peer are opaque structures, typically OpenSSL PSSL and PX509 pointers
   TOnNetTlsEachPeerVerify = function(Socket: TNetSocket; Context: PNetTlsContext;
     wasok: boolean; TLS, Peer: pointer): boolean of object;
+
+  /// callback raised by INetTls.AfterAccept for SNI resolution
+  // - should check the ServerName and return the proper certificate context,
+  // typically one OpenSSL PSSL_CTX instance
+  // - if the ServerName has no match, and the default certificate is good
+  // enough, should return nil
+  // - on any error, should raise an exception
+  // - TLS is an opaque structure, typically OpenSSL PSSL
+  TOnNetTlsAcceptServerName = function(Context: PNetTlsContext; TLS: pointer;
+    const ServerName: RawUtf8): pointer of object;
 
   /// TLS Options and Information for a given TCrtSocket/INetTls connection
   // - currently only properly implemented by mormot.lib.openssl11 - SChannel
@@ -510,9 +524,13 @@ type
     /// called by INetTls.AfterConnection to retrieve a private password
     // - not used on SChannel
     OnPrivatePassword: TOnNetTlsGetPassword;
+    /// called by INetTls.AfterAccept to set a server/host-specific certificate
+    // - not used on SChannel
+    OnAcceptServerName: TOnNetTlsAcceptServerName;
     /// opaque pointer used by INetTls.AfterBind/AfterAccept to propagate the
     // bound server certificate context into each accepted connection
     // - so that certificates are decoded only once in AfterBind
+    // - is typically a PSSL_CTX on OpenSSL
     AcceptCert: pointer;
   end;
 
@@ -550,6 +568,13 @@ type
   /// signature of a factory for a new TLS encrypted layer
   TOnNewNetTls = function: INetTls;
 
+  /// event called by HTTPS server to publish HTTP-01 challenges on port 80
+  // - Let's Encrypt typical uri is '/.well-known/acme-challenge/<TOKEN>'
+  // - the server should send back the returned content as response with
+  // application/octet-stream (i.e. BINARY_CONTENT_TYPE)
+  TOnNetTlsAcceptChallenge = function(const domain, uri: RawUtf8;
+    var content: RawUtf8): boolean;
+
 
 /// initialize a stack-allocated TNetTlsContext instance
 procedure InitNetTlsContext(var TLS: TNetTlsContext; Server: boolean = false;
@@ -561,6 +586,18 @@ var
   // - on Windows, this unit will set a factory using the system SChannel API
   // - on other targets, could be set by the mormot.lib.openssl11.pas unit
   NewNetTls: TOnNewNetTls;
+
+  /// global callback set to TNetTlsContext.AfterAccept from InitNetTlsContext()
+  // - defined e.g. by mormot.net.acme.pas unit to support Let's Encrypt
+  // - any HTTPS server should also publish a HTTP server on port 80 to serve
+  // HTTP-01 challenges via the OnNetTlsAcceptChallenge callback
+  OnNetTlsAcceptServerName: TOnNetTlsAcceptServerName;
+
+  /// global callback used for HTTP-01 Let's Encrypt challenges
+  // - defined e.g. by mormot.net.acme.pas unit to support Let's Encrypt
+  // - any HTTPS server should also publish a HTTP server on port 80 to serve
+  // HTTP-01 challenges associated with the OnNetTlsAcceptServerName callback
+  OnNetTlsAcceptChallenge: TOnNetTlsAcceptChallenge;
 
 
 { ******************** Efficient Multiple Sockets Polling }
@@ -1152,7 +1189,7 @@ type
     property RemoteIP: RawUtf8
       read fRemoteIP write fRemoteIP;
     /// remote IP address of the last packet received (SocketLayer=slUDP only)
-    function PeerAddress(LocalAsVoid: boolean = false): RawByteString;
+    function PeerAddress(LocalAsVoid: boolean = false): RawUtf8;
     /// remote IP port of the last packet received (SocketLayer=slUDP only)
     function PeerPort: TNetPort;
     /// set the TCP_NODELAY option for the connection
@@ -2307,6 +2344,7 @@ end;
 var
   // GetIPAddressesText(Sep=' ') cache - refreshed every 32 seconds
   IPAddresses: array[TIPAddress] of record
+    Safe: TLightLock;
     Text: RawUtf8;
     Tix: integer;
   end;
@@ -2319,6 +2357,20 @@ var
     Text: array[{WithoutName=}boolean] of RawUtf8;
   end;
 
+procedure MacIPAddressFlush;
+var
+  ip: TIPAddress;
+begin
+  for ip := low(ip) to high(ip) do
+   IPAddresses[ip].Tix := 0;
+  MacAddresses[false].Text[false] := '';
+  MacAddresses[false].Text[true] := '';
+  MacAddresses[false].Searched := false;
+  MacAddresses[true].Text[false] := '';
+  MacAddresses[true].Text[true] := '';
+  MacAddresses[true].Searched := false;
+end;
+
 function GetIPAddressesText(const Sep: RawUtf8; Kind: TIPAddress): RawUtf8;
 var
   ip: TRawUtf8DynArray;
@@ -2328,27 +2380,32 @@ begin
   result := '';
   with IPAddresses[Kind] do
   begin
-    if Sep = ' ' then
-    begin
-      now := mormot.core.os.GetTickCount64 shr 15; // refresh every 32768 ms
-      if now <> Tix then
-        Tix := now
-      else
+    Safe.Lock;
+    try
+      if Sep = ' ' then
       begin
-        result := Text;
-        if result <> '' then
-          exit; // return the value from cache
+        now := mormot.core.os.GetTickCount64 shr 15; // refresh every 32768 ms
+        if now <> Tix then
+          Tix := now
+        else
+        begin
+          result := Text;
+          if result <> '' then
+            exit; // return the value from cache
+        end;
       end;
+      // we need to ask the OS for the current IP addresses
+      ip := GetIPAddresses(Kind);
+      if ip = nil then
+        exit;
+      result := ip[0];
+      for i := 1 to high(ip) do
+        result := result + Sep + ip[i];
+      if Sep = ' ' then
+        Text := result;
+    finally
+      Safe.UnLock;
     end;
-    // we need to ask the OS for the current IP addresses
-    ip := GetIPAddresses(Kind);
-    if ip = nil then
-      exit;
-    result := ip[0];
-    for i := 1 to high(ip) do
-      result := result + Sep + ip[i];
-    if Sep = ' ' then
-      Text := result;
   end;
 end;
 
@@ -2396,8 +2453,10 @@ begin
       end;
     SetLength(w, length(w) - 1);
     SetLength(wo, length(wo) - 1);
+    Safe.Lock; // to avoid memory leak
     Text[false] := w;
     Text[true] := wo;
+    Safe.UnLock;
     result := Text[WithoutName];
   end;
 end;
@@ -2432,6 +2491,8 @@ begin
   TLS.PrivateKeyFile := RawUtf8(PrivateKeyFile);
   TLS.PrivatePassword := PrivateKeyPassword;
   TLS.CACertificatesFile := RawUtf8(CACertificatesFile);
+  if Server then
+    TLS.OnAcceptServerName := OnNetTlsAcceptServerName; // e.g. mormot.net.acme
 end;
 
 
@@ -3629,7 +3690,7 @@ begin
   Linger := 5; // should remain open for 5 seconds after a closesocket() call
   {$endif OSLINUX}
   if aClientAddr <> nil then
-    fRemoteIP := aClientAddr^.IP(RemoteIPLocalHostAsVoidInServers);
+    aClientAddr^.IP(fRemoteIP, RemoteIPLocalHostAsVoidInServers);
   {$ifdef OSLINUX}
   if Assigned(OnLog) then
     OnLog(sllTrace, 'Accept(%:%) sock=% %',
@@ -4397,12 +4458,12 @@ begin
   result.CreateSockIn; // use SockIn with 1KB input buffer: 2x faster
 end;
 
-function TCrtSocket.PeerAddress(LocalAsVoid: boolean): RawByteString;
+function TCrtSocket.PeerAddress(LocalAsVoid: boolean): RawUtf8;
 begin
   if fPeerAddr = nil then
     result := ''
   else
-    result := fPeerAddr^.IP(LocalAsVoid);
+    fPeerAddr^.IP(result, LocalAsVoid);
 end;
 
 function TCrtSocket.PeerPort: TNetPort;

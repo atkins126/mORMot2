@@ -1052,7 +1052,7 @@ var
   /// retrieve the MAC addresses of all hardware network adapters
   // - mormot.net.sock.pas will inject here its own cross-platform version
   // - this unit will include a simple parser of /sys/class/net/* for Linux only
-  // - as used by GetComputerUuid()
+  // - as used e.g. by GetComputerUuid() fallback if SMBIOS is not available
   GetSystemMacAddress: function: TRawUtf8DynArray;
 
 
@@ -1848,6 +1848,14 @@ var
   sd: TSystemD;
 
 {$endif OSLINUX}
+
+var
+  /// allow runtime-binding of complex OS API calls
+  // - used e.g. by mormot.core.os.mac.pas to inject its own methods
+  PosixInject: record
+    GetSmbios: function(info: TSmbiosBasicInfo): RawUtf8;
+    GetSmbiosData: function: RawByteString;
+  end;
 
 {$endif OSWINDOWS}
 
@@ -2811,24 +2819,29 @@ function ConsoleReadBody: RawByteString;
 /// low-level access to the keyboard state of a given key
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
-// local RTL wrapper function to avoid linking mormot.core.unicode.pas
+/// local RTL wrapper function to avoid linking mormot.core.unicode.pas
 // when using Windows API
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: integer; out res: RawUtf8);
 
 {$else}
 
-// internal function to avoid linking mormot.core.buffers.pas
+/// internal function to avoid linking mormot.core.buffers.pas
 function PosixParseHex32(p: PAnsiChar): integer;
 
 {$endif OSWINDOWS}
 
-// internal function to avoid linking mormot.core.buffers.pas
+/// internal function to avoid linking mormot.core.buffers.pas
 function _oskb(Size: cardinal): string;
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded string
 // - under Windows, will use the CP_OEMCP encoding
 // - under Linux, will expect the console to be defined with UTF-8 encoding
 function Utf8ToConsole(const S: RawUtf8): RawByteString;
+
+/// direct conversion of a console OEM-encoded string into UTF-8 encoded string
+// - under Windows, will use the CP_OEMCP encoding
+// - under Linux, will expect the console to be defined with UTF-8 encoding
+function ConsoleToUtf8(const S: RawByteString): RawUtf8;
 
 
 type
@@ -4162,18 +4175,35 @@ function RunProcess(const path, arg1: TFileName; waitfor: boolean;
   const arg4: TFileName = ''; const arg5: TFileName = '';
   const env: TFileName = ''; envaddexisting: boolean = false): integer;
 
+type
+  /// callback used by RunRedirect() to notify of console output at runtime
+  // - newly console output text is given as UTF-8 on all platforms
+  // - should return true to stop the execution, or false to continue
+  // - on idle state (each 200ms), is called with text='' to allow execution abort
+  TOnRedirect = function(const text: RawUtf8): boolean of object;
+
 /// like fpSystem, but cross-platform
 // - under POSIX, calls bash only if needed, after ParseCommandArgs() analysis
 // - under Windows (especially Windows 10), creating a process can be dead slow
 // https://randomascii.wordpress.com/2019/04/21/on2-in-createprocess
-// - waitfordelay/processid are implemented on Windows only
+// - waitfordelay/processid/onoutput are implemented on Windows only
+// - parsed is implemented on POSIX only
 function RunCommand(const cmd: TFileName; waitfor: boolean;
   const env: TFileName = ''; envaddexisting: boolean = false;
+  {$ifdef OSWINDOWS}
+  waitfordelayms: cardinal = INFINITE; processid: PHandle = nil;
+  redirected: PRawUtf8 = nil; const onoutput: TOnRedirect = nil
+  {$else}
   parsed: PParseCommands = nil
-  {$ifdef OSWINDOWS} ;
-  waitfordelayms: cardinal = INFINITE; processid: PHandle = nil
   {$endif OSWINDOWS}): integer;
 
+/// execute a command, returning its output console as UTF-8 text
+// - calling FPC RTL popen/pclose on POSIX, or CreateProcessW on Windows
+// - return '' on cmd execution error, or the whole output console content
+// - will optionally call onoutput() to notify the new output state
+// - can abort if onoutput() callback returns false, or waitfordelayms expires
+function RunRedirect(const cmd: TFileName; exitcode: PInteger = nil;
+  const onoutput: TOnRedirect = nil; waitfordelayms: cardinal = INFINITE): RawUtf8;
 
 
 
@@ -5531,7 +5561,7 @@ begin
   if Stub = MAP_FAILED then
   {$endif OSWINDOWS}
     raise EOSException.Create('ReserveExecutableMemory(): OS mmap failed');
-  ObjArrayAdd(CurrentFakeStubBuffers, self);
+  PtrArrayAdd(CurrentFakeStubBuffers, self);
 end;
 
 destructor TFakeStubBuffer.Destroy;
@@ -6163,7 +6193,7 @@ begin
   info.Length := p^.StructMaxLength;
 end;
 
-// caller should then try to decode SMB from pointer(result) + Info.Len
+// caller should then try to decode SMB from pointer(result) + info.Len
 function SearchSmbios(const mem: RawByteString; var info: TRawSmbiosInfo): QWord;
 var
   p, pend: PSmbEntryPoint32;
@@ -6232,7 +6262,7 @@ begin
            exit;
          end;
       // if not root on POSIX, SMBIOS is not available
-      // -> try to get what the OS exposes (Linux or FreeBSD)
+      // -> try to get what the OS exposes (Linux, MacOS or FreeBSD)
       DirectSmbiosInfo(_Smbios);
     end;
   finally
@@ -6292,18 +6322,19 @@ begin
   // did we already compute this UUID?
   fn := UUID_CACHE;
   s := StringFromFile(fn);
-  if length(s) = SizeOf(u) then
+  if length(s) = SizeOf(uuid) then
   begin
     uuid := PGuid(s)^;
     exit;
   end;
   // no known UUID: compute and store a 128-bit hash from hardware information
+  // note: /etc/machine-id is no viable alternative since it is from SW random
   {$ifdef CPUINTELARM}
   crc128c(@CpuFeatures, SizeOf(CpuFeatures), u.b);
   {$else}
   FillZero(u.b);
   {$endif CPUINTELARM}
-  if RawSmbios.Data <> '' then // some bios have no uuid
+  if RawSmbios.Data <> '' then // some bios have no uuid but some HW info
     crc32c128(@u.b, pointer(RawSmbios.Data), length(RawSmbios.Data));
   n := 0;
   for i := 0 to length(_Smbios) - 1 do // some of _Smbios[] may be set
@@ -6317,12 +6348,12 @@ begin
     mac := GetSystemMacAddress;
     for i := 0 to high(mac) do
       crctext(mac[i]);
+    if FileFromBuffer(@u, SizeOf(u), fn) then // only MAC make it HW unique
+      FileSetSticky(fn); // use S_ISVTX so that file is not removed from /var/tmp
   end
   else
     // fallback if mormot.net.sock is not included (very unlikely)
     crctext(Executable.Host);
-  if FileFromBuffer(@u, SizeOf(u), fn) then
-    FileSetSticky(fn); // use S_ISVTX so that file is not removed from /var/tmp
 end;
 
 procedure DecodeSmbiosUuid(src: PGuid; out dest: RawUtf8; const raw: TRawSmbiosInfo);
@@ -6344,6 +6375,12 @@ begin
     if raw.SmbMajorVersion shl 8 + raw.SmbMinorVersion < $0206 then
       uid.D1 := bswap32(uid.D1); // swap endian as of version 2.6
     {$endif SMB_UUID_SWAP4}
+    {$ifdef OSDARWIN}
+    // mandatory to match IOPlatformUUID value from ioreg :(
+    uid.D1 := bswap32(uid.D1);
+    uid.D2 := swap(uid.D2);
+    uid.D3 := swap(uid.D3);
+    {$endif OSDARWIN}
     dest := RawUtf8(UpperCase(copy(GUIDToString(uid), 2, 36)));
   end;
 end;
@@ -6486,8 +6523,8 @@ begin
     try
       with InternalGarbageCollection do
         if not SearchExisting or
-           (ObjArrayFind(Instances, Count, Instance) < 0) then
-          ObjArrayAddCount(Instances, Instance, Count);
+           not PtrUIntScanExists(pointer(Instances), Count, PtrUInt(Instance)) then
+          PtrArrayAdd(Instances, Instance, Count);
     finally
       GlobalUnLock;
     end;
@@ -7403,9 +7440,8 @@ end;
 
 procedure TLecuyerThreadSafe.FillShort31(var dest: TShort31);
 begin
-  Safe.Lock;
-  Generator.FillShort31(dest);
-  Safe.UnLock;
+  Fill(@dest, 32);
+  FillAnsiStringFromRandom(@dest, 32);
 end;
 
 
@@ -7674,8 +7710,10 @@ begin
   FinalizeSpecificUnit; // in mormot.core.os.posix/windows.inc files
   DeleteCriticalSection(ConsoleCriticalSection);
   DeleteCriticalSection(GlobalCriticalSection);
+  {$ifndef NOEXCEPTIONINTERCEPT}
   _RawLogException := nil;
   RawExceptionIntercepted := true;
+  {$endif NOEXCEPTIONINTERCEPT}
 end;
 
 

@@ -36,7 +36,6 @@ uses
   mormot.crypt.core,
   mormot.crypt.jwt,
   mormot.core.perf,
-  mormot.core.search,
   mormot.crypt.secure,
   mormot.core.log,
   mormot.orm.base,
@@ -329,7 +328,7 @@ begin
       name := name + SubFields[0];
     W.BsonWrite(name, result);
     for i := 0 to fStoredClassRecordProps.Fields.Count - 1 do
-      if i in Fields then
+      if FieldBitGet(Fields, i) then
       begin
         name := fStoredClassMapping^.ExtFieldNames[i];
         if i + 1 < sf then
@@ -351,7 +350,7 @@ begin
         else
           n := 0;
         for i := 0 to fStoredClassRecordProps.Fields.Count - 1 do
-          if i in Fields then
+          if FieldBitGet(Fields, i) then
           begin
             BsonFieldNames^[n] := ExtFieldNames[i];
             inc(n);

@@ -22,8 +22,17 @@ end;
 
 {$else}
 
+const
+  /// FPC system hardcoded MAX_PATH = 260 :(
+  // - but more than 260 chars are possible with the \\?\..... prefix
+  // or by disabling the limitation in registry since Windows 10, version 1607
+  // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+  // - 2047 chars seems big enough in practice - POSIX uses 4096
+  W32_MAX = 2047;
+
 type
-  TW32Temp = array[0..MAX_PATH] of WideChar; // no temp alloc for ASCII names
+  /// 2KB stack buffer for no heap allocation during UTF-16 encoding
+  TW32Temp = array[0..W32_MAX] of WideChar;
 
 procedure W32Convert(const FileName: TFileName; var Temp: TW32Temp);
 var
@@ -32,6 +41,13 @@ var
 begin
   // identical to FPC RTL, which converts to UnicodeString before Wide API call 
   U := SynUnicode(FileName); // let the RTL + OS do the conversion
+  // switch to extended-length path if needed, allowing up to 32,767 widechars
+  len := length(U);
+  if (len > MAX_PATH) and
+     (FileName[1] in ['A'..'Z', 'a'..'z']) and
+     (FileName[2] = ':') then
+    U := '\\?\' + U;
+  // move to TW32Temp stack buffer
   len := length(U) * 2 + 2;  // +2 to include trailing #0
   if len > SizeOf(Temp) then
     Temp[0] := #0 // avoid buffer overflow (will be rejected by Windows anyway)
@@ -48,15 +64,14 @@ begin
     result := nil
   else
   begin
-    if IsAnsiCompatible(pointer(FileName), len) then
-    begin
+    if (len < MAX_PATH) and
+       IsAnsiCompatible(pointer(FileName), len) then
       // most common case doesn't need any Unicode conversion
-      if len > MAX_PATH then
-        len := 0;
       for i := 0 to len do // include trailing #0
-        PWordArray(@Temp)[i] := PByteArray(FileName)[i];
-    end
+        PWordArray(@Temp)[i] := PByteArray(FileName)[i]
     else
+      // use a temporary SynUnicode variable for complex UTF-16 conversion
+      // or if MAX_PATH is reached and \\?\ prefix is needed for extended length
       W32Convert(FileName, Temp);
     result := @Temp;
   end;
@@ -487,13 +502,14 @@ begin
   FileTimestampUtc := FileTimeToUnixMSTime(FA.ftLastWriteTime) // no local time
 end;
 
+function GetFileSizeEx(hFile: THandle; var FileSize: Int64): BOOL;
+  stdcall; external kernel32;
+
 function FileSize(F: THandle): Int64;
-var
-  res: Int64Rec absolute result;
 begin
-  result := 0;
-  if PtrInt(F) > 0 then
-    res.Lo := GetFileSize(F, @res.Hi);
+  if (PtrInt(F) <= 0) or
+     not GetFileSizeEx(F, result) then
+    result := 0;
 end;
 
 function FileSeek64(Handle: THandle; const Offset: Int64; Origin: DWORD): Int64;
@@ -1779,6 +1795,25 @@ begin
   else
     Utf8ToConsoleDoConv(S, result);
 end;
+
+procedure ConsoleToUtf8DoConv(const Console: RawByteString; var Utf8: RawUtf8);
+var
+  tmp: TSynTempBuffer;
+begin
+  tmp.Init(length(Console) * 4);
+  OemToCharBuffW(pointer(Console), tmp.buf, length(Console) + 1); // +1 = #0
+  Win32PWideCharToUtf8(tmp.buf, StrLenW(tmp.Buf), Utf8);
+  tmp.Done;
+end;
+
+function ConsoleToUtf8(const S: RawByteString): RawUtf8;
+begin
+  if IsAnsiCompatible(S) then
+    result := S // no conversion needed
+  else
+    ConsoleToUtf8DoConv(S, result);
+end;
+
 
 constructor TFileVersion.Create(const aFileName: TFileName;
   aMajor, aMinor, aRelease, aBuild: integer);
@@ -3513,16 +3548,21 @@ begin
 end;
 
 function RunCommand(const cmd: TFileName; waitfor: boolean; const env: TFileName;
-  envaddexisting: boolean; parsed: PParseCommands; waitfordelayms: cardinal;
-  processid: PHandle): integer;
+  envaddexisting: boolean; waitfordelayms: cardinal; processid: PHandle;
+  redirected: PRawUtf8; const onoutput: TOnRedirect): integer;
 var
   startupinfo: TStartupInfo; // _STARTUPINFOW or _STARTUPINFOA is equal here
   processinfo: TProcessInformation;
+  security: TSecurityAttributes;
   exe, path: TFileName;
+  rd, wr: THandle;
   // CreateProcess can alter the strings -> use local SynUnicode temp variables
   wcmd, wenv, wpath: SynUnicode;
-  exitcode: cardinal;
-  i: integer;
+  output: RawByteString;
+  endtix, pending: Int64;
+  exitcode, n: cardinal;
+  i, l, ulen: PtrInt;
+  tmp: TSynTempBuffer;
 begin
   // https://support.microsoft.com/en-us/help/175986/info-understanding-createprocess-and-command-line-arguments
   result := -1;
@@ -3566,19 +3606,81 @@ begin
     else
       UniqueString(wenv);
   end;
+  security.nLength := SizeOf(security);
+  security.bInheritHandle := true;
+  security.lpSecurityDescriptor := nil;
   // launch the process
   FillCharFast(startupinfo, SizeOf(startupinfo), 0);
   startupinfo.cb := SizeOf(startupinfo);
+  if redirected <> nil then
+    if CreatePipe(rd, wr, @security, 0) then
+    begin
+      SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+      startupinfo.wShowWindow := SW_HIDE;
+      startupinfo.hStdOutput := wr;
+      startupinfo.dwFlags := STARTF_USESTDHANDLES or STARTF_USESHOWWINDOW;
+    end
+    else
+      redirected := nil;
   FillCharFast(processinfo, SizeOf(processinfo), 0);
-  // https://docs.microsoft.com/pl-pl/windows/desktop/ProcThread/process-creation-flags
-  if CreateProcessW(nil, pointer(wcmd), nil, nil, false,
+  // https://docs.microsoft.com/en-en/windows/desktop/ProcThread/process-creation-flags
+  if CreateProcessW(nil, pointer(wcmd), @security, @security, true,
     CREATE_UNICODE_ENVIRONMENT or CREATE_DEFAULT_ERROR_MODE or
       DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP,
     pointer({%H-}wenv), pointer(wpath), startupinfo, processinfo) then
   begin
     if processid <> nil then
       processid^ := processinfo.hProcess;
-    if waitfor then
+    if redirected <> nil then
+    begin
+      // see https://stackoverflow.com/a/25725197/458259
+      l := 0;
+      ulen := 0;
+      if waitfordelayms = INFINITE then
+        endtix := 0
+      else
+        endtix := GetTickCount64 + waitfordelayms;
+      repeat
+        exitcode := WaitForSingleObject(processinfo.hProcess, 200);
+        Win32Check(exitcode <> WAIT_FAILED);
+        repeat
+          Win32Check(GetFileSizeEx(rd, pending));
+          if pending = 0 then
+          begin
+            if Assigned(onoutput) and
+               onoutput('') then
+              exitcode := WAIT_OBJECT_0; // returned true to abort
+            break;
+          end;
+          n := 0;
+          Win32Check(ReadFile(rd, tmp, SizeOf(tmp), n, nil));
+          if n <= 0 then
+            break;
+          SetLength(output, PtrInt(n) + l);
+          MoveFast(tmp, PByteArray(output)[l], n);
+          inc(l, n);
+          if Assigned(onoutput) then
+          begin
+            redirected^ := ConsoleToUtf8(output);
+            if onoutput(copy(redirected^, ulen + 1, maxInt)) then
+            begin
+              exitcode := WAIT_OBJECT_0;
+              break; // returned true to stop the execution
+            end;
+            ulen := length(redirected^); // incremental valid UTF-8 output
+          end;
+        until n < SizeOf(tmp);
+      until (exitcode = WAIT_OBJECT_0) or
+            ((endtix <> 0) and
+             (GetTickCount64 > endtix));
+      if redirected^ = '' then
+        redirected^ := ConsoleToUtf8(output);
+      if GetExitCodeProcess(processinfo.hProcess, exitcode) then
+        result := exitcode       // waited for process to end -> return code
+      else
+        result := -GetLastError; // was not able to retrieve exit code
+    end
+    else if waitfor then
       if WaitForSingleObject(processinfo.hProcess, waitfordelayms) = WAIT_FAILED then
         if waitfordelayms <> INFINITE then
           result := -1 // still runing after waitfordelayms
@@ -3595,6 +3697,22 @@ begin
   end
   else
     result := -GetLastError;
+  if redirected <> nil then
+  begin
+    CloseHandle(rd);
+    CloseHandle(wr);
+  end;
+end;
+
+function RunRedirect(const cmd: TFileName; exitcode: PInteger;
+  const onoutput: TOnRedirect; waitfordelayms: cardinal): RawUtf8;
+var
+  res: integer;
+begin
+  result := '';
+  res := RunCommand(cmd, true, '', false, waitfordelayms, nil, @result, onoutput);
+  if exitcode <> nil then
+    exitcode^ := res;
 end;
 
 

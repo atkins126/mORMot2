@@ -694,7 +694,8 @@ begin
     fields := props.CopiableFieldsBits
   else
     fields := props.SimpleFieldsBits[ooInsert];
-  if not ForceID and IsZero(fields) then
+  if not ForceID and
+     IsZero(fields) then
     result := ''
   else
     GetJsonValue(Value, ForceID, fields, result);
@@ -1541,9 +1542,9 @@ begin
         if IsZero(bits) then
           // get all simple fields if none supplied, like MultiFieldValues()
           bits := SimpleFieldsBits[ooSelect];
-        if bits - SimpleFieldsBits[ooSelect] = [] then
+        if bits - SimpleFieldsBits[ooSelect] = [] then // only simple fields
         begin
-          Rec := Table.Create(self, ID); // use the cache
+          Rec := Table.Create(self, ID); // we can use the cache
           try
             Rec.GetAsDocVariant(true, bits, result, nil, {"id"=}true);
           finally
@@ -2657,10 +2658,10 @@ function TOrmTableWritable.UpdatesToBatch(
 var
   c: TOrmClass;
   rec: TOrm;
-  r: PtrInt;
+  r, f, p: PtrInt;
   def, def32, bits: TFieldBits;
   props: TIntegerDynArray;
-  upd, updlast, b, f, p: integer;
+  upd, updlast, b: integer;
 begin
   result := 0;
   c := QueryRecordType;
@@ -2710,7 +2711,7 @@ begin
             if p < 0 then
               raise EOrmTable.CreateUtf8(
                 '%.UpdatesToBatch: Unexpected %.%', [self, c, Results[f]]);
-            include(bits, p);
+            FieldBitSet(bits, p);
           end;
           b := b shl 1;
         end;
