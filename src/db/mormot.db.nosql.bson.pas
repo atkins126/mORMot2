@@ -2736,7 +2736,7 @@ end;
 procedure BsonItemsToDocVariant(Kind: TBsonElementType; BSON: PByte;
   var Doc: TDocVariantData; Option: TBsonDocArrayConversion);
 const
-  OPTIONS: array[TBsonDocArrayConversion] of TDocVariantOptions = (
+  _OPT_: array[TBsonDocArrayConversion] of TDocVariantOptions = (
     [],
     [dvoReturnNullForUnknownProperty],
     [dvoReturnNullForUnknownProperty, dvoValueCopiedByReference],
@@ -2766,7 +2766,7 @@ begin
     else
       exit; // leave Doc=varEmpty
     end;
-    Doc.Init(OPTIONS[Option], k);
+    Doc.Init(_OPT_[Option], k);
     cap := 0;
     repeat // will handle up to 64 TBsonElement per loop (via items[])
       n := 0;
@@ -3130,14 +3130,17 @@ begin
               raise EBsonException.Create('TBsonElement.FromVariant(betInt32)');
           betInt64:
             if not VariantToInt64(aValue, PInt64(Element)^) then
-              raise EBsonException.Create('TBsonElement.FromVariant(betInt64)');
+              raise EBsonException.Create('TBsonElement.FromVariant(betInt64)')
+            else if PInt64Rec(Element)^.Hi = 0 then
+              Kind := betInt32; // 32-bit is enough
         end;
         ElementBytes := BSON_ELEMENTSIZE[Kind];
       end;
     varString:
       if (v.VAny <> nil) and
          (PInteger(v.VAny)^ and $ffffff = JSON_SQLDATE_MAGIC_C) and
-         Iso8601CheckAndDecode(PUtf8Char(v.VAny) + 3, Length(RawUtf8(v.VAny)) - 3,
+         Iso8601CheckAndDecode(
+           PUtf8Char(v.VAny) + 3, Length(RawUtf8(v.VAny)) - 3,
            PDateTime(@Data.InternalStorage)^) then
       begin
         // recognized TJsonWriter.AddDateTime(woDateTimeWithMagic) ISO-8601 format

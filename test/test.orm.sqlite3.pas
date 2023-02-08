@@ -177,14 +177,16 @@ type
     procedure DataAsHex(Ctxt: TRestServerUriContext);
     /// method used to test the Server-Side ModelRoot/Sum or
     // ModelRoot/People/Sum Requests with JSON process
+    // - _GET_ prefix will force that only mGET is allowed
     // - implementation of this method returns the sum of two floating-points,
     // named A and B, as in the public TOrmPeople.Sum() method,
     // which implements the Client-Side of this service
     // - Table nor ID are never used here
-    procedure Sum(Ctxt: TRestServerUriContext);
+    procedure _GET_Sum(Ctxt: TRestServerUriContext);
     /// method used to test the Server-Side ModelRoot/Sum or
     // ModelRoot/People/Sum Requests with variant process
-    procedure Sum2(Ctxt: TRestServerUriContext);
+    // - _GET__POST_ prefix will force that only mGET and mPOST are allowed
+    procedure _GET__POST_Sum2(Ctxt: TRestServerUriContext);
   end;
 
 
@@ -1635,7 +1637,7 @@ begin
           check((length(Data) = 4) and
                 (PInteger(pointer(Data))^ = IntArray[i]));
           V2.IDValue := IntArray[i]; // debug use - do NOT set ID in your programs!
-          check(V2.DataAsHex(Client) = BinToHex(Data));
+          checkEqual(V2.DataAsHex(Client), BinToHex(Data));
           a := RandomDouble;
           b := RandomDouble;
           check(SameValue(TOrmPeople.Sum(Client, a, b, false), a + b, 1E-10));
@@ -2077,9 +2079,9 @@ begin
               check(GetBlob(aR, aF) = J.GetBlob(aR, aF))
             else
             begin
-              CheckUtf8((GetW(aR, aF) = J.GetW(aR, aF)) and
+              CheckUtf8((GetSynUnicode(aR, aF) = J.GetSynUnicode(aR, aF)) and
                     (GetA(aR, aF) = J.GetA(aR, aF)) and
-                    (length(GetW(aR, aF)) shr 1 = LengthW(aR, aF)),
+                    (length(GetSynUnicode(aR, aF)) = LengthW(aR, aF)),
                 'Get() in Row=% Field=%', [aR, aF]);
               if (aR > 0) and
                  (aF > 3) then
@@ -2772,16 +2774,19 @@ begin
     Ctxt.Error('Impossible to retrieve the Data BLOB field');
 end;
 
-procedure TRestServerTest.Sum(Ctxt: TRestServerUriContext);
+procedure TRestServerTest._GET_Sum(Ctxt: TRestServerUriContext);
 var
   a, b: double;
+  p: PUtf8Char;
 begin
-  if UrlDecodeNeedParameters(Ctxt.Parameters, 'A,B') then
+  // this is the fastest, but much more verbose
+  p := Ctxt.Parameters;
+  if UrlDecodeNeedParameters(p, 'A,B') then
   begin
-    while Ctxt.Parameters <> nil do
+    while p <> nil do
     begin
-      UrlDecodeDouble(Ctxt.Parameters, 'A=', a);
-      UrlDecodeDouble(Ctxt.Parameters, 'B=', b, @Ctxt.Parameters);
+      UrlDecodeDouble(p, 'A=', a);
+      UrlDecodeDouble(p, 'B=', b, @p);
     end;
     Ctxt.Results([a + b]);
   end
@@ -2789,10 +2794,10 @@ begin
     Ctxt.Error('Missing Parameter');
 end;
 
-procedure TRestServerTest.Sum2(Ctxt: TRestServerUriContext);
+procedure TRestServerTest._GET__POST_Sum2(Ctxt: TRestServerUriContext);
 begin
-  with Ctxt do
-    Results([InputDouble['a'] + InputDouble['b']]);
+  // why make it complicated?
+  Ctxt.Results([Ctxt.InputDouble['a'] + Ctxt.InputDouble['b']]);
 end;
 
 

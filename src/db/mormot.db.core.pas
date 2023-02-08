@@ -48,8 +48,8 @@ const
 
   /// maximum number of fields in a database Table
   // - default is 64, but can be set to 64, 128, 192 or 256
-  // adding MAX_SQLFIELDS_128, MAX_SQLFIELDS_192 or MAX_SQLFIELDS_256
-  // conditional directives for your project
+  // adding one MAX_SQLFIELDS_128, MAX_SQLFIELDS_192 or MAX_SQLFIELDS_256
+  // conditional directive for your project
   // - this constant is used internally to optimize memory usage in the
   // generated asm code, and statically allocate some arrays for better speed
   // - note that due to compiler restriction, 256 is the maximum value
@@ -169,15 +169,18 @@ type
   /// points to a bit set used for all available fields in a Table
   PFieldBits = ^TFieldBits;
 
-  /// used to store a field index in a Table
-  // - note that -1 is commonly used for the ID/RowID field so the values should
-  // be signed
-  // - MAX_SQLFIELDS may be up to 256, so ShortInt (-128..127) would not have
-  // been enough, so we use the SmallInt range (-32768..32767)
+  /// the integer type used to store a field index in a Table
+  // - the ID/RowID field  is commonly set as -1, so the values should be signed
+  {$ifdef MAX_SQLFIELDS_64}
+  // - default MAX_SQLFIELDS = 64 could use ShortInt (-128..127) range
+  TFieldIndex = ShortInt;
+  {$else}
+  // - MAX_SQLFIELDS may be up to 256, so define SmallInt range (-32768..32767)
   TFieldIndex = SmallInt;
+  {$endif MAX_SQLFIELDS_64}
 
   /// used to store field indexes in a Table
-  // - same as TFieldBits, but allowing to store the proper order
+  // - similar to TFieldBits, but allowing to store the proper order
   TFieldIndexDynArray = array of TFieldIndex;
 
 
@@ -244,6 +247,10 @@ function FieldBitCount(const Fields: TFieldBits; MaxFields: integer = MAX_SQLFIE
 procedure FillZero(var Fields: TFieldBits); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+var
+  /// some pre-allocated arrays used by FieldBitsToIndex(ALL_FIELDS)
+  MAX_SQLFIELDS_INDEX: array[0 .. MAX_SQLFIELDS] of TFieldIndexDynArray;
+
 /// convert a TFieldBits set of bits into an array of integers
 procedure FieldBitsToIndex(const Fields: TFieldBits;
   out Index: TFieldIndexDynArray; MaxLength: PtrInt = MAX_SQLFIELDS); overload;
@@ -261,7 +268,7 @@ function AddFieldIndex(var Indexes: TFieldIndexDynArray; Field: integer): intege
 procedure FieldIndexToBits(const Index: TFieldIndexDynArray;
   out Fields: TFieldBits); overload;
 
-// search a field index in an array of field indexes
+/// search a field index in an array of field indexes
 // - returns the index in Indexes[] of the given Field value, -1 if not found
 function SearchFieldIndex(var Indexes: TFieldIndexDynArray; Field: integer): integer;
 
@@ -349,6 +356,60 @@ var
   ROWID_TXT: RawUtf8;
 
 function ToText(op: TSqlCompareOperator): PShortString; overload;
+
+type
+  /// thread-safe sequence used to internally store TLastError message
+  TLastErrorID = integer;
+
+  /// allow to manage an Error messages list from IDs
+  // - used e.g. with a TLastErrorID threadvar for SetDbError/GetDbError
+  // since we can't create any string/RawUtf8 threadvar
+  {$ifdef USERECORDWITHMETHODS}
+  TLastError = record
+  {$else}
+  TLastError = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    /// make the internal storage thread-safe
+    Safe: TLightLock;
+    /// the latest thread safe generated ID
+    CurrentID: TLastErrorID;
+    /// the current index in Seq[] and Msg[] arrays
+    CurrentIndex: integer;
+    /// store the TLastErrorID values
+    Seq: TIntegerDynArray;
+    /// store the UTF-8 Message values
+    Msg: TRawUtf8DynArray;
+    /// initialize the Error messages list
+    procedure Init(Capacity: integer);
+    /// append a new UTF-8 message to the internal list, returning its ID
+    function NewMsg(const text: RawUtf8): TLastErrorID;
+    /// get the UTF-8 message associated to a given ID
+    function GetMsg(id: TLastErrorID; out text: RawUtf8): boolean;
+  end;
+
+/// set an error message for the current thread
+// - using an internal TLastError store and an associated TLastErrorID threadvar
+// since we can't create any string/RawUtf8 threadvar
+procedure SetDbError(const text: RawUtf8);
+
+/// unset the error message for the current thread
+procedure ClearDbError;
+
+/// get the error message assigned by SetDbError() for the current thread
+// - e.g. after any raise ESqlDBException.CreateUtf8
+function GetDbError: RawUtf8;
+
+/// quickly check if there is an error message for the current thread
+function HasDbError: boolean;
+
+type
+  /// abstract DB-oriented exception class
+  // - CreateUtf8() will also call SetDbError() with the resulting message text
+  ECoreDBException = class(ESynException)
+  protected
+    procedure CreateAfterSetMessageUtf8; override;
+  end;
 
 
 // backward compatibility types redirections
@@ -837,12 +898,12 @@ type
     // - if no Stream is supplied, a temporary memory stream will be created
     // (it's faster to supply one, e.g. any TRest.TempMemoryStream)
     constructor Create(aStream: TStream; Expand, withID: boolean;
-      const Fields: TFieldBits; aBufSize: integer = 8192); overload;
+      const aFields: TFieldBits; aBufSize: integer = 8192); overload;
     /// the data will be written to the specified Stream
     // - if no Stream is supplied, a temporary memory stream will be created
     // (it's faster to supply one, e.g. any TRest.TempMemoryStream)
     constructor Create(aStream: TStream; Expand, withID: boolean;
-      const Fields: TFieldIndexDynArray = nil; aBufSize: integer = 8192;
+      const aFields: TFieldIndexDynArray = nil; aBufSize: integer = 8192;
       aStackBuffer: PTextWriterStackBuffer = nil); overload;
     /// rewind the Stream position and write void JSON object
     procedure CancelAllVoid;
@@ -881,7 +942,7 @@ type
     // - this field is ignored by TOrmTable.GetJsonValues
     property WithID: boolean
       read fWithID;
-    /// Read-Only access to the field bits set for each column to be stored
+    /// Read-Only access to the field indexes set for each column to be stored
     property Fields: TFieldIndexDynArray
       read fFields;
     /// if not Expanded format, contains the Stream position of the first
@@ -1562,12 +1623,21 @@ var
   i, n: PtrInt;
   p: ^TFieldIndex;
 begin
+  if IsAllFields(Fields) then
+  begin
+    Index := MAX_SQLFIELDS_INDEX[MaxLength]; // we can reuse a shared instance
+    exit;
+  end
+  else if IsZero(Fields) then
+    exit;
   if MaxLength > MAX_SQLFIELDS then
     raise ESynDBException.CreateUtf8('FieldBitsToIndex(MaxLength=%)', [MaxLength]);
-  if IsAllFields(Fields) then
-    n := MaxLength
-  else
-    n := FieldBitCount(Fields, MaxLength);
+  n := FieldBitCount(Fields, MaxLength);
+  if n = MaxLength then
+  begin
+    Index := MAX_SQLFIELDS_INDEX[n]; // reuse a shared instance
+    exit;
+  end;
   SetLength(Index, n);
   p := pointer(Index);
   for i := 0 to MaxLength - 1 do
@@ -1575,13 +1645,20 @@ begin
     begin
       p^ := i;
       inc(p);
+      dec(n);
+      if n = 0 then
+        break;
     end;
 end;
 
 function FieldBitsToIndex(
   const Fields: TFieldBits; MaxLength: PtrInt): TFieldIndexDynArray;
 begin
-  FieldBitsToIndex(Fields, result, MaxLength);
+  if IsAllFields(Fields) and
+     (MaxLength <= high(MAX_SQLFIELDS_INDEX)) then
+    result := MAX_SQLFIELDS_INDEX[MaxLength] // we can reuse a shared instance
+  else
+    FieldBitsToIndex(Fields, result, MaxLength);
 end;
 
 function AddFieldIndex(var Indexes: TFieldIndexDynArray; Field: integer): integer;
@@ -1593,7 +1670,7 @@ end;
 
 function SearchFieldIndex(var Indexes: TFieldIndexDynArray; Field: integer): integer;
 begin
-  for result := 0 to length(Indexes) - 1 do
+  for result := 0 to length(Indexes) - 1 do // never called, no need to optimize
     if Indexes[result] = Field then
       exit;
   result := -1;
@@ -1824,6 +1901,116 @@ end;
 function ToText(op: TSqlCompareOperator): PShortString;
 begin
   result := GetEnumName(TypeInfo(TSqlCompareOperator), ord(op));
+end;
+
+
+{ TLastError }
+
+procedure TLastError.Init(Capacity: integer);
+begin
+  Safe.Lock;
+  try
+    Seq := nil;
+    Msg := nil;
+    SetLength(Seq, Capacity);
+    SetLength(Msg, Capacity);
+  finally
+    Safe.UnLock;
+  end;
+end;
+
+function TLastError.NewMsg(const text: RawUtf8): TLastErrorID;
+var
+  i: PtrInt;
+begin
+  Safe.Lock;
+  try
+    inc(CurrentID);
+    if CurrentID < 0 then
+      CurrentID := 1; // paranoid check after 2^31 messages :)
+    i := CurrentIndex + 1;
+    if i = length(Seq) then
+      i := 0;
+    result := CurrentID;
+    Seq[i] := result;
+    Msg[i] := text;
+    CurrentIndex := i;
+  finally
+    Safe.UnLock;
+  end;
+end;
+
+function TLastError.GetMsg(id: TLastErrorID; out text: RawUtf8): boolean;
+var
+  i: PtrInt;
+begin
+  result := false;
+  if id = 0 then
+    exit;
+  Safe.Lock;
+  try
+    i := IntegerScanIndex(pointer(Seq), length(Seq), id); // may use SSE2
+    if i >= 0 then
+    begin
+      text := Msg[i];
+      result := true;
+    end;
+  finally
+    Safe.UnLock;
+  end;
+end;
+
+var
+  LastDbError: TLastError; // store last error texts
+
+threadvar
+  LastDbErrorID: TLastErrorID; // 32-bit error text identifier for each thread
+
+procedure SetDbError(const text: RawUtf8);
+var
+  err: ^TLastError;
+  id: TLastErrorID;
+begin
+  if text <> '' then
+  begin
+    err := @LastDbError;
+    if err^.Seq = nil then
+      err^.Init(128);
+    id := err^.NewMsg(text);
+  end
+  else
+    id := 0; // reset
+  LastDbErrorID := id;
+end;
+
+procedure ClearDbError;
+begin
+  LastDbErrorID := 0; // reset
+end;
+
+function GetDbError: RawUtf8;
+var
+  id: TLastErrorID;
+begin
+  id := LastDbErrorID;
+  if id = 0 then
+    result := '' // no error
+  else if not LastDbError.GetMsg(id, result) then
+    FormatUtf8('Too many DB errors: id % is far behind', [id], result);
+end;
+
+function HasDbError: boolean;
+begin
+  result := LastDbErrorID <> 0;
+end;
+
+
+{ ECoreDBException }
+
+procedure ECoreDBException.CreateAfterSetMessageUtf8;
+begin
+  SetDbError(fMessageUtf8);
+  inherited CreateAfterSetMessageUtf8;
 end;
 
 
@@ -2220,7 +2407,7 @@ begin
 end;
 
 const
-  _ENDCLAUSE: array[0..9] of PUtf8Char = (
+  _ENDCLAUSE: array[0..10] of PUtf8Char = (
       'ORDER BY ',
       'GROUP BY ',
       'LIMIT ',
@@ -2230,6 +2417,7 @@ const
       'INNER ',
       'OUTER ',
       'JOIN ',
+      'WHERE ', // https://synopse.info/forum/viewtopic.php?pid=38842#p38842
       nil);
 
 function SqlWhereIsEndClause(const Where: RawUtf8): boolean;
@@ -2610,13 +2798,13 @@ begin
 end;
 
 constructor TResultsWriter.Create(aStream: TStream; Expand, withID: boolean;
-  const Fields: TFieldBits; aBufSize: integer);
+  const aFields: TFieldBits; aBufSize: integer);
 begin
-  Create(aStream, Expand, withID, FieldBitsToIndex(Fields), aBufSize);
+  Create(aStream, Expand, withID, FieldBitsToIndex(aFields), aBufSize);
 end;
 
 constructor TResultsWriter.Create(aStream: TStream; Expand, withID: boolean;
-  const Fields: TFieldIndexDynArray; aBufSize: integer;
+  const aFields: TFieldIndexDynArray; aBufSize: integer;
   aStackBuffer: PTextWriterStackBuffer);
 begin
   if aStream = nil then
@@ -2630,7 +2818,7 @@ begin
     inherited Create(aStream, aBufSize);
   fExpand := Expand;
   fWithID := withID;
-  fFields := Fields;
+  fFields := aFields;
 end;
 
 procedure TResultsWriter.AddColumns(aKnownRowsCount: integer);
@@ -2800,7 +2988,8 @@ const
     nil);
 
 constructor TSelectStatement.Create(const SQL: RawUtf8;
-  const GetFieldIndex: TOnGetFieldIndex; const SimpleFields: TSelectStatementSelectDynArray);
+  const GetFieldIndex: TOnGetFieldIndex;
+  const SimpleFields: TSelectStatementSelectDynArray);
 var
   prop, whereBefore: RawUtf8;
   P, B: PUtf8Char;
@@ -3988,13 +4177,23 @@ begin
     W.AddShort('insert into ');
 end;
 
-
-
-initialization
+procedure InitializeUnit;
+var
+  i, j: PtrInt;
+begin
   ShortStringToAnsi7String(JSON_SQLDATE_MAGIC_STR, JSON_SQLDATE_MAGIC_TEXT);
   ID_TXT := 'ID'; // avoid reallocation
   ROWID_TXT := 'RowID';
+  for j := 1 to high(MAX_SQLFIELDS_INDEX) do
+  begin
+    SetLength(MAX_SQLFIELDS_INDEX[j], j);
+    for i := 0 to j - 1 do
+      MAX_SQLFIELDS_INDEX[j, i] := i;
+  end;
+end;
 
+initialization
+  InitializeUnit;
 
 end.
 

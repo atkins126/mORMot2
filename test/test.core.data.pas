@@ -172,7 +172,7 @@ type
     fValDate: TDateTime;
     fData: RawBlob;
     fAnsi: WinAnsiString;
-    fUnicode: RawUnicode;
+    fUnicode: SynUnicode;
     fVariant: variant;
     procedure SetInt(const Value: int64);
   public
@@ -184,7 +184,7 @@ type
       read fInt write SetInt default 12;
     property Test: RawUtf8
       read fTest write fTest;
-    property Unicode: RawUnicode
+    property Unicode: SynUnicode
       read fUnicode write fUnicode;
     property Ansi: WinAnsiString
       read fAnsi write fAnsi;
@@ -276,6 +276,14 @@ type
       read fFileVersions write fFileVersions;
   end;
 
+  TEntry = packed record
+    ID: TID;
+    Timestamp512: cardinal;
+    Tag: cardinal;
+    Json: RawUtf8;
+  end;
+  PEntry = ^TEntry;
+
 
 
 implementation
@@ -292,7 +300,7 @@ begin
   Int := i;
   Test := Int32ToUtf8(i);
   Ansi := WinAnsiString(Test);
-  Unicode := WinAnsiToRawUnicode(Ansi);
+  Unicode := WinAnsiToSynUnicode(Ansi);
   ValFloat := i * 2.5;
   ValWord := i;
   ValDate := i + 30000;
@@ -310,7 +318,7 @@ begin
   test.Check(Int = i);
   test.Check(GetInteger(pointer(self.Test)) = i);
   test.Check(Ansi = WinAnsiString(self.Test));
-  test.Check(Unicode = WinAnsiToRawUnicode(Ansi));
+  test.Check(Unicode = WinAnsiToSynUnicode(Ansi));
   test.Check(ValFloat = i * 2.5);
   test.Check(ValWord = (i + offset) and $ffff);
   test.Check(ValDate = i + 30000);
@@ -1134,15 +1142,17 @@ type
     a: RawUtf8;
     b: integer;
   end;
+  TSubABs = array of TSubAB;
 
   TSubCD = packed record
     c: byte;
     d: RawUtf8;
   end;
+  TSubCDs = array of TSubCD;
 
   TAggregate = packed record
-    abArr: array of TSubAB;
-    cdArr: array of TSubCD;
+    abArr: TSubABs;
+    cdArr: TSubCDs;
   end;
 
   TNestedDtoObject = class(TSynAutoCreateFields)
@@ -1161,11 +1171,11 @@ type
 
   TDtoObject = class(TSynAutoCreateFields)
   private
-    FFieldNestedObject: TNestedDtoObject;
+    FNestedObject: TNestedDtoObject;
     FSomeField: RawUtf8;
   published
     property NestedObject: TNestedDtoObject
-      read FFieldNestedObject;
+      read FNestedObject;
     property SomeField: RawUtf8
       read FSomeField write FSomeField;
   end;
@@ -1176,6 +1186,22 @@ type
   published
     property Level: TSynLogInfo
       read fLevel;
+  end;
+
+  TNestedDtoObject2 = class(TNestedDtoObject)
+  private
+    FNestedObject: TNestedDtoObject;
+  published
+    property NestedObject: TNestedDtoObject
+      read FNestedObject;
+  end;
+
+  TDtoObject3 = class(TDtoObject)
+  private
+    FNestedObject2: TNestedDtoObject2;
+  published
+    property NestedObject2: TNestedDtoObject2
+      read FNestedObject2;
   end;
 
   TObjectWithVariant = class(TSynPersistent)
@@ -1230,7 +1256,7 @@ const
   __TTestCustomDiscogs =
     'pagination{per_page,items,page Integer}' +
     'releases[status,title,format,label,artist RawUtf8 year,id integer]';
-  __TRestCacheEntryValue =
+  __TEntry =
     'ID: Int64; Timestamp512,Tag: cardinal; Json: RawUtf8';
   __TSubAB =
     'a : RawUtf8; b : integer;';
@@ -1258,10 +1284,11 @@ var
   JAS: TTestCustomJsonArraySimple;
   JAV: TTestCustomJsonArrayVariant;
   GDtoObject, G2, G3: TDtoObject;
+  GNest: TDtoObject3;
   owv: TObjectWithVariant;
   Trans: TTestCustomJson2;
   Disco, Disco2: TTestCustomDiscogs;
-  Cache: TRestCacheEntryValue;
+  Cache: TEntry;
   peop: TOrmPeople;
   K: RawUtf8;
   strict, Valid: boolean;
@@ -1663,8 +1690,8 @@ var
       end;
     end;
     binary := DynArraySave(AA, TypeInfo(TRawUtf8DynArrayDynArray));
-    Check(DynArrayLoad(
-      AB, pointer(binary), TypeInfo(TRawUtf8DynArrayDynArray)) <> nil);
+    Check(DynArrayLoad(AB, pointer(binary), TypeInfo(TRawUtf8DynArrayDynArray),
+      nil, PAnsiChar(binary) + length(binary)) <> nil);
     Check(length(AA) = length(AB));
     for i := 0 to high(AA) do
     begin
@@ -1712,6 +1739,48 @@ var
     J := RecordSaveJson(agg2, TypeInfo(TAggregate));
     CheckHash(J, $E3AC9C44);
     check(IsValidJson(J));
+    Finalize(agg);
+    CheckEqual(length(agg.abArr), 0);
+    Check(not DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
+    CheckEqual(length(agg.abArr), 0);
+    U := 'a'#13#10'0'#13#10'1'#13#10;
+    Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
+    CheckEqual(length(agg.abArr), 2);
+    CheckEqual(agg.abArr[0].a, '0');
+    CheckEqual(agg.abArr[0].b, 0);
+    CheckEqual(agg.abArr[1].a, '1');
+    CheckEqual(agg.abArr[1].b, 0);
+    Finalize(agg);
+    CheckEqual(length(agg.abArr), 0);
+    U := 'a,b'#13#10'"0,1",2'#13#10'"1",3'#13#10;
+    Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
+    CheckEqual(length(agg.abArr), 2);
+    CheckEqual(agg.abArr[0].a, '0,1');
+    CheckEqual(agg.abArr[0].b, 2);
+    CheckEqual(agg.abArr[1].a, '1');
+    CheckEqual(agg.abArr[1].b, 3);
+    U := 'c,b,a'#13#10'5,1,"2,3"'#13#10'6,7,3'#13#10;
+    Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
+    CheckEqual(length(agg.abArr), 2);
+    CheckEqual(agg.abArr[0].a, '2,3');
+    CheckEqual(agg.abArr[0].b, 1);
+    CheckEqual(agg.abArr[1].a, '3');
+    CheckEqual(agg.abArr[1].b, 7);
+    Finalize(agg);
+    CheckEqual(length(agg.abArr), 0);
+    U := 'b'#13#10'1'#13#10'2'#13#10#13#10;
+    Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
+    CheckEqual(length(agg.abArr), 2);
+    CheckEqual(agg.abArr[0].a, '');
+    CheckEqual(agg.abArr[0].b, 1);
+    CheckEqual(agg.abArr[1].a, '');
+    CheckEqual(agg.abArr[1].b, 2);
+    U := 'a'#13#10#13#10;
+    Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
+    CheckEqual(length(agg.abArr), 0);
+    U := 'c'#13#10'0'#13#10'1'#13#10;
+    Check(not DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
+    CheckEqual(length(agg.abArr), 0);
 
     Finalize(JAS);
     FillCharFast(JAS, SizeOf(JAS), 0);
@@ -1778,6 +1847,7 @@ var
       end;
     end;
     Check(JAV.D = '4');
+
     GDtoObject := TDtoObject.Create;
     G2 := TDtoObject.Create;
     Check(IsObjectDefaultOrVoid(GDtoObject));
@@ -1806,10 +1876,12 @@ var
     Check(G2.NestedObject.FieldInteger = 0);
     Check(SetValueObject(G2, 'nestedobject.fieldinteger', 10));
     Check(G2.NestedObject.FieldInteger = 10);
+
     ClearObject(G2);
     U := ObjectToIni(G2);
     CheckEqual(U, '[Main]'#$0A'SomeField='#$0A#$0A'[NestedObject]'#$0A +
       'FieldString='#$0A'FieldInteger=0'#$0A'FieldVariant=null'#$0A#$0A);
+    CheckHash(U, $79F2E094);
     Check(not IniToObject('[main2]'#10'somefield=toto', G2));
     CheckEqual(G2.SomeField, '');
     CheckEqual(G2.NestedObject.FieldInteger, 0);
@@ -1826,6 +1898,47 @@ var
     U := ObjectToIni(G2);
     CheckEqual(U, '[Main]'#$0A'SomeField=titi'#$0A#$0A'[NestedObject]'#$0A +
       'FieldString=c:\abc'#$0A'FieldInteger=7'#$0A'FieldVariant=null'#$0A#$0A);
+    G2.NestedObject.FieldString := 'line1'#13#10'line2'#10'line3'#13#10#10#10;
+    U := ObjectToIni(G2);
+    CheckEqual(U, '[Main]'#$0A'SomeField=titi'#$0A#$0A'[NestedObject]'#$0A +
+      'FieldInteger=7'#$0A'FieldVariant=null'#$0A#$0A +
+      '[NestedObject.FieldString]'#$0A'line1'#$0A'line2'#$0A'line3'#$0A#$0A);
+    CheckHash(U, $B16E54F1);
+    ClearObject(G2);
+    Check(IsObjectDefaultOrVoid(G2));
+    CheckHash(ObjectToIni(G2), $79F2E094);
+    CheckEqual(G2.SomeField, '');
+    CheckEqual(G2.NestedObject.FieldInteger, 0);
+    CheckEqual(G2.NestedObject.FieldString, '');
+    Check(IniToObject(U, G2));
+    Check(not IsObjectDefaultOrVoid(G2));
+    CheckEqual(G2.SomeField, 'titi');
+    CheckEqual(G2.NestedObject.FieldInteger, 7);
+    CheckEqual(G2.NestedObject.FieldString, 'line1'#$0A'line2'#$0A'line3'#$0A#$0A);
+    CheckHash(ObjectToIni(G2), $B16E54F1);
+    GNest := TDtoObject3.Create;
+    U := ObjectToIni(GNest);
+    CheckEqual(U, '[Main]'#$0A'SomeField='#$0A#$0A'[NestedObject]'#$0A +
+      'FieldString='#$0A'FieldInteger=0'#$0A'FieldVariant=null'#$0A#$0A +
+      '[NestedObject2]'#$0A +
+      'FieldString='#$0A'FieldInteger=0'#$0A'FieldVariant=null'#$0A#$0A +
+      '[NestedObject2.NestedObject]'#$0A +
+      'FieldString='#$0A'FieldInteger=0'#$0A'FieldVariant=null'#$0A#$0A);
+    CheckHash(U, $9AFB5BD6);
+    GNest.SomeField := 'toto';
+    GNest.NestedObject2.FieldString := 'nested1';
+    GNest.NestedObject2.NestedObject.FieldString := 'nested2';
+    U := ObjectToIni(GNest);
+    CheckHash(U, $68286617);
+    Check(not IsObjectDefaultOrVoid(GNest));
+    ClearObject(GNest);
+    Check(IsObjectDefaultOrVoid(GNest));
+    CheckHash(ObjectToIni(GNest), $9AFB5BD6);
+    Check(IniToObject(U, GNest));
+    CheckEqual(GNest.SomeField, 'toto');
+    CheckEqual(GNest.NestedObject2.FieldString, 'nested1');
+    CheckEqual(GNest.NestedObject2.NestedObject.FieldString, 'nested2');
+    GNest.Free;
     G3 := TDtoObject2.Create;
     U := ObjectToIni(G3);
     CheckHash(U, $CDBF8A87);
@@ -1840,6 +1953,7 @@ var
     Check(ObjectEquals(G2, GDtoObject));
     G2.Free;
     GDtoObject.Free;
+
     owv := TObjectWithVariant.Create;
     J := ObjectToJson(owv);
     CheckEqual(J, '{"Value":null}');
@@ -1865,26 +1979,26 @@ var
 
     Finalize(Cache);
     FillCharFast(Cache, SizeOf(Cache), 0);
-    U := RecordSaveJson(Cache, TypeInfo(TRestCacheEntryValue));
+    U := RecordSaveJson(Cache, TypeInfo(TEntry));
     CheckEqual(U, '{"ID":0,"Timestamp512":0,"Tag":0,"Json":""}');
     check(IsValidJson(U));
     Cache.ID := 10;
     Cache.Timestamp512 := 200;
     Cache.Json := 'test';
     Cache.Tag := 12;
-    U := RecordSaveJson(Cache, TypeInfo(TRestCacheEntryValue));
+    U := RecordSaveJson(Cache, TypeInfo(TEntry));
     CheckEqual(U, '{"ID":10,"Timestamp512":200,"Tag":12,"Json":"test"}');
     check(IsValidJson(U));
     U := '{"ID":210,"Timestamp512":2200,"Json":"test2"}';
     check(IsValidJson(U));
-    RecordLoadJson(Cache, UniqueRawUtf8(U), TypeInfo(TRestCacheEntryValue));
+    RecordLoadJson(Cache, UniqueRawUtf8(U), TypeInfo(TEntry));
     Check(Cache.ID = 210);
     Check(Cache.Timestamp512 = 2200);
     Check(Cache.Json = 'test2');
     Check(Cache.Tag = 12);
     U := '{ID:220,Json:"test3",Timestamp512:2300}';
     check(IsValidJson(U));
-    RecordLoadJson(Cache, UniqueRawUtf8(U), TypeInfo(TRestCacheEntryValue));
+    RecordLoadJson(Cache, UniqueRawUtf8(U), TypeInfo(TEntry));
     Check(Cache.ID = 220);
     Check(Cache.Timestamp512 = 2300);
     Check(Cache.Json = 'test3');
@@ -2822,10 +2936,10 @@ begin
     __TTestCustomJsonArraySimple);
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayVariant),
     __TTestCustomJsonArrayVariant);
-  Rtti.RegisterFromText(TypeInfo(TRestCacheEntryValue), __TRestCacheEntryValue);
+  Rtti.RegisterFromText(TypeInfo(TEntry), __TEntry);
   TestJSONSerialization;
   TestJSONSerialization; // test twice for safety
-  Rtti.RegisterFromText(TypeInfo(TRestCacheEntryValue), '');
+  Rtti.RegisterFromText(TypeInfo(TEntry), '');
   Rtti.RegisterFromText(TypeInfo(TSubAB), '');
   Rtti.RegisterFromText(TypeInfo(TSubCD), '');
   Rtti.RegisterFromText(TypeInfo(TAggregate), '');
@@ -3186,15 +3300,15 @@ begin
   check(abs(i) < count);
   timer.Start;
   for i := 1 to ITER do
-    Check(JsonArrayCount(P) = count);
+    CheckEqual(JsonArrayCount(P), count);
   NotifyTestSpeed('JsonArrayCount(P)', c, len, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER do
-    Check(JsonArrayCount(P, P + length(people)) = count);
+    CheckEqual(JsonArrayCount(P, P + length(people)), count);
   NotifyTestSpeed('JsonArrayCount(P,PMax)', c, len, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER * 5000 do
-    Check(JsonObjectPropCount(P + 3) = 6, 'first TOrmPeople object');
+    CheckEqual(JsonObjectPropCount(P + 3), 6, 'first TOrmPeople object');
   NotifyTestSpeed('JsonObjectPropCount()', 0, ITER * 5000 * 119, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER do
@@ -3213,7 +3327,7 @@ begin
   for i := 1 to ITER do
   begin
     dv.InitJson(people, JSON_FAST);
-    Check(dv.count = count);
+    CheckEqual(dv.count, count);
     dv.Clear; // to reuse dv
   end;
   NotifyTestSpeed('TDocVariant', c, len, @timer, ONLYLOG);
@@ -3221,11 +3335,11 @@ begin
   for i := 1 to ITER do
   begin
     dv.InitJson(people, JSON_FAST + [dvoJsonParseDoNotGuessCount]);
-    Check(dv.count = count);
+    CheckEqual(dv.count, count);
     dv.Clear; // to reuse dv
   end;
   NotifyTestSpeed('TDocVariant no guess', c, len, @timer, ONLYLOG);
-  Check(DocVariantType.InternNames.Count = interned, 'no intern');
+  CheckEqual(DocVariantType.InternNames.Count, interned, 'no intern');
   DocVariantType.InternNames.Clean;
   timer.Start;
   for i := 1 to ITER do
@@ -3235,12 +3349,12 @@ begin
     dv.Clear; // to reuse dv
   end;
   NotifyTestSpeed('TDocVariant dvoIntern', c, len, @timer, ONLYLOG);
-  Check(DocVariantType.InternNames.Count - interned = 6, 'intern');
-  Check(DocVariantType.InternNames.Clean = 6, 'clean');
-  Check(DocVariantType.InternNames.Count = interned, 'cleaned');
+  CheckEqual(DocVariantType.InternNames.Count - interned, 6, 'intern');
+  CheckEqual(DocVariantType.InternNames.Clean, 6, 'clean');
+  CheckEqual(DocVariantType.InternNames.Count, interned, 'cleaned');
   table := TOrmTableJson.Create('', people);
   try
-    Check(table.RowCount = count);
+    CheckEqual(table.RowCount, count);
     timer.Start;
     for i := 1 to ITER do
     begin
@@ -3257,7 +3371,7 @@ begin
   begin
     table := TOrmTableJson.Create('', people);
     try
-      Check(table.RowCount = count);
+      CheckEqual(table.RowCount, count);
     finally
       table.Free;
     end;
@@ -3268,7 +3382,7 @@ begin
   begin
     table := TOrmTableJson.Create('', notexpanded);
     try
-      Check(table.RowCount = count);
+      CheckEqual(table.RowCount, count);
     finally
       table.Free;
     end;
@@ -3278,7 +3392,7 @@ begin
   for i := 1 to ITER do
   begin
     Check(dv.InitArrayFromResults(people));
-    Check(dv.count = count);
+    CheckEqual(dv.count, count);
     dv.Clear; // to reuse dv
   end;
   NotifyTestSpeed('TDocVariant FromResults exp', c, len, @timer, ONLYLOG);
@@ -3286,7 +3400,7 @@ begin
   for i := 1 to ITER do
   begin
     Check(dv.InitArrayFromResults(notexpanded));
-    Check(dv.count = count);
+    CheckEqual(dv.count, count);
     dv.Clear; // to reuse dv
   end;
   NotifyTestSpeed('TDocVariant FromResults not exp', c, lennexp * ITER, @timer, ONLYLOG);
@@ -4249,6 +4363,12 @@ procedure TTestCoreProcess._TDocVariant;
     Check(Doc.Count = 2);
     Check(Doc.Names[0] = 'name');
     Check(Doc.Values[0] = 'John');
+    CheckEqual(Doc.Compare('name', 'John'), 0);
+    Check(Doc.Equals('name', 'John'));
+    Check(Doc.Compare('name', 'john') < 0, 'compare<0');
+    Check(not Doc.Equals('name', 'john'));
+    CheckEqual(Doc.Compare('name', 'john', true), 0);
+    Check(Doc.Equals('name', 'john', true));
     Check(variant(Doc)._kind = ord(dvObject));
     Check(variant(Doc).name = 'John');
     Check(variant(Doc).name = Doc.Value['name']);
@@ -5187,17 +5307,39 @@ end;
 procedure TTestCoreProcess.UrlEncoding;
 var
   i: integer;
-  s, t: RawUtf8;
-  d: RawUtf8;
+  s, t, d: RawUtf8;
+  hf: TTextWriterHtmlFormat;
 begin
   for i := 1 to 100 do
   begin
     s := RandomUtf8(i);
+    Check(not NeedsHtmlEscape(pointer(s), hfNone));
     t := UrlEncode(s);
     Check(UrlDecode(t) = s);
     d := 'seleCT=' + t + '&where=' + Int32ToUtf8(i);
     CheckEqual(UrlEncode(['seleCT', s, 'where', i]), '?' + d);
     CheckEqual(UrlEncode(['seleCT', s, 'where', i], {trimlead=}true), d);
+  end;
+  for hf := low(hf) to high(hf) do
+  begin
+    for i := 1 to 10 do
+    begin
+      s := RandomIdentifier(i);
+      Check(not NeedsHtmlEscape(pointer(s), hf));
+      Check(not NeedsHtmlEscape(pointer(s), hf));
+      Check(not NeedsHtmlEscape(pointer(s), hf));
+      CheckEqual(HtmlEscape(s), s, 'HtmlEscape');
+    end;
+    s := 'some &';
+    Check((hf = hfNone) or NeedsHtmlEscape(pointer(s), hf));
+    s := '&';
+    Check((hf = hfNone) or NeedsHtmlEscape(pointer(s), hf));
+    s := '& some';
+    Check((hf = hfNone) or NeedsHtmlEscape(pointer(s), hf));
+    t := HtmlEscape(s, hf);
+    Check((t = s) <> (hf <> hfNone));
+    if hf <> hfNone then
+      CheckEqual(t, '&amp; some');
   end;
 end;
 
@@ -5247,9 +5389,22 @@ var
   end;
 
 begin
+  CheckEqual(GetDbError, '');
+  SetDbError('test1');
+  CheckEqual(GetDbError, 'test1');
+  SetDbError('test2');
+  CheckEqual(GetDbError, 'test2');
+  ClearDbError;
+  CheckEqual(GetDbError, '');
+  SetDbError('test3');
+  CheckEqual(GetDbError, 'test3');
+  ClearDbError;
+  CheckEqual(GetDbError, '');
   Stmt := nil;
   Props := TOrmPeople.OrmProps;
+  Check(Props <> nil);
   NewStmt('select * from atable');
+  Check(Stmt <> nil);
   Check(Stmt.TableName = 'atable');
   Check(Stmt.Where = nil);
   Stmt.SelectFieldBits(bits, withID);

@@ -158,7 +158,7 @@ type
     fBackgroundThread: TSynBackgroundThreadMethod;
     fOnMethodExecute: TOnServiceCanExecute;
     fOnExecute: TInterfaceMethodExecuteEventDynArray;
-    fExecuteLock: TRTLCriticalSection;
+    fExecuteLock: TOSLock;
     fExecuteCached: TInterfaceMethodExecuteCachedDynArray;
     procedure SetServiceLogByIndex(const aMethods: TInterfaceFactoryMethodBits;
       const aLogRest: IRestOrm; aLogClass: TOrmServiceLogClass);
@@ -312,7 +312,7 @@ type
 
 var
   /// global mutex used by optExecGlobalLocked and optFreeGlobalLocked
-  GlobalInterfaceExecuteMethod: TRTLCriticalSection;
+  GlobalInterfaceExecuteMethod: TOSLock;
 
 
 { ***************** TServiceContainerServer Services Holder }
@@ -373,6 +373,7 @@ type
     procedure FakeCallbackAdd(aFakeInstance: TObject);
     procedure FakeCallbackRemove(aFakeInstance: TObject);
     function GetFakeCallbacksCount: integer;
+    procedure SetPublishSignature(value: boolean);
     procedure RecordVersionCallbackNotify(TableIndex: integer;
       Occasion: TOrmOccasion; const DeletedID: TID;
       const DeletedRevision: TRecordVersion; const AddUpdateJson: RawUtf8);
@@ -461,7 +462,7 @@ type
     // - is set to FALSE by default, for security reasons: only "_contract_"
     // pseudo method is available - see TServiceContainer.ContractExpected
     property PublishSignature: boolean
-      read fPublishSignature write fPublishSignature;
+      read fPublishSignature write SetPublishSignature;
     /// the default TServiceFactoryServer.TimeoutSec value
     // - default is 30 minutes
     // - you can customize each service using its corresponding TimeoutSec property
@@ -581,7 +582,7 @@ constructor TServiceFactoryServer.Create(aRestServer: TRestServer;
   aTimeOutSec: cardinal; aSharedInstance: TInterfacedObject);
 begin
   // extract RTTI from the interface
-  InitializeCriticalSection(fExecuteLock);
+  fExecuteLock.Init;
   fInstanceGC := TSynObjectListLocked.Create({ownobjects=}false);
   fRestServer := aRestServer;
   inherited Create(aRestServer, aInterface, aInstanceCreation, aContractExpected);
@@ -713,7 +714,7 @@ begin
       if result = nil then
       begin
         result := TSynMonitorInputOutput.Create(
-          PInterfaceMethod(Ctxt.ServiceMethod)^.InterfaceDotMethodName);
+          Ctxt.ServiceMethod^.InterfaceDotMethodName);
         fStats[MethodIndex] := result;
       end;
     finally
@@ -759,10 +760,10 @@ begin
   end;
   // finalize service execution context
   FreeAndNil(fBackgroundThread);
-  DeleteCriticalSection(fExecuteLock);
   ObjArrayClear(fStats, true);
   ObjArrayClear(fExecuteCached);
   inherited Destroy;
+  fExecuteLock.Done;
 end;
 
 function TServiceFactoryServer.DoInstanceGC(Force: boolean): PtrInt;
@@ -817,20 +818,20 @@ begin
       BackgroundExecuteInstanceRelease(Obj, fBackgroundThread)
     else if optFreeGlobalLocked in fAnyOptions then
     begin
-      EnterCriticalSection(GlobalInterfaceExecuteMethod);
+      GlobalInterfaceExecuteMethod.Lock;
       try
         IInterface(Obj)._Release;
       finally
-        LeaveCriticalSection(GlobalInterfaceExecuteMethod);
+        GlobalInterfaceExecuteMethod.UnLock;
       end;
     end
     else if optFreeLockedPerInterface in fAnyOptions then
     begin
-      EnterCriticalSection(fExecuteLock);
+      fExecuteLock.Lock;
       try
         IInterface(Obj)._Release;
       finally
-        LeaveCriticalSection(fExecuteLock);
+        fExecuteLock.UnLock;
       end;
     end
     else
@@ -894,10 +895,11 @@ begin
         result := true;
       end;
     sicPerThread:
-      begin // use Length(SERVICE_PSEUDO_METHOD) to create an instance if none
+      begin
+        // use SERVICE_PSEUDO_METHOD_COUNT to create an instance if none
         Inst.Instance := nil;
         Inst.InstanceID := PtrUInt(GetCurrentThreadId);
-        if (RetrieveInstance(nil, Inst, Length(SERVICE_PSEUDO_METHOD), 0) >= 0) and
+        if (RetrieveInstance(nil, Inst, SERVICE_PSEUDO_METHOD_COUNT, 0) >= 0) and
            (Inst.Instance <> nil) then
           result := GetInterfaceFromEntry(Inst.Instance,
             fImplementationClassInterfaceEntry, Obj);
@@ -1110,7 +1112,7 @@ begin
   begin
     // initialize a new sicClientDriven instance
     if (InstanceCreation = sicClientDriven) and
-       ((cardinal(aMethodIndex - Length(SERVICE_PSEUDO_METHOD))
+       ((cardinal(aMethodIndex - SERVICE_PSEUDO_METHOD_COUNT)
           < cardinal(fInterface.MethodsCount)) or
         (aMethodIndex = ord(imInstance))) then
       AddNew;
@@ -1142,7 +1144,7 @@ begin
   end;
   // new TInterfacedObject corresponding to this session/user/group/thread
   if (InstanceCreation <> sicClientDriven) and
-     (cardinal(aMethodIndex - Length(SERVICE_PSEUDO_METHOD)) <
+     (cardinal(aMethodIndex - SERVICE_PSEUDO_METHOD_COUNT) <
       cardinal(fInterface.MethodsCount)) then
     AddNew;
 end;
@@ -1295,6 +1297,7 @@ procedure FinalizeLogRest(ctxt: TRestServerUriContext;
   exec: TInterfaceMethodExecute; timeEnd: Int64);
 var
   W: TJsonWriter;
+  ip: PUtf8Char;
 begin
   W := exec.TempTextWriter;
   if exec.CurrentStep < smsBefore then
@@ -1308,12 +1311,13 @@ begin
     W.AddShort('},Output:{Failed:"Probably due to wrong input"');
   W.Add('},Session:%,User:%,Time:%,MicroSec:%',
     [integer(Ctxt.Session), Ctxt.SessionUser, TimeLogNowUtc, timeEnd]);
-  if Ctxt.RemoteIPIsLocalHost then
+  ip := Ctxt.RemoteIPNotLocal;
+  if ip = nil then
     W.Add('}', ',')
   else
   begin
     W.AddShorter(',IP:"');
-    W.AddString(Ctxt.RemoteIP);
+    W.AddNoJsonEscape(ip, StrLen(ip));
     W.AddShorter('"},');
   end;
   with Ctxt.ServiceExecution^ do
@@ -1329,13 +1333,10 @@ var
   execres: boolean;
   opt: TInterfaceMethodOptions;
   exec: TInterfaceMethodExecuteCached;
-  timeStart, timeEnd: Int64;
+  timeEnd: Int64;
   m: PtrInt;
-  stats: TSynMonitorInputOutput;
   err: ShortString;
 begin
-  if mlInterfaces in fRestServer.StatLevels then
-    QueryPerformanceMicroSeconds(timeStart);
   // 1. initialize Inst.Instance and Inst.InstanceID
   Inst.InstanceID := 0;
   Inst.Instance := nil;
@@ -1399,7 +1400,7 @@ begin
   end;
   Ctxt.ServiceInstanceID := Inst.InstanceID;
   // 2. call method implementation
-  m := Ctxt.ServiceMethodIndex - Length(SERVICE_PSEUDO_METHOD);
+  m := Ctxt.ServiceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT;
   if (m < 0) or
      (Ctxt.ServiceExecution = nil) or
      (Ctxt.ServiceMethod = nil) then
@@ -1408,7 +1409,6 @@ begin
     exit;
   end;
   err := '';
-  stats := nil;
   exec := nil;
   WR := nil;
   try
@@ -1448,12 +1448,10 @@ begin
       WR.CustomOptions := WR.CustomOptions + [twoIgnoreDefaultInRecord];
     // root/calculator {"method":"add","params":[1,2]} -> {"result":[3],"id":0}
     Ctxt.ServiceResultStart(WR);
-    if mlInterfaces in fRestServer.StatLevels then
-      stats := GetStats(Ctxt, m);
     if optExecLockedPerInterface in opt then
-      EnterCriticalSection(fExecuteLock)
+      fExecuteLock.Lock
     else if optExecGlobalLocked in opt then
-      EnterCriticalSection(GlobalInterfaceExecuteMethod);
+      GlobalInterfaceExecuteMethod.Lock;
     try
       exec.BackgroundExecutionThread := fBackgroundThread;
       exec.OnCallback := Ctxt.ExecuteCallback;
@@ -1488,9 +1486,9 @@ begin
       Ctxt.Call.OutStatus := exec.ServiceCustomAnswerStatus;
     finally
       if optExecLockedPerInterface in opt then
-        LeaveCriticalSection(fExecuteLock)
+        fExecuteLock.UnLock
       else if optExecGlobalLocked in opt then
-        LeaveCriticalSection(GlobalInterfaceExecuteMethod);
+        GlobalInterfaceExecuteMethod.UnLock;
     end;
     if Ctxt.Call.OutHead = '' then
     begin
@@ -1506,24 +1504,15 @@ begin
       if InstanceCreation = sicSingle then
         // always release single shot instance immediately (no GC)
         InstanceFree(Inst.Instance);
-      if stats <> nil then
-      begin
-        QueryPerformanceMicroSeconds(timeEnd);
-        dec(timeEnd, timeStart);
-        Ctxt.StatsFromContext(stats, timeEnd);
-        if Ctxt.Server.StatUsage <> nil then
-          Ctxt.Server.StatUsage.Modified(stats, []);
-        if (mlSessions in fRestServer.StatLevels) and
-           (Ctxt.AuthSession <> nil) then
-          Ctxt.AuthSession.NotifyInterfaces(Ctxt, timeEnd);
-      end
-      else
-        timeEnd := 0;
     finally
       if exec <> nil then
       begin
         if Ctxt.ServiceExecution^.LogRest <> nil then
+        begin
+          QueryPerformanceMicroSeconds(timeEnd);
+          dec(timeEnd, Ctxt.MicroSecondsStart);
           FinalizeLogRest(Ctxt, exec, timeEnd);
+        end;
         fExecuteCached[m].Release(exec);
       end;
     end;
@@ -1797,6 +1786,9 @@ var
   c: TInterfaceFactoryArgumentDynArray;
 begin
   result := inherited AddServiceInternal(aService);
+  // notify that routing need to be updated
+  fRestServer.ResetRoutes;
+  // register the name of any interface callback parameter
   c := aService.InterfaceFactory.ArgUsed[imvInterface];
   if c = nil then
     exit;
@@ -1870,6 +1862,14 @@ begin
     result := 0;
 end;
 
+procedure TServiceContainerServer.SetPublishSignature(value: boolean);
+begin
+  if fPublishSignature = value then
+    exit;
+  fPublishSignature := value;
+  fRestServer.ResetRoutes; // (dis)active root/interface/_signature_ URI
+end;
+
 function FakeCallbackFind(list: PPointer; n: integer; id: TInterfacedObjectFakeID;
   conn: TRestConnectionID): TInterfacedObjectFakeServer;
 begin
@@ -1901,6 +1901,7 @@ begin
     (Ctxt = nil) then
     exit;
   connectionID := Ctxt.Call^.LowLevelConnectionID;
+  // decode {"ICallbackName":1234} input body
   JsonDecode(pointer(Ctxt.Call^.InBody), Values);
   if length(Values) <> 1 then
     exit;
@@ -1936,8 +1937,7 @@ begin
           @fake.fService.fExecution[Ctxt.ServiceMethodIndex];
         Ctxt.ServiceExecutionOptions := Ctxt.ServiceExecution.Options;
         Ctxt.Service := fake.fService;
-        Ctxt.ServiceMethodIndex := Ctxt.ServiceMethodIndex +
-          Length(SERVICE_PSEUDO_METHOD);
+        Ctxt.ServiceMethodIndex := Ctxt.ServiceMethodIndex + SERVICE_PSEUDO_METHOD_COUNT;
         fake._AddRef; // IInvokable=pointer in Ctxt.ExecuteCallback
         FormatUtf8('[%,"%"]',
           [PtrInt(PtrUInt(fake.fFakeInterface)), Values[0].Name.Text], params);
@@ -2189,8 +2189,8 @@ begin
       if (aExcludedMethodNamesCsv <> '') and
          not (byte(i) in {%H-}excluded) then
       begin
-        include(methods, fInterfaceMethod[i].
-          InterfaceMethodIndex - Length(SERVICE_PSEUDO_METHOD));
+        include(methods,
+          fInterfaceMethod[i].InterfaceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT);
         somemethods := true;
       end;
       inc(i);
@@ -2386,10 +2386,10 @@ end;
 
 
 initialization
-  InitializeCriticalSection(GlobalInterfaceExecuteMethod);
+  GlobalInterfaceExecuteMethod.Init;
 
 finalization
-  DeleteCriticalSection(GlobalInterfaceExecuteMethod);
+  GlobalInterfaceExecuteMethod.Done;
 
 end.
 

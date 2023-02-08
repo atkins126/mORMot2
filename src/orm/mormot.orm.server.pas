@@ -212,7 +212,7 @@ type
     // - default implementation will call the OnUpdateEvent/OnBlobUpdateEvent
     // methods, if defined
     // - will also handle TOrmHistory tables, as defined by TrackChanges()
-    // - returns true on success, false if an error occured (but action must continue)
+    // - returns true on success, false if an error occurred (but action must continue)
     // - you can override this method to implement a server-wide notification,
     // but be aware it may be the first step to break the stateless architecture
     // of the framework
@@ -2267,7 +2267,7 @@ begin
         if fValueID <> 0 then
         begin
           if fOrm.fCache <> nil then
-            fOrm.fCache.Notify(fRunTableIndex, fValueID, fValue, ooInsert);
+            fOrm.fCache.NotifyJson(fRunTable, fRunTableIndex, fValueID, fValue);
           result := true;
         end;
       end;
@@ -2289,9 +2289,8 @@ begin
         fResults[fCount] := HTTP_SUCCESS; // 200 ok
         result := true;
         if fOrm.fCache <> nil then
-          // JSON fValue may be uncomplete -> delete from cache
           if not (boPutNoCacheFlush in fBatchOptions) then
-            fOrm.fCache.NotifyDeletion(fRunTableIndex, fValueID);
+            fOrm.fCache.NotifyJson(fRunTable, fRunTableIndex, fValueID, fValue);
       end;
     encDelete:
       if fOrm.EngineDelete(fRunTableIndex, fValueID) then

@@ -285,6 +285,10 @@ type
     // will be able to retrieve it only if TServiceContainerServer.PublishSignature
     // is set to TRUE (which is not the default setting, for security reasons)
     function RetrieveSignature: RawUtf8; virtual; abstract;
+    /// search for a method name within this Interface RTTI and pseudo-methods
+    // - will return -1 if not found, im* pseudo-methods as 0..3, or the index
+    // in InterfaceFactory.Methods[] incremented by SERVICE_PSEUDO_METHOD_COUNT
+    function ServiceMethodIndex(const Name: RawUtf8): PtrInt;
     /// access to the registered Interface RTTI information
     property InterfaceFactory: TInterfaceFactory
       read fInterface;
@@ -364,6 +368,7 @@ type
 
 const
   /// the Server-side instance implementation patterns without any ID
+  // - so imFree won't be supported
   SERVICE_IMPLEMENTATION_NOID = [sicSingle, sicShared];
 
 
@@ -603,8 +608,9 @@ type
     /// the associated service provider
     InterfaceService: TServiceFactory;
     /// the index of the method for the given service
-    // - 0..2 indicates _free_/_contract_/_signature_ pseudo-methods
-    // - then points to InterfaceService.Interface.Methods[InterfaceMethodIndex-3]
+    // - 0..3 indicates _free_/_contract_/_signature_/_interface_ pseudo-methods
+    // - then points to InterfaceService.Interface.
+    // Methods[InterfaceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT]
     InterfaceMethodIndex: integer;
   end;
 
@@ -708,6 +714,7 @@ type
     property InterfaceMethod: TServiceContainerInterfaceMethods
       read fInterfaceMethod;
     /// direct access to the internal list of service.method wrapper
+    // - e.g. storing 'Calculator.Add', 'Calculator.Multiply', ... values
     property InterfaceMethods: TDynArrayHashed
       read fInterfaceMethods;
     /// the associated TRest instance, owning these services
@@ -1047,6 +1054,21 @@ begin
       fContractExpected := aContractExpected
   else
     fContractExpected := fContractHash; // for security
+end;
+
+function TServiceFactory.ServiceMethodIndex(const Name: RawUtf8): PtrInt;
+begin
+  result := fInterface.FindMethodIndex(Name);
+  if result >= 0 then
+    inc(result, SERVICE_PSEUDO_METHOD_COUNT)
+  else
+  begin
+    for result := 0 to SERVICE_PSEUDO_METHOD_COUNT - 1 do
+      if IdemPropNameU(Name,
+           SERVICE_PSEUDO_METHOD[TServiceInternalMethod(result)]) then
+        exit;
+    result := -1;
+  end;
 end;
 
 function TServiceFactory.GetInterfaceTypeInfo: PRttiInfo;
@@ -1437,7 +1459,7 @@ begin
     raise EServiceException.CreateUtf8('%.SetInterfaceMethodBits: n=%', [self, n]);
   if IncludePseudoMethods then
     for i := 0 to n - 1 do
-      if fInterfaceMethod[i].InterfaceMethodIndex < Length(SERVICE_PSEUDO_METHOD) then
+      if fInterfaceMethod[i].InterfaceMethodIndex < SERVICE_PSEUDO_METHOD_COUNT then
         include(bits, i);
   while MethodNamesCsv <> nil do
   begin
@@ -1447,7 +1469,7 @@ begin
       for i := 0 to n - 1 do
         with fInterfaceMethod[i] do // O(n) search is fast enough here
         begin
-          m := InterfaceMethodIndex - Length(SERVICE_PSEUDO_METHOD);
+          m := InterfaceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT;
           if (m >= 0) and
              IdemPropNameU(method, InterfaceService.fInterface.Methods[m].Uri) then
             include(bits, i);

@@ -24,3 +24,9 @@ Daemon (e.g. Windows Service) Stand-Alone Background Executable Support
 - Parent Daemon Settings Class
 - Parent Daemon Application Class
 
+### mormot.app.agl
+
+Launch, Watch and Kill Services or Executables from a main Service Instance
+- `TSynAngelizeService` Sub-Service Settings and Process
+- `TSynAngelize` Main Service Launcher and Watcher
+

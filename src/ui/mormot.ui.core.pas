@@ -281,6 +281,9 @@ procedure TextRectUtf8(const Rect: TRect; Canvas: TCanvas; X, Y: integer;
 procedure TextRectString(const Rect: TRect; Canvas: TCanvas; X, Y: integer;
   const Text: string; Align: TAlignment = taLeftJustify; NoControlChar: boolean = false);
 
+/// alternative to the VCL Canvas.TextFlas property for text output
+function TextFlags(Canvas: TCanvas): integer;
+
 {$ifdef OSWINDOWS}
 
 /// test if the ClearType is enabled for font display
@@ -737,11 +740,12 @@ end;
 procedure DrawTextUtf8(Control: TCustomControl; Canvas: TCanvas;
   const Text: RawUtf8; var Rect: TRect; CalcOnly: boolean);
 var
-  U: RawUnicode;
+  tmp: TSynTempBuffer;
 begin
-  U := Utf8DecodeToRawUnicode(Text);
-  DrawText(Canvas.Handle, pointer(U), length(U) shr 1, Rect,
+  Utf8DecodeToUnicode(Text, tmp);
+  DrawText(Canvas.Handle, tmp.buf, tmp.len shr 1, Rect,
     DrawTextFlags(Control, CalcOnly));
+  tmp.Done;
 end;
 
 {$else}
@@ -754,6 +758,17 @@ begin
 end;
 
 {$endif OSWINDOWS}
+
+function TextFlags(Canvas: TCanvas): integer;
+begin
+  {$ifdef FPC}
+  result := ETO_CLIPPED;
+  if Canvas.Brush.Style <> bsClear then
+    result := result or ETO_OPAQUE;
+  {$else}
+  result := Canvas.TextFlags;
+  {$endif FPC}
+end;
 
 procedure TextRectUtf8(const Rect: TRect; Canvas: TCanvas; X, Y: integer;
   Text: RawUtf8; Align: TAlignment; NoControlChar: boolean);
@@ -777,7 +792,7 @@ begin
   inc(Y, Rect.Top);
   {$ifdef OSWINDOWS}
   // direct Win32 API call
-  options := ETO_CLIPPED {$ifndef FPC} or Canvas.TextFlags{$endif};
+  options := ETO_CLIPPED {$ifdef ISDELPHI} or Canvas.TextFlags{$endif};
   if Canvas.Brush.Style <> bsClear then
     options := options or ETO_OPAQUE;
   if Align <> taLeftJustify then

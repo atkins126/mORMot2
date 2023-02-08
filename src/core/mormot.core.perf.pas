@@ -371,7 +371,7 @@ type
   // non-rentrant Lock/UnLock to access its individual properties
   TSynMonitor = class(TSynPersistent)
   protected
-    fSafe: TLightLock;
+    fSafe: TOSLightLock;
     fName: RawUtf8;
     fTaskCount: TSynMonitorCount64;
     fTotalTime: TSynMonitorTime;
@@ -500,7 +500,7 @@ type
     /// how many errors did occur during the processing
     property Errors: TSynMonitorCount
       read fInternalErrors;
-    /// information about the last error which occured during the processing
+    /// information about the last error which occurred during the processing
     property LastError: variant
       read fLastInternalError;
   end;
@@ -704,27 +704,38 @@ type
     procedure SetTime(gran: TSynMonitorUsageGranularity; aValue: integer);
   end;
 
+  /// one class property entry, as registered by TSynMonitorUsage.Track
   TSynMonitorUsageTrackProp = record
+    /// the RTTI of this integer property
     Info: PRttiProp;
     /// property type, as recognized by MonitorPropUsageValue()
     Kind: TSynMonitorType;
+    /// internal identifier of this property
     Name: RawUtf8;
+    /// the actual values of this properties, per granularty
     Values: array[mugHour..mugYear] of TInt64DynArray;
+    /// the last value of this property, used to store differencies
     ValueLast: Int64;
   end;
 
+  /// the class properties, as registered by TSynMonitorUsage.Track
   TSynMonitorUsageTrackPropDynArray = array of TSynMonitorUsageTrackProp;
 
+  /// one class instance entry, as registered by TSynMonitorUsage.Track
   TSynMonitorUsageTrack = record
+    /// the class which properties to track
     Instance: TObject;
+    /// internal identifier of this instance
     Name: RawUtf8;
+    /// access to the tracked properties information
     Props: TSynMonitorUsageTrackPropDynArray;
   end;
 
   PSynMonitorUsageTrackProp = ^TSynMonitorUsageTrackProp;
   PSynMonitorUsageTrack = ^TSynMonitorUsageTrack;
 
-  /// define all known information about a given time
+  /// define all known information about a given time, as persisted
+  // - store a TDocVariant object with per-name fields of Values[Gran] arrays
   // - may be the current time, or a former time
   TSynMonitorUsageLoad = array[mugHour..mugYear] of variant;
 
@@ -2585,6 +2596,7 @@ constructor TSynMonitor.Create(const aName: RawUtf8);
 begin
   Create;
   fName := aName;
+  fSafe.Init; // mandatory for TOSLightLock
 end;
 
 destructor TSynMonitor.Destroy;
@@ -2595,6 +2607,7 @@ begin
   fLastTime.Free;
   fTotalTime.Free;
   inherited Destroy;
+  fSafe.Done; // mandatory for TOSLightLock
 end;
 
 function TSynMonitor.RttiBeforeWriteObject(W: TTextWriter;

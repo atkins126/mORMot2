@@ -44,6 +44,7 @@ HTTP Client Classes
 ### mormot.net.server
 
 HTTP Server Classes
+- Custom URI Routing using an efficient Radix Tree
 - Shared Server-Side HTTP Process
 - `THttpServerSocket`/`THttpServer` HTTP/1.1 Server
 - `THttpApiServer` HTTP/1.1 Server Over Windows `http.sys` Module
@@ -123,3 +124,8 @@ Automatic Certificate Management Environment (ACME v2) Client
 - Let's Encrypt TLS / HTTPS Encryption Certificates Support
 - HTTP-01 Let's Encrypt Challenges HTTP Server on port 80
 
+### mormot.net.ldap
+
+Simple LDAP Protocol Client
+- LDAP Response Storage
+- LDAP Client Class

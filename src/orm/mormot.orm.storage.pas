@@ -509,13 +509,13 @@ type
     fModified: boolean;
     fOutInternalStateForcedRefresh: boolean;
     {$ifdef DEBUGSTORAGELOCK}
-    fStorageCriticalSectionCount: integer;
+    fStorageSafeCount: integer;
     {$endif DEBUGSTORAGELOCK}
     fOwner: TRestOrmServer;
     fStorageVirtual: TOrmVirtualTable;
     fBasicSqlCount: RawUtf8;
     fBasicSqlHasRows: array[boolean] of RawUtf8;
-    fStorageCriticalSection: TRTLCriticalSection;
+    fStorageSafe: TOSLock;
     fTempBuffer: PTextWriterStackBuffer;
     procedure RecordVersionFieldHandle(Occasion: TOrmOccasion;
       var Decoder: TJsonObjectDecoder);
@@ -654,7 +654,7 @@ type
     // - caller can modify these properties, then use UpdateOne() if the changes
     // have to be stored inside the Items[] list
     // - calller must always free the returned instance
-    // - returns NIL if any error occured, e.g. if the supplied aID was incorrect
+    // - returns NIL if any error occurred, e.g. if the supplied aID was incorrect
     // - method available since a TRestStorage instance may be created
     // stand-alone, i.e. without any associated Model/TRestOrmServer
     function GetOne(aID: TID): TOrm; virtual; abstract;
@@ -823,7 +823,8 @@ type
     // with a resource type of 10
     // - uses the same compressed format as the overloaded stream/file method
     // - you can specify a library (dll) resource instance handle, if needed
-    procedure LoadFromResource(ResourceName: string = ''; Instance: THandle = 0);
+    procedure LoadFromResource(ResourceName: string = '';
+      Instance: TLibHandle = 0);
     /// save the values into a binary file/stream
     // - the binary format is a custom compressed format (using our SynLZ fast
     // compression algorithm), with variable-length record storage: e.g. a 27 KB
@@ -872,7 +873,7 @@ type
     // - caller can modify these properties, then use UpdateOne() if the changes
     // have to be stored inside the Items[] list
     // - calller must always free the returned instance
-    // - returns NIL if any error occured, e.g. if the supplied aID was incorrect
+    // - returns NIL if any error occurred, e.g. if the supplied aID was incorrect
     // - method available since a TRestStorage instance may be created
     // stand-alone, i.e. without any associated Model/TRestOrmServer
     function GetOne(aID: TID): TOrm; override;
@@ -1464,7 +1465,8 @@ type
     fCache: TSynDictionary; // TRestStorageMultiDatabaseID/IRestOrmServer
     fSettings: TRestStorageMultiSettings;
     fModelClasses: TOrmClassDynArray;
-    function GetShutdown: boolean; {$ifdef HASINLINE}inline;{$endif}
+    function GetShutdown: boolean;
+      {$ifdef HASINLINE}inline;{$endif}
     function GetCached: RawJson;
     procedure SetShutdown(Value: boolean); virtual;
     function IDText(aID: TRestStorageMultiDatabaseID): TShort16;
@@ -1487,6 +1489,7 @@ type
     procedure OnServerInfo(Ctxt: TRestUriContext; var Info: TDocVariantData);
     /// check if the supplied database ID matches DatabaseIDBits definition
     function IsDatabaseIDCorrect(aID: TRestStorageMultiDatabaseID): boolean;
+      {$ifdef HASINLINE}inline;{$endif}
     /// raise ERestStorageMulti if the supplied database ID is out of range
     procedure EnsureDatabaseIDCorrect(aID: TRestStorageMultiDatabaseID;
       const aCaller: shortstring);
@@ -1878,7 +1881,7 @@ begin
   inherited Create(nil);
   if aClass = nil then
     raise ERestStorage.CreateUtf8('%.Create(aClass=nil)', [self]);
-  InitializeCriticalSection(fStorageCriticalSection);
+  fStorageSafe.Init;
   fStoredClass := aClass;
   fStoredClassRecordProps := aClass.OrmProps;
   if aServer <> nil then
@@ -1907,11 +1910,11 @@ destructor TRestStorage.Destroy;
 begin
   inherited;
   {$ifdef DEBUGSTORAGELOCK}
-  if fStorageCriticalSectionCount <> 0 then
+  if fStorageSafeCount <> 0 then
     raise ERestStorage.CreateUtf8('%.Destroy with CS=%',
-      [self, fStorageCriticalSectionCount]);
+      [self, fStorageSafeCount]);
   {$endif DEBUGSTORAGELOCK}
-  DeleteCriticalSection(fStorageCriticalSection);
+  fStorageSafe.Done;
   if fStorageVirtual <> nil then
   begin
     // no GPF e.g. if DB release after server
@@ -1972,14 +1975,14 @@ procedure TRestStorage.StorageLock(WillModifyContent: boolean
   {$ifdef DEBUGSTORAGELOCK}; const msg: shortstring {$endif});
 begin
   {$ifdef DEBUGSTORAGELOCK}
-  if fStorageLockLogTrace or
-     (fStorageCriticalSectionCount > 1) then
+  if true or //fStorageLockLogTrace or
+     (fStorageSafeCount > 1) then
     InternalLog('StorageLock % [%] %',
-      [fStoredClass, msg, fStorageCriticalSectionCount]);
+      [fStoredClass, msg, fStorageSafeCount]);
   {$endif DEBUGSTORAGELOCK}
-  mormot.core.os.EnterCriticalSection(fStorageCriticalSection);
+  fStorageSafe.Lock;
   {$ifdef DEBUGSTORAGELOCK}
-  inc(fStorageCriticalSectionCount);
+  inc(fStorageSafeCount);
   {$endif DEBUGSTORAGELOCK}
   if WillModifyContent and
      fStorageLockShouldIncreaseOwnerInternalState and
@@ -1990,15 +1993,15 @@ end;
 procedure TRestStorage.StorageUnLock;
 begin
   {$ifdef DEBUGSTORAGELOCK}
-  dec(fStorageCriticalSectionCount);
-  if fStorageLockLogTrace then
+  dec(fStorageSafeCount);
+  if true then // fStorageLockLogTrace then
     InternalLog('StorageUnlock % %',
-      [fStoredClass, fStorageCriticalSectionCount]);
-  if fStorageCriticalSectionCount < 0 then
+      [fStoredClass, fStorageSafeCount]);
+  if fStorageSafeCount < 0 then
     raise ERestStorage.CreateUtf8('%.StorageUnLock with CS=%',
-      [self, fStorageCriticalSectionCount]);
+      [self, fStorageSafeCount]);
   {$endif DEBUGSTORAGELOCK}
-  mormot.core.os.LeaveCriticalSection(fStorageCriticalSection);
+  fStorageSafe.UnLock;
 end;
 
 function TRestStorage.GetCurrentSessionUserID: TID;
@@ -3046,7 +3049,7 @@ begin
   batch := TRestBatch.Create(fTrackChangesPersistence, fStoredClass);
   try
     // fill the batch instance with pending tracked changes
-    StorageLock({modify=}false);
+    StorageLock({modify=}false {$ifdef DEBUGSTORAGELOCK}, 'TrackChangesAndFlush'{$endif});
     try
       // delete any previous value before any Add/Update
       for i := 0 to fTrackChangesDeletedCount - 1 do
@@ -3647,7 +3650,7 @@ begin
 end;
 
 procedure TRestStorageInMemory.LoadFromResource(ResourceName: string;
-  Instance: THandle);
+  Instance: TLibHandle);
 var
   S: TStream;
 begin
@@ -3763,7 +3766,7 @@ begin
     if i < 0 then
       result := ''
     else
-      GetJsonValue(fValue[i], {withID=}true, [], result);
+      GetJsonValue(fValue[i], {withID=}false, [], result);
   finally
     StorageUnLock;
   end;
@@ -4008,7 +4011,7 @@ begin
     dest := fValue[i];
     nfo := fStoredClassRecordProps.Fields;
     for f := 0 to nfo.Count - 1 do
-      if GetBitPtr(@Fields, f) then
+      if FieldBitGet(Fields, f) then
         nfo.List[f].CopyValue(Rec, dest);
     fModified := true;
     result := true;
@@ -4211,7 +4214,7 @@ end;
 
 procedure TRestStorageInMemory.UpdateFile;
 var
-  F: TFileStream;
+  F: TStream;
   timer: TPrecisionTimer;
 begin
   if (self = nil) or
@@ -4224,7 +4227,7 @@ begin
     DeleteFile(FileName); // always overwrite previous file
     if fCount > 0 then
     begin
-      F := TFileStream.Create(FileName, fmCreate);
+      F := TFileStreamEx.Create(FileName, fmCreate);
       try
         if BinaryFile then
           SaveToBinary(F)
@@ -4276,7 +4279,7 @@ begin
     end
     else
     begin
-      json := AnyTextFileToRawUtf8(fFileName, true);
+      json := RawUtf8FromFile(fFileName);
       LoadFromJson(pointer(json), length(json)); // buffer parsed in-place
     end;
   end;
@@ -4594,7 +4597,8 @@ begin
       if insertedRowID > 0 then
       begin
         if fStaticInMemory.Owner <> nil then
-          fStaticInMemory.Owner.CacheOrNil.Notify(rec, ooInsert);
+          fStaticInMemory.Owner.CacheOrNil.NotifyAllFields(
+            fStaticInMemory.StoredClassProps.TableIndex, rec);
         result := true;
       end;
     end;
@@ -4643,8 +4647,8 @@ begin
     begin
       i := fStaticInMemory.IDToIndex(newRowID);
       if i >= 0 then
-        fStaticInMemory.Owner.CacheOrNil.Notify(
-          fStaticInMemory.fValue[i], ooUpdate);
+        fStaticInMemory.Owner.CacheOrNil.NotifyAllFields(
+          fStaticInMemory.StoredClassProps.TableIndex, fStaticInMemory.fValue[i]);
     end;
     result := true;
   end;
@@ -4865,7 +4869,7 @@ var
   i, n: PtrInt;
 begin
   if aShardRange < MIN_SHARD then
-    raise ERestStorage.CreateUtf8('%.Create(%,aShardRange=%<%) does not make sense',
+    raise ERestStorage.CreateUtf8('Unexpected %.Create(%,aShardRange=%<%)',
       [self, aClass, aShardRange, MIN_SHARD]);
   inherited Create(aClass, aServer);
   fShardRange := aShardRange;
@@ -4973,10 +4977,12 @@ function TRestStorageShard.ShardFromID(aID: TID;
   out aShardTableIndex: integer; out aShard: TRestOrm;
   aOccasion: TOrmOccasion; aShardIndex: PInteger): boolean;
 var
-  ndx: cardinal;
+  ndx: integer;
 begin
   result := false;
-  if aID <= 0 then
+  if (self = nil ) or
+     (fShards = nil) or
+     (aID <= 0) then
     exit;
   case aOccasion of
     ooUpdate:
@@ -4987,17 +4993,18 @@ begin
         exit;
   end;
   ndx := ((aID - 1) div fShardRange) - fShardOffset;
-  if (ndx <= cardinal(fShardLast)) and
+  if (ndx >= 0) and
+     (ndx <= fShardLast) and
      (fShards[ndx] <> nil) then
   begin
     case aOccasion of
       ooUpdate:
         if (ssoNoUpdateButLastShard in fOptions) and
-           (ndx <> cardinal(fShardLast)) then
+           (ndx <> fShardLast) then
           exit;
       ooDelete:
         if (ssoNoDeleteButLastShard in fOptions) and
-           (ndx <> cardinal(fShardLast)) then
+           (ndx <> fShardLast) then
           exit;
     end;
     aShard := fShards[ndx];
@@ -5055,7 +5062,7 @@ end;
 function TRestStorageShard.EngineDelete(TableModelIndex: integer;
   ID: TID): boolean;
 var
-  tableIndex, shardIndex: integer;
+  tableIndex, shardIndex: integer; // should be integer - not PtrInt
   rest: TRestOrm;
 begin
   StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardDelete' {$endif});
@@ -5184,7 +5191,7 @@ end;
 function TRestStorageShard.EngineRetrieve(TableModelIndex: integer;
   ID: TID): RawUtf8;
 var
-  tableIndex: integer;
+  tableIndex: integer; // should be integer - not PtrInt
   rest: TRestOrm;
 begin
   StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardRetrieve' {$endif});
@@ -5201,7 +5208,7 @@ end;
 function TRestStorageShard.EngineRetrieveBlob(TableModelIndex: integer;
   aID: TID; BlobField: PRttiProp; out BlobData: RawBlob): boolean;
 var
-  tableIndex: integer;
+  tableIndex: integer; // should be integer - not PtrInt
   rest: TRestOrm;
 begin
   StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardRetrieveBlob' {$endif});
@@ -5218,7 +5225,7 @@ end;
 function TRestStorageShard.EngineUpdate(TableModelIndex: integer;
   ID: TID; const SentData: RawUtf8): boolean;
 var
-  tableIndex, shardIndex: integer;
+  tableIndex, shardIndex: integer; // should be integer - not PtrInt
   rest: TRestOrm;
 begin
   StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardUpdate' {$endif});
@@ -5240,7 +5247,7 @@ end;
 function TRestStorageShard.EngineUpdateBlob(TableModelIndex: integer;
   aID: TID; BlobField: PRttiProp; const BlobData: RawBlob): boolean;
 var
-  tableIndex: integer;
+  tableIndex: integer; // should be integer - not PtrInt
   rest: TRestOrm;
 begin
   result := false;
@@ -5271,7 +5278,7 @@ end;
 function TRestStorageShard.EngineUpdateFieldIncrement(TableModelIndex: integer;
   ID: TID; const FieldName: RawUtf8; Increment: Int64): boolean;
 var
-  tableIndex: integer;
+  tableIndex: integer; // should be integer - not PtrInt
   rest: TRestOrm;
 begin
   result := false;
@@ -5295,7 +5302,7 @@ begin
   StorageLock(true {$ifdef DEBUGSTORAGELOCK}, 'ShardBatchStart' {$endif});
   try
     if fShardBatch <> nil then
-      raise ERestStorage.CreateUtf8('%.InternalBatchStop should have been called', [self]);
+      raise ERestStorage.CreateUtf8('Missing %.InternalBatchStop call', [self]);
     if fShardLast < 0 then
       // new DB -> force fShardBatch<>nil
       SetLength(fShardBatch, 1)
@@ -5312,11 +5319,10 @@ end;
 function TRestStorageShard.InternalShardBatch(ShardIndex: integer): TRestBatch;
 begin
   if cardinal(ShardIndex) > cardinal(fShardLast) then
-    raise ERestStorage.CreateUtf8('%.InternalShardBatch(%)',
+    raise ERestStorage.CreateUtf8('Unexpected %.InternalShardBatch(%)',
       [self, ShardIndex]);
   if fShardBatch = nil then
-    raise ERestStorage.CreateUtf8('%.InternalBatchStart should have been called',
-      [self]);
+    raise ERestStorage.CreateUtf8('Missing %.InternalBatchStart call', [self]);
   if ShardIndex >= length(fShardBatch) then
     // InitNewShard just called
     SetLength(fShardBatch, ShardIndex + 1);

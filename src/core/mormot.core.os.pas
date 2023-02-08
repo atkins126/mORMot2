@@ -36,7 +36,6 @@ uses
   {$endif OSWINDOWS}
   classes,
   contnrs,
-  syncobjs,
   types,
   sysutils,
   mormot.core.base;
@@ -101,6 +100,8 @@ const
   HTTP_PAYLOADTOOLARGE = 413;
   /// HTTP Status Code for "Range Not Satisfiable"
   HTTP_RANGENOTSATISFIABLE = 416;
+  /// HTTP Status Code for "I'm a teapot"
+  HTTP_TEAPOT = 418;
   /// HTTP Status Code for "Internal Server Error"
   HTTP_SERVERERROR = 500;
   /// HTTP Status Code for "Not Implemented"
@@ -192,7 +193,7 @@ const
   HTML_CONTENT_TYPE_HEADER = HEADER_CONTENT_TYPE + HTML_CONTENT_TYPE;
 
   /// MIME content type used for UTF-8 encoded XML
-  XML_CONTENT_TYPE = 'text/xml; charset=UTF-8';
+  XML_CONTENT_TYPE = 'text/xml';
 
   /// HTTP header for MIME content type used for UTF-8 encoded XML
   XML_CONTENT_TYPE_HEADER = HEADER_CONTENT_TYPE + XML_CONTENT_TYPE;
@@ -284,6 +285,179 @@ var
   // - this global will be initialized with 'false' and 'true' constants, to
   // avoid a memory allocation each time it is assigned to a variable
   BOOL_UTF8: array[boolean] of RawUtf8;
+
+
+type
+  /// Security IDentifier (SID) Authority, encoded as 48-bit binary
+  TSidAuth = array[0..5] of byte;
+  PSidAuth = ^TSidAuth;
+
+  /// Security IDentifier (SID) binary format, as retrieved e.g. by Windows API
+  // - this definition is not detailed on oldest Delphi, and not available on
+  // POSIX, whereas it makes sense to also have it, e.g. for server process
+  TSid = packed record
+     Revision: byte;
+     SubAuthorityCount: byte;
+     IdentifierAuthority: TSidAuth;
+     SubAuthority: array[byte] of cardinal;
+  end;
+  PSid = ^TSid;
+  PSids = array of PSid;
+
+  /// define a list of well-known Security IDentifier (SID) groups
+  // - for instance, wksBuiltinAdministrators is set for local administrators
+  // - warning: does not exactly match winnt.h WELL_KNOWN_SID_TYPE enumeration
+  TWellKnownSid = (
+    wksNull,
+    wksWorld,
+    wksLocal,
+    wksConsoleLogon,
+    wksCreatorOwner,
+    wksCreatorGroup,
+    wksCreatorOwnerServer,
+    wksCreatorGroupServer,
+    wksIntegrityUntrusted,
+    wksIntegrityLow,
+    wksIntegrityMedium,
+    wksIntegrityMediumPlus,
+    wksIntegrityHigh,
+    wksIntegritySystem,
+    wksIntegrityProtectedProcess,
+    wksIntegritySecureProcess,
+    wksAuthenticationAuthorityAsserted,
+    wksAuthenticationServiceAsserted,
+    wksAuthenticationFreshKeyAuth,
+    wksAuthenticationKeyTrust,
+    wksAuthenticationKeyPropertyMfa,
+    wksAuthenticationKeyPropertyAttestation,
+    wksNtAuthority,
+    wksDialup,
+    wksNetwork,
+    wksBatch,
+    wksInteractive,
+    wksService,
+    wksAnonymous,
+    wksProxy,
+    wksEnterpriseControllers,
+    wksSelf,
+    wksAuthenticatedUser,
+    wksRestrictedCode,
+    wksTerminalServer,
+    wksRemoteLogonId,
+    wksThisOrganisation,
+    wksIisUser,
+    wksLocalSystem,
+    wksLocalService,
+    wksNetworkService,
+    wksLocalAccount,
+    wksLocalAccountAndAdministrator,
+    wksBuiltinDomain,
+    wksBuiltinAdministrators,
+    wksBuiltinUsers,
+    wksBuiltinGuests,
+    wksBuiltinPowerUsers,
+    wksBuiltinAccountOperators,
+    wksBuiltinSystemOperators,
+    wksBuiltinPrintOperators,
+    wksBuiltinBackupOperators,
+    wksBuiltinReplicator,
+    wksBuiltinRasServers,
+    wksBuiltinPreWindows2000CompatibleAccess,
+    wksBuiltinRemoteDesktopUsers,
+    wksBuiltinNetworkConfigurationOperators,
+    wksBuiltinIncomingForestTrustBuilders,
+    wksBuiltinPerfMonitoringUsers,
+    wksBuiltinPerfLoggingUsers,
+    wksBuiltinAuthorizationAccess,
+    wksBuiltinTerminalServerLicenseServers,
+    wksBuiltinDcomUsers,
+    wksBuiltinIUsers,
+    wksBuiltinCryptoOperators,
+    wksBuiltinUnknown,
+    wksBuiltinCacheablePrincipalsGroups,
+    wksBuiltinNonCacheablePrincipalsGroups,
+    wksBuiltinEventLogReadersGroup,
+    wksBuiltinCertSvcDComAccessGroup,
+    wksBuiltinRdsRemoteAccessServers,
+    wksBuiltinRdsEndpointServers,
+    wksBuiltinRdsManagementServers,
+    wksBuiltinHyperVAdmins,
+    wksBuiltinAccessControlAssistanceOperators,
+    wksBuiltinRemoteManagementUsers,
+    wksBuiltinDefaultSystemManagedGroup,
+    wksBuiltinStorageReplicaAdmins,
+    wksBuiltinDeviceOwners,
+    wksCapabilityInternetClient,
+    wksCapabilityInternetClientServer,
+    wksCapabilityPrivateNetworkClientServer,
+    wksCapabilityPicturesLibrary,
+    wksCapabilityVideosLibrary,
+    wksCapabilityMusicLibrary,
+    wksCapabilityDocumentsLibrary,
+    wksCapabilityEnterpriseAuthentication,
+    wksCapabilitySharedUserCertificates,
+    wksCapabilityRemovableStorage,
+    wksCapabilityAppointments,
+    wksCapabilityContacts,
+    wksBuiltinAnyPackage,
+    wksBuiltinAnyRestrictedPackage,
+    wksNtlmAuthentication,
+    wksSChannelAuthentication,
+    wksDigestAuthentication);
+
+  /// define a set of well-known SID
+  TWellKnownSids = set of TWellKnownSid;
+
+  /// custom binary buffer type which can be used to manage a Windows SID instance
+  RawSid = type RawByteString;
+
+
+/// a wrapper around MemCmp() on two Security IDentifier binary buffers
+function SidCompare(a, b: PSid): integer;
+
+/// compute the actual binary length of a Security IDentifier buffer, in bytes
+function SidLength(sid: PSid): PtrInt;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// allocate a RawSid instance from a PSid raw handler
+procedure ToRawSid(sid: PSid; out result: RawSid);
+
+/// convert a Security IDentifier as text, following the standard representation
+procedure SidToTextShort(sid: PSid; var result: shortstring);
+
+/// convert a Security IDentifier as text, following the standard representation
+function SidToText(sid: PSid): RawUtf8; overload;
+
+/// convert a Security IDentifier as text, following the standard representation
+function SidToText(const sid: RawSid): RawUtf8; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// parse a Security IDentifier text, following the standard representation
+// - won't support hexadecimal IdentifierAuthority, i.e. S-1-0x######-....
+function TextToSid(P: PUtf8Char; out sid: TSid): boolean; overload;
+
+/// parse a Security IDentifier text, following the standard representation
+function TextToSid(const text: RawUtf8): RawSid; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// returns a Security IDentifier of a well-known SID as binary
+// - is using an internal cache for the returned RawSid instances
+function KnownSid(wks: TWellKnownSid): RawSid;
+
+/// returns a Security IDentifier of a well-known SID as standard text
+// - e.g. wksBuiltinAdministrators as 'S-1-5-32-544'
+function KnownSidToText(wks: TWellKnownSid): PShortString;
+
+/// recognize most well-known SID from a Security IDentifier binary buffer
+// - returns wksNull if the supplied buffer was not recognized
+function SidToKnown(sid: PSid): TWellKnownSid; overload;
+
+/// recognize most well-known SID from a Security IDentifier standard text
+// - returns wksNull if the supplied text was not recognized
+function SidToKnown(const text: RawUtf8): TWellKnownSid; overload;
+
+/// recognize some well-known SIDs from the supplied SID dynamic array
+function SidToKnownGroups(const sids: PSids): TWellKnownSids;
 
 
 { ****************** Gather Operating System Information }
@@ -612,6 +786,12 @@ var
   // - contains e.g. 'LENOVO 20HES23B0U ThinkPad T470'
   BiosInfoText: RawUtf8;
 
+  /// how many hardware CPU sockets are defined on this system
+  // - i.e. the number of physical CPU slots, not the number of logical CPU
+  // cores as returned by SystemInfo.dwNumberOfProcessors
+  // - as used e.g. by SetThreadAffinity()
+  CpuSockets: integer;
+
   /// Level 1 to 4 CPU caches as returned by GetLogicalProcessorInformation
   // - yes, Intel introduced a Level 4 cache (eDRAM) with some Haswell/Iris CPUs
   // - this information is not retrieved on all Linux / POSIX systems yet
@@ -643,6 +823,11 @@ function ToTextShort(const osv: TOperatingSystemVersion): RawUtf8;
 // - including the kernel revision (not the distribution version) on POSIX systems
 // - returns e.g. 'Windows Vista', 'Windows 11 64-bit 22000' or 'Ubuntu Linux 5.4.0'
 function ToTextOS(osint32: integer): RawUtf8;
+
+/// check if the current OS (i.e. OS_KIND value) match a description
+// - will handle osPosix and osLinux as generic detection of those systems
+// - osUnknown will always return true
+function MatchOS(os: TOperatingSystem): boolean;
 
 type
   /// the recognized ARM/AARCH64 CPU types
@@ -809,6 +994,9 @@ const
   {$ifdef CPU64} + ' 64 bit' {$else} + ' 32 bit' {$endif};
 
 {$ifndef PUREMORMOT2}
+const
+  HTTP_RESP_STATICFILE = STATICFILE_CONTENT_TYPE;
+
 /// deprecated function: use COMPILER_VERSION constant instead
 function GetDelphiCompilerVersion: RawUtf8; deprecated;
 {$endif PUREMORMOT2}
@@ -818,13 +1006,15 @@ function GetDelphiCompilerVersion: RawUtf8; deprecated;
 {$ifdef UNICODE}
 
 const
-  /// a global constant to be appended for Windows Ansi or wide API names
+  /// a global constant to be appended for Windows Ansi or Wide API names
+  // - match the Wide API on Delphi, since String=UnicodeString
   _AW = 'W';
 
 {$else}
 
 const
-  /// a global constant to be appended for Windows Ansi or wide API names
+  /// a global constant to be appended for Windows Ansi or Wide API names
+  // - match the Ansi API on FPC or oldest Delphi, where String=AnsiString
   _AW = 'A';
 
 type
@@ -868,11 +1058,11 @@ var
 var
   /// emulate only some used fields of Windows' TSystemInfo
   SystemInfo: record
-    // retrieved from libc's getpagesize() - is expected to not be 0
+    /// retrieved from libc's getpagesize() - is expected to not be 0
     dwPageSize: cardinal;
-    // retrieved from HW_NCPU (BSD) or /proc/cpuinfo (Linux)
+    /// retrieved from HW_NCPU (BSD) or /proc/cpuinfo (Linux)
     dwNumberOfProcessors: cardinal;
-    // meaningful system information, as returned by fpuname()
+    /// meaningful system information, as returned by fpuname()
     uts: record
       sysname, release, version: RawUtf8;
     end;
@@ -889,8 +1079,9 @@ type
   // - under Linux, all version numbers are set to 0 by default, unless
   // you define the FPCUSEVERSIONINFO conditional and information is
   // extracted from executable resources
-  // - you should not have to use this class directly, but via the
-  // Executable global variable
+  // - for the main executable, do not create once instance of this class, but
+  // call GetExecutableVersion / SetExecutableVersion and access the Executable
+  // global variable
   TFileVersion = class
   protected
     fDetailed: string;
@@ -933,13 +1124,18 @@ type
     Comments: RawUtf8;
     /// associated Language Translation string version resource
     LanguageInfo: RawUtf8;
-    /// retrieve application version from exe file name
-    // - DefaultVersion32 is used if no information Version was included into
-    // the executable resources (on compilation time)
-    // - you should not have to use this constructor, but rather access the
-    // Executable global variable
+    /// initialize the version information, with optional custom values
+    // - will set the version numbers, and get BuildDateTime/BuildYear
+    // - call RetrieveInformationFromFileName to parse its internal resources
+    // - for the main executable, do not use this constructor, but call
+    // GetExecutableVersion / SetExecutableVersion and access the Executable
+    // global variable
     constructor Create(const aFileName: TFileName; aMajor: integer = 0;
       aMinor: integer = 0; aRelease: integer = 0; aBuild: integer = 0);
+    /// open and extract file information from the executable FileName
+    // - note that resource extraction is not available on POSIX, unless the
+    // FPCUSEVERSIONINFO conditional has been specified in the project options
+    function RetrieveInformationFromFileName: boolean;
     /// retrieve the version as a 32-bit integer with Major.Minor.Release
     // - following Major shl 16+Minor shl 8+Release bit pattern
     function Version32: integer;
@@ -991,6 +1187,8 @@ type
     ProgramName: RawUtf8;
     /// the main executable details, as used e.g. by TSynLog
     // - e.g. 'C:\Dev\lib\SQLite3\exe\TestSQL3.exe 1.2.3.123 (2011-03-29 11:09:06)'
+    // - you should have called GetExecutableVersion or SetExecutableVersion  
+    // to populate this field
     ProgramFullSpec: RawUtf8;
     /// the main executable file name (including full path)
     // - same as paramstr(0)
@@ -1003,6 +1201,8 @@ type
     // - for a library, will contain the whole .dll file name
     InstanceFileName: TFileName;
     /// the current executable version
+    // - you should have called GetExecutableVersion or SetExecutableVersion
+    // to populate this field
     Version: TFileVersion;
     /// the current computer host name
     Host: RawUtf8;
@@ -1021,6 +1221,8 @@ type
 var
   /// global information about the current executable and computer
   // - this structure is initialized in this unit's initialization block below
+  // but you need to call GetExecutableVersion to initialize its Version fields
+  // from the executable version resource (if any)
   // - you can call SetExecutableVersion() with a custom version, if needed
   Executable: TExecutable;
 
@@ -1029,10 +1231,18 @@ var
   ExeVersion: TExecutable absolute Executable;
   {$endif PUREMORMOT2}
 
-/// initialize Executable global variable, supplying a custom version number
-// - by default, the version numbers will be retrieved at startup from the
-// executable itself (if it was included at build time)
-// - but you can use this function to set any custom version numbers
+/// initialize Executable global variable, from the program version resources
+// - is not retrieved at startup, unless this function is especially called
+// - on POSIX, requires FPCUSEVERSIONINFO conditional to be set for the project
+// - use SetExecutableVersion() if you want to force a custom version
+// - is in fact just a wrapper around SetExecutableVersion(0, 0, 0, 0)
+procedure GetExecutableVersion;
+
+/// initialize Executable global variable with custom version numbers
+// - GetExecutableVersion will retrieve version information from the
+// executable itself (if it was included at build time and FPCUSEVERSIONINFO
+// conditional was specified for the project)
+// - but you can use this function to set any custom version number
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer); overload;
 
 /// initialize Executable global variable, supplying the version as text
@@ -1230,11 +1440,11 @@ procedure GetComputerUuid(out uuid: TGuid);
 {$ifdef OSWINDOWS}
 
 type
-  TThreadID = DWORD;
-  TMessage = Messages.TMessage;
-  HWND = Windows.HWND;
+  TThreadID     = DWORD;
+  TMessage      = Messages.TMessage;
+  HWND          = Windows.HWND;
+  BOOL          = Windows.BOOL;
   LARGE_INTEGER = Windows.LARGE_INTEGER;
-  BOOL = Windows.BOOL;
 
   /// the known Windows Registry Root key used by TWinRegistry.ReadOpen
   TWinRegistryRoot = (
@@ -1319,12 +1529,13 @@ type
   /// TSynWindowsPrivileges set synchronized with WinAPI
   TWinSystemPrivileges = set of TWinSystemPrivilege;
 
-  /// TSynWindowsPrivileges enumeration synchronized with WinAPI
+  /// define which WinAPI token is to be retrieved
   // - define the execution context, i.e. if the token is used for the current
   // process or the current thread
-  TPrivilegeTokenType = (
-    pttProcess,
-    pttThread);
+  // - used e.g. by TSynWindowsPrivileges or CurrentSid()
+  TWinTokenType = (
+    wttProcess,
+    wttThread);
 
   /// manage available privileges on Windows platform
   // - not all available privileges are active for all process
@@ -1335,15 +1546,14 @@ type
     fAvailable: TWinSystemPrivileges;
     fEnabled: TWinSystemPrivileges;
     fDefEnabled: TWinSystemPrivileges;
+    fToken: THandle;
     function SetPrivilege(
       aPrivilege: TWinSystemPrivilege; aEnablePrivilege: boolean): boolean;
     procedure LoadPrivileges;
   public
-    /// handle to privileges token
-    Token: THandle;
     /// initialize the object dedicated to management of available privileges
     // - aTokenPrivilege can be used for current process or current thread
-    procedure Init(aTokenPrivilege: TPrivilegeTokenType = pttProcess);
+    procedure Init(aTokenPrivilege: TWinTokenType = wttProcess);
     /// finalize the object and relese Token handle
     // - aRestoreInitiallyEnabled parameter can be used to restore initially
     // state of enabled privileges
@@ -1362,6 +1572,9 @@ type
     /// set of enabled privileges for current process/thread
     property Enabled: TWinSystemPrivileges
       read fEnabled;
+    /// handle to the low-level privileges token
+    property Token: THandle
+      read fToken;
   end;
 
   /// which information was returned by GetProcessInfo() overloaded functions
@@ -1407,10 +1620,94 @@ type
   PWinProcessInfo = ^TWinProcessInfo;
   TWinProcessInfoDynArray = array of TWinProcessInfo;
 
+  /// the SID types, as recognized by LookupSid()
+  TSidType = (
+    stUndefined,
+    stTypeUser,
+    stTypeGroup,
+    stTypeDomain,
+    stTypeAlias,
+    stTypeWellKnownGroup,
+    stTypeDeletedAccount,
+    stTypeInvalid,
+    stTypeUnknown,
+    stTypeComputer,
+    stTypeLabel,
+    stTypeLogonSession);
 
-/// quickly retrieve a Text value from Registry
-// - could be used if TWinRegistry is not needed, e.g. for a single value
-function ReadRegString(Key: THandle; const Path, Value: string): string;
+
+function ToText(p: TWinSystemPrivilege): PShortString; overload;
+
+/// calls OpenProcessToken() or OpenThreadToken() to get the current token
+// - caller should then run CloseHandle() once done with the Token handle
+function RawTokenOpen(wtt: TWinTokenType; access: cardinal): THandle;
+
+/// low-level retrieveal of raw binary information for a given token
+// - returns the number of bytes retrieved into buf.buf
+// - caller should then run buf.Done to release the buf result memory
+function RawTokenGetInfo(tok: THandle; tic: TTokenInformationClass;
+  var buf: TSynTempBuffer): cardinal;
+
+/// return the SID of a given token, nil if none found
+// - the returned PSid is located within buf temporary buffer
+// - so caller should call buf.Done once this PSid value is not needed any more
+function RawTokenSid(tok: THandle; var buf: TSynTempBuffer): PSid;
+
+/// return the group SIDs of a given token, nil if none found
+// - the returned PSid is located within buf temporary buffer
+// - so caller should call buf.Done once this PSid value is not needed any more
+function RawTokenGroups(tok: THandle; var buf: TSynTempBuffer): PSids;
+
+/// return the SID of the current user, from process or thread, as text
+// - e.g. 'S-1-5-21-823746769-1624905683-418753922-1000'
+// - optionally returning the name and domain via LookupSid()
+function CurrentSid(wtt: TWinTokenType = wttProcess;
+  name: PRawUtf8 = nil; domain: PRawUtf8 = nil): RawUtf8; overload;
+
+/// return the SID of the current user, from process or thread, as raw binary
+procedure CurrentSid(out sid: RawSid; wtt: TWinTokenType = wttProcess;
+  name: PRawUtf8 = nil; domain: PRawUtf8 = nil); overload;
+
+/// return the SID of the current user groups, from process or thread, as text
+function CurrentGroupsSid(wtt: TWinTokenType = wttProcess): TRawUtf8DynArray;
+
+/// recognize the well-known SIDs from the current user, from process or thread
+// - for instance, for an user with administrator rights on Windows, returns
+// $ [wksWorld, wksLocal, wksConsoleLogon, wksIntegrityHigh, wksInteractive,
+// $  wksAuthenticatedUser, wksThisOrganisation, wksBuiltinAdministrators,
+// $  wksBuiltinUsers, wksNtlmAuthentication]
+function CurrentKnownGroups(wtt: TWinTokenType = wttProcess): TWellKnownSids;
+
+/// fast check if the current user, from process or thread, has a well-known group SID
+function CurrentKnownGroup(wks: TWellKnownSid;
+  wtt: TWinTokenType = wttProcess): boolean;
+
+/// fast check if the current user, from process or thread, has a given group SID
+function CurrentUserHasGroup(const sid: RawUtf8;
+  wtt: TWinTokenType = wttProcess): boolean; overload;
+
+/// fast check if the current user, from process or thread, has a given group SID
+function CurrentUserHasGroup(sid: PSid;
+  wtt: TWinTokenType = wttProcess): boolean; overload;
+
+/// fast check if the current user, from process or thread, match a group by name
+// - calls LookupSid() on each group SID of this user, and filter with name/domain
+function CurrentUserHasGroup(const name, domain, server: RawUtf8;
+  wtt: TWinTokenType = wttProcess): boolean; overload;
+
+/// just a wrapper around "wksBuiltinAdministrators in CurrentKnownGroups"
+function CurrentUserIsAdmin: boolean;
+
+/// retrieve the name and domain of a given SID
+// - returns stUndefined if the SID could not be resolved by LookupAccountSid()
+function LookupSid(sid: PSid; out name, domain: RawUtf8;
+  const server: RawUtf8 = ''): TSidType; overload;
+
+/// retrieve the name and domain of a given SID, encoded from text
+// - returns stUndefined if the SID could not be resolved by LookupAccountSid()
+function LookupSid(const sid: RawUtf8; out name, domain: RawUtf8;
+  const server: RawUtf8 = ''): TSidType; overload;
+
 
 /// retrieve low-level process information, from the Windows API
 procedure GetProcessInfo(aPid: cardinal;
@@ -1420,6 +1717,13 @@ procedure GetProcessInfo(aPid: cardinal;
 procedure GetProcessInfo(const aPidList: TCardinalDynArray;
   out aInfo: TWinProcessInfoDynArray); overload;
 
+/// quickly retrieve a Text value from Registry
+// - could be used if TWinRegistry is not needed, e.g. for a single value
+function ReadRegString(Key: THandle; const Path, Value: string): string;
+
+/// convenient late-binding of any external library function
+// - just wrapper around LoadLibray + GetProcAddress once over a pointer
+function DelayedProc(var api; libname: PChar; procname: PAnsiChar): boolean;
 
 type
   HCRYPTPROV = pointer;
@@ -1540,8 +1844,21 @@ const
   NO_ERROR = Windows.NO_ERROR;
   ERROR_ACCESS_DENIED = Windows.ERROR_ACCESS_DENIED;
   ERROR_INVALID_PARAMETER = Windows.ERROR_INVALID_PARAMETER;
-  INVALID_HANDLE_VALUE = Windows.INVALID_HANDLE_VALUE;
+  ERROR_HANDLE_EOF = Windows.ERROR_HANDLE_EOF;
+  ERROR_ALREADY_EXISTS = Windows.ERROR_ALREADY_EXISTS;
+  ERROR_MORE_DATA = Windows.ERROR_MORE_DATA;
+  ERROR_CONNECTION_INVALID = Windows.ERROR_CONNECTION_INVALID;
+  ERROR_OLD_WIN_VERSION = Windows.ERROR_OLD_WIN_VERSION;
+  ERROR_IO_PENDING = Windows.ERROR_IO_PENDING;
+
+  INVALID_HANDLE_VALUE = Windows.INVALID_HANDLE_VALUE; // = HANDLE(-1)
   ENGLISH_LANGID = $0409;
+
+  // see http://msdn.microsoft.com/en-us/library/windows/desktop/aa383770
+  ERROR_WINHTTP_TIMEOUT = 12002;
+  ERROR_WINHTTP_CANNOT_CONNECT = 12029;
+  ERROR_WINHTTP_INVALID_SERVER_RESPONSE = 12152;
+  ERROR_MUI_FILE_NOT_FOUND = 15100;
 
   PROV_RSA_AES = 24;
   CRYPT_NEWKEYSET = 8;
@@ -1624,6 +1941,10 @@ function GetCurrentThreadId: DWORD; stdcall;
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentProcessId: DWORD; stdcall;
 
+/// retrieves the current process ID
+// - redefined in mormot.core.os to avoid dependency to the Windows unit
+function GetCurrentProcess: THandle; stdcall;
+
 /// redefined in mormot.core.os to avoid dependency to the Windows unit
 function WaitForSingleObject(hHandle: THandle; dwMilliseconds: DWORD): DWORD; stdcall;
 
@@ -1675,16 +1996,26 @@ function CloseHandle(hObject: THandle): BOOL; stdcall;
 
 /// redefined here to avoid warning to include "Windows" in uses clause
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
+// - also supports aFileName longer than MAX_PATH
 function FileCreate(const aFileName: TFileName): THandle;
 
-{$ifndef UNICODE}
-/// redefined here to call CreateFileW() on non-Unicode RTL
+/// redefined here to call CreateFileW() on non-Unicode RTL and support
+// aFileName longer than MAX_PATH
 function FileOpen(const aFileName: TFileName; aMode: integer): THandle;
-{$endif UNICODE}
 
 /// redefined here to avoid warning to include "Windows" in uses clause
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
 procedure FileClose(F: THandle); stdcall;
+
+/// redefined here to support FileName longer than MAX_PATH
+// - as our FileOpen/FileCreate redefinitions
+// - CheckAsDir = true is used by DirectoryExists()
+function FileExists(const FileName: TFileName; FollowLink: boolean = true;
+  CheckAsDir: boolean = false): boolean;
+
+/// redefined here to support FileName longer than MAX_PATH
+function DirectoryExists(const FileName: TFileName;
+  FollowLink: boolean = true): boolean; {$ifdef HASINLINE} inline; {$endif}
 
 /// redefined here to avoid warning to include "Windows" in uses clause
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
@@ -1709,6 +2040,9 @@ function GetFileOpenLimit(hard: boolean = false): integer;
 // - for instance, to set the limit of the current process to its highest value:
 // ! SetFileOpenLimit(GetFileOpenLimit(true));
 function SetFileOpenLimit(max: integer; hard: boolean = false): integer;
+
+/// read /proc/pid/status to ensure pid is of a real process, not a thread
+function IsValidPid(pid: cardinal): boolean;
 
 type
   /// Low-level access to the ICU library installed on this system
@@ -1880,9 +2214,14 @@ type
   TRTLCriticalSection = Windows.TRTLCriticalSection;
 
   /// defined as in FPC RTL, to avoid dependency to Windows.pas unit
+  // - note that on POSIX, a THandle is a 32-bit integer, but library or
+  // resource handles are likely to map pointers, i.e. up to a 64-bit integer
   TLibHandle = THandle;
 
 {$endif ISDELPHI}
+
+  /// handle for Slim Reader/Writer (SRW) locks in exclusive mode
+  TOSLightMutex = pointer;
 
 /// returns the current UTC time as TSystemTime
 // - under Delphi/Windows, directly call the homonymous Win32 API
@@ -1907,15 +2246,44 @@ function FileTimeToUnixTime(const FT: TFileTime): TUnixTime;
 function FileTimeToUnixMSTime(const FT: TFileTime): TUnixMSTime;
   {$ifdef FPC} inline; {$endif}
 
+var
+  // Slim Reader/Writer (SRW) API exclusive mode - fallback to TLightLock on XP
+  InitializeSRWLock,
+  AcquireSRWLockExclusive,
+  ReleaseSRWLockExclusive: procedure(var P: TOSLightMutex); stdcall;
+  TryAcquireSRWLockExclusive: function (var P: TOSLightMutex): BOOL; stdcall;
+
 {$else}
 
 type
   /// system-specific type returned by FileAge(): UTC 64-bit Epoch on POSIX
   TFileAge = TUnixTime;
 
+  /// system-specific structure holding a non-recursive mutex
+  TOSLightMutex = TRTLCriticalSection;
+
 {$ifdef OSLINUX}
-  {$define OSPTHREADS} // direct pthread calls were tested on Linux only
+  {$define OSPTHREADSLIB} // direct pthread calls were tested on Linux only
 {$endif OSLINUX}
+{$ifdef OSDARWIN}
+  {$define OSPTHREADSSTATIC} // direct pthread calls from the 'c' library
+{$endif OSDARWIN}
+{$ifdef OSBSD}
+  {$define OSPTHREADSSTATIC} // direct pthread calls from the c library
+{$endif OSBSD}
+
+// some pthread_mutex_*() API defined here for proper inlining
+{$ifdef OSPTHREADSLIB}
+var
+  pthread_mutex_lock: function(mutex: pointer): integer; cdecl;
+  pthread_mutex_trylock: function(mutex: pointer): integer; cdecl;
+  pthread_mutex_unlock: function(mutex: pointer): integer; cdecl;
+{$endif OSPTHREADSLIB}
+{$ifdef OSPTHREADSSTATIC}
+function pthread_mutex_lock(mutex: pointer): integer; cdecl;
+function pthread_mutex_trylock(mutex: pointer): integer; cdecl;
+function pthread_mutex_unlock(mutex: pointer): integer; cdecl;
+{$endif OSPTHREADSSTATIC}
 
 {$endif OSWINDOWS}
 
@@ -1958,6 +2326,13 @@ procedure DeleteCriticalSection(var cs : TRTLCriticalSection);
 
 {$ifdef OSPOSIX}
 
+{$ifdef OSDARWIN} // try to stabilize MacOS pthreads API calls
+function GetCurrentThreadId: TThreadID; inline;
+function TryEnterCriticalSection(var cs: TRTLCriticalSection): integer; inline;
+procedure EnterCriticalSection(var cs: TRTLCriticalSection); inline;
+procedure LeaveCriticalSection(var cs: TRTLCriticalSection); inline;
+{$else}
+
 /// returns the unique ID of the current running thread
 // - defined in mormot.core.os for inlined FpcCurrentThreadManager call
 var GetCurrentThreadId: function: TThreadID;
@@ -1974,6 +2349,8 @@ var LeaveCriticalSection: procedure(var cs: TRTLCriticalSection);
 // - returns 1 if the lock was acquired, or 0 if the mutex is already locked
 // - defined in mormot.core.os for inlined FpcCurrentThreadManager call
 var TryEnterCriticalSection: function(var cs: TRTLCriticalSection): integer;
+
+{$endif OSDARWIN}
 
 {$endif OSPOSIX}
 
@@ -2018,20 +2395,33 @@ procedure SetLastError(error: integer);
   {$ifdef OSWINDOWS} stdcall; {$else} inline; {$endif}
 
 /// returns a given error code as plain text
-// - calls FormatMessageW on Windows, or StrError() on POSIX
+// - redirects to WinErrorText(error, nil) on Windows, or StrError() on POSIX
 function GetErrorText(error: integer): RawUtf8;
-
-/// retrieve the text corresponding to an error message for a given Windows module
-// - use RTL SysErrorMessage() as fallback
-function SysErrorMessagePerModule(Code: cardinal; ModuleName: PChar): string;
+  {$ifdef HASINLINE} inline; {$endif}
 
 {$ifdef OSWINDOWS}
-/// override the RTL function to force the ENGLISH_LANGID flag
-function SysErrorMessage(Code: cardinal; ModuleName: PChar = nil): string;
-{$endif OSWINDOWS}
 
-/// raise an Exception from the last system error
+/// return the error message of a given Module
+// - first try WinErrorConstant() for system error constants (if ModuleName=nil),
+// then call FormatMessage() and override the RTL function to force the
+// ENGLISH_LANGID flag first
+// - if ModuleName does support this Code, will try it as system error
+// - replace SysErrorMessagePerModule() and SysErrorMessage() from mORMot 1
+function WinErrorText(Code: cardinal; ModuleName: PChar): RawUtf8;
+
+/// return the best known ERROR_* system error message constant texts
+// - without the 'ERROR_' prefix
+// - as used by WinErrorText()
+function WinErrorConstant(Code: cardinal): PUtf8Char;
+
+/// raise an EOSException from the last system error using WinErrorText()
+procedure RaiseLastError(const Context: shortstring;
+  RaisedException: ExceptClass = nil);
+
+/// raise an Exception from the last module error using WinErrorText()
 procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
+
+{$endif OSWINDOWS}
 
 /// compatibility function, wrapping Win32 API function
 // - returns the current main Window handle on Windows, or 0 on POSIX/Linux
@@ -2104,8 +2494,8 @@ function Unicode_InPlaceLower(W: PWideChar; WLen: integer): integer;
 // on Darwin, which is not monotonic -> always use this more coherent version
 // - on POSIX, will call (via vDSO) the very fast CLOCK_MONOTONIC_COARSE if
 // available, or the low-level mach_absolute_time() monotonic Darwin API
-// - do not expect exact millisecond resolution - it may rather be within the
-// 10-16 ms range, especially under Windows
+// - do not expect exact millisecond resolution - steps may rather be e.g.
+// within the 15-16 ms range on Windows, and 4-5 ms range on Linux
 {$ifdef OSWINDOWS}
 var
   GetTickCount64: function: Int64; stdcall;
@@ -2131,7 +2521,7 @@ function UnixTimeUtc: TUnixTime;
 // - will use e.g. fast clock_gettime(CLOCK_REALTIME_COARSE) under Linux,
 // or GetSystemTimeAsFileTime/GetSystemTimePreciseAsFileTime under Windows - the
 // later being more accurate, but slightly slower than the former, so you may
-// consider using UnixMSTimeUtcFast on Windows if its 10-16ms accuracy is enough
+// consider using UnixMSTimeUtcFast on Windows if its 16ms accuracy is enough
 function UnixMSTimeUtc: TUnixMSTime;
 
 /// returns the current UTC date/time as a millisecond-based c-encoded time
@@ -2167,7 +2557,7 @@ type
     ECode: DWord;
     /// = FPC's RaiseProc() FrameCount if EStack is Frame: PCodePointer
     EStackCount: integer;
-    /// the address where the exception occured
+    /// the address where the exception occurred
     EAddr: PtrUInt;
     /// the optional stack trace
     EStack: PPtrUInt;
@@ -2203,16 +2593,26 @@ procedure QueryPerformanceMicroSeconds(out Value: Int64);
 function ValidHandle(Handle: THandle): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// check for unsafe '..' '/xxx' 'c:xxx' '~/xxx' or '\\' patterns in a path
+function SafePathName(const Path: TFileName): boolean;
+
+/// check for unsafe '..' '/xxx' 'c:xxx' '~/xxx' or '\\' patterns in a RawUtf8 path
+function SafePathNameU(const Path: RawUtf8): boolean;
+
 /// check for unsafe '..' '/xxx' 'c:xxx' '~/xxx' or '\\' patterns in a filename
 function SafeFileName(const FileName: TFileName): boolean;
 
-/// check for unsafe '..' '/xxx' 'c:xxx' '~/xxx' or '\\' patterns in a filename
+/// check for unsafe '..' '/xxx' 'c:xxx' '~/xxx' or '\\' patterns in a RawUtf8 filename
 function SafeFileNameU(const FileName: RawUtf8): boolean;
 
 /// ensure all \ / path delimiters are normalized into the current OS expectation
 // - i.e. normalize file name to use '\' on Windows, or '/' on POSIX
 // - see MakePath() from mormot.core.text.pas to concatenate path items
 function NormalizeFileName(const FileName: TFileName): TFileName;
+
+/// add some " before and after if FileName has some space within
+// - could be used when generating command line parameters
+function QuoteFileName(const FileName: TFileName): TFileName;
 
 /// faster cross-platform alternative to sysutils homonymous function
 // - on Windows, just redirect to WindowsFileTimeToDateTime() since FileDate
@@ -2304,7 +2704,7 @@ function FileSeek64(Handle: THandle; const Offset: Int64;
 // - return true and set FileSize and FileTimestampUtc if found - note that
 // no local time conversion is done, so timestamp won't match FileAge()
 // - use a single Operating System call, so is faster than FileSize + FileAge
-function FileInfo(const FileName: TFileName; out FileSize: Int64;
+function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
   out FileTimestampUtc: TUnixMSTime): boolean;
 
 /// get low-level file information, in a cross-platform way
@@ -2316,16 +2716,19 @@ function FileInfo(const FileName: TFileName; out FileSize: Int64;
 function FileInfoByHandle(aFileHandle: THandle; out FileId, FileSize: Int64;
   out LastWriteAccess, FileCreateDateTime: TUnixMSTime): boolean;
 
+/// check if a given file is likely to be an executable
+// - will check the DOS/WinPE executable header in its first bytes on Windows
+// - will call fpStat() on POSIX to check the File and Executable bits
+function FileIsExecutable(const FileName: TFileName): boolean;
+
+/// compute the size of a directory's files, optionally with nested folders
+// - basic implementation using FindFirst/FindNext so won't be the fastest
+// available, nor fully accurate when files are actually (hard) links
+function DirectorySize(const FileName: TFileName; Recursive: boolean = false): Int64;
+
 /// copy one file to another, similar to the Windows API
 function CopyFile(const Source, Target: TFileName;
   FailIfExists: boolean): boolean;
-
-/// conversion of Windows OEM CP-437 charset into a UTF-16 encoded string
-function OemToUnicode(const oem: RawByteString): SynUnicode;
-
-/// conversion of Windows OEM CP-437 charset into a file name
-// - as used e.g. by mormot.core.zip for non UTF-8 file names
-function OemToFileName(const oem: RawByteString): TFileName;
 
 /// prompt the user for an error message to notify an unexpected issue
 // - in practice, text encoding is expected to be plain 7-bit ASCII
@@ -2358,12 +2761,19 @@ const
   /// operating-system dependent boolean if paths are case-insensitive
   PathCaseInsensitive = false;
   {$endif OSWINDOWS}
+  /// a convenient shortened constant to open a file for reading
+  fmOpenReadDenyNone = fmOpenRead or fmShareDenyNone;
 
 /// get a file date and time, from a FindFirst/FindNext search
 // - the returned timestamp is in local time, not UTC
 // - this method would use the F.Timestamp field available since Delphi XE2
 function SearchRecToDateTime(const F: TSearchRec): TDateTime;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// get a file date and time, from a FindFirst/FindNext search, as Windows time
+// - this cross-system function is used e.g. by mormot.core.zip which expects
+// Windows TimeStamps in its headers
+function SearchRecToWindowsTime(const F: TSearchRec): integer;
 
 /// check if a FindFirst/FindNext found instance is actually a file
 function SearchRecValidFile(const F: TSearchRec): boolean;
@@ -2374,7 +2784,7 @@ function SearchRecValidFolder(const F: TSearchRec): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
 type
-  // FPC TFileStream miss a Create(aHandle) constructor like Delphi
+  /// FPC TFileStream miss a Create(aHandle) constructor like Delphi
   TFileStreamFromHandle = class(THandleStream)
   protected
     fDontReleaseHandle: boolean;
@@ -2386,12 +2796,39 @@ type
       read fDontReleaseHandle write fDontReleaseHandle;
   end;
 
+  /// a TFileStream which supports FileName longer than MAX_PATH
+  TFileStreamEx = class(TFileStreamFromHandle)
+  Private
+    fFileName : TFileName;
+  public
+    /// open or create the file from its name, depending on the supplied Mode
+    // - Mode is typically fmCreate / fmOpenReadDenyNone
+    constructor Create(const aFileName: TFileName; Mode: cardinal);
+    /// can use this class from a low-level file OS handle
+    constructor CreateFromHandle(const aFileName: TFileName; aHandle: THandle);
+    /// the file name assigned to this class constructor
+    property FileName : TFileName
+      read fFilename;
+  end;
+
+  /// file stream which ignores I/O write errors
+  // - in case disk space is exhausted, TFileStreamWithoutWriteError.WriteBuffer
+  // won't throw any exception, so application will continue to work
+  // - used e.g. by TSynLog to let the application continue with no exception,
+  // even in case of a disk/partition full of logs
+  TFileStreamWithoutWriteError = class(TFileStreamEx)
+  public
+    /// this overriden function returns Count, as if it was always sucessfull
+    function Write(const Buffer; Count: Longint): Longint; override;
+  end;
+
+
 /// overloaded function optimized for one pass reading of a (huge) file
 // - will use e.g. the FILE_FLAG_SEQUENTIAL_SCAN flag under Windows, as stated
 // by http://blogs.msdn.com/b/oldnewthing/archive/2012/01/20/10258690.aspx
-// - note: under XP, we observed ERROR_NO_SYSTEM_RESOURCES problems when calling
-// FileRead() for chunks bigger than 32MB on files opened with this flag,
-// so it would use regular FileOpen() on this deprecated OS
+// - on Windows, to avoid ERROR_NO_SYSTEM_RESOURCES problems when calling
+// FileRead() for chunks bigger than 32MB on files opened with this flag, so you
+// should better FileRead() over e.g. 16MB chunks max (as StringFromFile does)
 // - on POSIX, calls fpOpen(pointer(FileName),O_RDONLY) with no fpFlock() call
 // - is used e.g. by StringFromFile() or HashFile() functions
 function FileOpenSequentialRead(const FileName: TFileName): integer;
@@ -2410,7 +2847,7 @@ function StreamCopyUntilEnd(Source, Dest: TStream): Int64;
 
 /// read a File content into a string
 // - content can be binary or text
-// - returns '' if file was not found or any read error occured
+// - returns '' if file was not found or any read error occurred
 // - wil use GetFileSize() API by default, unless HasNoSize is defined,
 // and read will be done using a buffer (required e.g. for POSIX char files)
 // - uses RawByteString for byte storage, whatever the codepage is
@@ -2444,9 +2881,18 @@ function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName): b
 // - following 'exename_123.tmp' pattern, in the system temporary folder
 function TemporaryFileName: TFileName;
 
+/// extract a path from a file name like ExtractFilePath function
+// - but cross-platform, i.e. detect both '\' and '/' on all platforms
+function ExtractPath(const FileName: TFileName): TFileName;
+
+/// extract a path from a RawUtf8 file name like ExtractFilePath function
+// - but cross-platform, i.e. detect both '\' and '/' on all platforms
+function ExtractPathU(const FileName: RawUtf8): RawUtf8;
+
 /// compute the file name, including its path if supplied, but without its extension
 // - e.g. GetFileNameWithoutExt('/var/toto.ext') = '/var/toto'
 // - may optionally return the extracted extension, as '.ext'
+// - will be cross-platform, i.e. detect both '\' and '/' on all platforms
 function GetFileNameWithoutExt(const FileName: TFileName;
   Extension: PFileName = nil): TFileName;
 
@@ -2496,12 +2942,6 @@ function DirectoryDeleteOlderFiles(const Directory: TFileName;
 function IsDirectoryWritable(const Directory: TFileName): boolean;
 
 type
-  /// text file layout, as recognized by TMemoryMap.TextFileKind
-  TTextFileKind = (
-    isUnicode,
-    isUtf8,
-    isAnsi);
-
   /// cross-platform memory mapping of a file content
   TMemoryMap = object
   protected
@@ -2525,12 +2965,8 @@ type
     // - file will be closed when UnMap will be called
     function Map(const aFileName: TFileName): boolean; overload;
     /// set a fixed buffer for the content
-    // - emulated a memory-mapping from an existing buffer
+    // - emulates memory-mapping over an existing buffer
     procedure Map(aBuffer: pointer; aBufferSize: PtrUInt); overload;
-    /// recognize the BOM of a text file
-    // - BOM is common only with Microsoft products
-    // - returns isAnsi if no BOM is available - but may be UTF-8 e.g. on POSIX
-    function TextFileKind: TTextFileKind;
     /// unmap the file
     procedure UnMap;
     /// retrieve the memory buffer mapped to the file content
@@ -2551,7 +2987,7 @@ type
   TSynMemoryStreamMapped = class(TSynMemoryStream)
   protected
     fMap: TMemoryMap;
-    fFileStream: TFileStream;
+    fFileStream: THandleStream;
     fFileName: TFileName;
   public
     /// create a TStream from a file content using fast memory mapping
@@ -2575,8 +3011,9 @@ type
   // - so that Windows is not required in your unit uses clause
   TExecutableResource = object
   private
-    HResInfo: THandle;
-    HGlobal: THandle;
+    // note: we can't use THandle which is 32-bit on 64-bit POSIX
+    HResInfo: TLibHandle;
+    HGlobal: TLibHandle;
   public
     /// the resource memory pointer, after successful Open()
     Buffer: pointer;
@@ -2586,7 +3023,7 @@ type
     // - use the current executable if Instance is left to its 0 default value
     // - returns TRUE if the resource has been found, and Buffer/Size are set
     function Open(const ResourceName: string; ResType: PChar;
-      Instance: THandle = 0): boolean;
+      Instance: TLibHandle = 0): boolean;
     /// unlock and finalize a resource
     procedure Close;
   end;
@@ -2697,8 +3134,8 @@ function ReadSystemMemory(address, size: PtrUInt): RawByteString;
 function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
 
 /// return the process name of a given PID
-// - under Windows, is a wrapper around QueryFullProcessImageNameW/GetModuleFileNameEx
-// PsAPI call
+// - under Windows, is a wrapper around
+// QueryFullProcessImageNameW/GetModuleFileNameEx PsAPI call
 // - on Linux, will query /proc/[pid]/exe or /proc/[pid]/cmdline pseudo-file
 function EnumProcessName(PID: cardinal): RawUtf8;
 
@@ -2803,10 +3240,13 @@ procedure TextBackground(Color: TConsoleColor);
 procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor = ccLightGray;
   NoLineFeed: boolean = false; NoColor: boolean = false); overload;
 
-/// will wait for the ENTER key to be pressed, processing Synchronize() pending
-// notifications, and the internal Windows Message loop (on this OS)
-// - to be used e.g. for proper work of console applications with interface-based
-// service implemented as optExecInMainThread
+/// will wait for the ENTER key to be pressed, with all needed waiting process
+// - on the main thread, will call Synchronize() for proper work e.g. with
+// interface-based service implemented as optExecInMainThread
+// - on Windows, from a non-main Thread, respond to PostThreadMessage(WM_QUIT)
+// - on Windows, also properly respond to Ctrl-C or closing console events
+// - on POSIX, will call SynDaemonIntercept first, so that Ctrl-C or SIG_QUIT
+// will also be intercepted and let this procedure return
 procedure ConsoleWaitForEnterKey;
 
 /// read all available content from stdin
@@ -2820,8 +3260,14 @@ function ConsoleReadBody: RawByteString;
 function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
-// when using Windows API
-procedure Win32PWideCharToUtf8(P: PWideChar; Len: integer; out res: RawUtf8);
+procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt;
+  out res: RawUtf8);
+
+/// local RTL wrapper function to avoid linking mormot.core.unicode.pas
+// - returns dest.buf as PWideChar result, and dest.len as length
+// - caller should always call dest.Done to release (unlikely) temporary memory
+function Utf8ToWin32PWideChar(const Text: RawUtf8;
+  var dest: TSynTempBuffer): PWideChar;
 
 {$else}
 
@@ -2834,14 +3280,13 @@ function PosixParseHex32(p: PAnsiChar): integer;
 function _oskb(Size: cardinal): string;
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded string
-// - under Windows, will use the CP_OEMCP encoding
+// - under Windows, will use the CP_OEM encoding
 // - under Linux, will expect the console to be defined with UTF-8 encoding
+// - we don't propose any ConsoleToUtf8() function because Windows depends on
+// the running program itself: most should generates CP_OEM (e.g. 850) as expected,
+// but some could use the system code page or even UTF-16 binary with BOM (!) -
+// so you may consider using AnsiToUtf8() with the proper code page
 function Utf8ToConsole(const S: RawUtf8): RawByteString;
-
-/// direct conversion of a console OEM-encoded string into UTF-8 encoded string
-// - under Windows, will use the CP_OEMCP encoding
-// - under Linux, will expect the console to be defined with UTF-8 encoding
-function ConsoleToUtf8(const S: RawByteString): RawUtf8;
 
 
 type
@@ -2951,11 +3396,12 @@ type
   /// a lightweight exclusive non-rentrant lock, stored in a PtrUInt value
   // - calls SwitchToThread after some spinning, but don't use any R/W OS API
   // - warning: methods are non rentrant, i.e. calling Lock twice in a raw would
-  // deadlock: use TRWLock or TSynLocker/TRTLCriticalSection for reentrant methods
-  // - light locks are expected to be kept a very small amount of time: use
-  // TSynLocker or TRTLCriticalSection if the lock may block too long
+  // deadlock: use TRWLock or TSynLocker/TOSLock for reentrant methods
   // - several lightlocks, each protecting a few variables (e.g. a list), may
-  // be more efficient than a more global TRTLCriticalSection/TRWLock
+  // be more efficient than a more global TOSLock/TRWLock
+  // - our light locks are expected to be kept a very small amount of time (some
+  // CPU cycles): use TOSLightLock if the lock may block too long
+  // - TryLock/UnLock can be used to thread-safely acquire a shared resource
   // - only consume 4 bytes on CPU32, 8 bytes on CPU64
   {$ifdef USERECORDWITHMETHODS}
   TLightLock = record
@@ -2971,11 +3417,16 @@ type
     // - e.g. not needed if TLightLock is defined as a class field
     procedure Init;
       {$ifdef HASINLINE} inline; {$endif}
+    /// could be called to finalize the instance as a TOSLock
+    // - does nothing - just for compatibility with TOSLock
+    procedure Done;
+      {$ifdef HASINLINE} inline; {$endif}
     /// enter an exclusive non-rentrant lock
     procedure Lock;
       {$ifdef HASINLINE} inline; {$endif}
     /// try to enter an exclusive non-rentrant lock
     // - if returned true, caller should eventually call UnLock()
+    // - could also be used to thread-safely acquire a shared resource
     function TryLock: boolean;
       {$ifdef HASINLINE} inline; {$endif}
     /// leave an exclusive non-rentrant lock
@@ -2987,12 +3438,12 @@ type
   // - calls SwitchToThread after some spinning, but don't use any R/W OS API
   // - warning: ReadLocks are reentrant and allow concurrent acccess, but calling
   // WriteLock within a ReadLock, or within another WriteLock, would deadlock
-  // - consider TRWLock is you need an upgradable lock - but if you mostly read,
-  // then a TRWLightLock.ReadLock/ReadUnLock/WriteLock is faster than upgrading
-  // - light locks are expected to be kept a very small amount of time: use
-  // TSynLocker or TRTLCriticalSection if the lock may block too long
+  // - consider TRWLock if you need an upgradable lock - but for mostly reads,
+  // TRWLightLock.ReadLock/ReadUnLock/WriteLock pattern is faster than upgrading
+  // - our light locks are expected to be kept a very small amount of time (some
+  // CPU cycles): use TSynLocker or TOSLock if the lock may block too long
   // - several lightlocks, each protecting a few variables (e.g. a list), may
-  // be more efficient than a more global TRTLCriticalSection/TRWLock
+  // be more efficient than a more global TOSLock/TRWLock
   // - only consume 4 bytes on CPU32, 8 bytes on CPU64
   {$ifdef USERECORDWITHMETHODS}
   TRWLightLock = record
@@ -3046,8 +3497,8 @@ type
 
   /// a lightweight multiple Reads / exclusive Write reentrant lock
   // - calls SwitchToThread after some spinning, but don't use any R/W OS API
-  // - locks are expected to be kept a very small amount of time: use TSynLocker
-  // or TRTLCriticalSection if the lock may block too long
+  // - our light locks are expected to be kept a very small amount of time (some
+  // CPU cycles): use TSynLocker or TOSLock if the lock may block too long
   // - warning: all methods are reentrant, but WriteLock/ReadWriteLock would
   // deadlock if called after a ReadOnlyLock
   {$ifdef USERECORDWITHMETHODS}
@@ -3059,9 +3510,9 @@ type
     Flags: PtrUInt; // bit 0 = WriteLock, 1 = ReadWriteLock, >1 = ReadOnlyLock
     LastReadWriteLockThread, LastWriteLockThread: TThreadID; // to be reentrant
     LastReadWriteLockCount,  LastWriteLockCount: cardinal;
-    {$ifndef ASMINTEL}
+    {$ifndef FPC_ASMX64}
     procedure ReadOnlyLockSpin;
-    {$endif ASMINTEL}
+    {$endif FPC_ASMX64}
   public
     /// initialize the R/W lock
     // - not needed if TRWLock is part of a class - i.e. if was filled with 0
@@ -3081,7 +3532,7 @@ type
     // !   rwlock.ReadOnlyUnLock;
     // ! end;
     procedure ReadOnlyLock;
-      {$ifndef ASMINTEL} inline; {$endif}
+      {$ifdef HASINLINE} {$ifndef FPC_ASMX64} inline; {$endif} {$endif}
     /// release a previous ReadOnlyLock call
     procedure ReadOnlyUnLock;
       {$ifdef HASINLINE} inline; {$endif}
@@ -3136,13 +3587,78 @@ type
   end;
   PRWLock = ^TRWLock;
 
-const
-  RW_FORCE: array[{write:}boolean] of TRWLockContext = (
-    cReadOnly,
-    cWrite);
-  RW_UPGRADE: array[{write:}boolean] of TRWLockContext = (
-    cReadOnly,
-    cReadWrite);
+  /// the standard rentrant lock supplied by the Operating System
+  // - maps TRTLCriticalSection, i.e. calls Win32 API or pthreads library
+  // - don't forget to call Init and Done to properly initialize the structure
+  // - if you do require a rentrant/recursive lock, consider TOSLightLock
+  // - same signature as TLightLock/TOSLightLock, usable as compile time alternatives
+  {$ifdef USERECORDWITHMETHODS}
+  TOSLock = record
+  {$else}
+  TOSLock = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    CS: TRTLCriticalSection;
+  public
+    /// to be called to setup the instance
+    // - mandatory in all cases, even if TOSLock is part of a class
+    procedure Init;
+    /// to be called to finalize the instance
+    procedure Done;
+    /// enter an OS lock
+    // - notice: this method IS reentrant/recursive
+    procedure Lock;
+      {$ifdef FPC} inline; {$endif}
+    /// try to enter an OS lock
+    // - if returned true, caller should eventually call UnLock()
+    function TryLock: boolean;
+      {$ifdef FPC} inline; {$endif}
+    /// leave an OS lock
+    procedure UnLock;
+      {$ifdef FPC} inline; {$endif}
+  end;
+
+  /// the fastest non-rentrant lock supplied by the Operating System
+  // - calls Slim Reader/Writer (SRW) Win32 API in exclusive mode or directly
+  // the pthread_mutex_*() library calls in non-recursive/fast mode on Linux
+  // - on XP, where SRW are not available, fallback to a TLightLock
+  // - on non-Linux POSIX, fallback to regular cthreads/TRTLCriticalSection
+  // - don't forget to call Init and Done to properly initialize the structure
+  // - to protect a very small code section of a few CPU cycles with no Init/Done
+  // needed, and a lower footprint, you may consider our TLightLock
+  // - same signature as TOSLock/TLightLock, usable as compile time alternatives
+  // - warning: non-rentrant, i.e. nested Lock calls would block, as TLightLock
+  // - no TryLock is defined on Windows, because TryAcquireSRWLockExclusive()
+  // raised some unexpected EExternalException C000026 NT_STATUS_RESOURCE_NOT_OWNED
+  // ("Attempt to release mutex not owned by caller") during testing
+  {$ifdef USERECORDWITHMETHODS}
+  TOSLightLock = record
+  {$else}
+  TOSLightLock = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    fMutex: TOSLightMutex;
+  public
+    /// to be called to setup the instance
+    // - mandatory in all cases, even if TOSLock is part of a class
+    procedure Init;
+    /// to be called to finalize the instance
+    procedure Done;
+    /// enter an OS lock
+    // - warning: this method is NOT reentrant/recursive, so any nested call
+    // would deadlock
+    procedure Lock;
+      {$ifdef HASINLINE} inline; {$endif}
+    {$ifdef OSPOSIX}
+    /// access to raw pthread_mutex_trylock() method
+    // - TryAcquireSRWLockExclusive() seems not stable on all Windows revisions
+    function TryLock: boolean;
+     {$ifdef HASINLINE} inline; {$endif}
+    {$endif OSPOSIX}
+    /// leave an OS lock
+    procedure UnLock;
+      {$ifdef HASINLINE} inline; {$endif}
+  end;
 
 type
   /// how TSynLocker handles its thread processing
@@ -3191,6 +3707,14 @@ type
     function GetUtf8(Index: integer): RawUtf8;
     procedure SetUtf8(Index: integer; const Value: RawUtf8);
     function GetIsLocked: boolean;
+    // - if RWUse=uSharedLock, calls EnterCriticalSection (no parallel readings)
+    // - warning: if RWUse=uRWLock, this method will use the internal TRWLock
+    // - defined in protected section for better inlining and to fix a Delphi
+    // compiler bug about warning a missing Windows unit in the uses classes
+    procedure RWLock(context: TRWLockContext);
+      {$ifdef HASINLINE} inline; {$endif}
+    procedure RWUnLock(context: TRWLockContext);
+      {$ifdef HASINLINE} inline; {$endif}
   public
     /// number of values stored in the internal Padding[] array
     // - equals 0 if no value is actually stored, or a 1..7 number otherwise
@@ -3218,18 +3742,23 @@ type
     /// finalize the mutex, and call FreeMem() on the pointer of this instance
     // - should have been initiazed with a NewSynLocker call
     procedure DoneAndFreeMem;
-    /// low-level acquisition of the lock, depending on RWUse property
-    // - warning: if RWUse=uRWLock, this method will use the internal TRWLock
-    procedure RWLock(context: TRWLockContext);
-      {$ifdef HASINLINEWINAPI} inline; {$endif}
-    /// low-level release of the lock, depending on RWUse property
-    procedure RWUnLock(context: TRWLockContext);
-      {$ifdef HASINLINEWINAPI} inline; {$endif}
-    /// lock the instance for exclusive access
-    // - redirects to RWLock(cWrite)
-    // - with default RWUse=uSharedLock, this method is re-entrant from the same
-    // thread i.e. you can nest Lock/UnLock calls in the same thread
-    // - warning: with RWUse=uRWLock, this method would deadlock on nested calls
+    /// low-level acquisition of the lock, as RWLock(cReadOnly)
+    // - if RWUse=uSharedLock, calls EnterCriticalSection (no parallel readings)
+    // - warning: with RWUse=uRWLock, a nested Lock call would deadlock, but not
+    // nested ReadLock calls
+    procedure ReadLock;
+    /// low-level release of the lock, as RWUnLock(cReadOnly)
+    procedure ReadUnLock;
+    /// low-level acquisition of the lock, as RWLock(cReadWrite)
+    // - if RWUse=uSharedLock, calls EnterCriticalSection (no parallel readings)
+    // - with RWUse=uRWLock, a nested Lock call would not deadlock
+    procedure ReadWriteLock;
+    /// low-level release of the lock, as RWUnLock(cReadWrite)
+    procedure ReadWriteUnLock;
+    /// lock the instance for exclusive access, as RWLock(cWrite)
+    // - is re-entrant from the same thread i.e. you can nest Lock/UnLock calls
+    // - warning: with RWUse=uRWLock, would deadlock after a nested ReadLock,
+    // but not after ReadWriteLock
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
     // ! Safe.Lock;
     // ! try
@@ -3238,7 +3767,6 @@ type
     // !   Safe.Unlock;
     // ! end;
     procedure Lock;
-      {$ifdef HASINLINEWINAPI} inline; {$endif}
     /// will try to acquire the mutex
     // - do nothing and return false if RWUse is not the default uSharedLock
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
@@ -3249,7 +3777,6 @@ type
     // !     Safe.Unlock;
     // !   end;
     function TryLock: boolean;
-      {$ifdef HASINLINEWINAPI} inline; {$endif}
     /// will try to acquire the mutex for a given time
     // - just wait and return false if RWUse is not the default uSharedLock
     // - use as such to avoid race condition (from a Safe: TSynLocker property):
@@ -3260,12 +3787,10 @@ type
     // !     Safe.Unlock;
     // !   end;
     function TryLockMS(retryms: integer; terminated: PBoolean = nil): boolean;
-    /// release the instance for exclusive access
-    // - redirects to RWUnLock(cWrite)
+    /// release the instance for exclusive access, as RWUnLock(cWrite)
     // - each Lock/TryLock should have its exact UnLock opposite, so a
     // try..finally block is mandatory for safe code
     procedure UnLock; overload;
-      {$ifdef HASINLINEWINAPI} inline; {$endif}
     /// will enter the mutex until the IUnknown reference is released
     // - could be used as such under Delphi:
     // !begin
@@ -3500,11 +4025,10 @@ function SleepHiRes(ms: cardinal; var terminated: boolean;
 
 /// call SleepHiRes() taking count of the activity, in 0/1/5/50/120-250 ms steps
 // - range is agressively designed burning some CPU in favor of responsiveness
-// - should reset start := 0 when some activity occured
+// - should reset start := 0 when some activity occurred
 // - would optionally return if terminated^ is set, or event is signaled
 // - returns the current GetTickCount64 value
-function SleepStep(var start: Int64; terminated: PBoolean = nil;
-  event: TEvent = nil): Int64;
+function SleepStep(var start: Int64; terminated: PBoolean = nil): Int64;
 
 /// compute optimal sleep time as 0/1/5/50 then 120-250 ms steps
 // - is agressively designed burning some CPU in favor of responsiveness
@@ -3522,15 +4046,45 @@ procedure SwitchToThread;
 /// try LockedExc() in a loop, calling SwitchToThread after some spinning
 procedure SpinExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt);
 
+/// try to kill/cancel a thread
+// - on Windows, calls the TerminateThread() API
+// - under Linux/FPC, calls pthread_cancel() API which is asynchronous
+function RawKillThread(Thread: TThread): boolean;
+
+type
+  /// store a bitmask of logical CPU cores, as used by SetThreadMaskAffinity
+  // - has 32/64-bit pointer-size on Windows, or 1024 bits on POSIX
+  TCpuSet = {$ifdef OSWINDOWS} PtrUInt {$else} array[0..127] of byte {$endif};
+var
+  /// low-level bitmasks of logical CPU cores hosted on each hardware CPU socket
+  // - filled at process startup as CpuSocketsMask[0 .. CpuSockets - 1] range
+  CpuSocketsMask: array of TCpuSet;
+
+/// fill a bitmask of CPU cores with zeros
+procedure ResetCpuSet(out CpuSet: TCpuSet);
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// set a particular bit in a mask of CPU cores
+function SetCpuSet(var CpuSet: TCpuSet; CpuIndex: cardinal): boolean;
+
+/// try to assign a given thread to a specific set of logical CPU core(s)
+// - on Windows, calls the SetThreadAffinityMask() API
+// - under Linux/FPC, calls pthread_setaffinity_np() API
+function SetThreadMaskAffinity(Thread: TThread; const Mask: TCpuSet): boolean;
+
+/// try to assign a given thread to a specific logical CPU core
+// - CpuIndex should be in 0 .. SystemInfo.dwNumberOfProcessors - 1 range
+function SetThreadCpuAffinity(Thread: TThread; CpuIndex: cardinal): boolean;
+
+/// try to assign a given thread to a specific hardware CPU socket
+// - SocketIndex should be in 0 .. CpuSockets - 1 range, and will use the
+// CpuSocketsMask[] information retrieved during process startup
+function SetThreadSocketAffinity(Thread: TThread; SocketIndex: cardinal): boolean;
+
 /// low-level naming of a thread
 // - on Windows, will raise a standard "fake" exception to notify the thread name
-// - under Linux/FPC, calls pthread_setname_np API which truncates to 16 chars
+// - under Linux/FPC, calls pthread_setname_np() API which truncates to 16 chars
 procedure RawSetThreadName(ThreadID: TThreadID; const Name: RawUtf8);
-
-/// try to kill/cancel a thread
-// - on Windows, call the TerminateThread() API
-// - under Linux/FPC, calls pthread_cancel API which is asynchronous
-function RawKillThread(Thread: TThread): boolean;
 
 /// name the current thread so that it would be easily identified in the IDE debugger
 // - could then be retrieved by CurrentThreadName/GetCurrentThreadName
@@ -3600,6 +4154,41 @@ function RegisterGlobalShutdownRelease(Instance: TObject;
 
 { ****************** Unix Daemon and Windows Service Support }
 
+type
+  /// all possible states of a Windows service
+  // - on POSIX, will identify only if the daemon is ssRunning or ssStopped
+  TServiceState = (
+    ssNotInstalled,
+    ssStopped,
+    ssStarting,
+    ssStopping,
+    ssRunning,
+    ssResuming,
+    ssPausing,
+    ssPaused,
+    ssFailed,
+    ssErrorRetrievingState);
+  PServiceState = ^TServiceState;
+  TServiceStateDynArray = array of TServiceState;
+
+/// return the ready to be displayed text of a TServiceState value
+function ToText(st: TServiceState): PShortString; overload;
+
+const
+  /// could be used with ConsoleWrite() to notify a Windows service state
+  SERVICESTATE_COLOR: array[TServiceState] of TConsoleColor = (
+    ccBlue,       // NotInstalled
+    ccLightRed,   // Stopped
+    ccGreen,      // Starting
+    ccRed,        // Stopping
+    ccLightGreen, // Running
+    ccGreen,      // Resuming
+    ccBrown,      // Pausing
+    ccWhite,      // Paused
+    ccMagenta,    // Failed
+    ccYellow);    // ErrorRetrievingState
+
+
 {$ifdef OSWINDOWS}
 
 { *** some minimal Windows API definitions, replacing WinSvc.pas missing for FPC }
@@ -3660,6 +4249,7 @@ const
   SERVICE_CONTROL_CONTINUE      = $00000003;
   SERVICE_CONTROL_INTERROGATE   = $00000004;
   SERVICE_CONTROL_SHUTDOWN      = $00000005;
+
   SERVICE_STOPPED               = $00000001;
   SERVICE_START_PENDING         = $00000002;
   SERVICE_STOP_PENDING          = $00000003;
@@ -3667,6 +4257,8 @@ const
   SERVICE_CONTINUE_PENDING      = $00000005;
   SERVICE_PAUSE_PENDING         = $00000006;
   SERVICE_PAUSED                = $00000007;
+
+  ERROR_FAILED_SERVICE_CONTROLLER_CONNECT = 1063;
 
 type
   PServiceStatus = ^TServiceStatus;
@@ -3689,33 +4281,33 @@ type
   end;
 
   SC_HANDLE = THandle;
-  SERVICE_STATUS_HANDLE = cardinal;
+  SERVICE_STATUS_HANDLE = THandle;
   TServiceTableEntry = record
-    lpServiceName: PChar;
-    lpServiceProc: procedure(ArgCount: integer; Args: PPChar); stdcall;
+    lpServiceName: PWideChar;
+    lpServiceProc: procedure(ArgCount: cardinal; Args: PPWideChar); stdcall;
   end;
   PServiceTableEntry = ^TServiceTableEntry;
+  TServiceDescription = record
+    lpDestription: PWideChar;
+  end;
 
   {$Z4}
   SC_STATUS_TYPE = (SC_STATUS_PROCESS_INFO);
   {$Z1}
 
-function OpenSCManager(lpMachineName, lpDatabaseName: PChar;
-  dwDesiredAccess: cardinal): SC_HANDLE; stdcall; external advapi32
-  name 'OpenSCManager' + _AW;
-function ChangeServiceConfig2(hService: SC_HANDLE; dwsInfoLevel: cardinal;
-  lpInfo: Pointer): BOOL; stdcall; external advapi32 name 'ChangeServiceConfig2W';
-function StartService(hService: SC_HANDLE; dwNumServiceArgs: cardinal;
-  lpServiceArgVectors: Pointer): BOOL; stdcall; external advapi32
-  name 'StartService' + _AW;
-function CreateService(hSCManager: SC_HANDLE; lpServiceName, lpDisplayName: PChar;
+function OpenSCManagerW(lpMachineName, lpDatabaseName: PWideChar;
+  dwDesiredAccess: cardinal): SC_HANDLE; stdcall; external advapi32;
+function ChangeServiceConfig2W(hService: SC_HANDLE; dwsInfoLevel: cardinal;
+  lpInfo: Pointer): BOOL; stdcall; external advapi32;
+function StartServiceW(hService: SC_HANDLE; dwNumServiceArgs: cardinal;
+  lpServiceArgVectors: PPWideChar): BOOL; stdcall; external advapi32;
+function CreateServiceW(hSCManager: SC_HANDLE;
+  lpServiceName, lpDisplayName: PWideChar;
   dwDesiredAccess, dwServiceType, dwStartType, dwErrorControl: cardinal;
-  lpBinaryPathName, lpLoadOrderGroup: PChar; lpdwTagId: LPDWORD; lpDependencies,
-  lpServiceStartName, lpPassword: PChar): SC_HANDLE; stdcall; external advapi32
-  name 'CreateService' + _AW;
-function OpenService(hSCManager: SC_HANDLE; lpServiceName: PChar;
-  dwDesiredAccess: cardinal): SC_HANDLE; stdcall; external advapi32
-  name 'OpenService' + _AW;
+  lpBinaryPathName, lpLoadOrderGroup: PWideChar; lpdwTagId: LPDWORD; lpDependencies,
+  lpServiceStartName, lpPassword: PWideChar): SC_HANDLE; stdcall; external advapi32;
+function OpenServiceW(hSCManager: SC_HANDLE; lpServiceName: PWideChar;
+  dwDesiredAccess: cardinal): SC_HANDLE; stdcall; external advapi32;
 function DeleteService(hService: SC_HANDLE): BOOL; stdcall; external advapi32;
 function CloseServiceHandle(hSCObject: SC_HANDLE): BOOL; stdcall; external advapi32;
 function QueryServiceStatus(hService: SC_HANDLE;
@@ -3727,12 +4319,15 @@ function ControlService(hService: SC_HANDLE; dwControl: cardinal;
   var lpServiceStatus: TServiceStatus): BOOL; stdcall; external advapi32;
 function SetServiceStatus(hServiceStatus: SERVICE_STATUS_HANDLE;
   var lpServiceStatus: TServiceStatus): BOOL; stdcall; external advapi32;
-function RegisterServiceCtrlHandler(lpServiceName: PChar;
-  lpHandlerProc: TFarProc): SERVICE_STATUS_HANDLE; stdcall; external advapi32
-  name 'RegisterServiceCtrlHandler' + _AW;
-function StartServiceCtrlDispatcher(
-  lpServiceStartTable: PServiceTableEntry): BOOL; stdcall; external advapi32
-  name 'StartServiceCtrlDispatcher' + _AW;
+function RegisterServiceCtrlHandlerW(lpServiceName: PWideChar;
+  lpHandlerProc: TFarProc): SERVICE_STATUS_HANDLE; stdcall; external advapi32;
+function StartServiceCtrlDispatcherW(
+  lpServiceStartTable: PServiceTableEntry): BOOL; stdcall; external advapi32;
+
+function OpenServiceManager(const TargetComputer, DatabaseName: RawUtf8;
+  dwDesiredAccess: cardinal): SC_HANDLE;
+function OpenServiceInstance(hSCManager: SC_HANDLE; const ServiceName: RawUtf8;
+  dwDesiredAccess: cardinal): SC_HANDLE;
 
 
 { *** high level classes to define and manage Windows Services }
@@ -3745,18 +4340,6 @@ var
   WindowsServiceLog: TSynLogProc;
 
 type
-  /// all possible states of the service
-  TServiceState = (
-    ssNotInstalled,
-    ssStopped,
-    ssStarting,
-    ssStopping,
-    ssRunning,
-    ssResuming,
-    ssPausing,
-    ssPaused,
-    ssErrorRetrievingState);
-
   /// TServiceControler class is intended to create a new Windows Service instance
   // or to maintain (that is start, stop, pause, resume...) an existing Service
   // - to provide the service itself, use the TService class
@@ -3779,9 +4362,8 @@ type
     // - Path - a path to binary (executable) of the service created.
     // - OrderGroup - an order group name (unnecessary)
     // - Dependencies - string containing a list with names of services, which must
-    // start before (every name should be separated with #0, entire
-    // list should be separated with #0#0. Or, an empty string can be
-    // passed if there is no dependancy).
+    // start before this service (every name should be separated with ';' or an
+    // empty string can be passed if there is no dependency).
     // - Username - login name. For service type SERVICE_WIN32_OWN_PROCESS, the
     // account name in the form of "DomainName\Username"; If the account
     // belongs to the built-in domain, ".\Username" can be specified;
@@ -3816,17 +4398,20 @@ type
     // the startup operation), SERVICE_ERROR_SEVERE,
     // SERVICE_ERROR_CRITICAL
     constructor CreateNewService(
-      const TargetComputer, DatabaseName, Name, DisplayName, Path: string;
-      const OrderGroup: string = ''; const Dependencies: string = '';
-      const Username: string = ''; const Password: string = '';
+      const TargetComputer, DatabaseName, Name, DisplayName: RawUtf8;
+      const Path: TFileName;
+      const OrderGroup: RawUtf8 = ''; const Dependencies: RawUtf8 = '';
+      const Username: RawUtf8 = ''; const Password: RawUtf8 = '';
       DesiredAccess: cardinal = SERVICE_ALL_ACCESS;
       ServiceType: cardinal = SERVICE_WIN32_OWN_PROCESS or SERVICE_INTERACTIVE_PROCESS;
       StartType: cardinal = SERVICE_DEMAND_START;
       ErrorControl: cardinal = SERVICE_ERROR_NORMAL);
     /// wrapper around CreateNewService() to install the current executable as service
-    class function Install(const Name, DisplayName, Description: string;
+    class function Install(const Name, DisplayName, Description: RawUtf8;
       AutoStart: boolean; ExeName: TFileName = '';
-      Dependencies: string = ''): TServiceState;
+      const Dependencies: RawUtf8 = ''): TServiceState;
+    /// wrapper around CreateOpenService(SERVICE_QUERY_STATUS) and GetState
+    class function CurrentState(const Name: RawUtf8): TServiceState;
     /// open an existing service, in order to control it or its configuration
     // from your application
     // - TargetComputer - set it to empty string if local computer is the target.
@@ -3838,7 +4423,7 @@ type
     // SERVICE_INTERROGATE, SERVICE_PAUSE_CONTINUE, SERVICE_QUERY_CONFIG,
     // SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STOP, SERVICE_USER_DEFINED_CONTROL
     constructor CreateOpenService(
-      const TargetComputer, DataBaseName, Name: string;
+      const TargetComputer, DataBaseName, Name: RawUtf8;
       DesiredAccess: cardinal = SERVICE_ALL_ACCESS);
     /// release memory and handles
     destructor Destroy; override;
@@ -3870,11 +4455,10 @@ type
     /// Removes service from the system, i.e. close the Service
     function Delete: boolean;
     /// starts the execution of a service with some specified arguments
-    // - this version expect PChar pointers, either AnsiString (for FPC and old
-    //  Delphi compiler), either UnicodeString (till Delphi 2009)
-    function Start(const Args: array of PChar): boolean;
+    // - this version expect PWideChar pointers, i.e. UTF-16 strings
+    function Start(const Args: array of PWideChar): boolean;
     /// try to define the description text of this service
-    procedure SetDescription(const Description: string);
+    function SetDescription(const Description: RawUtf8): boolean;
     /// this class method will check the command line parameters, and will let
     //  control the service according to it
     // - MyServiceSetup.exe /install will install the service
@@ -3886,8 +4470,8 @@ type
     // - if ExeFileName='', it will install the current executable
     // - optional Description and Dependencies text may be specified
     class procedure CheckParameters(const ExeFileName: TFileName;
-      const ServiceName, DisplayName, Description: string;
-      const Dependencies: string = '');
+      const ServiceName, DisplayName, Description: RawUtf8;
+      const Dependencies: RawUtf8 = '');
   end;
 
   {$M+}
@@ -3906,8 +4490,8 @@ type
   /// let an executable implement a Windows Service
   TService = class
   protected
-    fSName: string;
-    fDName: string;
+    fServiceName: RawUtf8;
+    fDisplayName: RawUtf8;
     fStartType: cardinal;
     fServiceType: cardinal;
     fData: cardinal;
@@ -3921,33 +4505,39 @@ type
     fOnResume: TServiceEvent;
     fOnStop: TServiceEvent;
     fStatusRec: TServiceStatus;
-    fArgsList: array of string;
+    fArgsList: TRawUtf8DynArray;
     fStatusHandle: THandle;
     function GetArgCount: Integer;
-    function GetArgs(Idx: Integer): string;
+    function GetArgs(Idx: Integer): RawUtf8;
     function GetInstalled: boolean;
     procedure SetStatus(const Value: TServiceStatus);
     procedure CtrlHandle(Code: cardinal);
     function GetControlHandler: TServiceControlHandler;
     procedure SetControlHandler(const Value: TServiceControlHandler);
+    procedure ServiceProc(ArgCount: integer; Args: PPWideChar);
   public
-    /// this method is the main service entrance, from the OS point of view
-    // - it will call OnControl/OnStop/OnPause/OnResume/OnShutdown events
-    // - and report the service status to the system (via ReportStatus method)
-    procedure DoCtrlHandle(Code: cardinal); virtual;
+    /// internal method redirecting to WindowsServiceLog global variable
+    class procedure DoLog(Level: TSynLogInfo; const Fmt: RawUtf8;
+      const Args: array of const; Instance: TObject);
     /// Creates the service
     // - the service is added to the internal registered services
     // - main application must call the global ServicesRun procedure to actually
     // start the services
     // - caller must free the TService instance when it's no longer used
-    constructor Create(const aServiceName, aDisplayName: string); reintroduce; virtual;
+    constructor Create(const aServiceName, aDisplayName: RawUtf8); reintroduce; virtual;
+    /// this method is the main service entrance, from the OS point of view
+    // - it will call OnControl/OnStop/OnPause/OnResume/OnShutdown events
+    // - and report the service status to the system (via ReportStatus method)
+    procedure DoCtrlHandle(Code: cardinal); virtual;
     /// Reports new status to the system
     function ReportStatus(dwState, dwExitCode, dwWait: cardinal): BOOL;
     /// Installs the service in the database
     // - return true on success
     // - create a local TServiceController with the current executable file,
     // with the supplied command line parameters
-    function Install(const Params: string = ''): boolean;
+    // - you can optionally append some parameters, which will be appended
+    // to the
+    function Install(const Params: TFileName = ''): boolean;
     /// Removes the service from database
     //  - uses a local TServiceController with the current Service Name
     procedure Remove;
@@ -3964,7 +4554,8 @@ type
     property ArgCount: Integer
       read GetArgCount;
     /// List of arguments passed to the service by the service controler
-    property Args[Idx: Integer]: string
+    // - Idx is in range 0..ArgCount - 1
+    property Args[Idx: Integer]: RawUtf8
       read GetArgs;
     /// Any data You wish to associate with the service object
     property Data: cardinal
@@ -4015,7 +4606,8 @@ type
     /// custom event triggered when the service is resumed
     property OnResume: TServiceEvent
       read fOnResume write fOnResume;
-    /// custom event triggered when the service receive an Interrogate
+    /// custom event triggered when the service receive an Interrogate command
+    // - could call ReportStatus() e.g. to notify a problem
     property OnInterrogate: TServiceEvent
       read fOnInterrogate write fOnInterrogate;
     /// custom event triggered when the service is shut down
@@ -4023,11 +4615,11 @@ type
       read fOnShutdown write fOnShutdown;
   published
     /// Name of the service. Must be unique
-    property ServiceName: string
-      read fSName;
+    property ServiceName: RawUtf8
+      read fServiceName;
     /// Display name of the service
-    property DisplayName: string
-      read fDName write fDName;
+    property DisplayName: RawUtf8
+      read fDisplayName write fDisplayName;
     /// Type of service
     property ServiceType: cardinal
       read fServiceType write fServiceType;
@@ -4041,7 +4633,7 @@ type
   TServiceSingle = class(TService)
   public
     /// will set a global function as service controller
-    constructor Create(const aServiceName, aDisplayName: string); override;
+    constructor Create(const aServiceName, aDisplayName: RawUtf8); override;
     /// will release the global service controller
     destructor Destroy; override;
   end;
@@ -4060,14 +4652,32 @@ function ServiceSingleRun: boolean;
 // enumeration item
 function CurrentStateToServiceState(CurrentState: cardinal): TServiceState;
 
-/// return the ready to be displayed text of a TServiceState value
-function ToText(st: TServiceState): PShortString; overload;
-
 /// return the ProcessID of a given service, by name
-function GetServicePid(const aServiceName: string): cardinal;
+function GetServicePid(const aServiceName: RawUtf8;
+  aServiceState: PServiceState = nil): cardinal;
 
-/// kill a Windows process from its ProcessID
+/// try to gently stop a given Windows console app from its ProcessID
+// - will send a Ctrl-C event (acquiring the process console)
+function CancelProcess(pid: cardinal; waitseconds: integer): boolean;
+
+/// try to gently quit a Windows process from its ProcessID
+// - will send a WM_QUIT message to all its threads
+function QuitProcess(pid: cardinal; waitseconds: integer): boolean;
+
+/// forcibly terminate a Windows process from its ProcessID
+// - call TerminateProcess() and wait for its ending
 function KillProcess(pid: cardinal; waitseconds: integer = 30): boolean;
+
+/// install a Windows event handler for Ctrl+C pressed on the Console
+function HandleCtrlC(const OnClose: TThreadMethod): boolean;
+
+/// define a Windows Job to close associated processes together
+// - warning: main process should include the CREATE_BREAKAWAY_FROM_JOB flag
+// - you should later call CloseHandle() on the returned handle, if not 0 
+function CreateJobToClose(parentpid: cardinal): THandle;
+
+/// associate a process to a Windows Job created by CreateJobToClose()
+function AssignJobToProcess(job, process: THandle; const ctxt: ShortString): boolean;
 
 {$else}
 
@@ -4094,7 +4704,10 @@ var
   RunUntilSigTerminatedPidFilePath: TFileName;
 
 /// local .pid file name as created by RunUntilSigTerminated(dofork=true)
-function RunUntilSigTerminatedPidFile: TFileName;
+function RunUntilSigTerminatedPidFile(ensureWritable: boolean = false): TFileName;
+
+/// check the local .pid file to return either ssRunning or ssStopped
+function RunUntilSigTerminatedState: TServiceState;
 
 var
   /// once SynDaemonIntercept has been called, this global variable
@@ -4104,7 +4717,7 @@ var
 /// enable low-level interception of executable stop signals
 // - any SIGQUIT / SIGTERM / SIGINT signal will set appropriately the global
 // SynDaemonTerminated variable, with an optional logged entry to log
-// - as called e.g. by RunUntilSigTerminated()
+// - called e.g. by RunUntilSigTerminated() or ConsoleWaitForEnterKey()
 // - you can call this method several times with no issue
 // - onLog can be assigned from TSynLog.DoLog for proper logging
 procedure SynDaemonIntercept(const onlog: TSynLogProc = nil);
@@ -4155,6 +4768,8 @@ const
   PARSECOMMAND_ERROR =
     [pcUnbalancedSingleQuote .. pcHasEndingBackSlash];
 
+  PARSCOMMAND_POSIX = {$ifdef OSWINDOWS} false {$else} true {$endif};
+
 /// low-level parsing of a RunCommand() execution command
 // - parse and fills argv^[0..argc^-1] with corresponding arguments, after
 // un-escaping and un-quoting if applicable, using temp^ to store the content
@@ -4166,45 +4781,102 @@ const
 // should be considered as indicative only with posix=false
 function ParseCommandArgs(const cmd: RawUtf8; argv: PParseCommandsArgs = nil;
   argc: PInteger = nil; temp: PRawUtf8 = nil;
-  posix: boolean = {$ifdef OSWINDOWS} false {$else} true {$endif}): TParseCommands;
+  posix: boolean = PARSCOMMAND_POSIX): TParseCommands;
+
+/// low-level extration of the executable of a RunCommand() execution command
+// - returns the first parameter returned by ParseCommandArgs()
+function ExtractExecutableName(const cmd: RawUtf8;
+  posix: boolean = PARSCOMMAND_POSIX): RawUtf8;
+
+type
+  /// callback used by RunRedirect() to notify of console output at runtime
+  // - newly console output text is given as raw bytes sent by the application,
+  // with no conversion: on POSIX, it is likely to be UTF-8 but on Windows it
+  // depends on the actual program so is likely to be CP_OEM but others could
+  // use the system code page or even UTF-16 binary with BOM (!) - so you
+  // may consider using AnsiToUtf8() with the proper code page
+  // - should return true to stop the execution, or false to continue
+  // - is called once when the process is started, with text='', ignoring its return
+  // - on idle state (each 200ms), is called with text='' to allow execution abort
+  // - the raw process ID (dword on Windows, cint on POSIX) is also supplied
+  TOnRedirect = function(const text: RawByteString; pid: cardinal): boolean of object;
+
+  /// define how RunCommand() and RunRedirect() run their sub-process
+  // - roEnvAddExisting is used when the env pairs should be added to the
+  // existing system environment variable
+  // - roWinJobCloseChildren will setup a Windows Job to close any child
+  // process(es) when the created process quits
+  TRunOptions = set of (
+    roEnvAddExisting,
+    roWinJobCloseChildren);
 
 /// like SysUtils.ExecuteProcess, but allowing not to wait for the process to finish
 // - optional env value follows 'n1=v1'#0'n2=v2'#0'n3=v3'#0#0 Windows layout
 function RunProcess(const path, arg1: TFileName; waitfor: boolean;
   const arg2: TFileName = ''; const arg3: TFileName = '';
   const arg4: TFileName = ''; const arg5: TFileName = '';
-  const env: TFileName = ''; envaddexisting: boolean = false): integer;
-
-type
-  /// callback used by RunRedirect() to notify of console output at runtime
-  // - newly console output text is given as UTF-8 on all platforms
-  // - should return true to stop the execution, or false to continue
-  // - on idle state (each 200ms), is called with text='' to allow execution abort
-  TOnRedirect = function(const text: RawUtf8): boolean of object;
+  const env: TFileName = ''; options: TRunOptions = []): integer;
 
 /// like fpSystem, but cross-platform
 // - under POSIX, calls bash only if needed, after ParseCommandArgs() analysis
 // - under Windows (especially Windows 10), creating a process can be dead slow
 // https://randomascii.wordpress.com/2019/04/21/on2-in-createprocess
-// - waitfordelay/processid/onoutput are implemented on Windows only
+// - waitfordelayms/processhandle/redirected/onoutput exist on Windows only -
+// and redirected is the raw byte output, which may be OEM, WinAnsi or UTF-16
+// depending on the program itself
 // - parsed is implemented on POSIX only
+// - optional env should be encoded as 'n1=v1'#0'n2=v2'#0#0 pairs
 function RunCommand(const cmd: TFileName; waitfor: boolean;
-  const env: TFileName = ''; envaddexisting: boolean = false;
+  const env: TFileName = ''; options: TRunOptions = [];
   {$ifdef OSWINDOWS}
-  waitfordelayms: cardinal = INFINITE; processid: PHandle = nil;
-  redirected: PRawUtf8 = nil; const onoutput: TOnRedirect = nil
+  waitfordelayms: cardinal = INFINITE; processhandle: PHandle = nil;
+  redirected: PRawByteString = nil; const onoutput: TOnRedirect = nil;
+  const wrkdir: TFileName = ''
   {$else}
   parsed: PParseCommands = nil
   {$endif OSWINDOWS}): integer;
 
 /// execute a command, returning its output console as UTF-8 text
-// - calling FPC RTL popen/pclose on POSIX, or CreateProcessW on Windows
+// - calling CreateProcessW on Windows (i.e. our RunCommand), and FPC RTL
+// popen/pclose on POSIX
 // - return '' on cmd execution error, or the whole output console content
+// with no conversion: on POSIX, it is likely to be UTF-8 but on Windows it
+// depends on the actual program so is likely to be CP_OEM but others could
+// use the system code page or even UTF-16 binary with BOM (!) - so you
+// may consider using AnsiToUtf8() with the proper code page
 // - will optionally call onoutput() to notify the new output state
 // - can abort if onoutput() callback returns false, or waitfordelayms expires
+// - optional env is Windows only, (FPC popen does not support it), and should
+// be encoded as name=value#0 pairs
+// - you can specify a wrkdir if the path specified by cmd is not good enough
 function RunRedirect(const cmd: TFileName; exitcode: PInteger = nil;
-  const onoutput: TOnRedirect = nil; waitfordelayms: cardinal = INFINITE): RawUtf8;
+  const onoutput: TOnRedirect = nil; waitfordelayms: cardinal = INFINITE;
+  setresult: boolean = true; const env: TFileName = '';
+  const wrkdir: TFileName = ''; options: TRunOptions = []): RawByteString;
 
+var
+  /// how many seconds we should wait for gracefull termination of a process
+  // in RunRedirect() - or RunCommand() on Windows
+  // - set 0 to disable gracefull exit, and force hard SIGKILL/TerminateProcess
+  RunAbortTimeoutSecs: integer = 5;
+
+{$ifdef OSWINDOWS}
+type
+  /// how in RunRedirect() or RunCommand() should try to gracefully terminate
+  // - ramCtrlC calls CancelProcess(), i.e. send CTRL_C_EVENT
+  // - ramQuit calls QuitProcess(), i.e. send WM_QUIT on all the process threads
+  TRunAbortMethods = set of (ramCtrlC, ramQuit);
+var
+  /// RunRedirect/RunCommand methods to gracefully terminate before TerminateProcess
+  RunAbortMethods: TRunAbortMethods = [ramCtrlC, ramQuit];
+{$else}
+type
+  /// how in RunRedirect() should try to gracefully terminate
+  TRunAbortMethods = set of (ramSIGTERM);
+var
+  /// RunRedirect() methods to gracefully terminate before SIGKILL
+  RunAbortMethods: TRunAbortMethods = [ramSIGTERM];
+{$endif OSWINDOWS}
 
 
 implementation
@@ -4298,6 +4970,8 @@ begin
       Reason := 'Unsupported Media Type';
     HTTP_RANGENOTSATISFIABLE:
       Reason := 'Requested Range Not Satisfiable';
+    HTTP_TEAPOT:
+      Reason := 'I''m a teapot';
     426:
       Reason := 'Upgrade Required';
     HTTP_SERVERERROR:
@@ -4392,6 +5066,352 @@ begin
   result := format('%d%s', [v, _U[u]]);
 end;
 
+function SidLength(sid: PSid): PtrInt;
+begin
+  if sid = nil then
+    result := 0
+  else
+    result := integer(sid^.SubAuthorityCount) shl 2 + 8;
+end;
+
+function SidCompare(a, b: PSid): integer;
+var
+  l: PtrInt;
+begin
+  l := SidLength(a);
+  result := l - SidLength(b);
+  if result = 0 then
+    result := MemCmp(pointer(a), pointer(b), l);
+end;
+
+procedure ToRawSid(sid: PSid; out result: RawSid);
+begin
+  if sid <> nil then
+    FastSetRawByteString(RawByteString(result), sid, SidLength(sid));
+end;
+
+procedure SidToTextShort(sid: PSid; var result: shortstring);
+var
+  a: PSidAuth;
+  i: PtrInt;
+begin // faster than ConvertSidToStringSidA()
+  if (sid = nil ) or
+     (sid^.Revision <> 1) then
+  begin
+    result[0] := #0; // invalid SID
+    exit;
+  end;
+  a := @sid^.IdentifierAuthority;
+  if (a^[0] <> 0) or
+     (a^[1] <> 0) then
+  begin
+    result := 'S-1-0x';
+    for i := 0 to 5 do
+      AppendShortByteHex(a^[i], result)
+  end
+  else
+  begin
+    result := 'S-1-';
+    AppendShortCardinal(bswap32(PCardinal(@a^[2])^), result);
+  end;
+  for i := 0 to integer(sid^.SubAuthorityCount) - 1 do
+  begin
+    AppendShortChar('-', result);
+    AppendShortCardinal(sid^.SubAuthority[i], result);
+  end;
+end;
+
+function SidToText(sid: PSid): RawUtf8;
+var
+  tmp: shortstring;
+begin
+  SidToTextShort(sid, tmp);
+  FastSetString(result, @tmp[1], ord(tmp[0]));
+end;
+
+function SidToText(const sid: RawSid): RawUtf8;
+begin
+  result := SidToText(pointer(sid));
+end;
+
+// GetNextCardinal() on POSIX does not ignore trailing '-'
+function GetNextUInt32(var P: PUtf8Char): cardinal;
+var
+  c: cardinal;
+begin
+  result := 0;
+  if P = nil then
+    exit;
+  repeat
+    c := ord(P^) - 48;
+    if c > 9 then
+      break
+    else
+      result := result * 10 + c;
+    inc(P);
+  until false;
+  while P^ in ['.', '-', ' '] do
+    inc(P);
+end;
+
+function TextToSid(P: PUtf8Char; out sid: TSid): boolean;
+begin
+  result := false;
+  if (P = nil) or
+     (PCardinal(P)^ <>
+        ord('S') + ord('-') shl 8 + ord('1') shl 16 + ord('-') shl 24) then
+    exit;
+  inc(P, 4);
+  if not (P^ in ['1'..'9']) then
+    exit;
+  PInt64(@sid)^ := 1;
+  PCardinal(@sid.IdentifierAuthority[2])^ := bswap32(GetNextUInt32(P));
+  while P^ in ['0'..'9'] do
+  begin
+    sid.SubAuthority[sid.SubAuthorityCount] := GetNextUInt32(P);
+    inc(sid.SubAuthorityCount);
+    if sid.SubAuthorityCount = 0 then
+      exit; // avoid any overflow
+  end;
+  result := P^ = #0
+end;
+
+function TextToSid(const text: RawUtf8): RawSid;
+var
+  tmp: TSid; // maximum size possible on stack (1032 bytes)
+begin
+  if TextToSid(pointer(text), tmp) then
+    ToRawSid(@tmp, result);
+end;
+
+var
+  KNOWN_SID: array[TWellKnownSid] of RawSid;
+  KNOWN_SID_TEXT: array[TWellKnownSid] of string[15];
+const
+  INTEGRITY_SID: array[0..7] of word = ( // S-1-16-x known values
+    0, 4096, 8192, 8448, 12288, 16384, 20480, 28672);
+
+procedure ComputeKnownSid(wks: TWellKnownSid);
+var
+  sid: TSid;
+begin
+  PInt64(@sid)^ := $0101; // sid.Revision=1, sid.SubAuthorityCount=1
+  if wks <= wksLocal then
+  begin // S-1-1-0
+    sid.IdentifierAuthority[5] := ord(wks);
+    sid.SubAuthority[0] := 0;
+  end
+  else if wks = wksConsoleLogon then
+  begin // S-1-2-1
+    sid.IdentifierAuthority[5] := 2;
+    sid.SubAuthority[0] := 1;
+  end
+  else if wks <= wksCreatorGroupServer then
+  begin // S-1-3-0
+    sid.IdentifierAuthority[5] := 3;
+    sid.SubAuthority[0] := ord(wks) - ord(wksCreatorOwner);
+  end
+  else if wks <= wksIntegritySecureProcess then
+  begin
+    sid.IdentifierAuthority[5] := 16; // S-1-16-x
+    sid.SubAuthority[0] := INTEGRITY_SID[ord(wks) - ord(wksIntegrityUntrusted)];
+  end
+  else if wks <= wksAuthenticationKeyPropertyAttestation then
+  begin // S-1-18-1
+    sid.IdentifierAuthority[5] := 18;
+    sid.SubAuthority[0] := ord(wks) - (ord(wksAuthenticationAuthorityAsserted) - 1)
+  end
+  else
+  begin // S-1-5-x
+    sid.IdentifierAuthority[5] := 5;
+    if wks = wksNtAuthority then
+      sid.SubAuthorityCount := 0
+    else if wks <= wksInteractive then
+      sid.SubAuthority[0] := ord(wks) - ord(wksNtAuthority)
+    else if wks <= wksThisOrganisation then
+      sid.SubAuthority[0] := ord(wks) - (ord(wksNtAuthority) - 1)
+    else if wks <= wksNetworkService then
+      sid.SubAuthority[0] := ord(wks) - (ord(wksNtAuthority) - 2)
+    else if wks <= wksLocalAccountAndAdministrator then //  S-1-5-113
+      sid.SubAuthority[0] := ord(wks) - (ord(wksLocalAccount) - 113)
+    else
+    begin
+      sid.SubAuthority[0] := 32;
+      if wks <> wksBuiltinDomain then
+      begin
+        sid.SubAuthorityCount := 2;
+        if wks <= wksBuiltinDcomUsers then
+          sid.SubAuthority[1] := ord(wks) - (ord(wksBuiltinAdministrators) - 544)
+        else if wks <= wksBuiltinDeviceOwners then // S-1-5-32-583
+          sid.SubAuthority[1] := ord(wks) - (ord(wksBuiltinIUsers) - 568)
+        else if wks <= wksCapabilityContacts then
+        begin // S-1-15-3-1
+          sid.IdentifierAuthority[5] := 15;
+          sid.SubAuthority[0] := 3;
+          sid.SubAuthority[1] := ord(wks) - (ord(wksCapabilityInternetClient) - 1)
+        end
+        else if wks <= wksBuiltinAnyRestrictedPackage then
+        begin // S-1-15-2-1
+          sid.IdentifierAuthority[5] := 15;
+          sid.SubAuthority[0] := 2;
+          sid.SubAuthority[1] := ord(wks) - (ord(wksBuiltinAnyPackage) - 1)
+        end
+        else if wks <= wksDigestAuthentication then
+        begin
+          sid.SubAuthority[0] := 64;
+          case wks of
+            wksNtlmAuthentication:
+              sid.SubAuthority[1] := 10; // S-1-5-64-10
+            wksSChannelAuthentication:
+              sid.SubAuthority[1] := 14;
+            wksDigestAuthentication:
+              sid.SubAuthority[1] := 21;
+          end;
+        end;
+      end;
+    end;
+  end;
+  GlobalLock;
+  if KNOWN_SID[wks] = '' then
+  begin
+    SidToTextShort(@sid, KNOWN_SID_TEXT[wks]);
+    ToRawSid(@sid, KNOWN_SID[wks]); // to be set last
+  end;
+  GlobalUnLock;
+end;
+
+function KnownSid(wks: TWellKnownSid): RawSid;
+begin
+  if (wks <> wksNull) and
+     (KNOWN_SID[wks] = '') then
+    ComputeKnownSid(wks);
+  result := KNOWN_SID[wks];
+end;
+
+function KnownSidToText(wks: TWellKnownSid): PShortString;
+begin
+  if (wks <> wksNull) and
+     (KNOWN_SID[wks] = '') then
+    ComputeKnownSid(wks);
+  result := @KNOWN_SID_TEXT[wks];
+end;
+
+// https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dtyp/81d92bba-d22b-4a8c-908a-554ab29148ab
+
+function SidToKnown(sid: PSid): TWellKnownSid;
+var
+  c: integer;
+begin
+  result := wksNull; // not recognized
+  if (sid = nil) or
+     (sid.Revision <> 1) or
+     (PCardinal(@sid.IdentifierAuthority)^ <> 0) or
+     (sid.IdentifierAuthority[4] <> 0) then
+    exit;
+  case sid.SubAuthorityCount of // very fast O(1) SID binary recognition
+    0:
+      if sid.IdentifierAuthority[5] = 5 then
+        result := wksNtAuthority; // S-1-5
+    1:
+      begin
+        c := sid.SubAuthority[0];
+        case sid.IdentifierAuthority[5] of
+          1:
+            if c = 0 then
+              result := wksWorld; // S-1-1-0
+          2:
+            if c in [0 .. 1] then // S-1-2-x
+              result := TWellKnownSid(ord(wksLocal) + c);
+          3:
+            if c in [0 .. 3] then // S-1-3-x
+              result := TWellKnownSid(ord(wksCreatorOwner) + c);
+          5:
+            case c of // S-1-5-x
+              1 .. 4:
+                result := TWellKnownSid((ord(wksDialup) - 1) + c);
+              6 .. 15:
+                result := TWellKnownSid((ord(wksService) - 6) + c);
+              17 .. 20:
+                result := TWellKnownSid((ord(wksIisUser) - 17) + c);
+              32:
+                result := wksBuiltinDomain;
+              113 .. 114:
+                result := TWellKnownSid(integer(ord(wksLocalAccount) - 113) + c);
+            end;
+          16:
+            begin // S-1-16-x
+              c := WordScanIndex(@INTEGRITY_SID, length(INTEGRITY_SID), c);
+              if c >= 0 then
+                result := TWellKnownSid(ord(wksIntegrityUntrusted) + c);
+            end;
+          18:
+            if c in [1 .. 6] then // S-1-18-x
+              result :=
+                TWellKnownSid((ord(wksAuthenticationAuthorityAsserted) - 1) + c);
+        end;
+      end;
+    2:
+      begin
+        c := sid.SubAuthority[1];
+        case sid.IdentifierAuthority[5] of
+          5:
+            case sid.SubAuthority[0] of
+              32: // S-1-5-32-544
+                case c of
+                  544 .. 562:
+                    result := TWellKnownSid(ord(wksBuiltinAdministrators) + c - 544);
+                  568 .. 583:
+                    result := TWellKnownSid(ord(wksBuiltinIUsers) + c - 568);
+                end;
+              64: // S-1-5-64-10
+                case c of
+                  10:
+                    result := wksNtlmAuthentication;
+                  14:
+                    result := wksSChannelAuthentication;
+                  21:
+                    result := wksDigestAuthentication;
+                end;
+            end;
+          15:
+            case sid.SubAuthority[0] of
+              2:
+                if c in [1 .. 2] then // S-1-15-2-x
+                  result := TWellKnownSid(ord(pred(wksBuiltinAnyPackage)) + c);
+              3:
+                if c in [1 .. 12] then // S-1-15-3-x
+                  result := TWellKnownSid(ord(pred(wksCapabilityInternetClient)) + c);
+            end;
+        end;
+      end;
+  end;
+end;
+
+function SidToKnown(const text: RawUtf8): TWellKnownSid;
+var
+  sid: TSid;
+begin
+  if TextToSid(pointer(text), sid) then
+    result := SidToKnown(@sid)
+  else
+    result := wksNull;
+end;
+
+function SidToKnownGroups(const sids: PSids): TWellKnownSids;
+var
+  k: TWellKnownSid;
+  i: PtrInt;
+begin
+  result := [];
+  for i := 0 to length(sids) - 1 do
+  begin
+    k := SidToKnown(sids[i]);
+    if k <> wksNull then
+      include(result, k);
+  end;
+end;
+
 
 { ****************** Gather Operating System Information }
 
@@ -4430,6 +5450,26 @@ begin
     // include kernel number to the distribution name, e.g. 'Ubuntu Linux 5.4.0'
     result := _fmt('%s Linux %d.%d.%d', [result, osv.utsrelease[2],
       osv.utsrelease[1], osv.utsrelease[0]]);
+end;
+
+function MatchOS(os: TOperatingSystem): boolean;
+var
+  current: TOperatingSystem;
+begin
+  current := OS_KIND;
+  if (os = osUnknown) or
+     (current = osUnknown) or
+     (os = current) then
+    result := true // exact match
+  else
+    case os of // search by family
+      osPosix:
+        result := current <> osWindows;
+      osLinux:
+        result := current in OS_LINUX;
+    else
+      result := false;
+    end;
 end;
 
 const
@@ -4514,7 +5554,7 @@ const
     $69,  // aciIntel
     $c0); // aciAmpere
 
-  ARMCPU_ID_TXT: array[TArmCpuType] of RawUtf8 = (
+  ARMCPU_ID_TXT: array[TArmCpuType] of string[15] = (
      '',
      'ARM810', 'ARM920', 'ARM922', 'ARM926', 'ARM940', 'ARM946', 'ARM966',
      'ARM1020', 'ARM1022', 'ARM1026', 'ARM11 MPCore', 'ARM1136', 'ARM1156',
@@ -4528,7 +5568,7 @@ const
      'Neoverse-V1', 'Cortex-A78', 'Cortex-A78AE', 'Cortex-X1', 'Cortex-510',
      'Cortex-710', 'Cortex-X2', 'Neoverse-N2', 'Neoverse-E1', 'Cortex-A78C');
 
-  ARMCPU_IMPL_TXT: array[TArmCpuImplementer] of RawUtf8 = (
+  ARMCPU_IMPL_TXT: array[TArmCpuImplementer] of string[18] = (
       '',
       'ARM', 'Broadcom', 'Cavium', 'DEC', 'FUJITSU', 'HiSilicon', 'Infineon',
       'Motorola/Freescale', 'NVIDIA', 'APM', 'Qualcomm', 'Samsung', 'Marvell',
@@ -4547,7 +5587,7 @@ begin
   if act = actUnknown then
     result := 'ARM 0x' + RawUtf8(IntToHex(id, 3))
   else
-    result := ARMCPU_ID_TXT[act];
+    ShortStringToAnsi7String(ARMCPU_ID_TXT[act], result);
 end;
 
 function ArmCpuImplementer(id: byte): TArmCpuImplementer;
@@ -4563,7 +5603,7 @@ begin
   if aci = aciUnknown then
     result := 'HW 0x' + RawUtf8(IntToHex(id, 2))
   else
-    result := ARMCPU_IMPL_TXT[aci];
+    ShortStringToAnsi7String(ARMCPU_IMPL_TXT[aci], result);
 end;
 
 
@@ -4631,7 +5671,7 @@ begin
     BALTIC_CHARSET:
       result := 1257;
   else
-    result := CODEPAGE_US; // default is ANSI_CHARSET = iso-8859-1 = windows-1252
+    result := CODEPAGE_US; // default ANSI_CHARSET = iso-8859-1 = windows-1252
   end;
 end;
 
@@ -4681,44 +5721,6 @@ procedure DeleteCriticalSectionIfNeeded(var cs: TRTLCriticalSection);
 begin
   if IsInitializedCriticalSection(cs) then
     DeleteCriticalSection(cs);
-end;
-
-function SysErrorMessagePerModule(Code: DWORD; ModuleName: PChar): string;
-begin
-  result := '';
-  if Code = 0 then
-    exit;
-  {$ifdef OSWINDOWS}
-  result := SysErrorMessage(Code, ModuleName);
-  if result <> '' then
-    exit;
-  {$endif OSWINDOWS}
-  result := SysErrorMessage(Code);
-  if result = '' then
-    {$ifdef OSWINDOWS}
-    if Code = ERROR_WINHTTP_CANNOT_CONNECT then
-      result := 'cannot connect'
-    else if Code = ERROR_WINHTTP_TIMEOUT then
-      result := 'timeout'
-    else if Code = ERROR_WINHTTP_INVALID_SERVER_RESPONSE then
-      result := 'invalid server response'
-    else
-    {$endif OSWINDOWS}
-      result := IntToHex(Code, 8);
-end;
-
-procedure RaiseLastModuleError(ModuleName: PChar; ModuleException: ExceptClass);
-var
-  LastError: integer;
-  Error: Exception;
-begin
-  LastError := GetLastError;
-  if LastError <> 0 then
-    Error := ModuleException.CreateFmt('%s error %x (%s)',
-      [ModuleName, LastError, SysErrorMessagePerModule(LastError, ModuleName)])
-  else
-    Error := ModuleException.CreateFmt('Undefined %s error', [ModuleName]);
-  raise Error;
 end;
 
 function Unicode_CodePage: integer;
@@ -4806,34 +5808,105 @@ begin
   result := (Int64(WinTime) - DateFileTimeDelta) / 10000;
 end;
 
+function DirectorySize(const FileName: TFileName; Recursive: boolean = false): Int64;
+var
+  SR: TSearchRec;
+  dir: TFileName;
+begin
+  result := 0;
+  dir := IncludeTrailingPathDelimiter(FileName);
+  if FindFirst(dir + FILES_ALL, faAnyFile, SR) <> 0 then
+    exit;
+  repeat
+   if SearchRecValidFile(SR) then
+     inc(result, SR.Size)
+   else if Recursive and
+           SearchRecValidFolder(SR) then
+     inc(result, DirectorySize(dir + SR.Name, true));
+  until FindNext(SR) <> 0;
+  FindClose(SR);
+end;
+
 function ValidHandle(Handle: THandle): boolean;
 begin
   result := PtrInt(Handle) > 0;
 end;
 
+function SafePathName(const Path: TFileName): boolean;
+var
+  i, o: PtrInt;
+begin
+  if Path <> '' then
+  begin
+    result := false;
+    if (Path[1] = '/') or
+       (PosExString(':', Path) <> 0) or
+       (PosExString('\\', Path) <> 0) then
+      exit;
+    o := 1;
+    repeat
+      i := PosExString('..', Path, o);
+      if i = 0 then
+        break;
+      o := i + 2; // '..test' or 'test..' are valid folder names
+      if cardinal(Path[o]) in [0, ord('\'), ord('/')] then
+        if (i = 1) or
+           (cardinal(Path[i - 1]) in [ord('\'), ord('/')]) then
+          exit;
+    until false;
+  end;
+  result := true;
+end;
+
+function SafePathNameU(const Path: RawUtf8): boolean;
+var
+  i, o: PtrInt;
+begin
+  if Path <> '' then
+  begin
+    result := false;
+    if (Path[1] = '/') or
+       (PosExChar(':', Path) <> 0) or
+       (PosEx('\\', Path) <> 0) then
+      exit;
+    o := 1;
+    repeat
+      i := PosEx('..', Path, o);
+      if i = 0 then
+        break;
+      o := i + 2;
+      if Path[o] in [#0, '\', '/'] then
+        if (i = 1) or
+           (Path[i - 1] in ['\', '/']) then
+          exit;
+    until false;
+  end;
+  result := true;
+end;
+
 function SafeFileName(const FileName: TFileName): boolean;
 begin
-  result := (FileName <> '') and
-            (FileName[1] <> '/') and
-            (PosExString('..', FileName) = 0) and
-            (PosExString(':', FileName) = 0) and
-            (PosExString('~', FileName) = 0) and
-            (PosExString('\\', FileName) = 0);
+  result := SafePathName(ExtractPath(FileName));
 end;
 
 function SafeFileNameU(const FileName: RawUtf8): boolean;
 begin
-  result := (FileName <> '') and
-            (FileName[1] <> '/') and
-            (PosEx('..', FileName) = 0) and
-            (PosExChar(':', FileName) = 0) and
-            (PosExChar('~', FileName) = 0) and
-            (PosEx('\\', FileName) = 0);
+  result := SafePathNameU(ExtractPathU(FileName));
 end;
 
 function NormalizeFileName(const FileName: TFileName): TFileName;
 begin
   result := StringReplace(FileName, InvertedPathDelim, PathDelim, [rfReplaceAll]);
+end;
+
+function QuoteFileName(const FileName: TFileName): TFileName;
+begin
+  if (FileName <> '') and
+     (PosExString(' ', FileName) <> 0) and
+     (FileName[1] <> '"') then
+    result := '"' + FileName + '"'
+  else
+    result := FileName;
 end;
 
 procedure DisplayError(const fmt: string; const args: array of const);
@@ -4867,11 +5940,44 @@ begin
             (F.Name <> '..');
 end;
 
+{ TFileStreamFromHandle }
+
 destructor TFileStreamFromHandle.Destroy;
 begin
   if not fDontReleaseHandle then
-    FileClose(Handle); // otherwise file is stil opened
+    FileClose(Handle); // otherwise file remains opened (FPC RTL inconsistency)
 end;
+
+{ TFileStreamEx }
+
+constructor TFileStreamEx.Create(const aFileName: TFileName; Mode: cardinal);
+var
+  h: THandle;
+begin
+  if Mode and fmCreate = fmCreate then
+    h := FileCreate(aFileName)
+  else
+    h := FileOpen(aFileName, Mode);
+  CreateFromHandle(aFileName, h);
+end;
+
+constructor TFileStreamEx.CreateFromHandle(const aFileName: TFileName; aHandle: THandle);
+begin
+  if not ValidHandle(aHandle) then
+    raise EOSException.CreateFmt('%s.Create(%s) failed as %s',
+      [ClassNameShort(self)^, aFileName, GetErrorText(GetLastError)]);
+  inherited Create(aHandle); // TFileStreamFromHandle constructor which own it 
+  fFileName := aFileName;
+end;
+
+{ TFileStreamWithoutWriteError }
+
+function TFileStreamWithoutWriteError.Write(const Buffer; Count: Longint): Longint;
+begin
+  inherited Write(Buffer, Count);
+  result := Count; // to ignore I/O errors
+end;
+
 
 function FileStreamSequentialRead(const FileName: TFileName): THandleStream;
 begin
@@ -4929,6 +6035,10 @@ begin
         P := pointer(result);
         repeat
           chunk := size;
+          {$ifdef OSWINDOWS}
+          if chunk > 16 shl 20 then
+            chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
+          {$endif OSWINDOWS}
           read := FileRead(F, P^, chunk);
           if read <= 0 then
           begin
@@ -5104,14 +6214,42 @@ begin
   raise EOSException.Create('TemporaryFileName failed');
 end;
 
+function ExtractPath(const FileName: TFileName): TFileName;
+var
+  i: PtrInt;
+  {$ifdef UNICODE}
+  p: PWordArray;
+  {$else}
+  p: PByteArray;
+  {$endif UNICODE}
+begin
+  p := pointer(FileName);
+  i := length(FileName);
+  while (i > 0) and
+        not (P[i - 1] in [ord('\'), ord('/'), ord(':')]) do
+    dec(i);
+  SetString(result, PChar(p), i);
+end;
+
+function ExtractPathU(const FileName: RawUtf8): RawUtf8;
+var
+  i: PtrInt;
+begin
+  i := length(FileName);
+  while (i > 0) and
+        not (FileName[i] in ['\', '/', ':']) do
+    dec(i);
+  FastSetString(result, pointer(FileName), i);
+end;
+
 function GetFileNameWithoutExt(const FileName: TFileName; Extension: PFileName): TFileName;
 var
   i, max: PtrInt;
 begin
   i := length(FileName);
-  max := i - 16;
+  max := i - 16; // a file .extension is unlikely to be more than 16 chars
   while (i > 0) and
-        not (cardinal(FileName[i]) in [ord('\'), ord('/'), ord('.')]) and
+        not (cardinal(FileName[i]) in [ord('\'), ord('/'), ord('.'), ord(':')]) and
         (i >= max) do
     dec(i);
   if (i = 0) or
@@ -5260,6 +6398,7 @@ begin
   FileClose(f);
   result := DeleteFile(fn);
 end;
+
 
 {$ifndef NOEXCEPTIONINTERCEPT}
 
@@ -5418,7 +6557,7 @@ begin
   result := false;
   // Memory-mapped file access does not go through the cache manager so
   // using FileOpenSequentialRead() is pointless here
-  F := FileOpen(aFileName, fmOpenRead or fmShareDenyNone);
+  F := FileOpen(aFileName, fmOpenReadDenyNone);
   if not ValidHandle(F) then
     exit;
   if Map(F) then
@@ -5446,17 +6585,6 @@ begin
   end;
 end;
 
-function TMemoryMap.TextFileKind: TTextFileKind;
-begin
-  result := isAnsi;
-  if (fBuf <> nil) and
-     (fBufSize >= 3) then
-    if PWord(fBuf)^ = $FEFF then
-      result := isUnicode
-    else if (PWord(fBuf)^ = $BBEF) and
-            (PByteArray(fBuf)[2] = $BF) then
-      result := isUtf8;
-end;
 
 
 { TSynMemoryStreamMapped }
@@ -5467,7 +6595,7 @@ begin
   fFileName := aFileName;
   // Memory-mapped file access does not go through the cache manager so
   // using FileOpenSequentialRead() is pointless here
-  fFileStream := TFileStream.Create(aFileName, fmOpenRead or fmShareDenyNone);
+  fFileStream := TFileStreamEx.Create(aFileName, fmOpenReadDenyNone);
   Create(fFileStream.Handle, aCustomSize, aCustomOffset);
 end;
 
@@ -5491,7 +6619,7 @@ end;
 { TExecutableResource }
 
 function TExecutableResource.Open(const ResourceName: string; ResType: PChar;
-  Instance: THandle): boolean;
+  Instance: TLibHandle): boolean;
 begin
   result := false;
   if Instance = 0 then
@@ -5654,32 +6782,7 @@ begin
 end;
 
 var
-  GlobalCriticalSection, ConsoleCriticalSection: TRTLCriticalSection;
-
-{$I-}
-procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor;
-  NoLineFeed, NoColor: boolean);
-begin
-  {$ifdef OSWINDOWS}
-  if not HasConsole then
-    exit;
-  {$endif OSWINDOWS}
-  mormot.core.os.EnterCriticalSection(ConsoleCriticalSection);
-  try
-    if not NoColor then
-      TextColor(Color);
-    write(Utf8ToConsole(Text));
-    if not NoLineFeed then
-      writeln;
-    if not NoColor then
-      TextColor(ccLightGray);
-    ioresult;
-  finally
-    mormot.core.os.LeaveCriticalSection(ConsoleCriticalSection);
-  end;
-end;
-{$I+}
-
+  GlobalCriticalSection: TOSLock;
 
 { TSynLibrary }
 
@@ -5848,9 +6951,25 @@ end;
 
 { TFileVersion }
 
+constructor TFileVersion.Create(const aFileName: TFileName;
+  aMajor, aMinor, aRelease, aBuild: integer);
+var
+  M, D: word;
+begin
+  fFileName := aFileName;
+  SetVersion(aMajor, aMinor, aRelease, aBuild);
+  if fBuildDateTime = 0 then // get build date from file age
+    fBuildDateTime := FileAgeToDateTime(aFileName);
+  if fBuildDateTime <> 0 then
+    DecodeDate(fBuildDateTime, BuildYear, M, D);
+end;
+
 function TFileVersion.Version32: integer;
 begin
-  result := Major shl 16 + Minor shl 8 + Release;
+  if self = nil then
+    result := 0
+  else
+    result := Major shl 16 + Minor shl 8 + Release;
 end;
 
 procedure TFileVersion.SetVersion(aMajor, aMinor, aRelease, aBuild: integer);
@@ -5860,7 +6979,12 @@ begin
   Release := aRelease;
   Build := aBuild;
   Main := Format('%d.%d', [Major, Minor]);
-  fDetailed := Format('%d.%d.%d.%d', [Major, Minor, Release, Build]);
+  if Build <> 0 then
+    fDetailed := Format('%s.%d.%d', [Main, Release, Build])
+  else if Release <> 0 then
+    fDetailed := Format('%s.%d', [Main, Release])
+  else
+    fDetailed := Main;
   fVersionInfo :=  '';
   fUserAgent := '';
 end;
@@ -5886,8 +7010,8 @@ begin
   else
   begin
     if fVersionInfo = '' then
-      fVersionInfo := _fmt('%s %s (%s)', [ExtractFileName(fFileName),
-        DetailedOrVoid, BuildDateTimeString]);
+      _fmt('%s %s (%s)', [ExtractFileName(fFileName),
+        DetailedOrVoid, BuildDateTimeString], fVersionInfo);
     result := fVersionInfo;
   end;
 end;
@@ -5900,9 +7024,8 @@ begin
   begin
     if fUserAgent = '' then
     begin
-      fUserAgent := _fmt('%s/%s%s', [
-        GetFileNameWithoutExtOrPath(fFileName), DetailedOrVoid,
-        OS_INITIAL[OS_KIND]]);
+      _fmt('%s/%s%s', [GetFileNameWithoutExtOrPath(fFileName), DetailedOrVoid,
+        OS_INITIAL[OS_KIND]], fUserAgent);
       {$ifdef OSWINDOWS}
       if OSVersion in WINDOWS_32 then
         fUserAgent := fUserAgent + '32';
@@ -5938,7 +7061,7 @@ begin
   vlen := 0;
   o := -1;
   for i := v to length(UserAgent) do
-    if not (UserAgent[i] in ['0'..'9', '.']) then
+    if not (UserAgent[i] in ['0' .. '9', '.']) then
     begin
       vlen := i - v; // vlen may be 0 if DetailedOrVoid was ''
       if UserAgent[i + 1] in [#0, '3'] then // end with OS_INITIAL or '32' suffix
@@ -5955,47 +7078,22 @@ end;
 
 procedure SetExecutableVersion(const aVersionText: RawUtf8);
 var
-  P: PAnsiChar;
+  P: PUtf8Char;
   i: integer;
-  ver: array[0..3] of integer;
+  ver: array[0 .. 3] of integer;
 begin
   P := pointer(aVersionText);
   for i := 0 to 3 do
-    ver[i] := GetNextCardinal(P);
+    ver[i] := GetNextUInt32(P);
   SetExecutableVersion(ver[0], ver[1], ver[2], ver[3]);
 end;
 
-procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
+procedure ComputeExecutableHash;
 begin
   with Executable do
   begin
-    if Version = nil then
-    begin
-      {$ifdef OSWINDOWS}
-      ProgramFileName := paramstr(0);
-      {$else}
-      ProgramFileName := GetModuleName(HInstance);
-      if ProgramFileName = '' then
-        ProgramFileName := ExpandFileName(paramstr(0));
-      {$endif OSWINDOWS}
-      ProgramFilePath := ExtractFilePath(ProgramFileName);
-      if IsLibrary then
-        InstanceFileName := GetModuleName(HInstance)
-      else
-        InstanceFileName := ProgramFileName;
-      ProgramName := GetFileNameWithoutExtOrPath(ProgramFileName);
-      GetUserHost(User, Host);
-      if Host = '' then
-        Host := 'unknown';
-      if User = '' then
-        User := 'unknown';
-      Version := TFileVersion.Create(
-        InstanceFileName, aMajor, aMinor, aRelease, aBuild);
-    end
-    else
-      Version.SetVersion(aMajor, aMinor, aRelease, aBuild);
-    ProgramFullSpec := _fmt('%s %s (%s)', [ProgramFileName,
-      Version.Detailed, Version.BuildDateTimeString]);
+    _fmt('%s %s (%s)', [ProgramFileName,
+      Version.DetailedOrVoid, Version.BuildDateTimeString], ProgramFullSpec);
     Hash.c0 := Version.Version32;
     {$ifdef OSLINUXANDROID}
     Hash.c0 := crc32c(Hash.c0, pointer(CpuInfoFeatures), length(CpuInfoFeatures));
@@ -6013,23 +7111,52 @@ begin
   end;
 end;
 
-const
-  // hexstr() is not available on Delphi -> use our own simple version
-  HexCharsLower: array[0..15] of AnsiChar = '0123456789abcdef';
+procedure GetExecutableVersion;
+begin
+  if Executable.Version.RetrieveInformationFromFileName then
+    ComputeExecutableHash;
+end;
+
+procedure InitializeExecutableInformation; // called once at startup
+begin
+  with Executable do
+  begin
+    {$ifdef OSWINDOWS}
+    ProgramFileName := paramstr(0);
+    {$else}
+    ProgramFileName := GetModuleName(HInstance);
+    if ProgramFileName = '' then
+      ProgramFileName := ExpandFileName(paramstr(0));
+    {$endif OSWINDOWS}
+    ProgramFilePath := ExtractFilePath(ProgramFileName);
+    if IsLibrary then
+      InstanceFileName := GetModuleName(HInstance)
+    else
+      InstanceFileName := ProgramFileName;
+    ProgramName := GetFileNameWithoutExtOrPath(ProgramFileName);
+    GetUserHost(User, Host);
+    if Host = '' then
+      Host := 'unknown';
+    if User = '' then
+      User := 'unknown';
+    Version := TFileVersion.Create(ProgramFileName); // with versions=0
+  end;
+  ComputeExecutableHash;
+end;
+
+procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
+begin
+  Executable.Version.SetVersion(aMajor, aMinor, aRelease, aBuild);
+  ComputeExecutableHash;
+end;
 
 function _GetExecutableLocation(aAddress: pointer): ShortString;
 var
   i: PtrInt;
-  b: PByte;
-begin // just return the address as hexadecimal
-  result[0] := AnsiChar(SizeOf(aAddress) * 2);
-  b := @aAddress;
+begin // return the address as hexadecimal - hexstr() is not available on Delphi
+  result[0] := #0;
   for i := SizeOf(aAddress) - 1 downto 0 do
-  begin
-    result[i * 2 + 1] := HexCharsLower[b^ shr 4];
-    result[i * 2 + 2] := HexCharsLower[b^ and $F];
-    inc(b);
-  end;
+    AppendShortByteHex(PByteArray(aAddress)[i], result);
 end; // mormot.core.log.pas will properly decode debug info - and handle .mab
 
 var
@@ -6127,7 +7254,7 @@ type
     MinVers: byte;
     MaxSize: word;
     Revision: byte;
-    PadTo16: array[1..5] of byte;
+    PadTo16: array[1 .. 5] of byte;
     IntAnch4: cardinal; // = SMB_INT4
     IntAnch5: byte;     // = SMB_INT5
     IntChecksum: byte;
@@ -6284,7 +7411,7 @@ begin
   result := _Smbios[info];
 end;
 
-{$ifndef FPC} // missing convenient RTL function in Delphi
+{$ifdef ISDELPHI} // missing convenient RTL function in Delphi
 function TryStringToGUID(const s: string; var uuid: TGuid): boolean;
 begin
   try
@@ -6294,7 +7421,7 @@ begin
     result := false;
   end;
 end;
-{$endif FPC}
+{$endif ISDELPHI}
 
 procedure GetComputerUuid(out uuid: TGuid);
 var
@@ -6388,7 +7515,7 @@ end;
 function DecodeSmbios(var raw: TRawSmbiosInfo; out info: TSmbiosBasicInfos): PtrInt;
 var
   lines: array[byte] of TSmbiosBasicInfo; // single pass efficient decoding
-  len: PtrInt;
+  len, trimright: PtrInt;
   cur: ^TSmbiosBasicInfo;
   s, sEnd: PByteArray;
 begin
@@ -6415,8 +7542,8 @@ begin
           lines[s[8]] := sbiBiosDate;
           if s[1] >= $17 then // 2.4+
           begin
-            info[sbiBiosRelease]  := _fmt('%d.%d', [s[$14], s[$15]]);
-            info[sbiBiosFirmware] := _fmt('%d.%d', [s[$16], s[$17]]);
+            _fmt('%d.%d', [s[$14], s[$15]], info[sbiBiosRelease]);
+            _fmt('%d.%d', [s[$16], s[$17]], info[sbiBiosFirmware]);
           end;
         end;
       1: // System Information (type 1)
@@ -6479,7 +7606,13 @@ begin
         if cur^ <> sbiUndefined then
         begin
           if info[cur^] = '' then // only set the first occurence if multiple
-            FastSetString(info[cur^], s, len);
+          begin
+            trimright := len;
+            while (trimright <> 0) and
+                  (s[trimright - 1] <= ord(' ')) do
+              dec(trimright);
+            FastSetString(info[cur^], s, trimright);
+          end;
           cur^ := sbiUndefined; // reset slot in lines[]
         end;
         s := @s[len + 1]; // next string
@@ -6496,115 +7629,6 @@ end;
 
 
 { **************** TSynLocker Threading Features }
-
-procedure GlobalLock;
-begin
-  mormot.core.os.EnterCriticalSection(GlobalCriticalSection);
-end;
-
-procedure GlobalUnLock;
-begin
-  mormot.core.os.LeaveCriticalSection(GlobalCriticalSection);
-end;
-
-var
-  InternalGarbageCollection: record // RegisterGlobalShutdownRelease() list
-    Instances:  TObjectDynArray;
-    Count: integer;
-    Shutdown: boolean; // paranoid check to avoid messing with Instances[]
-  end;
-
-function RegisterGlobalShutdownRelease(Instance: TObject;
-  SearchExisting: boolean): pointer;
-begin
-  if not InternalGarbageCollection.Shutdown then
-  begin
-    GlobalLock;
-    try
-      with InternalGarbageCollection do
-        if not SearchExisting or
-           not PtrUIntScanExists(pointer(Instances), Count, PtrUInt(Instance)) then
-          PtrArrayAdd(Instances, Instance, Count);
-    finally
-      GlobalUnLock;
-    end;
-  end;
-  result := Instance;
-end;
-
-function SleepDelay(elapsed: PtrInt): PtrInt;
-begin
-  if elapsed < 50 then
-    result := 0 // 10us on POSIX, SwitchToThread on Windows
-  else if elapsed < 200 then
-    result := 1
-  else if elapsed < 500 then
-    result := 5
-  else if elapsed < 2000 then
-    result := 50
-  else
-    result := 120 + Random32(130); // random 120-250 ms
-end;
-
-function SleepStepTime(var start, tix: Int64; endtix: PInt64): PtrInt;
-begin
-  tix := GetTickCount64;
-  if start = 0 then
-    start := tix;
-  result := SleepDelay(tix - start);
-  if endtix <> nil then
-    endtix^ := tix + result;
-end;
-
-function SleepStep(var start: Int64; terminated: PBoolean; event: TEvent): Int64;
-var
-  ms: integer;
-  endtix: Int64;
-begin
-  ms := SleepStepTime(start, result, @endtix);
-  if (ms < 10) or
-     (terminated = nil) then
-    if (ms = 0) or
-       (event = nil) then
-      SleepHiRes(ms) // < 16 ms is a pious wish on Windows anyway
-    else
-    begin
-      if event.WaitFor(ms) = wrSignaled then
-        start := 0; // make more reactive once signaled
-    end
-  else
-    repeat
-      if event = nil then
-        SleepHiRes(10) // on Windows, HW clock resolution is around 16 ms
-      else if event.WaitFor(10) = wrSignaled then
-      begin
-        start := 0; // more reactive
-        ms := 0; // and quit
-      end;
-      result := GetTickCount64;
-    until (ms = 0) or
-          terminated^ or
-          (result >= endtix);
-end;
-
-function SleepHiRes(ms: cardinal; var terminated: boolean;
-  terminatedvalue: boolean): boolean;
-var
-  start, endtix: Int64;
-begin
-  if terminated <> terminatedvalue then
-    if ms < 20 then
-      SleepHiRes(ms) // below HW clock resolution
-    else
-    begin
-      start := GetTickCount64;
-      endtix := start + ms;
-      repeat
-      until (terminated = terminatedvalue) or
-            (SleepStep(start, @terminated) > endtix);
-    end;
-  result := terminated = terminatedvalue;
-end;
 
 // as reference, take a look at Linus insight
 // from https://www.realworldtech.com/forum/?threadid=189711&curpostid=189755
@@ -6639,50 +7663,16 @@ begin
   result := spin;
 end;
 
-procedure SpinExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt);
-var
-  spin: PtrUInt;
-begin
-  spin := SPIN_COUNT;
-  while (Target <> Comperand) or
-        not LockedExc(Target, NewValue, Comperand) do
-    spin := DoSpin(spin);
-end;
-
-
-procedure _SetThreadName(ThreadID: TThreadID; const Format: RawUtf8;
-  const Args: array of const);
-begin
-  // do nothing - properly implemented in mormot.core.log
-end;
-
-procedure SetCurrentThreadName(const Format: RawUtf8; const Args: array of const);
-begin
-  SetThreadName(GetCurrentThreadId, Format, Args);
-end;
-
-procedure SetCurrentThreadName(const Name: RawUtf8);
-begin
-  SetThreadName(GetCurrentThreadId, '%', [Name]);
-end;
-
-function GetCurrentThreadName: RawUtf8;
-begin
-  ShortStringToAnsi7String(CurrentThreadName, result);
-end;
-
-function GetCurrentThreadInfo: ShortString;
-begin
-  result := ShortString(format('Thread %x [%s]',
-    [PtrUInt(GetCurrentThreadId), CurrentThreadName]));
-end;
-
 
 { TLightLock }
 
 procedure TLightLock.Init;
 begin
   Flags := 0;
+end;
+
+procedure TLightLock.Done;
+begin // just for compatibility with TOSLock
 end;
 
 procedure TLightLock.LockSpin;
@@ -6808,7 +7798,7 @@ begin
 end;
 
 // dedicated asm for this most simple (and used) method
-{$ifdef ASMX64}
+{$ifdef FPC_ASMX64} // some Delphi version was reported to fail with no clue why
 
 procedure TRWLock.ReadOnlyLock;
 asm     // since we may call SwitchToThread we need to have a stackframe
@@ -6830,29 +7820,6 @@ asm     // since we may call SwitchToThread we need to have a stackframe
         jmp     @retry
 @done:  // restore the stack frame
 end;
-
-{$else}
-
-{$ifdef ASMX86}
-
-procedure TRWLock.ReadOnlyLock;
-  {$ifdef FPCWINDOWS} nostackframe; assembler; {$endif}
-asm     // since we may call SwitchToThread we need to have a stackframe
-        push    ebx
-        mov     ebx, eax
-@retry: mov     ecx, SPIN_COUNT
-@spin:  mov     eax, dword ptr [ebx + TRWLock.Flags]
-        and     eax, not 1
-        lea     edx, [eax + 4]
-   lock cmpxchg dword ptr [ebx + TRWLock.Flags], edx
-        jz      @done
-        pause
-        dec     ecx
-        jnz     @spin
-        call    SwitchToThread
-        jmp     @retry
-@done:  pop     ebx
-end;    // restore the stack frame on systems which expects it
 
 {$else}
 
@@ -6878,8 +7845,7 @@ begin
         LockedExc(Flags, f + 4, f);
 end;
 
-{$endif ASMX86}
-{$endif ASMX64}
+{$endif FPC_ASMX64}
 
 procedure TRWLock.ReadOnlyUnLock;
 begin
@@ -6988,6 +7954,34 @@ begin
 end;
 
 
+{ TOSLock }
+
+procedure TOSLock.Init;
+begin
+  mormot.core.os.InitializeCriticalSection(CS);
+end;
+
+procedure TOSLock.Done;
+begin
+  DeleteCriticalSectionIfNeeded(CS);
+end;
+
+procedure TOSLock.Lock;
+begin
+  mormot.core.os.EnterCriticalSection(CS);
+end;
+
+function TOSLock.TryLock: boolean;
+begin
+  result := mormot.core.os.TryEnterCriticalSection(CS) <> 0;
+end;
+
+procedure TOSLock.UnLock;
+begin
+  mormot.core.os.LeaveCriticalSection(CS);
+end;
+
+
 { TAutoLock }
 
 constructor TAutoLock.Create(aLock: PSynLocker);
@@ -7075,30 +8069,34 @@ begin
   end; // uNoLock will just do nothing
 end;
 
+procedure TSynLocker.ReadLock;
+begin
+  RWLock(cReadOnly); // will be properly inlined
+end;
+
+procedure TSynLocker.ReadUnLock;
+begin
+  RWUnLock(cReadOnly);
+end;
+
+procedure TSynLocker.ReadWriteLock;
+begin
+  RWLock(cReadWrite);
+end;
+
+procedure TSynLocker.ReadWriteUnLock;
+begin
+  RWUnLock(cReadWrite);
+end;
+
 procedure TSynLocker.Lock;
 begin
-  case fRWUse of
-    uSharedLock:
-      begin
-        mormot.core.os.EnterCriticalSection(fSection);
-        inc(fLockCount);
-      end;
-    uRWLock:
-      fRW.WriteLock;
-  end; // uNoLock will just do nothing
+  RWLock(cWrite);
 end;
 
 procedure TSynLocker.UnLock;
 begin
-  case fRWUse of
-    uSharedLock:
-      begin
-        dec(fLockCount);
-        mormot.core.os.LeaveCriticalSection(fSection);
-      end;
-    uRWLock:
-      fRW.WriteUnLock;
-  end; // uNoLock will just do nothing
+  RWUnLock(cWrite);
 end;
 
 function TSynLocker.TryLock: boolean;
@@ -7445,8 +8443,198 @@ begin
 end;
 
 
+procedure GlobalLock;
+begin
+  mormot.core.os.EnterCriticalSection(GlobalCriticalSection.CS);
+end;
+
+procedure GlobalUnLock;
+begin
+  mormot.core.os.LeaveCriticalSection(GlobalCriticalSection.CS);
+end;
+
+var
+  InternalGarbageCollection: record // RegisterGlobalShutdownRelease() list
+    Instances:  TObjectDynArray;
+    Count: integer;
+    Shutdown: boolean; // paranoid check to avoid messing with Instances[]
+  end;
+
+function RegisterGlobalShutdownRelease(Instance: TObject;
+  SearchExisting: boolean): pointer;
+begin
+  if not InternalGarbageCollection.Shutdown then
+  begin
+    GlobalLock;
+    try
+      with InternalGarbageCollection do
+        if not SearchExisting or
+           not PtrUIntScanExists(pointer(Instances), Count, PtrUInt(Instance)) then
+          PtrArrayAdd(Instances, Instance, Count);
+    finally
+      GlobalUnLock;
+    end;
+  end;
+  result := Instance;
+end;
+
+function SleepDelay(elapsed: PtrInt): PtrInt;
+begin
+  if elapsed < 50 then
+    result := 0 // 10us on POSIX, SwitchToThread on Windows
+  else if elapsed < 200 then
+    result := 1
+  else if elapsed < 500 then
+    result := 5
+  else if elapsed < 2000 then
+    result := 50
+  else
+    result := 120 + Random32(130); // random 120-250 ms
+end;
+
+function SleepStepTime(var start, tix: Int64; endtix: PInt64): PtrInt;
+begin
+  tix := GetTickCount64;
+  if start = 0 then
+    start := tix;
+  result := SleepDelay(tix - start);
+  if endtix <> nil then
+    endtix^ := tix + result;
+end;
+
+function SleepStep(var start: Int64; terminated: PBoolean): Int64;
+var
+  ms: integer;
+  endtix: Int64;
+begin
+  ms := SleepStepTime(start, result, @endtix);
+  if (ms < 10) or
+     (terminated = nil) then
+    SleepHiRes(ms) // < 16 ms is a pious wish on Windows anyway
+  else
+    repeat
+      SleepHiRes(10); // on Windows, HW clock resolution is around 16 ms
+      result := GetTickCount64;
+    until (ms = 0) or
+          terminated^ or
+          (result >= endtix);
+end;
+
+function SleepHiRes(ms: cardinal; var terminated: boolean;
+  terminatedvalue: boolean): boolean;
+var
+  start, endtix: Int64;
+begin
+  if terminated <> terminatedvalue then
+    if ms < 20 then
+      SleepHiRes(ms) // below HW clock resolution
+    else
+    begin
+      start := GetTickCount64;
+      endtix := start + ms;
+      repeat
+      until (terminated = terminatedvalue) or
+            (SleepStep(start, @terminated) > endtix);
+    end;
+  result := terminated = terminatedvalue;
+end;
+
+procedure SpinExc(var Target: PtrUInt; NewValue, Comperand: PtrUInt);
+var
+  spin: PtrUInt;
+begin
+  spin := SPIN_COUNT;
+  while (Target <> Comperand) or
+        not LockedExc(Target, NewValue, Comperand) do
+    spin := DoSpin(spin);
+end;
+
+function SetCpuSet(var CpuSet: TCpuSet; CpuIndex: cardinal): boolean;
+begin
+  result := false;
+  if (CpuIndex >= SizeOf(CpuSet) shl 3) or
+     (CpuIndex >= SystemInfo.dwNumberOfProcessors) then
+    exit;
+  SetBitPtr(@CpuSet, CpuIndex);
+  result := true;
+end;
+
+function SetThreadCpuAffinity(Thread: TThread; CpuIndex: cardinal): boolean;
+var
+  mask: TCpuSet;
+begin
+  ResetCpuSet(mask);
+  result := SetCpuSet(mask, CpuIndex) and
+            SetThreadMaskAffinity(Thread, mask);
+end;
+
+function SetThreadSocketAffinity(Thread: TThread; SocketIndex: cardinal): boolean;
+begin
+  result := (SocketIndex < cardinal(length(CpuSocketsMask))) and
+            SetThreadMaskAffinity(Thread, CpuSocketsMask[SocketIndex]);
+end;
+
+procedure _SetThreadName(ThreadID: TThreadID; const Format: RawUtf8;
+  const Args: array of const);
+begin
+  // do nothing - properly implemented in mormot.core.log
+end;
+
+procedure SetCurrentThreadName(const Format: RawUtf8; const Args: array of const);
+begin
+  SetThreadName(GetCurrentThreadId, Format, Args);
+end;
+
+procedure SetCurrentThreadName(const Name: RawUtf8);
+begin
+  SetThreadName(GetCurrentThreadId, '%', [Name]);
+end;
+
+function GetCurrentThreadName: RawUtf8;
+begin
+  ShortStringToAnsi7String(CurrentThreadName, result);
+end;
+
+function GetCurrentThreadInfo: ShortString;
+begin
+  result := ShortString(format('Thread %x [%s]',
+    [PtrUInt(GetCurrentThreadId), CurrentThreadName]));
+end;
+
 
 { ****************** Unix Daemon and Windows Service Support }
+
+const
+  // hardcoded to avoid linking mormot.core.rtti for GetEnumName()
+  _SERVICESTATE: array[TServiceState] of string[12] = (
+    'NotInstalled',
+    'Stopped',
+    'Starting',
+    'Stopping',
+    'Running',
+    'Resuming',
+    'Pausing',
+    'Paused',
+    'Failed',
+    'Error');
+
+function ToText(st: TServiceState): PShortString; overload;
+begin
+  result := @_SERVICESTATE[st];
+end;
+
+function ExtractExecutableName(const cmd: RawUtf8; posix: boolean): RawUtf8;
+var
+  temp: RawUtf8;
+  argv: TParseCommandsArgs;
+  argc: integer;
+begin
+  if (pcInvalidCommand in ParseCommandArgs(cmd, @argv, @argc, @temp, posix)) or
+     ({%H-}argc = 0) then
+    result := ''
+  else
+    FastSetString(result, argv[0], StrLen(argv[0]));
+end;
 
 function ParseCommandArgs(const cmd: RawUtf8; argv: PParseCommandsArgs;
   argc: PInteger; temp: PRawUtf8; posix: boolean): TParseCommands;
@@ -7675,15 +8863,15 @@ begin
   SetMultiByteConversionCodePage(CP_UTF8);
   SetMultiByteRTLFileSystemCodePage(CP_UTF8);
   {$endif ISFPC27}
-  InitializeCriticalSection(GlobalCriticalSection);
-  InitializeCriticalSection(ConsoleCriticalSection);
+  GlobalCriticalSection.Init;
+  ConsoleCriticalSection.Init;
   InitializeSpecificUnit; // in mormot.core.os.posix/windows.inc files
   TrimDualSpaces(OSVersionText);
   TrimDualSpaces(OSVersionInfoEx);
   TrimDualSpaces(BiosInfoText);
   TrimDualSpaces(CpuInfoText);
   OSVersionShort := ToTextOS(OSVersionInt32);
-  SetExecutableVersion(0, 0, 0, 0);
+  InitializeExecutableInformation;
   JSON_CONTENT_TYPE_VAR := JSON_CONTENT_TYPE;
   JSON_CONTENT_TYPE_HEADER_VAR := JSON_CONTENT_TYPE_HEADER;
   NULL_STR_VAR := 'null';
@@ -7708,13 +8896,14 @@ begin
   ObjArrayClear(CurrentFakeStubBuffers);
   Executable.Version.Free;
   FinalizeSpecificUnit; // in mormot.core.os.posix/windows.inc files
-  DeleteCriticalSection(ConsoleCriticalSection);
-  DeleteCriticalSection(GlobalCriticalSection);
+  ConsoleCriticalSection.Done;
+  GlobalCriticalSection.Done;
   {$ifndef NOEXCEPTIONINTERCEPT}
   _RawLogException := nil;
   RawExceptionIntercepted := true;
   {$endif NOEXCEPTIONINTERCEPT}
 end;
+
 
 
 initialization

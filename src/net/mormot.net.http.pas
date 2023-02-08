@@ -127,9 +127,37 @@ function IsGet(const method: RawUtf8): boolean;
 function IsPost(const method: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// could be used e.g. in OnBeforeBody() callback to allow a GET /favicon.ico
-function IsUrlFavicon(P: PUtf8Char): boolean;
+/// quick check for case-sensitive 'PUT' HTTP method name
+function IsPut(const method: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
+
+/// quick check for case-sensitive 'DELETE' HTTP method name
+function IsDelete(const method: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// quick check for case-sensitive 'OPTIONS' HTTP method name
+function IsOptions(const method: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// could be used e.g. in OnBeforeBody() callback to allow a GET /favicon.ico
+function IsUrlFavIcon(P: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// decode a given parameter from an Url, in any position, into UTF-8 text
+// - P^ should be either nil or point to P^ = '?'
+// - UpperName should follow the UrlDecodeValue() format, e.g. 'NAME='
+function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
+  out Value: RawUtf8): boolean; overload;
+
+/// decode a given parameter from an Url, in any position, into a 32-bit cardinal
+// - UpperName should follow the UrlDecodeCardinal() format, e.g. 'COUNT='
+function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
+  out Value: cardinal): boolean; overload;
+
+/// decode a given parameter from an Url, in any position, into a 64-bit Int64
+// - UpperName should follow the UrlDecodeInt64() format, e.g. 'ID='
+function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
+  out Value: Int64): boolean; overload;
 
 const
   /// pseudo-header containing the current Synopse mORMot framework version
@@ -427,25 +455,29 @@ type
   /// a dynamic array of client connection identifiers, e.g. for broadcasting
   THttpServerConnectionIDDynArray = array of THttpServerConnectionID;
 
-  /// an opaque connection-specific pointer identifier with a strong type
+  /// an opaque connection-specific pointers identifier with a strong type
+  // - each THttpAsyncConnection or THttpServerSocket raw connection instance
+  // maintains those two abstract PtrUInt tags, as a fConnectionOpaque field
+  // - match TRestServerConnectionOpaque as defined in mormot.rest.core
   THttpServerConnectionOpaque = record
-    Value: pointer;
+    /// pointer-sized tag reserved to mORMot (e.g. to idenfity a REST session)
+    ValueInternal: PtrUInt;
+    /// pointer-sized tag free for the end-user code
+    // - could be used to avoid a lookup to a ConnectionID-indexed dictionary
+    ValueExternal: PtrUInt;
   end;
   /// reference to an opaque connection-specific pointer identifier
+  // - may be nil if unsupported, e.g. by the http.sys servers
   PHttpServerConnectionOpaque = ^THttpServerConnectionOpaque;
 
-  /// event handler used by THttpServerGeneric.OnRequest property
+  /// event handler used by THttpServerGeneric.OnRequest, OnBeforeRequest and
+  // OnAfterRequest
   // - Ctxt defines both input and output parameters
-  // - result of the function is the HTTP error code (200 if OK, e.g.)
-  // - OutCustomHeader will handle Content-Type/Location
-  // - if OutContentType is STATICFILE_CONTENT_TYPE (i.e. '!STATICFILE'),
-  // then OutContent is the UTF-8 filename of a file to be sent directly
-  // to the client via http.sys or NGINX's X-Accel-Redirect; the
-  // OutCustomHeader should contain the eventual 'Content-type: ....' value
+  // - result of the function is the HTTP status/error code (200 if OK, e.g.)
   TOnHttpServerRequest = function(Ctxt: THttpServerRequestAbstract): cardinal of object;
 
   /// event handler used by THttpServerGeneric.OnAfterResponse property
-  // - Ctxt defines both input and output parameters
+  // -
   // - Code defines the HTTP response code the (200 if OK, e.g.)
   TOnHttpServerAfterResponse = procedure(const Method, Url, RemoteIP: RawUtf8;
     const Code: cardinal) of object;
@@ -530,6 +562,12 @@ type
     fRespStatus: integer;
     fConnectionThread: TSynThread;
     fConnectionOpaque: PHttpServerConnectionOpaque;
+    fUrlParamPos: PUtf8Char; // may be set by TUriTreeNode.LookupParam
+    fRouteName: pointer; // = pointer(TUriTreeNodeData.Names)
+    fRouteValuePosLen: TIntegerDynArray; // [pos1,len1,...] pairs in fUri
+    function GetRouteValuePosLen(const Name: RawUtf8): PIntegerArray;
+    function GetRouteValue(const Name: RawUtf8): RawUtf8;
+      {$ifdef HASINLINE} inline; {$endif}
   public
     /// prepare an incoming request from a parsed THttpRequestContext
     // - will set input parameters URL/Method/InHeaders/InContent/InContentType
@@ -562,6 +600,35 @@ type
     // - could be used to avoid a lookup to a ConnectionID-indexed dictionary
     property ConnectionOpaque: PHttpServerConnectionOpaque
       read fConnectionOpaque;
+    /// returns the TUriRouter <parameter> value parsed from URI as text
+    // - Name lookup is case-sensitive
+    // - is the default property to this function, so that you could write
+    // ! Ctxt['param']
+    property RouteValue[const Name: RawUtf8]: RawUtf8
+      read GetRouteValue; default;
+    /// returns the TUriRouter <parameter> value parsed from URI as Int64
+    // - Name lookup is case-sensitive
+    function RouteInt64(const Name: RawUtf8; out Value: Int64): boolean;
+    /// returns the TUriRouter <parameter> value parsed from URI as RawUtf8
+    // - Name lookup is case-sensitive
+    function RouteUtf8(const Name: RawUtf8; out Value: RawUtf8): boolean;
+    /// check a TUriRouter <parameter> value parsed from URI
+    // - both Name lookup and value comparison are case-sensitive
+    function RouteEquals(const Name, ExpectedValue: RawUtf8): boolean;
+    /// retrieve and decode an URI-encoded parameter as UTF-8 text
+    // - UpperName should follow the UrlDecodeValue() format, e.g. 'NAME='
+    function UrlParam(const UpperName: RawUtf8; out Value: RawUtf8): boolean; overload;
+    /// retrieve and decode an URI-encoded parameter as 32-bit unsigned cardinal
+    // - UpperName should follow the UrlDecodeCardinal() format, e.g. 'COUNT='
+    function UrlParam(const UpperName: RawUtf8; out Value: cardinal): boolean; overload;
+    /// retrieve and decode an URI-encoded parameter as 64-bit signed Int64
+    // - UpperName should follow the UrlDecodeInt64() format, e.g. 'ID='
+    function UrlParam(const UpperName: RawUtf8; out Value: Int64): boolean; overload;
+    /// set the OutContent and OutContentType fields with the supplied JSON
+    procedure SetOutJson(const Json: RawUtf8); overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// set the OutContent and OutContentType fields with the supplied JSON
+    procedure SetOutJson(const Fmt: RawUtf8; const Args: array of const); overload;
   published
     /// input parameter containing the caller URI
     property Url: RawUtf8
@@ -636,9 +703,9 @@ type
   // - used e.g. for hsoBan40xIP
   THttpAcceptBan = class(TSynPersistent)
   protected
-    fLock: TLightLock; // may block only in IdleEverySecond
+    fSafe: TOSLightLock; // almost never on contention, no R/W needed
     fCount, fCurrent: integer;
-    fIP: array of TCardinalDynArray; // one list per second
+    fIP: array of TCardinalDynArray; // one [0..fMax] IP array per second
     fSeconds, fMax, fWhiteIP: cardinal;
     fRejected, fTotal: Int64;
     procedure SetMax(const Value: cardinal);
@@ -650,11 +717,14 @@ type
     // - maxpersecond is the maximum number of banned IPs remembered per second
     constructor Create(banseconds: cardinal = 4; maxpersecond: cardinal = 1024;
       banwhiteip: cardinal = cLocalhost32); reintroduce;
+    /// finalize this storage
+    destructor Destroy; override;
     /// register an IP4 to be rejected
     function BanIP(ip4: cardinal): boolean; overload;
     /// register an IP4 to be rejected
     procedure BanIP(const ip4: RawUtf8); overload;
     /// fast check if this IP4 is to be rejected
+    // - no RW lock is needed, since is done in the main socket accept() thread
     function IsBanned(const addr: TNetAddr): boolean;
     /// register an IP4 if status in >= 400 (but not 401/403)
     function ShouldBan(status, ip4: cardinal): boolean;
@@ -677,7 +747,7 @@ type
     property Count: integer
       read fCount;
     /// how many seconds a banned IP4 should be rejected
-    // - should be a power of two, with a default of 4
+    // - should be a power of two, up to 128, with a default of 4
     // - if set, any previous banned IP will be flushed
     property Seconds: cardinal
       read fSeconds write SetSeconds;
@@ -689,6 +759,7 @@ type
     property Max: cardinal
       read fMax write SetMax;
   end;
+
 
 
 implementation
@@ -861,7 +932,26 @@ begin
     ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24;
 end;
 
-function IsUrlFavicon(P: PUtf8Char): boolean;
+function IsPut(const method: RawUtf8): boolean;
+begin
+  result := PCardinal(method)^ =
+    ord('P') + ord('U') shl 8 + ord('T') shl 16;
+end;
+
+function IsDelete(const method: RawUtf8): boolean;
+begin
+  result := PCardinal(method)^ =
+    ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24;
+end;
+
+function IsOptions(const method: RawUtf8): boolean;
+begin
+  result := PCardinal(method)^ =
+    ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24;
+end;
+
+
+function IsUrlFavIcon(P: PUtf8Char): boolean;
 begin
   result := (P <> nil) and
         (PCardinalArray(P)[0] =
@@ -1025,6 +1115,51 @@ begin
   end;
 end;
 
+function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
+  out Value: RawUtf8): boolean;
+begin
+  if P <> nil then
+  begin
+    result := true;
+    inc(P);
+    repeat
+      if UrlDecodeValue(P, UpperName, Value, @P) then
+        exit;
+    until P = nil;
+  end;
+  result := false;
+end;
+
+function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
+  out Value: cardinal): boolean;
+begin
+  if P <> nil then
+  begin
+    result := true;
+    inc(P);
+    repeat
+      if UrlDecodeCardinal(P, UpperName, Value, @P) then
+        exit;
+    until P = nil;
+  end;
+  result := false;
+end;
+
+function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
+  out Value: Int64): boolean;
+begin
+  if P <> nil then
+  begin
+    result := true;
+    inc(P);
+    repeat
+      if UrlDecodeInt64(P, UpperName, Value, @P) then
+        exit;
+    until P = nil;
+  end;
+  result := false;
+end;
+
 
 
 { ******************** Reusable HTTP State Machine }
@@ -1067,6 +1202,9 @@ begin
   until false;
   SetRawUtf8(result, P, L, nointern);
 end;
+
+var
+  LastHost: RawUtf8;
 
 procedure THttpRequestContext.ParseHeader(P: PUtf8Char;
   HeadersUnFiltered: boolean);
@@ -1145,9 +1283,22 @@ begin
         end;
     ord('h') + ord('o') shl 8 + ord('s') shl 16 + ord('t') shl 24:
       if P[4] = ':' then
+      begin
         // 'HOST:'
-        GetTrimmed(P + 5, Host);
+        inc(P, 5);
+        while (P^ > #0) and
+              (P^ <= ' ') do
+          inc(P); // trim left
+        if StrComp(pointer(P), pointer(LastHost)) = 0 then
+          Host := LastHost // optimistic approach
+        else
+        begin
+          GetTrimmed(P, Host);
+          if LastHost = '' then
+            LastHost := Host;
+        end;
         // always add to headers - 'host:' sometimes parsed directly
+      end;
     ord('c') + ord('o') shl 8 + ord('n') shl 16 + ord('n') shl 24:
       if (PCardinal(P + 4)^ or $20202020 =
           ord('e') + ord('c') shl 8 + ord('t') shl 16 + ord('i') shl 24) and
@@ -1284,7 +1435,7 @@ end;
 
 function THttpRequestContext.HeaderGetValue(const aUpperName: RawUtf8): RawUtf8;
 begin
-  FindNameValue(Headers, pointer(aUpperName), result, false, ':');
+  FindNameValue(Headers, pointer(aUpperName), result{%H-}, false, ':');
 end;
 
 procedure THttpRequestContext.ParseHeaderFinalize;
@@ -1300,6 +1451,9 @@ begin
         ComputeContentEncoding(Compress, pointer(AcceptEncoding));
 end;
 
+var
+  _GETVAR, _POSTVAR: RawUtf8;
+
 function THttpRequestContext.ParseCommand: boolean;
 var
   P, B: PUtf8Char;
@@ -1311,16 +1465,31 @@ begin
   P := pointer(CommandUri);
   if P = nil then
     exit;
-  B := P;
-  while true do
-    if P^ = ' ' then
-      break
-    else if P^ = #0 then
-      exit
-    else
+  case PCardinal(P)^ of
+    ord('G') + ord('E') shl 8 + ord('T') shl 16 + ord(' ') shl 24:
+      begin
+        CommandMethod := _GETVAR; // optimistic
+        inc(P, 4);
+      end;
+    ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24:
+      begin
+        CommandMethod := _POSTVAR;
+        inc(P, 5);
+      end;
+  else
+    begin
+      B := P;
+      while true do
+        if P^ = ' ' then
+          break
+        else if P^ = #0 then
+          exit
+        else
+          inc(P);
+      SetRawUtf8(CommandMethod, B, P - B, {nointern=}false);
       inc(P);
-  SetRawUtf8(CommandMethod, B, P - B, {nointern=}false);
-  inc(P);
+    end;
+  end;
   B := P;
   while true do
     if P^ = ' ' then
@@ -1566,7 +1735,8 @@ begin
     ContentPos := pointer(Content);
     ContentLength := length(Content);
   end
-  else if ContentLength = 0 then // maybe set by SetupResponse for local file
+  else if ContentLength = 0 then
+    // maybe set by SetupResponse for local file (also for HEAD responses)
     ContentLength := ContentStream.Size - ContentStream.Position;
   result^.AppendShort('Content-Length: ');
   result^.Append(ContentLength);
@@ -1614,7 +1784,10 @@ begin
     end
   else
     // ContentStream requires async body sending
-    State := hrsSendBody;
+    if CommandMethod = 'HEAD' then
+      State := hrsResponseDone // need only the headers
+    else
+      State := hrsSendBody; // send the ContentStream out by chunks
 end;
 
 procedure THttpRequestContext.ProcessBody(
@@ -1672,11 +1845,11 @@ begin
     if ContentLength > 0 then
     begin
       // there is an already-compressed .gz file to send away
-      ContentStream := TFileStream.Create(gz, fmOpenRead or fmShareDenyNone);
+      ContentStream := TFileStreamEx.Create(gz, fmOpenReadDenyNone);
       ContentEncoding := 'gzip';
       include(HeaderFlags, hfContentStreamNeedFree);
       result := true;
-      exit; // use the stream to bypass recompression
+      exit; // only use ContentStream to bypass recompression
     end;
   end;
   ContentLength := FileSize(FileName);
@@ -1684,16 +1857,17 @@ begin
   if not result then
     // there is no such file available
     exit;
-  ContentStream := TFileStream.Create(FileName, fmOpenRead or fmShareDenyNone);
-  if ContentLength < 1 shl 20 then
+  ContentStream := TFileStreamEx.Create(FileName, fmOpenReadDenyNone);
+  if (ContentLength < 1 shl 20) and
+     (CommandMethod <> 'HEAD') then
   begin
-    // load smallest files (up to 1MB) in temp memory (and maybe compress them)
+    // smallest files (up to 1MB) in temp memory (and maybe compress them)
     SetLength(Content, ContentLength);
     ContentStream.Read(pointer(Content)^, ContentLength);
     FreeAndNilSafe(ContentStream);
   end
   else
-    // stream existing big file by chunks
+    // stream existing big file by chunks (also used for HEAD responses)
     include(HeaderFlags, hfContentStreamNeedFree);
 end;
 
@@ -1764,7 +1938,7 @@ procedure THttpSocket.GetHeader(HeadersUnFiltered: boolean);
 var
   s: RawUtf8;
   err: integer;
-  line: array[0..4095] of AnsiChar; // avoid most memory allocation
+  line: array[0..4095] of AnsiChar; // avoid most memory allocations
 begin
   // parse the headers
   HttpStateReset;
@@ -1979,6 +2153,7 @@ begin
   fOutContent := '';
   fOutContentType := '';
   fOutCustomHeaders := '';
+  fRouteName := nil; // no fRouteValuePosLen := nil (safe to reuse)
 end;
 
 procedure THttpServerRequestAbstract.Prepare(const aHttp: THttpRequestContext;
@@ -1996,6 +2171,7 @@ begin
   fOutContent := '';
   fOutContentType := '';
   fOutCustomHeaders := '';
+  fRouteName := nil;
 end;
 
 procedure THttpServerRequestAbstract.AddInHeader(AppendedHeader: RawUtf8);
@@ -2013,6 +2189,112 @@ begin
   AppendLine(fOutCustomHeaders, Values);
 end;
 
+function THttpServerRequestAbstract.GetRouteValuePosLen(const Name: RawUtf8): PIntegerArray;
+var
+  i: PtrInt;
+begin
+  if (self = nil) or
+     (Name = '') or
+     (fRouteName = nil) then
+    result := nil
+  else
+  begin
+    i := FindNonVoidRawUtf8(fRouteName, pointer(Name), length(Name),
+                            PDALen(PAnsiChar(fRouteName) - _DALEN)^ + _DAOFF);
+    if i >= 0 then
+      // result^ is one [pos,len] pair in fUrl
+      result := @fRouteValuePosLen[i * 2]
+    else
+      result := nil;
+  end;
+end;
+
+function THttpServerRequestAbstract.GetRouteValue(const Name: RawUtf8): RawUtf8;
+begin
+  RouteUtf8(Name, result);
+end;
+
+function THttpServerRequestAbstract.RouteInt64(const Name: RawUtf8;
+  out Value: Int64): boolean;
+var
+  v: PIntegerArray;
+begin
+  v := GetRouteValuePosLen(Name);
+  if v <> nil then
+  begin
+    SetInt64(PUtf8Char(pointer(Url)) + v[0], Value{%H-}); // will end at #0 or &
+    result := true;
+  end
+  else
+    result := false;
+end;
+
+function THttpServerRequestAbstract.RouteUtf8(const Name: RawUtf8;
+  out Value: RawUtf8): boolean;
+var
+  v: PIntegerArray;
+begin
+  v := GetRouteValuePosLen(Name);
+  if v <> nil then
+  begin
+    if v[1] <> 0 then
+      FastSetString(Value, @PByteArray(Url)[v[0]], v[1]);
+    result := true;
+  end
+  else
+    result := false;
+end;
+
+function THttpServerRequestAbstract.RouteEquals(
+  const Name, ExpectedValue: RawUtf8): boolean;
+var
+  v: PIntegerArray;
+begin
+  v := GetRouteValuePosLen(Name);
+  if v <> nil then
+    result := (v[1] = length(ExpectedValue)) and
+      CompareMemFixed(pointer(ExpectedValue), @PByteArray(Url)[v[0]], v[1])
+  else
+    result := false;
+end;
+
+function THttpServerRequestAbstract.UrlParam(const UpperName: RawUtf8;
+  out Value: RawUtf8): boolean;
+begin
+  if fUrlParamPos = nil then // may have been set by TUriTreeNode.LookupParam
+    fUrlParamPos := PosChar(pointer(Url), '?');
+  result := UrlDecodeParam(fUrlParamPos, UpperName, Value);
+end;
+
+function THttpServerRequestAbstract.UrlParam(const UpperName: RawUtf8;
+  out Value: cardinal): boolean;
+begin
+  if fUrlParamPos = nil then
+    fUrlParamPos := PosChar(pointer(Url), '?');
+  result := UrlDecodeParam(fUrlParamPos, UpperName, Value);
+end;
+
+function THttpServerRequestAbstract.UrlParam(const UpperName: RawUtf8;
+  out Value: Int64): boolean;
+begin
+  if fUrlParamPos = nil then
+    fUrlParamPos := PosChar(pointer(Url), '?');
+  result := UrlDecodeParam(fUrlParamPos, UpperName, Value);
+end;
+
+procedure THttpServerRequestAbstract.SetOutJson(const Json: RawUtf8);
+begin
+  fOutContent := Json;
+  fOutContentType := JSON_CONTENT_TYPE_VAR;
+end;
+
+procedure THttpServerRequestAbstract.SetOutJson(const Fmt: RawUtf8;
+  const Args: array of const);
+begin
+  FormatUtf8(Fmt, Args, RawUtf8(fOutContent));
+  fOutContentType := JSON_CONTENT_TYPE_VAR;
+end;
+
 
 { THttpAcceptBan }
 
@@ -2021,14 +2303,24 @@ begin
   fMax := maxpersecond;
   SetSeconds(banseconds);
   fWhiteIP := banwhiteip;
+  fSafe.Init;
+end;
+
+destructor THttpAcceptBan.Destroy;
+begin
+  inherited Destroy;
+  fSafe.Done;
 end;
 
 procedure THttpAcceptBan.SetMax(const Value: cardinal);
 begin
-  fLock.Lock;
-  fMax := Value;
-  SetIP;
-  fLock.UnLock;
+  fSafe.Lock;
+  try
+    fMax := Value;
+    SetIP;
+  finally
+    fSafe.UnLock;
+  end;
 end;
 
 procedure THttpAcceptBan.SetSeconds(const Value: cardinal);
@@ -2037,10 +2329,13 @@ begin
     raise EHttpSocket.CreateFmt(
       'Invalid %.SetSeconds(%): should be a small power of two',
       [ClassNameShort(self)^, Value]);
-  fLock.Lock;
-  fSeconds := Value;
-  SetIP;
-  fLock.UnLock;
+  fSafe.Lock;
+  try
+    fSeconds := Value;
+    SetIP;
+  finally
+    fSafe.UnLock;
+  end;
 end;
 
 procedure THttpAcceptBan.SetIP;
@@ -2067,7 +2362,7 @@ begin
    result := false
   else
   begin
-    fLock.Lock;
+    fSafe.Lock; // very quick O(1) process in the lock
     if fMax <> 0 then
       {$ifdef HASFASTTRYFINALLY}
       try
@@ -2085,7 +2380,7 @@ begin
       {$ifdef HASFASTTRYFINALLY}
       finally
       {$endif HASFASTTRYFINALLY}
-        fLock.UnLock;
+        fSafe.UnLock;
       end;
     result := true;
   end;
@@ -2112,7 +2407,7 @@ begin
   ip4 := addr.IP4;
   if ip4 = 0 then
     exit;
-  fLock.Lock;
+  fSafe.Lock; // O(n) process, but from the main accept() thread only
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -2136,7 +2431,7 @@ begin
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
-    fLock.UnLock;
+    fSafe.UnLock;
   end;
 end;
 
@@ -2156,7 +2451,7 @@ begin
   if (self = nil) or
      (fCount = 0) then
     exit;
-  fLock.Lock;
+  fSafe.Lock; // very quick O(1) process
   try
     if fCount <> 0 then
     begin
@@ -2168,11 +2463,17 @@ begin
       p^ := 0;         // the oldest slot becomes the current (no memory move)
     end;
   finally
-    fLock.UnLock;
+    fSafe.UnLock;
   end;
 end;
 
 
+
+initialization
+  _GETVAR :=  'GET';
+  _POSTVAR := 'POST';
+
+finalization
 
 end.
 

@@ -25,9 +25,9 @@ interface
 uses
   sysutils,
   classes,
-  {$ifndef FPC}
+  {$ifdef ISDELPHI}
   typinfo, // for proper Delphi inlining
-  {$endif FPC}
+  {$endif ISDELPHI}
   mormot.core.base,
   mormot.core.os,
   mormot.core.unicode,
@@ -453,6 +453,7 @@ const
 type
   /// internal pseudo methods when an interface is used as remote service
   // - match TInterfaceFactory MethodIndex 0..3
+  // - imFree expects an associated ClientID, other methods won't
   TServiceInternalMethod = (
     imFree,
     imContract,
@@ -468,6 +469,11 @@ const
     '_signature_',
     '_instance_');
 
+  /// the number of MethodIndex which are a TServiceInternalMethod, i.e. 4
+  SERVICE_PSEUDO_METHOD_COUNT = length(SERVICE_PSEUDO_METHOD);
+
+var
+  /// default value for TInterfaceFactory.JsonParserOptions
   JSONPARSER_SERVICE: TJsonParserOptions =
     [jpoHandleCustomVariants,
      jpoIgnoreUnknownEnum,
@@ -588,7 +594,8 @@ type
     constructor Create(aInterface: PRttiInfo);
     /// find the index of a particular method in internal Methods[] list
     // - will search for a match against Methods[].Uri property
-    // - won't find the default AddRef/Release/QueryInterface methods
+    // - won't find the default AddRef/Release/QueryInterface methods,
+    // nor the _free_/_instance_/... pseudo-methods
     // - will return -1 if the method is not known
     // - if aMethodName does not have an exact method match, it will try with a
     // trailing underscore, so that e.g. /service/start will match IService._Start()
@@ -632,7 +639,8 @@ type
       read fMethods;
     /// the number of internal methods
     // - does not include the default AddRef/Release/QueryInterface methods
-    // - nor the _free_/_contract_/_signature_ pseudo-methods
+    // - nor the _free_/_contract_/_signature_ pseudo-methods: so you should
+    // add SERVICE_PSEUDO_METHOD_COUNT to compute the regular MethodIndex
     property MethodsCount: integer
       read fMethodsCount;
     /// reference all known interface arguments per value type
@@ -2216,7 +2224,7 @@ type
     fOptions: TInterfacedObjectFakeOptions;
     fInvoke: TOnFakeInstanceInvoke;
     fServiceFactory: TObject; // holds a TServiceFactory instance
-    fParamsSafe: TLightLock;
+    fParamsSafe: TLightLock; // thread-safe acquisition of fParams
     fParams: TJsonWriter;
     fNotifyDestroy: TOnFakeInstanceDestroy;
     // the JITed asm stubs will redirect to these JSON-oriented process
@@ -2296,7 +2304,7 @@ type
   // instances (e.g. TSqlite3HttpServer or TRestServerNamedPipeResponse),
   // for better response time and CPU use (this is the technical reason why
   // service implementation methods have to handle multi-threading safety
-  // carefully, e.g. by using TRTLCriticalSection mutex on purpose) - warning:
+  // carefully, e.g. by using TOSLock mutex on purpose) - warning:
   // a Windows Service has no 'main thread' concept, so should not use it
   // - optFreeInMainThread will force the _Release/Destroy method to be run
   // in the main thread: setting this option for any method will affect the
@@ -2504,7 +2512,7 @@ type
   // TMvcRendererAbstract.ExecuteCommand
   TInterfaceMethodExecuteCached = class(TInterfaceMethodExecute)
   protected
-    fCached: TLightLock;
+    fCached: TLightLock; // thread-safe acquisition of fCachedWR
     fCachedWR: TJsonWriter;
   public
     /// initialize a TInterfaceMethodExecuteCachedDynArray of per-method caches
@@ -3165,7 +3173,7 @@ procedure TInterfacedObjectFakeRaw.FakeCallRaiseError(
 var
   msg: RawUtf8;
 begin
-  msg := FormatUtf8(Format, Args);
+  FormatUtf8(Format, Args, msg);
   raise EInterfaceFactory.CreateUtf8('%.FakeCall(%.%) failed: %',
     [self, fFactory.fInterfaceName, ctxt.method^.Uri, msg]);
 end;
@@ -3331,7 +3339,7 @@ begin
   fInvoke := aInvoke;
   fNotifyDestroy := aNotifyDestroy;
   fServiceFactory := aServiceFactory;
-  fParams := TJsonWriter.CreateOwnedStream(8192);
+  fParams := TJsonWriter.CreateOwnedStream(8192, {nosharedstream=}true);
 end;
 
 destructor TInterfacedObjectFake.Destroy;
@@ -3434,7 +3442,8 @@ begin
       resultAsJsonObject := true
     else if R^ <> '[' then
       FakeCallRaiseError(ctxt, 'JSON array/object result expected', []);
-    c.Init(R + 1, nil, fFactory.JsonParserOptions, @fFactory.DocVariantOptions, nil);
+    c.InitParser(R + 1, nil, fFactory.JsonParserOptions,
+      @fFactory.DocVariantOptions, nil, nil);
     arg := ctxt.Method^.ArgsOutFirst;
     if arg > 0 then
       repeat
@@ -3572,6 +3581,7 @@ const
     imvObject,         //  ptClass
     imvDynArray,       //  ptDynArray
     imvInterface,      //  ptInterface
+    imvNone,           //  ptPUtf8Char
     imvNone);          //  ptCustom
 
 var
@@ -4266,11 +4276,11 @@ begin
   if (MethodIndex < 0) or
      (self = nil) then
     result := ''
-  else if MethodIndex < Length(SERVICE_PSEUDO_METHOD) then
+  else if MethodIndex < SERVICE_PSEUDO_METHOD_COUNT then
     result := SERVICE_PSEUDO_METHOD[TServiceInternalMethod(MethodIndex)]
   else
   begin
-    dec(MethodIndex, Length(SERVICE_PSEUDO_METHOD));
+    dec(MethodIndex, SERVICE_PSEUDO_METHOD_COUNT);
     if cardinal(MethodIndex) < cardinal(fMethodsCount) then
       result := fMethods[MethodIndex].Uri
     else
@@ -4439,12 +4449,12 @@ var // warning: exact local variables order should match TFakeCallStack
   sr9, sr8, srcx, srdx, srsi, srdi: pointer;
   {$endif OSPOSIX}
 asm     // caller = mov eax,{MethodIndex}; jmp x64FakeStub
-        {$ifndef FPC}
+        {$ifdef ISDELPHI}
         // FakeCall(self: TInterfacedObjectFake; var aCall: TFakeCallStack): Int64
         // So, make space for two variables (+shadow space)
         // adds $50 to stack, so rcx .. at rpb+$10+$50 = rpb+$60
        .params 2
-        {$endif FPC}
+        {$endif ISDELPHI}
         mov     smetndx, rax
         movlpd  sxmm0, xmm0 // movlpd to ignore upper 64-bit of 128-bit xmm reg
         movlpd  sxmm1, xmm1
@@ -4463,7 +4473,7 @@ asm     // caller = mov eax,{MethodIndex}; jmp x64FakeStub
         mov     srdi, rdi
         lea     rsi, srdi // TFakeCallStack address as 2nd parameter
         {$else}
-        {$ifndef FPC}
+        {$ifdef ISDELPHI}
         mov     [rbp + $60], rcx
         mov     [rbp + $68], rdx
         mov     [rbp + $70], r8
@@ -4473,7 +4483,7 @@ asm     // caller = mov eax,{MethodIndex}; jmp x64FakeStub
         mov     qword ptr [rbp + $18], rdx
         mov     qword ptr [rbp + $20], r8
         mov     qword ptr [rbp + $28], r9
-        {$endif FPC}
+        {$endif ISDELPHI}
         lea     rdx, sxmm0 // TFakeCallStack address as 2nd parameter
         {$endif OSPOSIX}
         call    TInterfacedObjectFake.FakeCall
@@ -4485,6 +4495,7 @@ end;
 {$endif CPUX64}
 
 var
+  // just called once for _FAKEVMT creation (once per interface type on i386)
   VmtSafe: TLightLock;
 
 {$ifdef CPUX86}  // i386 stub requires "ret ArgsSizeInStack"
@@ -7465,7 +7476,8 @@ begin
     end
     else
     begin
-      ctxt.Init(P, nil, fFactory.JsonParserOptions, @fDocVariantOptions, nil);
+      ctxt.InitParser(P, nil, fFactory.JsonParserOptions,
+        @fDocVariantOptions, nil, nil);
       for a := fMethod^.ArgsInFirst to fMethod^.ArgsInLast do
       begin
         arg := @fMethod^.Args[a];
@@ -7561,7 +7573,7 @@ constructor TInterfaceMethodExecuteCached.Create(aFactory: TInterfaceFactory;
   aMethod: PInterfaceMethod; const aOptions: TInterfaceMethodOptions);
 begin
   inherited Create(aFactory, aMethod, aOptions);
-  fCachedWR := TJsonWriter.CreateOwnedStream(16384);
+  fCachedWR := TJsonWriter.CreateOwnedStream(16384, {nosharedstream=}true);
 end;
 
 destructor TInterfaceMethodExecuteCached.Destroy;

@@ -43,11 +43,24 @@ type
   gss_name_t_ptr = ^gss_name_t;
   gss_cred_id_t = pointer;
   gss_ctx_id_t = pointer;
-
+  {$ifdef OSDARWIN}
+  gss_length_t = cardinal; // no OM_STRING/xom.h on MacOS - see gssapi.hin
+  {$ifdef CPUINTEL}
+  // #if defined(__APPLE__) && (defined(__ppc__) || defined(__ppc64__) || defined(__i386__) || defined(__x86_64__))
+  {$A2} // #pragma pack(push,2)
+  {$endif CPUINTEL}
   gss_OID_desc = record
-    length: PtrUInt;
+    length: gss_length_t;
     elements: pointer;
   end;
+  {$else}
+  gss_length_t = PtrUInt;
+  gss_OID_desc = record
+    length: gss_length_t;
+    elements: pointer;
+  end;
+  {$endif OSDARWIN}
+
   gss_OID = ^gss_OID_desc;
   gss_OID_ptr = ^gss_OID;
   gss_OID_array = array [0..0] of gss_OID_desc;
@@ -65,6 +78,8 @@ type
     value: pointer;
   end;
   gss_buffer_t = ^gss_buffer_desc;
+
+  {$A+} // back to usual class/record alignment
 
 
 const
@@ -100,21 +115,23 @@ const
   gss_mech_spnego: array [0..5] of byte = (
     43, 6, 1, 5, 5, 2);
   gss_mech_spnego_desc: gss_OID_desc = (
-    length: Length(gss_mech_spnego);
+    length: SizeOf(gss_mech_spnego);
     elements: @gss_mech_spnego);
   GSS_C_MECH_SPNEGO: gss_OID = @gss_mech_spnego_desc;
 
+  // raw 1.2.840.113554.1.2.2.1 OID
   gss_nt_krb5_name: array [0..9] of byte = (
     42, 134, 72, 134, 247, 18, 1, 2, 2, 1);
   gss_nt_krb5_name_desc: gss_OID_desc = (
-    length: Length(gss_nt_krb5_name);
+    length: SizeOf(gss_nt_krb5_name);
     elements: @gss_nt_krb5_name);
   GSS_KRB5_NT_PRINCIPAL_NAME: gss_OID = @gss_nt_krb5_name_desc;
 
+  // raw 1.2.840.113554.1.2.1.1 OID
   gss_nt_user_name: array [0..9] of byte = (
     42, 134, 72, 134, 247, 18, 1, 2, 1, 1);
   gss_nt_user_name_desc: gss_OID_desc = (
-    length: Length(gss_nt_user_name);
+    length: SizeOf(gss_nt_user_name);
     elements: @gss_nt_user_name);
   GSS_C_NT_USER_NAME: gss_OID = @gss_nt_user_name_desc;
 
@@ -261,10 +278,21 @@ var
   /// access to the low-level libgssapi
   GssApi: TGssApi;
 
+  /// library name of the system implementation of GSSAPI
+  // - only used on MacOS by default (GSS is available since 10.7 Lion in 2011)
+  // - you can overwrite with a custom value, and call LoadGssApi again
+  {$ifdef OSDARWIN}
+  GssLib_OS: TFileName = '/System/Library/Frameworks/GSS.framework/GSS';
+  {$else}
+  GssLib_OS: TFileName = '';
+  {$endif OSDARWIN}
+
   /// library name of the MIT implementation of GSSAPI
+  // - you can overwrite with a custom value, and call LoadGssApi again
   GssLib_MIT: TFileName = 'libgssapi_krb5.so.2';
 
   /// library name of the Heimdal implementation of GSSAPI
+  // - you can overwrite with a custom value, and call LoadGssApi again
   GssLib_Heimdal: TFileName = 'libgssapi.so.3';
 
 
@@ -530,13 +558,14 @@ begin
   if GssApi <> nil then
     // already loaded
     exit;
-  tried := LibraryName + GssLib_MIT + GssLib_Heimdal;
+  tried := LibraryName + GssLib_OS + GssLib_MIT + GssLib_Heimdal;
   if GssApiTried = tried then
     // try LoadLibrary() only if any of the .so names changed
     exit;
   GssApiTried := tried;
   api := TGssApi.Create;
-  if api.TryLoadLibrary([LibraryName, GssLib_MIT, GssLib_Heimdal], nil) then
+  if api.TryLoadLibrary(
+      [LibraryName, GssLib_OS, GssLib_MIT, GssLib_Heimdal], nil) then
   begin
     P := @@api.gss_import_name;
     for i := 0 to high(GSS_NAMES) do

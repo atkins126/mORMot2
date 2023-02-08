@@ -175,7 +175,7 @@ type
     // to remote database engine (e.g. Oracle bound arrays or MS SQL Bulk insert)
     procedure InternalBatchStop; override;
     /// called internally by EngineAdd/EngineUpdate/EngineDelete in batch mode
-    procedure InternalBatchAppend(const aValue: RawUtf8; const aID: TID);
+    procedure InternalBatchAppend(const aValue: RawUtf8; aID: TID);
     /// TRestServer.Uri use it for Static.EngineList to by-pass virtual table
     // - overridden method to handle most potential simple queries, e.g. like
     // $ SELECT Field1,RowID FROM table WHERE RowID=... AND/OR/NOT Field2=
@@ -610,7 +610,7 @@ end;
 
 procedure TRestStorageExternal.InitializeExternalDB(const log: ISynLog);
 var
-  SQL: RawUtf8;
+  s: RawUtf8;
   i, f: PtrInt;
   nfo: TOrmPropInfo;
   Field: TSqlDBColumnCreate;
@@ -634,18 +634,18 @@ begin
     nfo := StoredClassRecordProps.Fields.List[f];
     if nfo.OrmFieldType in COPIABLE_FIELDS then // ignore oftMany
     begin
-      SQL := fStoredClassMapping^.ExtFieldNames[f];
+      s := fStoredClassMapping^.ExtFieldNames[f];
       if rpmQuoteFieldName in options then
-        fStoredClassMapping^.MapField(nfo.Name, '"' + SQL + '"')
-      else if fProperties.IsSqlKeyword(SQL) then
+        fStoredClassMapping^.MapField(nfo.Name, '"' + s + '"')
+      else if fProperties.IsSqlKeyword(s) then
       begin
         log.Log(sllWarning, '%.%: Field name % is not compatible with %',
-          [fStoredClass, nfo.Name, SQL, fProperties.DbmsEngineName], self);
+          [fStoredClass, nfo.Name, s, fProperties.DbmsEngineName], self);
         if rpmAutoMapKeywordFields in options then
         begin
           log.Log(sllWarning, '-> %.% mapped to %_',
-            [fStoredClass, nfo.Name, SQL], self);
-          fStoredClassMapping^.MapField(nfo.Name, SQL + '_');
+            [fStoredClass, nfo.Name, s], self);
+          fStoredClassMapping^.MapField(nfo.Name, s + '_');
         end
         else
           log.Log(sllWarning, '-> you should better use MapAutoKeywordFields', self);
@@ -675,19 +675,19 @@ begin
           // just ignore non handled field types
           SetLength(CreateColumns, f);
       end;
-      SQL := fProperties.SqlCreate(fTableName, CreateColumns, false);
+      s := fProperties.SqlCreate(fTableName, CreateColumns, false);
       if Assigned(fProperties.OnTableCreate) then
         TableCreated := fProperties.OnTableCreate(
-          fProperties, fTableName, CreateColumns, SQL)
-      else if SQL <> '' then
-        TableCreated := ExecuteDirect(pointer(SQL), [], [], false) <> nil;
+          fProperties, fTableName, CreateColumns, s)
+      else if s <> '' then
+        TableCreated := ExecuteDirect(pointer(s), [], [], false) <> nil;
       if TableCreated then
       begin
         LogFields(log);
         if fFieldsExternal = nil then
           raise ERestStorage.CreateUtf8(
             '%.Create: external table creation % failed: GetFields() ' +
-            'returned nil - SQL=[%]', [self, StoredClass, fTableName, SQL]);
+            'returned nil - sql=[%]', [self, StoredClass, fTableName, s]);
       end;
     end;
   FieldsInternalInit;
@@ -709,20 +709,20 @@ begin
               FillcharFast(Field, SizeOf(Field), 0);
               if PropInfoToExternalField(Fields.List[f], Field) then
               begin
-                SQL := fProperties.SqlAddColumn(fTableName, Field);
+                s := fProperties.SqlAddColumn(fTableName, Field);
                 if Assigned(fProperties.OnTableAddColumn) then
                 begin
                   if fProperties.OnTableAddColumn(
-                      fProperties, fTableName, Field, SQL) then
+                      fProperties, fTableName, Field, s) then
                     TableModified := true; // don't raise ERestStorage from here
                 end
-                else if SQL <> '' then
-                  if ExecuteDirect(pointer(SQL), [], [], false) <> nil then
+                else if s <> '' then
+                  if ExecuteDirect(pointer(s), [], [], false) <> nil then
                     TableModified := true
                   else
                     raise ERestStorage.CreateUtf8('%.Create: %: ' +
-                      'unable to create external missing field %.% - SQL=[%]',
-                      [self, StoredClass, fTableName, Fields.List[f].Name, SQL]);
+                      'unable to create external missing field %.% - sql=[%]',
+                      [self, StoredClass, fTableName, Fields.List[f].Name, s]);
               end;
             end;
       if TableModified then
@@ -732,13 +732,14 @@ begin
         FieldsInternalInit;
       end;
     end;
-  // compute the SQL statements used internally for external DB requests
+  // compute the sql statements used internally for external DB requests
   with fStoredClassMapping^ do
   begin
-    fSelectOneDirectSQL := FormatUtf8('select % from % where %=?',
-      [Sql.TableSimpleFields[true, false], fTableName, RowIDFieldName]);
-    fSelectAllDirectSQL := FormatUtf8('select %,% from %',
-      [Sql.InsertSet, RowIDFieldName, fTableName]);
+    FormatUtf8('select % from % where %=?',
+      [SQL.TableSimpleFields[{withid=}true, {withtablename=}false],
+       fTableName, RowIDFieldName], fSelectOneDirectSQL); // return ID field
+    FormatUtf8('select %,% from %', [sql.InsertSet, RowIDFieldName, fTableName],
+      fSelectAllDirectSQL);
     fRetrieveBlobFieldsSQL := InternalCsvToExternalCsv(
       StoredClassRecordProps.SqlTableRetrieveBlobFields);
     fUpdateBlobFieldsSQL := InternalCsvToExternalCsv(
@@ -1202,7 +1203,7 @@ begin
 end;
 
 procedure TRestStorageExternal.InternalBatchAppend(const aValue: RawUtf8;
-  const aID: TID);
+  aID: TID);
 begin
   if fBatchCount >= fBatchCapacity then
   begin
@@ -1392,30 +1393,33 @@ function TRestStorageExternal.EngineRetrieve(TableModelIndex: integer;
 var
   stmt: ISqlDBStatement;
   w: TJsonWriter;
+  tmp: TTextWriterStackBuffer;
 begin
   // TableModelIndex is not useful here
   result := '';
-  if (self = nil) or
-     (ID <= 0) then
-    exit;
-  try
-    stmt := fProperties.NewThreadSafeStatementPrepared(
-      fSelectOneDirectSQL, {results=}true, {except=}true);
-    if stmt = nil then
-      exit;
-    stmt.Bind(1, ID);
-    stmt.ExecutePrepared;
-    w := AcquireJsonWriter;
+  if (self <> nil) and
+     (ID > 0) then
     try
-      stmt.StepToJson(w);
-      w.SetText(result);
-    finally
-      ReleaseJsonWriter(w);
+      stmt := fProperties.NewThreadSafeStatementPrepared(
+        fSelectOneDirectSQL, {results=}true, {except=}true);
+      if stmt = nil then
+        exit;
+      stmt.Bind(1, ID);
+      stmt.ExecutePrepared;
+      w := AcquireJsonWriter(tmp);
+      try
+        stmt.StepToJson(w, {seekfirst=}false);
+        w.SetText(result);
+        // we do return "ID": even if caller will set it anyway, to follow TFB
+        // rules, and no performance change has been seen with an external DB
+        // https://synopse.info/forum/viewtopic.php?pid=38880#p38880
+      finally
+        ReleaseJsonWriter(w);
+      end;
+    except
+      stmt := nil;
+      HandleClearPoolOnConnectionIssue;
     end;
-  except
-    stmt := nil;
-    HandleClearPoolOnConnectionIssue;
-  end;
 end;
 
 function TRestStorageExternal.EngineExecute(const aSql: RawUtf8): boolean;

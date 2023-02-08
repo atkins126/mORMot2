@@ -254,6 +254,8 @@ type
     procedure TimeZones;
     /// test the SMBIOS decoding features
     procedure DmiSmbios;
+    /// test Security IDentifier (SID) process
+    procedure _SID;
     /// validates the median computation using the "Quick Select" algorithm
     procedure QuickSelect;
     /// test the TSynCache class
@@ -893,8 +895,8 @@ begin
     begin
       Rec := TSynFilterOrValidate.create;
       Rec.Parameters := Int32ToUtf8(i);
-      Check(L.AddObject(Rec.Parameters, Rec) = i - 1);
-      Check(L.IndexOf(Rec.Parameters) = i - 1);
+      CheckEqual(L.AddObject(Rec.Parameters, Rec), i - 1);
+      CheckEqual(L.IndexOf(Rec.Parameters), i - 1);
     end;
     Check(not L.Exists(''));
     Check(L.IndexOf('abcd') < 0);
@@ -903,14 +905,14 @@ begin
     for i := 1 to MAX do
     begin
       UInt32ToUtf8(i, s);
-      Check(L.IndexOf(s) = n);
-      Check(TSynFilterOrValidate(L.Objects[n]).Parameters = s);
+      CheckEqual(L.IndexOf(s), n);
+      CheckEqual(TSynFilterOrValidate(L.Objects[n]).Parameters, s);
       if i and 127 = 0 then
-        Check(L.Delete(s) = n)
+        CheckEqual(L.Delete(s), n)
       else
         inc(n);
     end;
-    Check(L.Count = n);
+    CheckEqual(L.Count, n);
     for i := 1 to MAX do
     begin
       UInt32ToUtf8(i, s);
@@ -918,9 +920,9 @@ begin
     end;
     L.SaveToFile(WorkDir + 'utf8list.txt');
     L.Clear;
-    Check(L.Count = 0);
+    CheckEqual(L.Count, 0);
     L.LoadFromFile(WorkDir + 'utf8list.txt');
-    Check(L.Count = n);
+    CheckEqual(L.Count, n);
     for i := 1 to MAX do
     begin
       UInt32ToUtf8(i, s);
@@ -1184,6 +1186,7 @@ var
   i, j, k, Len, count, AIcount: integer;
   U, U2: RawUtf8;
   P: PUtf8Char;
+  PA: PAnsiChar;
   PI: PIntegerArray;
   AB: TBooleanDynArray;
   R: TRec;
@@ -1316,7 +1319,7 @@ begin
   Test := dyn1.SaveTo;
   dyn1.Clear;
   Check(AB = nil);
-  Check(dyn1.LoadFrom(pointer(Test)) <> nil);
+  Check(dyn1.LoadFrom(pointer(Test), PAnsiChar(Test) + length(Test)) <> nil);
   Check(dyn1.Count = 4);
   for i := 0 to 3 do
     Check(AB[i] = (i and 1 = 1));
@@ -1382,7 +1385,7 @@ begin
   for i := 0 to 1000 do
     Check(AI[i] = 1000 - i);
   AIP.Clear;
-  Check(AIP.LoadFrom(pointer(Test)) <> nil);
+  Check(AIP.LoadFrom(pointer(Test), PAnsiChar(Test) + length(Test)) <> nil);
   for i := 0 to 1000 do
     Check(AIP.IndexOf(i) = i);
   AIP.Clear;
@@ -1447,7 +1450,7 @@ begin
   AIP.Clear;
   with DynArray(TypeInfo(TIntegerDynArray), AI) do
   begin
-    Check(LoadFrom(pointer(Test)) <> nil);
+    Check(LoadFromBinary(Test));
     for i := 0 to count - 1 do
       Check(AI[i] = i);
   end;
@@ -1534,7 +1537,8 @@ begin
   end;
   Check(P = nil);
   AUP.Clear;
-  Check(AUP.LoadFrom(pointer(Test)) - pointer(Test) = length(Test));
+  Check(AUP.LoadFrom(pointer(Test),
+    PAnsiChar(Test) + length(Test)) - pointer(Test) = length(Test));
   for i := 0 to 1000 do
     Check(GetInteger(pointer(AU[i])) = i + 1000);
   AUP.Clear;
@@ -1746,7 +1750,8 @@ begin
   CheckEqual(U, '[' + JSON_BASE64_MAGIC_UTF8 + BinToBase64(Test) + '"]');
   {$endif HASEXTRECORDRTTI}
   AFP.Clear;
-  Check(AFP.LoadFrom(pointer(Test)) - pointer(Test) = length(Test));
+  Check(AFP.LoadFrom(
+    pointer(Test), PAnsiChar(Test) + length(Test)) - pointer(Test) = length(Test));
   for i := 0 to 1000 do
   begin
     Fill(F, i);
@@ -1937,7 +1942,9 @@ begin
   Check(length(Province.Cities) = 0);
   Check(ACities.Count = 0);
   Province.Year := 0;
-  Check(RecordLoad(Province, pointer(Test), TypeInfo(TProvince))^ = #0);
+  PA := RecordLoad(Province, pointer(Test), TypeInfo(TProvince), nil,
+    PAnsiChar(pointer(Test)) + length(Test));
+  Check((PA <> nil) and (PA^ = #0));
   Check(Province.Name = 'Test');
   Check(Province.Comment = 'comment');
   Check(Province.Year = 1000);
@@ -1952,7 +1959,7 @@ begin
   Check(Province.Comment = '');
   Check(length(Province.Cities) = 0);
   Check(ACities.Count = 0);
-  Check(RecordLoad(Province, pointer(Test), TypeInfo(TProvince))^ = #0);
+  Check(RecordLoad(Province, Test, TypeInfo(TProvince)));
   Check(Province.Name = 'Test');
   Check(Province.Comment = 'comment');
   Check(Province.Year = 1000);
@@ -2090,7 +2097,12 @@ var
         inc(len, 777 + len shr 4);
     until len >= length(buf);
     NotifyTestSpeed(msg, 1, filled, @timer);
-     // validates overlapping forward Move/MoveFast
+    // validate negative count of Move/MoveFast (should not make any GPF)
+    if rtl then
+      move(buf[1], buf[2], -100)
+    else
+      moveFast(buf[1], buf[2], -100);
+    // validates overlapping forward Move/MoveFast
     if rtl then
       msg := 'Move'
     else
@@ -2182,6 +2194,8 @@ var
   bak, cpu: TX64CpuFeatures;
 {$endif ASMX64}
 begin
+  Check(FileIsExecutable(Executable.ProgramFileName));
+  Check(not FileIsExecutable(Executable.ProgramFilePath));
   SetLength(buf, 16 shl 20); // 16MB
   {$ifdef ASMX64} // activate and validate SSE2 + AVX branches
   bak := X64CpuFeatures;
@@ -2469,9 +2483,10 @@ begin
   CheckEqual(MacTextFromHex('12345'), '');
   CheckEqual(MacTextFromHex(s), 'c9:a6:46:d3:9c:61:4c:b7:bf:cd:ee:25:22:c8:f6:33');
   CheckEqual(MacTextFromHex(UpperCase(s)), 'c9:a6:46:d3:9c:61:4c:b7:bf:cd:ee:25:22:c8:f6:33');
-  s := s + s;
+  s := s + s; // validates also our patched RTL
   repeat
-    delete(s, Random32(length(s)) + 1, 1);
+    i := Random32(length(s)) + 1;
+    delete(s, i, 1);
     Check(TrimGuid(s) = (length(s) = 32));
   until s = '';
   s := '   ';
@@ -2537,8 +2552,8 @@ end;
 
 procedure TTestCoreBase._ParseCommandArguments;
 
-  procedure Test(const cmd: RawUtf8; const expected: array of RawUtf8; const
-    flags: TParseCommands = []; posix: boolean = true);
+  procedure Test(const cmd: RawUtf8; const expected: array of RawUtf8;
+     const flags: TParseCommands = []; posix: boolean = true);
   var
     tmp: RawUtf8;
     n, i: integer;
@@ -4344,7 +4359,7 @@ begin
     for n := 0 to 49 do
       PC := ToVarUInt32(juint + n, PC);
     check(PC <> nil);
-    st.Init(@varint, PAnsiChar(PC) - PAnsiChar(@varint));
+    {%H-}st.Init(@varint, PAnsiChar(PC) - PAnsiChar(@varint));
     check(not st.EOF);
     for n := 0 to 48 do
       check(st.VarUInt32 = cardinal(juint + n));
@@ -4513,12 +4528,7 @@ procedure TTestCoreBase._UTF8;
     if CP = CP_UTF16 then
       exit;
     Check(length(W) = length(A));
-    {$ifdef FPC}
     CheckUtf8(CompareMem(pointer(W), pointer(A), length(W)), 'CP%', [CP]);
-    {$else}
-    CheckUtf8(A = W, 'CP%-AW', [CP]);
-    CheckUtf8(C.RawUnicodeToAnsi(C.AnsiToRawUnicode(W)) = W, 'CP%-CW', [CP]);
-    {$endif FPC}
   end;
 
   procedure CheckTrimCopy(const S: RawUtf8; start, count: PtrInt);
@@ -4542,7 +4552,7 @@ var
   P: PUtf8Char;
   PB: PByte;
   q: RawUtf8;
-  Unic: RawUnicode;
+  Unic: RawByteString;
   WA: Boolean;
 const
   ROWIDS: array[0..17] of PUtf8Char = ('id', 'ID', 'iD', 'rowid', 'ROWid',
@@ -4553,6 +4563,66 @@ const
   IDPA: array[0..15] of PAnsiChar = (nil, 'T', '1', 'TE', 'TE', 'TE', 'TES',
     'TEST', 'TEST', 'TES', 'TEST', 'TESTE', 't', 'U', '2', 'TESTe');
 begin
+  Check(SafeFileName(''));
+  Check(SafePathName(''));
+  Check(SafeFileName('toto'));
+  Check(SafeFileName('toto.jpg'));
+  Check(SafeFileName('path/toto'));
+  Check(SafeFileName('path\toto.jpg'));
+  Check(SafeFileName('path../toto'));
+  Check(SafeFileName('path..\toto.jpg'));
+  Check(SafeFileName('..path/toto'));
+  Check(SafeFileName('..path\toto.jpg'));
+  Check(not SafeFileName('../toto'));
+  Check(not SafeFileName('..\toto.jpg'));
+  Check(SafePathName('one/two'));
+  Check(SafePathName('one\two'));
+  Check(SafePathName('one../two'));
+  Check(SafePathName('one..\two'));
+  Check(SafePathName('..one/two'));
+  Check(SafePathName('..one\two'));
+  Check(SafePathName('one/..two'));
+  Check(SafePathName('one\..two'));
+  Check(SafePathName('one/two..'));
+  Check(SafePathName('one\two..'));
+  Check(not SafePathName('one/../two'));
+  Check(not SafePathName('one\..\two'));
+  Check(not SafePathName('one/..'));
+  Check(not SafePathName('one\..'));
+  Check(not SafePathName('../two'));
+  Check(not SafePathName('..\two'));
+  Check(not SafePathName('/../two'));
+  Check(not SafePathName('\..\two'));
+  Check(SafeFileNameU(''));
+  Check(SafePathNameU(''));
+  Check(SafeFileNameU('toto'));
+  Check(SafeFileNameU('toto.jpg'));
+  Check(SafeFileNameU('path/toto'));
+  Check(SafeFileNameU('path\toto.jpg'));
+  Check(SafeFileNameU('path../toto'));
+  Check(SafeFileNameU('path..\toto.jpg'));
+  Check(SafeFileNameU('..path/toto'));
+  Check(SafeFileNameU('..path\toto.jpg'));
+  Check(not SafeFileNameU('../toto'));
+  Check(not SafeFileNameU('..\toto.jpg'));
+  Check(SafePathNameU('one/two'));
+  Check(SafePathNameU('one\two'));
+  Check(SafePathNameU('one../two'));
+  Check(SafePathNameU('one..\two'));
+  Check(SafePathNameU('..one/two'));
+  Check(SafePathNameU('..one\two'));
+  Check(SafePathNameU('one/..two'));
+  Check(SafePathNameU('one\..two'));
+  Check(SafePathNameU('one/two..'));
+  Check(SafePathNameU('one\two..'));
+  Check(not SafePathNameU('one/../two'));
+  Check(not SafePathNameU('one\..\two'));
+  Check(not SafePathNameU('one/..'));
+  Check(not SafePathNameU('one\..'));
+  Check(not SafePathNameU('../two'));
+  Check(not SafePathNameU('..\two'));
+  Check(not SafePathNameU('/../two'));
+  Check(not SafePathNameU('\..\two'));
   CaseFoldingTest;
   for i := 0 to high(ROWIDS) do
     Check(isRowID(ROWIDS[i]) = (i < 8));
@@ -4681,6 +4751,28 @@ begin
   Check(MakeCsv([1, 2, 3]) = '1,2,3');
   Check(MakeCsv([1, '2', 3], true) = '1,2,3,');
   Check(MakeCsv([1, '2 ,', 3]) = '1,2 ,3');
+  U := '';
+  Append(U, []);
+  CheckEqual(U, '');
+  Append(U, [1]);
+  CheckEqual(U, '1');
+  Append(U, [2, '34', 5]);
+  CheckEqual(U, '12345');
+  Append(U, []);
+  CheckEqual(U, '12345');
+  Append(U, [6]);
+  CheckEqual(U, '123456');
+  U := '';
+  Prepend(U, []);
+  CheckEqual(U, '');
+  Prepend(U, [1]);
+  CheckEqual(U, '1');
+  Prepend(U, [2, '34', 5]);
+  CheckEqual(U, '23451');
+  Prepend(U, []);
+  CheckEqual(U, '23451');
+  Prepend(U, [6]);
+  CheckEqual(U, '623451');
   U := '';
   AppendLine(U, []);
   CheckEqual(U, '');
@@ -4827,20 +4919,19 @@ begin
     Check(IsAnsiCompatible(U) or (PosEx('\u', json1) > 0));
     json2 := JsonReformat(json1, jsonNoEscapeUnicode);
     Check(json2 = json, 'jeu2');
-    Unic := Utf8DecodeToRawUnicode(U);
+    Unic := Utf8DecodeToUnicodeRawByteString(pointer(U), length(U));
     {$ifndef FPC_HAS_CPSTRING} // buggy FPC
     Check(Utf8ToWinAnsi(U) = W);
     Check(WinAnsiConvert.Utf8ToAnsi(WinAnsiConvert.AnsiToUtf8(W)) = W);
-    Check(WinAnsiConvert.RawUnicodeToAnsi(WinAnsiConvert.AnsiToRawUnicode(W)) = W);
+    Check(WinAnsiConvert.UnicodeStringToAnsi(WinAnsiConvert.AnsiToUnicodeString(W)) = W);
     if CurrentAnsiConvert.InheritsFrom(TSynAnsiFixedWidth) then
     begin
       Check(CurrentAnsiConvert.Utf8ToAnsi(CurrentAnsiConvert.AnsiToUtf8(W)) = W);
-      Check(CurrentAnsiConvert.RawUnicodeToAnsi(CurrentAnsiConvert.AnsiToRawUnicode
-        (W)) = W);
+      Check(CurrentAnsiConvert.UnicodeStringToAnsi(CurrentAnsiConvert.AnsiToUnicodeString(W)) = W);
     end;
-    res := RawUnicodeToUtf8(Unic);
+    res := RawUnicodeToUtf8(pointer(Unic), length(Unic) shr 1);
     Check(res = U);
-    Check(RawUnicodeToWinAnsi(Unic) = W);
+    Check(WinAnsiConvert.UnicodeBufferToAnsi(pointer(Unic), length(Unic) shr 1) = W);
     {$endif FPC_HAS_CPSTRING}
     WS := Utf8ToWideString(U);
     Check(length(WS) = length(Unic) shr 1);
@@ -5552,6 +5643,62 @@ begin
   CheckHash(s, $7A3BEEB8, 'BinarySave');
 end;
 
+{$ifdef OSWINDOWS}
+
+function CreateWellKnownSid(WellKnownSidType: byte; DomainSid: PSID;
+  pSid: PSID; var cbSid: cardinal): BOOL; stdcall; external 'Advapi32.dll';
+function ConvertSidToStringSidA(Sid: PSID; var StringSid: PAnsiChar): BOOL; stdcall;
+  external 'Advapi32.dll';
+
+{$endif OSWINDOWS}
+
+procedure TTestCoreBase._SID;
+var
+  k: TWellKnownSid;
+  s: RawUtf8;
+  s1, s2: RawSid;
+  {$ifdef OSWINDOWS}
+  known: TWellKnownSids;
+  sids: TRawUtf8DynArray;
+  {$endif OSWINDOWS}
+begin
+  CheckEqual(SizeOf(TSid), 1032, 'TSid');
+  for k := low(k) to high(k) do
+  begin
+    s1 := KnownSid(k);
+    Check(SidToKnown(pointer(s1)) = k);
+    Check(SidCompare(pointer(s1), pointer(s1)) = 0);
+    s := SidToText(s1);
+    CheckEqual(s, RawUtf8(KnownSidToText(k)^));
+    CheckUtf8(SidToKnown(s) = k, s);
+    s2 := TextToSid(s);
+    CheckEqual(s, SidToText(s2));
+    CheckUtf8(SidCompare(pointer(s1), pointer(s2)) = 0, s);
+  end;
+  {$ifdef OSWINDOWS}
+  CurrentSid(s1, wttProcess);
+  CurrentSid(s2, wttThread);
+  Check(SidCompare(pointer(s1), pointer(s2)) = 0);
+  s := SidToText(s1);
+  CheckUtf8(IdemPChar(pointer(s), 'S-1-5-21-'), s);
+  sids := CurrentGroupsSid;
+  Check(sids <> nil);
+  known := CurrentKnownGroups;
+  Check(known <> []);
+  for k := low(k) to high(k) do
+  begin
+    s := SidToText(KnownSid(k));
+    if k in known then
+    begin
+      Check(FindRawUtf8(sids, s) >= 0);
+      CheckUtf8(CurrentUserHasGroup(s), s);
+    end
+    else
+      CheckUtf8(not CurrentUserHasGroup(s), s);
+  end;
+  {$endif OSWINDOWS}
+end;
+
 {$IFDEF FPC} {$PUSH} {$ENDIF} {$HINTS OFF}
 // [dcc64 Hint] H2135 FOR or WHILE loop executes zero times - deleted
 procedure TTestCoreBase._IdemPropName;
@@ -6073,8 +6220,8 @@ begin
       {$endif HASNEWFILEAGE}
       CheckSame(fdt, mormot.core.os.FileAgeToDateTime(fn[i]), 0.01, 'fdt');
       // FPC FileAge() is wrong and truncates 1-2 seconds on Windows -> 0.01
-      Check(FileInfo(fn[i], fs, fu), 'FileInfo');
-      CheckEqual(fs, length(s), 'FileInfo Size');
+      Check(FileInfoByName(fn[i], fs, fu), 'FileInfoByName');
+      CheckEqual(fs, length(s), 'FileInfoByName Size');
       CheckEqual(FileAgeToUnixTimeUtc(fn[i]), fu div 1000, 'FileAgeToUnixTimeUtc');
       // writeln('now=',DateTimeToIso8601Text(Now));
       // writeln('utc=',DateTimeToIso8601Text(NowUtc));
@@ -6348,6 +6495,7 @@ begin
         check(not gen.FromObfuscated(obfusc, i3), 'tempered text');
         dec(obfusc[12]);
       end;
+      check(gen.FromObfuscated(obfusc, i3), 'detempered');
       //writeln('LastUnixCreateTime=', gen.LastUnixCreateTime);
       //writeln('UnixTimeUtc=', UnixTimeUtc);
     finally

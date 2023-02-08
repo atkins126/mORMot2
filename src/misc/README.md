@@ -14,3 +14,10 @@ You will find in this folder some reusable code which is too specific to be in t
 - Low-Level *ISO 9660* Encoding Structures
 - High-Level `.iso` File Reader
 
+Warning: this unit is just in early draft state - nothing works yet. ;)
+
+### mormot.misc.pecoff
+
+*PE COFF* File Reader, as used for windows executables or libraries (.exe, .dll)
+- Low-Level PE Encoding Structures  
+- High-Level PE (.exe, .dll...) File Reader  

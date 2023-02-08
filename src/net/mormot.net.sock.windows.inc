@@ -23,6 +23,7 @@ const
   // https://devblogs.microsoft.com/oldnewthing/20161221-00/?p=94985
   // -> Xitami uses 1024 since 1996
   // -> safe since our TFDSet is INTERNAL to this unit, and never published :)
+  // -> not too big, since TFDSet is allocated on stack
   FD_SETSIZE = 512;
 
 type
@@ -509,6 +510,11 @@ begin
   SetOpt(SOL_SOCKET, SO_RCVTIMEO, @ms, SizeOf(ms));
 end;
 
+procedure TNetSocketWrap.ReusePort;
+begin
+  // unsupported on Windows
+end;
+
 procedure TNetSocketWrap.SetLinger(linger: integer);
 var
   v: TLinger;
@@ -599,9 +605,6 @@ end;
 
 { ******************** IP Addresses Support }
 
-const
-  IPHLPAPI = 'iphlpapi.dll';
-
 type
   PMIB_IPADDRTABLE = ^MIB_IPADDRTABLE;
   MIB_IPADDRTABLE = record
@@ -617,9 +620,10 @@ type
     end;
   end;
 
-function GetIpAddrTable(pIpAddrTable: PMIB_IPADDRTABLE;
-  var pdwSize: DWORD; bOrder: BOOL): DWORD; stdcall; external IPHLPAPI;
-
+var
+  // some iphlpapi.dll late-binded API via DelayedProc()
+  GetIpAddrTable: function (pIpAddrTable: PMIB_IPADDRTABLE;
+    var pdwSize: DWORD; bOrder: BOOL): DWORD; stdcall;
 
 function GetIPAddresses(Kind: TIPAddress): TRawUtf8DynArray;
 var
@@ -632,7 +636,8 @@ begin
   if Kind = tiaIPv6 then
     exit; // GetIpAddrTable() is an IPv4 only API
   Size := SizeOf(Table);
-  if GetIpAddrTable(@Table, Size, false) <> NO_ERROR then
+  if not DelayedProc(GetIpAddrTable, 'iphlpapi.dll', 'GetIpAddrTable') or
+     (GetIpAddrTable(@Table, Size, false) <> NO_ERROR) then
     exit;
   SetLength(result, Table.dwNumEntries);
   n := 0;
@@ -730,13 +735,12 @@ type
     // DHCP v6 Info following (not used by our code)
   end;
 
-function GetAdaptersAddresses(Family: ULONG; Flags: DWORD; Reserved: pointer;
-  pAdapterAddresses: PIP_ADAPTER_ADDRESSES; pOutBufLen: PULONG): DWORD; stdcall;
-  external IPHLPAPI;
-
-function SendARP(DestIp: DWORD; srcIP: DWORD; pMacAddr: pointer;
-  PhyAddrLen: Pointer): DWORD; stdcall; external IPHLPAPI;
-
+var
+  // some iphlpapi.dll late-binded APIs via DelayedProc()
+  GetAdaptersAddresses: function(Family: ULONG; Flags: DWORD; Reserved: pointer;
+    pAdapterAddresses: PIP_ADAPTER_ADDRESSES; pOutBufLen: PULONG): DWORD; stdcall;
+  SendARP: function(DestIp: DWORD; srcIP: DWORD; pMacAddr: pointer;
+    PhyAddrLen: Pointer): DWORD; stdcall;
 
 function RetrieveMacAddresses(UpAndDown: boolean): TMacAddressDynArray;
 var
@@ -747,7 +751,9 @@ var
 begin
   result := nil;
   siz := 0;
-  if GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, nil, nil, @siz) <> ERROR_BUFFER_OVERFLOW then
+  if not DelayedProc(GetAdaptersAddresses, 'iphlpapi.dll', 'GetAdaptersAddresses') or
+     (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, nil, nil, @siz) <>
+       ERROR_BUFFER_OVERFLOW) then
     exit;
   SetLength(tmp, siz); // around 600 bytes per interface
   p := pointer(tmp);
@@ -780,7 +786,8 @@ var
 begin
   result := '';
   dwremoteIP := inet_addr(pointer(IP));
-  if dwremoteIP <> 0 then
+  if (dwremoteIP <> 0) and
+     DelayedProc(SendARP, 'iphlpapi.dll', 'SendARP') then
   begin
     PhyAddrLen := 8;
     if SendARP(dwremoteIP, 0, @pMacAddr, @PhyAddrLen) = NO_ERROR then
@@ -825,12 +832,13 @@ type
   // grow FD_SETSIZE up to 512 for the purpose of this class
   // - under POSIX, select() is very limited, so poll/epoll APIs are to be used
   // - in practice, TPollSocketSelect is FASTER than TPollSocketPoll + WSAPoll()
-  // because the new WSAPoll API is just an emulator usinig select() internally
+  // because the new WSAPoll API is just an emulator using select() internally
   TPollSocketSelect = class(TPollSocketAbstract)
   protected
     fHighestSocket: TNetSocket;
     fTagSocket: array of TNetSocket;
     fTagTag: array of TPollSocketTag;
+    // reference values prepared for Select() call
     fRead: TFDSet;
     fWrite: TFDSet;
   public
@@ -904,7 +912,7 @@ var
   tv: TTimeVal;
   rdp, wrp: PFDSet;
   ev: TPollSocketEvents;
-  i: PtrInt;
+  i, n: PtrInt;
   sock: TNetSocket;
   rd, wr: TFDSet; // modified by select() -> local copy on stack
 begin
@@ -913,16 +921,20 @@ begin
   if (self = nil) or
      (fCount = 0) then
     exit;
-  if fRead.fd_count > 0 then
+  n := fRead.fd_count; // fill local rd before select()
+  if n > 0 then
   begin
-    rd := fRead;
+    rd.fd_count := n;
+    MoveFast(fRead.fd_array, rd.fd_array, n * SizeOf(rd.fd_array[0]));
     rdp := @rd;
   end
   else
     rdp := nil;
-  if fWrite.fd_count > 0 then
+  n := fWrite.fd_count; // fill local wr
+  if n > 0 then
   begin
-    wr := fWrite;
+    wr.fd_count := n;
+    MoveFast(fWrite.fd_array, wr.fd_array, n * SizeOf(wr.fd_array[0]));
     wrp := @wr;
   end
   else
@@ -955,13 +967,11 @@ begin
        FD_ISSET(sock, wr{%H-}) then
       include(ev, pseWrite);
     if byte(ev) <> 0 then
-      with results.Events[results.Count] do
-      begin
-        result := true;
-        events := ev;
-        tag := fTagTag[i];
-        inc(results.Count);
-      end;
+    begin
+      SetRes(results.Events[results.Count], fTagTag[i], ev);
+      result := true;
+      inc(results.Count);
+    end;
   end;
 end;
 
@@ -1019,7 +1029,7 @@ begin
   LastError := GetLastError;
   raise ESChannel.CreateFmt('<%s>: Result %x [%s], System Error %d ''%s''',
     [fServerAddressW, res, SspiResToText(res), LastError,
-     SysErrorMessage(LastError)]);
+     string(GetErrorText(LastError))]);
 end;
 
 function TSChannelNetTls.CheckSEC_E_OK(res: integer): cardinal;
@@ -1511,8 +1521,8 @@ var
 procedure InitializeUnit;
 begin
   WSAStartup($0202, WsaDataOnce);
-  SocketAPIVersion := RawUtf8(Format(
-    '%s.%d', [WsaDataOnce.szDescription, WsaDataOnce.wVersion]));
+  SocketAPIVersion := RawUtf8(Format('%s.%d',
+    [WsaDataOnce.szDescription, WsaDataOnce.wVersion]));
   NewNetTls := NewSChannelNetTls;
 end;
 

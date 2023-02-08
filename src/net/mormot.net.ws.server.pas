@@ -236,8 +236,10 @@ var
   server: THttpServer;
 begin
   server := (fSocket as TWebSocketServerSocket).Server;
-  result := THttpServerRequest.Create(server, fProtocol.ConnectionID,
-    fOwnerThread, fProtocol.ConnectionFlags, fProtocol.ConnectionOpaque);
+  result := THttpServerRequest.Create(
+    server, fProtocol.ConnectionID, fOwnerThread,
+    fProtocol.ConnectionFlags + HTTP_TLS_FLAGS[fSocket.TLS.Enabled],
+    fProtocol.ConnectionOpaque);
   RequestProcess := server.Request;
 end;
 

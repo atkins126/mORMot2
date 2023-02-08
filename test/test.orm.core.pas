@@ -163,13 +163,13 @@ begin
   Check(ToMethod('') = mNone);
   Check(ToMethod('toto') = mNone);
   Check(ToMethod('get') = mGET);
-  Check(ToMethod('CONNECT') = mCONNECT);
+  Check(ToMethod('OPTIONS') = mOPTIONS);
   Check(not IsGet('get'));
   Check(IsGet('GET'));
   Check(not IsPost('Post'));
   Check(IsPost('POST'));
   for met := low(met) to high(met) do
-    Check(ToMethod(RawUtf8(MethodText(met))) = met);
+    Check(ToMethod(MethodText(met)) = met);
 end;
 
 procedure TTestOrmCore._TRestServerFullMemory;
@@ -597,8 +597,8 @@ begin
     wa[10] := #$E9;
     T.Ansi := wa;
     T.Test := WinAnsiToUtf8(T.Ansi);
-    T.Unicode := Utf8DecodeToRawUnicode(T.Test);
-    Check(RawUnicodeToWinAnsi(T.Unicode) = T.Ansi);
+    T.Unicode := Utf8ToSynUnicode(T.Test);
+    Check(RawUnicodeToWinAnsi(pointer(T.Unicode), length(T.Unicode)) = T.Ansi);
     // the same string is stored with some Delphi types, but will remain
     // identical in UTF-8 SQL, as all will be converted into UTF-8
     T.Valfloat := 3.141592653;
@@ -695,7 +695,8 @@ begin
     Check(T.SameValues(T2));
     bin := VariantSave(T.ValVariant);
     Check(bin <> '');
-    Check(VariantLoad(v, pointer(bin), @JSON_[mFast]) <> nil);
+    Check(VariantLoad(v, pointer(bin), @JSON_[mFast],
+      PAnsiChar(bin) + length(bin)) <> nil);
     CheckEqual(VariantSaveMongoJson(v, modMongoStrict), '{"name":"John","int":1234}');
   finally
     M.Free;

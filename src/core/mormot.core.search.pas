@@ -9,6 +9,7 @@ unit mormot.core.search;
    Several Indexing and Search Engines, as used by other parts of the framework
     - Files Search in Folders
     - ScanUtf8, GLOB and SOUNDEX Text Search
+    - Efficient CSV Parsing using RTTI
     - Versatile Expression Search Engine
     - Bloom Filter Probabilistic Index
     - Binary Buffers Delta Compression
@@ -169,6 +170,7 @@ type
     // be pointed to by the PatternText private field of this object
     procedure Prepare(const aPattern: RawUtf8;
       aCaseInsensitive, aReuse: boolean); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// initialize the internal fields for a given glob search pattern
     // - note that the aPattern buffer should remain in memory, since it will
     // be pointed to by the PatternText private field of this object
@@ -207,6 +209,9 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// access to the pattern text as stored in Pattern
     function PatternText: PUtf8Char;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// check if the pattern search was defined as case-insensitive
+    function CaseInsensitive: boolean;
       {$ifdef HASINLINE}inline;{$endif}
   end;
 
@@ -282,17 +287,17 @@ function MatchAdd(const One: TMatch; var Several: TMatchDynArray): boolean;
 function MatchAny(const Match: TMatchDynArray; const Text: RawUtf8): boolean;
 
 /// apply the CSV-supplied glob patterns to an array of RawUtf8
-// - any text not maching the pattern will be deleted from the array
+// - any text not matching the pattern will be deleted from the array
 procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
   var Values: TRawUtf8DynArray); overload;
 
 /// apply the CSV-supplied glob patterns to an array of string
-// - any text not maching the pattern will be deleted from the array
+// - any text not matching the pattern will be deleted from the array
 procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
   var Values: TStringDynArray); overload;
 
-/// return TRUE if the supplied content matchs a glob pattern
-// - ?  Matches any single characer
+/// return TRUE if the supplied content matches a glob pattern
+// - ?  Matches any single character
 // - *	Matches any contiguous characters
 // - [abc]  Matches a or b or c at that position
 // - [^abc]	Matches anything but a or b or c at that position
@@ -306,7 +311,7 @@ procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
 function IsMatch(const Pattern, Text: RawUtf8;
   CaseInsensitive: boolean = false): boolean;
 
-/// return TRUE if the supplied content matchs a glob pattern, using VCL strings
+/// return TRUE if the supplied content matches a glob pattern, using VCL strings
 // - is a wrapper around IsMatch() with fast UTF-8 conversion
 function IsMatchString(const Pattern, Text: string;
   CaseInsensitive: boolean = false): boolean;
@@ -383,12 +388,30 @@ function SoundExUtf8(U: PUtf8Char; next: PPUtf8Char = nil;
   Lang: TSynSoundExPronunciation = sndxEnglish): cardinal;
 
 const
-  /// number of bits to use for each interresting soundex char
+  /// number of bits to use for each interesting soundex char
   // - default is to use 8-bit, i.e. 4 soundex chars, which is the
   // standard approach
-  // - for a more detailled soundex, use 4 bits resolution, which will
+  // - for a more detailed soundex, use 4 bits resolution, which will
   // compute up to 7 soundex chars in a cardinal (that's our choice)
   SOUNDEX_BITS = 4;
+
+
+{ ******************  Efficient CSV Parsing using RTTI }
+
+/// parse a CSV buffer into a TDynArray of records using its RTTI fields
+// - TypeInfo should have proper fields description, e.g. from Delphi 2010
+// extended RTTI or mormot.core.rtti.pas' Rtti.RegisterFromText()
+// - first CSV line has headers matching the needed case-insensitive field names
+// - following CSV lines will be read and parsed into the dynamic array records
+// - any unknown header name within the RTTI fields will be ignored
+// - you can optionally intern all RawUtf8 values to reduce memory consumption
+function TDynArrayLoadCsv(var Value: TDynArray; Csv: PUtf8Char;
+  Intern: TRawUtf8Interning = nil): boolean;
+
+/// parse a CSV UTF-8 string into a dynamic array of records using its RTTI fields
+// - just a wrapper around DynArrayLoadCsv() with a temporary TDynArray
+function DynArrayLoadCsv(var Value; const Csv: RawUtf8; TypeInfo: PRttiInfo;
+  Intern: TRawUtf8Interning = nil): boolean;
 
 
 { ****************** Versatile Expression Search Engine }
@@ -506,7 +529,7 @@ type
   TExprParserAbstract = class(TParserAbstract)
   protected
     procedure ParseNextCurrentWord; override;
-    // may be overriden to provide custom words escaping (e.g. handle quotes)
+    // may be overridden to provide custom words escaping (e.g. handle quotes)
     procedure ParseNextWord; virtual;
     procedure Initialize; override;
   end;
@@ -544,7 +567,7 @@ type
   // - a "Bloom Filter" is a space-efficient probabilistic data structure,
   // that is used to test whether an element is a member of a set. False positive
   // matches are possible, but false negatives are not. Elements can be added to
-  // the set, but not removed. Typical use cases are to avoid unecessary
+  // the set, but not removed. Typical use cases are to avoid unnecessary
   // slow disk or network access if possible, when a lot of items are involved.
   // - memory use is very low, when compared to storage of all values: fewer
   // than 10 bits per element are required for a 1% false positive probability,
@@ -821,7 +844,7 @@ function SimpleDynArrayLoadFrom(Source: PAnsiChar; aTypeInfo: PRttiInfo;
 // is much faster than creating a temporary dynamic array to load the data
 // - will return nil if no or invalid data, or a pointer to the integer
 // array otherwise, with the items number stored in Count
-// - sligtly faster than SimpleDynArrayLoadFrom(Source,TypeInfo(TIntegerDynArray),Count)
+// - slightly faster than SimpleDynArrayLoadFrom(Source,TypeInfo(TIntegerDynArray),Count)
 function IntegerDynArrayLoadFrom(Source: PAnsiChar; var Count: integer): PIntegerArray;
 
 /// search in a RawUtf8 dynamic array BLOB content as stored by TDynArray.SaveTo
@@ -840,7 +863,7 @@ type
     ArrayLoad: TRttiBinaryLoad;
   public
     /// how many items were saved in the TDynArray.SaveTo binary buffer
-    // - equals -1 if Init() failed to unserialize its header
+    // - equals -1 if Init() failed to deserialize its header
     Count: integer;
     /// the zero-based index of the current item pointed by next Step() call
     // - is in range 0..Count-1 until Step() returns false
@@ -849,7 +872,7 @@ type
     // - after Step() returned false, points just after the binary buffer,
     // like a regular TDynArray.LoadFrom
     Reader: TFastReader;
-    /// RTTI information of the unserialized dynamic array
+    /// RTTI information of the deserialized dynamic array
     ArrayRtti: TRttiCustom;
     /// initialize iteration over a TDynArray.SaveTo binary buffer
     // - returns true on success, with Count and Position being set
@@ -888,7 +911,7 @@ type
   TSynFilterOrValidateObjArrayArray = array of TSynFilterOrValidateObjArray;
 
   /// will define a filter (transformation) or a validation process to be
-  // applied to a database Record content (typicaly a TOrm)
+  // applied to a database Record content (typically a TOrm)
   // - the optional associated parameters are to be supplied JSON-encoded
   TSynFilterOrValidate = class
   protected
@@ -916,9 +939,9 @@ type
       read fParameters write SetParameters;
   end;
 
-  /// will define a validation to be applied to a Record (typicaly a TOrm)
+  /// will define a validation to be applied to a Record (typically a TOrm)
   // field content
-  // - a typical usage is to validate an email or IP adress e.g.
+  // - a typical usage is to validate an email or IP address e.g.
   // - the optional associated parameters are to be supplied JSON-encoded
   TSynValidate = class(TSynFilterOrValidate)
   public
@@ -941,7 +964,7 @@ type
   PSynValidate = ^TSynValidate;
 
   /// IP v4 address validation to be applied to a Record field content
-  // (typicaly a TOrm)
+  // (typically a TOrm)
   // - this versions expect no parameter
   TSynValidateIPAddress = class(TSynValidate)
   protected
@@ -952,7 +975,7 @@ type
   end;
 
   /// IP address validation to be applied to a Record field content
-  // (typicaly a TOrm)
+  // (typically a TOrm)
   // - optional JSON encoded parameters are "AllowedTLD" or "ForbiddenTLD",
   // expecting a CSV lis of Top-Level-Domain (TLD) names, e.g.
   // $ '{"AllowedTLD":"com,org,net","ForbiddenTLD":"fr"}'
@@ -1001,7 +1024,7 @@ type
 
   /// glob case-sensitive pattern validation of a Record field content
   // - parameter is NOT JSON encoded, but is some basic TMatch glob pattern
-  // - ?	   	Matches any single characer
+  // - ?	   	Matches any single character
   // - *	   	Matches any contiguous characters
   // - [abc]  Matches a or b or c at that position
   // - [^abc]	Matches anything but a or b or c at that position
@@ -1028,7 +1051,7 @@ type
   end;
 
   /// glob case-insensitive pattern validation of a text field content
-  // (typicaly a TOrm)
+  // (typically a TOrm)
   // - parameter is NOT JSON encoded, but is some basic TMatch glob pattern
   // - same as TSynValidatePattern, but is NOT case sensitive
   TSynValidatePatternI = class(TSynValidatePattern);
@@ -1143,20 +1166,20 @@ type
     // codepoints - MaxLength may not match the UCS4 CodePoint, in case of
     // UTF-16 surrogates
     // - you can set this property to TRUE so that the UTF-8 byte count would
-    // be used for truncation againts the MaxLength parameter
+    // be used for truncation against the MaxLength parameter
     property Utf8Length: boolean
       read fUtf8Length write fUtf8Length;
   end;
 {$M-}
 
-  /// strong password validation for a Record field content (typicaly a TOrm)
+  /// strong password validation for a Record field content (typically a TOrm)
   // - the following parameters are set by default to
   // $ '{"MinLength":5,"MaxLength":20,"MinAlphaCount":1,"MinDigitCount":1,
   // $ "MinPunctCount":1,"MinLowerCount":1,"MinUpperCount":1,"MaxSpaceCount":0}'
   // - you can specify some JSON encoded parameters to change this default
   // values, which will validate the text field only if it contains from 5 to 10
   // characters, with at least one digit, one upper case letter, one lower case
-  // letter, and one ponctuation sign, with no space allowed inside
+  // letter, and one punctuation sign, with no space allowed inside
   TSynValidatePassWord = class(TSynValidateText)
   protected
     /// set password specific parameters
@@ -1170,7 +1193,7 @@ type
   {$NODEFINE TSynValidatePassWord }
 
   /// will define a transformation to be applied to a Record field content
-  // (typicaly a TOrm)
+  // (typically a TOrm)
   // - here "filter" means that content would be transformed according to a
   // set of defined rules
   // - a typical usage is to convert to lower or upper case, or
@@ -1185,7 +1208,7 @@ type
     procedure Process(aFieldIndex: integer; var Value: RawUtf8); virtual; abstract;
   end;
 
-  /// class-refrence type (metaclass) for a TSynFilter or a TSynValidate
+  /// class-reference type (metaclass) for a TSynFilter or a TSynValidate
   TSynFilterOrValidateClass = class of TSynFilterOrValidate;
 
   /// class-reference type (metaclass) of a record filter (transformation)
@@ -1233,7 +1256,7 @@ type
   // - this versions expect no parameter
   TSynFilterTrim = class(TSynFilter)
   public
-    /// perform the space triming conversion to the specified value
+    /// perform the space trimming conversion to the specified value
     procedure Process(aFieldIndex: integer; var Value: RawUtf8); override;
   end;
 
@@ -1260,7 +1283,7 @@ type
     // codepoints - MaxLength may not match the UCS4 CodePoint, in case of
     // UTF-16 surrogates
     // - you can set this property to TRUE so that the UTF-8 byte count would
-    // be used for truncation againts the MaxLength parameter
+    // be used for truncation against the MaxLength parameter
     property Utf8Length: boolean
       read fUtf8Length write fUtf8Length;
   end;
@@ -1291,7 +1314,7 @@ function IsValidEmail(P: PUtf8Char): boolean;
 { ***************** Cross-Platform TSynTimeZone Time Zones }
 
 type
-  {$A-}
+  {$A-} { make all records packed for cross-platform binary serialization }
 
   /// used to store Time Zone bias in TSynTimeZone
   // - map how low-level information is stored in the Windows Registry
@@ -1322,6 +1345,7 @@ type
       year: integer;
       tzi: TTimeZoneInfo;
     end;
+    /// search for the TTimeZoneInfo of a given year
     function GetTziFor(year: integer): PTimeZoneInfo;
   end;
 
@@ -1336,7 +1360,7 @@ type
   // saved from a Windows system first)
   // - for Linux/POSIX our mORMot 2 repository supplies a ready-to-use
   // ! {$R mormot.tz.res}
-  // - each time zone will be idendified by its TzId string, as defined by
+  // - each time zone will be identified by its TzId string, as defined by
   // Microsoft for its Windows Operating system
   // - note that each instance is thread-safe
   TSynTimeZone = class
@@ -1386,7 +1410,7 @@ type
     // - you can specify a library (dll) resource instance handle, if needed
     // - for Linux/POSIX our mORMot 2 repository supplies a ready-to-use
     // ! {$R mormot.tz.res}
-    procedure LoadFromResource(Instance: THandle = 0);
+    procedure LoadFromResource(Instance: TLibHandle = 0);
     /// write then time zone information into a compressed file
     // - if no file name is supplied, a ExecutableName.tz file would be created
     procedure SaveToFile(const FileName: TFileName);
@@ -1404,7 +1428,7 @@ type
     function NowToLocal(const TzId: TTimeZoneID): TDateTime;
     /// compute the UTC date/time for a given local TzId value
     // - by definition, a local time may correspond to two UTC times, during the
-    // time biais period, so the returned value is informative only, and any
+    // time bias period, so the returned value is informative only, and any
     // stored value should be following UTC
     function LocalToUtc(const LocalDateTime: TDateTime; const TzID: TTimeZoneID): TDateTime;
     /// direct access to the low-level time zone information
@@ -1445,7 +1469,7 @@ function NowToLocal(const TzId: TTimeZoneID): TDateTime;
 
 /// compute the UTC date/time for a given local TzId value
 // - by definition, a local time may correspond to two UTC times, during the
-// time biais period, so the returned value is informative only, and any
+// time bias period, so the returned value is informative only, and any
 // stored value should be following UTC
 // - will use a global shared thread-safe TSynTimeZone instance for the request
 function LocalToUtc(const LocalDateTime: TDateTime; const TzID: TTimeZoneID): TDateTime;
@@ -1460,7 +1484,7 @@ implementation
 
 procedure TFindFiles.FromSearchRec(const Directory: TFileName; const F: TSearchRec);
 begin
-  Name := Directory + F.Name;
+  Name := Directory + TFileName(F.Name);
   {$ifdef OSWINDOWS}
   {$ifdef HASINLINE} // FPC or Delphi 2006+
   Size := F.Size;
@@ -1493,8 +1517,11 @@ var
   var
     F: TSearchRec;
     ff: TFindFiles;
+    fold, name: TFileName; // FPC requires these implicit local variables :(
   begin
-    if FindFirst(dir + folder + Mask, faAnyfile - faDirectory, F) = 0 then
+    fold := dir + folder;
+    name := fold + Mask;
+    if FindFirst(name, faAnyfile - faDirectory, F) = 0 then
     begin
       repeat
         if SearchRecValidFile(F) and
@@ -1504,14 +1531,14 @@ var
           if ffoExcludesDir in Options then
             ff.FromSearchRec(folder, F)
           else
-            ff.FromSearchRec(dir + folder, F);
+            ff.FromSearchRec(fold, F);
           da.Add(ff);
         end;
       until FindNext(F) <> 0;
       FindClose(F);
     end;
     if (ffoSubFolder in Options) and
-       (FindFirst(dir + folder + '*', faDirectory, F) = 0) then
+       (FindFirst(fold + '*', faDirectory, F) = 0) then
     begin
       // recursive SearchFolder() call for nested directories
       repeat
@@ -2150,7 +2177,7 @@ begin
 end;
 
 function SimpleContainsU(t, tend, p: PUtf8Char; pmax: PtrInt; up: PNormTable): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
 // brute force case-insensitive search p[0..pmax] in t..tend-1
 var
   first: AnsiChar;
@@ -2179,7 +2206,8 @@ end;
 
 {$ifdef CPU64} // naive but very efficient code generation on FPC x86-64
 
-function SimpleContains8(t, tend, p: PUtf8Char; pmax: PtrInt): boolean; inline;
+function SimpleContains8(t, tend, p: PUtf8Char; pmax: PtrInt): boolean;
+  {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
 label
   next;
 var
@@ -2210,7 +2238,7 @@ end;
 {$ifdef CPUX86}
 
 function SimpleContains1(t, tend, p: PUtf8Char; pmax: PtrInt): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
 label
   next;
 var
@@ -2235,7 +2263,7 @@ next: inc(t);
 end;
 
 function SimpleContains4(t, tend, p: PUtf8Char; pmax: PtrInt): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
 label
   next;
 var
@@ -2262,7 +2290,7 @@ end;
 {$else}
 
 function SimpleContains1(t, tend, p: PUtf8Char; pmax: PtrInt): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
 label
   next;
 var
@@ -2289,7 +2317,7 @@ next: inc(t);
 end;
 
 function SimpleContains4(t, tend, p: PUtf8Char; pmax: PtrInt): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
 label
   next;
 var
@@ -2743,11 +2771,17 @@ begin
   result := Pattern;
 end;
 
+function TMatch.CaseInsensitive: boolean;
+begin
+  result := Upper = @NormToUpperAnsi7;
+end;
+
+
 function IsMatch(const Pattern, Text: RawUtf8; CaseInsensitive: boolean): boolean;
 var
   match: TMatch;
 begin
-  match.Prepare(Pattern, CaseInsensitive, {reuse=}false);
+  match.Prepare(pointer(Pattern), length(Pattern), CaseInsensitive, {reuse=}false);
   result := match.Match(Text);
 end;
 
@@ -3262,6 +3296,111 @@ begin
   end;
   if next <> nil then
     next^ := FindNextUtf8WordBegin(U);
+end;
+
+
+{ ******************  Efficient CSV Parsing using RTTI }
+
+function TDynArrayLoadCsv(var Value: TDynArray; Csv: PUtf8Char;
+  Intern: TRawUtf8Interning): boolean;
+var
+  rt: TRttiCustom;
+  pr: PRttiCustomProp;
+  p, v: PUtf8Char;
+  s: RawUtf8;
+  mapcount, mapped, m: PtrInt;
+  rec: pointer;
+  map: PRttiCustomPropDynArray;
+  n: integer;
+  ext: PInteger;
+begin
+  result := false;
+  rt := Value.Info.ArrayRtti;
+  if (rt = nil) or
+     (rt.Parser <> ptRecord) or
+     (rt.Props.Count = 0) then
+    exit;
+  // parse the CSV headers
+  mapped := 0;
+  mapcount := 0;
+  SetLength(map, 32);
+  p := pointer(GetNextLine(Csv, Csv));
+  if Csv = nil then
+    exit; // no data
+  while p <> nil do
+  begin
+    GetNextItem(p, ',', '"', s);
+    if s = '' then
+      exit; // we don't support void headers
+    if mapcount = length(map) then
+      SetLength(map, NextGrow(mapcount));
+    pr := rt.Props.Find(s);
+    if pr <> nil then
+    begin
+      map[mapcount] := pr; // found a matching field
+      inc(mapped);
+    end;
+    inc(mapcount);
+  end;
+  if mapped = 0 then
+    exit; // no field matching any header
+  // parse the value rows
+  n := 0;
+  ext := Value.CountExternal;
+  if ext = nil then
+    Value.UseExternalCount(@n); // faster Value.NewPtr
+  v := Csv;
+  while v^ in [#10, #13] do
+    inc(v);
+  while v^ <> #0 do
+  begin
+    rec := Value.NewPtr;
+    m := 0;
+    repeat
+      // parse next value
+      Csv := v;
+      if v^ = '"' then
+        v := GotoEndOfQuotedString(v); // special handling of double quotes
+      while (v^ <> ',') and
+            (v^ > #13) do
+        inc(v);
+      if (m < mapcount) and
+         (map[m] <> nil) then // not matching fields are just ignored
+      begin
+        if Csv^ = '"' then
+        begin
+          UnQuoteSqlStringVar(Csv, s);
+          if Intern <> nil then
+            Intern.UniqueText(s);
+        end
+        else
+          Intern.Unique(s, Csv, v - Csv);
+        map[m].SetValueText(rec, s);
+      end;
+      inc(m);
+      if v^ <> ',' then
+        break;
+      inc(v);
+    until v^ in [#0, #10, #13];
+    // go to next row
+    while v^ in [#10, #13] do
+      inc(v);
+  end;
+  if Value.Count = 0 then
+    Value.Capacity := 0
+  else
+    DynArrayFakeLength(Value.Value^, Value.Count);
+  Value.UseExternalCount(ext); // restore fCountP if local n count was used
+  result := true;
+end;
+
+function DynArrayLoadCsv(var Value; const Csv: RawUtf8; TypeInfo: PRttiInfo;
+  Intern: TRawUtf8Interning): boolean;
+var
+  da: TDynArray;
+begin
+  da.Init(TypeInfo, Value);
+  result := TDynArrayLoadCsv(da, pointer(CSV), Intern);
 end;
 
 
@@ -4856,7 +4995,7 @@ begin
      (ValueLen = 0) or
      (Source = nil) then
      // (Source[0] <> AnsiChar(SizeOf(PtrInt))) mORMot 2 stores elemsize=0
-     // {$ifndef FPC} or (Source[1] <> AnsiChar(rkLString)){$endif}
+     // {$ifdef ISDELPHI} or (Source[1] <> AnsiChar(rkLString)){$endif}
   begin
     result := -1;
     exit; // invalid Source or Value content
@@ -5654,7 +5793,7 @@ begin
   LoadFromBuffer(StringFromFile(FN));
 end;
 
-procedure TSynTimeZone.LoadFromResource(Instance: THandle);
+procedure TSynTimeZone.LoadFromResource(Instance: TLibHandle);
 var
   buf: RawByteString;
 begin

@@ -34,6 +34,14 @@ psql postgres://benchmarkdbuser:benchmarkdbpass@tfb-database:5432/hello_world < 
 
 Those two `.sql` scripts are located in this folder for convenience.
 
+## Command line  parameters
+Working threads (per server), used CPU cores, and servers count can be specified in command line as such:
+```
+$ raw threads cores servers
+```
+default is computed at startup depending on the available CPU cores on the running system.
+
+
 ## Some Numbers
 
 This file is currently in a pull request of the TFB repository.

@@ -261,6 +261,8 @@ type
   // - can be used e.g. as white-list or black-list of clients
   // - will maintain internally a sorted list of 32-bit integers for fast lookup
   // - with optional binary persistence
+  // - as used by TRestServer.BanIP/JwtForUnauthenticatedRequestWhiteIP
+  // - see also more efficient and lower level THttpAcceptBan in mormot.net.http
   TIPBan = class(TSynPersistentStore)
   protected
     fIP4: TIntegerDynArray;
@@ -993,6 +995,9 @@ type
     function Update(const buf: RawByteString): ICryptHash; overload;
     /// iterative process of a file content
     procedure UpdateFile(const filename: TFileName);
+    /// iterative process of a stream content
+    // - return the number of bytes hashed from the input TStream
+    function UpdateStream(stream: TStream): Int64;
     /// compute the digest, and return it in a memory buffer
     function Final(digest: pointer; digestlen: PtrInt): PtrInt; overload;
     /// compute the digest, and return it as UTF-8 hexadecimal text
@@ -1039,6 +1044,7 @@ type
     function Update(buf: pointer; buflen: PtrInt): ICryptHash; overload; virtual; abstract;
     function Update(const buf: RawByteString): ICryptHash; overload;
     procedure UpdateFile(const filename: TFileName);
+    function UpdateStream(stream: TStream): Int64;
     function Final(digest: pointer; digestlen: PtrInt): PtrInt; overload;
     function Final: RawUtf8; overload;
   end;
@@ -1642,8 +1648,8 @@ type
     // - returns the reason why this certificate has been revoked otherwise
     function IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason; overload;
     /// register a certificate in the internal certificate chain
-    // - returns false e.g. if the certificate was not valid, or its
-    // serial was already part of the internal list
+    // - returns false e.g. if the certificate was not valid, or its serial was
+    // already part of the internal list, or not of a compatible class
     // - self-signed certificate could be included - but add them with caution
     // - the Certificate should have one of cuCA, cuDigitalSignature usages
     function Add(const cert: ICryptCert): boolean;
@@ -2113,7 +2119,7 @@ type
 var
   /// low-level function used by StuffExeCertificate()
   // - properly implemented by mormot.crypt.openssl.pas, but this unit
-  // has a stand-alone version using a pre-generated certificate
+  // has a stand-alone version using a pre-generated fixed certificate
   CreateDummyCertificate: function(const Stuff: RawUtf8; const CertName: RawUtf8;
     Marker: cardinal): RawByteString;
 
@@ -2125,10 +2131,11 @@ var
 // a Windows signed executable
 // - raise EStuffExe if MainFile has no supported signature, or is already stuffed
 // - this function does not require mormot.crypt.openssl but may use it if
-// available to generate a genuine dummy certificate
+// available to generate a genuine dummy certificate - if UseInternalCertificate
+// is true, or OpenSSL is not available, it will use a fixed constant certificate
 // - use FindStuffExeCertificate() to retrieve the stuffed text
 procedure StuffExeCertificate(const MainFile, NewFile: TFileName;
-  const Stuff: RawUtf8);
+  const Stuff: RawUtf8; UseInternalCertificate: boolean = false);
 
 /// retrieve the text inserted by StuffExeCertificate() into the Windows
 // executable digital signature
@@ -3345,6 +3352,7 @@ begin
     fCryptoAesE.EncryptInit(key, 128);
     fCryptoAesD.DecryptInitFrom(fCryptoAesE, key, 128);
     fCryptoCRC := key.c[7];
+    FillZero(key.b);
     // fCrypto[] is not used if fCryptoAes*.Initialized are set
   end
   else
@@ -4069,6 +4077,23 @@ begin
   finally
     FileClose(F);
   end;
+end;
+
+function TCryptHash.UpdateStream(stream: TStream): Int64;
+var
+  temp: array[word] of word; // 128KB temporary buffer
+  read: integer;
+begin
+  result := 0;
+  if stream <> nil then
+    // we don't use stream.Size since some TStream classes don't support it
+    repeat
+      read := stream.Read(temp, SizeOf(temp)); // read until the end
+      if read <= 0 then
+        break;
+      Update(@temp, read);
+      inc(result, read);
+    until false;
 end;
 
 
@@ -4995,7 +5020,7 @@ var
   tmp: TTextWriterStackBuffer; // no allocation for a few certificates
   s: TBufferWriter;
 begin
-  s := TBufferWriter.Create(tmp);
+  s := TBufferWriter.Create(tmp{%H-});
   try
     for i := 0 to length(List) - 1 do
       s.Write(List[i].Save(cccCertOnly, '', ccfBinary));
@@ -5432,7 +5457,7 @@ const
   CERTIFICATE_ENTRY_OFFSET = $98;
   WIN_CERT_TYPE_PKCS_SIGNED_DATA = 2;
 
-function FindExeCertificate(const MainFile: TFileName; OutFile: TFileStream;
+function FindExeCertificate(const MainFile: TFileName; OutFile: THandleStream;
   out wc: WIN_CERTIFICATE; lenoffs, offs: PCardinal): RawByteString;
 var
   M: TStream;
@@ -5443,7 +5468,7 @@ var
 begin
   result := '';
   firstbuf := true;
-  M := TFileStream.Create(MainFile, fmOpenRead or fmShareDenyNone);
+  M := TFileStreamEx.Create(MainFile, fmOpenReadDenyNone);
   try
     repeat
       read := M.Read(buf{%H-}, SizeOf(buf));
@@ -5549,117 +5574,6 @@ begin
 end;
 
 const
-  _CERTNAME_ = 'Dummy Cert';
-  _MARKER_ = $0102aba5;
-
-const
-  ASN1_INT = $02;
-  ASN1_OID = $06;
-  ASN1_SEQ = $30;
-  ASN1_SET = $31;
-  ASN1_ARR = $a0;
-
-procedure StuffExeCertificate(const MainFile, NewFile: TFileName;
-  const Stuff: RawUtf8);
-var
-  O: TFileStream;
-  certoffs, certlenoffs: cardinal;
-  certslen, certsend: PtrInt;
-  sig, newcert: RawByteString;
-  p: PAnsiChar;
-  wc: WIN_CERTIFICATE;
-  fixme: array[0..3] of PAnsiChar;
-begin
-  if NewFile = MainFile then
-    raise EStuffExe.CreateUtf8('MainFile=NewFile=%', [MainFile]);
-  if (Stuff = '') or
-     (length(Stuff) > 32000) or
-     (StrLen(pointer(Stuff)) <> length(Stuff)) then
-    raise EStuffExe.CreateUtf8('Stuff should be pure Text for %', [MainFile]);
-  certoffs := 0;
-  certlenoffs := 0;
-  O := TFileStream.Create(NewFile, fmCreate);
-  try
-    try
-      // copy MainFile source file, parsing the PE header and cert chain
-      sig := FindExeCertificate(MainFile, O, wc, @certlenoffs, @certoffs);
-      if length(sig) < 4000 then
-        raise EStuffExe.CreateUtf8('No signature found in %', [MainFile]);
-      if PosEx(_CERTNAME_, sig) <> 0 then
-        raise EStuffExe.CreateUtf8('% is already stuffed', [MainFile]);
-      // parse the original PKCS#7 signed data
-      p := pointer(sig);
-      fixme[0] := p;
-      if Asn1Next(p, ASN1_SEQ, {moveafter=}false, 'SEQ') + 4 > length(sig) then
-        raise EStuffExe.CreateUtf8('Truncated signature in %', [MainFile]);
-      Asn1Next(p, ASN1_OID, true,  'OID');
-      fixme[1] := p;
-      Asn1Next(p, ASN1_ARR, false, 'ARR');
-      fixme[2] := p;
-      Asn1Next(p, ASN1_SEQ, false, 'PKCS#7');
-      Asn1Next(p, ASN1_INT, true,  'Version');
-      Asn1Next(p, ASN1_SET, true,  'Digest');
-      Asn1Next(p, ASN1_SEQ, true,  'Context');
-      fixme[3] := p;
-      certslen := Asn1Next(p, ASN1_ARR, false, 'Certs');
-      inc(p, certslen);
-      certsend := p - pointer(sig);
-      Asn1Next(p, ASN1_SET, true, 'SignerInfo');
-      if p - pointer(sig) > length(sig) then
-        raise EStuffExe.CreateUtf8('Wrong cert ending in %', [MainFile]);
-      // append the stuffed data within a dummy certificate
-      newcert := CreateDummyCertificate(Stuff, _CERTNAME_, _MARKER_);
-      if newcert = '' then
-        raise EStuffExe.CreateUtf8('CreateDummyCertificate for %', [MainFile]);
-      Asn1FixMe(@fixme, length(fixme), length(newcert), MainFile);
-      insert(newcert, sig, certsend + 1);
-      // write back the stuffed signature
-      wc.dwLength := length(sig) + SizeOf(wc);
-      while wc.dwLength and 7 <> 0 do // 64-bit padding
-      begin
-        inc(wc.dwLength);
-        SetLength(sig, wc.dwLength);    // padded with #0
-      end;
-      O.Seek(certlenoffs, soBeginning); // in PE header
-      O.WriteBuffer(wc.dwLength, 4);
-      O.Seek(certoffs, soBeginning);    // in the certificate table
-      O.WriteBuffer(wc, SizeOf(wc));
-      O.WriteBuffer(pointer(sig)^, wc.dwLength - SizeOf(wc));
-    except
-      DeleteFile(NewFile); // aborted file is clearly invalid
-    end;
-  finally
-    O.Free;
-  end;
-end;
-
-function FindStuffExeCertificate(const FileName: TFileName): RawUtf8;
-var
-  wc: WIN_CERTIFICATE;
-  i, j, len: PtrInt;
-  P: PAnsiChar;
-  cert: RawByteString;
-begin
-  result := '';
-  cert := FindExeCertificate(FileName, nil, wc, nil, nil);
-  i := PosEx(_CERTNAME_, cert);
-  if i = 0 then
-    exit;
-  P := pointer(Cert);
-  for j := i to length(cert) - 16 do
-    if PCardinal(P + j)^ = _MARKER_ then
-    begin
-      len := 0; // length is encoded as hexadecimal
-      if mormot.core.text.HexToBin(P + j + 4, @len, 2) and
-         (len + j + 8 < length(cert)) then
-      begin
-        FastSetString(result, P + j + 8, len);
-        exit;
-      end;
-    end;
-end;
-
-const
   // compressed from a mormot.crypt.openssl _CreateDummyCertificate() call
   _DUMMY: array[0..405] of byte = (
     $30, $82, $02, $ba, $30, $82, $02, $62, $a0, $03, $02, $01, $02, $02, $14,
@@ -5719,11 +5633,126 @@ begin
   fixme[6] := p + 306;
   PCardinal(p + 310)^ := Marker; // but we can overwrite the marker
   len := length(Stuff);
-  mormot.core.text.BinToHex(@len, p + 314, 2);
+  mormot.core.text.BinToHex(@len, p + 314, 2); // 16-bit hexa len
   Asn1FixMe(@fixme, 7, len - _DUMMYSTUFFLEN, 'CreateDummyCertificate');
   delete(dummy, 319, _DUMMYSTUFFLEN);
   insert(Stuff, dummy, 319);
   result := dummy;
+end;
+
+const
+  _CERTNAME_ = 'Dummy Cert';
+  _MARKER_ = $0102aba5;
+
+const
+  ASN1_INT = $02;
+  ASN1_OID = $06;
+  ASN1_SEQ = $30;
+  ASN1_SET = $31;
+  ASN1_ARR = $a0;
+
+procedure StuffExeCertificate(const MainFile, NewFile: TFileName;
+  const Stuff: RawUtf8; UseInternalCertificate: boolean);
+var
+  O: THandleStream;
+  certoffs, certlenoffs: cardinal;
+  certslen, certsend: PtrInt;
+  sig, newcert: RawByteString;
+  p: PAnsiChar;
+  wc: WIN_CERTIFICATE;
+  fixme: array[0..3] of PAnsiChar;
+begin
+  if NewFile = MainFile then
+    raise EStuffExe.CreateUtf8('MainFile=NewFile=%', [MainFile]);
+  if (Stuff = '') or
+     (length(Stuff) > 32000) or
+     (StrLen(pointer(Stuff)) <> length(Stuff)) then
+    raise EStuffExe.CreateUtf8('Stuff should be pure Text for %', [MainFile]);
+  certoffs := 0;
+  certlenoffs := 0;
+  O := TFileStreamEx.Create(NewFile, fmCreate);
+  try
+    try
+      // copy MainFile source file, parsing the PE header and cert chain
+      sig := FindExeCertificate(MainFile, O, wc, @certlenoffs, @certoffs);
+      if length(sig) < 4000 then
+        raise EStuffExe.CreateUtf8('No signature found in %', [MainFile]);
+      if PosEx(_CERTNAME_, sig) <> 0 then
+        raise EStuffExe.CreateUtf8('% is already stuffed', [MainFile]);
+      // parse the original PKCS#7 signed data
+      p := pointer(sig);
+      fixme[0] := p;
+      if Asn1Next(p, ASN1_SEQ, {moveafter=}false, 'SEQ') + 4 > length(sig) then
+        raise EStuffExe.CreateUtf8('Truncated signature in %', [MainFile]);
+      Asn1Next(p, ASN1_OID, true,  'OID');
+      fixme[1] := p;
+      Asn1Next(p, ASN1_ARR, false, 'ARR');
+      fixme[2] := p;
+      Asn1Next(p, ASN1_SEQ, false, 'PKCS#7');
+      Asn1Next(p, ASN1_INT, true,  'Version');
+      Asn1Next(p, ASN1_SET, true,  'Digest');
+      Asn1Next(p, ASN1_SEQ, true,  'Context');
+      fixme[3] := p;
+      certslen := Asn1Next(p, ASN1_ARR, false, 'Certs');
+      inc(p, certslen);
+      certsend := p - pointer(sig);
+      Asn1Next(p, ASN1_SET, true, 'SignerInfo');
+      if p - pointer(sig) > length(sig) then
+        raise EStuffExe.CreateUtf8('Wrong cert ending in %', [MainFile]);
+      // append the stuffed data within a dummy certificate
+      if UseInternalCertificate then
+        newcert := _CreateDummyCertificate(Stuff, _CERTNAME_, _MARKER_)
+      else // may come from OpenSSL
+        newcert := CreateDummyCertificate(Stuff, _CERTNAME_, _MARKER_);
+      if newcert = '' then
+        raise EStuffExe.CreateUtf8('CreateDummyCertificate for %', [MainFile]);
+      Asn1FixMe(@fixme, length(fixme), length(newcert), MainFile);
+      insert(newcert, sig, certsend + 1);
+      // write back the stuffed signature
+      wc.dwLength := length(sig) + SizeOf(wc);
+      while wc.dwLength and 7 <> 0 do // 64-bit padding
+      begin
+        inc(wc.dwLength);
+        SetLength(sig, length(sig) + 1); // wc.dwLength <> length(sig)
+        sig[length(sig)] := #0; // padded with #0
+      end;
+      O.Seek(certlenoffs, soBeginning); // in PE header
+      O.WriteBuffer(wc.dwLength, 4);
+      O.Seek(certoffs, soBeginning);    // in the certificate table
+      O.WriteBuffer(wc, SizeOf(wc));
+      O.WriteBuffer(pointer(sig)^, wc.dwLength - SizeOf(wc));
+    except
+      DeleteFile(NewFile); // aborted file is clearly invalid
+    end;
+  finally
+    O.Free;
+  end;
+end;
+
+function FindStuffExeCertificate(const FileName: TFileName): RawUtf8;
+var
+  wc: WIN_CERTIFICATE;
+  i, j, len: PtrInt;
+  P: PAnsiChar;
+  cert: RawByteString;
+begin
+  result := '';
+  cert := FindExeCertificate(FileName, nil, wc, nil, nil);
+  i := PosEx(_CERTNAME_, cert);
+  if i = 0 then
+    exit;
+  P := pointer(Cert);
+  for j := i to length(cert) - 16 do
+    if PCardinal(P + j)^ = _MARKER_ then
+    begin
+      len := 0; // length is encoded as 16-bit hexadecimal
+      if mormot.core.text.HexToBin(P + j + 4, @len, 2) and
+         (len + j + 8 < length(cert)) then
+      begin
+        FastSetString(result, P + j + 8, len);
+        exit;
+      end;
+    end;
 end;
 
 

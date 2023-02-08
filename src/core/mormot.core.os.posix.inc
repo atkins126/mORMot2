@@ -141,9 +141,15 @@ begin
   FastSetString(result, S, P - S);
 end;
 
-function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
 begin
-  result := RawUtf8(format(Fmt, Args));
+  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
+end;
+
+procedure _fmt(const Fmt: string; const Args: array of const;
+  var result: RawUtf8); overload;
+begin
+  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
 end;
 
 
@@ -682,6 +688,28 @@ begin
   result.MilliSecond := tz.tv_usec div MicroSecsPerMilliSec;
 end;
 
+// try to stabilize MacOS pthreads API calls
+
+function GetCurrentThreadId: TThreadID;
+begin
+  result := system.GetCurrentThreadID();
+end;
+
+function TryEnterCriticalSection(var cs: TRTLCriticalSection): integer;
+begin
+  result := system.TryEnterCriticalSection(cs);
+end;
+
+procedure EnterCriticalSection(var cs: TRTLCriticalSection);
+begin
+  system.EnterCriticalSection(cs);
+end;
+
+procedure LeaveCriticalSection(var cs: TRTLCriticalSection);
+begin
+  system.LeaveCriticalSection(cs);
+end;
+
 {$else}
 
 
@@ -713,10 +741,10 @@ const
 //   GetTickCount64 fpc    2 494 563 op/sec
 //   GetTickCount64 libc 119 919 893 op/sec
 function clock_gettime(clk_id: clockid_t; tp: ptimespec): cint;
-  cdecl; external clib name 'clock_gettime';
+  cdecl external clib name 'clock_gettime';
 
 function gettimeofday(tp: ptimeval; tzp: ptimezone): cint;
-  cdecl; external clib name 'gettimeofday';
+  cdecl external clib name 'gettimeofday';
 
 {$endif OSBSD}
 
@@ -787,14 +815,122 @@ begin
   result := UnixMSTimeUtc;
 end;
 
-{$ifdef OSPTHREADS}
+{$undef OSPTHREADS}
+{$undef HAS_PTHREADSETNAMENP}
+{$undef HAS_PTHREADSETAFFINITY}
 
+{$ifdef OSPTHREADSLIB}
+  {$define OSPTHREADS}
 var
   {%H-}pthread: pointer;
+  {$ifdef OSLINUX}
+  // pthread_setname_np for Linux https://stackoverflow.com/a/7989973/458259
+  {$define HAS_PTHREADSETNAMENP}
   pthread_setname_np: function(thread: pointer; name: PAnsiChar): integer; cdecl;
+  // pthread_setaffinity_np has been tested on Linux only
+  {$define HAS_PTHREADSETAFFINITY}
+  pthread_setaffinity_np: function (thread: pointer;
+    cpusetsize: SizeUInt; cpuset: pointer): integer; cdecl;
+  {$endif OSLINUX}
   pthread_cancel: function (thread: pointer): integer; cdecl;
+  pthread_mutex_init: function(mutex, attr: pointer): integer; cdecl;
+  pthread_mutex_destroy: function(mutex: pointer): integer; cdecl;
+{$endif OSPTHREADSLIB}
+
+{$ifdef OSPTHREADSSTATIC}
+  {$define OSPTHREADS}
+// note: pthread_setname_np() has no single API across POSIX systems
+function pthread_cancel(thread: pointer): integer;
+  cdecl external clib name 'pthread_cancel';
+function pthread_mutex_init(mutex, attr: pointer): integer;
+  cdecl external clib name 'pthread_mutex_init';
+function pthread_mutex_destroy(mutex: pointer): integer;
+  cdecl external clib name 'pthread_mutex_destroy';
+function pthread_mutex_lock(mutex: pointer): integer;
+  cdecl external clib name 'pthread_mutex_lock';
+function pthread_mutex_trylock(mutex: pointer): integer;
+  cdecl external clib name 'pthread_mutex_trylock';
+function pthread_mutex_unlock(mutex: pointer): integer;
+  cdecl external clib name 'pthread_mutex_unlock';
+{$endif OSPTHREADSSTATIC}
+
+
+function IsInitializedCriticalSection(var cs: TRTLCriticalSection): boolean;
+begin
+  {$ifdef OSLINUX}
+  result := cs.__m_kind <> 0;
+  {$else}
+  result := not IsZero(@cs, SizeOf(cs));
+  {$endif OSLINUX}
+end;
+
+{$ifdef OSPTHREADS}
+
+{ TOSLightLock }
+
+procedure TOSLightLock.Init;
+begin
+  FillCharFast(fMutex, SizeOf(fMutex), 0); // may be bigger than pthread struct
+  {$ifdef OSPTHREADSLIB}
+  if not Assigned(pthread_mutex_init) then
+    EOSException.Create('TOSLightLock.Init: no pthread_mutex_init')
+  else // no recursive attribute -> fast mutex
+  {$endif OSPTHREADSLIB}
+    pthread_mutex_init(@fMutex, nil);
+end;
+
+procedure TOSLightLock.Done;
+begin
+  if IsInitializedCriticalSection(fMutex) then
+    pthread_mutex_destroy(@fMutex);
+end;
+
+procedure TOSLightLock.Lock;
+begin
+  pthread_mutex_lock(@fMutex);
+end;
+
+function TOSLightLock.TryLock: boolean;
+begin
+  result := pthread_mutex_trylock(@fMutex) = 0;
+end;
+
+procedure TOSLightLock.UnLock;
+begin
+  pthread_mutex_unlock(@fMutex);
+end;
+
+{$else} // fallback to plain recursive TRTLCriticalSection
+
+{ TOSLightLock }
+
+procedure TOSLightLock.Init;
+begin
+  InitCriticalSection(fMutex);
+end;
+
+procedure TOSLightLock.Done;
+begin
+  DeleteCriticalSectionIfNeeded(fMutex);
+end;
+
+procedure TOSLightLock.Lock;
+begin
+  EnterCriticalSection(fMutex);
+end;
+
+function TOSLightLock.TryLock: boolean;
+begin
+  result := TryEnterCriticalSection(fMutex) <> 0;
+end;
+
+procedure TOSLightLock.UnLock;
+begin
+  LeaveCriticalSection(fMutex);
+end;
 
 {$endif OSPTHREADS}
+
 
 procedure SetUnixThreadName(ThreadID: TThreadID; const Name: RawByteString);
 var
@@ -829,7 +965,8 @@ begin
   if L = 0 then
     exit;
   trunc[L] := #0;
-  {$ifdef OSPTHREADS} // see https://stackoverflow.com/a/7989973
+  {$ifdef HAS_PTHREADSETNAMENP} // see https://stackoverflow.com/a/7989973
+  {$ifdef OSPTHREADSLIB}
   if Assigned(pthread_setname_np) then
     try
       pthread_setname_np(pointer(ThreadID), @trunc[0]);
@@ -837,7 +974,8 @@ begin
       // ignore any exception (pthread confusion with its static version?)
       @pthread_setname_np := nil; // don't continue that way
     end;
-  {$endif OSPTHREADS}
+  {$endif OSPTHREADSLIB}
+  {$endif HAS_PTHREADSETNAMENP}
 end;
 
 procedure RawSetThreadName(ThreadID: TThreadID; const Name: RawUtf8);
@@ -849,7 +987,7 @@ end;
 function RawKillThread(Thread: TThread): boolean;
 begin
   result := false;
-  {$ifdef OSPTHREADS}
+  {$ifdef OSPTHREADSLIB}
   if Assigned(pthread_cancel) then
     try
       result := pthread_cancel(pointer(Thread.ThreadID)) = 0;
@@ -857,8 +995,35 @@ begin
       // ignore any exception (pthread confusion with its static version?)
       @pthread_cancel := nil; // don't continue that way
     end;
-  {$endif OSPTHREADS}
+  {$endif OSPTHREADSLIB}
+  {$ifdef OSPTHREADSSTATIC}
+  result := pthread_cancel(pointer(Thread.ThreadID)) = 0;
+  {$endif OSPTHREADSSTATIC}
 end;
+
+procedure ResetCpuSet(out CpuSet: TCpuSet);
+begin
+  FillCharFast(CpuSet, SizeOf(CpuSet), 0);
+end;
+
+function SetThreadMaskAffinity(Thread: TThread; const Mask: TCpuSet): boolean;
+begin
+  result := false;
+  {$ifdef HAS_PTHREADSETAFFINITY}
+  {$ifdef OSPTHREADSLIB}
+  if (Thread <> nil) and
+     Assigned(pthread_setaffinity_np) then
+    try
+      result := pthread_setaffinity_np(
+        pointer(Thread.ThreadID), SizeOf(Mask), @Mask) = 0;
+    except
+      // ignore any exception (pthread confusion with its static version?)
+      @pthread_setaffinity_np := nil; // don't continue that way
+    end;
+  {$endif OSPTHREADSLIB}
+  {$endif HAS_PTHREADSETAFFINITY}
+end;
+
 
 {$ifndef NOEXCEPTIONINTERCEPT}
 
@@ -923,6 +1088,11 @@ begin
             (FileSetDate(Dest, DateTimeToFileDate(datetime)) = 0); // with LocalToEpoch()
 end;
 
+function SearchRecToWindowsTime(const F: TSearchRec): integer;
+begin
+  result := DateTimeToWindowsFileTime(FileDateToDateTime(F.Time));
+end;
+
 function FileAgeToWindowsTime(const FileName: TFileName): integer;
 begin
   result := DateTimeToWindowsFileTime(FileAgeToDateTime(FileName));
@@ -962,7 +1132,7 @@ begin
           {$endif OSLINUXANDROID}
 end;
 
-function FileInfo(const FileName: TFileName; out FileSize: Int64;
+function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
   out FileTimestampUtc: TUnixMSTime): boolean;
 var
   st: TStat;
@@ -1021,10 +1191,19 @@ begin
       FileCreateDateTime := lastreadaccess;
 end;
 
+function FileIsExecutable(const FileName: TFileName): boolean;
+var
+  st: TStat;
+begin
+  result := (fpStat(pointer(FileName), st) = 0) and
+            (st.st_mode and (S_IXUSR or S_IXGRP or S_IXOTH) <> 0) and
+            not FpS_ISDIR(st.st_mode);
+end;
+
 function CopyFile(const Source, Target: TFileName;
   FailIfExists: boolean): boolean;
 var
-  src, dst: TFileStream;
+  src, dst: THandleStream;
 begin
   result := false;
   if FileExists(Target) then
@@ -1033,9 +1212,9 @@ begin
     else
       DeleteFile(Target);
   try
-    src := TFileStream.Create(Source, fmOpenRead);
+    src := TFileStreamEx.Create(Source, fmOpenReadDenyNone);
     try
-      dst := TFileStream.Create(Target, fmCreate);
+      dst := TFileStreamEx.Create(Target, fmCreate);
       try
         StreamCopyUntilEnd(src, dst); // faster than dst.CopyFrom()
       finally
@@ -1049,39 +1228,6 @@ begin
   except
     result := false;
   end;
-end;
-
-function OemToUnicode(const oem: RawByteString): SynUnicode;
-const
-  OEMTOWIDE: array[128..255] of word = (
-    // from Windows API oemtocharw()
-    199, 252, 233, 226, 228, 224, 229, 231, 234, 235, 232, 239, 238, 236, 196,
-    197, 201, 230, 198, 244, 246, 242, 251, 249, 255, 214, 220, 248, 163, 216,
-    215, 402, 225, 237, 243, 250, 241, 209, 170, 186, 191, 174, 172, 189, 188,
-    161, 171, 187, 9617, 9618, 9619, 9474, 9508, 193, 194, 192, 169, 9571, 9553,
-    9559, 9565, 162, 165, 9488, 9492, 9524, 9516, 9500, 9472, 9532, 227, 195,
-    9562, 9556, 9577, 9574, 9568, 9552, 9580, 164, 240, 208, 202, 203, 200, 305,
-    205, 206, 207, 9496, 9484, 9608, 9604, 166, 204, 9600, 211, 223, 212, 210,
-    245, 213, 181, 254, 222, 218, 219, 217, 253, 221, 175, 180, 173, 177, 8215,
-    190, 182, 167, 247, 184, 176, 168, 183, 185, 179, 178, 9632, 160);
-var
-  len, i, c: PtrInt;
-begin
-  len := length(oem);
-  SetLength(result, len);
-  for i := 0 to len - 1 do
-  begin
-    c := PByteArray(oem)[i];
-    if c > 127 then
-      c := OEMTOWIDE[c];
-    PWordArray(result)[i] := c;
-  end;
-end;
-
-function OemToFileName(const oem: RawByteString): TFileName;
-begin
-  // let's assume TFileName is UTF-8 under Linux/POSIX
-  result := Utf8Encode(OemToUnicode(oem));
 end;
 
 {$I-}
@@ -1125,7 +1271,7 @@ end;
 
 function GetErrorText(error: integer): RawUtf8;
 begin
-  result := StrError(error);
+  result := StrError(error); // from FPC RTL: using a OS-specific array of const
 end;
 
 function TMemoryMap.DoMap(aCustomOffset: Int64): boolean;
@@ -1233,15 +1379,6 @@ end;
 procedure InitializeCriticalSection(var cs : TRTLCriticalSection);
 begin
   InitCriticalSection(cs);
-end;
-
-function IsInitializedCriticalSection(var cs: TRTLCriticalSection): boolean;
-begin
-  {$ifdef OSLINUX}
-  result := cs.__m_kind <> 0;
-  {$else}
-  result := not IsZero(@cs, SizeOf(cs));
-  {$endif OSLINUX}
 end;
 
 procedure DeleteCriticalSection(var cs : TRTLCriticalSection);
@@ -1364,30 +1501,53 @@ begin
   StdOut := StdOutputHandle;
 end;
 
-{$I-}
-
 var
-  TextAttr: integer = ord(ccDarkGray);
+  TextAttr: integer = 255; // always change the color at startup
 
 procedure TextColor(Color: TConsoleColor);
 const
   TERM_CTRL: string[8] = '04261537';
+var
+  s: shortstring;
 begin
-  if not StdOutIsTTY then
-    exit;
-  if ord(Color) = TextAttr then
+  if (ord(Color) = TextAttr) or
+     not StdOutIsTTY then
     exit;
   TextAttr := ord(Color);
   if ord(Color) >= 8 then
-    write(#27'[1;3', TERM_CTRL[(ord(Color) and 7) + 1], 'm')
+    s := #27'[1;3'
   else
-    write(#27'[0;3', TERM_CTRL[(ord(Color) and 7) + 1], 'm');
-  ioresult;
+    s := #27'[0;3';
+  AppendShortChar(TERM_CTRL[(ord(Color) and 7) + 1], s);
+  AppendShortChar('m', s);
+  fpwrite(StdOutputHandle, @s[1], ord(s[0])); // single syscall
 end;
 
 procedure TextBackground(Color: TConsoleColor);
 begin
   // not implemented yet - but not needed either
+end;
+
+var
+  ConsoleCriticalSection: TOSLock;
+const
+  PosixLineFeed: AnsiChar = #10;
+
+procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor;
+  NoLineFeed, NoColor: boolean);
+begin
+  ConsoleCriticalSection.Lock;
+  try
+    if not NoColor then
+      TextColor(Color);
+    fpwrite(StdOutputHandle, pointer(Text), length(Text)); // UTF-8 console
+    if not NoLineFeed then
+      fpwrite(StdOutputHandle, @PosixLineFeed, 1);
+    if not NoColor then
+      TextColor(ccLightGray);
+  finally
+    ConsoleCriticalSection.UnLock;
+  end;
 end;
 
 function WaitReadPending(fd, timeout: integer): boolean;
@@ -1406,16 +1566,21 @@ begin
   result := WaitReadPending(StdInputHandle, 0);
 end;
 
+{$I-}
 procedure ConsoleWaitForEnterKey;
 var
   c: AnsiChar;
 begin
   if GetCurrentThreadID = MainThreadID then
+  begin
+    SynDaemonIntercept; // intercept ^C and SIGQUIT - do nothing if already set
     repeat
       if IsMultiThread then
         CheckSynchronize(100)
       else
         Sleep(100);
+      if SynDaemonTerminated <> 0 then
+        break;
       if UnixKeyPending then
         repeat
           c := #0;
@@ -1424,11 +1589,13 @@ begin
           if c in [#10, #13] then
             exit;
         until false;
-    until false
+    until false;
+  end
   else
     ReadLn;
   ioresult;
 end;
+{$I+}
 
 function ConsoleStdInputLen: integer;
 begin
@@ -1441,38 +1608,31 @@ begin
   result := S; // expect a UTF-8 console under Linux/BSD
 end;
 
-function ConsoleToUtf8(const S: RawByteString): RawUtf8;
-begin
-  result := S; // expect a UTF-8 console under Linux/BSD
-end;
 
-{$I+}
-
-
-constructor TFileVersion.Create(const aFileName: TFileName;
-  aMajor, aMinor, aRelease, aBuild: integer);
+{$ifdef FPCUSEVERSIONINFO} // FPC 3.0+ if enabled in .inc / project options
+function TFileVersion.RetrieveInformationFromFileName: boolean;
 var
-  M, D: word;
-{$ifdef FPCUSEVERSIONINFO}
   VI: TVersionInfo;
-  TI, I: integer;
-{$endif FPCUSEVERSIONINFO}
+  TI: integer;
 begin
-  fFileName := aFileName;
-  {$ifdef FPCUSEVERSIONINFO} // FPC 3.0+ if enabled in Synopse.inc / project options
-  if aFileName <> '' then
-  begin
-    VI := TVersionInfo.Create;
+  result := false;
+  if fFileName = '' then
+    exit;
+  VI := TVersionInfo.Create;
+  try
     try
-      if (aFileName <> '') and
-         (aFileName <> ParamStr(0)) then
-        VI.Load(aFileName)
+      // extract information - VI.Load() may raise EResNotFound
+      if (fFileName <> '') and
+         (fFileName <> ParamStr(0)) then
+        VI.Load(fFileName)
       else
         VI.Load(HInstance); // load info for currently running program
-      aMajor := VI.FixedInfo.FileVersion[0];
-      aMinor := VI.FixedInfo.FileVersion[1];
-      aRelease := VI.FixedInfo.FileVersion[2];
-      aBuild := VI.FixedInfo.FileVersion[3];
+      result := VI.FixedInfo.FileVersion[0] <> 0;
+      // set extracted version numbers
+      SetVersion(VI.FixedInfo.FileVersion[0],
+                 VI.FixedInfo.FileVersion[1],
+                 VI.FixedInfo.FileVersion[2],
+                 VI.FixedInfo.FileVersion[3]);
       // detect translation
       if VI.VarFileInfo.Count > 0 then
         with VI.VarFileInfo.Items[0] do
@@ -1486,7 +1646,7 @@ begin
       end
       else
       begin
-        // look for index of language
+        // look for language index
         TI := VI.StringFileInfo.Count - 1;
         while (TI >= 0) and
               (CompareText(VI.StringFileInfo.Items[TI].Name, LanguageInfo) <> 0) do
@@ -1499,27 +1659,29 @@ begin
       end;
       with VI.StringFileInfo.Items[TI] do
       begin
-        CompanyName := Values['CompanyName'];
-        FileDescription := Values['FileDescription'];
-        FileVersion := Values['FileVersion'];
-        InternalName := Values['InternalName'];
-        LegalCopyright := Values['LegalCopyright'];
+        CompanyName      := Values['CompanyName'];
+        FileDescription  := Values['FileDescription'];
+        FileVersion      := Values['FileVersion'];
+        InternalName     := Values['InternalName'];
+        LegalCopyright   := Values['LegalCopyright'];
         OriginalFilename := Values['OriginalFilename'];
-        ProductName := Values['ProductName'];
-        ProductVersion := Values['ProductVersion'];
-        Comments := Values['Comments'];
+        ProductName      := Values['ProductName'];
+        ProductVersion   := Values['ProductVersion'];
+        Comments         := Values['Comments'];
       end;
-    finally
-      VI.Free;
+    except
+      // trap EResNotFound exception from VI.Load()
     end;
+  finally
+    VI.Free;
   end;
-  {$endif FPCUSEVERSIONINFO}
-  SetVersion(aMajor, aMinor, aRelease, aBuild);
-  if fBuildDateTime = 0 then // get build date from file age
-    fBuildDateTime := FileAgeToDateTime(aFileName);
-  if fBuildDateTime <> 0 then
-    DecodeDate(fBuildDateTime, BuildYear, M, D);
 end;
+{$else}
+function TFileVersion.RetrieveInformationFromFileName: boolean;
+begin
+  result := false; // nothing to be done
+end;
+{$endif FPCUSEVERSIONINFO}
 
 procedure GetUserHost(out User, Host: RawUtf8);
 begin
@@ -1561,8 +1723,9 @@ begin
         s := GetEnvironmentVariable('TMPDIR'); // POSIX
         if s = '' then
           s := GetEnvironmentVariable('TMP');
-        if s = '' then
-          if DirectoryExists('/tmp') then
+        if (s = '') or
+           not IsDirectoryWritable(s) then
+          if IsDirectoryWritable('/tmp') then
             s := '/tmp'
           else
             s := '/var/tmp';
@@ -1663,7 +1826,7 @@ begin
   result := true;
 end;
 
-procedure PosInjectSmbiosInfo(var info: TSmbiosBasicInfos);
+procedure PosixInjectSmbiosInfo(var info: TSmbiosBasicInfos);
 var
   i: TSmbiosBasicInfo;
 begin
@@ -1679,7 +1842,7 @@ var
 begin
   // complete information e.g. from mormot.core.os.mac
   if Assigned(PosixInject.GetSmbios) then
-    PosInjectSmbiosInfo(_Smbios);
+    PosixInjectSmbiosInfo(_Smbios);
   // check if require persistence after some HW changes
   if (PCardinal(@info)^ = SMB_FLAGS) or
      (CompressSynLZGetHash32(StringFromFile(SMB_CACHE)) = Hash32(info.Data)) then
@@ -1701,6 +1864,11 @@ begin
 end;
 
 {$ifdef OSBSDDARWIN}
+
+function IsValidPid(pid: cardinal): boolean;
+begin
+  result := pid <> 0;
+end;
 
 function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
 begin
@@ -1856,7 +2024,7 @@ begin
   QueryPerformanceMicroSeconds(us);
   e.i[0] := e.i[0] xor us;
   getloadavg(avg, 3);
-  DefaultHasher128(@e.h1, @avg, SizeOf(avg));
+  DefaultHasher128(@e.h1, @avg, SizeOf(avg)); // may be AesNiHash128
   GetMemoryInfo(mem, {withalloc=}false);
   DefaultHasher128(@e.h2, @mem, SizeOf(mem));
   {$ifdef OSDARWIN} // FPC CreateGuid calls /dev/urandom which is not advised
@@ -1885,13 +2053,26 @@ const
   DT_SOCK     = 12;
   DT_WHT      = 14;
 
+function IsValidPid(pid: cardinal): boolean;
+var
+  status, tgid: RawUtf8;
+begin
+  result := false;
+  if pid = 0 then
+    exit;
+  status := StringFromFile('/proc/' + IntToStr(pid) + '/status', {nosize=}true);
+  // ensure is a real process, not a thread
+  // https://www.memsql.com/blog/the-curious-case-of-thread-groups-identifiers
+  FindNameValue(status, 'TGID:', tgid);
+  result := GetCardinal(pointer(tgid)) = pid;
+end;
+
 function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
 var
   d: pDir;
   e: pDirent;
   n: integer;
   pid: cardinal;
-  fn, status, tgid: RawUtf8;
 begin
   result := nil;
   d := FpOpendir('/proc'); // (much) faster alternative to FindFirst()
@@ -1908,19 +2089,16 @@ begin
        (e.d_name[0] in ['1'..'9']) then
     begin
       pid := GetCardinal(@e.d_name[0]);
-      if pid = 0 then
-        continue;
-      fn := e.d_name;
-      status := StringFromFile('/proc/' + fn + '/status', {nosize=}true);
-      FindNameValue(status, 'TGID:', tgid);
-      if GetCardinal(pointer(tgid)) = pid then
-        // ensure is a real process, not a thread
-        // https://www.memsql.com/blog/the-curious-case-of-thread-groups-identifiers
+      if (pid <> 0) and
+         IsValidPid(pid) then
         AddInteger(TIntegerDynArray(result), n, pid);
     end;
   until false;
   FpClosedir(d^);
-  SetLength(result, n);
+  if n = 0 then
+    result := nil
+  else
+    DynArrayFakeLength(result, n);
 end;
 
 var
@@ -1991,7 +2169,7 @@ var
   rt: TTimeSpec; // with nanoseconds resolution
 begin
   clock_gettime(CLOCK_MONOTONIC_HIRES, @rt);
-  DefaultHasher128(@e.h0, @rt, SizeOf(rt));
+  DefaultHasher128(@e.h0, @rt, SizeOf(rt)); // maybe AesNiHash128
   SysInfo(@si); // uptime + loadavg + meminfo + numprocess
   DefaultHasher128(@e.h0, @si, SizeOf(si));
   // detailed CPU execution context and timing from Linux kernel
@@ -2087,7 +2265,7 @@ begin
     info[sbiCpuVersion] := CpuInfoText;
   // e.g. from mormot.core.os.mac
   if Assigned(PosixInject.GetSmbios) then
-    PosInjectSmbiosInfo(info);
+    PosixInjectSmbiosInfo(info);
 end;
 
 function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean;
@@ -2245,7 +2423,7 @@ end;
 
 {$ifdef USEMPROTECT}
 function mprotect(Addr: Pointer; Len: size_t; Prot: integer): integer;
-  cdecl; external clib name 'mprotect';
+  cdecl external clib name 'mprotect';
 {$endif USEMPROTECT}
 
 function SynMProtect(addr: pointer; size: size_t; prot: integer): integer;
@@ -2471,20 +2649,20 @@ type
 
 // retrieve information of a given user by name
 function getpwnam(name: PAnsiChar): PPasswd;
-  cdecl; external clib;
+  cdecl external clib name 'getpwnam';
 
 // sets the supplementary group IDs for the calling process
 function setgroups(n: size_t; groups: PGid): integer;
-  cdecl; external clib;
+  cdecl external clib name 'setgroups';
 
 function setuid(uid: TUid): integer;
-  cdecl; external clib;
+  cdecl external clib name 'setuid';
 function setgid(gid: TGid): integer;
-  cdecl; external clib;
+  cdecl external clib name 'setgid';
 
 // changes the root directory of the calling process
 function chroot(rootpath: PAnsiChar): integer;
-  cdecl; external clib;
+  cdecl external clib name 'chroot';
 
 function DropPriviledges(const UserName: RawUtf8): boolean;
 var
@@ -2508,15 +2686,29 @@ begin
             (chroot('.') = 0);
 end;
 
-function RunUntilSigTerminatedPidFile: TFileName;
+function RunUntilSigTerminatedPidFile(ensureWritable: boolean): TFileName;
 begin
   result := RunUntilSigTerminatedPidFilePath;
   if result = '' then
     result := Executable.ProgramFilePath;
+  if not ensureWritable then
+  begin
+    result := Format('%s.%s.pid', [result, Executable.ProgramName]);
+    if FileExists(result) then
+      exit;
+  end;
   if not IsDirectoryWritable(result) then
     // if the executable folder is not writable, use the temporary folder
     result := GetSystemPath(spTempFolder);
   result := Format('%s.%s.pid', [result, Executable.ProgramName]);
+end;
+
+function RunUntilSigTerminatedState: TServiceState;
+begin
+  if FileExists(RunUntilSigTerminatedPidFile(false)) then
+    result := ssRunning
+  else
+    result := ssStopped;
 end;
 
 function RunUntilSigTerminatedForKill(waitseconds: integer): boolean;
@@ -2534,12 +2726,12 @@ begin
     if fpgeterrno <> ESysESRCH then
       exit
     else
-    // ESysESRCH = no such process -> try to delete the .pid file
-    if DeleteFile(pidfilename) then
-    begin
-      result := true; // process crashed or hard reboot -> nothing to kill
-      exit;
-    end;
+      // ESysESRCH = no such process -> try to delete the .pid file
+      if DeleteFile(pidfilename) then
+      begin
+        result := true; // process crashed or hard reboot -> nothing to kill
+        exit;
+      end;
   if waitseconds <= 0 then
   begin
     result := true;
@@ -2554,7 +2746,7 @@ begin
   until result or
         (GetTickCount64 > tix);
   if not result then
-    fpkill(pid, SIGKILL); // finesse
+    fpkill(pid, SIGKILL); // murder with finesse
 end;
 
 procedure CleanAfterFork;
@@ -2638,7 +2830,7 @@ begin
 end;
 
 function RunInternal(args: PPAnsiChar; waitfor: boolean; const env: TFileName;
-  envaddexisting: boolean): integer;
+  options: TRunOptions): integer;
 var
   pid: TPID;
   e: array[0..511] of PAnsiChar; // max 512 environment variables
@@ -2672,7 +2864,7 @@ begin
     begin
       n := 0;
       result := -ESysE2BIG;
-      if envaddexisting and
+      if (roEnvAddExisting in options) and
          (envpp <> nil) then
       begin
         while envpp^ <> nil do
@@ -2717,7 +2909,7 @@ end;
 
 function RunProcess(const path, arg1: TFileName; waitfor: boolean;
   const arg2, arg3, arg4, arg5, env: TFileName;
-  envaddexisting: boolean): integer;
+  options: TRunOptions): integer;
 var
   a: array[0..6] of PAnsiChar; // assume no UNICODE on POSIX, i.e. as TFileName
 begin
@@ -2728,11 +2920,11 @@ begin
   a[4] := pointer(arg4);
   a[5] := pointer(arg5);
   a[6] := nil; // end pointer list with null
-  result := RunInternal(@a, waitfor, env, envaddexisting);
+  result := RunInternal(@a, waitfor, env, options);
 end;
 
 function RunCommand(const cmd: TFileName; waitfor: boolean;
-  const env: TFileName; envaddexisting: boolean; parsed: PParseCommands): integer;
+  const env: TFileName; options: TRunOptions; parsed: PParseCommands): integer;
 var
   temp: RawUtf8;
   err: TParseCommands;
@@ -2743,7 +2935,7 @@ begin
     parsed^ := err;
   if err = [] then
     // no need to spawn the shell for simple commands
-    result := RunInternal(a, waitfor, env, envaddexisting)
+    result := RunInternal(a, waitfor, env, options)
   else if err * PARSECOMMAND_ERROR <> [] then
     // no system call for clearly invalid command line
     result := -ESysEPERM
@@ -2754,28 +2946,71 @@ begin
     a[1] := '-c';
     a[2] := pointer(cmd);
     a[3] := nil;
-    result := RunInternal(@a, waitfor, env, envaddexisting);
+    result := RunInternal(@a, waitfor, env, options);
   end;
 end;
 
 function RunRedirect(const cmd: TFileName; exitcode: PInteger;
-  const onoutput: TOnRedirect; waitfordelayms: cardinal): RawUtf8;
+  const onoutput: TOnRedirect; waitfordelayms: cardinal;
+  setresult: boolean; const env, wrkdir: TFileName; options: TRunOptions): RawByteString;
 var
-  // note: FPC popen(file) allows access to the pid whereas clib popen() won't
+  // notes: - FPC popen() allows access to the pid whereas clib popen() won't
+  //        - env and options params are not supported by popen() so are ignored
   f: file;
   fd: THandle;
-  pid, res: cint;
-  u: RawUtf8;
+  pid, res, wr: cint;
   n, l: TSsize;
   wait: cardinal;
   endtix: Int64;
   tmp: array[word] of byte; // 64KB stack buffer
+
+  function RedirectOutput(flush: boolean; var redir: RawByteString): boolean;
+  var
+    u: RawUtf8;
+  begin
+    result := false;
+    if WaitReadPending(fd, wait) then
+    begin
+      n := fpread(fd, tmp, SizeOf(tmp));
+      if n < 0 then
+        exit; // pipe closed = execution finished
+      if setresult and
+         (n <> 0) then
+      begin
+        if redir = '' then
+          FastSetString(RawUtf8(redir), @tmp, n) // assume CP_UTF8
+        else
+        begin
+          SetLength(redir, l + n); // append
+          MoveFast(tmp, PByteArray(redir)[l], n);
+        end;
+        inc(l, n);
+      end;
+      if Assigned(onoutput) then
+      begin
+        FastSetString(u, @tmp, n); // console output is likely UTF-8 on POSIX
+        if onoutput(u, pid) and
+           not flush then
+          endtix := 1; // returned true: force kill() on abort
+      end;
+    end
+    else if Assigned(onoutput) and // idle
+            onoutput('', pid) and
+            not flush then
+      endtix := 1; // returned true to abort -> kill()
+    result := true;
+  end;
+
 begin
   result := '';
-  if popen(f, cmd, 'r') <> 0 then
+  if wrkdir <> '' then
+    ChDir(wrkdir);
+  if popen(f, cmd, 'r') <> 0 then // fork and launch cmd - env is ignored by now
     exit;
   fd := TFileRec(f).Handle;
   pid := pcint(@TFileRec(f).userdata[2])^; // see popen() from Unix.pp
+  if Assigned(onoutput) then
+    onoutput('', pid);
   wait := 200;
   if waitfordelayms = INFINITE then
     endtix := 0
@@ -2787,28 +3022,33 @@ begin
   end;
   l := 0;
   repeat
-    if WaitReadPending(fd, wait) then
-    begin
-      n := fpread(fd, tmp, SizeOf(tmp));
-      if n <= 0 then
-        break; // pipe closed = execution finished
-      SetLength(result, l + n);
-      MoveFast(tmp, PByteArray(result)[l], n);
-      inc(l, n);
-      if Assigned(onoutput) then
-      begin
-        FastSetString(u, @tmp, n);
-        if onoutput(u) then
-          endtix := 1; // force kill() on abort
-      end;
-    end
-    else if Assigned(onoutput) and // idle
-            onoutput('') then
-      endtix := 1; // returned true to abort -> kill()
+    if not RedirectOutput({flush=}false, result) then
+      break; // pipe closed = execution finished
     if (endtix <> 0) and
        (GetTickCount64 > endtix) then
     begin
-      fpkill(pid, SIGKILL); // abort process execution after timeout
+      // abort process execution after timeout or onoutput()=true
+      if RunAbortTimeoutSecs > 0 then
+      begin
+        // try gracefull death
+        if (ramSIGTERM in RunAbortMethods) and
+           (fpkill(pid, SIGTERM) = 0) then
+        begin
+          endtix := GetTickCount64 + RunAbortTimeoutSecs * 1000;
+          repeat
+            wr := FpWaitPid(pid, @res, WNOHANG);  // 0 = no state change
+            RedirectOutput({flush=}true, result); // continue redirection
+            if (wr <> 0) or
+               (GetTickCount64 > endtix) then
+              break;
+            SleepHiRes(5);
+          until false;
+          if wr = pid then // <0 for error
+            break; // gracefully ended
+        end;
+      end;
+      // force process termination
+      fpkill(pid, SIGKILL);
       pid := 0;
       break;
     end;
@@ -2837,12 +3077,14 @@ begin
 end;
 
 {$else}
-function getpagesize: integer; cdecl; external clib;
+function getpagesize: integer;
+  cdecl external clib name 'getpagesize';
 {$endif OSANDROID}
 
 {$ifdef OSLINUX}
 
-function get_nprocs: integer;  cdecl; external clib;
+function get_nprocs: integer;
+  cdecl external clib name 'get_nprocs';
 
 procedure SetLinuxDistrib(const release: RawUtf8);
 var
@@ -2893,7 +3135,7 @@ begin
   xaddr := 0;
   efi := StringFromFile('/sys/firmware/efi/systab', {nosize=}true);
   if efi = '' then
-    efi := StringFromFile('/proc/efi/systab'{nosize=}); // old Linux up to 2.6.6
+    efi := StringFromFile('/proc/efi/systab', {nosize=}true); // old Linux<2.6.6
   if efi = '' then
     exit;
   FindNameValue(efi, 'SMBIOS', addr);
@@ -3082,6 +3324,16 @@ begin
   P^ := #0; // make asciiz
 end;
 
+function ParseInt(P: PUtf8Char): integer;
+begin
+  P := ParseLine(P);
+  if (P <> nil) and
+     (P^ in ['0'..'9']) then
+    result := GetCardinal(P)
+  else
+    result := -1;
+end;
+
 {$ifdef CPUAARCH64}
 {$ifdef OSLINUXANDROID}
 // AARCH64 armv8.o is only validated on Linux
@@ -3103,11 +3355,11 @@ var
   P: PAnsiChar;
   modname, beg: PUtf8Char;
   uts: UtsName;
+  {$ifndef OSDARWIN}
   {$ifdef CPUARM3264}
   act, aci: TIntegerDynArray;
   i: PtrInt;
   {$endif CPUARM3264}
-  {$ifndef OSDARWIN}
   tp: timespec;
   {$endif OSDARWIN}
   {$ifdef OSBSDDARWIN}
@@ -3115,12 +3367,16 @@ var
   {$else}
   hw, cache, cpuinfo: PUtf8Char;
   proccpuinfo, release, prod: RawUtf8;
+  procid, phyid, phyndx: integer;
+  phy: TIntegerDynArray;
   {$ifdef OSLINUX}
   prodver, dist: RawUtf8;
   SR: TSearchRec;
   {$endif OSLINUX}
   {$endif OSBSDDARWIN}
+  {$ifndef OSDARWIN}
   tm: TThreadManager;
+  {$endif OSDARWIN}
 begin
   // retrieve Kernel and Hardware information
   StdOutIsTTY := (IsATTY(StdOutputHandle) = 1) and
@@ -3222,6 +3478,7 @@ begin
   cache := nil;
   SystemInfo.dwNumberOfProcessors := 0;
   proccpuinfo := StringFromFile('/proc/cpuinfo', true);
+  procid := -1;
   cpuinfo := pointer(proccpuinfo);
   while cpuinfo <> nil do
   begin
@@ -3231,8 +3488,13 @@ begin
       if beg^ = 'P' then
         modname := ParseLine(beg) // Processor : ARMv7
       else
+      begin
         // loop over all "processor : 0 .. 1 .. 2" lines to count the CPUs
-        inc(SystemInfo.dwNumberOfProcessors)
+        inc(SystemInfo.dwNumberOfProcessors);
+        procid := ParseInt(beg);
+        if procid >= integer(SystemInfo.dwNumberOfProcessors) then
+          procid := -1; // paranoid
+      end
     else if IdemPChar(beg, 'MODEL NAME') then
       modname := ParseLine(beg)
     else if IdemPChar(beg, 'FEATURES') or
@@ -3246,8 +3508,24 @@ begin
     else if IdemPChar(beg, 'CPU IMPLEMENTER') then
       ParseHex32Add(beg, aci)
     else if IdemPChar(beg, 'CPU PART') then
-      ParseHex32Add(beg, act);
+      ParseHex32Add(beg, act)
     {$endif CPUARM3264}
+    else if IdemPChar(beg, 'PHYSICAL ID') then
+    begin
+      phyid := ParseInt(beg); // in practice, may be 0,3,... and not 0,1,...
+      if phyid < 0 then
+        continue;
+      phyndx := IntegerScanIndex(pointer(phy), CpuSockets, phyid);
+      if phyndx < 0 then
+      begin
+        AddInteger(phy, CpuSockets, phyid);
+        SetLength(CpuSocketsMask, CpuSockets);
+        phyndx := CpuSockets - 1;
+      end;
+      if (procid >= 0) and
+         (procid < SizeOf(TCpuSet) shl 3) then
+        SetBitPtr(@CpuSocketsMask[phyndx], procid);
+    end;
   end;
   {$ifdef CPUARM3264}
   if act <> nil then // CPU part/implementer are more detailed than model name
@@ -3290,6 +3568,8 @@ begin
   {$endif OSBSDDARWIN}
   if CpuCacheSize <> 0 then
     CpuInfoText := _oskb(CpuCacheSize) + ' cache';
+  if CpuSockets = 0 then
+    CpuSockets := 1;
   SystemInfo.uts.release := uts.Release;
   SystemInfo.uts.sysname := uts.Sysname;
   SystemInfo.uts.version := uts.Version;
@@ -3323,17 +3603,18 @@ begin
     CpuInfoText := CPU_ARCH_TEXT;
   // intialize supported APIs
   TimeZoneLocalBias := -GetLocalTimeOffset;
-  GetThreadManager(tm); // for inlined RTL calls (avoid one level of redirection)
-  @GetCurrentThreadId      := @tm.GetCurrentThreadId;
-  @TryEnterCriticalSection := @tm.TryEnterCriticalSection;
-  @EnterCriticalSection    := @tm.EnterCriticalSection;
-  @LeaveCriticalSection    := @tm.LeaveCriticalSection;
   {$ifdef OSDARWIN}
   mach_timebase_info(mach_timeinfo);
   mach_timecoeff := mach_timeinfo.Numer / mach_timeinfo.Denom;
   mach_timenanosecond := (mach_timeinfo.Numer = 1) and
                          (mach_timeinfo.Denom = 1);
   {$else}
+  // for inlined RTL calls (avoid one level of redirection)
+  GetThreadManager(tm);
+  @GetCurrentThreadId      := @tm.GetCurrentThreadId;
+  @TryEnterCriticalSection := @tm.TryEnterCriticalSection;
+  @EnterCriticalSection    := @tm.EnterCriticalSection;
+  @LeaveCriticalSection    := @tm.LeaveCriticalSection;
   // try Linux kernel 2.6.32+ or FreeBSD 8.1+ fastest clocks
   if clock_gettime(CLOCK_REALTIME_COARSE, @tp) = 0 then
     CLOCK_REALTIME_FAST := CLOCK_REALTIME_COARSE;
@@ -3350,17 +3631,27 @@ begin
       'clock_gettime() not supported by %s kernel - errno=%d',
       [PAnsiChar(@uts.release), fpgeterrno]);
   // direct access to the pthread library if possible (Linux only)
-  {$ifdef OSPTHREADS}
+  {$ifdef OSPTHREADSLIB}
   // mutex_lock() is blocking when dlopen run from a .so: cthreads uses both
   // static and dynamic linking, which is really confusing to our code
   // -> we don't open libpthread but we get its symbol
   pthread := dlopen('libpthread.so.0', RTLD_LAZY);
   if pthread <> nil then
   begin
+    {$ifdef HAS_PTHREADSETNAMENP}
     @pthread_setname_np := dlsym(pthread, 'pthread_setname_np');
+    {$endif HAS_PTHREADSETNAMENP}
+    {$ifdef HAS_PTHREADSETAFFINITY}
+    @pthread_setaffinity_np := dlsym(pthread, 'pthread_setaffinity_np');
+    {$endif HAS_PTHREADSETAFFINITY}
     @pthread_cancel := dlsym(pthread, 'pthread_cancel');
+    @pthread_mutex_init := dlsym(pthread, 'pthread_mutex_init');
+    @pthread_mutex_destroy := dlsym(pthread, 'pthread_mutex_destroy');
+    @pthread_mutex_trylock := dlsym(pthread, 'pthread_mutex_trylock');
+    @pthread_mutex_lock    := dlsym(pthread, 'pthread_mutex_lock');
+    @pthread_mutex_unlock  := dlsym(pthread, 'pthread_mutex_unlock');
   end;
-  {$endif OSPTHREADS}
+  {$endif OSPTHREADSLIB}
   // some ARM/AARCH64 specific initialization
   {$ifdef CPUARM3264}
   StrLen := @StrLenLibc; // libc version is faster than plain pascal or RTL code
@@ -3402,10 +3693,10 @@ end;
 
 procedure FinalizeSpecificUnit;
 begin
-  {$ifdef OSPTHREADS}
+  {$ifdef OSPTHREADSLIB}
   if pthread <> nil then
     dlclose(pthread);
-  {$endif OSPTHREADS}
+  {$endif OSPTHREADSLIB}
   {$ifdef OSLINUX} // systemd API is Linux-specific
   sd.Done;
   {$endif OSLINUX}

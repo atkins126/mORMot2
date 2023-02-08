@@ -16,7 +16,7 @@ unit mormot.orm.core;
     - TOrmVirtual Definitions
     - TOrmProperties Definitions
     - TOrmModel TOrmModelProperties Definitions
-    - TRestCache Definition
+    - TOrmCache Definition
     - TRestBatch TRestBatchLocked Definitions
     - TSynValidateRest TSynValidateUniqueField Definitions
     - TOrmAccessRights Definition
@@ -37,9 +37,9 @@ uses
   classes,
   variants,
   contnrs,
-  {$ifndef FPC}
+  {$ifdef ISDELPHI}
   typinfo, // for proper Delphi inlining
-  {$endif FPC}
+  {$endif ISDELPHI}
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -81,7 +81,7 @@ type
   TOrmModel = class;
   TOrmModelProperties = class;
   TRestOrmParent = class;
-  TRestCache = class;
+  TOrmCache = class;
   TRestBatch = class;
   {$M-}
 
@@ -456,6 +456,14 @@ type
     // - is just a wrapper around Retrieve(aPublishedRecord.ID,aValue)
     // - return true on success
     function Retrieve(aPublishedRecord, aValue: TOrm): boolean; overload;
+    /// get a known TOrm instance JSON representation
+    // - a slightly faster alternative to Value.GetJsonValues
+    procedure GetJsonValue(Value: TOrm; withID: boolean; const Fields: TFieldBits;
+      out Json: RawUtf8; LowerCaseID: boolean = false); overload;
+    /// get a known TOrm instance JSON representation
+    // - a slightly faster alternative to Value.GetJsonValues
+    procedure GetJsonValue(Value: TOrm; withID: boolean; Occasion: TOrmOccasion;
+      var Json: RawUtf8; LowerCaseID: boolean = false); overload;
     /// get a list of members from a SQL statement as TObjectList
     // - implements REST GET collection
     // - for better server speed, the WHERE clause should use bound parameters
@@ -1124,7 +1132,7 @@ type
     /// access the Database Model associated with REST Client or Server instance
     function Model: TOrmModel;
     /// access the internal caching parameters for a given TOrm
-    // - will always return a TRestCache instance, creating one if needed
+    // - will always return a TOrmCache instance, creating one if needed
     // - purpose of this caching mechanism is to speed up retrieval of some
     // common values at either Client or Server level (like configuration settings)
     // - by default, this CRUD level per-ID cache is disabled
@@ -1139,10 +1147,10 @@ type
     // you shall ensure that your business logic is safe, calling Cache.Flush()
     // overloaded methods on purpose: better no cache than unproper cache -
     // "premature optimization is the root of all evil"
-    function Cache: TRestCache;
+    function Cache: TOrmCache;
     /// access the internal caching parameters for a given TOrm
-    // - will return nil if no TRestCache instance has been defined
-    function CacheOrNil: TRestCache;
+    // - will return nil if no TOrmCache instance has been defined
+    function CacheOrNil: TOrmCache;
     /// returns TRUE if this table is worth caching (e.g. not in memory)
     function CacheWorthItForTable(aTableIndex: cardinal): boolean;
     /// log the corresponding text (if logging is enabled)
@@ -1604,7 +1612,7 @@ type
     // - won't work with cross-reference mapping (FillPrepareMany)
     // - use the mapping prepared with Map() method
     // - can specify a destination record to be filled instead of main Dest
-    function Fill(aRow: integer; aDest: TOrm = nil): boolean;
+    function Fill(aRow: PtrInt; aDest: TOrm = nil): boolean;
     /// compute the updated ORM field bits during a fill
     // - will return Props.SimpleFieldsBits[ooUpdate] if no fill is in process
     procedure ComputeSetUpdatedFieldBits(Props: TOrmProperties;
@@ -1660,10 +1668,18 @@ type
     fFill: TOrmFill;
     /// internal properties getters (using fProps data for speed)
     function GetHasBlob: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     function GetSimpleFieldCount: integer;
+      {$ifdef HASINLINE} inline; {$endif}
     function GetFillCurrentRow: integer;
+      {$ifdef HASINLINE} inline; {$endif}
     function GetFillReachedEnd: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     function GetTable: TOrmTable;
+      {$ifdef HASINLINE} inline; {$endif}
+    procedure ManyFieldsCreate(many: POrmPropInfoRttiMany);
+    procedure InternalCreate;
+      {$ifdef HASINLINE}inline;{$endif}
     /// register RttiJsonRead/RttiJsonWrite callbacks for custom serialization
     class procedure RttiCustomSetParser(Rtti: TRttiCustom); override;
     /// 'fake' nested TOrm properties would be serialized as integer
@@ -2265,15 +2281,18 @@ type
       Occasion: TOrmOccasion; OrmOptions: TOrmWriterOptions = []); overload;
     /// same as overloaded GetJsonValues(), but returning result into a RawUtf8
     // - if UsingStream is not set, it will use a temporary TRawByteStringStream
+    // - a slightly faster alternative may be IRestOrm.GetJsonValue overload
     function GetJsonValues(Expand, withID: boolean;
       Occasion: TOrmOccasion; UsingStream: TRawByteStringStream = nil;
       OrmOptions: TOrmWriterOptions = []): RawUtf8; overload;
     /// same as overloaded GetJsonValues(), but allowing to set the fields to
     // be retrieved, and returning result into a RawUtf8
+    // - a slightly faster alternative may be IRestOrm.GetJsonValue overload
     function GetJsonValues(Expand, withID: boolean; const Fields: TFieldBits;
       OrmOptions: TOrmWriterOptions = []): RawUtf8; overload;
     /// same as overloaded GetJsonValues(), but allowing to set the fields to
     // be retrieved, and returning result into a RawUtf8
+    // - a slightly faster alternative may be IRestOrm.GetJsonValue overloads
     function GetJsonValues(Expand, withID: boolean; const FieldsCsv: RawUtf8;
       OrmOptions: TOrmWriterOptions = []): RawUtf8; overload;
     /// will append the record fields as an expanded JSON object
@@ -2282,7 +2301,7 @@ type
     // - by default, will append the simple fields, unless the Fields optional
     // parameter is customized to a non void value
     procedure AppendAsJsonObject(W: TJsonWriter; Fields: TFieldBits;
-      WithID: boolean);
+      WithID: boolean; LowerCaseID: boolean = false);
     /// will append all the FillPrepare() records as an expanded JSON array
     // - generates '[{rec1},{rec2},...]' using a loop similar to:
     // ! while FillOne do .. AppendJsonObject() ..
@@ -2292,7 +2311,7 @@ type
     // parameter is customized to a non void value
     // - see also IRestOrm.AppendListAsJsonArray for a high-level wrapper method
     procedure AppendFillAsJsonArray(const FieldName: RawUtf8; W: TJsonWriter;
-      const Fields: TFieldBits = []);
+      const Fields: TFieldBits = []; WithID: boolean = true; LowerCaseID: boolean = false);
     /// change TDocVariantData.Options for all variant published fields
     // - may be used to replace e.g. JSON_FAST_EXTENDED by JSON_FAST
     procedure ForceVariantFieldsOptions(aOptions: TDocVariantOptions = JSON_FAST);
@@ -2315,13 +2334,15 @@ type
     procedure SetBinaryValuesSimpleFields(var Read: TFastReader);
     /// write the record fields into RawByteString a binary buffer
     // - same as GetBinaryValues(), but also writing the ID field first
-    function GetBinary: RawByteString;
+    function GetBinary(WithID: boolean = true;
+      SimpleFields: boolean = false): RawByteString;
     /// set the record fields from a binary buffer saved by GetBinary()
     // - same as SetBinaryValues(), but also reading the ID field first
     procedure SetBinary(var Read: TFastReader); overload;
     /// set the record fields from a binary buffer saved by GetBinary()
-    // - same as SetBinaryValues(), but also reading the ID field first
-    procedure SetBinary(const binary: RawByteString); overload;
+    procedure SetBinary(const binary: RawByteString; WithID: boolean = true;
+      SimpleFields: boolean = false); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// set all field values from a supplied array of TSqlVar values
     // - Values[] array must match the OrmProps.Field[] order: will return
     // false if the Values[].VType does not match OrmProps.FieldType[]
@@ -2523,7 +2544,7 @@ type
     // - handle UTF-8 SQL to Delphi values conversion (see TPropInfo mapping)
     // - this method has been made virtual e.g. so that a calculated value can
     // be used in a custom field
-    function FillRow(aRow: integer; aDest: TOrm = nil): boolean; virtual;
+    function FillRow(aRow: PtrInt; aDest: TOrm = nil): boolean; virtual;
     /// fill all published properties of this object from the next available
     // TOrmTable prepared row
     // - FillPrepare() must have been called before
@@ -2555,11 +2576,11 @@ type
 
     /// fill all published properties of this object from a TOrmTable result row
     // - call FillPrepare() then FillRow(Row)
-    procedure FillFrom(Table: TOrmTable; Row: integer); overload;
+    procedure FillFrom(Table: TOrmTable; Row: PtrInt); overload;
     /// fill all published properties of this object from a JSON result row
     // - create a TOrmTable from the JSON data
     // - call FillPrepare() then FillRow(Row)
-    procedure FillFrom(const JSONTable: RawUtf8; Row: integer); overload;
+    procedure FillFrom(const JSONTable: RawUtf8; Row: PtrInt); overload;
     /// fill all published properties of this object from a JSON object result
     // - use JSON data, as exported by GetJsonValues()
     // - JSON data may be expanded or not
@@ -2910,12 +2931,12 @@ type
     procedure ToObjectList(DestList: TObjectList;
       RecordType: TOrmClass = nil); overload;
     {$ifdef ORMGENERICS}
-    {$ifndef FPC}
+    {$ifdef ISDELPHI}
     /// create a IList<TOrm*> with TOrm instances corresponding to this resultset
     // - always returns an IList<> instance, even if the TOrmTable is nil or void
     // - is disabled on FPC because it generates internal compiler errors :(
     function ToIList<T: TOrm>: IList<T>;
-    {$endif FPC}
+    {$endif ISDELPHI}
     /// create a IList<TOrm> with TOrm instances corresponding to this resultset
     // - weak typed result - rather use the ToIList<T> function on Delphi
     // - our IList<> and IKeyValue<> interfaces are faster and generates smaller
@@ -4235,7 +4256,13 @@ type
   end;
 
 
-  { -------------------- TRestCache Definition }
+  { -------------------- TOrmCache Definition }
+
+  /// the state result of TOrmCache.Retrieve method
+  TOrmCacheRetrieve = (
+    ocrCacheDisabled,
+    ocrRetrievedFromCache,
+    ocrNotInCache);
 
   /// implement a fast TOrm cache, per ID, at the TRest level
   // - purpose of this caching mechanism is to speed up retrieval of some common
@@ -4244,16 +4271,17 @@ type
   // RETRIEVE, ADD, DELETION and UPDATE (that is, a complex direct SQL UPDATE
   // or via TOrmMany pattern won't be taken into account)
   // - only Simple fields are cached: e.g. the BLOB fields are not stored
-  // - this cache is thread-safe (access is locked per table)
+  // - this cache is thread-safe via a per-table TRWLightLock
   // - this caching will be located at the TRest level, that is no automated
   // synchronization is implemented between TRestClient and TRestServer:
   // you shall ensure that your code won't fail due to this restriction
-  TRestCache = class
+  TOrmCache = class
   protected
     fRest: IRestOrm;
     fModel: TOrmModel;
     /// fCache[] follows fRest.Model.Tables[] array: one entry per TOrm
-    fCache: TRestCacheEntryDynArray;
+    fCache: TOrmCacheEntryDynArray;
+    function RetrieveFromCache(aCache: POrmCacheEntry; aID: TID; aValue: TOrm): boolean;
   public
     /// create a cache instance
     // - the associated TOrmModel will be used internally
@@ -4261,32 +4289,32 @@ type
     /// release the cache instance
     destructor Destroy; override;
     /// flush the cache
-    // - this will flush all stored JSON content, but keep the settings
+    // - this will flush all stored content, but keep the settings
     // (SetCache/SetTimeOut) as before
     procedure Flush; overload;
     /// flush the cache for a given table
-    // - this will flush all stored JSON content, but keep the settings
+    // - this will flush all stored content, but keep the settings
     // (SetCache/SetTimeOut) as before for this table
     procedure Flush(aTable: TOrmClass); overload;
     /// flush the cache for a given record
-    // - this will flush the stored JSON content for this record (and table
+    // - this will flush the stored content for this record (and table
     // settings will be kept)
     procedure Flush(aTable: TOrmClass; aID: TID); overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// flush the cache for a given record
-    // - this will flush the stored JSON content for this record (and table
+    // - this will flush the stored content for this record (and table
     // settings will be kept)
     procedure Flush(aTableIndex: PtrInt; aID: TID); overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// flush the cache for a set of specified records
-    // - this will flush the stored JSON content for these record (and table
+    // - this will flush the stored content for these record (and table
     // settings will be kept)
     procedure Flush(aTable: TOrmClass; const aIDs: array of TID); overload;
     /// flush the cache, and destroy all settings
-    // - this will flush all stored JSON content, AND destroy the settings
+    // - this will flush all stored content, AND reset the settings
     // (SetCache/SetTimeOut) to default (i.e. no cache enabled)
     procedure Clear;
-    // - will fill the internal JSON cache of a given Table with data coming
+    // - will fill the internal cache of a given Table with data coming
     // from a REST query
     // - returns the number of TOrm items actually cached
     // - may be handy to pre-load a set of values (e.g. a lookup table) from a
@@ -4320,9 +4348,9 @@ type
     function SetTimeOut(aTable: TOrmClass; aTimeoutMS: cardinal): boolean;
     /// returns TRUE if the table is part of the current caching policy
     function IsCached(aTable: TOrmClass): boolean;
-    /// returns the number of JSON serialization records within this cache
+    /// returns the number of cached records with their associated data
     function CachedEntries: cardinal;
-    /// returns the memory used by JSON serialization records within this cache
+    /// returns the memory used by records content within this cache
     // - this method will also flush any outdated entries in the cache
     function CachedMemory(FlushedEntriesCount: PInteger = nil): cardinal;
     /// read-only access to the associated TRest.ORM instance
@@ -4332,33 +4360,28 @@ type
     property Model: TOrmModel
       read fModel;
   public { TRest low level methods which are not to be called usualy: }
-    /// retrieve a record specified by its ID from cache into JSON content
-    // - return '' if the item is not in cache
-    function Retrieve(aTableIndex: integer; aID: TID): RawUtf8; overload;
+    /// check if a record specified by its table and ID is in the cache
+    // - TOrmClass to be specified as its index in Rest.Model.Tables[]
+    function Exists(aTableIndex: integer; aID: TID): boolean;
     /// fill a record specified by its ID from cache into a new TOrm instance
     // - return false if the item is not in cache
-    // - this method will call RetrieveJson method, unserializing the cached
-    // JSON content into the supplied aValue instance
-    function Retrieve(aID: TID; aValue: TOrm): boolean; overload;
-    /// TRest instance shall call this method when a record is added or updated
-    // - this overloaded method expects the content to be specified as JSON object
-    procedure Notify(aTable: TOrmClass; aID: TID; const aJson: RawUtf8;
-      aAction: TOrmOccasion); overload;
-    /// TRest instance shall call this method when a record is retrieved,
-    // added or updated
-    // - this overloaded method expects the content to be specified as JSON object,
-    // and TOrmClass to be specified as its index in Rest.Model.Tables[]
-    procedure Notify(aTableIndex: integer; aID: TID; const aJson: RawUtf8;
-      aAction: TOrmOccasion); overload;
-    /// TRest instance shall call this method when a record is added or updated
-    // - this overloaded method will call the other Trace method, serializing
-    // the supplied aRecord content as JSON (not in the case of oeDelete)
-    procedure Notify(aRecord: TOrm; aAction: TOrmOccasion); overload;
+    function Retrieve(aID: TID; aValue: TOrm; aTableIndex: integer): TOrmCacheRetrieve;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// return the JSON corresponding to the TOrm instance from cache
+    function RetrieveJson(aTable: TOrmClass; aTableIndex: integer; aID: TID): RawUtf8;
+    /// TRest instance shall call this method when a record is added or read
+    // - aRecord should have all its simple fields populated
+    procedure NotifyAllFields(aTableIndex: integer; aRecord: TOrm); overload;
+    /// TRest instance shall call this method when a record is updated
+    // - existing cached instance will be completed with aFields from aRecord
+    procedure NotifyUpdate(aTableIndex: integer; aRecord: TOrm; const aFields: TFieldBits);
+    /// TRest instance shall call this method when a record is added/updated
+    // - same as NotifyAllFields and NotifyUpdate, but from a JSON object
+    procedure NotifyJson(aTable: TOrmClass; aTableIndex: integer; aID: TID;
+      const aJson: RawUtf8);
     /// TRest instance shall call this method when a record is deleted
-    // - this method is dedicated for a record deletion
     procedure NotifyDeletion(aTable: TOrmClass; aID: TID); overload;
     /// TRest instance shall call this method when a record is deleted
-    // - this method is dedicated for a record deletion
     // - TOrmClass to be specified as its index in Rest.Model.Tables[]
     procedure NotifyDeletion(aTableIndex: integer; aID: TID); overload;
       {$ifdef HASINLINE} inline; {$endif}
@@ -4387,8 +4410,6 @@ type
     fTableIndex: integer;
     fBatchCount: integer;
     fOptions: TRestBatchOptions;
-    fDeletedRecordRef: TIDDynArray;
-    fDeletedCount: integer;
     fAddCount: integer;
     fUpdateCount: integer;
     fDeleteCount: integer;
@@ -4480,15 +4501,13 @@ type
     // or TOrmProperties.FieldBitsFrom()
     // - this method will always compute and send any TModTime fields, unless
     // DoNotAutoComputeFields is set to true
-    // - if not all fields are specified, will reset the cache entry associated
-    // with this value, unless ForceCacheUpdate is TRUE
     function Update(Value: TOrm; const CustomFields: TFieldBits = [];
-      DoNotAutoComputeFields: boolean = false; ForceCacheUpdate: boolean = false): integer; overload; virtual;
+      DoNotAutoComputeFields: boolean = false): integer; overload; virtual;
     /// update a member in current BATCH sequence
     // - work in BATCH mode: nothing is sent to the server until BatchSend call
     // - is an overloaded method to Update(Value,FieldBitsFromCsv())
     function Update(Value: TOrm; const CustomCsvFields: RawUtf8;
-      DoNotAutoComputeFields: boolean = false; ForceCacheUpdate: boolean = false): integer; overload;
+      DoNotAutoComputeFields: boolean = false): integer; overload;
     /// delete a member in current BATCH sequence
     // - work in BATCH mode: nothing is sent to the server until BatchSend call
     // - returns the corresponding index in the current BATCH sequence, -1 on error
@@ -4922,7 +4941,7 @@ type
   TSqlPropInfoListOptions = TOrmPropInfoListOptions;
   TSqlPropInfoAttribute = TOrmPropInfoAttribute;
   TSqlPropInfoAttributes = TOrmPropInfoAttributes;
-  TSqlRestCache = TRestCache;
+  TSqlRestCache = TOrmCache;
   TSqlRestBatch = TRestBatch;
   TSqlRestBatchLocked = TRestBatchLocked;
   TOrmPropertiesMapping = TOrmMapping;
@@ -5031,7 +5050,7 @@ begin
       begin
         W.AddShorter('RowID,'); // first is always the ID
         for f := 0 to Props.Fields.Count - 1 do
-          if GetBitPtr(FieldBits, f) then
+          if FieldBitGet(FieldBits^, f) then
           begin
             W.AddString(Props.Fields.List[f].Name);
             W.AddComma;
@@ -5332,7 +5351,7 @@ end;
 procedure TOrmTable.FillOrms(P: POrm; RecordType: TOrmClass);
 var
   cloned: TOrm;
-  r: integer;
+  r: PtrInt;
 begin
   cloned := RecordType.Create;
   try
@@ -5386,12 +5405,12 @@ begin
   FillOrms(list.First, Item);
 end;
 
-{$ifndef FPC} // disabled on FPC because generates internal compiler errors :(
+{$ifdef ISDELPHI} // disabled on FPC because generates internal compiler errors :(
 function TOrmTable.ToIList<T>: IList<T>;
 begin
   ToNewIList(T, result);
 end;
-{$endif FPC}
+{$endif ISDELPHI}
 {$endif ORMGENERICS}
 
 function TOrmTable.ToObjArray(var ObjArray; RecordType: TOrmClass): boolean;
@@ -5439,8 +5458,7 @@ function TOrmTable.SearchValue(const UpperValue: RawUtf8;
 var
   Kind: TOrmFieldType;
   Search: PAnsiChar;
-  UpperUnicode: RawUnicode;
-  UpperUnicodeLen: integer;
+  UpperU, ValueU: SynUnicode;
   info: POrmTableFieldType;
   Val64: Int64;
   ValTimeLog: TTimelogBits absolute Val64;
@@ -5578,16 +5596,18 @@ begin
   else if UnicodeComparison then
   begin
     // slowest but always accurate Unicode comparison
-    UpperUnicode := Utf8DecodeToRawUnicodeUI(RawUtf8(Search), @UpperUnicodeLen);
+    Utf8ToSynUnicode(pointer(Search), StrLen(pointer(Search)), UpperU);
     while PtrUInt(result) <= PtrUInt(fRowCount) do
-      if FindUnicode(pointer(Utf8DecodeToRawUnicodeUI(GetResults(o))),
-          pointer(UpperUnicode), UpperUnicodeLen) then
+    begin
+      Utf8ToSynUnicode(GetResults(o), GetResultsLen(o), ValueU);
+      if FindUnicode(pointer(ValueU), pointer(UpperU), length(UpperU)) then
         exit
       else
       begin
         inc(o, fFieldCount);
         inc(result);
-      end
+      end;
+    end;
   end
   else // default fast Win1252 search
     while PtrUInt(result) <= PtrUInt(fRowCount) do
@@ -6161,7 +6181,7 @@ begin
   end;
 end;
 
-function TOrmFill.Fill(aRow: integer; aDest: TOrm): boolean;
+function TOrmFill.Fill(aRow: PtrInt; aDest: TOrm): boolean;
 var
   D: TOrm;
   f: integer;
@@ -6171,7 +6191,7 @@ var
 begin
   if (self = nil) or
      (Table = nil) or
-     (cardinal(aRow) > cardinal(Table.fRowCount)) then
+     (PtrUInt(aRow) > PtrUInt(Table.fRowCount)) then
     result := False
   else
   begin
@@ -6303,7 +6323,7 @@ var
 begin
   // private sub function for proper TOrm.OrmProps method inlining
   rtticustom := Rtti.RegisterClass(self);
-  mormot.core.os.EnterCriticalSection(Rtti.RegisterLock);
+  Rtti.RegisterSafe.Lock;
   try
     result := rtticustom.PrivateSlot; // Private is TOrmProperties
     if Assigned(result) then
@@ -6323,7 +6343,7 @@ begin
        rcfClassMayBeID];  // avoid most IsPropClassInstance calls
     self.InternalDefineModel(result);
   finally
-    mormot.core.os.LeaveCriticalSection(Rtti.RegisterLock);
+    Rtti.RegisterSafe.UnLock;
   end;
 end;
 
@@ -6335,7 +6355,7 @@ begin
     result := POrmClass(self)^;
 end;
 
-procedure ManyFieldsCreate(self: TOrm; many: POrmPropInfoRttiMany);
+procedure TOrm.ManyFieldsCreate(many: POrmPropInfoRttiMany);
 var
   n: TDALen;
 begin
@@ -6347,14 +6367,19 @@ begin
   until n = 0;
 end;
 
-constructor TOrm.Create;
+procedure TOrm.InternalCreate;
 var
   props: TOrmProperties;
 begin // don't call inherited Create but make TOrmProperties custom setup
   props := OrmProps;
   if props.ManyFields <> nil then
     // auto-instanciate any TOrmMany instance
-    ManyFieldsCreate(self, pointer(props.ManyFields));
+    ManyFieldsCreate(pointer(props.ManyFields));
+end;
+
+constructor TOrm.Create;
+begin
+  InternalCreate;
 end;
 
 destructor TOrm.Destroy;
@@ -6386,7 +6411,7 @@ end;
 
 constructor TOrm.Create(const aSimpleFields: array of const; aID: TID);
 begin
-  Create;
+  InternalCreate;
   fID := aID;
   if not SimplePropertiesFill(aSimpleFields) then
     raise EOrmException.CreateUtf8('Incorrect %.Create(aSimpleFields) call', [self]);
@@ -6433,7 +6458,7 @@ end;
 
 constructor TOrm.Create(const aClient: IRestOrm; aID: TID; ForUpdate: boolean);
 begin
-  Create;
+  InternalCreate;
   if aClient <> nil then
     aClient.Retrieve(aID, self, ForUpdate);
 end;
@@ -6441,14 +6466,14 @@ end;
 constructor TOrm.Create(const aClient: IRestOrm;
   aPublishedRecord: TOrm; ForUpdate: boolean);
 begin
-  Create;
+  InternalCreate;
   if aClient <> nil then
     aClient.Retrieve(aPublishedRecord.ID, self, ForUpdate);
 end;
 
 constructor TOrm.Create(const aClient: IRestOrm; const aSqlWhere: RawUtf8);
 begin
-  Create;
+  InternalCreate;
   if aClient <> nil then
     aClient.Retrieve(aSqlWhere, self);
 end;
@@ -6456,7 +6481,7 @@ end;
 constructor TOrm.Create(const aClient: IRestOrm;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const);
 begin
-  Create;
+  InternalCreate;
   if aClient <> nil then
     aClient.Retrieve(FormatUtf8(FormatSqlWhere, [], BoundsSqlWhere), self);
 end;
@@ -6464,26 +6489,26 @@ end;
 constructor TOrm.Create(const aClient: IRestOrm;
   const FormatSqlWhere: RawUtf8; const ParamsSqlWhere, BoundsSqlWhere: array of const);
 begin
-  Create;
+  InternalCreate;
   if aClient <> nil then
     aClient.Retrieve(FormatUtf8(FormatSqlWhere, ParamsSqlWhere, BoundsSqlWhere), self);
 end;
 
 constructor TOrm.CreateFrom(const JsonRecord: RawUtf8);
 begin
-  Create;
+  InternalCreate;
   FillFrom(JsonRecord);
 end;
 
 constructor TOrm.CreateFrom(P: PUtf8Char);
 begin
-  Create;
+  InternalCreate;
   FillFrom(P);
 end;
 
 constructor TOrm.CreateFrom(const aDocVariant: variant);
 begin
-  Create;
+  InternalCreate;
   FillFrom(aDocVariant);
 end;
 
@@ -6571,7 +6596,7 @@ begin
     end;
 end;
 
-procedure TOrm.FillFrom(Table: TOrmTable; Row: integer);
+procedure TOrm.FillFrom(Table: TOrmTable; Row: PtrInt);
 begin
   try
     FillPrepare(Table);
@@ -6583,7 +6608,7 @@ begin
   end;
 end;
 
-procedure TOrm.FillFrom(const JSONTable: RawUtf8; Row: integer);
+procedure TOrm.FillFrom(const JSONTable: RawUtf8; Row: PtrInt);
 var
   Table: TOrmTableJson;
   tmp: TSynTempBuffer; // work on a private copy
@@ -6776,7 +6801,7 @@ begin
       aCustomFieldsCsv);
 end;
 
-function TOrm.FillRow(aRow: integer; aDest: TOrm): boolean;
+function TOrm.FillRow(aRow: PtrInt; aDest: TOrm): boolean;
 begin
   if self <> nil then
     if aDest = nil then
@@ -6874,7 +6899,7 @@ var
   f: PtrInt;
 begin
   with Orm do
-    for f := 0 to SimpleFieldCount - 1 do
+    for f := 0 to length(SimpleFields) - 1 do
       SimpleFields[f].GetBinary(self, W);
 end;
 
@@ -6889,15 +6914,19 @@ begin
         List[f].GetBinary(self, W);
 end;
 
-function TOrm.GetBinary: RawByteString;
+function TOrm.GetBinary(WithID, SimpleFields: boolean): RawByteString;
 var
   W: TBufferWriter;
   temp: TTextWriterStackBuffer; // 8KB
 begin
   W := TBufferWriter.Create(temp{%H-});
   try
-    W.WriteVarUInt64(fID);
-    GetBinaryValues(W);
+    if WithID then
+      W.WriteVarUInt64(fID);
+    if SimpleFields then
+      GetBinaryValuesSimpleFields(W)
+    else
+      GetBinaryValues(W);
     result := W.FlushTo;
   finally
     W.Free;
@@ -6910,12 +6939,17 @@ begin
   SetBinaryValues(Read);
 end;
 
-procedure TOrm.SetBinary(const binary: RawByteString);
+procedure TOrm.SetBinary(const binary: RawByteString; WithID, SimpleFields: boolean);
 var
   read: TFastReader;
 begin
   read.Init(binary);
-  SetBinary(read);
+  if WithID then
+    fID := Read.VarUInt64;
+  if SimpleFields then
+    SetBinaryValuesSimpleFields(read)
+  else
+    SetBinaryValues(read);
 end;
 
 procedure TOrm.SetBinaryValues(var Read: TFastReader);
@@ -6932,9 +6966,13 @@ var
   f: PtrInt;
 begin
   with Orm do
-    for f := 0 to SimpleFieldCount - 1 do
+    for f := 0 to length(SimpleFields) - 1 do
       SimpleFields[f].SetBinary(self, Read);
 end;
+
+const
+  ID_STR: array[boolean] of string[15] = (
+    '"ID_str":"', '"idStr":"');
 
 procedure TOrm.GetJsonValues(W: TOrmWriter);
 var
@@ -6957,7 +6995,7 @@ begin
     W.AddComma;
     if (owoID_str in W.OrmOptions) and W.Expand then
     begin
-      W.AddShort('"ID_str":"');
+      W.AddShort(ID_STR[owoLowCaseID in W.OrmOptions]);
       W.Add(fID);
       W.Add('"', ',');
     end;
@@ -6982,8 +7020,12 @@ begin
     W.Add('}');
 end;
 
+const
+  _ID: array[boolean] of string[7] = (
+    '{"ID":', '{"id":');
+
 procedure TOrm.AppendAsJsonObject(W: TJsonWriter; Fields: TFieldBits;
-  WithID: boolean);
+  WithID, LowerCaseID: boolean);
 var // Fields are not "const" since are modified if zero
   i: PtrInt;
   P: TOrmProperties;
@@ -6996,7 +7038,7 @@ begin
   end;
   if WithID then
   begin
-    W.AddShorter('{"ID":');
+    W.AddShorter(_ID[LowerCaseID]);
     W.Add(fID);
     W.AddComma;
   end
@@ -7023,14 +7065,14 @@ begin
 end;
 
 procedure TOrm.AppendFillAsJsonArray(const FieldName: RawUtf8;
-  W: TJsonWriter; const Fields: TFieldBits);
+  W: TJsonWriter; const Fields: TFieldBits; WithID, LowerCaseID: boolean);
 begin
   if FieldName <> '' then
     W.AddFieldName(FieldName);
   W.Add('[');
   while FillOne do
   begin
-    AppendAsJsonObject(W, Fields, {withID=}true);
+    AppendAsJsonObject(W, Fields, WithID, LowerCaseID);
     W.AddComma;
   end;
   W.CancelLastComma;
@@ -7085,8 +7127,8 @@ begin
     exit;
   with Orm do
     serializer := CreateJsonWriter(Json, Expand, withID,
-      SimpleFieldsBits[Occasion], {knownrows=}0, 0, @tmp);
-  serializer.OrmOptions := OrmOptions;
+      SimpleFieldsIndex[Occasion], {knownrows=}0, 0, @tmp);
+  serializer.OrmOptions := OrmOptions; // SetOrmOptions() may refine ColNames[]
   GetJsonValuesAndFree(serializer);
 end;
 
@@ -7101,7 +7143,7 @@ begin
   try
     serializer := Orm.CreateJsonWriter(J, Expand, withID, Fields,
       {knownrows=}0, 0, @tmp);
-    serializer.OrmOptions := OrmOptions;
+    serializer.OrmOptions := OrmOptions; // SetOrmOptions() may refine ColNames[]
     GetJsonValuesAndFree(serializer);
     result := J.DataString;
   finally
@@ -7490,7 +7532,7 @@ begin
   info.Json := Json + 1;
   props := Orm.Fields;
   for i := 0 to props.Count - 1 do
-    if GetBitPtr(@Fields, i) then
+    if FieldBitGet(Fields, i) then
     begin
       info.GetJsonFieldOrObjectOrArray;
       props.List[i].SetValue(self, info.Value, info.ValueLen, info.WasString);
@@ -7503,7 +7545,7 @@ constructor TOrm.CreateAndFillPrepare(const aClient: IRestOrm;
 var
   aTable: TOrmTable;
 begin
-  Create;
+  InternalCreate;
   aTable := aClient.MultiFieldValues(RecordClass, aCustomFieldsCsv, aSqlWhere);
   if aTable = nil then
     exit;
@@ -7534,7 +7576,7 @@ end;
 constructor TOrm.CreateAndFillPrepare(const aClient: IRestOrm;
   const aIDs: array of TID; const aCustomFieldsCsv: RawUtf8);
 begin
-  Create;
+  InternalCreate;
   FillPrepare(aClient, aIDs, aCustomFieldsCsv);
 end;
 
@@ -7542,7 +7584,7 @@ constructor TOrm.CreateAndFillPrepare(const aJson: RawUtf8);
 var
   aTable: TOrmTable;
 begin
-  Create;
+  InternalCreate;
   aTable := TOrmTableJson.CreateFromTables([RecordClass], '', aJson);
   aTable.OwnerMustFree := true;
   FillPrepare(aTable);
@@ -7552,7 +7594,7 @@ constructor TOrm.CreateAndFillPrepare(aJson: PUtf8Char; aJsonLen: integer);
 var
   aTable: TOrmTable;
 begin
-  Create;
+  InternalCreate;
   aTable := TOrmTableJson.CreateFromTables([RecordClass], '', aJson, aJsonLen);
   aTable.OwnerMustFree := true;
   FillPrepare(aTable);
@@ -7568,7 +7610,7 @@ var
   instance: TOrm;
   SQL: RawUtf8;
 begin
-  Create;
+  InternalCreate;
   props := aClient.Model.Props[POrmClass(self)^];
   if props.props.JoinedFields = nil then
     raise EModelException.CreateUtf8('No nested TOrm to JOIN in %', [self]);
@@ -7606,7 +7648,7 @@ end;
 constructor TOrm.CreateAndFillPrepareMany(const aClient: IRestOrm;
   const aFormatSQLJoin: RawUtf8; const aParamsSQLJoin, aBoundsSQLJoin: array of const);
 begin
-  Create;
+  InternalCreate;
   if Length(Orm.ManyFields) = 0 then
     raise EModelException.CreateUtf8(
       '%.CreateAndFillPrepareMany() with no many-to-many fields', [self]);
@@ -7998,7 +8040,10 @@ begin
   cur := pointer(props.List);
   n := props.Count;
   repeat
-    W.WriteObjectPropName(pointer(cur^.Name), length(cur^.Name), Options);
+    if woHumanReadable in Options then
+      W.WriteObjectPropNameHumanReadable(pointer(cur^.Name), length(cur^.Name))
+    else
+      W.AddProp(pointer(cur^.Name), length(cur^.Name));
     cur^.GetJsonValues(Instance, W);
     inc(cur);
     dec(n);
@@ -8224,7 +8269,7 @@ begin
     exit;
   with Orm do
     if Filters = nil then
-    // no filter set yet -> process OK
+      // no filter set yet -> process OK
       result := true
     else
     begin
@@ -8543,7 +8588,7 @@ end;
 
 constructor TOrmMany.Create;
 begin
-  inherited Create;
+  InternalCreate;
   with Orm do
     if (fRecordManySourceProp <> nil) and
        (fRecordManyDestProp <> nil) then
@@ -8998,7 +9043,7 @@ var
   i: PtrInt;
 begin
   //assert(aTableIndex>=0);
-  EnterCriticalSection(fLock); // may be called from several threads at once
+  fSafe.Lock; // may be called from several threads at once
   try
     for i := 0 to fModelMax do
       if fModel[i].Model = aModel then
@@ -9013,7 +9058,7 @@ begin
       TableIndex := aTableIndex;
     end;
   finally
-    LeaveCriticalSection(fLock);
+    fSafe.UnLock;
   end;
 end;
 
@@ -9031,13 +9076,14 @@ var
   nMany, nORM, nSimple, nDynArray, nBlob, nBlobCustom, nCopiableFields: integer;
   isTOrmMany: boolean;
   F: TOrmPropInfo;
+  oo: TOrmOccasion;
   opt: TOrmPropInfoListOptions;
 label
   Simple, Small, Copiabl;
 begin
   inherited Create;
   if aTable = nil then
-    raise EModelException.Create('TOrmProperties.Create(nil)');
+    raise EModelException.CreateU('TOrmProperties.Create(nil)');
   // register for JsonToObject() and for TOrmPropInfoRttiTID.Create()
   // (should have been done before in TOrmModel.Create/AddTable)
   fTableRtti := Rtti.RegisterClass(aTable) as TRttiJson;
@@ -9115,7 +9161,7 @@ begin
           fSqlTableUpdateBlobFields := fSqlTableUpdateBlobFields + F.Name + '=?,';
           fSqlTableRetrieveBlobFields := fSqlTableRetrieveBlobFields + F.Name + ',';
           fSqlTableRetrieveAllFields := fSqlTableRetrieveAllFields + ',' + F.Name;
-          goto Copiabl;
+          goto Copiabl; // NOT_SIMPLE_FIELDS are not included by default
         end;
       oftID: // = TOrm(aID)
         if isTOrmMany and
@@ -9131,7 +9177,7 @@ begin
       oftMany:
         begin
           ManyFields[nMany] := F as TOrmPropInfoRttiMany;
-          inc(nMany);
+          inc(nMany); // NOT_SIMPLE_FIELDS are not included by default
         end;
       oftBlobDynArray:
         with F as TOrmPropInfoRttiDynArray do
@@ -9173,8 +9219,8 @@ begin
               'field is allowed per class', [Table]);
           fRecordVersionField := F as TOrmPropInfoRttiRecordVersion;
           fSqlTableRetrieveAllFields := fSqlTableRetrieveAllFields + ',' + F.Name;
-          goto Copiabl;
-        end; // TRecordVersion is a copiable but not a simple field!
+          goto Copiabl; // NOT_SIMPLE_FIELDS are not included by default
+        end;
       oftVariant: // oftNullable are included in SmallfieldsBits
         goto Simple;
     else
@@ -9230,6 +9276,8 @@ Copiabl:FieldBitSet(CopiableFieldsBits, i);
   if SmallFieldsBits <> SimpleFieldsBits[ooSelect] - FieldBits[oftVariant] -
     FieldBits[oftBlobDynArray] - FieldBits[oftBlobCustom] - FieldBits[oftUtf8Custom] then
     raise EModelException.CreateUtf8('TOrmProperties.Create(%) Bits?', [Table]);
+  for oo := low(oo) to high(oo) do
+    FieldBitsToIndex(SimpleFieldsBits[oo], SimpleFieldsIndex[oo], Fields.Count);
   if isTOrmMany then
   begin
     fRecordManySourceProp := Fields.ByRawUtf8Name('Source') as TOrmPropInfoRttiInstance;
@@ -9353,7 +9401,7 @@ var
 begin
   if (cardinal(aIndex) > cardinal(fTablesMax)) or
      (fTableProps[aIndex] <> nil) then
-    raise EModelException.Create('TOrmModel.SetTableProps');
+    raise EModelException.CreateU('TOrmModel.SetTableProps');
   Table := fTables[aIndex];
   if Table.InheritsFrom(TOrmFts5) then
     Kind := ovkFTS5
@@ -9727,7 +9775,7 @@ end;
 function TOrmModel.GetTableIndexExisting(aTable: TOrmClass): PtrInt;
 begin
   if self = nil then
-    raise EModelException.Create('nil.GetTableIndexExisting');
+    raise EModelException.CreateU('nil.GetTableIndexExisting');
   result := GetTableIndex(aTable);
   if result < 0 then
     raise EModelException.CreateUtf8('% is not part of % root=%',
@@ -9831,7 +9879,8 @@ var
   aProps: array[0..31] of TOrmModelProperties;
 begin
   if self = nil then
-    raise EOrmException.Create('Model required');
+    raise EOrmException.CreateUtf8(
+      'SqlFromSelectWhere(%): no Model', [SqlSelect]);
   if high(Tables) = 0 then
   begin
     // fastest common call with one TOrmClass
@@ -9840,8 +9889,9 @@ begin
   end;
   // 'SELECT T1.F1,T1.F2,T1.F3,T2.F1,T2.F2 FROM T1,T2 WHERE ..' e.g.
   if cardinal(high(Tables)) > high(aProps) then
-    raise EModelException.CreateUtf8('%.SqlFromSelectWhere() up to % Tables[]',
-      [self, Length(aProps)]);
+    raise EModelException.CreateUtf8(
+      '%.SqlFromSelectWhere(%) up to % Tables[]',
+      [self, SqlSelect, Length(aProps)]);
   for i := 0 to high(Tables) do
     aProps[i] := Props[Tables[i]]; // raise EModelException if not found
   if SqlSelect = '*' then
@@ -10134,7 +10184,7 @@ begin
   for i := 0 to fTablesMax do
     with TableProps[i].Props do
     begin
-      EnterCriticalSection(fLock); // may be called from several threads at once
+      fSafe.Lock; // may be called from several threads at once
       try
         for j := 0 to fModelMax do
           if fModel[j].Model = self then
@@ -10146,7 +10196,7 @@ begin
           end;
         TableProps[i].Free;
       finally
-        LeaveCriticalSection(fLock);
+        fSafe.UnLock;
       end;
     end;
   ObjArrayClear(fIDGenerator);
@@ -10609,30 +10659,11 @@ begin
 end;
 
 
-{ ------------ TRestCache Definition }
+{ ------------ TOrmCache Definition }
 
-/// unserialize a JSON cached record of a given ID
-function CacheRetrieveJson(var Entry: TRestCacheEntry; aID: TID; aValue: TOrm;
-  aTag: PCardinal = nil): boolean;
-  {$ifdef HASINLINE} inline; {$endif}
-var
-  json: RawUtf8;
-begin
-  if Entry.CacheEnable and
-     Entry.RetrieveJson(aID, json, aTag) then
-  begin
-    aValue.FillFrom(json);
-    aValue.fID := aID; // override RowID field (may be not present after Update)
-    result := true;
-  end
-  else
-    result := false;
-end;
+{ TOrmCache }
 
-
-{ TRestCache }
-
-constructor TRestCache.Create(const aRest: IRestOrm);
+constructor TOrmCache.Create(const aRest: IRestOrm);
 var
   i: PtrInt;
 begin
@@ -10645,13 +10676,13 @@ begin
     fCache[i].Init;
 end;
 
-destructor TRestCache.Destroy;
+destructor TOrmCache.Destroy;
 begin
   pointer(fRest) := nil; // don't change reference count
   inherited Destroy;
 end;
 
-function TRestCache.CachedEntries: cardinal;
+function TOrmCache.CachedEntries: cardinal;
 var
   i: PtrInt;
 begin
@@ -10661,7 +10692,7 @@ begin
       inc(result, fCache[i].CachedEntries);
 end;
 
-function TRestCache.CachedMemory(FlushedEntriesCount: PInteger): cardinal;
+function TOrmCache.CachedMemory(FlushedEntriesCount: PInteger): cardinal;
 var
   i: PtrInt;
 begin
@@ -10673,7 +10704,7 @@ begin
       inc(result, fCache[i].CachedMemory(FlushedEntriesCount));
 end;
 
-function TRestCache.SetTimeOut(aTable: TOrmClass; aTimeoutMS: cardinal): boolean;
+function TOrmCache.SetTimeOut(aTable: TOrmClass; aTimeoutMS: cardinal): boolean;
 var
   i: PtrInt;
 begin
@@ -10690,7 +10721,7 @@ begin
     end;
 end;
 
-function TRestCache.IsCached(aTable: TOrmClass): boolean;
+function TOrmCache.IsCached(aTable: TOrmClass): boolean;
 var
   i: PtrUInt;
 begin
@@ -10704,7 +10735,7 @@ begin
       result := true;
 end;
 
-function TRestCache.SetCache(aTable: TOrmClass): boolean;
+function TOrmCache.SetCache(aTable: TOrmClass): boolean;
 var
   i: PtrInt;
 begin
@@ -10717,12 +10748,12 @@ begin
     if PtrUInt(i) < PtrUInt(Length(fCache)) then
     begin
       // global cache of all records of this table
-      fCache[i].SetCache;
+      fCache[i].SetCacheAll;
       result := true;
     end;
 end;
 
-function TRestCache.SetCache(aTable: TOrmClass; aID: TID): boolean;
+function TOrmCache.SetCache(aTable: TOrmClass; aID: TID): boolean;
 var
   i: PtrInt;
 begin
@@ -10739,7 +10770,7 @@ begin
   result := True;
 end;
 
-function TRestCache.SetCache(aTable: TOrmClass;
+function TOrmCache.SetCache(aTable: TOrmClass;
   const aIDs: array of TID): boolean;
 var
   i: PtrUInt;
@@ -10759,7 +10790,7 @@ begin
   result := True;
 end;
 
-function TRestCache.SetCache(aRecord: TOrm): boolean;
+function TOrmCache.SetCache(aRecord: TOrm): boolean;
 begin
   if (self = nil) or
      (aRecord = nil) or
@@ -10769,7 +10800,7 @@ begin
     result := SetCache(POrmClass(aRecord)^, aRecord.fID);
 end;
 
-procedure TRestCache.Clear;
+procedure TOrmCache.Clear;
 var
   i: PtrInt;
 begin
@@ -10778,11 +10809,11 @@ begin
       fCache[i].Clear;
 end;
 
-function TRestCache.FillFromQuery(aTable: TOrmClass;
+function TOrmCache.FillFromQuery(aTable: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const): integer;
 var
   rec: TOrm;
-  cache: ^TRestCacheEntry;
+  cache: ^TOrmCacheEntry;
 begin
   result := 0;
   if self = nil then
@@ -10793,8 +10824,8 @@ begin
   rec := aTable.CreateAndFillPrepare(fRest, FormatSqlWhere, BoundsSqlWhere);
   try
     while rec.FillOne do
-    begin // expand=true (JSON object), withid=false (not in JSON), ooInsert=all
-      cache^.SetJson(rec.fID, rec.GetJsonValues(true, false, ooInsert));
+    begin
+      cache^.SetBinary(rec.fID, rec.GetBinary({withid=}false, {simple=}true));
       inc(result);
     end;
   finally
@@ -10802,7 +10833,7 @@ begin
   end;
 end;
 
-procedure TRestCache.Flush;
+procedure TOrmCache.Flush;
 var
   i: PtrInt;
 begin
@@ -10811,19 +10842,19 @@ begin
       fCache[i].FlushCacheAllEntries; // include *CriticalSection(Mutex)
 end;
 
-procedure TRestCache.Flush(aTable: TOrmClass);
+procedure TOrmCache.Flush(aTable: TOrmClass);
 begin
   if self <> nil then // includes *CriticalSection(Mutex):
     fCache[fModel.GetTableIndexExisting(aTable)].FlushCacheAllEntries;
 end;
 
-procedure TRestCache.Flush(aTable: TOrmClass; aID: TID);
+procedure TOrmCache.Flush(aTable: TOrmClass; aID: TID);
 begin
   if self <> nil then
     fCache[fModel.GetTableIndexExisting(aTable)].FlushCacheEntry(aID);
 end;
 
-procedure TRestCache.Flush(aTableIndex: PtrInt; aID: TID);
+procedure TOrmCache.Flush(aTableIndex: PtrInt; aID: TID);
 begin
   if self <> nil then
     with fCache[aTableIndex] do
@@ -10831,52 +10862,90 @@ begin
         FlushCacheEntry(aID);
 end;
 
-procedure TRestCache.Flush(aTable: TOrmClass; const aIDs: array of TID);
+procedure TOrmCache.Flush(aTable: TOrmClass; const aIDs: array of TID);
 begin
   if (self <> nil) and
      (length(aIDs) > 0) then
     fCache[fModel.GetTableIndexExisting(aTable)].FlushCacheEntries(aIDs);
 end;
 
-procedure TRestCache.Notify(aTable: TOrmClass; aID: TID;
-  const aJson: RawUtf8; aAction: TOrmOccasion);
+procedure SaveToCache(aCache: POrmCacheEntry; aRecord: TOrm);
 begin
-  if (self <> nil) and
-     (aTable <> nil) and
-     (aID > 0) then
-    Notify(fModel.GetTableIndex(aTable), aID, aJson, aAction);
+  aCache^.SetBinary(aRecord.fID, aRecord.GetBinary({withid=}false, {simple=}true));
 end;
 
-procedure TRestCache.Notify(aRecord: TOrm; aAction: TOrmOccasion);
+procedure TOrmCache.NotifyAllFields(aTableIndex: integer; aRecord: TOrm);
 var
-  aTableIndex: cardinal;
+  c: POrmCacheEntry;
 begin
   if (self = nil) or
      (aRecord = nil) or
-     (aRecord.fID <= 0) or
-     not (aAction in [ooInsert, ooUpdate]) then
+     (aRecord.fID <= 0) then
     exit;
-  aTableIndex := fModel.GetTableIndex(POrmClass(aRecord)^);
-  if aTableIndex < cardinal(Length(fCache)) then
-    with fCache[aTableIndex] do
-      if CacheEnable then // expand=true, withid=false, ooInsert=all
-        SetJson(aRecord.fID, aRecord.GetJsonValues(true, false, ooInsert));
+  if aTableIndex < 0 then
+    aTableIndex := fModel.GetTableIndex(POrmClass(aRecord)^);
+  if cardinal(aTableIndex) < cardinal(Length(fCache)) then
+  begin
+    c := @fCache[aTableIndex];
+    if c^.CacheEnable then
+      SaveToCache(c, aRecord);
+  end;
 end;
 
-procedure TRestCache.Notify(aTableIndex: integer; aID: TID;
-  const aJson: RawUtf8; aAction: TOrmOccasion);
+procedure TOrmCache.NotifyUpdate(aTableIndex: integer; aRecord: TOrm;
+  const aFields: TFieldBits);
+var
+  bin: RawByteString;
+  cached: TOrm;
 begin
   if (self <> nil) and
-     (aID > 0) and
-     (aAction in [ooSelect, ooInsert, ooUpdate]) and
-     (aJson <> '') and
-     (cardinal(aTableIndex) < cardinal(Length(fCache))) then
+     (aRecord <> nil) and
+     (aRecord.fID > 0) and
+     (cardinal(aTableIndex) < cardinal(Length(fCache))) and
+     not IsZero(aFields) then
     with fCache[aTableIndex] do
       if CacheEnable then
-        SetJson(aID, aJson);
+        if aRecord.Orm.SimpleFieldsBits[ooSelect] - aFields = [] then
+          SetBinary(aRecord.fID, aRecord.GetBinary({withid=}false, {simple=}true))
+        else if RetrieveBinary(aRecord.fID, bin) then
+        begin
+          cached := TOrm(aRecord.NewInstance);
+          try
+            cached.SetBinary(bin, {withid=}false, {simple=}true);
+            cached.FillFrom(aRecord, aFields); // complete existing cached fields
+            SetBinary(cached.fID, cached.GetBinary({withid=}false, {simple=}true));
+          finally
+            cached.Free;
+          end;
+        end;
 end;
 
-procedure TRestCache.NotifyDeletion(aTableIndex: integer; aID: TID);
+procedure TOrmCache.NotifyJson(aTable: TOrmClass; aTableIndex: integer;
+  aID: TID; const aJson: RawUtf8);
+var
+  new: TOrm;
+  fields: TFieldBits;
+  tmp: TSynTempBuffer; // work on a private copy
+begin
+  if (self = nil) or
+     (aID <= 0) or
+     (aTable = nil) or
+     (aJson = '') or
+     (cardinal(aTableIndex) >= cardinal(Length(fCache))) or
+     not fCache[aTableIndex].CacheEnable then
+    exit;
+  tmp.Init(aJson);
+  new := aTable.Create;
+  try
+    new.FillFrom(tmp.buf, @fields);
+    NotifyUpdate(aTableIndex, new, fields);
+  finally
+    new.Free;
+    tmp.Done;
+  end;
+end;
+
+procedure TOrmCache.NotifyDeletion(aTableIndex: integer; aID: TID);
 begin
   if (self <> nil) and
      (aID > 0) and
@@ -10886,7 +10955,7 @@ begin
         FlushCacheEntry(aID);
 end;
 
-procedure TRestCache.NotifyDeletions(aTableIndex: integer;
+procedure TOrmCache.NotifyDeletions(aTableIndex: integer;
   const aIDs: array of TID);
 begin
   if (self <> nil) and
@@ -10897,7 +10966,7 @@ begin
          FlushCacheEntries(aIDs);
 end;
 
-procedure TRestCache.NotifyDeletion(aTable: TOrmClass; aID: TID);
+procedure TOrmCache.NotifyDeletion(aTable: TOrmClass; aID: TID);
 begin
   if (self <> nil) and
      (aTable <> nil) and
@@ -10905,30 +10974,77 @@ begin
     NotifyDeletion(fModel.GetTableIndex(aTable), aID);
 end;
 
-function TRestCache.Retrieve(aID: TID; aValue: TOrm): boolean;
-var
-  TableIndex: cardinal;
+function TOrmCache.Exists(aTableIndex: integer; aID: TID): boolean;
 begin
-  result := false;
-  if (self = nil) or
-     (aValue = nil) or
-     (aID <= 0) then
-    exit;
-  TableIndex := fModel.GetTableIndexExisting(POrmClass(aValue)^);
-  if TableIndex < cardinal(Length(fCache)) then
-    if CacheRetrieveJson(fCache[TableIndex], aID, aValue) then
-      result := true;
+  result := (self <> nil) and
+            (aID > 0) and
+            (cardinal(aTableIndex) < cardinal(Length(fCache))) and
+            fCache[aTableIndex].Exists(aID);
 end;
 
-function TRestCache.Retrieve(aTableIndex: integer; aID: TID): RawUtf8;
+function TOrmCache.RetrieveFromCache(aCache: POrmCacheEntry; aID: TID; aValue: TOrm): boolean;
+var
+  e: POrmCacheEntryValue;
+  r: TFastReader;
 begin
-  result := '';
+  result := false;
+  aCache^.Safe.ReadLock;
+  try // inlined TOrmCacheEntry.RetrieveBinary to avoid temporary RawByteString
+    e := aCache^.RetrieveEntry(aID);
+    if (e <> nil) and
+       (e <> ORMCACHE_DEPRECATED) then
+    begin
+      r.Init(pointer(e^.Binary), length(e^.Binary));
+      aValue.SetBinaryValuesSimpleFields(r);
+      aValue.fID := aID; // override RowID field
+      result := true;
+      exit;
+    end;
+  finally
+    aCache^.Safe.ReadUnLock;
+  end;
+  if e = ORMCACHE_DEPRECATED then // happens at most every 512 ms
+    aCache^.FlushCacheEntry(aID); // Safe.WriteLock outside Safe.ReadLock
+end;
+
+function TOrmCache.Retrieve(aID: TID; aValue: TOrm; aTableIndex: integer): TOrmCacheRetrieve;
+var
+  c: POrmCacheEntry;
+begin
+  result := ocrCacheDisabled;
   if (self <> nil) and
+     (aValue <> nil) and
      (aID > 0) and
      (cardinal(aTableIndex) < cardinal(Length(fCache))) then
-    with fCache[aTableIndex] do
-      if CacheEnable then
-        RetrieveJson(aID, result);
+  begin
+    c := @fCache[aTableIndex];
+    if c^.CacheEnable then
+      if RetrieveFromCache(c, aID, aValue) then
+        result := ocrRetrievedFromCache
+      else
+        result := ocrNotInCache;
+  end;
+end;
+
+function TOrmCache.RetrieveJson(aTable: TOrmClass; aTableIndex: integer; aID: TID): RawUtf8;
+var
+  orm: TOrm; // we use a temporary TOrm instance for the serialization itself
+begin
+  result := '';
+  if (self = nil) or
+     (aTable = nil) or
+     (aID <= 0) or
+     (cardinal(aTableIndex) >= cardinal(Length(fCache))) or
+     not fCache[aTableIndex].CacheEnable then
+    exit;
+  orm := aTable.Create;
+  try
+    if Retrieve(aID, orm, aTableIndex) = ocrRetrievedFromCache then
+      result := orm.GetJsonValues({expand=}true, {withid=}false,
+        orm.Orm.SimpleFieldsBits[ooSelect]);
+  finally
+    orm.Free;
+  end;
 end;
 
 
@@ -10976,7 +11092,6 @@ begin
   fAddCount := 0;
   fUpdateCount := 0;
   fDeleteCount := 0;
-  fDeletedCount := 0;
   fPreviousTable := nil;
   fTable := aTable;
   if boExtendedJson in Options then
@@ -11229,7 +11344,7 @@ begin
           nfo := pointer(props.Fields.List);
           for f := 0 to props.Fields.Count - 1 do
           begin
-            if GetBitPtr(@fields, f) then
+            if FieldBitGet(fields, f) then
             begin
               nfo^.GetJsonValues(Value, fBatch);
               fBatch.AddComma;
@@ -11241,7 +11356,7 @@ begin
         end
     end;
     if fCalledWithinRest and ForceID then
-      fRest.CacheOrNil.Notify(Value, ooInsert);
+      fRest.CacheOrNil.NotifyAllFields(-1, Value);
   end
   else
     fBatch.Add('{', '}'); // '{"Table":[...,"POST",{},...]}'
@@ -11266,7 +11381,7 @@ begin
     exit;
   end;
   if Assigned(fRest) then
-    AddID(fDeletedRecordRef, fDeletedCount, fModel.RecordReference(Table, ID));
+    fRest.CacheOrNil.NotifyDeletion(Table, ID);
   Encode(Table, encDelete, nil, ID);
   result := fBatchCount;
   inc(fBatchCount);
@@ -11287,7 +11402,7 @@ begin
     exit;
   end;
   if Assigned(fRest) then
-    AddID(fDeletedRecordRef, fDeletedCount, RecordReference(fTableIndex, ID));
+    fRest.CacheOrNil.NotifyDeletion(fTableIndex, ID);
   Encode(fTable, encDelete, nil, ID);
   result := fBatchCount;
   inc(fBatchCount);
@@ -11297,7 +11412,7 @@ begin
 end;
 
 function TRestBatch.Update(Value: TOrm; const CustomFields: TFieldBits;
-  DoNotAutoComputeFields, ForceCacheUpdate: boolean): integer;
+  DoNotAutoComputeFields: boolean): integer;
 var
   props: TOrmProperties;
   fields: TFieldBits;
@@ -11342,7 +11457,7 @@ begin
     nfo := pointer(props.Fields.List);
     for f := 0 to props.Fields.Count - 1 do
     begin
-      if GetBitPtr(@fields, f) then
+      if FieldBitGet(fields, f) then
       begin
         nfo^.GetJsonValues(Value, fBatch);
         fBatch.AddComma;
@@ -11353,18 +11468,14 @@ begin
     fBatch.Add(']');
   end;
   fBatch.AddComma;
-  if fCalledWithinRest and
-     (fields - props.SimpleFieldsBits[ooUpdate] = []) then
-    ForceCacheUpdate := true; // safe to update the cache with supplied values
-  if ForceCacheUpdate then
-    fRest.CacheOrNil.Notify(Value, ooUpdate)
-  else if Assigned(fRest) then
+  if Assigned(fRest) and
+     fCalledWithinRest and
+     (fRest.CacheOrNil <> nil) then
   begin
-    // may not contain all cached fields -> delete from cache
     tableindex := fTableIndex;
     if POrmClass(Value)^ <> fTable then
-      tableindex := fModel.GetTableIndexExisting(props.Table);
-    AddID(fDeletedRecordRef, fDeletedCount, RecordReference(tableindex, Value.IDValue));
+      tableindex := fModel.GetTableIndexExisting(POrmClass(Value)^);
+    fRest.CacheOrNil.NotifyUpdate(tableindex, Value, fields)
   end;
   result := fBatchCount;
   inc(fBatchCount);
@@ -11374,7 +11485,7 @@ begin
 end;
 
 function TRestBatch.Update(Value: TOrm; const CustomCsvFields: RawUtf8;
-  DoNotAutoComputeFields, ForceCacheUpdate: boolean): integer;
+  DoNotAutoComputeFields: boolean): integer;
 var
   bits: TFieldBits;
 begin
@@ -11383,12 +11494,10 @@ begin
      not Value.Orm.FieldBitsFromCsv(CustomCsvFields, bits) then
     result := -1
   else
-    result := Update(Value, bits, DoNotAutoComputeFields, ForceCacheUpdate);
+    result := Update(Value, bits, DoNotAutoComputeFields);
 end;
 
 function TRestBatch.PrepareForSending(out Data: RawUtf8): boolean;
-var
-  i: PtrInt;
 begin
   if (self = nil) or
      (fBatch = nil) then // no opened BATCH sequence
@@ -11397,11 +11506,6 @@ begin
   begin
     if fBatchCount > 0 then
     begin // if something to send
-      if Assigned(fRest) then
-        for i := 0 to fDeletedCount - 1 do
-          if fDeletedRecordRef[i] <> 0 then
-            fRest.CacheOrNil.NotifyDeletion(
-              fDeletedRecordRef[i] and 63, fDeletedRecordRef[i] shr 6);
       fBatch.CancelLastComma;
       fBatch.Add(']');
       if (fTable <> nil) and

@@ -22,6 +22,7 @@ interface
 
 uses
   sysutils,
+  classes,
   mormot.core.base,
   mormot.core.os,
   mormot.core.unicode,
@@ -54,6 +55,7 @@ const
 // - handle 'YYYYMMDDThhmmss' and 'YYYY-MM-DD hh:mm:ss' format
 // - will also recognize '.sss' milliseconds suffix, if any
 function Iso8601ToDateTime(const S: RawByteString): TDateTime; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// Date/Time conversion from ISO-8601
 // - handle 'YYYYMMDDThhmmss' and 'YYYY-MM-DD hh:mm:ss' format
@@ -138,6 +140,11 @@ procedure IntervalTextToDateTimeVar(Text: PUtf8Char; var result: TDateTime);
 // - you may rather use DateTimeToIso8601Text() to handle 0 or date-only values
 function DateTimeToIso8601(D: TDateTime; Expanded: boolean; FirstChar: AnsiChar = 'T';
   WithMS: boolean = false; QuotedChar: AnsiChar = #0): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// raw basic Date/Time conversion into ISO-8601
+procedure DateTimeToIso8601Var(D: TDateTime; Expanded, WithMS: boolean;
+  FirstChar, QuotedChar: AnsiChar; var Result: RawUtf8);
 
 /// basic Date/Time conversion into ISO-8601
 // - use 'YYYYMMDDThhmmss' format if not Expanded
@@ -264,6 +271,28 @@ function ParseMonth(var P: PUtF8Char; var Month: word): boolean; overload;
 
 /// decode a month from its RFC 822 text value (Jan, Feb...)
 function ParseMonth(const s: RawUtf8; var Month: word): boolean; overload;
+
+const
+  /// Rotate local log file if reached this size (1MB by default)
+  // - .log file will be save as .log.bak file
+  // - a new .log file is created
+  // - used by AppendToTextFile() and LogToTextFile() functions (not TSynLog)
+  MAXLOGSIZE = 1024*1024;
+
+/// log a message with the current timestamp to a local text file
+// - the text file is located in the executable directory, and its name is
+// simply the executable file name with the '.log' extension instead of '.exe'
+// - format contains the current date and time, then the Msg on one line
+// - date and time format used is 'YYYYMMDD hh:mm:ss (i.e. ISO-8601)'
+procedure LogToTextFile(Msg: RawUtf8);
+
+/// log a message with the current timestamp to a local text file
+// - this version expects the filename to be specified
+// - format contains the current date and time, then the Msg on one line
+// - date and time format used is 'YYYYMMDD hh:mm:ss'
+function AppendToTextFile(aLine: RawUtf8; const aFileName: TFileName;
+  aMaxSize: Int64 = MAXLOGSIZE; aUtcTimeStamp: boolean = false): boolean;
+
 
 var
   /// custom TTimeLog date to ready to be displayed text function
@@ -859,29 +888,12 @@ begin
   result := tmp;
 end;
 
-function Iso8601CheckAndDecode(P: PUtf8Char; L: integer;
-  var Value: TDateTime): boolean;
-// handle 'YYYY-MM-DDThh:mm:ss[.sss]' or 'YYYY-MM-DD' or 'Thh:mm:ss[.sss]'
+function Iso8601ToDateTime(const S: RawByteString): TDateTime;
+var
+  tmp: TDateTime; // circumvent FPC limitation
 begin
-  if P = nil then
-    result := false
-  else if (((L = 9) or (L = 13)) and
-            (P[0] = 'T') and (P[3] = ':')) or // 'Thh:mm:ss[.sss]'
-          ((L = 10) and
-           (P[4] = '-') and (P[7] = '-')) or // 'YYYY-MM-DD'
-          (((L = 19) or (L = 23)) and
-           (P[4] = '-') and (P[10] = 'T')) then
-  begin
-    Iso8601ToDateTimePUtf8CharVar(P, L, Value);
-    result := PInt64(@Value)^ <> 0;
-  end
-  else
-    result := false;
-end;
-
-function IsIso8601(P: PUtf8Char; L: integer): boolean;
-begin
-  result := Iso8601ToTimeLogPUtf8Char(P, L) <> 0;
+  Iso8601ToDateTimePUtf8CharVar(pointer(S), length(S), tmp);
+  result := tmp;
 end;
 
 procedure Iso8601ToDateTimePUtf8CharVar(P: PUtf8Char; L: integer;
@@ -1025,6 +1037,31 @@ begin
       MI * (SecsPerMin * MSecsPerSec) + SS * MSecsPerSec + MS) / MSecsPerDay;
 end;
 
+function Iso8601CheckAndDecode(P: PUtf8Char; L: integer;
+  var Value: TDateTime): boolean;
+// handle 'YYYY-MM-DDThh:mm:ss[.sss]' or 'YYYY-MM-DD' or 'Thh:mm:ss[.sss]'
+begin
+  if P = nil then
+    result := false
+  else if (((L = 9) or (L = 13)) and
+            (P[0] = 'T') and (P[3] = ':')) or // 'Thh:mm:ss[.sss]'
+          ((L = 10) and
+           (P[4] = '-') and (P[7] = '-')) or // 'YYYY-MM-DD'
+          (((L = 19) or (L = 23)) and
+           (P[4] = '-') and (P[10] = 'T')) then
+  begin
+    Iso8601ToDateTimePUtf8CharVar(P, L, Value);
+    result := PInt64(@Value)^ <> 0;
+  end
+  else
+    result := false;
+end;
+
+function IsIso8601(P: PUtf8Char; L: integer): boolean;
+begin
+  result := Iso8601ToTimeLogPUtf8Char(P, L) <> 0;
+end;
+
 function Iso8601ToTimePUtf8Char(P: PUtf8Char; L: integer): TDateTime;
 begin
   Iso8601ToTimePUtf8CharVar(P, L, result);
@@ -1145,11 +1182,6 @@ begin
     result := result - Time
   else
     result := result + Time;
-end;
-
-function Iso8601ToDateTime(const S: RawByteString): TDateTime;
-begin
-  result := Iso8601ToDateTimePUtf8Char(pointer(S), length(S));
 end;
 
 {$ifndef CPUX86NOTPIC}
@@ -1298,6 +1330,12 @@ end;
 
 function DateTimeToIso8601(D: TDateTime; Expanded: boolean;
   FirstChar: AnsiChar; WithMS: boolean; QuotedChar: AnsiChar): RawUtf8;
+begin
+  DateTimeToIso8601Var(D, Expanded, WithMS, FirstChar, QuotedChar, result);
+end;
+
+procedure DateTimeToIso8601Var(D: TDateTime; Expanded, WithMS: boolean;
+  FirstChar, QuotedChar: AnsiChar; var Result: RawUtf8);
 var
   tmp: array[0 .. 31] of AnsiChar;
 begin
@@ -1546,6 +1584,99 @@ begin
             (GotoNextNotSpace(P)^ = #0);
 end;
 
+var
+  AppendToTextFileSafe: TOSLightLock; // to make AppendToTextFile() thread-safe
+  AppendToTextFileSafeSet: boolean;
+
+function AppendToTextFile(aLine: RawUtf8; const aFileName: TFileName;
+  aMaxSize: Int64; aUtcTimeStamp: boolean): boolean;
+var
+  f: THandle;
+  old: TFileName;
+  buf: array[1..22] of AnsiChar;
+  size: Int64;
+  i: integer;
+  now: TSynSystemTime;
+begin
+  result := false;
+  if (aFileName = '') or
+     (aLine = '') then
+    exit;
+  if not AppendToTextFileSafeSet then
+  begin
+    GlobalLock;
+    if not AppendToTextFileSafeSet then
+      AppendToTextFileSafe.Init;
+    AppendToTextFileSafeSet := true;
+    GlobalUnLock;
+  end;
+  AppendToTextFileSafe.Lock;
+  try
+    f := FileOpen(aFileName, fmOpenWrite or fmShareDenyNone);
+    if not ValidHandle(f) then
+    begin
+      f := FileCreate(aFileName);
+      if not ValidHandle(f) then
+        exit; // you may not have write access to this folder
+    end;
+    // append to end of file
+    size := FileSeek64(f, 0, soFromEnd);
+    if (aMaxSize > 0) and
+       (size > aMaxSize) then
+    begin
+      // rotate log file if too big
+      FileClose(f);
+      old := aFileName + '.bak'; // '.log.bak'
+      DeleteFile(old); // rotate once
+      RenameFile(aFileName, old);
+      f := FileCreate(aFileName);
+      if not ValidHandle(f) then
+        exit;
+      FileClose(f);
+      f := FileOpen(aFileName, fmOpenWrite or fmShareDenyNone);
+      if not ValidHandle(f) then
+        exit;
+    end;
+    PWord(@buf)^ := 13 + 10 shl 8; // first go to next line
+    now.FromNow(not aUtcTimeStamp);
+    DateToIso8601PChar(@buf[3], true, now.Year, now.Month, now.Day);
+    TimeToIso8601PChar(@buf[13], true, now.Hour, now.Minute, now.Second, 0, ' ');
+    buf[22] := ' ';
+    for i := 1 to length(aLine) do
+      if aLine[i] < ' ' then
+        aLine[i] := ' '; // avoid line feed in text log file
+    result := (FileWrite(f, buf, SizeOf(buf)) = SizeOf(buf)) and
+              (FileWrite(f, pointer(aLine)^, length(aLine)) = length(aLine));
+    FileClose(f);
+  finally
+    AppendToTextFileSafe.UnLock;
+  end;
+end;
+
+var
+  LogToTextFileName: TFileName;
+
+procedure LogToTextFile(Msg: RawUtf8);
+begin
+  if Msg = '' then
+  begin
+    Msg := GetErrorText(GetLastError);
+    if Msg = '' then
+      exit;
+  end;
+  if LogToTextFileName = '' then
+  begin
+    GlobalLock;
+    try
+      LogToTextFileName := ChangeFileExt(Executable.ProgramFileName, '.log');
+      if not IsDirectoryWritable(Executable.ProgramFilePath) then
+        LogToTextFileName := GetSystemPath(spLog) + ExtractFileName(LogToTextFileName);
+    finally
+      GlobalUnLock;
+    end;
+  end;
+  AppendToTextFile(Msg, LogToTextFileName);
+end;
 
 
 { ************ TSynDate / TSynDateTime / TSynSystemTime High-Level objects }
@@ -1564,8 +1695,8 @@ var
 begin
   with GlobalTime[LocalTime] do
   begin
-    tix := GetTickCount64 {$ifdef OSPOSIX} shr 3 {$endif}; // Linux: 8ms refresh
-    if clock <> tix then // Windows: typically in range of 10-16 ms
+    tix := GetTickCount64 shr 4;
+    if clock <> tix then // recompute every 16 ms
     begin
       clock := tix;
       NewTime.Clear;
@@ -2418,9 +2549,9 @@ end;
 function UnixTimeToString(const UnixTime: TUnixTime; Expanded: boolean;
   FirstTimeChar: AnsiChar): RawUtf8;
 begin
-  // inlined UnixTimeToDateTime
-  result := DateTimeToIso8601(UnixTime / SecsPerDay + UnixDateDelta,
-    Expanded, FirstTimeChar, false);
+  // inlined UnixTimeToDateTime() + DateTimeToIso8601()
+  DateTimeToIso8601Var(UnixTime / SecsPerDay + UnixDateDelta,
+    Expanded, false, FirstTimeChar, #0, result);
 end;
 
 procedure UnixTimeToFileShort(const UnixTime: TUnixTime; out result: TShort16);
@@ -3093,13 +3224,26 @@ begin
 end;
 
 
-
-initialization
+procedure InitializeUnit;
+begin
   // as expected by ParseMonth() to call FindShortStringListExact()
   assert(PtrUInt(@HTML_MONTH_NAMES[3]) - PtrUInt(@HTML_MONTH_NAMES[1]) = 8);
   // some mormot.core.text wrappers are implemented by this unit
   _VariantToUtf8DateTimeToIso8601 := DateTimeToIso8601TextVar;
   _Iso8601ToDateTime := Iso8601ToDateTime;
+end;
+
+procedure FinalizeUnit;
+begin
+  if AppendToTextFileSafeSet then
+    AppendToTextFileSafe.Done;
+end;
+
+initialization
+  InitializeUnit;
+
+finalization
+  FinalizeUnit;
 
 end.
 

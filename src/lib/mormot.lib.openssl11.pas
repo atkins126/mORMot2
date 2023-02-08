@@ -1259,7 +1259,8 @@ type
     function Len: integer;
       {$ifdef HASINLINE} inline; {$endif}
     function GetType: integer;
-    procedure ToUtf8(out result: RawUtf8; flags: cardinal = ASN1_STRFLGS_RFC2253);
+    procedure ToUtf8(out result: RawUtf8;
+      flags: cardinal = ASN1_STRFLGS_RFC2253 and not ASN1_STRFLGS_ESC_MSB);
     procedure ToHex(out result: RawUtf8);
     function Equals(const another: asn1_string_st): boolean;
   end;
@@ -1410,7 +1411,8 @@ type
     function Item(ndx: integer): PX509_NAME_ENTRY;
     function GetEntry(NID: integer): RawUtf8; overload; // not MBSTRING ready
     function GetEntry(const Name: RawUtf8): RawUtf8; overload;
-    procedure ToUtf8(out result: RawUtf8; flags: cardinal = XN_FLAG_RFC2253);
+    procedure ToUtf8(out result: RawUtf8;
+      flags: cardinal = XN_FLAG_RFC2253 and not ASN1_STRFLGS_ESC_MSB);
     procedure AddEntry(const Name, Value: RawUtf8);
     procedure AddEntries(const Country, State, Locality,
       Organization, OrgUnit, CommonName, EmailAddress, SurName, GivenName: RawUtf8);
@@ -2363,7 +2365,8 @@ function Digest(md: PEVP_MD; buf: pointer; buflen: integer): RawUtf8; overload;
 function Digest(md: PEVP_MD; const buf: RawByteString): RawUtf8; overload;
 
 /// load a private key from a PEM or DER buffer, optionally with a password
-// - try first with PEM text format, then will fallback to DER binary
+// - try first with PEM text format, then will fallback to DER binary (as raw,
+// PKCS#8 or PKCS#12 format)
 // - caller should make result.Free once done with the result
 function LoadPrivateKey(PrivateKey: pointer; PrivateKeyLen: integer;
   const Password: SpiUtf8): PEVP_PKEY; overload;
@@ -7434,25 +7437,40 @@ end;
 function LoadPrivateKey(PrivateKey: pointer; PrivateKeyLen: integer;
   const Password: SpiUtf8): PEVP_PKEY;
 var
+  pw: pointer;
   priv: PBIO;
+  pkcs12: PPKCS12;
 begin
   if (PrivateKey = nil) or
      (PrivateKeyLen = 0) then
     result := nil
   else
   begin
+    pw := PassNotNil(Password);
     priv := BIO_new_mem_buf(PrivateKey, PrivateKeyLen);
     if IsPem(PrivateKey, '-----BEGIN') then
-      result := PEM_read_bio_PrivateKey(priv, nil, nil, PassNotNil(Password))
+      result := PEM_read_bio_PrivateKey(priv, nil, nil, pw)
     else
       result := nil;
     if result = nil then
     begin
-      priv.reset;
       if Password = '' then
+      begin
+        priv.Reset;
         result := d2i_PrivateKey_bio(priv, nil); // try raw binary format
+      end;
       if result = nil then
-        result := d2i_PKCS8PrivateKey_bio(priv, nil, nil, PassNotNil(Password));
+      begin
+        priv.Reset;
+        result := d2i_PKCS8PrivateKey_bio(priv, nil, nil, pw); // try PKCS#8
+      end;
+      if result = nil then
+      begin
+        priv.Reset;
+        pkcs12 := d2i_PKCS12_bio(priv, nil); // try PKCS#12
+        pkcs12.Extract(Password, @result, nil, nil); // ignore cert
+        pkcs12.Free;
+      end;
     end;
     priv.Free;
   end;
@@ -7686,7 +7704,7 @@ begin
      (Name <> '') and
      (Value <> '') then
     X509_NAME_add_entry_by_txt(@self, pointer(Name),
-      MBSTRING[IsAnsiCompatible(Value)], pointer(Value), -1, -1, 0);
+      MBSTRING[not IsAnsiCompatible(Value)], pointer(Value), -1, -1, 0);
 end;
 
 procedure X509_NAME.AddEntries(const Country, State, Locality, Organization,
@@ -9177,7 +9195,7 @@ function PKCS12.Extract(const password: SpiUtf8; privatekey: PPEVP_PKEY;
   cert: PPX509; ca: PPstack_st_X509): boolean;
 begin
   result := (@self <> nil) and
-    (PKCS12_parse(@self, pointer(password), privatekey, cert, ca) = OPENSSLSUCCESS);
+    (PKCS12_parse(@self, PassNotNil(password), privatekey, cert, ca) = OPENSSLSUCCESS);
 end;
 
 function PKCS12.ToBinary: RawByteString;
@@ -9694,8 +9712,12 @@ begin
       SSL_CTX_set_default_verify_paths(fCtx);
   end;
   if FileExists(TFileName(Context.CertificateFile)) then
-     SSL_CTX_use_certificate_file(
-       fCtx, pointer(Context.CertificateFile), SSL_FILETYPE_PEM)
+     EOpenSslNetTls.Check(self, 'CertificateFile',
+       SSL_CTX_use_certificate_file(
+         fCtx, pointer(Context.CertificateFile), SSL_FILETYPE_PEM))
+  else if Context.CertificateRaw <> nil then
+    EOpenSslNetTls.Check(self, 'CertificateRaw',
+      SSL_CTX_use_certificate(fCtx, Context.CertificateRaw))
   else if Bind then
     raise EOpenSslNetTls.Create('AfterBind: CertificateFile required');
   if FileExists(TFileName(Context.PrivateKeyFile)) then
@@ -9707,6 +9729,12 @@ begin
         fCtx, pointer(Context.PrivatePassword));
     SSL_CTX_use_PrivateKey_file(
       fCtx, pointer(Context.PrivateKeyFile), SSL_FILETYPE_PEM);
+    EOpenSslNetTls.Check(self, 'check_private_key',
+      SSL_CTX_check_private_key(fCtx), @Context.LastError);
+  end
+  else if Context.PrivateKeyRaw <> nil then
+  begin
+    SSL_CTX_use_PrivateKey(fCtx, Context.PrivateKeyRaw);
     EOpenSslNetTls.Check(self, 'check_private_key',
       SSL_CTX_check_private_key(fCtx), @Context.LastError);
   end

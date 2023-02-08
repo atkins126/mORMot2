@@ -88,11 +88,11 @@ type
     /// convert a floating-point value into text
     function ToTextFunc(Value: double): string;
     /// swap two by-reference floating-point values
-    // - would validate pointer use instead of XMM1/XMM2 registers under Win64
+    // - would validate pointer use instead of XMM1/XMM2 registers on x86-64
     procedure Swap(var n1, n2: double);
-    // test unaligned stack access
+    /// test unaligned stack access
     function StackIntMultiply(n1, n2, n3, n4, n5, n6, n7, n8, n9, n10: integer): Int64;
-    // test float stack access
+    /// test float stack access
     function StackFloatMultiply(n1, n2, n3, n4, n5, n6, n7, n8, n9, n10: double): Int64;
     /// do some work with strings, sets and enumerates parameters,
     // testing also var (in/out) parameters and set as a function result
@@ -102,8 +102,8 @@ type
     /// test integer, strings and wide strings dynamic arrays, together with records
     function ComplexCall(const Ints: TIntegerDynArray;
       const Strs1: TRawUtf8DynArray; var Str2: TWideStringDynArray;
-      const Rec1: TVirtualTableModuleProperties; var Rec2: TRestCacheEntryValue;
-      Float1: double; var Float2: double): TRestCacheEntryValue;
+      const Rec1: TVirtualTableModuleProperties; var Rec2: TEntry;
+      Float1: double; var Float2: double): TEntry;
     /// validates ArgsInputIsOctetStream raw binary upload
     function DirectCall(const Data: RawBlob): integer;
     /// validates huge RawJson/RawUtf8
@@ -337,8 +337,8 @@ type
       var options: TServiceInstanceImplementations): TRttiParserComplexTypes;
     function ComplexCall(const Ints: TIntegerDynArray;
       const Strs1: TRawUtf8DynArray; var Str2: TWideStringDynArray;
-      const Rec1: TVirtualTableModuleProperties; var Rec2: TRestCacheEntryValue;
-      Float1: double; var Float2: double): TRestCacheEntryValue;
+      const Rec1: TVirtualTableModuleProperties; var Rec2: TEntry;
+      Float1: double; var Float2: double): TEntry;
     function DirectCall(const Data: RawBlob): integer;
     function RepeatJsonArray(const item: RawUtf8; count: integer): RawJson;
     function RepeatTextArray(const item: RawUtf8; count: integer): RawUtf8;
@@ -468,8 +468,8 @@ end;
 
 function TServiceCalculator.ComplexCall(const Ints: TIntegerDynArray;
   const Strs1: TRawUtf8DynArray; var Str2: TWideStringDynArray;
-  const Rec1: TVirtualTableModuleProperties; var Rec2: TRestCacheEntryValue;
-  Float1: double; var Float2: double): TRestCacheEntryValue;
+  const Rec1: TVirtualTableModuleProperties; var Rec2: TEntry;
+  Float1: double; var Float2: double): TEntry;
 var
   i: integer;
 begin
@@ -816,7 +816,7 @@ procedure TTestServiceOrientedArchitecture.Test(const Inst:
     Strs1: TRawUtf8DynArray;
     Str2: TWideStringDynArray;
     Rec1: TVirtualTableModuleProperties;
-    Rec2, RecRes: TRestCacheEntryValue;
+    Rec2, RecRes: TEntry;
     s: RawUtf8;
     r: string;
   begin
@@ -1294,7 +1294,7 @@ procedure TTestServiceOrientedArchitecture.ServiceInitialization;
       CheckEqual(fClient.URI(
         'root/calculator.' + Method, 'POST', @resp, nil, @data),
         ExpectedResult);
-      if ExpectedResult = 200 then
+      if ExpectedResult = HTTP_SUCCESS then
       begin
         CheckEqual(fClient.URI(
           'root/CALCulator.' + Method + uriencoded, 'POST', @data),
@@ -1305,20 +1305,12 @@ procedure TTestServiceOrientedArchitecture.ServiceInitialization;
           ExpectedResult);
         CheckEqual(data, resp,
           'alternative "param1=value1&param2=value2" URI-encoded scheme');
-        CheckEqual(fClient.URI(
-          'root/Calculator.' + Method + '/1234?' + ParamsURI, 'GET', @data),
-          ExpectedResult);
-        CheckEqual(data, resp, 'alternative URI-encoded scheme with ClientDrivenID');
         FastSetString(data, pointer(Params), length(Params)); // =UniqueString
         CheckEqual(fClient.URI(
           'root/calculator/' + Method, 'POST', @data, nil, @data),
           ExpectedResult);
         CheckEqual(data, resp, 'interface/method routing');
         FastSetString(data, pointer(Params), length(Params)); // =UniqueString
-        CheckEqual(fClient.URI(
-          'root/calculator/' + Method + '/123', 'POST', @data, nil, @Params),
-          ExpectedResult);
-        CheckEqual(data, resp, 'interface/method/clientdrivenID routing');
         CheckEqual(fClient.URI(
           'root/CALCulator/' + Method + uriencoded, 'POST', @data),
           ExpectedResult);
@@ -1358,7 +1350,7 @@ procedure TTestServiceOrientedArchitecture.ServiceInitialization;
     if (result <> '') and
        (result[1] = '"') then
       result := UnQuoteSQLString(result); // '"777"' -> '777'
-    if (ExpectedResult = 200) and
+    if (ExpectedResult = HTTP_SUCCESS) and
        (fClient.Server.ServicesRouting = TRestServerRoutingRest) then
     begin
       resp := XMLUTF8_HEADER + '<result><Result>' + result + '</Result></result>';
@@ -1427,7 +1419,7 @@ begin
     exit;
   //JsonReformatToFile(S.Contract, 'contract.json');
   //FileFromString(S.ContractHash, 'contract.hash');
-  CheckEqual(S.ContractHash, '"BD1262EAFD23820E"');
+  CheckEqual(S.ContractHash, '"4B6563E68276633B"');
   Check(TServiceCalculator(nil).Test(1, 2) = '3');
   Check(TServiceCalculator(nil).ToTextFunc(777) = '777');
   for i := 0 to high(ExpectedURI) do // SpecialCall interface not checked
@@ -1503,19 +1495,19 @@ begin
       (fClient.Server.Services['Calculator'] as TServiceFactoryServer).
         ResultAsXMLObjectIfAcceptOnlyXML := true;
     CheckEqual(Ask('None', '1,2', 'one=1&two=2',
-      '{one:1,two=2}', 400), '');
+      '{one:1,two=2}', HTTP_BADREQUEST), '');
     CheckEqual(Ask('Add', '1,2', 'n1=1&n2=2',
-      '{n1:1,n2:2}', 200), '3');
+      '{n1:1,n2:2}', HTTP_SUCCESS), '3');
     CheckEqual(Ask('Add', '1,0', 'n2=1',
-      '{n2:1}', 200), '1');
+      '{n2:1}', HTTP_SUCCESS), '1');
     CheckEqual(Ask('Multiply', '2,3', 'n1=2&n2=3',
-      '{n0:"abc",n2:3,m:null,n1:2}', 200), '6');
+      '{n0:"abc",n2:3,m:null,n1:2}', HTTP_SUCCESS), '6');
     CheckEqual(Ask('Subtract', '23,20', 'n2=20&n1=23',
-      '{n0:"abc",n2:20,n1:23}', 200), '3');
+      '{n0:"abc",n2:20,n1:23}', HTTP_SUCCESS), '3');
     CheckEqual(Ask('ToText', '777,"abc"', 'result=abc&value=777',
-      '{result:"abc",value=777}', 200), '777');
+      '{result:"abc",value=777}', HTTP_SUCCESS), '777');
     CheckEqual(Ask('ToTextFunc', '777', 'value=777',
-      '{result:"abc",value=777}', 200), '777');
+      '{result:"abc",value=777}', HTTP_SUCCESS), '777');
     if rout = 0 then
       CheckEqual(fClient.URI(
         'root/ComplexCalculator.GetCustomer?CustomerId=John%20Doe', 'POST',
@@ -1842,20 +1834,20 @@ end;
 
 procedure TTestServiceOrientedArchitecture.ClientSideRESTCustomRecordLayout;
 begin
-  TRttiJson.RegisterCustomSerializer(TypeInfo(TRestCacheEntryValue),
+  TRttiJson.RegisterCustomSerializer(TypeInfo(TEntry),
     TTestServiceOrientedArchitecture.CustomReader,
     TTestServiceOrientedArchitecture.CustomWriter);
   try
     ClientTest(TRestServerRoutingRest, false);
   finally
-    TRttiJson.UnRegisterCustomSerializer(TypeInfo(TRestCacheEntryValue));
+    TRttiJson.UnRegisterCustomSerializer(TypeInfo(TEntry));
   end;
 end;
 
 class procedure TTestServiceOrientedArchitecture.CustomReader(var Context:
   TJsonParserContext; Data: pointer);
 var
-  V: ^TRestCacheEntryValue absolute Data;
+  V: PEntry absolute Data;
   Values: array[0..2] of TValuePUtf8Char;
 begin
   // {"ID":1786554763,"Timestamp":323618765,"Json":"D:\\TestSQL3.exe"}
@@ -1870,7 +1862,7 @@ end;
 class procedure TTestServiceOrientedArchitecture.CustomWriter(W: TJsonWriter;
   Data: pointer; Options: TTextWriterWriteObjectOptions);
 var
-  V: ^TRestCacheEntryValue absolute Data;
+  V: PEntry absolute Data;
 begin
   W.AddJsonEscape([
     'ID', V.ID,

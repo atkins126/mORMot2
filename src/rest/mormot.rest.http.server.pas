@@ -175,6 +175,13 @@ const
   // use a thread-pool and has an event-driven approach so scales much better
   WEBSOCKETS_DEFAULT_MODE = useBidirAsync;
 
+  /// the kind of HTTP server which involves plain sockets, not http.sys
+  HTTP_SOCKET_MODES = [
+    useHttpSocket,
+    useBidirSocket,
+    useHttpAsync,
+    useBidirAsync];
+
   /// the TRestHttpServerUse which have bi-directional callback notifications
   // - i.e. the THttpServerGeneric classes with CanNotifyCallback=true
   HTTP_BIDIR = [useBidirSocket, useBidirAsync];
@@ -238,7 +245,6 @@ type
     fRootRedirectToURI: array[boolean] of RawUtf8;
     fLog: TSynLogClass;
     fOnCustomRequest: TOnRestHttpServerRequest;
-    fFavicon: RawByteString;
     procedure SetAccessControlAllowOrigin(const Value: RawUtf8);
     procedure ComputeAccessControlHeader(Ctxt: THttpServerRequestAbstract;
       ReplicateAllowHeaders: boolean);
@@ -402,6 +408,14 @@ type
     // aHttpServerSecurity=secTLS so that it would redirect https://localhost:port
     procedure RootRedirectToUri(const aRedirectedUri: RawUtf8;
       aRegisterUri: boolean = true; aHttps: boolean = false);
+    /// specify URI routes for internal URI rewrites or callback execution
+    // - just redirect to the HttpServer.Route function
+    // - URI rewrites allow to extend the default routing, e.g. from TRestServer
+    // - callbacks execution allow efficient server-side processing with parameters
+    // - warning: with the THttpApiServer, URIs will be limited by the actual
+    // root URI registered at http.sys level - there is no such limitation with
+    // the socket servers, which bind to a port, so handle all URIs on it
+    function Route: TUriRouter;
     /// defines the WebSockets protocols used by useBidirSocket/useBidirAsync
     // - i.e. 'synopsebinary' and optionally 'synopsejson' protocols
     // - if aWebSocketsURI is '', any URI would potentially upgrade; you can
@@ -413,6 +427,8 @@ type
     // so that AJAX applications would be able to connect to this server
     // - this method raise an EHttpServer if the associated server class does not
     // support WebSockets, i.e. this instance isn't useBidirSocket/useBidirAsync
+    // - warning: only a single WebSockets server could be used in TRestServer
+    // callback at the same time to avoid confusion between the WS connections
     function WebSocketsEnable(
       const aWSURI, aWSEncryptionKey: RawUtf8; aWSAjax: boolean = false;
       aWSBinaryOptions: TWebSocketProtocolBinaryOptions = [pboSynLzCompress];
@@ -443,6 +459,9 @@ type
     // - equals e.g. '1234' if Port = '1.2.3.4:1234'
     property PublicPort: RawUtf8
       read fPublicPort;
+    /// the kind of HTTP Server used by this instance
+    property Use: TRestHttpServerUse
+      read fUse;
     /// read-only access to all internal servers
     property DBServer[Index: integer]: TRestServer
       read GetDBServer;
@@ -459,10 +478,6 @@ type
     // so allow any kind of custom routing or process
     property OnCustomRequest: TOnRestHttpServerRequest
       read fOnCustomRequest write fOnCustomRequest;
-    /// you can set here some binary to be returned on GET /favicon.ico
-    // - you can use e.g. FAVICON_BINARY constant below
-    property Favicon: RawByteString
-      read fFavicon write fFavicon;
   published
     /// the associated running HTTP server instance
     // - either THttpApiServer (available only under Windows), THttpServer,
@@ -499,23 +514,6 @@ type
 
 function ToText(use: TRestHttpServerUse): PShortString; overload;
 function ToText(sec: TRestHttpServerSecurity): PShortString; overload;
-
-const
-  /// decoded into FAvIconBinary function result
-  // - using Base64 encoding is the easiest with Delphi and RawByteString :)
-  _FAVICON_BINARY: RawUtf8 =
-    'aQOi9AjOyJ+H/gMAAAEAAQAYGBAAAQAEAOgBAAAWAAAAKAAAABgAAAAwAAAAAQAEWhEAEFoH' +
-    'AAEC7wAFBQgAVVVVAAMDwwCMjIwA////AG1tcQCjo6sACQmbADU1NgAAACsACAhPAMvLywAA' +
-    'AHEADy34AABu/QBaEFVXYiJnWgdVUmd8zHdmWgVVVmRCERESRGRaBFUiYVoEERlmZVVVUiIR' +
-    'ERqqERESJlVVdiERq93d26ERIsVVZBEa2DMziNoRFiVUdhGtgzAAM42hFHzCQRG4MAAAADix' +
-    'EUJCYRrTWgQAM9oRYiIhG4MAAOAAA4oRIpKRG4MAD/4AA4oRIpKRG4MADv4AA4oRIiIhGoMA' +
-    'AAAOA9oRKUlhStMwAAAAONERKVJhmbgzDuADOLF5ZlxEERuDMzMzixmUZVVEkRG9Z3eNsREk' +
-    'RVVWQRGWu7u2kRlGVVVcJJGUzMzEESQlVVVVwndaBBGXcsVaBFVnd3REd3RlWgZVR3zMdEVV' +
-    'VVX///8A/4D/AP4APwD4AA8A8AAHAOAAAwDAAAEAwAABAIBaHwCAAAAAgAABAMAAAQDgAAMA' +
-    '4AAHAPAABwD8AB8A/wB/AA==';
-
-/// used by TRestHttpServer to return a nice /favicon.ico
-function FAvIconBinary: RawByteString;
 
 
 { ************ TRestHttpRemoteLogServer to Receive Remote Log Stream }
@@ -580,16 +578,6 @@ end;
 function ToText(sec: TRestHttpServerSecurity): PShortString;
 begin
   result := GetEnumName(TypeInfo(TRestHttpServerSecurity), ord(sec));
-end;
-
-var
-  _FAvIconBinary: RawByteString;
-
-function FAvIconBinary: RawByteString;
-begin
-  if _FAvIconBinary = '' then
-    _FAvIconBinary := AlgoRle.Decompress(Base64ToBin(_FAVICON_BINARY));
-  result := _FAvIconBinary;
 end;
 
 
@@ -711,8 +699,9 @@ begin
 end;
 
 constructor TRestHttpServer.Create(const aServers: array of TRestServer;
-  const aPort: RawUtf8; aThreadPoolCount: Integer; aSecurity: TRestHttpServerSecurity;
-  aOptions: TRestHttpServerOptions; const CertificateFile, PrivateKeyFile: TFileName;
+  const aPort: RawUtf8; aThreadPoolCount: Integer;
+  aSecurity: TRestHttpServerSecurity; aOptions: TRestHttpServerOptions;
+  const CertificateFile: TFileName; const PrivateKeyFile: TFileName;
   const PrivateKeyPassword: RawUtf8; const CACertificatesFile: TFileName);
 var
   tls: TNetTlsContext;
@@ -724,8 +713,8 @@ begin
 end;
 
 const
-  HTTPSERVERSOCKETCLASS: array[
-      useHttpSocket .. high(TRestHttpServerUse)] of THttpServerSocketGenericClass = (
+  HTTPSERVERSOCKETCLASS: array[useHttpSocket .. high(TRestHttpServerUse)] of
+      THttpServerSocketGenericClass = (
     THttpServer,                 // useHttpSocket
     TWebSocketServerRest,        // useBidirSocket
     THttpAsyncServer,            // useHttpAsync
@@ -817,8 +806,9 @@ begin
   if aUse in HTTP_API_MODES then
     if PosEx('Wine', OSVersionInfoEx) > 0 then
     begin
-      log.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
-        'fallback to useHttpAsync', [ToText(aUse)^, OSVersionInfoEx], self);
+      if Assigned(log) then
+        log.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
+          'fallback to useHttpAsync', [ToText(aUse)^, OSVersionInfoEx], self);
       aUse := useHttpAsync; // the closest server we have using sockets
     end
     else
@@ -835,8 +825,9 @@ begin
     except
       on E: Exception do
       begin
-        log.Log(sllError, '% for % % at%  -> fallback to socket-based server',
-          [E, ToText(aUse)^, fHttpServer, fDBServerNames], self);
+        if Assigned(log) then
+          log.Log(sllError, '% for % % at%  -> fallback to socket-based server',
+            [E, ToText(aUse)^, fHttpServer, fDBServerNames], self);
         FreeAndNilSafe(fHttpServer); // if http.sys initialization failed
         if fUse in [useHttpApiOnly, useHttpApiRegisteringURIOnly] then
           // propagate fatal exception with no fallback to the sockets server
@@ -870,8 +861,9 @@ begin
       end;
     end;
   end;
-  // setup the newly created server instance
-  fHttpServer.OnRequest := Request;
+  // setup the newly created HTTP server instance
+  fHttpServer.OnRequest := Request; // main TRestServer(s) processing callback
+  fHttpServer.SetFavIcon; // nice default icon for the browsers :)
   {$ifndef PUREMORMOT2} // deprecated since unsafe
   if aSecurity = secSynShaAes then
     fHttpServer.RegisterCompress(CompressShaAes, 0); // CompressMinSize=0
@@ -886,12 +878,15 @@ begin
     if aThreadPoolCount > 1 then
       THttpApiServer(fHttpServer).Clone(aThreadPoolCount - 1);
   {$endif USEHTTPSYS}
-  fFavicon := FAvIconBinary; // nice default icon from browser :)
   // last HTTP server handling callbacks would be set for the TRestServer(s)
   if fHttpServer.CanNotifyCallback then
     for i := 0 to high(fDBServers) do
       fDBServers[i].Server.OnNotifyCallback := NotifyCallback;
-  log.Log(sllHttp, '% initialized for %', [fHttpServer, fDBServerNames], self);
+  // finish the TRestServer(s) startup
+  for i := 0 to high(fDBServers) do
+    fDBServers[i].Server.ComputeRoutes; // pre-compute URI routes
+  if Assigned(log) then
+    log.Log(sllHttp, '% initialized for %', [fHttpServer, fDBServerNames], self);
 end;
 
 constructor TRestHttpServer.Create(const aPort: RawUtf8; aServer: TRestServer;
@@ -938,7 +933,7 @@ begin
         if not noRestServerShutdown then
           fDBServers[i].Server.Shutdown;
         if TMethod(fDBServers[i].Server.OnNotifyCallback).Data = self then
-          // avoid unexpected GPF
+          // avoid unexpected GPF, and proper TRestServer reuse
           fDBServers[i].Server.OnNotifyCallback := nil;
       end;
     finally
@@ -1023,6 +1018,15 @@ begin
   fRootRedirectToUri[aHttps] := aRedirectedUri;
   if aRedirectedUri <> '' then
     HttpApiAddUri('/', '+', HTTPS_SECURITY[aHttps], aRegisterUri, true);
+end;
+
+function TRestHttpServer.Route: TUriRouter;
+begin
+  if (self = nil) or
+     (fHttpServer = nil) then
+    result := nil
+  else
+    result := fHttpServer.Route;
 end;
 
 function TRestHttpServer.HttpApiAddUri(const aRoot, aDomainName: RawByteString;
@@ -1123,16 +1127,7 @@ begin
       begin
         result := HTTP_BADREQUEST; // we need an URI to identify the REST server
         exit;
-      end
-    else if (fFavicon <> '') and
-            IsUrlFavicon(pointer(Ctxt.Url)) then
-    begin
-      // GET /favicon.ico
-      Ctxt.OutContent := fFavicon;
-      Ctxt.OutContentType := 'image/x-icon';
-      result := HTTP_SUCCESS;
-      exit;
-    end;
+      end;
   if (Ctxt.Method = '') or
      ((rsoOnlyJsonRequests in fOptions) and
       not IsGet(Ctxt.Method) and
@@ -1142,8 +1137,7 @@ begin
     result := HTTP_BADREQUEST;
     exit;
   end;
-  if PCardinal(Ctxt.Method)^ =
-    ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24 then
+  if IsOptions(Ctxt.Method) then
   begin
     // handle CORS
     if fAccessControlAllowOrigin = '' then
@@ -1384,7 +1378,10 @@ function TRestHttpServer.WebSocketsEnable(const aWSURI, aWSEncryptionKey: RawUtf
   aWSAjax: boolean; aWSBinaryOptions: TWebSocketProtocolBinaryOptions;
   const aOnWSUpgraded: TOnWebSocketProtocolUpgraded): PWebSocketProcessSettings;
 begin
-  // will raise an EHttpServer exception if not supported
+  if not (fUse in HTTP_BIDIR) then
+    raise EHttpServer.CreateUtf8(
+      'Unexpected %.WebSocketsEnable over % - need e.g. WEBSOCKETS_DEFAULT_MODE',
+      [self, ToText(fUse)^]);
   result := (fHttpServer as THttpServerSocketGeneric).WebSocketsEnable(
     aWSURI, aWSEncryptionKey, aWSAjax, aWSBinaryOptions);
   if Assigned(aOnWSUpgraded) then
@@ -1572,8 +1569,6 @@ begin
 end;
 
 
-initialization
-  //assert(length(FAvIconBinary) = 510);
 
 end.
 

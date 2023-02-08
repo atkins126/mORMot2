@@ -89,6 +89,23 @@ type
   end;
 
 
+const
+  /// the exact version expected by the current state of this unit
+  // - an error message is generated via DisplayFatalError() if the statically
+  // linked sqlite3.o(bj) does not match this expected value
+  EXPECTED_SQLITE3_VERSION = '3.40.0';
+
+  /// the github release tag associated with this EXPECTED_SQLITE3_VERSION
+  // - to be used if you don't want the latest version of sqlite3, but the very
+  // same binaries expected by this unit, in one of its previous version
+  // - you could download the static for this exact mORMot source revision e.g. as
+  // https://github.com/synopse/mORMot2/releases/download/2.0.4383/mormot2static.7z
+  EXPECTED_RELEASE_TAG = '2.0.4383';
+
+  /// where to download the latest available static binaries, including SQLite3
+  EXPECTED_STATIC_DOWNLOAD = 'https://synopse.info/files/mormot2static.7z';
+
+
 { ************ Encryption-Related Functions }
 
 /// use this procedure to change the password for an existing SQLite3 database file
@@ -144,12 +161,12 @@ var
 
 implementation
 
-{$ifndef FPC}
+{$ifdef ISDELPHI}
 {$ifdef OSWINDOWS}
 uses
   Windows; // statically linked Delphi .obj requires the Windows API
 {$endif OSWINDOWS}
-{$endif FPC}
+{$endif ISDELPHI}
 
 
 { ************ TSqlite3LibraryStatic Implementation }
@@ -399,7 +416,7 @@ begin
   // simple full pascal version of the standard C library function
   result := nil;
   if s <> nil then
-    while s^<>#0 do
+    while s^ <> #0 do
     begin
       if s^ = c then
         result := s;
@@ -713,7 +730,7 @@ var
   hdr: array[0..2047] of byte;
 begin
   result := false;
-  F := FileOpen(FileName, fmOpenRead or fmShareDenyNone);
+  F := FileOpen(FileName, fmOpenReadDenyNone);
   if not ValidHandle(F) then
     exit;
   if (FileRead(F, hdr, SizeOf(hdr)) = SizeOf(hdr)) and
@@ -726,50 +743,50 @@ begin
   FileClose(F);
 end;
 
-procedure OldSqlEncryptTablePassWordToPlain(const FileName: TFileName;
-  const OldPassWord: RawUtf8);
 const
   OLDENCRYPTTABLESIZE = $4000;
 
-  procedure CreateSqlEncryptTableBytes(const PassWord: RawUtf8; Table: PByteArray);
-  // very fast table (private key) computation from a given password
-  // - execution speed and code size was the goal here: can be easily broken
-  // - the new encryption scheme is both safer and more performant
-  var
-    i, j, k, L: integer;
+procedure CreateSqlEncryptTableBytes(const PassWord: RawUtf8; Table: PByteArray);
+// very fast table (private key) computation from a given password
+// - execution speed and code size was the goal here: can be easily broken
+// - the new encryption scheme is both safer and more performant
+var
+  i, j, k, L: integer;
+begin
+  L := length(PassWord) - 1;
+  j := 0;
+  k := integer(L * ord(PassWord[1])) + 134775813; // initial value, prime based
+  for i := 0 to OLDENCRYPTTABLESIZE - 1 do
   begin
-    L := length(PassWord) - 1;
-    j := 0;
-    k := integer(L * ord(PassWord[1])) + 134775813; // initial value, prime based
-    for i := 0 to OLDENCRYPTTABLESIZE - 1 do
-    begin
-      Table^[i] := (ord(PassWord[j + 1])) xor byte(k);
-      k := integer(k * 3 + i); // fast prime-based pseudo random generator
-      if j = L then
-        j := 0
-      else
-        inc(j);
-    end;
+    Table^[i] := (ord(PassWord[j + 1])) xor byte(k);
+    k := integer(k * 3 + i); // fast prime-based pseudo random generator
+    if j = L then
+      j := 0
+    else
+      inc(j);
   end;
+end;
 
-  procedure XorOffset(P: PByte; Index, Count: cardinal; SqlEncryptTable: PByteArray);
-  var
-    len: cardinal;
-  begin
-    // deprecated fast and simple Cypher using Index (= offset in file)
-    if Count > 0 then
-      repeat
-        Index := Index and (OLDENCRYPTTABLESIZE - 1);
-        len := OLDENCRYPTTABLESIZE - Index;
-        if len > Count then
-          len := Count;
-        XorMemory(pointer(P), @SqlEncryptTable^[Index], len);
-        inc(P, len);
-        inc(Index, len);
-        dec(Count, len);
-      until Count = 0;
-  end;
+procedure XorOffset(P: PByte; Index, Count: cardinal; SqlEncryptTable: PByteArray);
+var
+  len: cardinal;
+begin
+  // deprecated fast and simple Cypher using Index (= offset in file)
+  if Count > 0 then
+    repeat
+      Index := Index and (OLDENCRYPTTABLESIZE - 1);
+      len := OLDENCRYPTTABLESIZE - Index;
+      if len > Count then
+        len := Count;
+      XorMemory(pointer(P), @SqlEncryptTable^[Index], len);
+      inc(P, len);
+      inc(Index, len);
+      dec(Count, len);
+    until Count = 0;
+end;
 
+procedure OldSqlEncryptTablePassWordToPlain(const FileName: TFileName;
+  const OldPassWord: RawUtf8);
 var
   F: THandle;
   R: integer;
@@ -1029,21 +1046,9 @@ function sqlite3_error_offset(DB: TSqlite3DB): integer; cdecl; external;
 
 { TSqlite3LibraryStatic }
 
-const
-  // error message if statically linked sqlite3.o(bj) does not match this value
-  EXPECTED_SQLITE3_VERSION = '3.39.4';
-
-  // the github release tag associated with this EXPECTED_SQLITE3_VERSION
-  // - you could download the static for this exact mORMot source revision e.g. as
-  // https://github.com/synopse/mORMot2/releases/download/2.0.4148/mormot2static.7z
-  EXPECTED_RELEASE_TAG = '2.0.4148';
-
-  // where to download the latest available static binaries, including SQLite3
-  EXPECTED_STATIC_DOWNLOAD = 'https://synopse.info/files/mormot2static.7z';
-
-
 constructor TSqlite3LibraryStatic.Create;
 begin
+  // resolve all SQLite3 API endpoints with external functions
   initialize             := @sqlite3_initialize;
   shutdown               := @sqlite3_shutdown;
   open                   := @sqlite3_open;

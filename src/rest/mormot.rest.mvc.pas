@@ -12,6 +12,8 @@ unit mormot.rest.mvc;
     - Web Renderer Returning Mustache Views or Json
     - Application ViewModel/Controller using Interfaces
 
+   TODO: remove TMvcRunOnRestServer in favor of THttpServer.Router
+
   *****************************************************************************
 }
 
@@ -1368,7 +1370,7 @@ end;
 
 function TMvcViewsMustache.GetTemplate(const aFileName: TFileName): RawUtf8;
 begin
-  result := AnyTextFileToRawUtf8(ViewTemplateFolder + aFileName, true);
+  result := RawUtf8FromFile(ViewTemplateFolder + aFileName);
 end;
 
 function TMvcViewsMustache.GetTemplateAge(const aFileName: TFileName): TUnixTime;
@@ -1876,31 +1878,35 @@ begin
   fPublishOptions := aPublishOptions;
   bypass := bypassAuthentication in fPublishOptions;
   if aSubURI <> '' then
-    fRestServer.ServiceMethodRegister(aSubURI, RunOnRestServerSub, bypass)
+    fRestServer.ServiceMethodRegister(
+      aSubURI, RunOnRestServerSub, bypass, [mGET, mPOST]) // POST for www-form
   else
   begin
     for m := 0 to fApplication.fFactory.MethodsCount - 1 do
     begin
       method := fApplication.fFactory.Methods[m].Uri;
-      if method[1] = '_' then
+      if (method[1] = '_') and
+         (method[2] <> '_') then
         // e.g. IService._Start() -> /service/start
         delete(method, 1, 1);
-      fRestServer.ServiceMethodRegister(method, RunOnRestServerRoot, bypass);
+      fRestServer.ServiceMethodRegister(
+        method, RunOnRestServerRoot, bypass, [mGET, mPOST]);
     end;
     if publishMvcInfo in fPublishOptions then
       fRestServer.ServiceMethodRegister(
-        MVCINFO_URI, RunOnRestServerRoot, bypass);
+        MVCINFO_URI, RunOnRestServerRoot, bypass, [mGET]);
     if publishStatic in fPublishOptions then
       fRestServer.ServiceMethodRegister(
-        STATIC_URI, RunOnRestServerRoot, bypass);
+        STATIC_URI, RunOnRestServerRoot, bypass, [mGET]);
   end;
   if (registerOrmTableAsExpressions in fPublishOptions) and
      aViews.InheritsFrom(TMvcViewsMustache) then
     TMvcViewsMustache(aViews).RegisterExpressionHelpersForTables(fRestServer);
   fStaticCache.Init({casesensitive=}true);
   fApplication.SetSession(TMvcSessionWithRestServer.Create(aApplication));
-  // no remote ORM access via REST
-  fRestServer.Options := fRestServer.Options + [rsoNoTableURI, rsoNoInternalState];
+  // no remote ORM access via REST, and route method_name as method/name too
+  fRestServer.Options := fRestServer.Options +
+    [rsoNoTableURI, rsoNoInternalState, rsoMethodUnderscoreAsSlashUri];
 end;
 
 function TMvcRunOnRestServer.AddStaticCache(const aFileName: TFileName;
@@ -1919,6 +1925,7 @@ end;
 procedure TMvcRunOnRestServer.InternalRunOnRestServer(
   Ctxt: TRestServerUriContext; const MethodName: RawUtf8);
 var
+  p: PUtf8Char;
   mvcinfo, inputContext: variant;
   rawMethodName, rawFormat, cached, body, content: RawUtf8;
   staticFileName: TFileName;
@@ -1928,8 +1935,11 @@ var
   method: PInterfaceMethod;
   timer: TPrecisionTimer;
 begin
-  Split(MethodName, '/', rawMethodName, rawFormat);
-  // 1. implement mvc-info endpoint
+  // 1. parse URI
+  p := pointer(MethodName);
+  if GetNextItemMultiple(p, '/?', rawMethodName) = '/' then
+    GetNextItem(p, '?', rawFormat);
+  // 2. implement mvc-info endpoint
   if (publishMvcInfo in fPublishOptions) and
      IdemPropNameU(rawMethodName, MVCINFO_URI) then
   begin
@@ -1942,7 +1952,7 @@ begin
     Ctxt.Returns(fMvcInfoCache, HTTP_SUCCESS, HTML_CONTENT_TYPE_HEADER, True);
   end
   else
-  // 2. serve static resources, with proper caching
+  // 3. serve static resources, with proper caching
   if (publishStatic in fPublishOptions) and
      IdemPropNameU(rawMethodName, STATIC_URI) then
   begin
@@ -1990,7 +2000,7 @@ begin
   end
   else
   begin
-    // 3. render regular page using proper viewer
+    // 4. render regular page using proper viewer
     timer.Start;
     if IdemPropNameU(rawFormat, 'json') then
       rendererClass := TMvcRendererJson
@@ -2006,7 +2016,8 @@ begin
           method := @fApplication.fFactory.Methods[methodIndex];
           inputContext := Ctxt.GetInputAsTDocVariant(JSON_MVC, method);
           if Assigned(fApplication.OnBeforeRender) then
-            if not fApplication.OnBeforeRender(Ctxt, method, inputContext, renderer) then
+            if not fApplication.OnBeforeRender(
+                     Ctxt, method, inputContext, renderer) then
               // aborted by this event handler
               exit;
           if not VarIsEmpty(inputContext) then
@@ -2025,12 +2036,13 @@ begin
           method := nil;
         renderer.ExecuteCommand(methodIndex);
         if Assigned(fApplication.OnAfterRender) then
-          if not fApplication.OnAfterRender(Ctxt, method, inputContext, renderer) then
+          if not fApplication.OnAfterRender(
+                   Ctxt, method, inputContext, renderer) then
             // processed by this event handler
             exit;
       end
       else
-        renderer.CommandError('notfound', true, HTTP_NOTFOUND);
+        renderer.CommandError('invalid method', true, HTTP_NOTFOUND);
       body := renderer.Output.Content;
       if viewHasGenerationTimeTag in renderer.fOutputFlags then
         body := StringReplaceAll(body, fViews.ViewGenerationTimeTag,
@@ -2046,15 +2058,15 @@ end;
 
 procedure TMvcRunOnRestServer.RunOnRestServerRoot(Ctxt: TRestServerUriContext);
 begin
-  InternalRunOnRestServer(Ctxt, Ctxt.Uri + '/' + Ctxt.UriBlobFieldName);
+  InternalRunOnRestServer(Ctxt, Ctxt.UriWithoutRoot);
 end;
 
 procedure TMvcRunOnRestServer.RunOnRestServerSub(Ctxt: TRestServerUriContext);
 begin
-  if Ctxt.UriBlobFieldName = '' then
+  if Ctxt.UriMethodPath = '' then
     Ctxt.Redirect(Ctxt.UriWithoutSignature + '/default')
   else
-    InternalRunOnRestServer(Ctxt, Ctxt.UriBlobFieldName);
+    InternalRunOnRestServer(Ctxt, Ctxt.UriMethodPath);
 end;
 
 

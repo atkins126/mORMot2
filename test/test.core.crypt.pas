@@ -21,6 +21,7 @@ uses
   mormot.core.perf,
   mormot.core.test,
   mormot.core.variants,
+  mormot.lib.pkcs11,
   mormot.crypt.jwt,
   mormot.crypt.ecc;
 
@@ -51,8 +52,8 @@ type
     procedure Hashes;
     /// stream-oriented cryptography
     procedure Streams;
-    /// Base64 encoding/decoding functions
-    procedure _Base64;
+    /// Base64/Base58/Base32 encoding/decoding functions
+    procedure BaseEncoding;
     {$ifndef PUREMORMOT2}
     /// CompressShaAes() using SHA-256 / AES-256-CTR algorithm over SynLZ
     procedure _CompressShaAes;
@@ -69,6 +70,8 @@ type
     procedure _JWT;
     /// validate TBinaryCookieGenerator object
     procedure _TBinaryCookieGenerator;
+    /// mormot.lib.pkcs11 unit validation
+    procedure Pkcs11;
     /// Cryptography Catalog
     procedure Catalog;
     /// compute some performance numbers, mostly against regression
@@ -820,10 +823,10 @@ procedure TTestCoreCrypto._JWT;
         check(jwt.result = jwtValid);
         check(jwt.reg[jrcIssuer] = 'myself');
       end;
-      inc(tok[length(tok) - 5]);
-      jwt.result := jwtWrongFormat;
+      inc(tok[length(tok) - 5]); // make signature either wrong or not base64uri
+      jwt.result := jwtNoToken;
       J.Verify(tok, jwt);
-      check(jwt.result = jwtInvalidSignature, 'detection');
+      check(jwt.result in [jwtInvalidSignature, jwtWrongFormat], 'detection');
       NotifyTestSpeed('%', [J.Algorithm], N, 0, @tim);
     finally
       J.Free;
@@ -1468,12 +1471,12 @@ begin
   end;
 end;
 
-procedure TTestCoreCrypto._Base64;
+procedure TTestCoreCrypto.BaseEncoding;
 const
   Value64: RawUtf8 = 'SGVsbG8gL2Mn6XRhaXQg5+Ar';
 var
   tmp, tmp2: RawByteString;
-  u, b64: RawUtf8;
+  u, b64, b58, b32: RawUtf8;
   msg: string;
   Value: WinAnsiString;
   P: PUtf8Char;
@@ -1481,6 +1484,7 @@ var
   i, j, L, n: Integer;
   i64: Qword;
   enc, dec: TPrecisionTimer;
+  c: byte;
 begin
   tmp := 'wrJQQCQkdzByZA==';
   Check(IsBase64(tmp));
@@ -1511,12 +1515,27 @@ begin
   tmp := Base58ToBin('111233QC4');
   CheckEqual(length(tmp), 7, 'b58-6');
   Check(CompareMem(pointer(tmp), @i64, 7), 'b58-7');
+  CheckEqual(BinToBase32(''), '');
+  CheckEqual(BinToBase32('f'), 'MY======');
+  CheckEqual(BinToBase32('fo'), 'MZXQ====');
+  CheckEqual(BinToBase32('foo'), 'MZXW6===');
+  CheckEqual(BinToBase32('foob'), 'MZXW6YQ=');
+  CheckEqual(BinToBase32('fooba'), 'MZXW6YTB');
+  CheckEqual(BinToBase32('foobar'), 'MZXW6YTBOI======');
+  CheckEqual(Base32ToBin(''), '');
+  CheckEqual(Base32ToBin('MY======'), 'f');
+  CheckEqual(Base32ToBin('MZXQ===='), 'fo');
+  CheckEqual(Base32ToBin('MZXW6==='), 'foo');
+  CheckEqual(Base32ToBin('MZXW6YQ='), 'foob');
+  CheckEqual(Base32ToBin('MZXW6YTB'), 'fooba');
+  CheckEqual(Base32ToBin('MZXW6YTBOI======'), 'foobar');
+  CheckEqual(Base32ToBin('MZXW6YTB1'), '');
+  CheckEqual(Base32ToBin('MZXW6YTB========'), '');
   tmp := '';
-  for i := 1 to 1998 do
+  for i := 1 to 1982 do
   begin
     b64 := BinToBase64(tmp);
     Check((tmp = '') or IsBase64(b64));
-    Check(BinToBase64(tmp) = b64);
     Check(Base64ToBin(b64) = tmp);
     if tmp <> '' then
     begin
@@ -1529,12 +1548,15 @@ begin
     Check(Base64uriToBin(b64) = tmp);
     if i < 67 then // Base58 is much slower than Base64: not used on big buffers
     begin
-      b64 := BinToBase58(tmp);
-      CheckEqual(Base58ToBin(b64), tmp);
+      b58 := BinToBase58(tmp);
+      Check(Base58ToBin(b58) = tmp);
     end;
+    b32 := BinToBase32(tmp);
+    Check(Base32ToBin(b32) = tmp);
     if tmp <> '' then
     begin
       Check(not IsPem(b64));
+      Check(not IsPem(b32));
       b64 := DerToPem(pointer(tmp), length(tmp), TPemKind(i and 7));
       Check(IsPem(b64));
       CheckUtf8(PemToDer(b64) = tmp, b64);
@@ -1547,7 +1569,8 @@ begin
     b64 := UnZeroed(tmp);
     Check(StrLen(pointer(b64)) = length(b64), 'unz');
     Check(Zeroed(b64) = tmp, 'UnZeroed');
-    tmp := tmp + AnsiChar(Random32(255));
+    c := Random32;
+    AppendBufferToRawByteString(tmp, c, 1);
   end;
   Check(Zeroed(UnZeroed(#0)) = #0, 'unz0');
   Check(Zeroed(UnZeroed(#0#0)) = #0#0, 'unz1');
@@ -1557,6 +1580,10 @@ begin
   enc.Init;
   dec.Init;
   tmp := RandomString(1 shl 20);
+  b32 := BinToBase32(tmp);
+  tmp2 := Base32ToBin(b32);
+  CheckEqual(length(tmp2), length(tmp)); // tmp = tmp2 fails on FPC :(
+  Check(CompareMem(pointer(tmp), pointer(tmp2), length(tmp)));
   tmp2 := Zeroed(UnZeroed(tmp));
   {$ifdef FPC}
   SetCodePage(tmp2, StringCodePage(tmp)); // circumvent FPC inconsistency/bug
@@ -1589,8 +1616,8 @@ begin
     inc(L, 1 shl i);
   end;
   i64 := Int64(L) * n; // may overflow 32-bit L with AVX
-  NotifyTestSpeed('encoding' + msg, 0, i64, @enc);
-  NotifyTestSpeed('decoding' + msg, 0, i64, @dec);
+  NotifyTestSpeed('base64 encoding' + msg, 0, i64, @enc);
+  NotifyTestSpeed('base64 decoding' + msg, 0, i64, @dec);
 end;
 
 const
@@ -2788,6 +2815,41 @@ begin
     CheckEqual(gen.Validate(cook[i]), cookid[i], 'loaded');
   NotifyTestSpeed('validate', length(cook), 0, @timer);
 end;
+
+procedure TTestCoreCrypto.Pkcs11;
+var
+  o: CK_OBJECT_CLASS;
+  h: CK_HW_FEATURE_TYPE;
+  k: CK_KEY_TYPE;
+  c: CK_CERTIFICATE_TYPE;
+  a: CK_ATTRIBUTE_TYPE;
+  t: CK_MECHANISM_TYPE;
+  r: CK_RV;
+begin
+  Check(1 shl ord(CKF_ERROR_STATE) = $01000000);
+  Check(ord(CKK_SHA512_T_HMAC) = $00000045);
+  Check(cardinal(1 shl ord(CKF_EXTENSION)) = $80000000);
+  for o := low(o) to high(o) do
+    Check(OBJECT_CLASS(ToULONG(o)) = o);
+  for h := low(h) to high(h) do
+    Check(HW_FEATURE_TYPE(ToULONG(h)) = h);
+  for k := low(k) to high(k) do
+    Check(KEY_TYPE(ToULONG(k)) = k);
+  for c := low(c) to high(c) do
+    Check(CERTIFICATE_TYPE(ToULONG(c)) = c);
+  for a := low(a) to high(a) do
+    Check(ATTRIBUTE_TYPE(ToULONG(a)) = a);
+  for t := low(t) to pred(high(t)) do
+    Check(ToULONG(succ(t)) > ToULONG(t));
+  for t := low(t) to high(t) do
+    Check(MECHANISM_TYPE(ToULONG(t)) = t);
+  for r := low(r) to pred(high(r)) do
+    Check(ToULONG(succ(r)) > ToULONG(r));
+  for r := low(r) to high(r) do
+    Check(RV(ToULONG(r)) = r);
+end;
+
+
 
 initialization
   {$ifdef USE_OPENSSL}

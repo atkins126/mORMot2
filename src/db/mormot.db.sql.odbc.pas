@@ -184,7 +184,7 @@ type
   protected
     fStatement: pointer;
     fColData: TRawByteStringDynArray;
-    fSqlW: RawUnicode;
+    fSqlW: RawByteString;
     procedure AllocStatement;
     procedure DeallocStatement;
     function CType2SQL(CDataType: integer): integer;
@@ -384,8 +384,8 @@ begin
           pointer(fUserID), length(fUserID), pointer(fPassWord), length(fPassWord)),
         SQL_HANDLE_DBC, fDbc)
       else if fDatabaseName = '' then
-        raise EOdbcException.Create(
-          'Need ServerName=DataSourceName or DataBaseName=FullConnectString')
+        raise EOdbcException.CreateU(
+          'Missing ServerName=DataSourceName or DataBaseName=FullConnectString')
       else
       begin
         FastSetString(fSqlDriverFullString, nil, 1024);
@@ -736,8 +736,9 @@ begin
         if Col.ColumnType in FIXEDLENGTH_SQLDBFIELDTYPE then
           Col.ColumnDataState := colDataFilled
         else
-          raise EOdbcException.CreateUtf8('%.GetCol: [%] column has no size', [self,
-            Col.ColumnName]);
+          raise EOdbcException.CreateUtf8(
+            '%.GetCol: SQL_NO_TOTAL [%] % column has no size',
+            [self, Col.ColumnName, ToText(Col.ColumnType)^]);
     else
       RaiseError;
     end;
@@ -988,7 +989,7 @@ var
   StrLen_or_Ind: array of PtrInt;
   ArrayData: array of record
     StrLen_or_Ind: array of PtrInt;
-    WData: RawUnicode;
+    WData: RawByteString; // as UTF-16 buffer
   end;
 label
   retry;
@@ -1108,7 +1109,7 @@ retry:            VData := CurrentAnsiConvert.Utf8ToAnsi(VData);
                 end
                 else
                 begin
-                  VData := Utf8DecodeToRawUnicode(VData);
+                  VData := Utf8DecodeToUnicodeRawByteString(pointer(VData), length(VData));
                   if fDbms = dMSSQL then
                   begin
                     // CONTAINS(field, ?) do not accept NVARCHAR(max)
@@ -1281,7 +1282,7 @@ begin
       '%.Prepare should be called only once', [self]);
   // 1. process SQL
   inherited Prepare(aSql, ExpectResults); // set fSql + Connect if necessary
-  fSqlW := Utf8DecodeToRawUnicode(fSql);
+  fSqlW := Utf8DecodeToUnicodeRawByteString(pointer(fSQL), length(fSQL));
   // 2. prepare statement and bind result columns (if any)
   AllocStatement;
   try

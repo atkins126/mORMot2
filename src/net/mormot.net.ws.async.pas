@@ -108,9 +108,9 @@ type
   TWebSocketAsyncConnections = class(THttpAsyncConnections)
   protected
     // maintain a thread-safe list to minimize ProcessIdleTix time
-    fOutgoingSafe: TLightLock;
+    fOutgoingSafe: TLightLock; // atomic fOutgoingHandle[] access
     fOutgoingCount: integer;
-    fOutgoingHandle: TIntegerDynArray; // = TPollAsyncConnectionHandle
+    fOutgoingHandle: TPollAsyncConnectionHandleDynArray;
     procedure NotifyOutgoing(Connection: TWebSocketAsyncConnection);
     procedure ProcessIdleTixSendFrames;
     // overriden to send pending frames
@@ -389,14 +389,15 @@ procedure TWebSocketAsyncConnections.NotifyOutgoing(
   Connection: TWebSocketAsyncConnection);
 begin
   fOutgoingSafe.Lock;
-  AddInteger(fOutgoingHandle, fOutgoingCount, Connection.Handle, {nodup=}true);
+  AddInteger(TIntegerDynArray(fOutgoingHandle), fOutgoingCount,
+    Connection.Handle, {nodup=}true);
   fOutgoingSafe.UnLock;
 end;
 
 procedure TWebSocketAsyncConnections.ProcessIdleTixSendFrames;
 var
   i, conn, valid, sent, invalid, unknown: PtrInt;
-  pending: TIntegerDynArray; // keep fOutgoingSafe lock short
+  pending: TPollAsyncConnectionHandleDynArray; // keep fOutgoingSafe lock short
   c: TAsyncConnection;
   timer: TPrecisionTimer;
 begin
@@ -470,7 +471,8 @@ function TWebSocketAsyncProcess.ComputeContext(
   out RequestProcess: TOnHttpServerRequest): THttpServerRequestAbstract;
 begin
   result := THttpServerRequest.Create(
-    fConnection.fServer, fProtocol.ConnectionID, nil, fProtocol.ConnectionFlags,
+    fConnection.fServer, fProtocol.ConnectionID, nil, 
+    fProtocol.ConnectionFlags + HTTP_TLS_FLAGS[Assigned(fConnection.fSecure)],
     fProtocol.ConnectionOpaque);
   RequestProcess :=  fConnection.fServer.Request;
 end;
@@ -609,6 +611,7 @@ end;
 destructor TWebSocketAsyncServer.Destroy;
 var
   closing: TWebSocketFrame;
+  n: integer;
   log: ISynLog;
 begin
   log := TSynLog.Enter(self, 'Destroy');
@@ -616,8 +619,8 @@ begin
   closing.opcode := focConnectionClose;
   closing.content := [];
   closing.tix := 0;
-  WebSocketBroadcast(closing, nil);
-  log.Log(sllTrace, 'Destroy: WebSocketBroadcast(focConnectionClose) done', self);
+  n := WebSocketBroadcast(closing, nil);
+  log.Log(sllTrace, 'Destroy: WebSocketBroadcast(closing)=%', [n], self);
   // no more incoming request
   Shutdown;
   // close any pending connection
@@ -668,7 +671,7 @@ begin
      not (aFrame.opcode in [focText, focBinary, focConnectionClose]) then
     exit;
   FrameSendEncode(aFrame, {mask=}0, tmp);
-  fAsync.Lock(cReadOnly);
+  fAsync.ConnectionLock.ReadOnlyLock;
   try
     // use TWebSocketAsyncConnection.SendDirect for non-blocking socket sending
     if aClientsConnectionID = nil then
@@ -683,7 +686,7 @@ begin
           fAsync.LockedConnectionSearch(aClientsConnectionID[i])).
             SendDirect(tmp, aFrame.opcode, aTimeOut)));
   finally
-    fAsync.UnLock(cReadOnly);
+    fAsync.ConnectionLock.ReadOnlyUnLock;
     tmp.Done;
   end;
 end;

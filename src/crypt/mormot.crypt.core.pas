@@ -965,7 +965,7 @@ type
     // - returns true if the 128-bit CRC of the encrypted text matches the
     // supplied buffer, ignoring the 128-bit CRC of the plain data
     // - since it is easy to forge such 128-bit CRC, it will only indicate
-    // that no transmission error occured, but won't be an integrity or
+    // that no transmission error occurred, but won't be an integrity or
     // authentication proof (which will need full Decrypt + MacDecryptCheckTag)
     // - checked CRC includes any MacSetNonce() Associated value
     function MacCheckError(Encrypted: pointer; Count: cardinal): boolean; override;
@@ -1439,20 +1439,23 @@ type
 
 
 var
-  /// the AES-256 encoding class used by CompressShaAes() global function
+  /// the DEPRECATED AES-256 encoding class used by CompressShaAes() global function
+  // - DO NOT USE: since HTTP compression is optional, this scheme is not safe
   // - use any of the implementation classes, corresponding to the chaining
   // mode required - TAesEcb, TAesCbc, TAesCfb, TAesOfb and TAesCtr* classes to
   // handle in ECB, CBC, CFB, OFB and CTR mode (including PKCS7-like padding)
   // - set to the secure and efficient CFB mode by default
   CompressShaAesClass: TAesAbstractClass = TAesCfb;
 
-/// set an text-based encryption key for CompressShaAes() global function
+/// set an text-based encryption key for DEPRECATED CompressShaAes() global function
+// - DO NOT USE: since HTTP compression is optional, this scheme is not safe
 // - will compute the key via Sha256Weak() and set CompressShaAesKey
 // - the key is global to the whole process
 procedure CompressShaAesSetKey(const Key: RawByteString;
   AesClass: TAesAbstractClass = nil);
 
-/// encrypt data content using the AES-256/CFB algorithm, after SynLZ compression
+/// encrypt data content using the DEPRECATED AES-256/CFB algorithm, after SynLZ
+// - DO NOT USE: since HTTP compression is optional, this scheme is not safe
 // - as expected by THttpSocket.RegisterCompress()
 // - will return 'synshaaes' as ACCEPT-ENCODING: header parameter
 // - will use global CompressShaAesKey / CompressShaAesClass variables to be set
@@ -1473,17 +1476,17 @@ type
   /// thread-safe class containing a TAes encryption/decryption engine
   TAesLocked = class
   protected
-    fSafe: TLightLock; // TAes is enough for cache line padding of this lock
+    fSafe: TOSLightLock; // TAes is enough for cache line padding of this lock
     fAes: TAes;
   public
     /// initialize the instance
     constructor Create; virtual;
     /// finalize all used memory and resources
     destructor Destroy; override;
-    /// enter the associated TTLightLock
+    /// enter the associated non-reentrant TOSLightLock
     procedure Lock;
       {$ifdef HASINLINE} inline; {$endif}
-    /// leave the associated TTLightLock
+    /// leave the associated non-reentrant TOSLightLock
     procedure UnLock;
       {$ifdef HASINLINE} inline; {$endif}
   end;
@@ -1840,6 +1843,7 @@ type
     procedure Update(Buffer: pointer; Len: integer); overload;
     /// update the SHA-256 context with some data
     procedure Update(const Buffer: RawByteString); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// finalize and compute the resulting SHA-256 hash Digest of all data
     // affected to Update() method
     procedure Final(out Digest: TSha256Digest; NoInit: boolean = false); overload;
@@ -1889,6 +1893,7 @@ type
     procedure Update(Buffer: pointer; Len: integer); overload;
     /// update the SHA-384 / SHA-512 context with some data
     procedure Update(const Buffer: RawByteString); overload;
+      {$ifdef HASINLINE} inline; {$endif}
   end;
 
   /// implements SHA-384 hashing
@@ -1983,6 +1988,7 @@ type
     procedure Update(Buffer: pointer; Len: integer); overload;
     /// update the SHA-3 context with some data
     procedure Update(const Buffer: RawByteString); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// finalize and compute the resulting SHA-3 hash 256-bit Digest
     procedure Final(out Digest: THash256; NoInit: boolean = false); overload;
     /// finalize and compute the resulting SHA-3 hash 512-bit Digest
@@ -2120,6 +2126,7 @@ type
     procedure Update(const buffer; Len: cardinal); overload;
     /// update the MD5 context with some data
     procedure Update(const Buffer: RawByteString); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// finalize the MD5 hash process
     // - the resulting hash digest would be stored in buf public variable
     procedure Finalize;
@@ -2196,6 +2203,7 @@ type
     procedure Update(Buffer: pointer; Len: integer); overload;
     /// update the SHA-1 context with some data
     procedure Update(const Buffer: RawByteString); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// finalize and compute the resulting SHA-1 hash Digest of all data
     // affected to Update() method
     // - will also call Init to reset all internal temporary context, for safety
@@ -2581,10 +2589,10 @@ function AesBlockToString(const block: TAesBlock): RawUtf8;
 
 
 /// direct MD5 hash calculation of some data (string-encoded)
-// - result is returned in hexadecimal format
+// - result is returned in lowercase hexadecimal format
 function Md5(const s: RawByteString): RawUtf8;
 
-/// compute the hexadecimal representation of a MD5 digest
+/// compute the lowercase hexadecimal representation of a MD5 digest
 function Md5DigestToString(const D: TMd5Digest): RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -5387,7 +5395,7 @@ begin
     if (enclen <= SIZ) or
        (pcd^.crc <> crc32c(VERSION, @pcd.nonce, CRCSIZ)) then
       exit;
-    // inlined RecordLoad() for safety
+    // inlined RecordLoad() for paranoid safety
     P := @pcd^.data;
     len := FromVarUInt32(PByte(P));
     if enclen - len <> PtrUInt(PAnsiChar(P) - pointer(Data)) then
@@ -6859,7 +6867,7 @@ function AesPkcs7File(const src, dst: TFileName; encrypt: boolean; const key;
   keySizeBits: cardinal; aesMode: TAesMode; IV: PAesBlock): Int64;
 var
   fn: TFileName;
-  s, d: TFileStream;
+  s, d: THandleStream;
   siz: Int64;
   aes: TAesPkcs7Abstract;
 begin
@@ -6878,9 +6886,9 @@ begin
       raise ESynCrypto.CreateUtf8('AesPkcs7File: already existing %', [fn]);
   end;
   try
-    s := TFileStream.Create(src, fmOpenRead or fmShareDenyNone);
+    s := TFileStreamEx.Create(src, fmOpenReadDenyNone);
     try
-      d := TFileStream.Create(fn, fmCreate);
+      d := TFileStreamEx.Create(fn, fmCreate);
       try
         if encrypt then
         begin
@@ -7108,12 +7116,14 @@ end;
 
 constructor TAesLocked.Create;
 begin
+  fSafe.Init; // mandatory for TOSLightLock
 end;
 
 destructor TAesLocked.Destroy;
 begin
   inherited Destroy;
   fAes.Done; // fill AES buffer with 0 for safety
+  fSafe.Done;
 end;
 
 procedure TAesLocked.Lock;
@@ -7648,8 +7658,11 @@ end;
 { CryptDataForCurrentUser }
 
 var
-  __h: THash256;
-  __hmac: THmacSha256; // initialized from CryptProtectDataEntropy salt
+  _h: record
+    safe: TLightLock;
+    k: THash256;      // decoded local private key file
+    mac: THmacSha256; // initialized from CryptProtectDataEntropy salt
+  end;
 
 // don't use BinToBase64uri() to avoid linking mormot.core.buffers.pas
 
@@ -7708,68 +7721,76 @@ begin
   RawBase64Uri(pointer(result), P, bdiv, bmod);
 end;
 
-procedure read__h__hmac;
+procedure read_h;
 var
   fn: TFileName;
   k256: THash256;
   key, key2, appsec: RawByteString;
 begin
-  // CryptProtectDataEntropy used as salt
-  __hmac.Init(@CryptProtectDataEntropy, 32);
-  // CryptProtectDataEntropy derivated for current user -> fn + k256 
-  FastSetRawByteString(appsec, @CryptProtectDataEntropy, 32);
-  Pbkdf2HmacSha256(appsec, Executable.User, 100, k256);
-  FillZero(appsec);
-  appsec := Base64Uri(@k256, 15); // =BinToBase64Uri()
-  fn := FormatString({$ifdef OSWINDOWS}'%_%'{$else}'%.syn-%'{$endif},
-    [GetSystemPath(spUserData), appsec]);  // .* files are hidden under Linux
-  FastSetRawByteString(appsec, @k256[15], 17); // use remaining bytes as key
-  Sha256Weak(appsec, k256); // just a way to reduce to 256-bit
+  _h.safe.Lock;
   try
-    // extract private user key from local hidden file 
-    key := StringFromFile(fn);
-    if key <> '' then
-    begin
-      try
-        key2 := TAesCfb.SimpleEncrypt(key, k256, 256, false, true);
-      except
-        key2 := ''; // handle decryption error
-      end;
-      FillZero(key);
-      {$ifdef OSWINDOWS}
-      // may probably enhance privacy by using Windows API
-      key := CryptDataForCurrentUserDPAPI(key2, appsec, false);
-      {$else}
-      // chmod 400 + AES-CFB + AFUnSplit is enough for privacy on POSIX 
-      key := key2;
-      {$endif OSWINDOWS}
-      if TAesPrng.AFUnsplit(key, __h, SizeOf(__h)) then
-        // successfully extracted secret key in __h
-        exit;
-    end;
-    // persist the new private user key into local hidden file
-    if FileExists(fn) then
-      // allow rewrite of an invalid local file
-      FileSetHidden(fn, {ReadOnly=}false);
-    TAesPrng.Main.FillRandom(__h);
-    key := TAesPrng.Main.AFSplit(__h, SizeOf(__h), 126);
-    {$ifdef OSWINDOWS}
-    // 4KB local file, DPAPI-cyphered but with no DPAPI BLOB layout
-    key2 := CryptDataForCurrentUserDPAPI(key, appsec, true);
-    FillZero(key);
-    {$else}
-    // 4KB local chmod 400 hidden .file in $HOME folder under Linux/POSIX
-    key2 := key;
-    {$endif OSWINDOWS}
-    key := TAesCfb.SimpleEncrypt(key2, k256, 256, true, true);
-    if not FileFromString(key, fn) then
-      ESynCrypto.CreateUtf8('Unable to write %', [fn]);
-    FileSetHidden(fn, {ReadOnly=}true); // chmod 400
-  finally
-    FillZero(key);
-    FillZero(key2);
+    // try again for true thread-safety
+    if not IsZero(_h.k) then
+      exit;
+    // CryptProtectDataEntropy used as salt
+    _h.mac.Init(@CryptProtectDataEntropy, 32);
+    // CryptProtectDataEntropy derivated for current user -> fn + k256
+    FastSetRawByteString(appsec, @CryptProtectDataEntropy, 32);
+    Pbkdf2HmacSha256(appsec, Executable.User, 100, k256);
     FillZero(appsec);
-    FillZero(k256);
+    appsec := Base64Uri(@k256, 15); // =BinToBase64Uri()
+    fn := FormatString({$ifdef OSWINDOWS}'%_%'{$else}'%.syn-%'{$endif},
+      [GetSystemPath(spUserData), appsec]);  // .* files are hidden under Linux
+    FastSetRawByteString(appsec, @k256[15], 17); // use remaining bytes as key
+    Sha256Weak(appsec, k256); // just a way to reduce to 256-bit
+    try
+      // extract private user key from local hidden file
+      key := StringFromFile(fn);
+      if key <> '' then
+      begin
+        try
+          key2 := TAesCfb.SimpleEncrypt(key, k256, 256, false, true);
+        except
+          key2 := ''; // handle decryption error
+        end;
+        FillZero(key);
+        {$ifdef OSWINDOWS}
+        // may probably enhance privacy by using Windows API
+        key := CryptDataForCurrentUserDPAPI(key2, appsec, false);
+        {$else}
+        // chmod 400 + AES-CFB + AFUnSplit is enough for privacy on POSIX
+        key := key2;
+        {$endif OSWINDOWS}
+        if TAesPrng.AFUnsplit(key, _h.k, SizeOf(_h.k)) then
+          // successfully extracted secret key in _h
+          exit;
+      end;
+      // persist the new private user key into local hidden file
+      if FileExists(fn) then
+        // allow rewrite of an invalid local file
+        FileSetHidden(fn, {ReadOnly=}false);
+      TAesPrng.Main.FillRandom(_h.k);
+      key := TAesPrng.Main.AFSplit(_h.k, SizeOf(_h.k), 126);
+      {$ifdef OSWINDOWS}
+      // 4KB local file, DPAPI-cyphered but with no DPAPI BLOB layout
+      key2 := CryptDataForCurrentUserDPAPI(key, appsec, true);
+      FillZero(key);
+      {$else}
+      // 4KB local chmod 400 hidden .file in $HOME folder under Linux/POSIX
+      key2 := key;
+      {$endif OSWINDOWS}
+      key := TAesCfb.SimpleEncrypt(key2, k256, 256, true, true);
+      if not FileFromString(key, fn) then
+        ESynCrypto.CreateUtf8('Unable to write %', [fn]);
+      FileSetHidden(fn, {ReadOnly=}true); // chmod 400
+    finally
+      FillZero(key);
+      FillZero(key2);
+      FillZero(appsec);
+      FillZero(k256);
+    end;
+  finally
+    _h.Safe.UnLock;
   end;
 end;
 
@@ -7782,14 +7803,14 @@ begin
   result := '';
   if Data = '' then
     exit;
-  if IsZero(__h) then
-    read__h__hmac;
+  if IsZero(_h.k) then
+    read_h;
   try
-    hmac := __hmac; // thread-safe reuse of CryptProtectDataEntropy salt
-    hmac.Update(AppSecret);
-    hmac.Update(__h);
+    hmac := _h.mac;         // thread-safe reuse of CryptProtectDataEntropy salt
+    hmac.Update(AppSecret); // application-specific context as additional salt
+    hmac.Update(_h.k);      // includes secret per-user key file decoded content
     hmac.Done(secret);
-    result := TAesCfc.MacEncrypt(Data, secret, Encrypt);
+    result := TAesCfc.MacEncrypt(Data, secret, Encrypt); // fast cipher + crc
   finally
     FillZero(secret);
   end;
@@ -8715,8 +8736,7 @@ end;
 
 procedure TSha3.Update(const Buffer: RawByteString);
 begin
-  if Buffer <> '' then
-    PSha3Context(@Context)^.Absorb(pointer(Buffer), Length(Buffer) shl 3);
+  Update(pointer(Buffer), Length(Buffer));
 end;
 
 procedure TSha3.Update(Buffer: pointer; Len: integer);
@@ -11000,7 +11020,7 @@ end;
 
 {$endif PUREMORMOT2}
 
-// required by read__h__hmac -> deprecated even if available with PUREMORMOT2
+// required by read_h -> deprecated even if available with PUREMORMOT2
 procedure Sha256Weak(const s: RawByteString; out Digest: TSha256Digest);
 var
   L: integer;
@@ -11151,7 +11171,7 @@ begin
      (CryptoApiAesProvider <> HCRYPTPROV_NOTTESTED) then
     CryptoApi.ReleaseContext(CryptoApiAesProvider, 0);
   {$endif USE_PROV_RSA_AES}
-  FillZero(__h);
+  FillZero(_h.k); // anti-forensic of the dead process
 end;
 
 

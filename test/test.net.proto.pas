@@ -25,6 +25,7 @@ uses
   mormot.core.perf,
   mormot.net.sock,
   mormot.net.http,
+  mormot.net.server,
   mormot.net.async,
   mormot.net.rtsphttp;
 
@@ -32,15 +33,28 @@ type
   /// this test case will validate several low-level protocols
   TNetworkProtocols = class(TSynTestCase)
   protected
+    one, two: RawUtf8;
+    three: boolean;
+    request: integer;
+    four: Int64;
+    function DoRequest_(Ctxt: THttpServerRequestAbstract): cardinal;
+    function DoRequest0(Ctxt: THttpServerRequestAbstract): cardinal;
+    function DoRequest1(Ctxt: THttpServerRequestAbstract): cardinal;
+    function DoRequest2(Ctxt: THttpServerRequestAbstract): cardinal;
+    function DoRequest3(Ctxt: THttpServerRequestAbstract): cardinal;
+    function DoRequest4(Ctxt: THttpServerRequestAbstract): cardinal;
+    // this is the main method called by RtspOverHttp[BufferedWrite]
     procedure DoRtspOverHttp(options: TAsyncConnectionsOptions);
   published
+    /// validate TUriTree high-level structure
+    procedure _TUriTree;
     /// RTSP over HTTP, as implemented in SynProtoRTSPHTTP unit
     procedure RtspOverHttp;
     /// RTSP over HTTP, with always temporary buffering
     procedure RtspOverHttpBufferedWrite;
   end;
 
-  
+
 implementation
 
 procedure RtspRegressionTests(proxy: TRtspOverHttpServer; test: TSynTestCase;
@@ -253,6 +267,298 @@ procedure TNetworkProtocols.RtspOverHttpBufferedWrite;
 begin
   DoRtspOverHttp(ASYNC_OPTION + [acoWritePollOnly]);
 end;
+
+function TNetworkProtocols.DoRequest_(Ctxt: THttpServerRequestAbstract): cardinal;
+begin
+  one := Ctxt['one'];
+  Ctxt.RouteUtf8('two', two);
+  three := Ctxt.RouteEquals('three', '3');
+  if not Ctxt.RouteInt64('four', four) then
+    four := -1;
+  result := HTTP_SUCCESS;
+end;
+
+function TNetworkProtocols.DoRequest0(Ctxt: THttpServerRequestAbstract): cardinal;
+begin
+  result := DoRequest_(Ctxt);
+  request := 0;
+end;
+
+function TNetworkProtocols.DoRequest1(Ctxt: THttpServerRequestAbstract): cardinal;
+begin
+  result := DoRequest_(Ctxt);
+  request := 1;
+end;
+
+function TNetworkProtocols.DoRequest2(Ctxt: THttpServerRequestAbstract): cardinal;
+begin
+  result := DoRequest_(Ctxt);
+  request := 2;
+end;
+
+function TNetworkProtocols.DoRequest3(Ctxt: THttpServerRequestAbstract): cardinal;
+begin
+  result := DoRequest_(Ctxt);
+  request := 3;
+end;
+
+function TNetworkProtocols.DoRequest4(Ctxt: THttpServerRequestAbstract): cardinal;
+begin
+  result := DoRequest_(Ctxt);
+  request := 4;
+end;
+
+const
+  NODES: array[0..10] of RawUtf8 = (
+    'water', 'slow', 'slower', 'waste', 'watch', 'water',
+    'toaster', 'team', 'tester', 't', 'toast');
+
+procedure TNetworkProtocols._TUriTree;
+var
+  tree: TUriTree;
+  router: TUriRouter;
+  ctxt: THttpServerRequestAbstract;
+  i: PtrInt;
+  n: TRadixTreeNode;
+  timer: TPrecisionTimer;
+  rnd: array[0..999] of RawUtf8;
+
+  procedure Call(const uri, exp1, exp2: RawUtf8; exp3: boolean = false;
+    exp4: Int64 = -1; expstatus: integer = HTTP_SUCCESS;
+    const met: RawUtf8 = 'GET');
+  begin
+    request := -1;
+    one := '';
+    two := '';
+    three := false;
+    four := -1;
+    ctxt.Method := met;
+    ctxt.Url := uri;
+    CheckEqual(router.Process(ctxt), expstatus);
+    CheckEqual(one, exp1);
+    CheckEqual(two, exp2);
+    Check(three = exp3);
+    CheckEqual(four, exp4);
+  end;
+
+  procedure Compute(const uri, expected: RawUtf8; const met: RawUtf8 = 'POST';
+    expstatus: integer = 0);
+  begin
+    ctxt.Method := met;
+    ctxt.Url := uri;
+    CheckEqual(router.Process(ctxt), expstatus);
+    if expected <> '' then
+      CheckEqual(ctxt.Url, expected);
+  end;
+
+begin
+  tree := TUriTree.Create;
+  try
+    tree.insert('romane');
+    tree.insert('romanus');
+    tree.insert('romulus');
+    tree.insert('rubens');
+    tree.insert('ruber');
+    tree.insert('rubicon');
+    tree.insert('rubicundus');
+    CheckHash(tree.ToText, $0946B9A0);
+    CheckEqual(tree.Root.Lookup('rubens', nil).FullText, 'rubens');
+    Check(tree.Root.Lookup('Rubens', nil) = nil);
+  finally
+    tree.Free;
+  end;
+  tree := TUriTree.Create([rtoCaseInsensitiveUri]);
+  try
+    tree.insert('romanus');
+    tree.insert('romane');
+    tree.insert('rubicundus');
+    tree.insert('rubicon');
+    tree.insert('ruber');
+    tree.insert('romulus');
+    tree.insert('rubens');
+    CheckHash(tree.ToText, $305E57F1);
+    CheckEqual(tree.Root.Lookup('rubens', nil).FullText, 'rubens');
+    CheckEqual(tree.Root.Lookup('Rubens', nil).FullText, 'rubens');
+  finally
+    tree.Free;
+  end;
+  tree := TUriTree.Create;
+  try
+    tree.insert('/plaintext');
+    tree.insert('/');
+    tree.insert('/plain');
+    //writeln(tree.ToText);
+    CheckHash(tree.ToText, $B3522B86);
+  finally
+    tree.Free;
+  end;
+  tree := TUriTree.Create;
+  try
+    for i := 0 to high(NODES) do
+      CheckEqual(tree.Insert(NODES[i]).FullText, NODES[i]);
+    //writeln(tree.ToText);
+    CheckHash(tree.ToText, $CC40347C);
+    for i := 0 to high(NODES) do
+    begin
+      n := tree.Find(NODES[i]);
+      CheckUtf8(n <> nil, NODES[i]);
+      CheckEqual(n.FullText, NODES[i]);
+    end;
+    for i := 0 to high(NODES) do
+      CheckEqual(tree.Insert(NODES[i]).FullText, NODES[i]);
+    tree.AfterInsert; // sort by depth
+    //writeln(tree.ToText);
+    CheckHash(tree.ToText, $200CAEEB);
+    for i := 0 to high(NODES) do
+      CheckEqual(tree.Find(NODES[i]).FullText, NODES[i]);
+  finally
+    tree.Free;
+  end;
+  tree := TUriTree.Create;
+  try
+    for i := 0 to high(rnd) do
+      rnd[i] := RandomIdentifier(Random32(24) * 2 + 1);
+    for i := 0 to high(rnd) do
+      CheckEqual(tree.Insert(rnd[i]).FullText, rnd[i]);
+    timer.Start;
+    for i := 0 to high(rnd) do
+      CheckEqual(tree.Find(rnd[i]).FullText, rnd[i]);
+    NotifyTestSpeed('big tree lookups', length(rnd), 0, @timer);
+  finally
+    tree.Free;
+  end;
+  ctxt := THttpServerRequestAbstract.Create;
+  router := TUriRouter.Create;
+  try
+    Call('/plaintext', '', '', false, -1, 0);
+    Call('/', '', '', false, -1, 0);
+    router.Get('/plaintext', DoRequest_);
+    router.Get('/plaintext', DoRequest_);
+    CheckEqual(request, -1);
+    Call('/plaintext', '', '');
+    Call('/', '', '', false, -1, 0);
+    //writeln(router.Tree[urmGet].ToText);
+    router.Get('/', DoRequest0);
+    Call('/plaintext', '', '');
+    CheckEqual(request, -1);
+    Call('/', '', '', false);
+    CheckEqual(request, 0);
+    router.Get('/do/<one>/pic/<two>', DoRequest0);
+    router.Get('/do/<one>', DoRequest1);
+    router.Get('/do/<one>/pic', DoRequest2);
+    router.Get('/do/<one>/pic/<two>/', DoRequest3);
+    router.Get('/da/<one>/<two>/<three>/<four>/', DoRequest4);
+    //writeln(router.Tree[urmGet].ToText);
+    Call('/do/a', 'a', '');
+    CheckEqual(request, 1);
+    Call('/do/123', '123', '');
+    CheckEqual(request, 1);
+    Call('/do/toto/pic', 'toto', '');
+    CheckEqual(request, 2);
+    Call('/do/toto/pic/titi/', 'toto', 'titi');
+    CheckEqual(request, 3);
+    Call('/do/toto/pic/titi', 'toto', 'titi');
+    CheckEqual(request, 0);
+    Call('/do/toto/pic/titi/', 'toto', 'titi');
+    CheckEqual(request, 3);
+    Call('/da/1/2/3/4', '', '', false, -1, 0);
+    CheckEqual(request, -1);
+    Call('/da/1/2/3/4/', '1', '2', true, 4);
+    CheckEqual(request, 4);
+    Call('/da/a1/b2/3/47456/', 'a1', 'b2', true, 47456);
+    CheckEqual(request, 4);
+    Compute('/static', '/static');
+    Compute('/static2', '/static2');
+    Compute('/', '/');
+    router.Post('/static', '/some/static');
+    Compute('/static', '/some/static');
+    Compute('/static2', '/static2');
+    Compute('/', '/');
+    router.Post('/static2', '/some2/static');
+    router.Post('/', '/index');
+    Compute('/static', '/some/static');
+    Compute('/static2', '/some2/static');
+    Compute('/', '/index');
+    Compute('/stat', '/stat');
+    router.Post('/user/<id>', '/root/user.new?id=<id>');
+    Compute('/user/1234', '/root/user.new?id=1234');
+    Compute('/user/1234/', '/user/1234/');
+    router.Post('/user/<id>/picture', '/root/user.newpic?id=<id>&pic=');
+    router.Post('/user/<id>/picture/<pic>', '/root/user.newpic?pic=<pic>&id=<id>');
+    Compute('/user/1234/picture', '/root/user.newpic?id=1234&pic=');
+    Compute('/user/1234/picture/5', '/root/user.newpic?pic=5&id=1234');
+    Compute('/user/1234/picture/', '/user/1234/picture/');
+    Compute('/user/1234', '/root/user.new?id=1234');
+    Compute('/user/1234/', '/user/1234/');
+    Compute('/static', '/some/static');
+    Compute('/static2', '/some2/static');
+    Compute('/', '/index');
+    Compute('/stat', '/stat');
+    timer.Start;
+    for i := 1 to 1000 do
+      CheckEqual(router.Tree[urmPost].Find('/static').FullText, '/static');
+    NotifyTestSpeed('URI lookups', 1000, 0, @timer);
+    timer.Start;
+    for i := 1 to 1000 do
+      Compute('/static', '/some/static');
+    NotifyTestSpeed('URI static rewrites', 1000, 0, @timer);
+    timer.Start;
+    for i := 1 to 1000 do
+      Compute('/user/1234', '/root/user.new?id=1234');
+    NotifyTestSpeed('URI parametrized rewrites', 1000, 0, @timer);
+    timer.Start;
+    for i := 1 to 1000 do
+      Compute('/plaintext', '', 'GET', 200);
+    NotifyTestSpeed('URI static execute', 1000, 0, @timer);
+    timer.Start;
+    for i := 1 to 1000 do
+      Compute('/do/toto/pic', '', 'GET', 200);
+    NotifyTestSpeed('URI parametrized execute', 1000, 0, @timer);
+    router.Put('/index.php', '404');
+    router.Put('/index.php', '404');
+    router.Put('/admin.php', '404');
+    Compute('/index.php', '/index.php', 'PUT', 404);
+    Compute('/admin.php', '/admin.php', 'PUT', 404);
+    router.Delete('/*', '/static/*');
+    router.Delete('/root1/<path:url>', '/roota/<url>');
+    router.Delete('/root2/*', '/rootb/*');
+    router.Delete('/root3/<url>', '/rootc/<url>');
+    router.Delete('/root4/<int:id>', '/rootd/<id>');
+    Compute('/root1/one', '/roota/one', 'DELETE');
+    Compute('/root1/one/', '/roota/one/', 'DELETE');
+    Compute('/root1/one/two', '/roota/one/two', 'DELETE');
+    Compute('/root2/one', '/rootb/one', 'DELETE');
+    Compute('/root2/one/', '/rootb/one/', 'DELETE');
+    Compute('/root2/one/two', '/rootb/one/two', 'DELETE');
+    Compute('/root3/one', '/rootc/one', 'DELETE');
+    Compute('/root3/one/', '/static/root3/one/', 'DELETE');
+    Compute('/root3/one/two', '/static/root3/one/two', 'DELETE');
+    Compute('/root4/one', '/static/root4/one', 'DELETE');
+    Compute('/root4/1', '/rootd/1', 'DELETE');
+    Compute('/root4/123', '/rootd/123', 'DELETE');
+    Compute('/roota/one', '/static/roota/one', 'DELETE');
+    Compute('/one', '/static/one', 'DELETE');
+    Compute('/one/two', '/static/one/two', 'DELETE');
+    //writeln(router.Tree[urmGet].ToText);
+    //writeln(router.Tree[urmPost].ToText);
+    //writeln(router.Tree[urmPut].ToText);
+    //writeln(router.Tree[urmDelete].ToText);
+    CheckHash(router.Tree[urmGet].ToText, $18A0BF58);
+    CheckHash(router.Tree[urmPost].ToText, $E173FBB0);
+    CheckHash(router.Tree[urmPut].ToText, $80F7A0EF);
+    CheckHash(router.Tree[urmDelete].ToText, $39501147);
+    router.Clear([urmPost]);
+    Call('/plaintext', '', '');
+    Compute('/static', '/static');
+    router.Clear;
+    Call('/plaintext', '', '', false, -1, 0);
+    Compute('/static', '/static');
+  finally
+    router.Free;
+    ctxt.Free;
+  end;
+end;
+
 
 end.
 

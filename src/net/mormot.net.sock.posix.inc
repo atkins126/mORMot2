@@ -43,6 +43,10 @@ const
   SOCK_NONBLOCK = O_NONBLOCK; // see net.h
   {$endif OSLINUX}
 
+  {$ifdef OSLINUXANDROID}
+  SO_REUSEPORT = 15; // available since Kernel 3.9 - not defined by FPC yet
+  {$endif OSLINUXANDROID}
+
   {$ifdef OSFREEBSD}
   NI_NUMERICHOST = 2;
   NI_NUMERICSERV = 8;
@@ -389,6 +393,9 @@ end;
 
 { TNetAddr }
 
+var
+  _gethostbynamesafe: TOSLightLock; // gethostbyname() result is NOT thread-safe
+
 function TNetAddr.SetFrom(const address, addrport: RawUtf8;
   layer: TNetLayer): TNetResult;
 var
@@ -436,20 +443,25 @@ begin
     exit;
   end;
   // resolve name or IP (getaddrinfo is more recent, but addrinfo is not fixed)
-  h := gethostbyname(pointer(address));
-  if h = nil then
-    result := nrNotFound
-  else
-  begin
-    addr4.sin_family := h^.h_addrtype;
-    case h^.h_addrtype of
-      AF_INET:
-         addr4.sin_addr := h^.h_addr^^;
-      AF_INET6:
-         psockaddr6(@Addr)^.sin6_addr := h^.h_addr6^^;
-      else
-        result := nrNotImplemented;
+  _gethostbynamesafe.Lock;
+  try
+    h := gethostbyname(pointer(address));
+    if h = nil then
+      result := nrNotFound
+    else
+    begin
+      addr4.sin_family := h^.h_addrtype;
+      case h^.h_addrtype of
+        AF_INET:
+           addr4.sin_addr := h^.h_addr^^;
+        AF_INET6:
+           psockaddr6(@Addr)^.sin6_addr := h^.h_addr6^^;
+        else
+          result := nrNotImplemented;
+      end;
     end;
+  finally
+    _gethostbynamesafe.UnLock;
   end;
 end;
 
@@ -471,6 +483,17 @@ begin
     tv.tv_sec := d;
     tv.tv_usec := (ms - (d * 1000)) * 1000;
   end;
+end;
+
+procedure TNetSocketWrap.ReusePort;
+var
+  v: integer;
+begin
+  // see https://lwn.net/Articles/542629 for Linux (available since Kernel 3.9)
+  v := ord(true);
+  if @self <> nil then
+    setsockopt(TSocket(@self), SOL_SOCKET, SO_REUSEPORT, @v, SizeOf(v));
+  // don't call SetOpt() which raise ENetSock on old kernel without SO_REUSEPORT
 end;
 
 procedure TNetSocketWrap.SetSendTimeout(ms: integer);
@@ -930,7 +953,7 @@ begin
        (p^.fd > 0) then
     begin
       if r = POLLIN then
-        byte(d^.events) := byte([pseRead]) // optimized for the most common case
+        byte(e) := byte([pseRead]) // optimized for the most common case
       else
       begin
         byte(e) := 0;
@@ -942,9 +965,8 @@ begin
           include(e, pseError);
         if r and POLLHUP <> 0 then
           include(e, pseClosed);
-        d^.events := e;
       end;
-      d^.tag := t^;
+      SetRes(d^, t^, e);
       inc(d);
       p^.revents := 0; // reset result flags for reuse
     end;
@@ -991,10 +1013,10 @@ type
   /// socket polling via Linux epoll optimized API
   // - not available under Windows or BSD/Darwin
   // - direct call of the epoll API in level-triggered (LT) mode
+  // - this class IS thread-safe, as the epoll API itself
   TPollSocketEpoll = class(TPollSocketAbstract)
   protected
     fEPFD: integer;
-    fResults: array of EPoll_Event;
   public
     constructor Create(aOwner: TPollSockets); override;
     destructor Destroy; override;
@@ -1019,9 +1041,7 @@ type
 constructor TPollSocketEpoll.Create(aOwner: TPollSockets);
 begin
   inherited Create(aOwner);
-  fMaxSockets := 100; // initial value: no limitation in practice and can grow
   fEPFD := epoll_create(10000); // since 2.6.8 size is ignored
-  SetLength(fResults, fMaxSockets);
 end;
 
 destructor TPollSocketEpoll.Destroy;
@@ -1044,7 +1064,8 @@ const
   //                  in ET mode properly reflects connection close
   EPOLLMODE_LT = 0;                     // Level Triggered mode
   EPOLLMODE_ET = EPOLLET or EPOLLRDHUP; // Event Triggered mode + RDHUP
-  // "EPOLLET" edge triggered detection is not consistent with select or poll
+  // "EPOLLET" edge triggered detection is not really consistent with select
+  // or poll and do not work as expected e.g. with TTestMultiThreadProcess
   // -> PollForPendingEvents() will use fast O(n*m) MergePendingEvents()
   EPOLLMODE = EPOLLMODE_LT;
   // EPOLLRDHUP is relevant only in ET mode
@@ -1053,7 +1074,8 @@ const
 function TPollSocketEpoll.Subscribe(socket: TNetSocket; events: TPollSocketEvents;
   tag: TPollSocketTag): boolean;
 var
-  e: EPoll_Event;
+  e: TEPoll_Event;
+  err: integer;
 begin
   result := false;
   if (self = nil) or
@@ -1073,17 +1095,20 @@ begin
   else
     e.events := 0;
   // EPOLLERR and EPOLLHUP are always implicitly tracked
-  result := epoll_ctl(fEPFD, EPOLL_CTL_ADD, TSocket(socket), @e) >= NO_ERROR;
+  repeat
+    err := epoll_ctl(fEPFD, EPOLL_CTL_ADD, TSocket(socket), @e);
+  until err <> ESysEINTR;
+  result := err >= NO_ERROR;
   if not result then
     exit;
-  inc(fCount);
-  if fCount = fMaxSockets then
-    fMaxSockets := NextGrow(fMaxSockets); // epoll has no theoritical limit
+  LockedInc32(@fCount);
+  fMaxSockets := fCount;
 end;
 
 function TPollSocketEpoll.Unsubscribe(socket: TNetSocket): boolean;
 var
-  e: EPoll_Event; // should be there even if not used (old kernel < 2.6.9)
+  e: TEPoll_Event; // should be there even if not used (old kernel < 2.6.9)
+  err: integer;
 begin
   if (self = nil) or
      (socket = nil) or
@@ -1092,13 +1117,14 @@ begin
     result := false
   else
   begin
-    result := epoll_ctl(fEPFD, EPOLL_CTL_DEL, TSocket(socket), @e) >= NO_ERROR;
+    repeat
+      err := epoll_ctl(fEPFD, EPOLL_CTL_DEL, TSocket(socket), @e);
+    until err <> ESysEINTR;
+    result := err >= NO_ERROR;
     if result then
     begin
-      dec(fCount);
-      if (fMaxSockets > 100) and
-         (fCount < fMaxSockets shr 1) then
-        fMaxSockets := fMaxSockets shr 1; // size down fMaxSockets
+      LockedDec32(@fCount);
+      fMaxSockets := fCount;
     end;
     if (fOwner <> nil) and
        fOwner.fUnsubscribeShouldShutdownSocket then
@@ -1112,36 +1138,33 @@ var
   e: TPollSocketEvents;
   n: PtrInt;
   ev: integer;
-  ee: ^EPoll_Event;
+  ee: PEPoll_Event;
   er: PPollSocketResult;
+  tmp: array[byte] of TEPoll_Event; // up to 256 events at once seems fair
 begin
   result := false; // error or nothing new
   if (self = nil) or
      (fEPFD <= 0) then
     exit;
   // we allow fCount=0 which enable background epoll_ctl subscription
-  if fMaxSockets > length(fResults) then
-  begin
-    fResults := nil;
-    SetLength(fResults, fMaxSockets);
-  end;
-  n := epoll_wait(fEPFD, pointer(fResults), fMaxSockets, timeoutMS);
+  n := epoll_wait(fEPFD, @tmp, length(tmp), timeoutMS);
+  // if pending > length(tmp): epoll_wait() would round-robin
   results.Count := n;
   if n <= 0 then
-    exit;
+    exit; // nothing new
+  // epoll notified some sockets
   if results.Events = nil then
     // temporary results.Events = new in PollForPendingEvents()
     SetLength(results.Events, n + 4)
   else if n > length(results.Events) then
   begin
-    // results.Events can be reused between PollForPendingEvents() calls
+    // results.Events reused between calls: allocate as much as possible
     results.Events := nil;
-    SetLength(results.Events, fMaxSockets)
+    SetLength(results.Events, length(tmp));
   end;
-  ee := pointer(fResults);
+  ee := @tmp;
   er := pointer(results.Events);
   repeat
-    er^.tag := TPollSocketTag(ee^.data.ptr);
     ev := ee^.events;
     byte(e) := byte([pseRead]); // optimized for the most common case
     if ev <> EPOLLIN then
@@ -1155,7 +1178,13 @@ begin
       if ev and EPOLLCLOSE <> 0 then
         include(e, pseClosed);
     end;
-    er^.events := e;
+    // inlined forward SetRes(er^, TPollSocketTag(ee^.data.ptr), e)
+    {$ifdef CPU32}
+    er^.B[4] := byte(e);
+    er^.Li := TPollSocketTag(ee^.data.ptr);
+    {$else}
+    er^ := PtrUInt(ee^.data.ptr) or (PtrUInt(byte(e)) shl 60);
+    {$endif CPU32}
     inc(ee);
     inc(er);
     dec(n)
@@ -1176,9 +1205,11 @@ procedure InitializeUnit;
 begin
   SocketAPIVersion := OSVersionShort +
     {$ifdef USEPOLL} ' poll' {$else} ' epoll' {$endif USEPOLL};
+  _gethostbynamesafe.Init;
 end;
 
 procedure FinalizeUnit;
 begin
+  _gethostbynamesafe.Done;
 end;
 

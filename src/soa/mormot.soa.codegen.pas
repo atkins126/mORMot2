@@ -25,9 +25,9 @@ uses
   sysutils,
   classes,
   variants,
-  {$ifndef FPC}
+  {$ifdef ISDELPHI}
   typinfo, // for proper Delphi inlining
-  {$endif FPC}
+  {$endif ISDELPHI}
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -538,6 +538,7 @@ const
     wUnknown,  //  ptClass
     wUnknown,  //  ptDynArray
     wUnknown,  //  ptInterface
+    wRawUtf8,  //  ptPUtf8Char
     wUnknown); //  ptCustom
 
   TYPES_SOA: array[TInterfaceMethodValueType] of TWrapperType = (
@@ -1346,13 +1347,13 @@ begin
     if port = 0 then
       port := 80;
     _ObjAddProp('port', port, context);
-    if IdemPropNameU(Ctxt.UriBlobFieldName, 'context') then
+    if IdemPropNameU(Ctxt.UriMethodPath, 'context') then
     begin
       Ctxt.ReturnsJson(context, 200, {304=}true, twNone, {humanreadable=}true);
       exit;
     end;
     root := Ctxt.Server.Model.Root;
-    if Ctxt.UriBlobFieldName = '' then
+    if Ctxt.UriMethodPath = '' then
     begin
       result := '<html><title>mORMot Wrappers</title>' +
         '<body style="font-family:verdana;"><h1>Generated Code/Doc Wrappers</h1>' +
@@ -1386,7 +1387,7 @@ begin
   finally
     FindClose(SR);
   end;
-  Split(Ctxt.UriBlobFieldName, '/', templateName, unitName);
+  Split(Ctxt.UriMethodPath, '/', templateName, unitName);
   Split(unitName, '.', unitName, templateExt);
   if PosExChar('.', templateExt) > 0 then
   begin
@@ -1400,8 +1401,8 @@ begin
     // download as file
     head := HEADER_CONTENT_TYPE + 'application/' + LowerCase(templateExt);
   templateName := templateName + '.' + templateExt + '.mustache';
-  template := AnyTextFileToRawUtf8(IncludeTrailingPathDelimiter(
-    Path[templateFound]) + Utf8ToString(templateName), true);
+  template := RawUtf8FromFile(
+    IncludeTrailingPathDelimiter(Path[templateFound]) + Utf8ToString(templateName));
   if template = '' then
   begin
     Ctxt.Error(templateName, HTTP_NOTFOUND);
@@ -1704,8 +1705,7 @@ begin
     DestFileName := 'mORMotServer.pas'
   else if DestFileName[1] = PathDelim then
     DestFileName := ExtractFilePath(TemplateName) + DestFileName;
-  FileFromString(WrapperFromModel(Server,
-    AnyTextFileToRawUtf8(TemplateName, true),
+  FileFromString(WrapperFromModel(Server, RawUtf8FromFile(TemplateName),
     StringToUtf8(ExtractFileName(DestFileName)), 0), DestFileName);
 end;
 
@@ -1731,7 +1731,7 @@ begin
     Free;
   end;
   ctxt.fileName := GetFileNameWithoutExtOrPath(DestFileName);
-  FileFromString(TSynMustache.Parse(AnyTextFileToRawUtf8(TemplateName, true)).
+  FileFromString(TSynMustache.Parse(RawUtf8FromFile(TemplateName)).
     Render(ctxt, nil, nil, nil, true), DestFileName);
 end;
 

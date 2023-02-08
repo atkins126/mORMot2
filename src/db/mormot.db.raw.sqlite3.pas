@@ -134,7 +134,7 @@ const
   SQLITE_UTF16_ALIGNED = 8;
 
 
-  /// Successful result. No error occured
+  /// Successful result. No error occurred
   SQLITE_OK = 0;
   /// SQL error or missing database - legacy generic code
   // - Use Extended Result Codes for more detailed information about errors
@@ -192,6 +192,8 @@ const
   SQLITE_RANGE = 25;
   /// File opened that is not a database file
   SQLITE_NOTADB = 26;
+
+  // note: SQLITE_NOTICE=27 and SQLITE_WARNING=28 are never returned by the API
 
   /// sqlite3.step() return code: another result row is ready
   SQLITE_ROW = 100;
@@ -458,7 +460,8 @@ const
   SQLITE_IOERR_SHMOPEN = 4618;
   /// The SQLITE_IOERR_SHMSIZE error code is an extended error code for SQLITE_IOERR indicating an I/O error
   // within the xShmMap method on the sqlite3_io_methods object while trying to enlarge a "shm" file as part
-  // of WAL mode transaction processing. This error may indicate that the underlying filesystem volume is out of space.
+  // of WAL mode transaction processing. This error may indicate that the underlying filesystem volume is
+  // out of space.
   SQLITE_IOERR_SHMSIZE = 4874;
   /// The SQLITE_IOERR_SHMMAP error code is an extended error code for SQLITE_IOERR indicating an I/O error
   // within the xShmMap method on the sqlite3_io_methods object while trying to map a shared memory segment
@@ -503,6 +506,11 @@ const
   /// The SQLITE_IOERR_DATA error code is an extended error code for SQLITE_IOERR used only by checksum VFS shim to
   // indicate that the checksum on a page of the database file is incorrect.
   SQLITE_IOERR_DATA = 8202;
+  ///  The SQLITE_IOERR_CORRUPTFS error code is an extended error code for
+  // SQLITE_IOERR used only by a VFS to indicate that a seek or read failure
+  // was due to the request not falling within the file's boundary rather than
+  // an ordinary device failure. This often indicates a corrupt filesystem.
+  SQLITE_IOERR_CORRUPTFS = 8458;
 
 
   /// The database is opened in read-only mode
@@ -2190,8 +2198,8 @@ type
     // that caused the most recent I/O error or failure to open a file.
     // - The return value is OS-dependent.
     // - For example, on unix systems, after sqlite3.open_v2() returns SQLITE_CANTOPEN,
-    // this interface could be called to get back the underlying "errno" that caused the problem,
-    // such as ENOSPC, EAUTH, EISDIR, and so forth.
+    // this interface could be called to get back the underlying "errno" that
+    // caused the problem, such as ENOSPC, EAUTH, EISDIR, and so forth.
     system_errno: function(DB: TSqlite3DB): integer; cdecl;
 
     /// Enables or disables the extended result codes feature of SQLite.
@@ -2301,7 +2309,7 @@ type
     /// Set A Busy Timeout
     // - This routine sets a busy handler that sleeps for a specified amount of time
     // when a table is locked. The handler will sleep multiple times until at least
-    // "ms" milliseconds of sleeping have accumulated. After at least "ms" milliseconds
+    // "Milliseconds" of sleeping have accumulated. After at least "Milliseconds"
     // of sleeping, the handler returns 0 which causes sqlite3.step() to return
     // SQLITE_BUSY or SQLITE_IOERR_BLOCKED.
     // - Calling this routine with an argument less than or equal to zero turns off
@@ -2319,6 +2327,7 @@ type
     // returned immediately upon encountering the lock. If the busy callback is not
     // nil, then the callback might be invoked with two arguments.
     // - The default busy callback is nil.
+    // - See sqlite3.busy_timeout() for setting a simple time-specific callback
     busy_handler: function(DB: TSqlite3DB;
       CallbackPtr: TSqlBusyHandler; user: Pointer): integer;  cdecl;
 
@@ -2327,7 +2336,7 @@ type
     // - UserData is passed through as the only parameter to the Callback.
     // - Only a single progress handler may be defined at one time per database connection;
     // setting a new progress handler cancels the old one.
-    // Setting Callback to nil disables the progress handler.
+    // - Setting Callback to nil disables the progress handler.
     // The progress handler is also disabled by setting N to a value less than 1.
     progress_handler: procedure(DB: TSqlite3DB; N: integer; Callback: TSqlProgressCallback;
       UserData: pointer); cdecl;
@@ -4161,7 +4170,7 @@ type
     secDONE);
 
   /// custom SQLite3 dedicated Exception type
-  ESqlite3Exception = class(ESynException)
+  ESqlite3Exception = class(ECoreDBException)
   protected
     fErrorCode: integer;
     fSQLite3ErrorCode: TSqlite3ErrorCode;
@@ -4251,8 +4260,12 @@ type
   // lmNormal using this pragma and then accessing the database file (for read
   // or write). Simply setting the locking-mode to lmNormal is not enough - locks
   // are not released until the next time the database file is accessed.
-  // - lmExclusive gives much better write performance, and could be used when
-  // needed, in case of a heavy loaded mORMot server
+  // - lmExclusive is safer and gives better performance, so is adviced for a
+  // mORMot server, e.g. a MicroService with its own stand-alone persistence -
+  // locking the DB file is a security and performance feature, and the proper
+  // and clean way to give access to the data is via a regular service endpoint:
+  // if some external process changes the DB content, the service cache and
+  // consistency expectations are likely to be broken
   TSqlLockingMode = (
     lmNormal,
     lmExclusive);
@@ -4559,8 +4572,10 @@ type
     function FieldS(Col: integer): string;
     /// return a field as Win-Ansi (i.e. code page 1252) encoded text value, first Col is 0
     function FieldA(Col: integer): WinAnsiString;
+    {$ifndef PUREMORMOT2}
     /// return a field RawUnicode encoded text value, first Col is 0
     function FieldW(Col: integer): RawUnicode;
+    {$endif PUREMORMOT2}
     /// return a field as a blob value (RawByteString/RawBlob is an AnsiString),
     // first Col is 0
     function FieldBlob(Col: integer): RawByteString;
@@ -4596,7 +4611,7 @@ type
     procedure FieldToJson(WR: TJsonWriter; Value: TSqlite3Value;
       DoNotFetchBlobs: boolean);
     /// append all columns values of the current Row to a JSON stream
-    // - will use WR.Expand to guess the expected output format
+    // - will use WR.Expand to generate the expected output format
     // - will implement twoIgnoreDefaultInRecord in WR.CustomOptions setting
     // - BLOB field value is saved as Base64, in the '"\uFFF0base64encodedbinary"
     // format and contains true BLOB data
@@ -5193,6 +5208,8 @@ type
       read fTransactionActive;
     /// sets a busy handler that sleeps for a specified amount of time
     // (in milliseconds) when a table is locked, before returning an error
+    // - let SQLite3 intercept SQLITE_BUSY errors using busy_timeout() handler
+    // - only useful if the database is not in lmExclusive mode
     property BusyTimeout: integer
       read fBusyTimeout write SetBusyTimeout;
     /// query or change the suggested maximum number of database disk pages
@@ -5661,23 +5678,32 @@ end;
 constructor ESqlite3Exception.Create(aDB: TSqlite3DB; aErrorCode: integer;
   const aSql: RawUtf8);
 var
-  msg: RawUtf8;
+  er: integer;
 begin
   fErrorCode := aErrorCode;
   fSQLite3ErrorCode := sqlite3_resultToErrorCode(aErrorCode);
   FormatUtf8('Error % (%) [%] using %', [ErrorCodeToText(SQLite3ErrorCode),
-    aErrorCode, aSql, sqlite3.VersionText], msg);
+    aErrorCode, aSql, sqlite3.VersionText], fMessageUtf8);
   if aDB = 0 then
-    msg := msg + ' with aDB=nil'
+    fMessageUtf8 := fMessageUtf8 + ' with aDB=nil'
   else
   begin
-    msg := FormatUtf8('% - %', [msg, sqlite3.errmsg(aDB)]);
+    fMessageUtf8 := FormatUtf8('% - %', [fMessageUtf8, sqlite3.errmsg(aDB)]);
     if Assigned(sqlite3.extended_errcode) then
-      msg := FormatUtf8('%, extended_errcode=%',
-        [msg, sqlite3.extended_errcode(aDB)]);
+    begin
+      er := sqlite3.extended_errcode(aDB);
+      if er > 255 then // see https://sqlite.org/rescode.html#extrc
+        fMessageUtf8 := FormatUtf8('%, extended_errcode=%', [fMessageUtf8, er]);
+    end;
+    if Assigned(sqlite3.system_errno) then
+    begin
+      er := sqlite3.system_errno(aDB);
+      if er <> 0 then
+        fMessageUtf8 := FormatUtf8('%, system_errno=%', [fMessageUtf8, er]);
+    end;
   end;
   DB := aDB;
-  inherited Create(Utf8ToString(msg));
+  CreateAfterSetMessageUtf8;
 end;
 
 function sqlite3_check(DB: TSqlite3DB; aResult: integer;
@@ -5746,46 +5772,47 @@ begin
 end;
 
 // under FPC, MemSize() returns the value expected by xSize()
-// under Delphi, we need to store the size as 4 bytes header for xSize()
+// under Delphi, of with a FPC MM which don't support MemSize(), we store the
+// size as 4 bytes header (a 32-bit header is enough for SQLite3)
 
 {$ifdef FPC}
 
-function xMalloc(size: integer): pointer; cdecl;
+function xMalloc1(size: integer): pointer; cdecl;
 begin
   result := GetMem(size);
 end;
 
-procedure xFree(ptr: pointer); cdecl;
+procedure xFree1(ptr: pointer); cdecl;
 begin
   FreeMem(ptr);
 end;
 
-function xRealloc(ptr: pointer; size: integer): pointer; cdecl;
+function xRealloc1(ptr: pointer; size: integer): pointer; cdecl;
 begin
   result := ReAllocMem(ptr, size);
 end;
 
-function xSize(ptr: pointer): integer; cdecl;
+function xSize1(ptr: pointer): integer; cdecl;
 begin
   result := MemSize(ptr);
 end;
 
-{$else}
+{$endif FPC}
 
-function xMalloc(size: integer): pointer; cdecl;
+function xMalloc2(size: integer): pointer; cdecl;
 begin
   GetMem(result, size + 4);
   PInteger(result)^ := size;
   inc(PInteger(result));
 end;
 
-procedure xFree(ptr: pointer); cdecl;
+procedure xFree2(ptr: pointer); cdecl;
 begin
   dec(PInteger(ptr));
   FreeMem(ptr);
 end;
 
-function xRealloc(ptr: pointer; size: integer): pointer; cdecl;
+function xRealloc2(ptr: pointer; size: integer): pointer; cdecl;
 begin
   dec(PInteger(ptr));
   ReallocMem(ptr, size + 4);
@@ -5794,18 +5821,13 @@ begin
   result := ptr;
 end;
 
-function xSize(ptr: pointer): integer; cdecl;
+function xSize2(ptr: pointer): integer; cdecl;
 begin
   if ptr = nil then
     result := 0
   else
-  begin
-    dec(PInteger(ptr));
-    result := PInteger(ptr)^;
-  end;
+    result := PInteger(PAnsiChar(ptr) - 4)^;
 end;
-
-{$endif FPC}
 
 function xRoundup(size: integer): integer; cdecl;
 begin
@@ -5822,28 +5844,39 @@ begin
 end;
 
 procedure TSqlite3Library.ForceToUseSharedMemoryManager;
-// due to FPC's linker limitation, all wrapper functions should be defined outside
+// due to FPC's linker limitation, wrapper functions should be defined outside
 var
   mem: TSqlite3MemMethods;
   res: integer;
-  {$ifdef FPC_X64}
+  {$ifdef FPC_SINGLEABI}
   mm: TMemoryManager;
-  {$endif FPC_X64}
+  {$endif FPC_SINGLEABI}
 begin
   if not Assigned(config) then
     exit;
-  {$ifdef FPC_X64} // SQLite3 prototypes match FPC RTL functions on x86_64 ABI
-  GetMemoryManager(mm);
-  mem.xMalloc := @mm.Getmem;
-  mem.xFree := @mm.Freemem;
-  mem.xSize := @mm.MemSize;
-  {$else}
-  mem.xMalloc := @xMalloc;
-  mem.xFree := @xFree;
-  mem.xSize := @xSize;
-  {$endif FPC_X64}
-  mem.xRealloc := @xRealloc;
+  // use the size header by default (and always on Delphi)
+  mem.xMalloc := @xMalloc2;
+  mem.xFree := @xFree2;
+  mem.xSize := @xSize2;
+  mem.xRealloc := @xRealloc2;
   mem.xRoundup := @xRoundup;
+  {$ifdef FPC}
+  if MemSize(self) <> 0 then
+  begin
+    // we can use directly the FPC MM which supports MemSize()
+    {$ifdef FPC_SINGLEABI} // SQLite3 prototypes match FPC RTL ABI on non-i386
+    GetMemoryManager(mm);
+    mem.xMalloc := @mm.Getmem;
+    mem.xFree := @mm.Freemem;
+    mem.xSize := @mm.MemSize;
+    {$else}
+    mem.xMalloc := @xMalloc1;
+    mem.xFree := @xFree1;
+    mem.xSize := @xSize1;
+    {$endif FPC_SINGLEABI}
+    mem.xRealloc := @xRealloc1;
+  end;
+  {$endif FPC}
   mem.xInit := @xInit;
   mem.xShutdown := @xShutdown;
   mem.pAppData := nil;
@@ -7885,7 +7918,7 @@ begin
   {$ifdef NOSQLITE3FPUSAVE}
   sqlite3.finalize(Request);
   {$else}
-  saved := SetFpuFlags(ffLibrary);
+  saved := SetFpuFlags;
   sqlite3.finalize(Request);
   ResetFpuFlags(saved);
   {$endif NOSQLITE3FPUSAVE}
@@ -8439,6 +8472,7 @@ begin
   result := sqlite3.column_value(Request, Col);
 end;
 
+{$ifndef PUREMORMOT2}
 function TSqlRequest.FieldW(Col: integer): RawUnicode;
 var
   P: PWideChar;
@@ -8448,6 +8482,7 @@ begin
   P := sqlite3.column_text16(Request, Col);
   SetString(result, PUtf8Char(pointer(P)), StrLenW(P) * 2 + 1);
 end;
+{$endif PUREMORMOT2}
 
 function TSqlRequest.Prepare(DB: TSqlite3DB; const SQL: RawUtf8;
   NoExcept: boolean): integer;
@@ -8459,10 +8494,11 @@ begin
   fDB := DB;
   fRequest := 0;
   fResetDone := false;
+  ClearDbError;
   if DB = 0 then
     raise ESqlite3Exception.Create(DB, SQLITE_CANTOPEN, SQL);
   {$ifndef NOSQLITE3FPUSAVE}
-  saved := SetFpuFlags(ffLibrary);
+  saved := SetFpuFlags;
   try
   {$endif NOSQLITE3FPUSAVE}
     result := sqlite3.prepare_v2(RequestDB, pointer(SQL), length(SQL) + 1,
@@ -8531,7 +8567,7 @@ begin
   {$ifdef NOSQLITE3FPUSAVE}
   result := sqlite3.reset(Request);
   {$else}
-  saved := SetFpuFlags(ffLibrary);
+  saved := SetFpuFlags;
   // no check here since it is in PREVIOUS execution error state
   result := sqlite3.reset(Request);
   ResetFpuFlags(saved);
@@ -8551,7 +8587,7 @@ begin
   {$ifdef NOSQLITE3FPUSAVE}
   result := sqlite3.step(Request);
   {$else}
-  saved := SetFpuFlags(ffLibrary);
+  saved := SetFpuFlags;
   result := sqlite3.step(Request);
   ResetFpuFlags(saved);
   {$endif NOSQLITE3FPUSAVE}
@@ -8585,7 +8621,7 @@ begin
     SQLITE_TEXT:
       begin
         WR.Add('"');
-        WR.AddJsonEscape(sqlite3.value_text(Value), 0);
+        WR.AddJsonEscape(sqlite3.value_text(Value), {len=}0); // len=0 : fastest
         WR.Add('"');
       end;
   end;

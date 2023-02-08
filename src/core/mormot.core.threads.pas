@@ -23,7 +23,9 @@ interface
 uses
   sysutils,
   classes,
-  syncobjs,
+  {$ifndef PUREMORMOT2}
+  syncobjs, // please favor TSynEvent from mormot.core.os instead of TEvent
+  {$endif PUREMORMOT2}
   mormot.core.base,
   mormot.core.os,
   mormot.core.text,
@@ -34,6 +36,8 @@ uses
   mormot.core.json,
   mormot.core.log,
   mormot.core.perf;
+
+{$ifndef PUREMORMOT2}
 
 const
   // defined here to avoid explicit link to syncobjs in uses clause
@@ -50,6 +54,9 @@ type
   // - note that you may better use TSynEvent from mormot.core.os.pas
   TEvent = syncobjs.TEvent;
 
+{$endif PUREMORMOT2}
+
+type
   /// a dynamic array of TThread
   TThreadDynArray = array of TThread;
 
@@ -511,7 +518,7 @@ type
   // TSynBackgroundThreadMethod and provide a much more convenient callback
   TSynBackgroundThreadMethodAbstract = class(TSynBackgroundThreadAbstract)
   protected
-    fPendingProcessLock: TLightLock;
+    fPendingProcessLock: TLightLock; // atomic access to fPendingProcessFlag
     fCallerEvent: TSynEvent;
     fParam: pointer;
     fCallerThreadID: TThreadID;
@@ -660,7 +667,7 @@ type
   public
     /// initialize the thread for a periodic task processing
     // - aOnProcess would be called when ProcessEvent.SetEvent is called or
-    // aOnProcessMS milliseconds period was elapse since last process
+    // aOnProcessMS milliseconds period was elapsed since last process
     // - if aOnProcessMS is 0, will wait until ProcessEvent.SetEvent is called
     // - you could define some callbacks to nest the thread execution, e.g.
     // assigned to TRestServer.BeginCurrentThread/EndCurrentThread
@@ -670,7 +677,7 @@ type
       const aOnAfterExecute: TOnNotifyThread = nil;
       aStats: TSynMonitorClass = nil;
       CreateSuspended: boolean = false); reintroduce; virtual;
-    /// finalize the thread
+    /// finalize and wait for the thread ending
     destructor Destroy; override;
     /// access to the implementation event of the periodic task
     property OnProcess: TOnSynBackgroundThreadProcess
@@ -704,7 +711,7 @@ type
     Secs: cardinal;
     NextTix: Int64;
     Msg: TRawUtf8DynArray;
-    MsgSafe: TLightLock;
+    MsgSafe: TLightLock; // protect Msg[] list
   end;
 
   /// stores TSynBackgroundTimer internal registration list
@@ -808,12 +815,12 @@ type
   // - used e.g. by TBlockingCallback in mormot.rest.server.pas
   // - once created, process would block via a WaitFor call, which would be
   // released when NotifyFinished is called by the process background thread
-  TBlockingProcess = class(TEvent)
+  TBlockingProcess = class(TSynEvent)
   protected
     fTimeOutMs: integer;
     fEvent: TBlockingEvent;
-    fSafe: PSynLocker;
     fOwnedSafe: boolean;
+    fSafe: PSynLocker;
     procedure ResetInternal; virtual; // override to reset associated params
   public
     /// initialize the semaphore instance
@@ -1030,6 +1037,17 @@ type
     constructor Create(CreateSuspended: boolean;
       const OnStart, OnStop: TOnNotifyThread;
       const ProcessName: RawUtf8); reintroduce; virtual;
+    /// assign each thread to a single logical CPU core
+    // - for instance, for a HTTP server, it may ensure better scalability with
+    // short-living requests and high number of threads
+    procedure SetServerThreadsAffinityPerCpu(
+      const log: ISynLog; const threads: TThreadDynArray);
+    /// assign each thread to a single hardware CPU socket
+    // - for instance, for a HTTP server, it may ensure better scalability on
+    // complex hardware with several physical CPU packages - but it is very
+    // picky, so should be enabled only with proper testing on the actual HW
+    procedure SetServerThreadsAffinityPerSocket(
+      const log: ISynLog; const threads: TThreadDynArray);
   end;
 
   /// abstract class to implement a thread with logging notifications
@@ -1099,18 +1117,18 @@ type
   TSynThreadPool = class
   protected
     {$ifndef USE_WINIOCP}
-    fSafe: TLightLock;
+    fSafe: TOSLightLock; // TLightLock is likely to be less stable
     {$endif USE_WINIOCP}
     fWorkThread: TSynThreadPoolWorkThreads;
     fWorkThreadCount: integer;
     fRunningThreads: integer;
     fExceptionsCount: integer;
+    fContentionAbortDelay: integer;
     fOnThreadTerminate: TOnNotifyThread;
     fOnThreadStart: TOnNotifyThread;
     fContentionTime: Int64;
     fContentionAbortCount: cardinal;
     fContentionCount: cardinal;
-    fContentionAbortDelay: integer;
     fName: RawUtf8;
     fTerminated: boolean;
     {$ifdef USE_WINIOCP}
@@ -1875,7 +1893,7 @@ begin
   fLock.Enter;
   try
     fValue.RetrieveValueOrRaiseException(pointer(Name), length(Name),
-      fValue.IsCaseSensitive, result, false);
+      fValue.IsCaseSensitive, result{%H-}, false);
   finally
     fLock.Leave;
   end;
@@ -1904,7 +1922,7 @@ end;
 
 function TLockedDocVariant.Copy: variant;
 begin
-  VarClear(result);
+  VarClear(result{%H-});
   fLock.Enter;
   try
     TDocVariantData(result).InitCopy(variant(fValue), JSON_FAST);
@@ -2347,6 +2365,7 @@ begin
   if fExecute = exRun then
   begin
     Terminate;
+    fProcessEvent.SetEvent;     // release WaitFor() ASAP
     WaitForNotExecuting(10000); // expect the background task to be finished
   end;
   inherited Destroy;
@@ -2647,7 +2666,7 @@ end;
 
 constructor TBlockingProcess.Create(aTimeOutMs: integer; aSafe: PSynLocker);
 begin
-  inherited Create(nil, false, false, '');
+  inherited Create; // TSynEvent.Create
   if aTimeOutMs <= 0 then
     fTimeOutMs := 3000
   else // never wait for ever
@@ -2663,7 +2682,7 @@ end;
 
 destructor TBlockingProcess.Destroy;
 begin
-  inherited Destroy;
+  inherited Destroy; // TSynEvent
   if fOwnedSafe then
     fSafe^.DoneAndFreeMem;
 end;
@@ -2679,7 +2698,7 @@ begin
   finally
     fSafe^.UnLock;
   end;
-  inherited WaitFor(fTimeOutMs);
+  inherited WaitFor(fTimeOutMs); // TSynEvent
   fSafe^.Lock;
   try
     if fEvent <> evRaised then
@@ -2708,16 +2727,16 @@ begin
     if fEvent in [evRaised, evTimeOut] then
       exit; // ignore if already notified
     fEvent := evRaised;
-    SetEvent; // notify caller to unlock "WaitFor" method
     result := true;
   finally
     fSafe^.UnLock;
   end;
+  SetEvent; // notify caller to unlock "WaitFor" method outside of fSafe^.Lock
 end;
 
 procedure TBlockingProcess.ResetInternal;
 begin
-  ResetEvent;
+  ResetEvent; // non-blocking TSynEvent method
   fEvent := evNone;
 end;
 
@@ -3007,7 +3026,7 @@ begin
     exit;
   if MS < 32 then
   begin
-    // smaller than GetTickCount resolution (under Windows)
+    // smaller than GetTickCount64 resolution (under Windows)
     SleepHiRes(MS);
     if Terminated then
       exit;
@@ -3067,6 +3086,51 @@ end;
 procedure TNotifiedThread.SetOnTerminate(const Event: TOnNotifyThread);
 begin
   fOnThreadTerminate := Event;
+end;
+
+procedure TNotifiedThread.SetServerThreadsAffinityPerCpu(
+  const log: ISynLog; const threads: TThreadDynArray);
+var
+  rnd, i: PtrInt;
+begin
+  rnd := SystemInfo.dwNumberOfProcessors;
+  if (threads = nil) or
+     (rnd <= 1) then
+    exit;
+  if Assigned(log) then
+    log.Log(sllTrace, 'Create: SetThreadCpuAffinity of % threads over % cores',
+      [length(threads), rnd], self);
+  SetThreadCpuAffinity(self, 0);
+  for i := 1 to length(threads) do
+    SetThreadCpuAffinity(threads[i - 1], i mod rnd);
+end;
+
+procedure TNotifiedThread.SetServerThreadsAffinityPerSocket(
+  const log: ISynLog; const threads: TThreadDynArray);
+var
+  sock, persock, i: integer;
+  ok: boolean;
+begin
+  if (threads = nil) or
+     (CpuSockets <= 1) then
+    exit;
+  // with multiple CPU sockets, group threads by closest HW socket
+  persock := length(threads) div CpuSockets;
+  if Assigned(log) then
+    log.Log(sllTrace, 'Create: CpuSockets=% persock=%',
+      [CpuSockets, persock], self);
+  sock := 0;
+  SetThreadSocketAffinity(self, sock); // AW with R0 and lower R# threads
+  for i := 0 to high(threads) do
+  begin
+    ok := SetThreadSocketAffinity(threads[i], sock);
+    if Assigned(log) then
+      log.Log(sllTrace, 'Create: SetThreadSocketAffinity(#%,%)=%',
+        [i, sock, BOOL_STR[ok]], self);
+    if (sock < CpuSockets - 1) and
+       (i mod persock = 0) then
+      inc(sock); // e.g. 0,0,0,0,1,1,1,1,1 for 9 threads and 2 sockets
+  end;
 end;
 
 
@@ -3173,6 +3237,7 @@ begin
   if fRequestQueue = 0 then
     exit;
   {$else}
+  fSafe.Init; // mandatory for TOSLightLock
   fQueuePendingContext := aQueuePendingContext;
   {$endif USE_WINIOCP}
   // now create the worker threads
@@ -3212,6 +3277,8 @@ begin
   finally
     {$ifdef USE_WINIOCP}
     CloseHandle(fRequestQueue);
+    {$else}
+    fSafe.Done; // mandatory for TOSLightLock
     {$endif USE_WINIOCP}
   end;
   inherited Destroy;
@@ -3236,7 +3303,6 @@ function TSynThreadPool.Push(aContext: pointer; aWaitOnContention: boolean): boo
     thread: ^TSynThreadPoolWorkThread;
   begin
     result := false; // queue is full
-    found := nil;
     fSafe.Lock;
     thread := pointer(fWorkThread);
     for i := 1 to fWorkThreadCount do
@@ -3335,7 +3401,11 @@ begin
      (fPendingContextCount = 0) then
     exit;
   fSafe.Lock;
+  {$ifdef HASFASTTRYFINALLY}
   try
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
     if fPendingContextCount > 0 then
     begin
       result := fPendingContext[0];
@@ -3345,7 +3415,9 @@ begin
       if fPendingContextCount = 128 then
         SetLength(fPendingContext, 128); // reduce when congestion is resolved
     end;
+  {$ifdef HASFASTTRYFINALLY}
   finally
+  {$endif HASFASTTRYFINALLY}
     fSafe.UnLock;
   end;
 end;

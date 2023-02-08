@@ -109,6 +109,9 @@ const
   /// you can use this cookie value to delete a cookie on the browser side
   COOKIE_EXPIRED = '; Expires=Sat, 01 Jan 2010 00:00:01 GMT';
 
+  CONTENT_TYPE_WEBFORM: PAnsiChar = 'APPLICATION/X-WWW-FORM-URLENCODED';
+  CONTENT_TYPE_MULTIPARTFORM: PAnsiChar = 'MULTIPART/FORM-DATA';
+
 
 { ************ TRestBackgroundTimer for Multi-Thread Process }
 
@@ -137,7 +140,7 @@ type
     fBackgroundBatch: TRestBatchLockedDynArray;
     fBackgroundInterning: array of TRawUtf8Interning;
     fBackgroundInterningMaxRefCount: integer;
-    fBackgroundInterningSafe: TLightLock;
+    fBackgroundInterningSafe: TLightLock; // paranoid lock
     procedure SystemUseBackgroundExecute(Sender: TSynBackgroundTimer;
       const Msg: RawUtf8);
     // used by AsyncRedirect/AsyncBatch/AsyncInterning
@@ -829,8 +832,8 @@ type
     function AsyncBatchUpdate(Value: TOrm; const CustomFields: TFieldBits = [];
       DoNotAutoComputeFields: boolean = false): integer;
     function AsyncBatchDelete(Table: TOrmClass; ID: TID): integer;
-    function Cache: TRestCache;
-    function CacheOrNil: TRestCache;
+    function Cache: TOrmCache;
+    function CacheOrNil: TOrmCache;
     function CacheWorthItForTable(aTableIndex: cardinal): boolean;
   public
     // TRestRunThreads compatibility methods
@@ -1083,6 +1086,19 @@ type
 { ************ TRestUriParams REST URI Definitions }
 
 type
+  /// an opaque connection-specific pointer identifier with a strong type
+  // - each raw connection instance maintains two abstract PtrUInt tags
+  // - match THttpServerConnectionOpaque as defined in mormot.net.http
+  TRestServerConnectionOpaque = record
+    /// pointer-sized tag reserved to mORMot (e.g. to idenfity a REST session)
+    ValueInternal: PtrUInt;
+    /// pointer-sized tag free for the end-user code
+    ValueExternal: PtrUInt;
+  end;
+  /// reference to an opaque connection-specific pointer identifier
+  // - may be nil if unsupported, e.g. by the http.sys servers
+  PRestServerConnectionOpaque = ^TRestServerConnectionOpaque;
+
   /// flags which may be set by the caller to notify low-level context
   // - llfHttps will indicates that the communication was made over HTTPS
   // - llfSecured is set if the transmission is encrypted or in-process,
@@ -1154,9 +1170,11 @@ type
     LowLevelConnectionFlags: TRestUriParamsLowLevelFlags;
     /// most HTTP servers support a per-connection pointer storage
     // - may be nil if unsupported, e.g. by the http.sys servers
-    // - see also THttpServerConnectionOpaque as defined in mormot.net.http
+    // - map to THttpAsyncConnection or THttpServerSocket fConnectionOpaque field
+    // of type THttpServerConnectionOpaque as defined in mormot.net.http
     // - could be used to avoid a lookup to a ConnectionID-indexed dictionary
-    LowLevelConnectionOpaque: PPointer;
+    // - warning: only ValueExternal is usable by end-user code
+    LowLevelConnectionOpaque: PRestServerConnectionOpaque;
     /// pre-parsed Remote IP of the current connection
     LowLevelRemoteIP: RawUtf8;
     /// pre-parsed "Bearer" HTTP header value
@@ -1171,9 +1189,6 @@ type
     // - if GuessJsonIfNoneSet is TRUE, returns JSON if none was set in headers
     procedure InBodyType(out ContentType: RawUtf8;
       GuessJsonIfNoneSet: boolean = True);
-    /// check if the "Content-Type" value from InHead is JSON
-    // - if GuessJsonIfNoneSet is TRUE, assume JSON is used
-    function InBodyTypeIsJson(GuessJsonIfNoneSet: boolean = True): boolean;
     /// retrieve the "Content-Type" value from OutHead
     // - if GuessJsonIfNoneSet is TRUE, returns JSON if none was set in headers
     function OutBodyType(GuessJsonIfNoneSet: boolean = True): RawUtf8;
@@ -1225,9 +1240,9 @@ type
 
 type
   /// the available HTTP methods transmitted between client and server
-  // - some custom verbs are available in addition to standard REST commands
-  // - most of iana verbs are available
-  // see http://www.iana.org/assignments/http-methods/http-methods.xhtml
+  // - remote ORM supports non-standard mLOCK/mUNLOCK/mABORT/mSTATE verbs
+  // - not all iana verbs are available, because TRestRouter will only
+  // support mGET .. mOPTIONS verbs anyway
   // - for basic CRUD operations, we consider Create=mPOST, Read=mGET,
   // Update=mPUT and Delete=mDELETE - even if it is not fully RESTful
   TUriMethod = (
@@ -1243,23 +1258,7 @@ type
     mLOCK,
     mUNLOCK,
     mSTATE,
-    mOPTIONS,
-    mPROPFIND,
-    mPROPPATCH,
-    mTRACE,
-    mCOPY,
-    mMKCOL,
-    mMOVE,
-    mPURGE,
-    mREPORT,
-    mMKACTIVITY,
-    mMKCALENDAR,
-    mCHECKOUT,
-    mMERGE,
-    mNOTIFY,
-    mPATCH,
-    mSEARCH,
-    mCONNECT);
+    mOPTIONS);
 
   /// set of available HTTP methods transmitted between client and server
   TUriMethods = set of TUriMethod;
@@ -1279,7 +1278,7 @@ type
     fMethod: TUriMethod;
     fInputCookiesRetrieved: boolean;
     fClientKind: TRestClientKind;
-    fInputPostContentType: RawUtf8;
+    fInputContentType: RawUtf8;
     fInHeaderLastName: RawUtf8;
     fInHeaderLastValue: RawUtf8;
     fOutSetCookie: RawUtf8;
@@ -1289,9 +1288,6 @@ type
     fJwtContent: PJwtContent;
     fTix64: Int64;
     function GetUserAgent: RawUtf8;
-    function GetRemoteIP: RawUtf8;
-    function GetRemoteIPIsLocalHost: boolean;
-    function GetRemoteIPNotLocal: RawUtf8;
     function GetInHeader(const HeaderName: RawUtf8): RawUtf8;
     procedure RetrieveCookies;
     function GetInCookie(CookieName: RawUtf8): RawUtf8;
@@ -1317,15 +1313,14 @@ type
     // authentication is not enabled
     property Method: TUriMethod
       read fMethod;
-    /// retrieve the "RemoteIP" value from the incoming HTTP headers
-    property RemoteIP: RawUtf8
-      read GetRemoteIP;
-    /// true if the "RemoteIP" value from the incoming HTTP headers is '127.0.0.1'
-    property RemoteIPIsLocalHost: boolean
-      read GetRemoteIPIsLocalHost;
-    /// "RemoteIP" value from the incoming HTTP headers but '' for '127.0.0.1'
-    property RemoteIPNotLocal: RawUtf8
-      read GetRemoteIPNotLocal;
+    /// retrieve the "RemoteIP" value from Call^.LowLevelRemoteIP or from
+    // the incoming HTTP headers
+    // - may return '127.0.0.1'
+    procedure SetRemoteIP(var IP: RawUtf8);
+      {$ifdef HASINLINE} inline; {$endif}
+    /// "RemoteIP" value from Call^.LowLevelRemoteIP  but nil for '127.0.0.1'
+    // - won't scan the incoming HTTP headers, but it is usually not needed
+    function RemoteIPNotLocal: PUtf8Char;
     /// retrieve the "User-Agent" value from the incoming HTTP headers
     property UserAgent: RawUtf8
       read GetUserAgent;
@@ -1337,6 +1332,9 @@ type
     // - will be used e.g. by ClientOrmOptions to check if the
     // current remote client expects standard JSON in all cases
     function ClientKind: TRestClientKind;
+    /// check if the content-type input is 'application/json' or ''
+    function ContentTypeIsJson: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     /// decode any multipart/form-data POST request input
     // - returns TRUE and set MultiPart array as expected, on success
     function InputAsMultiPart(var MultiPart: TMultiPartDynArray): boolean;
@@ -1509,10 +1507,13 @@ type
 
 
 /// convert a string HTTP verb into its TUriMethod enumerate
+// - conversion is case-insensitive
 function ToMethod(const method: RawUtf8): TUriMethod;
+  {$ifdef FPC}inline;{$endif}
 
 /// convert a TUriMethod enumerate to its #0 terminated uppercase text
 function MethodText(m: TUriMethod): RawUtf8;
+  {$ifdef FPC}inline;{$endif}
 
 
 {$ifndef PUREMORMOT2}
@@ -2310,8 +2311,8 @@ class function TRest.CreateFromFile(aModel: TOrmModel;
   const aJsonFile: TFileName; aServerHandleAuthentication: boolean;
   aKey: cardinal): TRest;
 begin
-  result := CreateFromJson(aModel, AnyTextFileToRawUtf8(aJsonFile, true),
-    aServerHandleAuthentication, aKey);
+  result := CreateFromJson(
+    aModel, RawUtf8FromFile(aJsonFile), aServerHandleAuthentication, aKey);
 end;
 
 procedure TRest.ServicesRelease(Caller: TServiceContainer);
@@ -2856,12 +2857,12 @@ begin
   result := fOrm.AsyncBatchDelete(Table, ID);
 end;
 
-function TRest.Cache: TRestCache;
+function TRest.Cache: TOrmCache;
 begin
   result := fOrm.Cache;
 end;
 
-function TRest.CacheOrNil: TRestCache;
+function TRest.CacheOrNil: TOrmCache;
 begin
   result := fOrm.CacheOrNil;
 end;
@@ -3672,14 +3673,6 @@ begin
     ContentType := JSON_CONTENT_TYPE_VAR;
 end;
 
-function TRestUriParams.InBodyTypeIsJson(GuessJsonIfNoneSet: boolean): boolean;
-var
-  contenttype: RawUtf8;
-begin
-  InBodyType(contenttype, GuessJsonIfNoneSet);
-  result := IdemPChar(pointer(contenttype), JSON_CONTENT_TYPE_UPPER);
-end;
-
 function TRestUriParams.OutBodyType(GuessJsonIfNoneSet: boolean): RawUtf8;
 begin
   FindNameValue(OutHead, HEADER_CONTENT_TYPE_UPPER, result);
@@ -3733,32 +3726,23 @@ const
     'UNLOCK',
     'STATE',
     'OPTIONS',
-    'PROPFIND',
-    'PROPPATCH',
-    'TRACE',
-    'COPY',
-    'MKCOL',
-    'MOVE',
-    'PURGE',
-    'REPORT',
-    'MKACTIVITY',
-    'MKCALENDAR',
-    'CHECKOUT',
-    'MERGE',
-    'NOTIFY',
-    'PATCH',
-    'SEARCH',
-    'CONNECT',
     '');
+var
+  // quick O(n) search of the first 4 characters within L1 cache
+  METHODNAME32: array[TUriMethod] of cardinal;
 
 function ToMethod(const method: RawUtf8): TUriMethod;
 begin
-  result := TUriMethod(IdemPPChar(pointer(method), pointer(@METHODNAME)) + 1);
+  if length(method) < 3 then
+    result := mNone
+  else
+    result := TUriMethod(IntegerScanIndex(@METHODNAME32, length(METHODNAME32) - 1,
+      (PCardinal(method)^) and $dfdfdfdf) + 1);
 end;
 
 function MethodText(m: TUriMethod): RawUtf8;
 begin
-  dec(m);
+  dec(m); // METHODNAME[] has no mNone entry
   if cardinal(m) < cardinal(ord(high(METHODNAME))) then
     result := METHODNAME[m]
   else
@@ -3772,8 +3756,8 @@ constructor TRestUriContext.Create(const aCall: TRestUriParams);
 begin
   fCall := @aCall;
   fMethod := ToMethod(aCall.Method);
-  if fMethod = mPost then
-    aCall.InBodyType(fInputPostContentType, {guessjsonifnone=}false);
+  if aCall.InBody <> '' then
+    aCall.InBodyType(fInputContentType, {guessjsonifnone=}false);
 end;
 
 destructor TRestUriContext.Destroy;
@@ -3813,27 +3797,18 @@ begin
   result := fClientKind;
 end;
 
-function TRestUriContext.GetRemoteIP: RawUtf8;
+procedure TRestUriContext.SetRemoteIP(var IP: RawUtf8);
 begin
-  result := fCall^.HeaderOnce(fCall^.LowLevelRemoteIP, HEADER_REMOTEIP_UPPER);
+  IP := fCall^.HeaderOnce(fCall^.LowLevelRemoteIP, HEADER_REMOTEIP_UPPER);
 end;
 
-function TRestUriContext.GetRemoteIPNotLocal: RawUtf8;
+function TRestUriContext.RemoteIPNotLocal: PUtf8Char;
 begin
-  if self <> nil then
-  begin
-    result := fCall^.HeaderOnce(fCall^.LowLevelRemoteIP, HEADER_REMOTEIP_UPPER);
-    if result = '127.0.0.1' then
-      result := '';
-  end
+  if (self <> nil) and
+     (fCall^.LowLevelRemoteIP <> '127.0.0.1') then
+    result := pointer(fCall^.LowLevelRemoteIP)
   else
-    result := '';
-end;
-
-function TRestUriContext.GetRemoteIPIsLocalHost: boolean;
-begin
-  result := (GetRemoteIP = '') or
-            (fCall^.LowLevelRemoteIP = '127.0.0.1');
+    result := nil;
 end;
 
 function TRestUriContext.AuthenticationBearerToken: RawUtf8;
@@ -3971,12 +3946,18 @@ begin
                         'Set-Cookie: ' + fOutSetCookie);
 end;
 
+function TRestUriContext.ContentTypeIsJson: boolean;
+begin
+  result := (fInputContentType = '') or
+            IdemPChar(pointer(fInputContentType), JSON_CONTENT_TYPE_UPPER);
+end;
+
 function TRestUriContext.InputAsMultiPart(
   var MultiPart: TMultiPartDynArray): boolean;
 begin
   result := (Method = mPOST) and
-     IdemPChar(pointer(fInputPostContentType), 'MULTIPART/FORM-DATA') and
-     MultiPartFormDataDecode(fInputPostContentType, fCall^.InBody, MultiPart);
+     IdemPChar(pointer(fInputContentType), CONTENT_TYPE_MULTIPARTFORM) and
+     MultiPartFormDataDecode(fInputContentType, fCall^.InBody, MultiPart);
 end;
 
 function TRestUriContext.TickCount64: Int64;
@@ -4909,10 +4890,17 @@ begin
   end;
 end;
 
-
+procedure InitializeUnit;
+var
+  m: TUriMethod;
+begin
+  DefaultTAuthGroupClass := TAuthGroup;
+  for m := low(METHODNAME32) to pred(high(METHODNAME32)) do
+    METHODNAME32[m] := PCardinal(METHODNAME[m])^;
+end;
 
 initialization
-  DefaultTAuthGroupClass := TAuthGroup;
+  InitializeUnit;
 
 end.
 

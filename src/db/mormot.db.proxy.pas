@@ -158,7 +158,7 @@ type
     fTransactionRetryTimeout: Int64;
     fTransactionActiveTimeout: Int64;
     fTransactionActiveAutoReleaseTicks: Int64;
-    fLock: TRTLCriticalSection;
+    fSafe: TOSLock;
     function GetAuthenticate: TSynAuthenticationAbstract;
     /// default Handle*() will just return the incoming value
     function HandleInput(const input: RawByteString): RawByteString; virtual;
@@ -747,7 +747,7 @@ begin
   fAuthenticate := aAuthenticate;
   fTransactionRetryTimeout := 100;
   fTransactionActiveTimeout := 120000; // after 2 minutes, clear any transaction
-  InitializeCriticalSection(fLock);
+  fSafe.Init;
 end;
 
 function TSqlDBProxyConnectionProtocol.GetAuthenticate: TSynAuthenticationAbstract;
@@ -789,7 +789,7 @@ begin
   tix := GetTickCount64;
   tixend := tix + fTransactionRetryTimeout;
   repeat
-    EnterCriticalSection(fLock);
+    fSafe.Lock;
     try
       if (fTransactionActiveAutoReleaseTicks <> 0) and
          (tix > fTransactionActiveAutoReleaseTicks) then
@@ -807,7 +807,7 @@ begin
         connection.StartTransaction;
       end;
     finally
-      LeaveCriticalSection(fLock);
+      fSafe.UnLock;
     end;
     if result or
        (tix > tixend) then
@@ -822,7 +822,7 @@ begin
   if sessionID = 0 then
     raise ESqlDBRemote.CreateUtf8(
       '%: Remote transaction expects authentication/session', [self]);
-  EnterCriticalSection(fLock);
+  fSafe.Lock;
   try
     if sessionID <> fTransactionSessionID then
       raise ESqlDBRemote.CreateUtf8('Invalid %.TransactionEnd(%) - expected %',
@@ -830,14 +830,14 @@ begin
     fTransactionSessionID := 0;
     fTransactionActiveAutoReleaseTicks := 0;
   finally
-    LeaveCriticalSection(fLock);
+    fSafe.UnLock;
   end;
 end;
 
 destructor TSqlDBProxyConnectionProtocol.Destroy;
 begin
   fAuthenticate.Free;
-  DeleteCriticalSection(fLock);
+  fSafe.Done;
   inherited Destroy;
 end;
 
@@ -969,7 +969,8 @@ begin
       cExecuteToJson,
       cExecuteToExpandedJson:
         begin
-          RecordLoad(exec, P, TypeInfo(TSqlDBProxyConnectionCommandExecute));
+          RecordLoad(exec, P, TypeInfo(TSqlDBProxyConnectionCommandExecute),
+            nil, PAnsiChar(pointer(msgin)) + length(msgin));
           execwithres := header.Command <> cExecute;
           stmt := Connection.NewStatementPrepared(exec.SQL,
             execwithres, true);
@@ -1123,7 +1124,7 @@ var
   outheader: PRemoteMessageHeader;
   intext: RawUtf8                             absolute Input;
   inexec: TSqlDBProxyConnectionCommandExecute absolute Input;
-  msg: PAnsiChar;
+  msg, msgmax: PAnsiChar;
   outdef: TSqlDBDefinition                    absolute Output;
   outint64: Int64                             absolute Output;
   outboolean: boolean                         absolute Output;
@@ -1171,6 +1172,7 @@ begin
      (outheader.Magic <> REMOTE_MAGIC) then
     raise ESqlDBRemote.CreateUtf8('Incorrect %.Process() magic/version', [self]);
   msg := pointer(msgout);
+  msgmax := msg + length(msgout);
   inc(msg, SizeOf(header));
   case outheader.Command of
     cGetToken,
@@ -1187,13 +1189,13 @@ begin
     cTryStartTransaction:
       outboolean := boolean(msg^);
     cGetFields:
-      DynArrayLoad(outcolarr, msg, TypeInfo(TSqlDBColumnDefineDynArray));
+      DynArrayLoad(outcolarr, msg, TypeInfo(TSqlDBColumnDefineDynArray), nil, msgmax);
     cGetIndexes:
-      DynArrayLoad(outindexarr, msg, TypeInfo(TSqlDBIndexDefineDynArray));
+      DynArrayLoad(outindexarr, msg, TypeInfo(TSqlDBIndexDefineDynArray), nil, msgmax);
     cGetTableNames:
-      DynArrayLoad(outarr, msg, TypeInfo(TRawUtf8DynArray));
+      DynArrayLoad(outarr, msg, TypeInfo(TRawUtf8DynArray), nil, msgmax);
     cGetForeignKeys:
-      outnamevalue.SetBlobDataPtr(msg);
+      outnamevalue.SetBlobDataPtr(msg, msgmax);
     cExecute,
     cExecuteToBinary,
     cExecuteToJson,

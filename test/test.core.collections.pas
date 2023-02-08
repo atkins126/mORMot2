@@ -7,9 +7,18 @@ interface
 
 {$I ..\src\mormot.defines.inc}
 
+{$ifdef HASGENERICS} // do-nothing unit on oldest compilers (e.g. < Delphi XE8)
+
+// include generics.collections to the Benchmark tests
+{$define RTL_BENCH}
+
 uses
   sysutils,
   classes,
+  {$ifdef RTL_BENCH}
+  generics.collections,
+  generics.defaults,
+  {$endif RTL_BENCH}
   mormot.core.base,
   mormot.core.os,
   mormot.core.text,
@@ -23,8 +32,6 @@ uses
   mormot.core.perf,
   mormot.core.test;
 
-{$ifdef HASGENERICS} // do-nothing unit on oldest compilers (e.g. < Delphi XE8)
-
 type
   /// regression tests for mormot.core.collections features
   TTestCoreCollections = class(TSynTestCase)
@@ -33,6 +40,7 @@ type
   published
     procedure _IList;
     procedure _IKeyValue;
+    procedure Benchmark;
   end;
 
 implementation
@@ -164,7 +172,7 @@ begin
     Check(li[li.Find(cop[n])] = cop[n], 'sorted find');
   {$else}
   begin
-    i := li[li.Find(cop[n])];
+    i := li[li.IndexOf(cop[n])];
     CheckEqual(da.ItemCompare(@i, @cop[n]), 0, 'sorted find');
   end;
   {$endif USEEQUALOP}
@@ -225,8 +233,6 @@ begin
     Check(i > MAX - 5);
   for i in li do
     CheckEqual(li.IndexOf(i), i);   // O(n) brute force search
-  for i in li do
-    CheckEqual(li.Find(i), i);      // O(n) brute force search
   pi := li.First;
   for i := 0 to li.Count - 1 do // fastest method
   begin
@@ -240,9 +246,7 @@ begin
   for i in li do                // use an enumerator - safe and clean
     Check(cardinal(i) <= MAX);
   for i in li do
-    CheckEqual(li.IndexOf(i), i);   // O(n) brute force search
-  for i in li do
-    CheckEqual(li.Find(i), i);      // O(1) hash table search
+    CheckEqual(li.IndexOf(i), i);   // O(1) hash table search
   // manual IList<double> validation
   ld := Collections.NewList<double>;
   for d in ld do
@@ -263,8 +267,6 @@ begin
     Check(d > MAX - 5);
   for d in ld do
     Check(ld.IndexOf(d) = trunc(d));   // O(n) brute force search
-  for d in ld do
-    Check(ld.Find(d) = trunc(d));      // O(n) brute force search
   pd := ld.First;
   for i := 0 to ld.Count - 1 do // fastest method
   begin
@@ -278,9 +280,7 @@ begin
   for d in ld do                // use an enumerator - safe and clean
     Check(d <= MAX);
   for d in ld do
-    CheckEqual(ld.IndexOf(d), trunc(d));   // O(n) brute force search
-  for d in ld do
-    CheckEqual(ld.Find(d), trunc(d));      // O(1) hash table search
+    CheckEqual(ld.IndexOf(d), trunc(d));   // O(1) hash table search
   // manual IList<TObjectWithID> validation
   lo := Collections.NewList<TObjectWithID>;
   lo.Capacity := MAX + 1;
@@ -296,7 +296,7 @@ begin
   i := 0;
   for o in lo do
   begin
-    CheckEqual(lo.Find(o), i); // O(n) lookup by address
+    CheckEqual(lo.IndexOf(o), i); // O(n) lookup by address
     inc(i);
   end;
   o := nil; // iterative Pop(o) will release the previous o<>nil instances
@@ -312,7 +312,7 @@ begin
   for i := 0 to MAX do
     CheckEqual(lo.Add(lo[i]), i); // duplicate found by loCreateUniqueIndex
   for i := 0 to MAX do
-    CheckEqual(lo.Find(lo[i]), i); // O(1) lookup via loCreateUniqueIndex
+    CheckEqual(lo.IndexOf(lo[i]), i); // O(1) lookup via loCreateUniqueIndex
   for i := 0 to lo.Count - 1 do
     CheckEqual(lo[i].IDValue, i);
   for o in lo do
@@ -359,8 +359,6 @@ begin
     Check(Utf8ToInteger(u) > MAX - 5);
   for u in lu do
     CheckEqual(lu.IndexOf(u), Utf8ToInteger(u));   // O(n) brute force search
-  for u in lu do
-    CheckEqual(lu.Find(u), Utf8ToInteger(u));      // O(n) brute force search
   pu := lu.First;
   for i := 0 to lu.Count - 1 do // fastest method
   begin
@@ -375,8 +373,7 @@ begin
   for u in lu do                    // use an enumerator - safe and clean
   begin
     CheckEqual(Utf8ToInteger(u), i);
-    CheckEqual(lu.IndexOf(u), i);   // O(n) brute force search
-    CheckEqual(lu.Find(u), i);      // O(1) hash table search
+    CheckEqual(lu.IndexOf(u), i);   // O(1) hash table search
     inc(i);
   end;
   // minimal THash128 compilation check
@@ -448,10 +445,12 @@ var
   i: integer;
   vi: Int64;
   di: IKeyValue<integer, Int64>;
+  ei: TPair<integer, Int64>;
   u: RawUtf8;
   pu: PRawUtf8Array;
   vu: double;
   du: IKeyValue<RawUtf8, double>;
+  eu: TPair<RawUtf8, double>;
   setcapa: boolean;
   setcapatxt: PUtf8Char;
   timer: TPrecisionTimer;
@@ -472,7 +471,7 @@ begin
         di.Add(i, i)
       else
         Check(di.TryAdd(i, i));
-    Check(di.Count = MAX + 1);
+    CheckEqual(di.Count, MAX + 1);
     NotifyTestSpeed('integer,Int64 % add', [setcapatxt], MAX, 0, @timer);
     for i := 0 to MAX do
     begin
@@ -488,9 +487,28 @@ begin
     for i := 0 to MAX do
       Check(di[i] = i);
     NotifyTestSpeed('integer,Int64 % get', [setcapatxt], MAX, 0, @timer);
-    Check(di.Count = MAX + 1);
+    timer.Start;
+    for i := 0 to MAX do
+    begin
+      Check(di.Key[i] = i);
+      Check(di.Value[i] = i);
+    end;
+    NotifyTestSpeed('integer,Int64 % iter', [setcapatxt], MAX, 0, @timer);
+    CheckEqual(di.Count, MAX + 1);
+    timer.Start;
+    i := 0;
+    for ei in di do
+    begin
+      Check(ei.Key = i);
+      Check(ei.Value = i);
+      inc(i);
+    end;
+    NotifyTestSpeed('integer,Int64 % enum', [setcapatxt], MAX, 0, @timer);
+    CheckEqual(i, MAX + 1);
     di.Clear;
-    Check(di.Count = 0);
+    CheckEqual(di.Count, 0);
+    for ei in di do
+      Check(false);
     // manual IKeyValue<RawUtf8, double> validation
     du := Collections.NewKeyValue<RawUtf8, double>([kvoDefaultIfNotFound]);
     if setcapa then
@@ -505,7 +523,7 @@ begin
       else
         Check(du.TryAdd(u, vu));
     end;
-    Check(du.Count = MAX + 1);
+    CheckEqual(du.Count, MAX + 1);
     NotifyTestSpeed('RawUtf8,double% add', [setcapatxt], MAX, 0, @timer);
     for i := 0 to MAX do
     begin
@@ -530,13 +548,327 @@ begin
     for i := 0 to MAX do
       Check(du[pu[i]] = i);
     NotifyTestSpeed('RawUtf8,double% get', [setcapatxt], MAX, 0, @timer);
-    Check(du.Count = MAX + 1);
+    timer.Start;
+    for i := 0 to MAX do
+    begin
+      Check(du.Key[i] = pu[i]);
+      Check(du.Value[i] = i);
+    end;
+    NotifyTestSpeed('RawUtf8,double% iter', [setcapatxt], MAX, 0, @timer);
+    CheckEqual(du.Count, MAX + 1);
+    timer.Start;
+    i := 0;
+    for eu in du do
+    begin
+      Check(eu.Key = pu[i]);
+      Check(eu.Value = i);
+      inc(i);
+    end;
+    NotifyTestSpeed('RawUtf8,double% enum', [setcapatxt], MAX, 0, @timer);
+    CheckEqual(i, MAX + 1);
     du.Clear;
     Check(du.Count = 0);
   end;
 end;
 
+
+{$ifdef FPC}
+  {$WARN 4046 off} // needed with FPC generics.collections unit
+{$endif FPC}
+
+type
+  TBenchmark = function(count: integer): string;
+
+const
+  SEARCH_INT = 1000;
+  {$ifdef FPC}
+  SEARCH_UTF = 10; // FPC generics use AnsiCompareStr() which is awfully slow
+  {$else}
+  SEARCH_UTF = 100;
+  {$endif FPC}
+
+function mORMotList1(count: integer): string;
+var
+  l: IList<integer>;
+  i: integer;
+begin
+  result := 'mORMot IList<integer>';
+  l := Collections.NewList<integer>;
+  //l.Capacity := count;
+  for i := 1 to count do
+    l.Add(i);
+  for i := 0 to l.Count - 1 do
+    if l[i] = 0 then
+      result := '';
+  for i in l do
+    if i = 0 then
+      result := '';
+  for i := count downto count - SEARCH_INT do
+    if i > 0 then
+      if l.IndexOf(i) < 0 then
+        result := '';
+end;
+
+{$ifdef RTL_BENCH}
+function systemList1(count: integer): string;
+var
+  l: generics.collections.TList<integer>;
+  i: integer;
+begin
+  result := 'system TList<integer>';
+  l := generics.collections.TList<integer>.Create;
+  try
+    //l.Capacity := count;
+    for i := 1 to count do
+      l.Add(i);
+    for i := 0 to l.Count - 1 do
+      if l[i] = 0 then
+        result := '';
+    for i in l do
+      if i = 0 then
+        result := '';
+    for i := count downto count - SEARCH_INT do
+      if i > 0 then
+        if l.IndexOf(i) < 0 then
+          result := '';
+  finally
+    l.Free;
+  end;
+end;
+{$endif RTL_BENCH}
+
+function mORMotList2(count: integer): string;
+var
+  l: IList<RawUtf8>;
+  i: integer;
+  u: RawUtf8;
+begin
+  result := 'mORMot IList<RawUtf8>';
+  l := Collections.NewList<RawUtf8>;
+  //l.Capacity := count;
+  for i := 1 to count do
+    l.Add(UInt32ToUtf8(i));
+  for i := 0 to l.Count - 1 do
+    if l[i] = '' then
+      result := '';
+  for u in l do
+    if u = '' then
+      result := '';
+  for i := count downto count - SEARCH_UTF do
+    if i > 0 then
+      if l.IndexOf(UInt32ToUtf8(i)) < 0 then
+        result := '';
+end;
+
+{$ifdef RTL_BENCH}
+function systemList2(count: integer): string;
+var
+  l: generics.collections.TList<RawUtf8>;
+  i: integer;
+  u: RawUtf8;
+begin
+  result := 'system TList<RawUtf8>';
+  l := generics.collections.TList<RawUtf8>.Create;
+  try
+    //l.Capacity := count;
+    for i := 1 to count do
+      l.Add(UInt32ToUtf8(i));
+    for i := 0 to l.Count - 1 do
+      if l[i] = '' then
+        result := '';
+    for u in l do
+      if u = '' then
+        result := '';
+    for i := count downto count - SEARCH_UTF do
+      if i > 0 then
+        if l.IndexOf(UInt32ToUtf8(i)) < 0 then
+          result := '';
+  finally
+    l.Free;
+  end;
+end;
+{$endif RTL_BENCH}
+
+function mORMotKeyValue1(count: integer): string;
+var
+  d: IKeyValue<integer, integer>;
+  p: TPair<integer, integer>;
+  i: integer;
+begin
+  result := 'mORMot IKeyValue<int,int>';
+  d := Collections.NewKeyValue<integer, integer>;
+  //d.Capacity := count;
+  for i := 1 to count do
+    d.Add(i, i shl 3);
+  for i := 1 to d.Count do
+    if d[i] <> i shl 3 then
+      result := '';
+  for p in d do
+    if (p.Key = 0) or
+       (p.Value = 0) then
+      result := '';
+  for i := count downto count - SEARCH_INT do
+    if i > 0 then
+      if not d.ContainsValue(i shl 3) then
+        result := '';
+end;
+
+{$ifdef RTL_BENCH}
+function systemMap1(count: integer): string;
+var
+  d: TDictionary<integer, integer>;
+  p: generics.collections.TPair<integer, integer>;
+  i: integer;
+begin
+  result := 'system TDictionary<int,int>';
+  d := TDictionary<integer, integer>.Create;
+  try
+    //d.Capacity := count;
+    for i := 1 to count do
+      d.Add(i, i shl 3);
+    for i := 1 to d.Count do
+      if d[i] <> i shl 3 then
+        result := '';
+    for p in d do
+      if (p.Key = 0) or
+         (p.Value = 0) then
+        result := '';
+    for i := count downto count - SEARCH_INT do
+      if i > 0 then
+        if not d.ContainsValue(i shl 3) then
+          result := '';
+  finally
+    d.Free;
+  end;
+end;
+{$endif RTL_BENCH}
+
+function mORMotKeyValue2(count: integer): string;
+var
+  d: IKeyValue<RawUtf8, integer>;
+  p: TPair<RawUtf8, integer>;
+  i: integer;
+begin
+  result := 'mORMot IKeyValue<utf,int>';
+  d := Collections.NewKeyValue<RawUtf8, integer>;
+  //d.Capacity := count;
+  for i := 1 to count do
+    d.Add(UInt32ToUtf8(i), i);
+  for i := 1 to d.Count do
+    if d[UInt32ToUtf8(i)] <> i then
+      result := '';
+  for p in d do
+    if (p.Key = '') or
+       (p.Value = 0) then
+      result := '';
+  for i := count downto count - SEARCH_UTF do
+    if i > 0 then
+      if not d.ContainsValue(i) then
+        result := '';
+end;
+
+{$ifdef RTL_BENCH}
+function systemMap2(count: integer): string;
+var
+  d: TDictionary<RawUtf8, integer>;
+  p: generics.collections.TPair<RawUtf8, integer>;
+  i: integer;
+begin
+  result := 'system TDictionary<utf,int>';
+  d := TDictionary<RawUtf8, integer>.Create;
+  try
+    //d.Capacity := count;
+    for i := 1 to count do
+      d.Add(UInt32ToUtf8(i), i);
+    for i := 1 to d.Count do
+      if d[UInt32ToUtf8(i)] <> i then
+        result := '';
+    for p in d do
+      if (p.Key = '') or
+         (p.Value = 0) then
+        result := '';
+    for i := count downto count - SEARCH_UTF do
+      if i > 0 then
+        if not d.ContainsValue(i) then
+          result := '';
+  finally
+    d.Free;
+  end;
+end;
+{$endif RTL_BENCH}
+
+{
+  the list of all benchmark sub-routines
+  - our test case consists in adding, getting, enumerating, then searching
+  - to be fair, for basic features (adding + getting + enumerating), mORMot
+  generics are slightly slower than latest Delphi generics.collection
+  unit - but faster than FPC generics anyway
+  - mORMot generics increases the .dcu size much less than Delphi's RTL
+  e.g. size of test.core.collections.dcu with Delphi 11.1 on Win32:
+    default mormot.core.generics:       24 KB
+    NOSPECIALIZE mormot.core.generics:  47 KB
+    default mormot.core.generics + Delphi generics.collection: 199 KB
+    (for only 4 generics collections definition)
+  - but our extended test with value searching let mORMot outperforms both
+  Delphi and FPC RTL, even more the FPC generics which use the very slow
+  AnsiCompareStr() call - for no benefit, and no Delphi compatibility
+}
+const
+  {$ifdef RTL_BENCH}
+  BENCHS: array[0..7] of TBenchmark = (
+    systemList1,
+    mORMotList1,
+    systemList2,
+    mORMotList2,
+    systemMap1,
+    mORMotKeyValue1,
+    systemMap2,
+    mORMotKeyValue2);
+  {$else}
+  BENCHS: array[0..3] of TBenchmark = (
+    mORMotList1,
+    mORMotList2,
+    mORMotKeyValue1,
+    mORMotKeyValue2);
+  {$endif RTL_BENCH}
+
+procedure TTestCoreCollections.Benchmark;
+const
+  REP = 4;
+var
+  timer1, timer2: TPrecisionTimer;
+  name: string;
+  b, i, j, mul, n, max, tot: PtrInt;
+begin
+  for b := low(BENCHS) to high(BENCHS) do
+  begin
+    max := 10;
+    for i := 1 to REP - 1 do
+      max := max * 20;
+    timer1.Start;
+    tot := 0;
+    n := 10;
+    for i := 1 to REP do
+    begin
+      timer2.Start;
+      mul := max div n; // to have big enough time
+      for j := 1 to mul do
+      begin
+        name := BENCHS[b](n);
+        Check(name <> '');
+      end;
+      NotifyTestSpeed('size=%', [n], n * mul, 0, @timer2, {onlylog=}true);
+      inc(tot, n * mul);
+      n := n * 20;
+    end;
+    NotifyTestSpeed(name, tot, 0, @timer1);
+  end;
+end;
+
 {$else}
+
+uses
+  mormot.core.test;
 
 type
   TTestCoreCollections = class(TSynTestCase)

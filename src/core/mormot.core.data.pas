@@ -15,6 +15,7 @@ unit mormot.core.data;
     - TDynArray and TDynArrayHashed Wrappers
     - Integer Arrays Extended Process
     - RawUtf8 String Values Interning and TRawUtf8List
+    - Abstract Radix Tree Classes
 
   *****************************************************************************
 }
@@ -859,6 +860,13 @@ var
   // - RTTI_COMPARE[true] for case-insensitive comparison
   RTTI_COMPARE: TRttiComparers;
 
+  /// lookup table for comparison of ordinal RTTI type values
+  // - slightly faster alternative to RTTI_COMPARE[rkOrdinalTypes]
+  RTTI_ORD_COMPARE: array[TRttiOrd] of TRttiCompare;
+
+  /// lookup table for comparison of floating-point RTTI type values
+  // - slightly faster alternative to RTTI_COMPARE[rkFloat]
+  RTTI_FLOAT_COMPARE: array[TRttiFloat] of TRttiCompare;
 
 /// raw binary serialization of a dynamic array
 // - as called e.g. by TDynArray.SaveTo, using ExternalCount optional parameter
@@ -878,7 +886,11 @@ function DynArraySave(var Value; TypeInfo: PRttiInfo): RawByteString; overload;
 // - Value shall be set to the target dynamic array field
 // - is a wrapper around BinaryLoad(rkDynArray)
 function DynArrayLoad(var Value; Source: PAnsiChar; TypeInfo: PRttiInfo;
+  {$ifdef PUREMORMOT2} // SourceMax is manadatory for safety
+  TryCustomVariants: PDocVariantOptions; SourceMax: PAnsiChar): PAnsiChar;
+  {$else}
   TryCustomVariants: PDocVariantOptions = nil; SourceMax: PAnsiChar = nil): PAnsiChar;
+  {$endif PUREMORMOT2}
   {$ifdef HASINLINE}inline;{$endif}
 
 /// low-level binary unserialization as saved by DynArraySave/TDynArray.Save
@@ -926,7 +938,9 @@ function DynArrayCompare<TArray>(var Array1, Array2: TArray;
   CaseInSensitive: boolean = false): integer; overload;
 {$endif FPCGENERICS}
 
-// two low-level comparison methods used for T*ObjArray by mormot.core.json
+// some low-level comparison methods used by mormot.core.json
+function _BC_SQWord(A, B: PInt64; Info: PRttiInfo; out Compared: integer): PtrInt;
+function _BC_UQWord(A, B: PQWord; Info: PRttiInfo; out Compared: integer): PtrInt;
 function _BC_ObjArray(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
 function _BCI_ObjArray(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
 
@@ -1085,13 +1099,17 @@ function RecordSaveBase64(const Rec; TypeInfo: PRttiInfo;
 // of the string length - note that if you change the type definition, any
 // previously-serialized content will fail, maybe triggering unexpected GPF: you
 // may use TypeInfoToHash() if you share this binary data accross executables
-// - you can optionally provide in SourceMax the first byte after the input
-// memory buffer, which will be used to avoid any unexpected buffer overflow -
-// would be mandatory when decoding the content from any external process
-// (e.g. a maybe-forged client) - with no performance penalty
+// - you should provide in SourceMax the first byte after the Source memory
+// buffer, which will be used to avoid any unexpected buffer overflow - clearly
+// mandatory when decoding the content from any external process (e.g. a
+// maybe-forged client) - with no performance penalty
 // - is a wrapper around BinaryLoad(rkRecordTypes)
 function RecordLoad(var Rec; Source: PAnsiChar; TypeInfo: PRttiInfo;
+  {$ifdef PUREMORMOT2} // SourceMax is manadatory for safety
+  Len: PInteger; SourceMax: PAnsiChar;
+  {$else}              // mORMot 1 compatibility mode
   Len: PInteger = nil; SourceMax: PAnsiChar = nil;
+  {$endif PUREMORMOT2}
   TryCustomVariants: PDocVariantOptions = nil): PAnsiChar; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1120,17 +1138,6 @@ function VariantHash(const value: variant; CaseInsensitive: boolean;
 
 { ************ TDynArray and TDynArrayHashed Wrappers }
 
-var
-  /// low-level JSON unserialization function
-  // - defined in this unit to avoid circular reference with mormot.core.json,
-  // and be called by TDynArray.LoadFromJson method
-  // - this unit will just set a wrapper raising an ERttiException
-  // - link mormot.core.json.pas to have a working implementation
-  // - rather call LoadJson() from mormot.core.json than this low-level function
-  GetDataFromJson: procedure(Data: pointer; var Json: PUtf8Char;
-    EndOfObject: PUtf8Char; Rtti: TRttiCustom;
-    CustomVariantOptions: PDocVariantOptions; Tolerant: boolean);
-
 type
   /// function prototype to be used for TDynArray Sort and Find method
   // - common functions exist for base types: see e.g. SortDynArrayBoolean,
@@ -1145,6 +1152,9 @@ type
 
   /// event oriented version of TDynArraySortCompare
   TOnDynArraySortCompare = function(const A, B): integer of object;
+
+  /// defined here as forward definition of the TRawUtf8Interning final class
+  TRawUtf8InterningAbstract = class(TSynPersistent);
 
 const
   /// redirect to the proper SortDynArrayAnsiString/SortDynArrayAnsiStringI
@@ -1313,7 +1323,7 @@ type
     // - Init and InitSpecific methods will reset the aCountPointer to 0: you
     // can use this method to set the external count variable without overriding
     // the current value
-    procedure UseExternalCount(var aCountPointer: integer);
+    procedure UseExternalCount(aCountPointer: PInteger);
       {$ifdef HASINLINE}inline;{$endif}
     /// initialize the wrapper to point to no dynamic array
     // - it won't clear the wrapped array, just reset the fValue internal pointer
@@ -1381,7 +1391,7 @@ type
     procedure Clear;
       {$ifdef HASINLINE}inline;{$endif}
     /// delete the whole dynamic array content, ignoring exceptions
-    // - returns true if no exception occured when calling Clear, false otherwise
+    // - returns true if no exception occurred when calling Clear, false otherwise
     // - you should better not call this method, which will catch and ignore
     // all exceptions - but it may somewhat make sense in a destructor
     // - this method will recognize T*ObjArray types and free all instances
@@ -1390,7 +1400,7 @@ type
     // - the deleted element is finalized if necessary
     // - this method will recognize T*ObjArray types and free all instances
     function Delete(aIndex: PtrInt): boolean;
-    /// search for an element value inside the dynamic array
+    /// search for an element inside the dynamic array using RTTI
     // - return the index found (0..Count-1), or -1 if Item was not found
     // - will search for all properties content of Item: TList.IndexOf()
     // searches by address, this method searches by content using the RTTI
@@ -1408,7 +1418,7 @@ type
     // - warning: Item must be of the same exact type than the dynamic array,
     // and must be a reference to a variable (you can't write IndexOf(i+10) e.g.)
     function IndexOf(const Item; CaseInSensitive: boolean = true): PtrInt;
-    /// search for an element value inside the dynamic array
+    /// search for an element inside the dynamic array using the Compare function
     // - this method will use the Compare property function, or the supplied
     // aCompare for the search; if none of them are set, it will fallback to
     // IndexOf() to perform a default case-sensitive RTTI search
@@ -1500,6 +1510,11 @@ type
     // in order to be sorted in increasing order according to Compare function
     procedure SortRange(aStart, aStop: integer;
       aCompare: TDynArraySortCompare = nil);
+    /// will check all items against aCompare
+    function IsSorted(aCompare: TDynArraySortCompare = nil): boolean;
+    /// will check all items against aCompare, calling Sort() if needed
+    // - faster than plain Sort() if the array is likely to be already sorted
+    procedure EnsureSorted(aCompare: TDynArraySortCompare = nil);
     /// sort the dynamic array items, using a Compare method (not function)
     // - it will change the dynamic array content, and exchange all items
     // in order to be sorted in increasing order according to Compare function,
@@ -1511,7 +1526,15 @@ type
     // - this method will use the Compare property function for the search
     // - returns TRUE and the matching indexes, or FALSE if none found
     // - if the array is not sorted, returns FALSE
-    function FindAllSorted(const Item; out FirstIndex, LastIndex: integer): boolean;
+    // - warning: FirstIndex/LastIndex parameters should be integer, not PtrInt
+    function FindAllSorted(const Item;
+      out FirstIndex, LastIndex: integer): boolean; overload;
+    /// search the item pointers which match a given value in a sorted dynamic array
+    // - this method will use the Compare property function for the search
+    // - return nil and FindCount = 0 if no matching item was found
+    // - return the a pointer to the first matching item, and FindCount >=1
+    // - warning: FindCount out parameter should be integer, not PtrInt
+    function FindAllSorted(const Item; out FindCount: integer): pointer; overload;
     /// search for an element value inside a sorted dynamic array
     // - this method will use the Compare property function for the search
     // - will be faster than a manual FindAndAddIfNotExisting+Sort process
@@ -1521,6 +1544,7 @@ type
     // - if the array is not sorted, returns FALSE and Index=-1
     // - warning: Item must be of the same exact type than the dynamic array,
     // and must be a reference to a variable (no FastLocateSorted(i+10) e.g.)
+    // - warning: Index out parameter should be integer, not PtrInt
     function FastLocateSorted(const Item; out Index: integer): boolean;
     /// insert a sorted element value at the proper place
     // - the index should have been computed by FastLocateSorted(): false
@@ -1601,10 +1625,15 @@ type
     function SaveTo: RawByteString; overload;
     /// unserialize dynamic array content from binary written by TDynArray.SaveTo
     // - return nil if the Source buffer is incorrect: invalid type, wrong
-    // checksum, or optional SourceMax overflow
+    // checksum, or SourceMax overflow
     // - return a non nil pointer just after the Source content on success
     // - this method will raise an ESynException for T*ObjArray types
-    function LoadFrom(Source: PAnsiChar; SourceMax: PAnsiChar = nil): PAnsiChar; 
+    function LoadFrom(Source: PAnsiChar;
+      {$ifdef PUREMORMOT2} // SourceMax is manadatory for safety
+      SourceMax: PAnsiChar): PAnsiChar;
+      {$else}             // mORMot 1 compatibility mode
+      SourceMax: PAnsiChar = nil): PAnsiChar;
+      {$endif PUREMORMOT2}
     /// unserialize dynamic array content from binary written by TDynArray.SaveTo
     procedure LoadFromReader(var Read: TFastReader);
     /// unserialize the dynamic array content from a TDynArray.SaveTo binary string
@@ -1647,17 +1676,20 @@ type
     // of an invalid input buffer
     // - this method will recognize T*ObjArray types, and will first free
     // any existing instance before unserializing, to avoid memory leak
+    // - set e.g. @JSON_[mFast] as CustomVariantOptions parameter to handle
+    // complex JSON object or arrays as TDocVariant into variant fields
+    // - can use an associated TRawUtf8Interning instance for RawUtf8 values
     // - warning: the content of P^ will be modified during parsing: make a
     // local copy if it will be needed later (using e.g. the overloaded method)
     function LoadFromJson(P: PUtf8Char; EndOfObject: PUtf8Char = nil;
-      CustomVariantOptions: PDocVariantOptions = nil;
-      Tolerant: boolean = false): PUtf8Char; overload;
+      CustomVariantOptions: PDocVariantOptions = nil; Tolerant: boolean = false;
+      Interning: TRawUtf8InterningAbstract = nil): PUtf8Char; overload;
     /// load the dynamic array content from an UTF-8 encoded JSON buffer
     // - this method will make a private copy of the JSON for in-place parsing
     // - returns false in case of invalid input buffer, true on success
     function LoadFromJson(const Json: RawUtf8;
-      CustomVariantOptions: PDocVariantOptions = nil;
-      Tolerant: boolean = false): boolean; overload;
+      CustomVariantOptions: PDocVariantOptions = nil; Tolerant: boolean = false;
+      Interning: TRawUtf8InterningAbstract = nil): boolean; overload;
     ///  select a sub-section (slice) of a dynamic array content
     procedure Slice(var Dest; Limit: cardinal; Offset: cardinal = 0);
     /// assign the current dynamic array content into a variable
@@ -1728,25 +1760,25 @@ type
     // slower and more error prone method (such pointer access lacks of strong
     // typing abilities), which is designed for TDynArray abstract/internal use
     function ItemPtr(index: PtrInt): pointer;
-      {$ifdef HASGETTYPEKIND}inline;{$endif}
+      {$ifdef HASINLINE}inline;{$endif}
     /// just a convenient wrapper of Info.Cache.ItemSize
     function ItemSize: PtrUInt;
       {$ifdef HASINLINE}inline;{$endif}
     /// will copy one element content from its index into another variable
-    // - do nothing if index is out of range
-    procedure ItemCopyAt(index: PtrInt; Dest: pointer);
+    // - do nothing and return false if index is out of range or Dest is nil
+    function ItemCopyAt(index: PtrInt; Dest: pointer): boolean;
       {$ifdef FPC}inline;{$endif}
     /// will move one element content from its index into another variable
     // - will erase the internal item after copy
-    // - do nothing if index is out of range
-    procedure ItemMoveTo(index: PtrInt; Dest: pointer);
+    // - do nothing and return false if index is out of range or Dest is nil
+    function ItemMoveTo(index: PtrInt; Dest: pointer): boolean;
     /// will copy one variable content into an indexed element
     // - do nothing if index is out of range
     // - ClearBeforeCopy will call ItemClear() before the copy, which may be safer
     // if the source item is a copy of Values[index] with some dynamic arrays
     procedure ItemCopyFrom(Source: pointer; index: PtrInt;
       ClearBeforeCopy: boolean = false);
-      {$ifdef HASGETTYPEKIND}inline;{$endif}
+      {$ifdef HASINLINE}inline;{$endif}
     /// compare the content of two items, returning TRUE if both values equal
     // - use the Compare() property function (if set) or using Info.Cache.ItemInfo
     // if available - and fallbacks to binary comparison
@@ -1759,13 +1791,13 @@ type
     /// will reset the element content
     // - i.e. release any managed type memory, and fill Item with zeros
     procedure ItemClear(Item: pointer);
-      {$ifdef HASGETTYPEKIND}inline;{$endif}
+      {$ifdef HASINLINE}inline;{$endif}
     /// will fill the element with some random content
     // - this method is thread-safe using Rtti.DoLock/DoUnLock
     procedure ItemRandom(Item: pointer);
     /// will copy one element content
     procedure ItemCopy(Source, Dest: pointer);
-      {$ifdef HASGETTYPEKIND}inline;{$endif}
+      {$ifdef HASINLINE}{$ifndef ISDELPHI2009}inline;{$endif}{$endif}
     /// will copy the first field value of an array element
     // - will use the array KnownType to guess the copy routine to use
     // - returns false if the type information is not enough for a safe copy
@@ -2039,7 +2071,7 @@ type
     procedure Clear; inline;
     procedure ItemCopy(Source, Dest: pointer); inline;
     function ItemPtr(index: PtrInt): pointer; inline;
-    procedure ItemCopyAt(index: PtrInt; Dest: pointer); inline;
+    function ItemCopyAt(index: PtrInt; Dest: pointer): boolean; inline;
     function Add(const Item): PtrInt; inline;
     procedure Delete(aIndex: PtrInt); inline;
     function SaveTo: RawByteString; overload; inline;
@@ -2052,7 +2084,8 @@ type
     procedure SaveToJson(W: TTextWriter); overload; inline;
     function LoadFromJson(P: PUtf8Char; aEndOfObject: PUtf8Char = nil;
       CustomVariantOptions: PDocVariantOptions = nil): PUtf8Char; inline;
-    function LoadFrom(Source: PAnsiChar; SourceMax: PAnsiChar = nil): PAnsiChar; inline;
+    function LoadFrom(Source: PAnsiChar; SourceMax: PAnsiChar
+      {$ifndef PUREMORMOT2} = nil{$endif}): PAnsiChar; inline;
     function LoadFromBinary(const Buffer: RawByteString): boolean; inline;
     procedure CreateOrderedIndex(var aIndex: TIntegerDynArray;
       aCompare: TDynArraySortCompare);
@@ -2246,15 +2279,20 @@ type
 // !var
 // !  IntArray: TIntegerDynArray;
 // !begin
-// !  with DynArray(TypeInfo(TIntegerDynArray),IntArray) do
+// !  with DynArray(TypeInfo(TIntegerDynArray), IntArray) do
 // !  begin
 // !    (...)
 // !  end;
 // ! (...)
-// ! DynArray(TypeInfo(TIntegerDynArray),IntArrayA).SaveTo
+// ! bin := DynArray(TypeInfo(TIntegerDynArray), IntArray).SaveTo;
 function DynArray(aTypeInfo: PRttiInfo; var aValue;
   aCountPointer: PInteger = nil): TDynArray;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// get the hash function corresponding to a given standard array type
+// - as used e.g. internally by TDynArrayHasher.Init
+function DynArrayHashOne(Kind: TRttiParserType;
+  CaseInsensitive: boolean = false): TDynArrayHashOne;
 
 /// sort any dynamic array, via an external array of indexes
 // - this function will use the supplied TSynTempBuffer for index storage,
@@ -2267,10 +2305,8 @@ procedure DynArraySortIndexed(Values: pointer; ItemSize, Count: integer;
 // - as used e.g. internally by TDynArray
 function DynArraySortOne(Kind: TRttiParserType; CaseInsensitive: boolean): TDynArraySortCompare;
 
-/// get the hash function corresponding to a given standard array type
-// - as used e.g. internally by TDynArrayHasher.Init
-function DynArrayHashOne(Kind: TRttiParserType;
-  CaseInsensitive: boolean = false): TDynArrayHashOne;
+/// sort any TObjArray with a given comparison function
+procedure ObjArraySort(var aValue; Compare: TDynArraySortCompare);
 
 
 { *************** Integer Arrays Extended Process }
@@ -2509,17 +2545,21 @@ function UpdateIniNameValue(var Content: RawUtf8;
 
 /// fill a class Instance properties from an .ini content
 // - the class property fields are searched in the supplied main SectionName
-// - nested objects are searched in their own section, named from their property
+// - nested objects and multi-line text values are searched in their own section,
+// named from their section level and property (e.g. [mainprop.nested1.nested2])
 // - returns true if at least one property has been identified
 function IniToObject(const Ini: RawUtf8; Instance: TObject;
-  const SectionName: RawUtf8 = 'Main'): boolean;
+  const SectionName: RawUtf8 = 'Main'; DocVariantOptions: PDocVariantOptions = nil;
+  Level: integer = 0): boolean;
 
 /// serialize a class Instance properties into an .ini content
 // - the class property fields are written in the supplied main SectionName
-// - nested objects are written in their own section, named from their property
+// - nested objects and multi-line text values are written in their own section,
+// named from their section level and property (e.g. [mainprop.nested1.nested2])
 function ObjectToIni(const Instance: TObject; const SectionName: RawUtf8 = 'Main';
   Options: TTextWriterWriteObjectOptions =
-    [woEnumSetsAsText, woRawBlobAsBase64, woHumanReadableEnumSetAsComment]): RawUtf8;
+    [woEnumSetsAsText, woRawBlobAsBase64, woHumanReadableEnumSetAsComment];
+    Level: integer = 0): RawUtf8;
 
 /// returns TRUE if the supplied HTML Headers contains 'Content-Type: text/...',
 // 'Content-Type: application/json' or 'Content-Type: application/xml'
@@ -2574,7 +2614,7 @@ type
   // - thanks to the Copy-On-Write feature of string variables, this may
   // reduce a lot the memory overhead of duplicated text content
   // - this class is thread-safe and optimized for performance
-  TRawUtf8Interning = class(TSynPersistent)
+  TRawUtf8Interning = class(TRawUtf8InterningAbstract)
   protected
     fPool: array of TRawUtf8InterningSlot;
     fPoolLast: integer;
@@ -2834,7 +2874,7 @@ type
     /// the OnChange event will be raised only when EndUpdate will be called
     // - this method will also call Safe.Lock for thread-safety
     procedure BeginUpdate;
-    /// call the OnChange event if changes occured
+    /// call the OnChange event if changes occurred
     // - this method will also call Safe.UnLock for thread-safety
     procedure EndUpdate;
     /// set low-level text and objects from existing arrays
@@ -2842,16 +2882,14 @@ type
     /// set all lines, separated by the supplied delimiter
     // - this method is thread-safe
     procedure SetText(const aText: RawUtf8; const Delimiter: RawUtf8 = #13#10);
-    /// set all lines from an UTF-8 text file
-    // - expect the file is explicitly an UTF-8 file
-    // - will ignore any trailing UTF-8 BOM in the file content, but will not
-    // expect one either
+    /// set all lines from a text file
+    // - will assume text file with no BOM is already UTF-8 encoded
     // - this method is thread-safe
     procedure LoadFromFile(const FileName: TFileName);
     /// write all lines into the supplied stream
     // - this method is thread-safe
     procedure SaveToStream(Dest: TStream; const Delimiter: RawUtf8 = #13#10);
-    /// write all lines into a new file
+    /// write all lines into a new UTF-8 file
     // - this method is thread-safe
     procedure SaveToFile(const FileName: TFileName; const Delimiter: RawUtf8 = #13#10);
     /// return the count of stored RawUtf8
@@ -2943,6 +2981,149 @@ type
 procedure QuickSortIndexedPUtf8Char(Values: PPUtf8CharArray; Count: integer;
   var SortedIndexes: TCardinalDynArray; CaseSensitive: boolean = false);
 
+var
+  /// low-level JSON unserialization function
+  // - defined in this unit to avoid circular reference with mormot.core.json,
+  // but to publish the TDynArray.LoadFromJson overloaded methods
+  // - this unit will just set a wrapper raising an ERttiException
+  // - link mormot.core.json.pas to have a working implementation
+  // - rather call LoadJson() from mormot.core.json than this low-level function
+  GetDataFromJson: procedure(Data: pointer; var Json: PUtf8Char;
+    EndOfObject: PUtf8Char; Rtti: TRttiCustom;
+    CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
+    Interning: TRawUtf8InterningAbstract);
+
+
+{ ************ Abstract Radix Tree Classes }
+
+type
+  TRadixTree = class;
+
+  /// refine the TRadixTreeNode content
+  // - rtfParam is <param> node, i.e. a TRadixTreeNodeParams with Names <> nil
+  // - rtfParamInteger is for a rtfParam which value should be only an integer,
+  // either from rtoIntegerParams global flag, or individually as <int:###>
+  // - rtfParamPath is for a rtfParam which value should be the whole path,
+  // until the end of the URI or the beginning of the parameters (i.e. at '?'),
+  // set individually as <path:###> parameter - * being synonymous to <path:path>
+  TRadixTreeNodeFlags = set of (
+    rtfParam,
+    rtfParamInteger,
+    rtfParamPath);
+
+  /// implement an abstract Radix Tree node
+  TRadixTreeNode = class
+  protected
+    function ComputeDepth: integer;
+    procedure SortChildren;
+  public
+    /// the main Tree holding this node
+    Owner: TRadixTree;
+    /// the characters to be compared at this level
+    Chars: RawUtf8;
+    /// how many branches are within this node - used to sort by priority
+    Depth: integer;
+    /// describe the content of this node
+    Flags: TRadixTreeNodeFlags;
+    /// the nested nodes
+    Child: array of TRadixTreeNode;
+    /// the whole text up to this level
+    FullText: RawUtf8;
+    /// initialize this node instance
+    constructor Create(aOwner: TRadixTree); reintroduce;
+    /// instantiate a new node with the same class and properties
+    function Split(const Text: RawUtf8): TRadixTreeNode; virtual;
+    /// finalize this Radix Tree node
+    destructor Destroy; override;
+    /// search for the node corresponding to a given text
+    function Find(P: PUtf8Char): TRadixTreeNode;
+    /// internal debugging/testing method
+    procedure ToText(var Result: RawUtf8; Level: integer);
+  end;
+
+  /// our TRadixTree works on dynamic/custom types of node classes
+  TRadixTreeNodeClass = class of TRadixTreeNode;
+
+  /// allow to customize TRadixTree process
+  // - e.g. if static text matching should be case-insensitive (but <params> are
+  // always case-sensitive, because they are internal labels)
+  // - if <param> values should be only plain integers, never alphabetical text -
+  // you may also specify int:xxx for a single parameter, e.g. as <int:id>
+  TRadixTreeOptions = set of (
+    rtoCaseInsensitiveUri,
+    rtoIntegerParams);
+
+  /// implement an abstract Radix Tree over UTF-8 case-insensitive text
+  // - as such, this class is not very useful if you just need to lookup for
+  // a text value: a TDynArrayHasher/TDictionary is faster and uses less RAM
+  // - but, once extended e.g. as TUriTree, it can very efficiently parse
+  // some text with variants parts (e.g. parameters)
+  TRadixTree = class
+  protected
+    fRoot: TRadixTreeNode;
+    fDefaultNodeClass: TRadixTreeNodeClass;
+    fOptions: TRadixTreeOptions;
+    fNormTable: PNormTable; // for efficient rtoCaseInsensitiveUri
+    procedure SetNodeClass; virtual; abstract;
+  public
+    /// initialize the Radix Tree
+    constructor Create(aOptions: TRadixTreeOptions = []); reintroduce;
+    /// finalize this Radix Tree
+    destructor Destroy; override;
+    /// define how TRadixTreeNode.Lookup() will process this node
+    // - as set with this class constructor
+    property Options: TRadixTreeOptions
+      read fOptions;
+    /// finalize this Radix Tree node
+    procedure Clear;
+    /// low-level insertion of a given Text entry as a given child
+    // - may return an existing node instance, if Text was already inserted
+    function Insert(Text: RawUtf8; Node: TRadixTreeNode = nil;
+      NodeClass: TRadixTreeNodeClass = nil): TRadixTreeNode;
+    /// to be called after Insert() to consolidate the internal tree state
+    // - nodes will be sorted by search priority, i.e. the longest depths first
+    // - as called e.g. by TUriTree.Setup()
+    procedure AfterInsert;
+    /// search for the node corresponding to a given text
+    // - more than 6 million lookups per second, with 1000 items stored
+    function Find(const Text: RawUtf8): TRadixTreeNode;
+    /// internal debugging/testing method
+    function ToText: RawUtf8;
+    /// low-level access to the root node of the Radix Tree
+    property Root: TRadixTreeNode
+      read fRoot;
+  end;
+
+  /// implement an abstract Radix Tree static or <param> node
+  TRadixTreeNodeParams = class(TRadixTreeNode)
+  protected
+    /// is called for each <param> as Pos/Len pair//
+    // - called eventually with Pos^='?' and Len=-1 for the inlined parameters
+    // - should return true on success, false to abort
+    function LookupParam(Ctxt: TObject; Pos: PUtf8Char; Len: integer): boolean;
+      virtual; abstract;
+  public
+    /// all the <param1> <param2> names, in order, up to this parameter
+    // - equals nil for static nodes
+    // - is referenced as pointer into THttpServerRequestAbstract.fRouteName
+    Names: TRawUtf8DynArray;
+    /// overriden to support the additional Names fields
+    function Split(const Text: RawUtf8): TRadixTreeNode; override;
+    /// main search method, recognizing static or <param> patterns
+    function Lookup(P: PUtf8Char; Ctxt: TObject): TRadixTreeNodeParams;
+  end;
+
+  /// implement an abstract Radix Tree with static or <param> nodes
+  TRadixTreeParams = class(TRadixTree)
+  public
+    /// low-level registration of a new URI path, with <param> support
+    // - returns the node matching the given URI
+    // - called e.g. from TUriRouter.Rewrite/Run methods
+    // - will recognize <param> alphanumerical and <int:id> integer parameters
+    function Setup(const aFromUri: RawUtf8; out aNames: TRawUtf8DynArray): TRadixTreeNodeParams;
+  end;
+
+  ERadixTree = class(ESynException);
 
 
 implementation
@@ -4171,16 +4352,18 @@ begin
 end;
 
 function IniToObject(const Ini: RawUtf8; Instance: TObject;
-  const SectionName: RawUtf8): boolean;
+  const SectionName: RawUtf8; DocVariantOptions: PDocVariantOptions;
+  Level: integer): boolean;
 var
   r: TRttiCustom;
   i: integer;
   p: PRttiCustomProp;
-  section: PUtf8Char;
-  v: RawUtf8;
+  section, nested, json: PUtf8Char;
+  name: PAnsiChar;
+  n, v: RawUtf8;
   up: array[byte] of AnsiChar;
 begin
-  result := false;
+  result := false; // true when at least one property has been read
   if (Ini = '') or
      (Instance = nil) then
     exit;
@@ -4194,33 +4377,101 @@ begin
   begin
     if p^.Prop <> nil then
       if p^.Value.Kind = rkClass then
-      begin // recursive load from another per-property section
-        if IniToObject(Ini, p^.Prop^.GetObjProp(Instance), p^.Name) then
+      begin
+        // recursive load from another per-property section
+        if Level = 0 then
+          n := p^.Name
+        else
+          n := SectionName + '.' + p^.Name;
+        if IniToObject(Ini, p^.Prop^.GetObjProp(Instance), n,
+              DocVariantOptions, Level + 1) then
           result := true;
       end
       else
       begin
         PWord(UpperCopy255(up{%H-}, p^.Name))^ := ord('=');
         v := FindIniNameValue(section, @up, #0);
-        if (v <> #0) and
-           p^.Prop^.SetValueText(Instance, v) then
-          result := true;
+        if p^.Value.Parser in ptMultiLineStringTypes then
+        begin
+          if v = #0 then // may be stored in a multi-line section body
+          begin
+            name := @up;
+            if Level <> 0 then
+            begin
+              name := UpperCopy255(name, SectionName);
+              name^ := '.';
+              inc(name);
+            end;
+            PWord(UpperCopy255(name, p^.Name))^ := ord(']');
+            nested := pointer(Ini);
+            if FindSectionFirstLine(nested, @up) then
+            begin
+              // multi-line text value has been stored in its own section
+              v := GetSectionContent(nested);
+              if p^.Prop^.SetValueText(Instance, v) then
+                result := true;
+            end;
+          end
+          else if p^.Prop^.SetValueText(Instance, v) then // single line text
+            result := true;
+        end
+        else if v <> #0 then
+          if (p^.OffsetSet <= 0) or // has a setter?
+             (rcfBoolean in p^.Value.Cache.Flags) or // simple value?
+             (p^.Value.Kind in (rkGetIntegerPropTypes + [rkEnumeration, rkFloat])) then
+          begin
+            if p^.Prop^.SetValueText(Instance, v) then // RTTI conversion
+              result := true;
+          end
+          else // e.g. rkVariant, rkSet, rkDynArray
+          begin
+            json := pointer(v); // convert complex values from JSON
+            GetDataFromJson(@PByteArray(Instance)[p^.OffsetSet], json,
+              nil, p^.Value, DocVariantOptions, true, nil);
+            if json <> nil then
+              result := true;
+          end;
       end;
     inc(p);
   end;
 end;
 
+function TrimAndIsMultiLine(var U: RawUtf8): boolean;
+var
+  L: PtrInt;
+  P: PUtf8Char absolute U;
+begin
+  result := false;
+  L := length(U);
+  if L = 0 then
+    exit;
+  while P[L - 1] in [#13, #10] do
+  begin
+    dec(L);
+    if L = 0 then
+    begin
+      U := ''; // no meaningful text
+      exit;
+    end;
+  end;
+  if L <> length(U) then
+    SetLength(U, L); // trim right
+  if BufferLineLength(P, P + L) = L then // may use x86_64 SSE2 asm
+    exit; // no line feed
+  result := true; // there are line feeds within this text
+  U := TrimChar(U, [#13]); // normalize #13#10 into #10 as ObjectToIni()
+end;
+
 function ObjectToIni(const Instance: TObject; const SectionName: RawUtf8;
-  Options: TTextWriterWriteObjectOptions): RawUtf8;
+  Options: TTextWriterWriteObjectOptions; Level: integer): RawUtf8;
 var
   W: TTextWriter;
   tmp: TTextWriterStackBuffer;
   nested: TRawUtf8DynArray;
   i, nestedcount: integer;
-  o: TTextWriterWriteObjectOptions;
   r: TRttiCustom;
   p: PRttiCustomProp;
-  s: RawUtf8;
+  n, s: RawUtf8;
 begin
   result := '';
   if Instance = nil then
@@ -4237,33 +4488,55 @@ begin
       if p^.Prop <> nil then
         if p^.Value.Kind = rkClass then
         begin
-          s := ObjectToIni(p^.Prop^.GetObjProp(Instance), p^.Name);
+          if Level = 0 then
+            n := p^.Name
+          else
+            n := SectionName + '.' + p^.Name;
+          s := ObjectToIni(p^.Prop^.GetObjProp(Instance), n, Options, Level + 1);
           if s <> '' then
             AddRawUtf8(nested, nestedcount, s);
         end
-        else
+        else if p^.Value.Kind = rkEnumeration then
         begin
-          o := Options - [woHumanReadableEnumSetAsComment];
-          case p^.Value.Kind of
-            rkSet: // not supported yet in IniToObject/SetValueText above
-              exclude(o, woEnumSetsAsText);
-            rkEnumeration:
-              if woHumanReadableEnumSetAsComment in Options then
-              begin
-                p^.Value.Cache.EnumInfo^.GetEnumNameAll(
-                  s, '; values=', false, #10, true);
-                W.AddString(s);
-              end;
+          if woHumanReadableEnumSetAsComment in Options then
+          begin
+            p^.Value.Cache.EnumInfo^.GetEnumNameAll(
+              s, '; values=', {quoted=}false, #10, {uncamelcase=}true);
+            W.AddString(s);
           end;
+          // AddValueJson() would have written "quotes"
           W.AddString(p^.Name);
           W.Add('=');
-          case p^.Value.Kind of
-            rkEnumeration: // AddValueJson() would have written "quotes"
-              W.AddTrimLeftLowerCase(p^.Value.Cache.EnumInfo^.GetEnumNameOrd(
-                p^.Prop^.GetOrdProp(Instance)));
+          W.AddTrimLeftLowerCase(p^.Value.Cache.EnumInfo^.GetEnumNameOrd(
+            p^.Prop^.GetOrdProp(Instance)));
+          W.Add(#10);
+        end
+        else if p^.Value.Parser in ptMultiLineStringTypes then
+        begin
+          p^.Prop^.GetAsString(Instance, s);
+          if TrimAndIsMultiLine(s) then
+          begin
+            // store multi-line text values in their own section
+            if Level = 0 then
+              FormatUtf8('[%]'#10'%'#10#10, [p^.Name, s], n)
+            else
+              FormatUtf8('[%.%]'#10'%'#10#10, [SectionName, p^.Name, s], n);
+            AddRawUtf8(nested, nestedcount, n);
+          end
           else
-            p^.AddValueJson(W, Instance, o, twOnSameLine);
+          begin
+            W.AddString(p^.Name);
+            W.Add('=');
+            W.AddString(s); // single line text
+            W.Add(#10);
           end;
+        end
+        else
+        begin
+          W.AddString(p^.Name);
+          W.Add('=');
+          p^.AddValueJson(W, Instance, // simple and complex types
+            Options - [woHumanReadableEnumSetAsComment], twOnSameLine);
           W.Add(#10);
         end;
       inc(p);
@@ -5081,9 +5354,9 @@ end;
 procedure TRawUtf8List.SaveToFile(
   const FileName: TFileName; const Delimiter: RawUtf8);
 var
-  FS: TFileStream;
+  FS: TStream;
 begin
-  FS := TFileStream.Create(FileName, fmCreate);
+  FS := TFileStreamEx.Create(FileName, fmCreate);
   try
     SaveToStream(FS, Delimiter);
   finally
@@ -5212,32 +5485,8 @@ begin
 end;
 
 procedure TRawUtf8List.LoadFromFile(const FileName: TFileName);
-var
-  Map: TMemoryMap;
-  P: PUtf8Char;
-  tmp: RawUtf8;
 begin
-  if Map.Map(FileName) then
-  try
-    P := pointer(Map.Buffer);
-    if Map.Size <> 0 then
-      case Map.TextFileKind of
-      isUtf8:
-        // ignore UTF-8 BOM
-        SetTextPtr(P + 3, P + Map.Size, #13#10);
-      isUnicode:
-        begin
-          // conversion from UTF-16 content (mainly on Windows) into UTF-8
-          RawUnicodeToUtf8(PWideChar(P + 2), (Map.Size - 2) shr 1, tmp);
-          SetText(tmp, #13#10);
-        end;
-      else
-        // assume text file with no BOM is already UTF-8 encoded
-        SetTextPtr(P, P + Map.Size, #13#10);
-      end;
-  finally
-    Map.UnMap;
-  end;
+  SetText(RawUtf8FromFile(FileName), #13#10); // RawUtf8FromFile() detects BOM
 end;
 
 procedure TRawUtf8List.SetTextPtr(P, PEnd: PUtf8Char; const Delimiter: RawUtf8);
@@ -5433,32 +5682,59 @@ begin
   Source.Copy(Data, result);
 end;
 
-function _BC_Ord(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
-var
-  ro: TRttiOrd;
+// efficient branchless comparison of every TRttiOrd/TRttiFloat raw value
+
+function _BC_SByte(A, B: PShortInt; Info: PRttiInfo; out Compared: integer): PtrInt;
 begin
-  ro := Info^.RttiOrd;
-  case ro of // branchless comparison
-    roSByte:
-      Compared := ord(PShortInt(A)^ > PShortInt(B)^) - ord(PShortInt(A)^ < PShortInt(B)^);
-    roUByte:
-      Compared := ord(PByte(A)^ > PByte(B)^) - ord(PByte(A)^ < PByte(B)^);
-    roSWord:
-      Compared := ord(PSmallInt(A)^ > PSmallInt(B)^) - ord(PSmallInt(A)^ < PSmallInt(B)^);
-    roUWord:
-      Compared := ord(PWord(A)^ > PWord(B)^) - ord(PWord(A)^ < PWord(B)^);
-    roSLong:
-      Compared := ord(PInteger(A)^ > PInteger(B)^) - ord(PInteger(A)^ < PInteger(B)^);
-    roULong:
-      Compared := ord(PCardinal(A)^ > PCardinal(B)^) - ord(PCardinal(A)^ < PCardinal(B)^);
-    {$ifdef FPC_NEWRTTI}
-    roSQWord:
-      Compared := ord(PInt64(A)^ > PInt64(B)^) - ord(PInt64(A)^ < PInt64(B)^);
-    roUQWord:
-      Compared := ord(PQWord(A)^ > PQWord(B)^) - ord(PQWord(A)^ < PQWord(B)^);
-    {$endif FPC_NEWRTTI}
-  end;
-  result := ORDTYPE_SIZE[ro];
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := 1;
+end;
+
+function _BC_UByte(A, B: PByte; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := 1;
+end;
+
+function _BC_SWord(A, B: PSmallInt; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := 2;
+end;
+
+function _BC_UWord(A, B: PWord; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := 2;
+end;
+
+function _BC_SLong(A, B: PInteger; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := 4;
+end;
+
+function _BC_ULong(A, B: PCardinal; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := 4;
+end;
+
+function _BC_SQWord(A, B: PInt64; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := 8;
+end;
+
+function _BC_UQWord(A, B: PQWord; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := 8;
+end;
+
+function _BC_Ord(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  result := RTTI_ORD_COMPARE[Info^.RttiOrd](A, B, Info, Compared);
 end;
 
 function _BS_Float(Data: pointer; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
@@ -5473,22 +5749,27 @@ begin
   Source.Copy(Data, result);
 end;
 
-function _BC_Float(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
-var
-  rf: TRttiFloat;
+function _BC_Single(A, B: PSingle; Info: PRttiInfo; out Compared: integer): PtrInt;
 begin
-  rf := Info^.RttiFloat;
-  case rf of // efficient branchless comparison
-    rfSingle:
-      Compared := ord(PSingle(A)^ > PSingle(B)^) - ord(PSingle(A)^ < PSingle(B)^);
-    rfDouble:
-      Compared := ord(PDouble(A)^ > PDouble(B)^) - ord(PDouble(A)^ < PDouble(B)^);
-    rfExtended:
-      Compared := ord(PExtended(A)^ > PExtended(B)^) - ord(PExtended(A)^ < PExtended(B)^);
-    rfComp, rfCurr:
-      Compared := ord(PInt64(A)^ > PInt64(B)^) - ord(PInt64(A)^ < PInt64(B)^);
-  end;
-  result := FLOATTYPE_SIZE[rf];
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := SizeOf(single);
+end;
+
+function _BC_Double(A, B: PDouble; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := SizeOf(double);
+end;
+
+function _BC_Extended(A, B: PExtended; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  Compared := ord(A^ > B^) - ord(A^ < B^);
+  result := SizeOf(extended);
+end;
+
+function _BC_Float(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  result := RTTI_FLOAT_COMPARE[Info^.RttiFloat](A, B, Info, Compared);
 end;
 
 function _BS_64(Data: PInt64; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
@@ -5654,9 +5935,11 @@ end;
 function DynArrayLoad(var Value; Source: PAnsiChar; TypeInfo: PRttiInfo;
   TryCustomVariants: PDocVariantOptions; SourceMax: PAnsiChar): PAnsiChar;
 begin
+  {$ifndef PUREMORMOT2}
   if SourceMax = nil then
-    // backward compatible: assume fake 100MB Source input buffer
+    // mORMot 1 unsafe backward compatible: assume fake 100MB Source input
     SourceMax := Source + 100 shl 20;
+  {$endif PUREMORMOT2}
   result := BinaryLoad(
     @Value, source, TypeInfo, nil, SourceMax, [rkDynArray], TryCustomVariants);
 end;
@@ -6260,6 +6543,8 @@ begin
           siz := cmp(A, B, Info, result);
           inc(PAnsiChar(A), siz);
           inc(PAnsiChar(B), siz);
+          if result <> 0 then
+            exit;
           dec(Count);
         until Count = 0
       else
@@ -6471,9 +6756,10 @@ var
 begin
   load := RTTI_BINARYLOAD[Info^.Kind];
   if Assigned(load) and
-     (Info^.Kind in Kinds) then
+     (Info^.Kind in Kinds) and
+     (SourceMax <> nil) then
   begin
-    read.Init(Source, SourceMax - Source);
+    {%H-}read.Init(Source, SourceMax - Source);
     read.CustomVariants := TryCustomVariants;
     size := load(Data, read, Info);
     if Len <> nil then
@@ -6583,9 +6869,11 @@ end;
 function RecordLoad(var Rec; Source: PAnsiChar; TypeInfo: PRttiInfo;
   Len: PInteger; SourceMax: PAnsiChar; TryCustomVariants: PDocVariantOptions): PAnsiChar;
 begin
+  {$ifndef PUREMORMOT2}
   if SourceMax = nil then
-    // backward compatible: assume fake 100MB Source input buffer
+    // mORMot 1 unsafe backward compatible: assume fake 100MB Source input
     SourceMax := Source + 100 shl 20;
+  {$endif PUREMORMOT2}
   result := BinaryLoad(@Rec, Source, TypeInfo, Len, SourceMax,
     rkRecordTypes, TryCustomVariants);
 end;
@@ -6653,8 +6941,9 @@ const
      SortDynArrayPointer,       //  ptClass
      nil,                       //  ptDynArray
      SortDynArrayPointer,       //  ptInterface
+     SortDynArrayPUtf8Char,     //  ptPUtf8Char
      nil),                      //  ptCustom
-    // case sensitive comparison/sort functions:
+    // case insensitive comparison/sort functions:
     (nil,                        //  ptNone
      nil,                        //  ptArray
      SortDynArrayBoolean,        //  ptBoolean
@@ -6694,7 +6983,19 @@ const
      SortDynArrayPointer,        //  ptClass
      nil,                        //  ptDynArray
      SortDynArrayPointer,        //  ptInterface
+     SortDynArrayPUtf8CharI,     //  ptPUtf8Char
      nil));                      //  ptCustom
+
+function DynArraySortOne(Kind: TRttiParserType;
+  CaseInsensitive: boolean): TDynArraySortCompare;
+begin
+  result := PT_SORT[CaseInsensitive, Kind];
+end;
+
+procedure ObjArraySort(var aValue; Compare: TDynArraySortCompare);
+begin
+  DynArray(TypeInfo(TObjectDynArray), aValue).Sort(Compare);
+end;
 
 
 { TDynArray }
@@ -7000,13 +7301,13 @@ begin
   result := true;
 end;
 
+{$ifdef FPC} // very efficient inlined code on FPC
 function TDynArray.ItemPtr(index: PtrInt): pointer;
 label
-  ok, ko;
+  ok, ko; // labels make the code shorter and more efficient
 var
   c: PtrUInt;
 begin
-  // very efficient code on FPC and modern Delphi
   result := pointer(fValue);
   if result = nil then
     exit;
@@ -7021,39 +7322,68 @@ ok:   inc(PByte(result), index * fInfo.Cache.ItemSize) // branchless ext count
     else
       goto ko;
   end
-  else
-    {$ifdef FPC} // FPC stores high() in TDALen=PtrInt
+  else // FPC stores high() in TDALen=PtrInt
     if PtrUInt(index) <= PPtrUInt(PAnsiChar(result) - _DALEN)^ then
-    {$else}     // Delphi stores length() in TDALen=NativeInt
-    if PtrUInt(index) < PPtrUInt(PtrUInt(result) - _DALEN)^ then
-    {$endif FPC}
       goto ok
     else
 ko:   result := nil;
 end;
+{$else} // latest Delphi compilers have troubles with inlining + labels
+function TDynArray.ItemPtr(index: PtrInt): pointer;
+var
+  c: PtrUInt;
+begin
+  result := pointer(fValue);
+  if result = nil then
+    exit;
+  result := PPointer(result)^;
+  if result = nil then
+    exit;
+  c := PtrUInt(fCountP);
+  if c <> 0 then
+    if PtrUInt(index) < PCardinal(c)^ then
+      inc(PByte(result), index * fInfo.Cache.ItemSize) // branchless ext count
+    else
+      result := nil
+  else // Delphi stores length() in TDALen=NativeInt
+    if PtrUInt(index) < PPtrUInt(PtrUInt(result) - _DALEN)^ then
+      inc(PByte(result), index * fInfo.Cache.ItemSize)
+    else
+      result := nil;
+end;
+{$endif FPC}
 
-procedure TDynArray.ItemCopyAt(index: PtrInt; Dest: pointer);
+function TDynArray.ItemCopyAt(index: PtrInt; Dest: pointer): boolean;
 var
   p: pointer;
 begin
   p := ItemPtr(index);
   if p <> nil then
+  begin
     ItemCopy(p, Dest);
+    result := true;
+  end
+  else
+    result := false;
 end;
 
-procedure TDynArray.ItemMoveTo(index: PtrInt; Dest: pointer);
+function TDynArray.ItemMoveTo(index: PtrInt; Dest: pointer): boolean;
 var
   p: pointer;
 begin
   p := ItemPtr(index);
   if (p = nil) or
      (Dest = nil) then
+  begin
+    result := false;
     exit;
+  end;
   if (fInfo.ArrayRtti <> nil) and
      not fNoFinalize then
     fInfo.ArrayRtti.ValueFinalize(Dest); // also handle T*ObjArray
   MoveFast(p^, Dest^, fInfo.Cache.ItemSize);
   FillCharFast(p^, fInfo.Cache.ItemSize, 0);
+  result := true;
 end;
 
 procedure TDynArray.ItemCopyFrom(Source: pointer; index: PtrInt;
@@ -7215,10 +7545,12 @@ function TDynArray.LoadFrom(Source, SourceMax: PAnsiChar): PAnsiChar;
 var
   read: TFastReader;
 begin
+  {$ifndef PUREMORMOT2}
   if SourceMax = nil then
-    // backward compatible: assume fake 100MB Source input buffer
+    // mORMot 1 unsafe backward compatible: assume fake 100MB Source input
     SourceMax := Source + 100 shl 20;
-  read.Init(Source, SourceMax - Source);
+  {$endif PUREMORMOT2}
+  {%H-}read.Init(Source, SourceMax - Source);
   LoadFromReader(read);
   if read.P <> Source then
     result := read.P
@@ -7314,17 +7646,20 @@ end;
 
 procedure _GetDataFromJson(Data: pointer; var Json: PUtf8Char;
   EndOfObject: PUtf8Char; Rtti: TRttiCustom;
-  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean);
+  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
+  Interning: TRawUtf8InterningAbstract);
 begin
   raise ERttiException.Create('GetDataFromJson() not implemented - ' +
     'please include mormot.core.json in your uses clause');
 end;
 
 function TDynArray.LoadFromJson(P: PUtf8Char; EndOfObject: PUtf8Char;
-  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean): PUtf8Char;
+  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
+  Interning: TRawUtf8InterningAbstract): PUtf8Char;
 begin
   SetCount(0); // faster to use our own routine now
-  GetDataFromJson(fValue, P, EndOfObject, Info, CustomVariantOptions, Tolerant);
+  GetDataFromJson(fValue, P,
+    EndOfObject, Info, CustomVariantOptions, Tolerant, Interning);
   if fCountP <> nil then
     // GetDataFromJson() set the array length (capacity), not the external count
     if fValue^ = nil then
@@ -7335,13 +7670,15 @@ begin
 end;
 
 function TDynArray.LoadFromJson(const Json: RawUtf8;
-  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean): boolean;
+  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
+  Interning: TRawUtf8InterningAbstract): boolean;
 var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(Json);
   try
-    result := LoadFromJson(tmp.buf, nil, CustomVariantOptions, Tolerant) <> nil;
+    result := LoadFromJson(tmp.buf, nil,
+      CustomVariantOptions, Tolerant, Interning) <> nil;
   finally
     tmp.Done;
   end;
@@ -7465,7 +7802,7 @@ begin
       result := fnd(fValue^, @Item, aCompare, n, fInfo.Cache.ItemSize);
     end
     else
-      result := IndexOf(Item, {caseinsens=}false)
+      result := IndexOf(Item, {caseinsens=}false) // no fCompare -> default
   else
     result := -1;
 end;
@@ -7518,22 +7855,67 @@ end;
 function TDynArray.FindAllSorted(const Item;
   out FirstIndex, LastIndex: integer): boolean;
 var
-  found, last: integer;
-  P: PAnsiChar;
+  found, last: integer; // FastLocateSorted() requires an integer
+  siz: PtrInt;
+  P, val: PAnsiChar;
 begin
   result := FastLocateSorted(Item, found);
   if not result then
     exit;
   FirstIndex := found;
   P := fValue^;
-  while (FirstIndex > 0) and
-        (fCompare(P[(FirstIndex - 1) * fInfo.Cache.ItemSize], Item) = 0) do
+  siz := fInfo.Cache.ItemSize;
+  inc(P, found * siz);
+  val := P; // faster than Item after RawUtf8 interning
+  while FirstIndex > 0 do
+  begin
+    dec(P, siz);
+    if fCompare(P^, val^) <> 0 then
+      break;
     dec(FirstIndex);
+  end;
   last := GetCount - 1;
   LastIndex := found;
-  while (LastIndex < last) and
-        (fCompare(P[(LastIndex + 1) * fInfo.Cache.ItemSize], Item) = 0) do
+  P := val;
+  while LastIndex < last do
+  begin
+    inc(P, siz);
+    if fCompare(P^, val^) <> 0 then
+      break;
     inc(LastIndex);
+  end;
+end;
+
+function TDynArray.FindAllSorted(const Item; out FindCount: integer): pointer;
+var
+  found: integer; // FastLocateSorted() requires an integer
+  siz: PtrInt;
+  P, fnd, limit: PAnsiChar;
+begin
+  FindCount := 0;
+  result := nil;
+  if not FastLocateSorted(Item, found) then
+    exit;
+  P := fValue^;
+  limit := P;
+  siz := fInfo.Cache.ItemSize;
+  inc(P, found * siz);
+  fnd := P; // faster than Item after RawUtf8 interning
+  repeat
+    result := P;
+    inc(FindCount);
+    dec(P, siz);
+  until (P < limit) or
+        (fCompare(P^, fnd^) <> 0);
+  inc(limit, GetCount * siz);
+  P := fnd;
+  repeat
+    inc(P, siz);
+    if (P >= limit) or
+       (fCompare(P^, fnd^) <> 0) then
+      break;
+    inc(FindCount);
+  until false;
 end;
 
 function TDynArray.FastLocateSorted(const Item; out Index: integer): boolean;
@@ -7550,7 +7932,7 @@ begin
     else if fSorted then
     begin
       P := fValue^;
-      // first compare with the last sorted item (handle some common cases)
+      // first compare with the last sorted item (common case, e.g. with IDs)
       dec(n);
       cmp := fCompare(Item, P[n * fInfo.Cache.ItemSize]);
       if cmp >= 0 then
@@ -7584,11 +7966,9 @@ begin
       // Item not found: returns false + the index where to insert
     end
     else
-      // not Sorted
-      Index := -1
+      Index := -1 // not Sorted
   else
-    // no fCompare()
-    Index := -1;
+    Index := -1; // no fCompare()
 end;
 
 procedure TDynArray.FastAddSorted(Index: PtrInt; const Item);
@@ -7977,6 +8357,43 @@ begin
   end;
 end;
 
+function TDynArray.IsSorted(aCompare: TDynArraySortCompare): boolean;
+var
+  n: integer;
+  siz: PtrInt;
+  p, prev: PAnsiChar;
+begin
+  result := false;
+  n := GetCount;
+  if not Assigned(aCompare) then
+    aCompare := fCompare;
+  if (not Assigned(aCompare)) or
+     (n = 0) then
+    exit; // nothing to sort
+  siz := fInfo.Cache.ItemSize;
+  p := fValue^;
+  prev := p;
+  inc(p, siz);
+  dec(n);
+  if n <> 0 then
+    repeat
+      if aCompare(p^, prev^) < 0 then
+        exit;
+      prev := p;
+      inc(p, siz);
+      dec(n);
+    until n = 0;
+  result := true; // all items are sorted
+end;
+
+procedure TDynArray.EnsureSorted(aCompare: TDynArraySortCompare);
+begin
+  if IsSorted(aCompare) then
+    fSorted := true
+  else
+    Sort(aCompare);
+end;
+
 procedure TDynArray.Sort(const aCompare: TOnDynArraySortCompare; aReverse: boolean);
 var
   QuickSort: TDynArrayQuickSort;
@@ -8211,9 +8628,9 @@ bin:  result := AnyScanIndex(fValue^, @Item, n, fInfo.Cache.ItemSize)
     result := -1;
 end;
 
-procedure TDynArray.UseExternalCount(var aCountPointer: integer);
+procedure TDynArray.UseExternalCount(aCountPointer: PInteger);
 begin
-  fCountP := @aCountPointer;
+  fCountP := aCountPointer;
 end;
 
 procedure TDynArray.Void;
@@ -8240,7 +8657,7 @@ begin
     begin
       // FastDynArrayClear() with ObjArray support
       dec(p);
-      if (p^.refCnt >= 0) and
+      if (p^.refCnt > 0) and
          DACntDecFree(p^.refCnt) then
       begin
         if (OldLength <> 0) and
@@ -8272,7 +8689,7 @@ begin
   else
   begin
     dec(p); // p^ = start of heap object
-    if p^.refCnt <= 1 then
+    if p^.refCnt = 1 then
     begin
       // we own the dynamic array instance -> direct reallocation
       if (NewLength < OldLength) and
@@ -8532,7 +8949,7 @@ begin
   if Source <> nil then // avoid GPF
     if fInfo.Cache.ItemInfo = nil then
     begin
-      if (SourceMax = nil) or
+      if {$ifndef PUREMORMOT2} (SourceMax = nil) or {$endif}
          (Source + fInfo.Cache.ItemSize <= SourceMax) then
         MoveFast(Source^, Item^, fInfo.Cache.ItemSize);
     end
@@ -8642,6 +9059,27 @@ begin
   if PtrUInt(Item^) <> 0 then
     result := Hasher(0, tmp{%H-},
       UpperCopy255W(tmp{%H-}, pointer(Item^), Length(Item^)) - {%H-}tmp)
+  else
+    result := 0;
+end;
+
+function HashPUtf8Char(Item: PAnsiChar; Hasher: THasher): cardinal;
+begin
+  Item := PPointer(Item)^; // passed by reference
+  if Item <> nil then
+    result := Hasher(0, Item, StrLen(Item))
+  else
+    result := 0;
+end;
+
+function HashPUtf8CharI(Item: PUtf8Char; Hasher: THasher): cardinal;
+var
+  tmp: array[byte] of AnsiChar; // avoid slow heap allocation
+begin
+  Item := PPointer(Item)^;
+  if Item <> nil then
+    result := Hasher(0, tmp{%H-},
+      UpperCopy255Buf(tmp{%H-}, Item, StrLen(Item)) - {%H-}tmp)
   else
     result := 0;
 end;
@@ -8808,6 +9246,7 @@ const
     {$ifdef CPU32} @HashInteger {$else} @HashInt64 {$endif}, // ptClass
     nil,                     //  ptDynArray
     {$ifdef CPU32} @HashInteger {$else} @HashInt64 {$endif}, // ptInterface
+    @HashPUtf8Char,          //  ptPUtf8Char
     nil),                    //  ptCustom
    // case insensitive hash functions:
    (nil,                     //  ptNone
@@ -8848,18 +9287,13 @@ const
     {$ifdef CPU32} @HashInteger {$else} @HashInt64 {$endif}, // ptClass
     nil,                     //  ptDynArray
     {$ifdef CPU32} @HashInteger {$else} @HashInt64 {$endif}, // ptInterface
+    @HashPUtf8CharI,         //  ptPUtf8Char
     nil));                   //  ptCustom
 
 function DynArrayHashOne(Kind: TRttiParserType;
   CaseInsensitive: boolean): TDynArrayHashOne;
 begin
   result := PT_HASH[CaseInsensitive, Kind];
-end;
-
-function DynArraySortOne(Kind: TRttiParserType;
-  CaseInsensitive: boolean): TDynArraySortCompare;
-begin
-  result := PT_SORT[CaseInsensitive, Kind];
 end;
 
 procedure TDynArrayHasher.Init(aDynArray: PDynArray; aHashItem: TDynArrayHashOne;
@@ -9025,12 +9459,13 @@ end;
 
 function TDynArrayHasher.HashTableIndexToIndex(aHashTableIndex: PtrInt): PtrInt;
 begin
+  result := PtrUInt(fHashTableStore);
   {$ifdef DYNARRAYHASH_16BIT}
   if hash16bit in fState then
-    result := PWordArray(fHashTableStore)[aHashTableIndex]
+    result := PWordArray(result)[aHashTableIndex]
   else
   {$endif DYNARRAYHASH_16BIT}
-    result := fHashTableStore[aHashTableIndex];
+    result := PIntegerArray(result)[aHashTableIndex];
 end;
 
 function TDynArrayHasher.Find(aHashCode: cardinal; aForAdd: boolean): PtrInt;
@@ -9183,7 +9618,7 @@ begin
     RaiseFatalCollision('HashAdd HashTableSize', aHashCode);
   if fHashTableSize - n < n shr 2 then
   begin
-    // grow hash table when 25% void
+    // grow hash table when 25% void (192/256,384/512,768/1024,1536/2048...)
     ForceReHash;
     ndx := Find(aHashCode, {foradd=}true); // recompute position
     if ndx >= 0 then
@@ -9574,9 +10009,9 @@ begin
   result := InternalDynArray.ItemPtr(index);
 end;
 
-procedure TDynArrayHashed.ItemCopyAt(index: PtrInt; Dest: pointer);
+function TDynArrayHashed.ItemCopyAt(index: PtrInt; Dest: pointer): boolean;
 begin
-  InternalDynArray.ItemCopyAt(index, Dest);
+  result := InternalDynArray.ItemCopyAt(index, Dest);
 end;
 
 procedure TDynArrayHashed.Clear;
@@ -10424,12 +10859,420 @@ begin
 end;
 
 
+{ ************ Abstract Radix Tree Classes }
+
+{ TRadixTreeNode }
+
+function TRadixTreeNode.ComputeDepth: integer;
+var
+  i: PtrInt;
+begin
+  result := 1;
+  for i := 0 to high(Child) do
+    inc(result, Child[i].ComputeDepth); // recursive calculation
+  Depth := result;
+end;
+
+function RadixTreeNodeCompare(const A, B): integer;
+begin // sort static first, then deeper, by path:, by longest path, by text
+  result := ord(TRadixTreeNode(B).Chars[1] <> '<') -
+            ord(TRadixTreeNode(A).Chars[1] <> '<');
+  if result = 0 then
+    result := ord(IdemPChar(pointer(TRadixTreeNode(A).Chars), '<PATH:')) -
+              ord(IdemPChar(pointer(TRadixTreeNode(B).Chars), '<PATH:'));
+  if result = 0 then
+    result := CompareInteger(TRadixTreeNode(B).Depth, TRadixTreeNode(A).Depth);
+  if result = 0 then
+    result := CompareInteger(length(TRadixTreeNode(B).FullText),
+                             length(TRadixTreeNode(A).FullText));
+  if result = 0 then
+    result := StrComp(pointer(TRadixTreeNode(A).FullText),
+                      pointer(TRadixTreeNode(B).FullText));
+end;
+
+procedure TRadixTreeNode.SortChildren;
+var
+  i: PtrInt;
+begin
+  for i := 0 to high(Child) do
+    Child[i].SortChildren; // recursive sorting
+  ObjArraySort(Child, RadixTreeNodeCompare);
+end;
+
+constructor TRadixTreeNode.Create(aOwner: TRadixTree);
+begin
+  inherited Create;
+  Owner := aOwner;
+end;
+
+function TRadixTreeNode.Split(const Text: RawUtf8): TRadixTreeNode;
+begin
+  result := TRadixTreeNodeClass(PPointer(self)^).Create(Owner);
+  result.Chars := Text;
+  result.FullText := FullText;
+  result.Child := Child;
+  result.Flags := Flags;
+  Chars := '';
+  FullText := '';
+  Child := nil;
+  Flags := [];
+  ObjArrayAdd(Child, result);
+end;
+
+destructor TRadixTreeNode.Destroy;
+begin
+  inherited Destroy;
+  ObjArrayClear(Child);
+end;
+
+function TRadixTreeNode.Find(P: PUtf8Char): TRadixTreeNode;
+var
+  c: PUtf8Char;
+  n: TDALen;
+  t: PNormTable;
+  ch: ^TRadixTreeNode;
+begin
+  result := nil; // no match
+  t := Owner.fNormTable;
+  c := pointer(Chars);
+  repeat
+    if (t[P^] <> c^) or // may do LowerCaseSelf(Chars) at Insert()
+       (P^ = #0) then
+      break;
+    inc(P);
+    inc(c);
+  until false;
+  if c^ <> #0 then
+    exit; // not enough matched chars
+  // if we reached here, the text do match up to now
+  if P^ = #0 then
+    result := self // exact match found for this entry
+  else
+  begin
+    ch := pointer(Child);
+    if ch = nil then
+      exit;
+    n := PDALen(PAnsiChar(ch) - _DALEN)^ + _DAOFF;
+    repeat
+      if ch^.Chars[1] = t[P^] then
+      begin
+        result := ch^.Find(P);
+        if result <> nil then
+          exit; // match found in children
+      end;
+      inc(ch);
+      dec(n);
+    until n = 0;
+  end;
+end;
+
+procedure TRadixTreeNode.ToText(var Result: RawUtf8; Level: integer);
+var
+  i: PtrInt;
+begin
+  Result := Result + RawUtf8OfChar(' ', Level) + Chars + #10;
+  for i := 0 to high(Child) do
+    Child[i].ToText(Result, Level + length(Chars));
+end;
+
+
+{ TRadixTree }
+
+constructor TRadixTree.Create(aOptions: TRadixTreeOptions);
+begin
+  SetNodeClass;
+  fOptions := aOptions;
+  if rtoCaseInsensitiveUri in aOptions then
+    fNormTable := @NormToLower
+  else
+    fNormTable := @NormToNorm;
+  fRoot := fDefaultNodeClass.Create(self); // with no text
+end;
+
+destructor TRadixTree.Destroy;
+begin
+  inherited Destroy;
+  fRoot.Free; // will recursively free all nested children
+end;
+
+procedure TRadixTree.Clear;
+begin
+  if self = nil then
+    exit;
+  fRoot.Free;
+  fRoot := fDefaultNodeClass.Create(self);
+end;
+
+function TRadixTree.Insert(Text: RawUtf8; Node: TRadixTreeNode;
+  NodeClass: TRadixTreeNodeClass): TRadixTreeNode;
+var
+  match, textlen, nodelen, i: PtrInt;
+  chars: RawUtf8;
+begin
+  result := nil;
+  if Text = '' then
+    exit;
+  if Node = nil then
+    Node := fRoot;
+  if rtoCaseInsensitiveUri in Options then
+    LowerCaseSelf(Text);
+  textlen := length(Text);
+  nodelen := length(Node.Chars);
+  // check how many chars of Text are within Node.Chars
+  match := 0;
+  while (match < textlen) and
+        (match < nodelen) and
+        (Text[match + 1] = Node.Chars[match + 1]) do
+    inc(match);
+  // insert the node where fits
+  chars := copy(Text, match + 1, maxInt);
+  if (match = 0) or
+     (Node = fRoot) or
+     ((match < textlen) and
+      (match >= nodelen)) then
+  begin
+    // we can just insert a new leaf node
+    if chars <> '' then
+      for i := 0 to high(Node.Child) do
+        if Node.Child[i].Chars[1] = chars[1] then
+        begin
+          result := Insert(chars, Node.Child[i]); // recursive insertion
+          result.FullText := Text;
+          exit;
+        end;
+  end
+  else if match <> nodelen then
+  begin
+    // need to split the existing node
+    Node.Split(copy(Node.Chars, match + 1, maxInt)); // split children
+    Node.Chars := copy(Text, 1, match); // new shared root
+    if chars = '' then
+    begin
+      result := Node; // don't need a sub child - use shared root
+      result.FullText := Text;
+      exit;
+    end;
+  end
+  else
+  begin
+    // match an existing node
+    result := Node;
+    exit;
+  end;
+  // create new leaf
+  if NodeClass = nil then
+    NodeClass := fDefaultNodeClass;
+  result := NodeClass.Create(self);
+  result.Chars := chars;
+  result.FullText := Text;
+  ObjArrayAdd(Node.Child, result);
+end;
+
+procedure TRadixTree.AfterInsert;
+begin
+  fRoot.ComputeDepth;
+  fRoot.SortChildren;
+end;
+
+function TRadixTree.Find(const Text: RawUtf8): TRadixTreeNode;
+var
+  n: TDALen;
+  c: AnsiChar;
+  ch: ^TRadixTreeNode;
+begin
+  result := nil;
+  if (self = nil) or
+     (Text = '') then
+    exit;
+  ch := pointer(fRoot.Child);
+  if ch = nil then
+    exit;
+  n := PDALen(PAnsiChar(ch) - _DALEN)^ + _DAOFF;
+  c := fNormTable[Text[1]];
+  repeat
+    if ch^.Chars[1] = c then // recursive call if may match
+    begin
+      result := ch^.Find(pointer(Text));
+      if result <> nil then
+        exit;
+    end;
+    inc(ch);
+    dec(n);
+  until n = 0;
+end;
+
+function TRadixTree.ToText: RawUtf8;
+begin
+  result := '';
+  if self <> nil then
+    fRoot.ToText(result, 0);
+end;
+
+
+{ TRadixTreeNodeParams }
+
+function TRadixTreeNodeParams.Split(const Text: RawUtf8): TRadixTreeNode;
+begin
+  result := inherited Split(Text);
+  TRadixTreeNodeParams(result).Names := Names;
+  Names := nil;
+end;
+
+function TRadixTreeNodeParams.Lookup(P: PUtf8Char; Ctxt: TObject): TRadixTreeNodeParams;
+var
+  n: TDALen;
+  c: PUtf8Char;
+  t: PNormTable;
+  f: TRadixTreeNodeFlags;
+  ch: ^TRadixTreeNodeParams;
+begin
+  result := nil; // no match
+  t := Owner.fNormTable;
+  if Names = nil then
+  begin
+    // static text
+    c := pointer(Chars);
+    if c <> nil then
+    begin
+      repeat
+        if (t^[P^] <> c^) or // may do LowerCaseSelf(Chars) at Insert()
+           (P^ = #0) then
+          break;
+        inc(P);
+        inc(c);
+      until false;
+      if c^ <> #0 then
+        exit; // not enough matched chars
+    end;
+  end
+  else
+  begin
+    // <named> parameter
+    c := P;
+    f := Flags;
+    if rtfParamInteger in f then // <int:name> or rtoIntegerParams
+    begin
+      if (P^ < '0') or (P^ > '9') then
+        exit; // void <integer> is not allowed
+      repeat
+        inc(P)
+      until (P^ < '0') or (P^ > '9');
+      if (P^ <> #0) and (P^ <> '?') and (P^ <> '/') then
+        exit; // not an integer
+    end
+    else if rtfParamPath in f then // <path:filename> or * as <path:path>
+      while (P^ <> #0) and (P^ <> '?') do
+        inc(P)
+    else // regular <param>
+      while (P^ <> #0) and (P^ <> '?') and (P^ <> '/') do
+        inc(P);
+    if not LookupParam(Ctxt, c, P - c) then
+      exit; // the parameter is not in the expected format for Ctxt
+  end;
+  // if we reached here, the URI do match up to now
+  if (P^ = #0) or (P^ = '?') then
+  begin
+    if P^ = '?' then
+      LookupParam(Ctxt, P, -1); // store the inlined parameters position in Ctxt
+    result := self; // exact match found for this entry (excluding URI params)
+    exit;
+  end;
+  ch := pointer(Child);
+  if ch = nil then
+    exit;
+  n := PDALen(PAnsiChar(ch) - _DALEN)^ + _DAOFF;
+  repeat
+    if (ch^.Names <> nil) or
+       (ch^.Chars[1] = t^[P^]) then // recursive call only if worth it
+    begin
+      result := ch^.Lookup(P, Ctxt);
+      if result <> nil then
+        exit; // match found in children
+    end;
+    inc(ch);
+    dec(n);
+  until n = 0;
+end;
+
+
+{ TRadixTreeParams }
+
+function TRadixTreeParams.Setup(const aFromUri: RawUtf8;
+  out aNames: TRawUtf8DynArray): TRadixTreeNodeParams;
+var
+  u: PUtf8Char;
+  item, full: RawUtf8;
+  flags: TRadixTreeNodeFlags;
+begin
+  u := pointer(TrimU(aFromUri));
+  if PosExChar('<', aFromUri) = 0 then
+    // a simple static route
+    result := Insert(aFromUri) as TRadixTreeNodeParams
+  else
+    // parse static..<param1>..static..<param2>..static into static/param nodes
+    repeat
+      GetNextItem(u, '<', item);
+      full := full + item;
+      result := Insert(full) as TRadixTreeNodeParams; // static (Names = nil)
+      if u = nil then
+        break;
+      GetNextItem(u, '>', item);
+      if item = '' then
+        raise ERadixTree.CreateUtf8('Void <> in %.Setup(''%'')', [self, aFromUri]);
+      flags := [rtfParam];
+      if IdemPChar(pointer(item), 'INT:') then
+      begin
+        delete(item, 1, 4);
+        include(flags, rtfParamInteger);
+      end
+      else if rtoIntegerParams in Options then
+        include(flags, rtfParamInteger);
+      if IdemPChar(pointer(item), 'PATH:') then
+      begin
+        delete(item, 1, 5);
+        include(flags, rtfParamPath);
+      end;
+      if FindRawUtf8(aNames{%H-}, item) >= 0 then
+        raise ERadixTree.CreateUtf8('Duplicated <%> in %.Setup(''%'')',
+          [item, self, aFromUri]);
+      AddRawUtf8(aNames, item);
+      full := full + '<' + item + '>'; // avoid name collision with static
+      result := Insert(full) as TRadixTreeNodeParams; // param (Names <> nil)
+      result.Names := copy(aNames); // each node has its own Names copy
+      result.Flags := flags;
+      if (u = nil) or
+         (u^ = #0) then
+        // TODO: detect wildchar incompatibilities with nested searches?
+        break;
+      if u^ <> '/' then
+        raise ERadixTree.CreateUtf8('Unexpected <%>% in %.Setup(''%'')',
+          [item, u^, self, aFromUri]);
+    until false;
+  AfterInsert; // compute Depth and sort by priority
+end;
+
+
 
 procedure InitializeUnit;
 var
   k: TRttiKind;
 begin
   // initialize RTTI binary persistence and comparison
+  RTTI_ORD_COMPARE[roSByte]  := @_BC_SByte;
+  RTTI_ORD_COMPARE[roUByte]  := @_BC_UByte;
+  RTTI_ORD_COMPARE[roSWord]  := @_BC_SWord;
+  RTTI_ORD_COMPARE[roUWord]  := @_BC_UWord;
+  RTTI_ORD_COMPARE[roSLong]  := @_BC_SLong;
+  RTTI_ORD_COMPARE[roULong]  := @_BC_ULong;
+  {$ifdef FPC_NEWRTTI}
+  RTTI_ORD_COMPARE[roSQWord] := @_BC_SQWord;
+  RTTI_ORD_COMPARE[roUQWord] := @_BC_UQWord;
+  {$endif FPC_NEWRTTI}
+  RTTI_FLOAT_COMPARE[rfSingle]   := @_BC_Single;
+  RTTI_FLOAT_COMPARE[rfDouble]   := @_BC_Double;
+  RTTI_FLOAT_COMPARE[rfExtended] := @_BC_Extended;
+  RTTI_FLOAT_COMPARE[rfComp]     := @_BC_SQWord; // PInt64 is the best
+  RTTI_FLOAT_COMPARE[rfCurr]     := @_BC_SQWord;
   for k := succ(low(k)) to high(k) do
     case k of
       rkInteger,

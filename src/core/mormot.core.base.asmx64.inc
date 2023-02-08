@@ -31,6 +31,7 @@
 const
   // non-temporal writes should bypass the cache when the size is bigger than
   // half the size of the largest level cache = 512KB, assuming a low 1MB cache
+  // - today CPUs could have 144MB of cache (!) so we prefer a fixed value
   NONTEMPORALSIZE = 512 * 1024;
 
   {$ifdef NO_ERMS}
@@ -57,21 +58,24 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         mov     rax, cnt             // rax=r8/rdx=cnt
         lea     r10, [rip + @jmptab] // 0..16 dedicated sub-functions
         sub     rax, 16
-        jg      @up16                // >16 or <0
+        ja      @up16                // >16 or <0
         {$ifdef WIN64ABI}    // circumvent FPC asm bug and adapt to xmm ABI
         jmp     qword ptr [r10 + r8 * 8]
-@up16:  movups  xmm0, oword ptr [src + rax]    // last 16   = xmm0
+@up16:  // >16 or <0
+        jng     @z  // <0
+        movups  xmm0, oword ptr [src + rax]    // last 16   = xmm0
         movups  xmm1, oword ptr [src]          // first 16  = xmm1
         cmp     rax, 96 - 16
         {$else}
         jmp     qword ptr [r10 + rdx * 8]
 @up16:  // >16 or <0
+        jng     @z  // <0
         mov     r8, rdx
         movups  xmm0, oword ptr [src + rax]    // last 16   = xmm0
         movups  xmm1, oword ptr [src]          // first 16  = xmm1
         cmp     rdx, 144  // more volatile xmm registers on SystemV ABI
         {$endif WIN64ABI}
-        ja      @lrg         // >96/144 or <0
+        ja      @lrg         // >96/144
         // cnt = 17..96/144
         cmp     al, $10
         jbe     @sml10
@@ -2848,7 +2852,7 @@ procedure LockedDec(var Target: PtrUInt; Decrement: PtrUInt);
    lock sub     qword ptr [Target], Decrement
 end;
 
-{$ifndef FPC}
+{$ifdef ISDELPHI}
 
 // those functions are intrinsics with FPC :)
 
@@ -2887,7 +2891,7 @@ asm
         sub     dword ptr [r8].TDiv100Rec.M, eax
 end;
 
-{$endif FPC}
+{$endif ISDELPHI}
 
 function IsXmmYmmOSEnabled: boolean;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}

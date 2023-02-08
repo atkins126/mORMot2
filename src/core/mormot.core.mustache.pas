@@ -25,6 +25,7 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
+  mormot.core.search,
   mormot.core.buffers,
   mormot.core.datetime,
   mormot.core.rtti,
@@ -339,7 +340,7 @@ type
   // over {things:["Peanut butter", "Pen spinning", "Handstands"]} renders as
   // "My favorite things:\n1. Peanut butter\n2. Pen spinning\n3. Handstands\n"
   // - you could use {{-index0}} for 0-based index value
-  // - handles -first  -last  and  -odd  pseudo-section keys, e.g.
+  // - handles -first -last and -odd  pseudo-section keys, e.g.
   // "{{#things}}{{^-first}}, {{/-first}}{{.}}{{/things}}"
   // over {things:["one", "two", "three"]} renders as 'one, two, three'
   // - allows inlined partial templates , to be defined e.g. as
@@ -367,6 +368,8 @@ type
     class procedure WikiToHtml(const Value: variant; out Result: variant);
     class procedure MarkdownToHtml(const Value: variant; out Result: variant);
     class procedure SimpleToHtml(const Value: variant; out Result: variant);
+    class procedure Match(const Value: variant; out Result: variant);
+    class procedure MatchI(const Value: variant; out Result: variant);
     class procedure Lower(const Value: variant; out Result: variant);
     class procedure Upper(const Value: variant; out Result: variant);
     class procedure EnumTrim(const Value: variant; out Result: variant);
@@ -376,6 +379,10 @@ type
     class procedure If_(const Value: variant; out Result: variant);
     class procedure NewGuid(const Value: variant; out Result: variant);
     class procedure ExtractFileName(const Value: variant; out Result: variant);
+    class procedure HumanBytes(const Value: variant; out Result: variant);
+    class procedure Sub(const Value: variant; out Result: variant);
+    class procedure Values(const Value: variant; out Result: variant);
+    class procedure Keys(const Value: variant; out Result: variant);
   public
     /// parse a {{mustache}} template, and returns the corresponding
     // TSynMustache instance
@@ -430,9 +437,12 @@ type
     /// returns a list of most used static Expression Helpers
     // - registered helpers are DateTimeToText, DateToText, DateFmt, TimeLogToText,
     // BlobToBase64, JsonQuote, JsonQuoteUri, ToJson, EnumTrim, EnumTrimRight,
-    // Lower, Upper, PowerOfTwo, Equals (expecting two parameters), MarkdownToHtml,
-    // SimpleToHtml (Markdown with no HTML pass-through) and WikiToHtml
-    // (following TJsonWriter.AddHtmlEscapeWiki syntax)
+    // Lower / Upper (Unicode ready), PowerOfTwo, Equals (expecting two parameters),
+    // NewGuid, ExtractFileName, HumanBytes (calling KB function), Sub (as
+    // {{Sub AString,12,3}}), MarkdownToHtml, SimpleToHtml (Markdown with no
+    // HTML pass-through), WikiToHtml (callining TJsonWriter.AddHtmlEscapeWiki),
+    // Match / MatchI (as {{Match AString,startwith*}}), and Values / Keys (over
+    // a data object)
     // - an additional #if helper is also registered, which would allow runtime
     // view logic, via = < > <= >= <> operators over two values:
     // $ {{#if .,"=",123}}  {{#if Total,">",1000}}  {{#if info,"<>",""}}
@@ -814,7 +824,7 @@ begin
       ListCount := -1
     else
     begin
-      ListCount := DocumentType.IterateCount(aDoc);
+      ListCount := DocumentType.IterateCount(aDoc, {GetObjectAsValues=}false);
       if fContextCount = 0 then
         ListCurrentDocument := aDoc; // allow {#.}...{/.} at first level
     end;
@@ -933,7 +943,8 @@ begin
   void := (c <= varNull) or
           ((c = varBoolean) and
            (Value.VWord = 0));
-  if result <> msNothing then
+  if (result <> msNothing) and // helper?
+     (c < varFirstCustom) then // simple helper values are not pushed
   begin
     if void then
       result := msNothing;
@@ -942,17 +953,18 @@ begin
   PushContext(Value);
   if void then
     // null or false value will not display the section
-    exit;
-  with fContext[fContextCount - 1] do
-    if ListCount < 0 then
-      // single item
-      result := msSingle
-    else if ListCount = 0 then
-      // empty list will not display the section
-      exit
-    else
-      // non-empty list
-      result := msList;
+    result := msNothing
+  else
+    with fContext[fContextCount - 1] do
+      if ListCount < 0 then
+        // single item
+        result := msSingle
+      else if ListCount = 0 then
+        // empty list will not display the section
+        result := msNothing
+      else
+        // non-empty list
+        result := msList;
 end;
 
 
@@ -1176,10 +1188,11 @@ begin
     if result = msNothing then
       d := nil
     else
-      rc := PT_RTTI[ptVariant];
+      rc := PT_RTTI[ptVariant]; // use temp variant value from helper
   end;
   void := IsVoidContext(d, rc);
-  if result <> msNothing then
+  if (result <> msNothing) and // helper?
+     (tmp.VType < varFirstCustom) then // simple helper values are not pushed
   begin
     if void then
       result := msNothing;
@@ -1190,17 +1203,18 @@ begin
   PushContext(d, rc);
   if void then
     // null or false value will not display the section
-    exit;
-  with fContext[fContextCount - 1] do
-    if ListCount < 0 then
-      // single item
-      result := msSingle
-    else if ListCount = 0 then
-      // empty list will not display the section
-      exit
-    else
-      // non-empty list
-      result := msList;
+    result := msNothing
+  else
+    with fContext[fContextCount - 1] do
+      if ListCount < 0 then
+        // single item
+        result := msSingle
+      else if ListCount = 0 then
+        // empty list will not display the section
+        result := msNothing
+      else
+        // non-empty list
+        result := msList;
 end;
 
 
@@ -1699,10 +1713,12 @@ begin
     Free;
   end;
   fCachedContextVariant := TSynMustacheContextVariant.Create(self,
-    TJsonWriter.CreateOwnedStream(16384), SectionMaxCount + 4, Null, true);
+    TJsonWriter.CreateOwnedStream(16384, {nosharedstream=}true),
+    SectionMaxCount + 4, Null, true);
   fCachedContextVariant.CancelAll; // to be reused from a void context
   fCachedContextData := TSynMustacheContextData.Create(self,
-    TJsonWriter.CreateOwnedStream(16384), SectionMaxCount + 4, nil, nil, true);
+    TJsonWriter.CreateOwnedStream(16384, {nosharedstream=}true),
+    SectionMaxCount + 4, nil, nil, true);
   fCachedContextData.CancelAll; // to be reused from a void context
 end;
 
@@ -2008,6 +2024,12 @@ begin
       'If',
       'NewGuid',
       'ExtractFileName',
+      'HumanBytes',
+      'Sub',
+      'Values',
+      'Keys',
+      'Match',
+      'MatchI',
       'Lower',
       'Upper'],
      [DateTimeToText,
@@ -2028,6 +2050,12 @@ begin
       If_,
       NewGuid,
       ExtractFileName,
+      HumanBytes,
+      Sub,
+      Values,
+      Keys,
+      Match,
+      MatchI,
       Lower,
       Upper]);
   result := HelpersStandardList;
@@ -2076,13 +2104,12 @@ class procedure TSynMustache.DateFmt(const Value: variant;
   out Result: variant);
 var
   dt: TDateTime;
+  dv: PDocVariantData;
 begin
   // {{DateFmt DateValue,"dd/mm/yyy"}}
-  with _Safe(Value)^ do
-    if IsArray and
-       (Count = 2) and
-       VariantToDateTime(Values[0], dt) then
-      Result := FormatDateTime(Values[1], dt)
+  if _SafeArray(Value, 2, dv) and
+       VariantToDateTime(dv^.Values[0], dt) then
+      Result := FormatDateTime(dv^.Values[1], dt)
     else
       SetVariantNull(Result{%H-});
 end;
@@ -2108,11 +2135,10 @@ begin
     exit;
   VariantToUtf8(Value, u, wasstring);
   if wasstring then
-    if (u <> '') and
-       (GotoNextNotSpace(pointer(u))^ in ['[', '{']) then
-      r := JsonReformat(u)
-    else
-      QuotedStrJson(u, r)
+    QuotedStrJson(u, r)
+  else if (u <> '') and
+          (GotoNextNotSpace(pointer(u))^ in ['[', '{']) then
+    r := JsonReformat(u) // e.g. from TDocVariantData
   else
     r := u; // false, true, number
   RawUtf8ToVariant(r, Result);
@@ -2123,10 +2149,8 @@ class procedure TSynMustache.JsonQuote(const Value: variant;
 var
   json: RawUtf8;
 begin
-  if not VarIsEmptyOrNull(Value) then
-    // avoid to return "null"
-    VariantToUtf8(Value, json);
-  RawUtf8ToVariant(QuotedStrJson(json), Result);
+  if VariantToText(Value, json) then
+    RawUtf8ToVariant(QuotedStrJson(json), Result);
 end;
 
 class procedure TSynMustache.JsonQuoteUri(const Value: variant;
@@ -2134,10 +2158,8 @@ class procedure TSynMustache.JsonQuoteUri(const Value: variant;
 var
   json: RawUtf8;
 begin
-  if not VarIsEmptyOrNull(Value) then
-    // avoid to return "null"
-    VariantToUtf8(Value, json);
-  RawUtf8ToVariant(UrlEncode(QuotedStrJson(json)), Result);
+  if VariantToText(Value, json) then
+    RawUtf8ToVariant(UrlEncode(QuotedStrJson(json)), Result);
 end;
 
 procedure ToHtml(const Value: variant; var Result: variant;
@@ -2149,23 +2171,18 @@ begin
   // {{{SimpleToHtml content,browserhasnoemoji,nohtmlescape}}}
   d := _Safe(Value);
   if d^.IsArray and
-     (d^.Count >= 2) then
+     (d^.Count >= 2) and
+     VariantToText(d^.Values[0], txt) then
   begin
-    if VarIsEmptyOrNull(d^.Values[0]) then
-      exit; // don't append 'null' text
-    VariantToUtf8(d^.Values[0], txt);
     if not VarIsVoid(d^.Values[1]) then
       exclude(fmt, heEmojiToUtf8);
     if (d^.Count >= 3) and
        not VarIsVoid(d^.Values[2]) then
       exclude(fmt, heHtmlEscape);
   end
-  else
+  else if not VariantToText(Value, txt) then
     // {{{MarkdownToHtml content}}}
-    if VarIsEmptyOrNull(Value) then
-      exit
-    else
-      VariantToUtf8(Value, txt);
+    exit;
   if txt <> '' then
     if wiki then
       txt := HtmlEscapeWiki(txt, fmt)
@@ -2257,13 +2274,13 @@ end;
 
 class procedure TSynMustache.Equals_(const Value: variant;
   out Result: variant);
+var
+  dv: PDocVariantData;
 begin
   // {{#Equals .,12}}
-  with _Safe(Value)^ do
-    if IsArray and
-       (Count = 2) and
-       (FastVarDataComp(@Values[0], @Values[1], false) = 0) then
-      Result := true
+  if _SafeArray(Value, 2, dv) and
+       (FastVarDataComp(@dv^.Values[0], @dv^.Values[1], false) = 0) then
+      Result := VarTrue
     else
       SetVariantNull(Result{%H-});
 end;
@@ -2272,41 +2289,38 @@ class procedure TSynMustache.If_(const Value: variant; out Result: variant);
 var
   cmp: integer;
   oper: RawUtf8;
+  dv: PDocVariantData;
   wasString: boolean;
 begin
   // {{#if .<>""}} or {{#if .,"=",123}}
   SetVariantNull(result{%H-});
-  with _Safe(Value)^ do
-    if IsArray and
-       (Count = 3) then
-    begin
-      VariantToUtf8(Values[1], oper, wasString);
-      if wasString and
-         (oper <> '') then
-      begin
-        cmp := FastVarDataComp(@Values[0], @Values[2], false);
-        case PWord(oper)^ of
-          ord('='):
-            if cmp = 0 then
-              result := True;
-          ord('>'):
-            if cmp > 0 then
-              result := True;
-          ord('<'):
-            if cmp < 0 then
-              result := True;
-          ord('>') + ord('=') shl 8:
-            if cmp >= 0 then
-              result := True;
-          ord('<') + ord('=') shl 8:
-            if cmp <= 0 then
-              result := True;
-          ord('<') + ord('>') shl 8:
-            if cmp <> 0 then
-              result := True;
-        end;
-      end;
-    end;
+  if not _SafeArray(Value, 3, dv) then
+    exit;
+  VariantToUtf8(dv^.Values[1], oper, wasString);
+  if (oper = '') or
+     not wasString then
+    exit;
+  cmp := FastVarDataComp(@dv^.Values[0], @dv^.Values[2], false);
+  case PWord(oper)^ of
+    ord('='):
+      if cmp = 0 then
+        result := VarTrue;
+    ord('>'):
+      if cmp > 0 then
+        result := VarTrue;
+    ord('<'):
+      if cmp < 0 then
+        result := VarTrue;
+    ord('>') + ord('=') shl 8:
+      if cmp >= 0 then
+        result := VarTrue;
+    ord('<') + ord('=') shl 8:
+      if cmp <= 0 then
+        result := VarTrue;
+    ord('<') + ord('>') shl 8:
+      if cmp <> 0 then
+        result := VarTrue;
+  end;
 end;
 
 class procedure TSynMustache.NewGuid(const Value: variant;
@@ -2321,16 +2335,91 @@ begin
   Result := SysUtils.ExtractFileName(Value);
 end;
 
-class procedure TSynMustache.Lower(const Value: variant;
+class procedure TSynMustache.HumanBytes(const Value: variant;
+  out Result: variant);
+var
+  u: RawUtf8;
+  i64: Int64;
+begin
+  if not VarIsEmptyOrNull(Value) then
+    if VariantToInt64(Value, i64) or
+       (VariantToUtf8(Value, u) and
+        ToInt64(u, i64)) then
+      KBU(i64, u);
+  RawUtf8ToVariant(u, Result);
+end;
+
+class procedure TSynMustache.Sub(const Value: variant;
+  out Result: variant);
+var
+  utf: RawUtf8;
+  dv: PDocVariantData;
+  i, n: integer;
+begin
+  // {{Sub AString,12,3}}
+  SetVariantNull(Result{%H-});
+  if _SafeArray(Value, 3, dv) and
+      VariantToText(dv^.Values[0], utf) and
+      VariantToInteger(dv^.Values[1], i) and
+      VariantToInteger(dv^.Values[2], n) then
+    RawUtf8ToVariant(copy(utf, i, n), Result);
+end;
+
+class procedure TSynMustache.Values(const Value: variant;
   out Result: variant);
 begin
-  Result := SysUtils.LowerCase(Value);
+  TDocVariantData(Result).InitArrayFromObjectValues(Value, JSON_FAST);
+end;
+
+class procedure TSynMustache.Keys(const Value: variant;
+  out Result: variant);
+begin
+  TDocVariantData(Result).InitArrayFromObjectNames(Value, JSON_FAST);
+end;
+
+procedure DoMatch(dv: PDocVariantData; ci: boolean; var res: variant);
+var
+  s, p: RawUtf8;
+begin
+  // {{Match AString,APattern}}
+  if VariantToText(dv^.Values[0], s) and
+     VariantToText(dv^.Values[1], p) and
+     IsMatch(p, s, ci) then
+    res := VarTrue;
+end;
+
+class procedure TSynMustache.Match(const Value: variant; out Result: variant);
+var
+  dv: PDocVariantData;
+begin
+  if _SafeArray(Value, 2, dv) then
+     DoMatch(dv, {caseinsens=}false, Result);
+end;
+
+class procedure TSynMustache.MatchI(const Value: variant; out Result: variant);
+var
+  dv: PDocVariantData;
+begin
+  if _SafeArray(Value, 2, dv) then
+     DoMatch(dv, {caseinsens=}true, Result);
+end;
+
+class procedure TSynMustache.Lower(const Value: variant;
+  out Result: variant);
+var
+  u: RawUtf8;
+begin
+  if VariantToText(Value, u) then
+    RawUtf8ToVariant(LowerCaseUnicode(u), Result);
 end;
 
 class procedure TSynMustache.Upper(const Value: variant;
   out Result: variant);
+var
+  u: RawUtf8;
 begin
-  Result := SysUtils.UpperCase(Value);
+  if VariantToText(Value, u) then
+    RawUtf8ToVariant(UpperCaseUnicode(u), Result);
 end;
 
 

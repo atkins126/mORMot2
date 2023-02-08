@@ -61,6 +61,7 @@ This unit uses MacOSAll and link several toolkits, so was not included in `mormo
 Efficient Unicode Conversion Classes shared by all framework units
 - UTF-8 Efficient Encoding / Decoding
 - UTF-8 / UTF-16 / Ansi Conversion Classes
+- Text File Loading with BOM/Unicode Support
 - Low-Level String Conversion Functions
 - Text Case-(in)sensitive Conversion and Comparison
 - Operating-System Independent Unicode Process
@@ -127,6 +128,7 @@ Low-Level Data Processing Functions shared by all framework units
 - `TDynArray` and `TDynArrayHashed` Wrappers
 - `Integer` Arrays Extended Process
 - `RawUtf8` String Values Interning and `TRawUtf8List`
+- Abstract Radix Tree Classes
 
 ### mormot.core.json
 
@@ -165,6 +167,7 @@ Use `Collections.NewList<T>` and `Collections.NewKeyValue<TKey, TValue>` factori
 Several Indexing and Search Engines, as used by other parts of the framework
 - Files Search in Folders
 - ScanUtf8, GLOB and SOUNDEX Text Search
+- Efficient CSV Parsing using RTTI
 - Versatile Expression Search Engine
 - *Bloom Filter* Probabilistic Index
 - Binary Buffers Delta Compression

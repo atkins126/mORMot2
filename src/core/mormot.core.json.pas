@@ -26,9 +26,9 @@ uses
   classes,
   contnrs,
   sysutils,
-  {$ifndef FPC}
+  {$ifdef ISDELPHI}
   typinfo, // for proper Delphi inlining
-  {$endif FPC}
+  {$endif ISDELPHI}
   mormot.core.base,
   mormot.core.os,
   mormot.core.unicode,
@@ -237,8 +237,8 @@ type
     // - may have been overwritten with a #0 termination in the input buffer
     EndOfObject: AnsiChar;
     /// decode a JSON field value in-place from an UTF-8 encoded text buffer
-    // - warning: will decode in the Json buffer memory itself (no memory
-    // allocation or copy), for faster process - so take care that it is not shared
+    // - warning: will decode in the Json buffer memory itself (no memory copy
+    // nor allocation), for faster process - so take care that it is not shared
     // - Value/ValueLen/WasString is set with the parsed value
     // - EndOfObject is set to the JSON ending char (',' ':' or '}' e.g.)
     // - Json points to the next field to be decoded, or nil on parsing error
@@ -472,9 +472,9 @@ function JsonObjectAsJsonArrays(Json: PUtf8Char;
 // !var
 // !  cfg: RawUtf8;
 // ! ...
-// !  cfg := StringFromFile(ExtractFilePath(paramstr(0))+'Config.json');
+// !  cfg := StringFromFile(Executable.ProgramFilePath + 'config.json');
 // !  RemoveCommentsFromJson(@cfg[1]);
-// !  pLastChar := JsonToObject(sc,pointer(cfg),configValid);
+// !  pLastChar := JsonToObject(obj, pointer(cfg), isvalid);
 procedure RemoveCommentsFromJson(P: PUtf8Char); overload;
 
 /// remove comments from a text buffer before passing it to JSON parser
@@ -624,8 +624,8 @@ function FormatUtf8(const Format: RawUtf8;
 
 type
   /// JSON-capable TTextWriter/TTextDateWriter inherited class
-  // - in addition to TTextWriter/TTextDateWriter, will handle JSON serialization
-  // of any kind of value, including classes
+  // - in addition to TTextWriter/TTextDateWriter, will handle JSON
+  // serialization of any kind of value, including records, classes or arrays
   TJsonWriter = class(TTextDateWriter)
   protected
     // used by AddCRAndIndent for enums, sets and T*ObjArray comment of values
@@ -655,8 +655,7 @@ type
     procedure BlockEnd(Stopper: AnsiChar; Options: TTextWriterWriteObjectOptions);
     /// used internally by WriteObject() when serializing a published property
     // - will call AddCRAndIndent then append "PropName":
-    procedure WriteObjectPropName(PropName: PUtf8Char; PropNameLen: PtrInt;
-      Options: TTextWriterWriteObjectOptions);
+    procedure WriteObjectPropNameHumanReadable(PropName: PUtf8Char; PropNameLen: PtrInt);
     /// used internally by WriteObject() when serializing a published property
     // - will call AddCRAndIndent then append "PropName":
     procedure WriteObjectPropNameShort(const PropName: ShortString;
@@ -1048,7 +1047,7 @@ type
     /// returns true if the Init() method has been called
     function Initialized: boolean;
     /// can be used to set all data from one BLOB memory buffer
-    procedure SetBlobDataPtr(aValue: pointer);
+    procedure SetBlobDataPtr(aValue, aValueMax: pointer);
     /// can be used to set or retrieve all stored data as one BLOB content
     property BlobData: RawByteString
       read GetBlobData write SetBlobData;
@@ -1202,9 +1201,11 @@ type
       aCompare: TDynArraySortCompare): boolean;
     procedure SetTimeouts;
     function ComputeNextTimeOut: cardinal;
+      {$ifdef HASINLINE} inline; {$endif}
     function GetCapacity: integer;
     procedure SetCapacity(const Value: integer);
-    function GetTimeOutSeconds: cardinal; {$ifdef FPC} inline; {$endif}
+    function GetTimeOutSeconds: cardinal;
+      {$ifdef HASINLINE} inline; {$endif}
     procedure SetTimeOutSeconds(Value: cardinal);
     function GetThreadUse: TSynLockerUse;
       {$ifdef HASINLINE} inline; {$endif}
@@ -1312,7 +1313,8 @@ type
     /// apply a specified event over all items stored in this dictionnary
     // - would browse the list in the adding order
     // - returns the number of times OnEach has been called
-    // - this method is thread-safe, since it will lock the instance
+    // - this method is thread-safe - if the callback modifies the data, set
+    // MayModify=true and call fSafe.Lock/UnLock when writing
     function ForEach(const OnEach: TOnSynDictionary;
       Opaque: pointer = nil; MayModify: boolean = true): integer; overload;
     /// apply a specified event over matching items stored in this dictionnary
@@ -1320,7 +1322,8 @@ type
     // value item with the supplied comparison functions and aKey/aValue content
     // - returns the number of times OnMatch has been called, i.e. how many times
     // KeyCompare(aKey,Keys[#])=0 or ValueCompare(aValue,Values[#])=0
-    // - this method is thread-safe, since it will lock the instance
+    // - this method is thread-safe - if the callback modifies the data, set
+    // MayModify=true and call fSafe.Lock/UnLock when writing
     function ForEach(const OnMatch: TOnSynDictionary;
       KeyCompare, ValueCompare: TDynArraySortCompare; const aKey, aValue;
       Opaque: pointer = nil; MayModify: boolean = true): integer; overload;
@@ -1431,11 +1434,8 @@ type
       const aKey, aValue; aIndex: PtrInt): boolean;
     {$endif PUREMORMOT2}
     /// returns how many items are currently stored in this dictionary
-    // - this method is thread-safe, but returns an evolving value
-    function Count: integer;
-    /// fast returns how many items are currently stored in this dictionary
     // - this method is NOT thread-safe so should be protected by fSafe.Lock/UnLock
-    function RawCount: integer;
+    function Count: integer;
       {$ifdef HASINLINE}inline;{$endif}
     /// direct access to the primary key identifiers
     // - if you want to access the keys, you should use fSafe.Lock/Unlock
@@ -1474,6 +1474,15 @@ type
       read GetThreadUse write SetThreadUse;
   end;
 
+const
+  // TSynDictionary.fSafe.Padding[DIC_*] place holders - defined here for inlining
+  DIC_KEYCOUNT   = 0;   // Keys.Count integer
+  DIC_KEY        = 1;   // Key.Value pointer
+  DIC_VALUECOUNT = 2;   // Values.Count integer
+  DIC_VALUE      = 3;   // Values.Value pointer
+  DIC_TIMECOUNT  = 4;   // Timeouts.Count integer
+  DIC_TIMESEC    = 5;   // Timeouts Seconds integer
+  DIC_TIMETIX    = 6;   // last GetTickCount64 shr 10 integer
 
 
 { ********** Low-level JSON Serialization for any kind of Values }
@@ -1703,11 +1712,14 @@ type
     Prop: PRttiCustomProp;
     /// force the item class when reading a TObjectList without "ClassName":...
     ObjectListItem: TRttiCustom;
+    /// optional RawUtf8 values interning
+    Interning: TRawUtf8Interning;
     /// TDocVariant initialization options
     DVO: TDocVariantOptions;
     /// initialize this unserialization context
-    procedure Init(P: PUtf8Char; Rtti: TRttiCustom; O: TJsonParserOptions;
-      CV: PDocVariantOptions; ObjectListItemClass: TClass);
+    procedure InitParser(P: PUtf8Char; Rtti: TRttiCustom; O: TJsonParserOptions;
+      CV: PDocVariantOptions; ObjectListItemClass: TClass;
+      RawUtf8Interning: TRawUtf8Interning);
     /// call GetJsonField() to retrieve the next JSON value
     // - on success, return true and set Value/ValueLen and WasString fields
     function ParseNext: boolean;
@@ -1854,9 +1866,10 @@ type
     function ValueToVariant(Data: pointer; out Dest: TVarData;
       Options: pointer{PDocVariantOptions} = nil): PtrInt; override;
     /// unserialize some JSON input into Data^
+    // - as used by LoadJson() and similar high-level functions
     procedure ValueLoadJson(Data: pointer; var Json: PUtf8Char; EndOfObject: PUtf8Char;
       ParserOptions: TJsonParserOptions; CustomVariantOptions: PDocVariantOptions;
-      ObjectListItemClass: TClass = nil);
+      ObjectListItemClass: TClass; Interning: TRawUtf8Interning);
     /// how many iterations could be done one a given value
     // - returns -1 if the value is not iterable, or length(DynArray) or
     // TRawUtf8List.Count or TList.Count or TSynList.Count
@@ -2069,7 +2082,8 @@ function DynArraySaveJson(const Value; TypeInfo: PRttiInfo;
 // a temporary TDynArray wrapper on the stack
 // - to be used e.g. for custom record JSON serialization, within a
 // TDynArrayJsonCustomWriter callback or Rtti.RegisterFromText()
-function DynArrayBlobSaveJson(TypeInfo: PRttiInfo; BlobValue: pointer): RawUtf8;
+function DynArrayBlobSaveJson(TypeInfo: PRttiInfo; BlobValue: pointer;
+  BlobLen: PtrInt): RawUtf8;
 
 /// wrapper to serialize a T*ObjArray dynamic array as JSON
 // - for proper serialization on Delphi 7-2009, use Rtti.RegisterObjArray()
@@ -2107,7 +2121,7 @@ function ObjectToJsonDebug(Value: TObject;
 // a constant (refcount=-1) - see e.g. the overloaded RecordLoadJson()
 function LoadJson(var Value; Json: PUtf8Char; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char = nil; CustomVariantOptions: PDocVariantOptions = nil;
-  Tolerant: boolean = true): PUtf8Char; overload;
+  Tolerant: boolean = true; Interning: TRawUtf8Interning = nil): PUtf8Char; overload;
 
 /// unserialize most kind of content as JSON, using its RTTI, as saved by
 // TJsonWriter.AddRecordJson / RecordSaveJson
@@ -2115,7 +2129,7 @@ function LoadJson(var Value; Json: PUtf8Char; TypeInfo: PRttiInfo;
 // so is safe with a read/only or shared string - but slightly slower
 function LoadJson(var Value; const Json: RawUtf8; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char = nil; CustomVariantOptions: PDocVariantOptions = nil;
-  Tolerant: boolean = true): boolean; overload;
+  Tolerant: boolean = true; Interning: TRawUtf8Interning = nil): boolean; overload;
 
 /// fill a record content from a JSON serialization as saved by
 // TJsonWriter.AddRecordJson / RecordSaveJson
@@ -2128,7 +2142,7 @@ function LoadJson(var Value; const Json: RawUtf8; TypeInfo: PRttiInfo;
 // a constant (refcount=-1) - see e.g. the overloaded RecordLoadJson()
 function RecordLoadJson(var Rec; Json: PUtf8Char; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char = nil; CustomVariantOptions: PDocVariantOptions = nil;
-  Tolerant: boolean = true): PUtf8Char; overload;
+  Tolerant: boolean = true; Interning: TRawUtf8Interning = nil): PUtf8Char; overload;
 
 /// fill a record content from a JSON serialization as saved by
 // TJsonWriter.AddRecordJson / RecordSaveJson
@@ -2136,7 +2150,7 @@ function RecordLoadJson(var Rec; Json: PUtf8Char; TypeInfo: PRttiInfo;
 // so is safe with a read/only or shared string - but slightly slower
 function RecordLoadJson(var Rec; const Json: RawUtf8; TypeInfo: PRttiInfo;
   CustomVariantOptions: PDocVariantOptions = nil;
-  Tolerant: boolean = true): boolean; overload;
+  Tolerant: boolean = true; Interning: TRawUtf8Interning = nil): boolean; overload;
 
 /// fill a dynamic array content from a JSON serialization as saved by
 // TJsonWriter.AddDynArrayJson
@@ -2152,7 +2166,7 @@ function RecordLoadJson(var Rec; const Json: RawUtf8; TypeInfo: PRttiInfo;
 // a constant (refcount=-1) - see e.g. the overloaded DynArrayLoadJson()
 function DynArrayLoadJson(var Value; Json: PUtf8Char; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char = nil; CustomVariantOptions: PDocVariantOptions = nil;
-  Tolerant: boolean = true): PUtf8Char; overload;
+  Tolerant: boolean = true; Interning: TRawUtf8Interning = nil): PUtf8Char; overload;
 
 /// fill a dynamic array content from a JSON serialization as saved by
 // TJsonWriter.AddDynArrayJson, which won't be modified
@@ -2160,7 +2174,7 @@ function DynArrayLoadJson(var Value; Json: PUtf8Char; TypeInfo: PRttiInfo;
 // so is safe with a read/only or shared string - but slightly slower
 function DynArrayLoadJson(var Value; const Json: RawUtf8;
   TypeInfo: PRttiInfo; CustomVariantOptions: PDocVariantOptions = nil;
-  Tolerant: boolean = true): boolean; overload;
+  Tolerant: boolean = true; Interning: TRawUtf8Interning = nil): boolean; overload;
 
 /// read an object properties, as saved by ObjectToJson function
 // - ObjectInstance must be an existing TObject instance
@@ -2189,13 +2203,13 @@ function DynArrayLoadJson(var Value; const Json: RawUtf8;
 // the default values are expected to be set before JSON parsing
 function JsonToObject(var ObjectInstance; From: PUtf8Char;
   out Valid: boolean; TObjectListItemClass: TClass = nil;
-  Options: TJsonParserOptions = []): PUtf8Char;
+  Options: TJsonParserOptions = []; Interning: TRawUtf8Interning = nil): PUtf8Char;
 
 /// parse the supplied JSON with some tolerance about Settings format
 // - will make a TSynTempBuffer copy for parsing, and un-comment it
 // - returns true if the supplied JSON was successfully retrieved
-// - returns false and set InitialJsonContent := '' on error
-function JsonSettingsToObject(var InitialJsonContent: RawUtf8;
+// - returns false on error
+function JsonSettingsToObject(const JsonContent: RawUtf8;
   Instance: TObject): boolean;
 
 /// read an object properties, as saved by ObjectToJson function
@@ -2205,8 +2219,8 @@ function JsonSettingsToObject(var InitialJsonContent: RawUtf8;
 // during process, before calling safely JsonToObject()
 // - will return TRUE on success, or FALSE if the supplied JSON was invalid
 function ObjectLoadJson(var ObjectInstance; const Json: RawUtf8;
-  TObjectListItemClass: TClass = nil;
-  Options: TJsonParserOptions = []): boolean;
+  TObjectListItemClass: TClass = nil; Options: TJsonParserOptions = [];
+  Interning: TRawUtf8Interning = nil): boolean;
 
 /// create a new object instance, as saved by ObjectToJson(...,[...,woStoreClassName,...]);
 // - JSON input should be either 'null', either '{"ClassName":"TMyClass",...}'
@@ -2217,7 +2231,7 @@ function ObjectLoadJson(var ObjectInstance; const Json: RawUtf8;
 // don't call JsonToObject(pointer(JSONRawUtf8)) but makes a temporary copy of
 // the JSON text buffer before calling this function, if want to reuse it later
 function JsonToNewObject(var From: PUtf8Char; var Valid: boolean;
-  Options: TJsonParserOptions = []): TObject;
+  Options: TJsonParserOptions = []; Interning: TRawUtf8Interning = nil): TObject;
 
 /// read an TObject published property, as saved by ObjectToJson() function
 // - will use direct in-memory reference to the object, or call the corresponding
@@ -2228,8 +2242,8 @@ function JsonToNewObject(var From: PUtf8Char; var Valid: boolean;
 // owner class: you can set the j2oSetterExpectsToFreeTempInstance option
 // to let this method release it when the setter returns
 function PropertyFromJson(Prop: PRttiCustomProp; Instance: TObject;
-  From: PUtf8Char; var Valid: boolean;
-  Options: TJsonParserOptions = []): PUtf8Char;
+  From: PUtf8Char; var Valid: boolean; Options: TJsonParserOptions = [];
+  Interning: TRawUtf8Interning = nil): PUtf8Char;
 
 /// decode a specified parameter compatible with URI encoding into its original
 // object contents
@@ -2247,8 +2261,8 @@ function UrlDecodeObject(U: PUtf8Char; Upper: PAnsiChar;
 // - ObjectInstance must be an existing TObject instance
 // - this function will call RemoveCommentsFromJson() before process
 function JsonFileToObject(const JsonFile: TFileName; var ObjectInstance;
-  TObjectListItemClass: TClass = nil;
-  Options: TJsonParserOptions = []): boolean;
+  TObjectListItemClass: TClass = nil; Options: TJsonParserOptions = [];
+  Interning: TRawUtf8Interning = nil): boolean;
 
 
 const
@@ -2349,6 +2363,8 @@ type
     /// finalize the instance, and its class or T*ObjArray published properties
     destructor Destroy; override;
   end;
+  /// meta-class definition of TSynAutoCreateFields
+  TSynAutoCreateFieldsClass = class of TSynAutoCreateFields;
 
   /// adding locking methods to a TSynAutoCreateFields with virtual constructor
   TSynAutoCreateFieldsLocked = class(TSynPersistentLock)
@@ -2359,6 +2375,8 @@ type
     /// release the instance (including the locking resource) and nested classes
     destructor Destroy; override;
   end;
+  /// meta-class definition of TSynAutoCreateFieldsLocked
+  TSynAutoCreateFieldsLockedClass = class of TSynAutoCreateFieldsLocked;
 
   /// abstract TInterfacedObject class, which will instantiate all its nested
   // class published properties, then release them when freed
@@ -2381,6 +2399,8 @@ type
     /// finalize the instance, and release its published properties
     destructor Destroy; override;
   end;
+  /// meta-class definition of TInterfacedObjectAutoCreateFields
+  TInterfacedObjectAutoCreateFieldsClass = class of TInterfacedObjectAutoCreateFields;
 
   /// abstract TCollectionItem class, which will instantiate all its nested class
   // published properties, then release them (and any T*ObjArray) when freed
@@ -2421,7 +2441,7 @@ type
   // - would fallback and try to read as INI file if no valid JSON is found
   TSynJsonFileSettings = class(TSynAutoCreateFields)
   protected
-    fInitialJsonContent: RawUtf8;
+    fInitialJsonContent, fSectionName: RawUtf8;
     fFileName: TFileName;
     fLoadedAsIni: boolean;
     fSettingsOptions: TSynJsonFileSettingsOptions;
@@ -2430,19 +2450,23 @@ type
   public
     /// read existing settings from a JSON content
     // - if the input is no JSON object, then a .INI structure is tried
-    function LoadFromJson(var aJson: RawUtf8): boolean;
+    function LoadFromJson(const aJson: RawUtf8;
+      const aSectionName: RawUtf8 = 'Main'): boolean;
     /// read existing settings from a JSON or INI file file
-    function LoadFromFile(const aFileName: TFileName): boolean; virtual;
+    function LoadFromFile(const aFileName: TFileName;
+      const aSectionName: RawUtf8 = 'Main'): boolean; virtual;
     /// persist the settings as a JSON file, named from LoadFromFile() parameter
     // - will use the INI format if it was used at loading, or fsoWriteIni is set
     procedure SaveIfNeeded; virtual;
     /// optional persistence file name, as set by LoadFromFile()
     property FileName: TFileName
-      read fFileName;
+      read fFileName write fFileName;
     /// allow to customize the storing process
     property SettingsOptions: TSynJsonFileSettingsOptions
       read fSettingsOptions write fSettingsOptions;
   end;
+  /// meta-class definition of TSynJsonFileSettings
+  TSynJsonFileSettingsClass = class of TSynJsonFileSettings;
 
 
 implementation
@@ -4574,11 +4598,11 @@ end;
 function JsonBufferReformatToFile(P: PUtf8Char; const Dest: TFileName;
   Format: TTextWriterJsonFormat): boolean;
 var
-  F: TFileStream;
+  F: TStream;
   temp: array[word] of word; // 128KB
 begin
   try
-    F := TFileStream.Create(Dest, fmCreate);
+    F := TFileStreamEx.Create(Dest, fmCreate);
     try
       with TJsonWriter.Create(F, @temp, SizeOf(temp)) do
       try
@@ -4958,7 +4982,7 @@ begin
   Ctxt.W.Add('"');
   if Data^ <> nil then
     with PStrRec(Data^ - SizeOf(TStrRec))^ do
-      // will handle RawUtf8 but also AnsiString, WinAnsiString and RawUnicode
+      // will handle RawUtf8 but also AnsiString, WinAnsiString or other CP
       Ctxt.W.AddAnyAnsiBuffer(Data^, length, twJsonEscape,
        {$ifdef HASCODEPAGE} codePage {$else} Ctxt.Info.Cache.CodePage {$endif});
   Ctxt.W.Add('"');
@@ -5055,6 +5079,16 @@ begin
   else
   {$endif HASINTERFACEASTOBJECT}
     Ctxt.W.AddNull;
+end;
+
+procedure _JS_PUtf8Char(Data: PPUtf8Char; const Ctxt: TJsonSaveContext);
+begin
+  // PUtf8Char can be saved/serialized as their own UTF-8 content,
+  // but not restored/unserialized in _JL_PUtf8Char()
+  Ctxt.W.Add('"');
+  if Data^ <> nil then
+    Ctxt.W.AddJsonEscape(Data^, {len=}0);
+  Ctxt.W.Add('"');
 end;
 
 procedure _JS_ID(Data: PInt64; const Ctxt: TJsonSaveContext);
@@ -5336,7 +5370,8 @@ const
     @_JS_Unicode, @_JS_DateTime, @_JS_DateTimeMS, @_JS_GUID, @_JS_Hash,
     @_JS_Hash, @_JS_Hash, nil, @_JS_TimeLog, @_JS_Unicode, @_JS_UnixTime,
     @_JS_UnixMSTime, @_JS_Variant, @_JS_Unicode, @_JS_WinAnsi, @_JS_Word,
-    @_JS_Enumeration, @_JS_Set, nil, @_JS_DynArray, @_JS_Interface, nil);
+    @_JS_Enumeration, @_JS_Set, nil, @_JS_DynArray, @_JS_Interface,
+    @_JS_PUtf8Char, nil);
 
   /// use pointer to allow any complex kind of Data^ type in above functions
   // - typecast to TRttiJsonSave for proper function call
@@ -5350,39 +5385,67 @@ begin // call TDebugFile.FindLocationShort if mormot.core.log is used
   w.Add('"');
 end;
 
-// serialization of published props for records and classes
+//  serialization of properties for both records and classes
 procedure _JS_RttiCustom(Data: PAnsiChar; const Ctxt: TJsonSaveContext);
 var
   nfo: TRttiJson;
   p: PRttiCustomProp;
   n: integer;
-  done: boolean;
+  flags: set of (isNotFirst, noStored, noDefault, noHook, noVoid, isHumanReadable);
   c: TJsonSaveContext;
 begin
   c.W := Ctxt.W;
   c.Options := Ctxt.Options;
   nfo := TRttiJson(Ctxt.Info);
-  if (nfo.Kind = rkClass) and
-     (Data <> nil) then
-    // class instances are accessed by reference, records are stored by value
-    Data := PPointer(Data)^
+  if nfo.fJsonWriter.Code <> nil then // TRttiJson.RegisterCustomSerializer()
+  begin
+    if nfo.Kind = rkClass then
+      Data := PPointer(Data)^;
+    TOnRttiJsonWrite(nfo.fJsonWriter)(c.W, Data, c.Options); // e.g. TOrm.RttiJsonWrite
+    exit;
+  end;
+  if nfo.Kind = rkClass then
+  begin
+    if Data <> nil then
+      Data := PPointer(Data)^; // class instances are accessed by reference
+    if Data = nil then
+    begin
+      Ctxt.W.AddNull; // append 'null' for nil class instance
+      exit;
+    end;
+    flags := [];
+    if (woStoreStoredFalse in c.Options) or
+       (rcfDisableStored in Ctxt.Info.Flags) then
+      include(flags, noStored);
+    if not (woDontStoreDefault in c.Options) then
+      include(flags, noDefault);
+    if not (rcfHookWriteProperty in Ctxt.Info.Flags) then
+      include(flags, noHook);
+  end
   else
-    exclude(c.Options, woFullExpand); // not for null or for records
-  if Data = nil then
-    // append 'null' for nil class instance
-    c.W.AddNull
-  else if nfo.fJsonWriter.Code <> nil then
-    // TRttiJson.RegisterCustomSerializer() callback - e.g. TOrm.RttiJsonWrite
-    TOnRttiJsonWrite(nfo.fJsonWriter)(c.W, Data, c.Options)
-  else if not (rcfHookWrite in nfo.Flags) or
-          not TCCHook(Data).RttiBeforeWriteObject(c.W, c.Options) then
+  begin
+    exclude(c.Options, woFullExpand); // not available for null or records
+    flags := [noStored, noDefault, noHook];
+  end;
+  if not (rcfHookWrite in nfo.Flags) or
+     not TCCHook(Data).RttiBeforeWriteObject(c.W, c.Options) then
   begin
     // regular JSON serialization using nested fields/properties
-    c.W.BlockBegin('{', c.Options);
+    if not ((woDontStoreVoid in c.Options) or
+            (twoIgnoreDefaultInRecord in c.W.CustomOptions)) then
+      include(flags, noVoid);
+    if woHumanReadable in c.Options then
+    begin
+      include(flags, isHumanReadable);
+      c.W.BlockBegin('{', c.Options)
+    end
+    else
+      c.W.Add('{');
     c.Prop := pointer(nfo.Props.List);
     n := nfo.Props.Count;
     if (nfo.Kind = rkClass) and
-       (c.Options * [woFullExpand, woStoreClassName, woStorePointer, woDontStoreInherited] <> []) then
+       (c.Options * [woFullExpand, woStoreClassName, woStorePointer,
+                     woDontStoreInherited] <> []) then
     begin
       if woFullExpand in c.Options then
       begin
@@ -5417,7 +5480,6 @@ begin
           inc(c.Prop, NotInheritedIndex);
         end;
     end;
-    done := false;
     if n > 0 then
       // this is the main loop serializing Info.Props[]
       repeat
@@ -5425,27 +5487,28 @@ begin
         if // handle Props.NameChange() set to New='' to ignore this field
            (p^.Name <> '') and
            // handle woStoreStoredFalse flag and "stored" attribute in code
-           ((woStoreStoredFalse in c.Options) or
-            (rcfDisableStored in Ctxt.Info.Flags) or
+           ((noStored in flags) or
             (p^.Prop = nil) or
             (p^.Prop.IsStored(pointer(Data)))) and
            // handle woDontStoreDefault flag over "default" attribute in code
-           (not (woDontStoreDefault in c.Options) or
+           ((noDefault in flags) or
             (p^.Prop = nil) or
             (p^.OrdinalDefault = NO_DEFAULT) or
             not p^.ValueIsDefault(Data)) and
            // detect 0 numeric values and empty strings
-           (not ((woDontStoreVoid in c.Options) or
-                 (twoIgnoreDefaultInRecord in c.W.CustomOptions)) or
+           ((noVoid in flags) or
             not p^.ValueIsVoid(Data)) then
         begin
           // if we reached here, we should serialize this property
-          if done then
+          if isNotFirst in flags then
             // append ',' and proper indentation if a field was just appended
             c.W.BlockAfterItem(c.Options);
-          done := true;
-          c.W.WriteObjectPropName(pointer(p^.Name), length(p^.Name), c.Options);
-          if not (rcfHookWriteProperty in Ctxt.Info.Flags) or
+          include(flags, isNotFirst);
+          if isHumanReadable in flags then
+            c.W.WriteObjectPropNameHumanReadable(pointer(p^.Name), length(p^.Name))
+          else
+            c.W.AddProp(pointer(p^.Name), length(p^.Name));
+          if (noHook in flags) or
              not TCCHook(Data).RttiWritePropertyValue(c.W, p, c.Options) then
             _JS_OneProp(c, p, Data);
         end;
@@ -5456,7 +5519,10 @@ begin
       until false;
     if rcfHookWrite in Ctxt.Info.Flags then
        TCCHook(Data).RttiAfterWriteObject(c.W, c.Options);
-    c.W.BlockEnd('}', c.Options);
+    if isHumanReadable in flags then
+      c.W.BlockEnd('}', c.Options)
+    else
+      c.W.Add('}');
     if woFullExpand in c.Options then
       c.W.BlockEnd('}', c.Options);
   end;
@@ -5634,20 +5700,21 @@ end;
 
 { TJsonWriter }
 
-procedure TJsonWriter.WriteObjectPropName(PropName: PUtf8Char;
-  PropNameLen: PtrInt; Options: TTextWriterWriteObjectOptions);
+procedure TJsonWriter.WriteObjectPropNameHumanReadable(
+  PropName: PUtf8Char; PropNameLen: PtrInt);
 begin
-  if woHumanReadable in Options then
-    AddCRAndIndent; // won't do anything if has already been done
+  AddCRAndIndent; // won't do anything if has already been done
   AddProp(PropName, PropNameLen); // handle twoForceJsonExtended
-  if woHumanReadable in Options then
-    Add(' ');
+  Add(' ');
 end;
 
 procedure TJsonWriter.WriteObjectPropNameShort(const PropName: ShortString;
   Options: TTextWriterWriteObjectOptions);
 begin
-  WriteObjectPropName(@PropName[1], ord(PropName[0]), Options);
+  if woHumanReadable in Options then
+    WriteObjectPropNameHumanReadable(@PropName[1], ord(PropName[0]))
+  else
+    AddProp(@PropName[1], ord(PropName[0]));
 end;
 
 procedure TJsonWriter.WriteObjectAsString(Value: TObject;
@@ -5819,7 +5886,7 @@ end;
 function TJsonWriter.GetTempJsonWriter: TJsonWriter;
 begin
   if fInternalJsonWriter = nil then
-    fInternalJsonWriter := TJsonWriter.CreateOwnedStream
+    fInternalJsonWriter := TJsonWriter.CreateOwnedStream(4096, {noshare=}true)
   else
     fInternalJsonWriter.CancelAllAsNew;
   result := fInternalJsonWriter;
@@ -5887,7 +5954,7 @@ begin
     {$ifdef HASCODEPAGE}
     CodePage := GetCodePage(s);
     {$else}
-    CodePage := 0; // TSynAnsiConvert.Engine(0)=CurrentAnsiConvert
+    CodePage := CP_ACP; // TSynAnsiConvert.Engine(0)=CurrentAnsiConvert
     {$endif HASCODEPAGE}
   AddAnyAnsiBuffer(pointer(s), L, Escape, CodePage);
 end;
@@ -5914,7 +5981,7 @@ begin
   if (P <> nil) and
      (Len > 0) then
   begin
-    if CodePage = 0 then // CP_UTF8 is very likely on POSIX or LCL
+    if CodePage = CP_ACP then // CP_UTF8 is very likely on POSIX or LCL
       CodePage := Unicode_CodePage; // = CurrentAnsiConvert.CodePage
     case CodePage of
       CP_UTF8:          // direct write of RawUtf8 content
@@ -7129,11 +7196,13 @@ end;
 
 { TJsonParserContext }
 
-procedure TJsonParserContext.Init(P: PUtf8Char; Rtti: TRttiCustom;
-  O: TJsonParserOptions; CV: PDocVariantOptions; ObjectListItemClass: TClass);
+procedure TJsonParserContext.InitParser(P: PUtf8Char; Rtti: TRttiCustom;
+  O: TJsonParserOptions; CV: PDocVariantOptions; ObjectListItemClass: TClass;
+  RawUtf8Interning: TRawUtf8Interning);
 begin
   Json := P;
   Valid := true;
+  Interning := RawUtf8Interning;
   if Rtti <> nil then
     O := O + TRttiJson(Rtti).fIncludeReadOptions;
   Options := O;
@@ -7180,7 +7249,7 @@ function TJsonParserContext.ParseUtf8: RawUtf8;
 begin
   GetJsonField;
   Valid := Json <> nil;
-  FastSetString(result, Value, ValueLen)
+  Interning.Unique(result, Value, ValueLen)
 end;
 
 function TJsonParserContext.ParseString: string;
@@ -7418,9 +7487,9 @@ end;
 procedure _JL_RawUtf8(Data: PRawByteString; var Ctxt: TJsonParserContext);
 begin
   if Ctxt.ParseNext then
-    // will handle RawUtf8 but also AnsiString, WinAnsiString and RawUnicode
+    // will handle RawUtf8 but also AnsiString, WinAnsiString or other CP
     if Ctxt.Info.Cache.CodePage = CP_UTF8 then
-      FastSetString(RawUtf8(Data^), Ctxt.Value, Ctxt.ValueLen)
+      Ctxt.Interning.Unique(RawUtf8(Data^), Ctxt.Value, Ctxt.ValueLen)
     else if Ctxt.Info.Cache.CodePage >= CP_RAWBLOB then
       Ctxt.Valid := false // paranoid check (RawByteString should handle it)
     else
@@ -8034,8 +8103,17 @@ end;
 
 procedure _JL_Interface(Data: PInterface; var Ctxt: TJsonParserContext);
 begin
-  // _JS_Interface() may have serialized the object instance, but we can't
-  // unserialize it since we don't know which class to create
+  // _JS_Interface() may have serialized the object instance properties, but we
+  // can't unserialize it since we don't know which class to create
+  Ctxt.Valid := Ctxt.ParseNull;
+  Data^ := nil;
+end;
+
+procedure _JL_PUtf8Char(Data: PPUtf8Char; var Ctxt: TJsonParserContext);
+begin
+  // _JS_PUtf8Char() may have been serialized as JSON string, but we can't
+  // unserialize it since we can't allocate the memory and Ctxt.Json
+  // input is transient by definition
   Ctxt.Valid := Ctxt.ParseNull;
   Data^ := nil;
 end;
@@ -8236,7 +8314,7 @@ begin
     repeat
       if Ctxt.ParseNext then
       begin
-        FastSetString(item, Ctxt.Value, Ctxt.ValueLen);
+        Ctxt.Interning.Unique(item, Ctxt.Value, Ctxt.ValueLen);
         Data^.AddObject(item, nil);
       end;
     until (not Ctxt.Valid) or
@@ -8259,7 +8337,7 @@ var
     @_JL_GUID, @_JL_Hash, @_JL_Hash, @_JL_Hash, @_JL_Int64, @_JL_TimeLog,
     @_JL_UnicodeString, @_JL_UnixTime, @_JL_UnixMSTime, @_JL_Variant,
     @_JL_WideString, @_JL_WinAnsi, @_JL_Word, @_JL_Enumeration, @_JL_Set,
-    nil, @_JL_DynArray, @_JL_Interface, nil);
+    nil, @_JL_DynArray, @_JL_Interface, @_JL_PUtf8Char, nil);
 
 
 { TValuePUtf8Char }
@@ -8715,9 +8793,9 @@ begin
   result := DynArray.SaveTo;
 end;
 
-procedure TSynNameValue.SetBlobDataPtr(aValue: pointer);
+procedure TSynNameValue.SetBlobDataPtr(aValue, aValueMax: pointer);
 begin
-  DynArray.LoadFrom(aValue);
+  DynArray.LoadFrom(aValue, aValueMax);
   DynArray.ForceReHash;
 end;
 
@@ -9008,15 +9086,6 @@ end;
 
 { TSynDictionary }
 
-const // use fSafe.Padding[DIC_*] slots for Keys/Values place holders
-  DIC_KEYCOUNT   = 0;   // Keys.Count integer
-  DIC_KEY        = 1;   // Key.Value pointer
-  DIC_VALUECOUNT = 2;   // Values.Count integer
-  DIC_VALUE      = 3;   // Values.Value pointer
-  DIC_TIMECOUNT  = 4;   // Timeouts.Count integer
-  DIC_TIMESEC    = 5;   // Timeouts Seconds integer
-  DIC_TIMETIX    = 6;   // last GetTickCount64 shr 10 integer
-
 constructor TSynDictionary.Create(aKeyTypeInfo, aValueTypeInfo: PRttiInfo;
   aKeyCaseInsensitive: boolean; aTimeoutSeconds: cardinal;
   aCompressAlgo: TAlgoCompress; aHasher: THasher);
@@ -9034,6 +9103,7 @@ begin
     @fSafe.Padding[DIC_KEYCOUNT].VInteger, aKeyCaseInsensitive);
   fValues.Init(aValueTypeInfo, fSafe.Padding[DIC_VALUE].VAny,
     @fSafe.Padding[DIC_VALUECOUNT].VInteger);
+  fValues.Compare := DynArraySortOne(fValues.Info.ArrayFirstField, aKeyCaseInsensitive);
   fTimeouts.Init(TypeInfo(TIntegerDynArray), fTimeOut,
     @fSafe.Padding[DIC_TIMECOUNT].VInteger);
   if aCompressAlgo = nil then
@@ -9117,7 +9187,7 @@ begin
   now := tix64 shr 10;
   if fSafe.Padding[DIC_TIMETIX].VInteger = integer(now) then
     exit; // no need to search more often than every second
-  fSafe.RwLock(cReadWrite); // would upgrade to cWrite only if needed
+  fSafe.ReadWriteLock; // would upgrade to cWrite only if needed
   try
     fSafe.Padding[DIC_TIMETIX].VInteger := now;
     for i := fSafe.Padding[DIC_TIMECOUNT].VInteger - 1 downto 0 do
@@ -9127,7 +9197,7 @@ begin
           fOnCanDelete(fKeys.ItemPtr(i)^, fValues.ItemPtr(i)^, i)) then
       begin
         if result = 0 then
-          fSafe.RWLock(cWrite);
+          fSafe.Lock; // = cWrite
         fKeys.Delete(i);
         fValues.Delete(i);
         fTimeOuts.Delete(i);
@@ -9137,8 +9207,8 @@ begin
       fKeys.ForceReHash; // mandatory after manual fKeys.Delete(i)
   finally
     if result > 0 then
-      fSafe.RWUnLock(cWrite);
-    fSafe.RwUnLock(cReadWrite);
+      fSafe.UnLock; // = cWrite
+    fSafe.ReadWriteUnLock;
   end;
 end;
 
@@ -9186,9 +9256,8 @@ begin
   try
     result := fKeys.FindHashedForAdding(aKey^, added);
     if added then
-    begin
+    begin // fKey[result] := aKey;
       with fKeys{$ifdef UNDIRECTDYNARRAY}.InternalDynArray{$endif} do
-        // fKey[result] := aKey;
         ItemCopy(aKey, PAnsiChar(Value^) + (result * Info.Cache.ItemSize));
       if fValues.Add(aValue^) <> result then
         raise ESynDictionary.CreateUtf8('%.Add fValues.Add', [self]);
@@ -9220,19 +9289,19 @@ end;
 
 function TSynDictionary.Clear(const aKey): PtrInt;
 begin
-  fSafe.RWLock(cReadWrite);
+  fSafe.ReadWriteLock;
   try
     result := fKeys.FindHashed(aKey);
     if result >= 0 then
     begin
-      fSafe.RWLock(cWrite);
+      fSafe.Lock;
       fValues.ItemClear(fValues.ItemPtr(result));
       if fSafe.Padding[DIC_TIMESEC].VInteger > 0 then
         fTimeOut[result] := 0;
-      fSafe.RWUnLock(cWrite);
+      fSafe.UnLock;
     end;
   finally
-    fSafe.RWUnLock(cReadWrite);
+    fSafe.ReadWriteUnLock;
   end;
 end;
 
@@ -9273,7 +9342,10 @@ begin
      (fValues.Info.ArrayRtti.Kind <> rkDynArray) then
     raise ESynDictionary.CreateUtf8('%.Values: % items are not dynamic arrays',
       [self, fValues.Info.Name]);
-  fSafe.RWLock(RW_FORCE[aAction <> iaFind]); // cReadOnly only for iaFind
+  if aAction = iaFind then
+    fSafe.ReadLock
+  else
+    fSafe.Lock; // other actions may need to write the internal data
   try
     ndx := fKeys.FindHashed(aKey);
     if ndx < 0 then
@@ -9300,7 +9372,10 @@ begin
         result := nested.Add(aArrayValue) >= 0;
     end;
   finally
-    fSafe.RWUnLock(RW_FORCE[aAction <> iaFind]);
+    if aAction = iaFind then
+      fSafe.ReadUnLock
+    else
+      fSafe.UnLock;
   end;
 end;
 
@@ -9315,7 +9390,7 @@ function TSynDictionary.FindKeyFromValue(const aValue;
 var
   ndx: PtrInt;
 begin
-  fSafe.RwLock(cReadOnly); // cReadOnly is good enough for SetTimeoutAtIndex()
+  fSafe.ReadLock; // cReadOnly is good enough for SetTimeoutAtIndex()
   try
     ndx := fValues.IndexOf(aValue); // use fast RTTI for value search
     result := ndx >= 0;
@@ -9323,14 +9398,10 @@ begin
     begin
       fKeys.ItemCopyAt(ndx, @aKey);
       if aUpdateTimeOut then
-      begin
-        fSafe.RwLock(cWrite);
-        SetTimeoutAtIndex(ndx);
-        fSafe.RwUnLock(cWrite);
-      end;
+        SetTimeoutAtIndex(ndx); // no cWrite lock needed
     end;
   finally
-    fSafe.RwUnLock(cReadOnly);
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -9373,7 +9444,6 @@ begin
     result := -1
   else
   begin
-    //result := fKeys.FindHashed(aKey);
     result := fKeys.Hasher.FindOrNew(fKeys.Hasher.HashOne(@aKey), @aKey, nil);
     if result < 0 then
       result := -1
@@ -9433,7 +9503,7 @@ begin
   result := false;
   if self = nil then
     exit;
-  fSafe.RWLock(cReadOnly);
+  fSafe.ReadLock;
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -9449,7 +9519,7 @@ begin
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
-    fSafe.RWUnLock(cReadOnly);
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -9460,21 +9530,21 @@ begin
   result := false;
   if self = nil then
     exit;
-  fSafe.RWLock(cReadWrite);
+  fSafe.ReadWriteLock;
   try
     ndx := fKeys.FindHashedAndDelete(aKey);
     if ndx >= 0 then
     begin
-      fSafe.RWLock(cWrite);
+      fSafe.Lock;
       fValues.ItemMoveTo(ndx, @aValue); // faster than ItemCopy()
       fValues.Delete(ndx);
       if fSafe.Padding[DIC_TIMESEC].VInteger > 0 then
         fTimeOuts.Delete(ndx);
-      fSafe.RWUnLock(cWrite);
+      fSafe.UnLock;
       result := true;
     end;
   finally
-    fSafe.RWUnLock(cReadWrite);
+    fSafe.ReadWriteUnLock;
   end;
 end;
 
@@ -9483,7 +9553,7 @@ begin
   result := false;
   if self = nil then
     exit;
-  fSafe.RWLock(cReadOnly);
+  fSafe.ReadLock;
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -9493,7 +9563,7 @@ begin
   {$ifdef HASFASTTRYFINALLY}
   finally
   {$endif HASFASTTRYFINALLY}
-    fSafe.RWUnLock(cReadOnly);
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -9503,21 +9573,21 @@ begin
   result := false;
   if self = nil then
     exit;
-  fSafe.RWLock(cReadOnly);
+  fSafe.ReadLock;
   try
     result := fValues.Find(aValue, aCompare) >= 0;
   finally
-    fSafe.RWUnLock(cReadOnly);
+    fSafe.ReadUnLock;
   end;
 end;
 
 procedure TSynDictionary.CopyValues(out Dest; ObjArrayByRef: boolean);
 begin
-  fSafe.RWLock(cReadOnly);
+  fSafe.ReadLock;
   try
     fValues.CopyTo(Dest, ObjArrayByRef);
   finally
-    fSafe.RWUnLock(cReadOnly);
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -9528,7 +9598,10 @@ var
   i, n, ks, vs: PtrInt;
 begin
   result := 0;
-  fSafe.RWLock(RW_FORCE[MayModify]);
+  if MayModify then
+    fSafe.ReadWriteLock
+  else
+    fSafe.ReadLock;
   try
     n := fSafe.Padding[DIC_KEYCOUNT].VInteger;
     if (n = 0) or
@@ -9547,7 +9620,10 @@ begin
       inc(v, vs);
     end;
   finally
-    fSafe.RWUnLock(RW_FORCE[MayModify]);
+    if MayModify then
+      fSafe.ReadWriteUnLock
+    else
+      fSafe.ReadUnLock;
   end;
 end;
 
@@ -9558,7 +9634,10 @@ var
   k, v: PAnsiChar;
   i, n, ks, vs: PtrInt;
 begin
-  fSafe.RWLock(RW_FORCE[MayModify]);
+  if MayModify then
+    fSafe.ReadWriteLock
+  else
+    fSafe.ReadLock;
   try
     result := 0;
     if (not Assigned(OnMatch)) or
@@ -9585,7 +9664,10 @@ begin
       inc(v, vs);
     end;
   finally
-    fSafe.RWUnLock(RW_FORCE[MayModify]);
+    if MayModify then
+      fSafe.ReadWriteUnLock
+    else
+      fSafe.ReadUnLock;
   end;
 end;
 
@@ -9602,11 +9684,6 @@ end;
 
 function TSynDictionary.Count: integer;
 begin
-  result := fSafe.LockedInt64[DIC_KEYCOUNT];
-end;
-
-function TSynDictionary.RawCount: integer;
-begin
   result := fSafe.Padding[DIC_KEYCOUNT].VInteger;
 end;
 
@@ -9614,7 +9691,7 @@ procedure TSynDictionary.SaveToJson(W: TJsonWriter; EnumSetsAsText: boolean);
 var
   k, v: RawUtf8;
 begin
-  fSafe.RWLock(cReadOnly);
+  fSafe.ReadLock;
   try
     if fSafe.Padding[DIC_KEYCOUNT].VInteger > 0 then
     begin
@@ -9623,7 +9700,7 @@ begin
       fValues.SaveToJson(v, EnumSetsAsText);
     end;
   finally
-    fSafe.RWUnLock(cReadOnly);
+    fSafe.ReadUnLock;
   end;
   W.AddJsonArraysAsJsonObject(pointer(k), pointer(v));
 end;
@@ -9650,11 +9727,11 @@ begin
     result := '';
     exit;
   end;
-  fSafe.RWLock(cReadOnly);
+  fSafe.ReadLock;
   try
     fValues.SaveToJson(result, EnumSetsAsText, ReFormat);
   finally
-    fSafe.RWUnLock(cReadOnly);
+    fSafe.ReadUnLock;
   end;
 end;
 
@@ -9712,7 +9789,7 @@ begin
       begin
         // RTTI_BINARYLOAD[rkDynArray]() did not set the external count
         fSafe.Padding[DIC_KEYCOUNT].VInteger   := n;
-        fSafe.Padding[DIC_VALUECOUNT].VInteger := n;      
+        fSafe.Padding[DIC_VALUECOUNT].VInteger := n;
         SetTimeouts;  // set ComputeNextTimeOut for all items
         fKeys.ForceReHash; // optimistic: input from TSynDictionary.SaveToBinary
         result := true;
@@ -9750,7 +9827,7 @@ begin
     exit;
   W := TBufferWriter.Create(tmp{%H-});
   try
-    fSafe.RWLock(cReadOnly);
+    fSafe.ReadLock;
     try
       if fSafe.Padding[DIC_KEYCOUNT].VInteger = 0 then
         exit;
@@ -9759,7 +9836,7 @@ begin
       DynArraySave(pointer(fValues.Value),
         @fSafe.Padding[DIC_VALUECOUNT].VInteger, W, fValues.Info.Info);
     finally
-      fSafe.RWUnLock(cReadOnly);
+      fSafe.ReadUnLock;
     end;
     result := W.FlushAndCompress(NoCompression, Algo);
   finally
@@ -9847,6 +9924,18 @@ begin
   result := SizeOf(pointer);
 end;
 
+function _BC_PUtf8Char(A, B: PPUtf8Char; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  compared := StrComp(A^, B^);
+  result := SizeOf(pointer);
+end;
+
+function _BCI_PUtf8Char(A, B: PPUtf8Char; Info: PRttiInfo; out Compared: integer): PtrInt;
+begin
+  compared := StrIComp(A^, B^);
+  result := SizeOf(pointer);
+end;
+
 function _BC_Default(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
 begin
   Compared := ComparePointer(A, B); // weak fallback
@@ -9862,35 +9951,52 @@ begin
   // set Name and Flags from Props[]
   inherited SetParserType(aParser, aParserComplex);
   // set comparison functions
-  if rcfObjArray in fFlags then
+  fCompare[true]  := RTTI_COMPARE[true][Kind];  // generic comparison
+  fCompare[false] := RTTI_COMPARE[false][Kind];
+  if rcfHasRttiOrd in fCache.Flags then
   begin
-    fCompare[true] := _BCI_ObjArray;
+    fCompare[true]  := @RTTI_ORD_COMPARE[fCache.RttiOrd]; // tuned compare
+    fCompare[false] := fCompare[true];
+  end
+  else if rcfGetInt64Prop in fCache.Flags then
+  begin
+    if rcfQWord in fCache.Flags then
+      fCompare[true] := @_BC_UQWord  // QWord compare
+    else
+      fCompare[true] := @_BC_SQWord; // Int64 compare
+    fCompare[false] := fCompare[true];
+  end
+  else if Kind = rkFloat then
+  begin
+    fCompare[true]  := @RTTI_FLOAT_COMPARE[fCache.RttiFloat]; // tuned compare
+    fCompare[false] := fCompare[true];
+  end
+  else if rcfObjArray in fFlags then
+  begin
+    fCompare[true]  := _BCI_ObjArray; // direct compare
     fCompare[false] := _BC_ObjArray;
   end
-  else
+  else if aParser = ptPUtf8Char then
   begin
-    fCompare[true] := RTTI_COMPARE[true][Kind];
-    fCompare[false] := RTTI_COMPARE[false][Kind];
-    if Kind = rkLString then
-      // RTTI_COMPARE[rkLString] is StrComp/StrIComp which is mostly fine
-      if Cache.CodePage >= CP_RAWBLOB then
-      begin
-        // should use RawByteString length, ignore any #0 or CaseInsensitive
-        fCompare[true] := @_BC_RawByteString;
-        fCompare[false] := @_BC_RawByteString;
-      end
-      else if Cache.CodePage = CP_UTF16 then
-      begin
-        // RawUnicode expects _BC_WString=StrCompW and _BCI_WString=StrICompW
-        fCompare[true] := RTTI_COMPARE[true][rkWString];
-        fCompare[false] := RTTI_COMPARE[false][rkWString];
-      end;
-    if not Assigned(fCompare[true]) then
+    fCompare[true]  := @_BCI_PUtf8Char; // rkPointer with no RTTI
+    fCompare[false] := @_BC_PUtf8Char;
+  end
+  else if Kind = rkLString then // override default StrComp/StrIComp
+    if Cache.CodePage >= CP_RAWBLOB then
     begin
-      // fallback if not enough RTTI
-      fCompare[true] := @_BC_Default;
-      fCompare[false] := @_BC_Default;
+      fCompare[true]  := @_BC_RawByteString; // ignore #0 or CaseInsensitive
+      fCompare[false] := @_BC_RawByteString;
+    end
+    else if Cache.CodePage = CP_UTF16 then
+    begin
+      fCompare[true]  := RTTI_COMPARE[true][rkWString];  // StrCompW
+      fCompare[false] := RTTI_COMPARE[false][rkWString]; // StrICompW
     end;
+  if not Assigned(fCompare[true]) then
+  begin
+    // fallback to ComparePointer(A, B) if not enough RTTI
+    fCompare[true] := @_BC_Default;
+    fCompare[false] := @_BC_Default;
   end;
   // set class serialization and initialization
   if aParser = ptClass then
@@ -9979,7 +10085,7 @@ begin
         begin
           fJsonSave := @_JS_TRawUtf8List;
           fJsonLoad := @_JL_TRawUtf8List;
-        end
+        end;
     end;
   end
   else if rcfBinary in Flags then
@@ -10102,14 +10208,15 @@ end;
 
 procedure TRttiJson.ValueLoadJson(Data: pointer; var Json: PUtf8Char;
   EndOfObject: PUtf8Char; ParserOptions: TJsonParserOptions;
-  CustomVariantOptions: PDocVariantOptions; ObjectListItemClass: TClass);
+  CustomVariantOptions: PDocVariantOptions; ObjectListItemClass: TClass;
+  Interning: TRawUtf8Interning);
 var
   ctxt: TJsonParserContext;
 begin
   if Assigned(self) then
   begin
-    ctxt.Init(
-      Json, self, ParserOptions, CustomVariantOptions, ObjectListItemClass);
+    ctxt.InitParser(Json, self, ParserOptions,
+      CustomVariantOptions, ObjectListItemClass, Interning);
     if Assigned(fJsonLoad) then
       // efficient direct Json parsing
       TRttiJsonLoad(fJsonLoad)(Data, ctxt)
@@ -10411,10 +10518,12 @@ end;
 
 procedure _GetDataFromJson(Data: pointer; var Json: PUtf8Char;
   EndOfObject: PUtf8Char; Rtti: TRttiCustom;
-  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean);
+  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
+  Interning: TRawUtf8InterningAbstract);
 begin
   (Rtti as TRttiJson).ValueLoadJson(Data, Json, EndOfObject,
-    JSONPARSER_DEFAULTORTOLERANTOPTIONS[Tolerant], CustomVariantOptions);
+    JSONPARSER_DEFAULTORTOLERANTOPTIONS[Tolerant],
+    CustomVariantOptions, nil, TRawUtf8Interning(Interning));
 end;
 
 
@@ -10647,7 +10756,8 @@ begin
     SaveJson(Value, TypeInfo, TEXTWRITEROPTIONS_SETASTEXT[EnumSetsAsText], result);
 end;
 
-function DynArrayBlobSaveJson(TypeInfo: PRttiInfo; BlobValue: pointer): RawUtf8;
+function DynArrayBlobSaveJson(TypeInfo: PRttiInfo;
+  BlobValue: pointer; BlobLen: PtrInt): RawUtf8;
 var
   DynArray: TDynArray;
   Value: pointer; // decode BlobValue into a temporary dynamic array
@@ -10656,7 +10766,7 @@ begin
   Value := nil;
   DynArray.Init(TypeInfo, Value);
   try
-    if DynArray.LoadFrom(BlobValue) = nil then
+    if DynArray.LoadFrom(BlobValue, PAnsiChar(BlobValue) + BlobLen) = nil then
       result := ''
     else
       with TJsonWriter.CreateOwnedStream(temp) do
@@ -10752,23 +10862,24 @@ end;
 
 function LoadJson(var Value; Json: PUtf8Char; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char; CustomVariantOptions: PDocVariantOptions;
-  Tolerant: boolean): PUtf8Char;
+  Tolerant: boolean; Interning: TRawUtf8Interning): PUtf8Char;
 begin
-  TRttiJson(Rtti.RegisterType(TypeInfo)).ValueLoadJson(@Value, Json, EndOfObject,
-    JSONPARSER_DEFAULTORTOLERANTOPTIONS[Tolerant], CustomVariantOptions);
+  TRttiJson(Rtti.RegisterType(TypeInfo)).ValueLoadJson(
+    @Value, Json, EndOfObject, JSONPARSER_DEFAULTORTOLERANTOPTIONS[Tolerant],
+    CustomVariantOptions, nil, Interning);
   result := Json;
 end;
 
 function LoadJson(var Value; const Json: RawUtf8; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char; CustomVariantOptions: PDocVariantOptions;
-  Tolerant: boolean): boolean;
+  Tolerant: boolean; Interning: TRawUtf8Interning): boolean;
 var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(Json); // make private copy before in-place decoding
   try
     result := LoadJson(Value, tmp.buf, TypeInfo, EndOfObject,
-      CustomVariantOptions, Tolerant) <> nil;
+      CustomVariantOptions, Tolerant, Interning) <> nil;
   finally
     tmp.Done;
   end;
@@ -10776,26 +10887,28 @@ end;
 
 function RecordLoadJson(var Rec; Json: PUtf8Char; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char; CustomVariantOptions: PDocVariantOptions;
-  Tolerant: boolean): PUtf8Char;
+  Tolerant: boolean; Interning: TRawUtf8Interning): PUtf8Char;
 begin
   if (TypeInfo = nil) or
      not (TypeInfo.Kind in rkRecordTypes) then
     raise EJsonException.CreateUtf8('RecordLoadJson: % is not a record',
       [TypeInfo.Name]);
-  TRttiJson(Rtti.RegisterType(TypeInfo)).ValueLoadJson(@Rec, Json, EndOfObject,
-      JSONPARSER_DEFAULTORTOLERANTOPTIONS[Tolerant], CustomVariantOptions);
+  TRttiJson(Rtti.RegisterType(TypeInfo)).ValueLoadJson(
+    @Rec, Json, EndOfObject, JSONPARSER_DEFAULTORTOLERANTOPTIONS[Tolerant],
+    CustomVariantOptions, nil, Interning);
   result := Json;
 end;
 
 function RecordLoadJson(var Rec; const Json: RawUtf8; TypeInfo: PRttiInfo;
-  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean): boolean;
+  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
+  Interning: TRawUtf8Interning): boolean;
 var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(Json); // make private copy before in-place decoding
   try
     result := RecordLoadJson(Rec, tmp.buf, TypeInfo, nil,
-      CustomVariantOptions, Tolerant) <> nil;
+      CustomVariantOptions, Tolerant, Interning) <> nil;
   finally
     tmp.Done;
   end;
@@ -10803,73 +10916,76 @@ end;
 
 function DynArrayLoadJson(var Value; Json: PUtf8Char; TypeInfo: PRttiInfo;
   EndOfObject: PUtf8Char; CustomVariantOptions: PDocVariantOptions;
-  Tolerant: boolean): PUtf8Char;
+  Tolerant: boolean; Interning: TRawUtf8Interning): PUtf8Char;
 begin
   if (TypeInfo = nil) or
      (TypeInfo.Kind <> rkDynArray) then
     raise EJsonException.CreateUtf8('DynArrayLoadJson: % is not a dynamic array',
       [TypeInfo.Name]);
-  TRttiJson(Rtti.RegisterType(TypeInfo)).ValueLoadJson(@Value, Json, EndOfObject,
-    JSONPARSER_DEFAULTORTOLERANTOPTIONS[Tolerant], CustomVariantOptions);
+  TRttiJson(Rtti.RegisterType(TypeInfo)).ValueLoadJson(
+    @Value, Json, EndOfObject, JSONPARSER_DEFAULTORTOLERANTOPTIONS[Tolerant],
+    CustomVariantOptions, nil, Interning);
   result := Json;
 end;
 
 function DynArrayLoadJson(var Value; const Json: RawUtf8; TypeInfo: PRttiInfo;
-  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean): boolean;
+  CustomVariantOptions: PDocVariantOptions; Tolerant: boolean;
+  Interning: TRawUtf8Interning): boolean;
 var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(Json); // make private copy before in-place decoding
   try
     result := DynArrayLoadJson(Value, tmp.buf, TypeInfo, nil,
-      CustomVariantOptions, Tolerant) <> nil;
+      CustomVariantOptions, Tolerant, Interning) <> nil;
   finally
     tmp.Done;
   end;
 end;
 
 function JsonToObject(var ObjectInstance; From: PUtf8Char; out Valid: boolean;
-  TObjectListItemClass: TClass; Options: TJsonParserOptions): PUtf8Char;
+  TObjectListItemClass: TClass; Options: TJsonParserOptions;
+  Interning: TRawUtf8Interning): PUtf8Char;
 var
   ctxt: TJsonParserContext;
 begin
   if pointer(ObjectInstance) = nil then
     raise ERttiException.Create('JsonToObject(nil)');
-  ctxt.Init(From, Rtti.RegisterClass(TObject(ObjectInstance)), Options,
-    nil, TObjectListItemClass);
+  ctxt.InitParser(From, Rtti.RegisterClass(TObject(ObjectInstance)), Options,
+    nil, TObjectListItemClass, Interning);
   TRttiJsonLoad(Ctxt.Info.JsonLoad)(@ObjectInstance, ctxt);
   Valid := ctxt.Valid;
   result := ctxt.Json;
 end;
 
-function JsonSettingsToObject(var InitialJsonContent: RawUtf8;
+function JsonSettingsToObject(const JsonContent: RawUtf8;
   Instance: TObject): boolean;
 var
   tmp: TSynTempBuffer;
 begin
   result := false;
-  if InitialJsonContent = '' then
+  if JsonContent = '' then
     exit;
-  tmp.Init(InitialJsonContent);
+  tmp.Init(JsonContent); // copy for in-place comment removal and JSON parsing
   try
     RemoveCommentsFromJson(tmp.buf);
     JsonToObject(Instance, tmp.buf, result, nil, JSONPARSER_TOLERANTOPTIONS);
-    if not result then
-      InitialJsonContent := '';
   finally
     tmp.Done;
   end;
 end;
 
 function ObjectLoadJson(var ObjectInstance; const Json: RawUtf8;
-  TObjectListItemClass: TClass; Options: TJsonParserOptions): boolean;
+  TObjectListItemClass: TClass; Options: TJsonParserOptions;
+  Interning: TRawUtf8Interning): boolean;
 var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(Json);
   if tmp.len <> 0 then
     try
-      JsonToObject(ObjectInstance, tmp.buf, result, TObjectListItemClass, Options);
+      JsonToObject(ObjectInstance,
+        tmp.buf, result, TObjectListItemClass, Options, Interning);
     finally
       tmp.Done;
     end
@@ -10878,16 +10994,17 @@ begin
 end;
 
 function JsonToNewObject(var From: PUtf8Char; var Valid: boolean;
-  Options: TJsonParserOptions): TObject;
+  Options: TJsonParserOptions; Interning: TRawUtf8Interning): TObject;
 var
   ctxt: TJsonParserContext;
 begin
-  ctxt.Init(From, nil, Options, nil, nil);
+  ctxt.InitParser(From, nil, Options, nil, nil, Interning);
   result := ctxt.ParseNewObject;
 end;
 
 function PropertyFromJson(Prop: PRttiCustomProp; Instance: TObject;
-  From: PUtf8Char; var Valid: boolean; Options: TJsonParserOptions): PUtf8Char;
+  From: PUtf8Char; var Valid: boolean; Options: TJsonParserOptions;
+  Interning: TRawUtf8Interning): PUtf8Char;
 var
   ctxt: TJsonParserContext;
 begin
@@ -10897,7 +11014,7 @@ begin
      (Prop^.Value.Kind <> rkClass) or
      (Instance = nil) then
     exit;
-  ctxt.Init(From, Prop^.Value, Options, nil, nil);
+  ctxt.InitParser(From, Prop^.Value, Options, nil, nil, Interning);
   if not JsonLoadProp(pointer(Instance), Prop, ctxt) then
     exit;
   Valid := true;
@@ -10915,17 +11032,19 @@ begin
 end;
 
 function JsonFileToObject(const JsonFile: TFileName; var ObjectInstance;
-  TObjectListItemClass: TClass; Options: TJsonParserOptions): boolean;
+  TObjectListItemClass: TClass; Options: TJsonParserOptions;
+  Interning: TRawUtf8Interning): boolean;
 var
   tmp: RawUtf8;
 begin
-  tmp := AnyTextFileToRawUtf8(JsonFile, true);
+  tmp := RawUtf8FromFile(JsonFile);
   if tmp = '' then
     result := false
   else
   begin
     RemoveCommentsFromJson(pointer(tmp));
-    JsonToObject(ObjectInstance, pointer(tmp), result, TObjectListItemClass, Options);
+    JsonToObject(ObjectInstance,
+      pointer(tmp), result, TObjectListItemClass, Options, Interning);
   end;
 end;
 
@@ -11128,27 +11247,37 @@ begin
   result := true; // success
 end;
 
-function TSynJsonFileSettings.LoadFromJson(var aJson: RawUtf8): boolean;
+function TSynJsonFileSettings.LoadFromJson(const aJson: RawUtf8;
+  const aSectionName: RawUtf8): boolean;
 begin
   if fsoReadIni in fSettingsOptions then
-    result := false
+  begin
+    fSectionName := aSectionName;
+    result := false;
+  end
   else
     result := JsonSettingsToObject(aJson, self);
   if not result then
   begin
-    result := IniToObject(aJson, self);
+    result := IniToObject(aJson, self, aSectionName, @JSON_[mFastFloat]);
     if result then
+    begin
+      fSectionName := aSectionName;
       include(fSettingsOptions, fsoWriteIni); // save back as INI
+    end;
   end;
   if result then
     result := AfterLoad;
 end;
 
-function TSynJsonFileSettings.LoadFromFile(const aFileName: TFileName): boolean;
+function TSynJsonFileSettings.LoadFromFile(const aFileName: TFileName;
+  const aSectionName: RawUtf8): boolean;
 begin
   fFileName := aFileName;
-  fInitialJsonContent := StringFromFile(aFileName);
-  result := LoadFromJson(fInitialJsonContent);
+  fInitialJsonContent := RawUtf8FromFile(aFileName); // may detect BOM
+  result := LoadFromJson(fInitialJsonContent, aSectionName);
+  if not result then
+    fInitialJsonContent := ''; // file was neither valid JSON nor INI: ignore
 end;
 
 procedure TSynJsonFileSettings.SaveIfNeeded;
@@ -11160,7 +11289,7 @@ begin
      (fsoDisableSaveIfNeeded in fSettingsOptions) then
     exit;
   if fsoWriteIni in fSettingsOptions then
-    saved := ObjectToIni(self)
+    saved := ObjectToIni(self, fSectionName)
   else
     saved := ObjectToJson(self, SETTINGS_WRITEOPTIONS);
   if saved = fInitialJsonContent then
@@ -11258,6 +11387,6 @@ end;
 initialization
   InitializeUnit;
   DefaultJsonWriter := TJsonWriter;
-  
+
 end.
 

@@ -81,7 +81,7 @@ type
   protected
     fRest: TRest;
     fModel: TOrmModel; // owned by the TRest associated instance
-    fCache: TRestCache;
+    fCache: TOrmCache;
     fTransactionActiveSession: cardinal;
     fTransactionTable: TOrmClass;
     fTempJsonWriter: TJsonWriter;
@@ -238,14 +238,16 @@ type
     /// release internal used instances
     destructor Destroy; override;
     /// internal TOrm value serialization to a JSON object
-    procedure GetJsonValue(Value: TOrm; withID: boolean;
-      const Fields: TFieldBits; out Json: RawUtf8); overload;
+    // - will use shared AcquireJsonWriter instance if available
+    procedure GetJsonValue(Value: TOrm; withID: boolean; const Fields: TFieldBits;
+      out Json: RawUtf8; LowerCaseID: boolean = false); overload;
     /// internal TOrm value serialization to a JSON object
-    procedure GetJsonValue(Value: TOrm; withID: boolean;
-      Occasion: TOrmOccasion; var Json: RawUtf8); overload;
+    // - will use shared AcquireJsonWriter instance if available
+    procedure GetJsonValue(Value: TOrm; withID: boolean; Occasion: TOrmOccasion;
+      var Json: RawUtf8; LowerCaseID: boolean = false); overload;
       {$ifdef FPC} inline; {$endif} // avoid URW1111 on Delphi 2010
     /// access to a thread-safe internal cached TJsonWriter instance
-    function AcquireJsonWriter: TJsonWriter;
+    function AcquireJsonWriter(var tmp: TTextWriterStackBuffer): TJsonWriter;
       {$ifdef HASINLINE} inline; {$endif}
     /// release the thread-safe cached TJsonWriter returned by AcquireJsonWriter
     procedure ReleaseJsonWriter(WR: TJsonWriter);
@@ -448,8 +450,8 @@ type
     function AsyncBatchDelete(Table: TOrmClass; ID: TID): integer;
     function Model: TOrmModel;
       {$ifdef HASINLINE}inline;{$endif}
-    function Cache: TRestCache;
-    function CacheOrNil: TRestCache;
+    function Cache: TOrmCache;
+    function CacheOrNil: TOrmCache;
       {$ifdef HASINLINE}inline;{$endif}
     function CacheWorthItForTable(aTableIndex: cardinal): boolean; virtual;
     function LogClass: TSynLogClass;
@@ -568,7 +570,7 @@ implementation
 constructor TRestOrm.Create(aRest: TRest);
 begin
   inherited Create;
-  fTempJsonWriter := TJsonWriter.CreateOwnedStream(16384);
+  fTempJsonWriter := TJsonWriter.CreateOwnedStream(16384, {nosharedstream=}true);
   if aRest = nil then
     exit;
   fRest := aRest;
@@ -615,12 +617,12 @@ begin
         result := SqlFromSelect(SqlTableName, FieldNames, WhereClause, '');
 end;
 
-function TRestOrm.AcquireJsonWriter: TJsonWriter;
+function TRestOrm.AcquireJsonWriter(var tmp: TTextWriterStackBuffer): TJsonWriter;
 begin
   if fTempJsonWriterLock.TryLock then
     result := fTempJsonWriter
   else
-    result := TJsonWriter.CreateOwnedStream(8100);
+    result := TJsonWriter.CreateOwnedStream(tmp);
 end;
 
 procedure TRestOrm.ReleaseJsonWriter(WR: TJsonWriter);
@@ -635,24 +637,26 @@ begin
 end;
 
 procedure TRestOrm.GetJsonValue(Value: TOrm; withID: boolean;
-  Occasion: TOrmOccasion; var Json: RawUtf8);
+  Occasion: TOrmOccasion; var Json: RawUtf8; LowerCaseID: boolean);
 begin
-  GetJsonValue(Value, withID, Value.Orm.SimpleFieldsBits[Occasion], Json);
+  GetJsonValue(
+    Value, withID, Value.Orm.SimpleFieldsBits[Occasion], Json, LowerCaseID);
 end;
 
 procedure TRestOrm.GetJsonValue(Value: TOrm; withID: boolean;
-  const Fields: TFieldBits; out Json: RawUtf8);
+  const Fields: TFieldBits; out Json: RawUtf8; LowerCaseID: boolean);
 var
   WR: TJsonWriter;
+  tmp: TTextWriterStackBuffer;
 begin
   // faster than Json := Value.GetJsonValues(true, withID, Fields);
-  WR := AcquireJsonWriter;
+  WR := AcquireJsonWriter(tmp);
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
-    Value.AppendAsJsonObject(WR, Fields, withID);
+    Value.AppendAsJsonObject(WR, Fields, withID, LowerCaseID);
     WR.SetText(Json);
   {$ifdef HASFASTTRYFINALLY}
   finally
@@ -728,9 +732,9 @@ begin
   end;
   // on success, Value.ID is updated with the new RowID
   Value.IDValue := result;
-  if SendData and
-     (result <> 0) then
-    fCache.Notify(POrmClass(Value)^, result, json, ooInsert);
+  if (result <> 0) and
+     SendData then
+    fCache.NotifyAllFields(t, Value);
 end;
 
 
@@ -741,7 +745,7 @@ begin
   result := fModel;
 end;
 
-function TRestOrm.CacheOrNil: TRestCache;
+function TRestOrm.CacheOrNil: TOrmCache;
 begin
   result := fCache;
 end;
@@ -871,7 +875,7 @@ var
   t: PtrInt;
 begin
   t := fModel.GetTableIndexExisting(Table);
-  if fCache.Retrieve(t, ID) <> '' then
+  if fCache.Exists(t, ID) then
     result := true
   else
     result := EngineRetrieve(t, ID) <> ''; // try from DB
@@ -1355,6 +1359,7 @@ end;
 function TRestOrm.Retrieve(aID: TID; Value: TOrm; ForUpdate: boolean): boolean;
 var
   t: integer; // used by EngineRetrieve() for SQL statement caching
+  ocr: TOrmCacheRetrieve;
   resp: RawUtf8;
 begin
   // check parameters
@@ -1365,27 +1370,33 @@ begin
   if (self = nil) or
      (aID = 0) then
     exit;
-  t := fModel.GetTableIndexExisting(POrmClass(Value)^);
+  t := fModel.GetTableIndex(POrmClass(Value)^);
+  if t < 0 then
+    exit;
   // try to lock before retrieval (if ForUpdate)
   if ForUpdate and
      not fModel.Lock(t, aID) then
     exit;
-  // try to retrieve existing JSON from internal cache
-  resp := fCache.Retrieve(t, aID);
+  // try to retrieve existing record from internal cache
+  ocr := fCache.Retrieve(aID, Value, t);
+  if ocr = ocrRetrievedFromCache then
+  begin
+    result := true;
+    exit;
+  end;
+  // get JSON object '{...}' in resp from corresponding EngineRetrieve() method
+  resp := EngineRetrieve(t, aID);
   if resp = '' then
   begin
-    // get JSON object '{...}' in resp from corresponding EngineRetrieve() method
-    resp := EngineRetrieve(t, aID);
-    if resp = '' then
-    begin
-      fCache.NotifyDeletion(t, aID);
-      exit;
-    end;
-    fCache.Notify(t, aID, resp, ooSelect);
+    fCache.NotifyDeletion(t, aID); // ensure there is no cache for this ID
+    exit;
   end;
-  Value.IDValue := aID; // resp may not contain the "RowID": field after Update
   // fill Value from JSON if was correctly retrieved
   Value.FillFrom(resp);
+  Value.IDValue := aID; // resp may not contain the "RowID": field
+  if (ocr <> ocrCacheDisabled) and
+     not ForUpdate then
+    fCache.NotifyAllFields(t, Value);
   result := true;
 end;
 
@@ -1800,9 +1811,9 @@ end;
 function TRestOrm.Update(Value: TOrm; const CustomFields: TFieldBits;
   DoNotAutoComputeFields: boolean): boolean;
 var
-  JsonValues: RawUtf8;
+  json: RawUtf8;
   t: integer;
-  FieldBits: TFieldBits;
+  bits: TFieldBits;
 begin
   if (self = nil) or
      (Value = nil) or
@@ -1820,31 +1831,31 @@ begin
        (Value.FillContext.Table <> nil) and
        (Value.FillContext.TableMapRecordManyInstances = nil) then
       // within FillPrepare/FillOne loop: update ID, TModTime and mapped fields
-      FieldBits := Value.FillContext.TableMapFields +
-        Value.Orm.FieldBits[oftModTime]
+      bits := Value.FillContext.TableMapFields + Value.Orm.FieldBits[oftModTime]
     else
       // update all simple/custom fields (also for FillPrepareMany)
-      FieldBits := Value.Orm.SimpleFieldsBits[ooUpdate]
+      bits := Value.Orm.SimpleFieldsBits[ooUpdate]
   else
     // CustomFields<>[] -> update specified (and TModTime fields)
     if DoNotAutoComputeFields then
-      FieldBits := CustomFields
+      bits := CustomFields
     else
-      FieldBits := CustomFields + Value.Orm.FieldBits[oftModTime];
-  if IsZero(FieldBits) then
+      bits := CustomFields + Value.Orm.FieldBits[oftModTime];
+  if IsZero(bits) then
   begin
     result := true; // a TOrm with NO simple fields (e.g. ID/blob pair)
     exit;
   end;
-  fCache.Notify(Value, ooUpdate); // will serialize Value (JsonValues may not be enough)
-  GetJsonValue(Value, {withid=}false, FieldBits, JsonValues);
+  GetJsonValue(Value, {withid=}false, bits, json);
   WriteLock;
   try
     // may be within a batch in another thread
-    result := EngineUpdate(t, Value.IDValue, JsonValues);
+    result := EngineUpdate(t, Value.IDValue, json);
   finally
     WriteUnLock;
   end;
+  if result then
+    fCache.NotifyUpdate(t, Value, bits);
 end;
 
 function TRestOrm.Update(Value: TOrm; const CustomCsvFields: RawUtf8;
@@ -1889,18 +1900,23 @@ begin
     result := 0;
     exit;
   end;
-  if ForceID or
-     (Value.IDValue = 0) then
-  begin
-    result := Add(Value, true, ForceID);
-    if (result <> 0) or
+  WriteLock; // make this atomic
+  try
+    if ForceID or
        (Value.IDValue = 0) then
-      exit;
+    begin
+      result := Add(Value, true, ForceID);
+      if (result <> 0) or
+         (Value.IDValue = 0) then
+        exit;
+    end;
+    if Update(Value) then
+      result := Value.IDValue
+    else
+      result := 0;
+  finally
+    WriteUnlock;
   end;
-  if Update(Value) then
-    result := Value.IDValue
-  else
-    result := 0;
 end;
 
 function TRestOrm.UpdateField(Table: TOrmClass; ID: TID;
@@ -1918,7 +1934,6 @@ function TRestOrm.UpdateField(Table: TOrmClass;
   const WhereFieldName: RawUtf8; const WhereFieldValue: array of const;
   const FieldName: RawUtf8; const FieldValue: array of const): boolean;
 var
-  t: integer;
   SetValue, WhereValue: RawUtf8;
 begin
   result := false;
@@ -1928,9 +1943,8 @@ begin
     exit;
   VarRecToInlineValue(WhereFieldValue[0], WhereValue);
   VarRecToInlineValue(FieldValue[0], SetValue);
-  t := fModel.GetTableIndexExisting(Table);
-  result := EngineUpdateField(t, FieldName, SetValue,
-    WhereFieldName, WhereValue);
+  result := EngineUpdateField(fModel.GetTableIndexExisting(Table),
+    FieldName, SetValue, WhereFieldName, WhereValue);
   // warning: this may not update the internal cache
 end;
 
@@ -1949,13 +1963,12 @@ function TRestOrm.UpdateField(Table: TOrmClass;
   const WhereFieldName: RawUtf8; const WhereFieldValue: variant;
   const FieldName: RawUtf8; const FieldValue: variant): boolean;
 var
-  t: integer;
   value, where: RawUtf8;
 begin
   VariantToInlineValue(WhereFieldValue, where);
   VariantToInlineValue(FieldValue, value);
-  t := fModel.GetTableIndexExisting(Table);
-  result := EngineUpdateField(t, FieldName, value, WhereFieldName, where);
+  result := EngineUpdateField(fModel.GetTableIndexExisting(Table),
+    FieldName, value, WhereFieldName, where);
   // warning: this may not update the internal cache
 end;
 
@@ -2157,8 +2170,8 @@ begin
   blob := Table.OrmProps.BlobFieldPropFromRawUtf8(BlobFieldName);
   if blob = nil then
     exit;
-  result := EngineUpdateBlob(fModel.GetTableIndexExisting(Table), aID, blob,
-    BlobData);
+  result := EngineUpdateBlob(
+    fModel.GetTableIndexExisting(Table), aID, blob, BlobData);
 end;
 
 function TRestOrm.UpdateBlob(Table: TOrmClass; aID: TID;
@@ -2426,10 +2439,10 @@ begin
     result := fRest.Run.BackgroundTimer.AsyncBatchDelete(Table, ID);
 end;
 
-function TRestOrm.Cache: TRestCache;
+function TRestOrm.Cache: TOrmCache;
 begin
   if fCache = nil then
-    fCache := TRestCache.Create(self);
+    fCache := TOrmCache.Create(self);
   result := fCache;
 end;
 
@@ -2696,7 +2709,7 @@ begin
       if rec.IDValue = 0 then
         raise EOrmTable.CreateUtf8('%.UpdatesToBatch: no %.ID map', [self, c]);
       upd := fUpdatedRowsFields[r];
-      if upd = 0 then // more than 32 fields -> send all mapped
+      if upd = 0 then // more than 32 fields -> include all fields to batch
         bits := def32
       else if upd <> updlast then
       begin

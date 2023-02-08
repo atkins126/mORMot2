@@ -669,17 +669,19 @@ type
   {$M-}
 
   /// generic Exception type, as used by mormot.db.sql and mormot.db.sql.* units
-  ESqlDBException = class(ESynException)
+  ESqlDBException = class(ECoreDBException)
   protected
     fStatement: TSqlDBStatement;
   public
     /// constructor which will use FormatUtf8() instead of Format()
     // - if the first Args[0] is a TSqlDBStatement class instance, the current
     // SQL statement will be part of the exception message
+    // - will also call SetDbError() with the resulting message text
     constructor CreateUtf8(const Format: RawUtf8; const Args: array of const);
   published
     /// associated TSqlDBStatement instance, if supplied as first parameter
-    property Statement: TSqlDBStatement read fStatement;
+    property Statement: TSqlDBStatement
+      read fStatement;
   end;
 
   /// generic interface to access a SQL query result rows
@@ -1229,7 +1231,6 @@ type
     fUserID: RawUtf8;
     fForcedSchemaName: RawUtf8;
     fMainConnection: TSqlDBConnection;
-    fMainConnectionLock: TLightLock;
     fBatchMaxSentAtOnce: integer;
     fLoggedSqlMaxSize: integer;
     fConnectionTimeOutTicks: Int64;
@@ -1258,6 +1259,7 @@ type
     fOnTableCreate: TOnTableCreate;
     fOnTableAddColumn: TOnTableAddColumn;
     fOnTableCreateMultiIndex: TOnTableCreateMultiIndex;
+    fMainConnectionLock: TOSLightLock;
     procedure SetConnectionTimeOutMinutes(minutes: cardinal);
     function GetConnectionTimeOutMinutes: cardinal;
     // this default implementation just returns the fDbms value or dDefault
@@ -2670,12 +2672,11 @@ type
   TSqlDBConnectionPropertiesThreadSafe = class(TSqlDBConnectionProperties)
   protected
     fConnectionPool: TSynObjectListLightLocked;
-    fLatestConnectionRetrievedInPool: PtrInt;
     fConnectionPoolDeprecatedTix: cardinal;
     fThreadingMode: TSqlDBConnectionPropertiesThreadSafeThreadingMode;
     fDeleteConnectionInOwnThread: boolean;
     /// returns -1 if none was defined yet
-    function LockedPerThreadIndex: PtrInt;
+    function GetLockedPerThreadIndex: PtrInt;
     /// overridden method to properly handle multi-thread
     function GetMainConnection: TSqlDBConnection; override;
   public
@@ -2948,6 +2949,8 @@ type
     /// create a statement instance
     // - this overridden version will initialize the internal fColumn* fields
     constructor Create(aConnection: TSqlDBConnection); override;
+    /// retrieve one row of the resultset as a JSON object into a TResultsWriter
+    function StepToJson(W: TJsonWriter; SeekFirst: boolean = false): boolean; override;
     /// retrieve a column name of the current Row
     // - Columns numeration (i.e. Col value) starts with 0
     // - it's up to the implementation to ensure than all column names are unique
@@ -3058,7 +3061,7 @@ begin
           if c[1] = 'Z' then
           begin
             if c[2] = 'Z' then
-              raise ESqlDBException.Create(
+              raise ESqlDBException.CreateU(
                 'Only up to 656 parameters are possible in :AA to :ZZ range');
             c[1] := 'A';
             inc(c[2]);
@@ -3287,7 +3290,7 @@ begin
   result := false;
   if Json = nil then
     exit;
-  p.Init(Json, nil, [], nil, nil);
+  p.InitParser(Json, nil, [], nil, nil, nil);
   if not p.ParseArray then
     exit;
   n := JsonArrayCount(p.Json); // prefetch input and compute dest length
@@ -3296,15 +3299,14 @@ begin
   SetLength(Values, n);
   for i := 0 to n - 1 do
   begin
-    p.GetJsonFieldOrObjectOrArray;
-    if not p.Valid then
-      exit;
+    if not p.ParseNextAny then
+      exit; // input parsing error
     case ParamType of
       ftUtf8: // SQL single-quoted string
         QuotedStr(p.Value, p.ValueLen, '''', Values[i]);
       ftDate: // normalize
-        Values[i] := DateTimeToIso8601(Iso8601ToDateTimePUtf8Char(
-          p.Value, p.ValueLen), {expanded=}true, TimeSeparator, DateMS, '''');
+        DateTimeToIso8601Var(Iso8601ToDateTimePUtf8Char(p.Value, p.ValueLen),
+          {expanded=}true, DateMS, TimeSeparator, '''', Values[i]);
     else
       if (p.Value = '') and
          not p.WasString then
@@ -3331,29 +3333,24 @@ end;
 
 constructor ESqlDBException.CreateUtf8(const Format: RawUtf8;
   const Args: array of const);
-var
-  msg {$ifndef SYNDB_SILENCE}, sql{$endif}: RawUtf8;
 begin
-  msg := FormatUtf8(Format, Args);
+  FormatUtf8(Format, Args, fMessageUtf8);
   {$ifndef SYNDB_SILENCE}
-  if (length(Args) > 0) and
-     (Args[0].VType = vtObject) and
-     (Args[0].VObject <> nil) then
-    if Args[0].VObject.InheritsFrom(TSqlDBStatement) then
-    begin
-      fStatement := TSqlDBStatement(Args[0].VObject);
-      if fStatement.Connection.Properties.LogSqlStatementOnException then
-      begin
-        try
-          sql := fStatement.GetSqlWithInlinedParams;
-        except
-          sql := fStatement.SQL; // if parameter access failed -> append with ?
-        end;
-        msg := msg + ' - ' + sql;
+  if high(Args) >= 0 then
+  begin
+    fStatement := VarRecAs(Args[0], TSqlDBStatement);
+    if (fStatement <> nil) and
+       fStatement.Connection.Properties.LogSqlStatementOnException then
+      try
+        fMessageUtf8 := fMessageUtf8 + ' - ' +
+          fStatement.GetSqlWithInlinedParams;
+      except
+        fMessageUtf8 := fMessageUtf8 + ' - ' +
+          fStatement.SQL; // if parameter access failed -> append with ?
       end;
-    end;
+  end;
   {$endif SYNDB_SILENCE}
-  inherited Create(Utf8ToString(msg));
+  CreateAfterSetMessageUtf8;
 end;
 
 
@@ -3385,6 +3382,7 @@ constructor TSqlDBConnectionProperties.Create(const aServerName, aDatabaseName,
 var
   db: TSqlDBDefinition;
 begin
+  fMainConnectionLock.Init; // mandatory for TOSLightLock
   fServerName := aServerName;
   fDatabaseName := aDatabaseName;
   fUserID := aUserID;
@@ -3449,6 +3447,7 @@ begin
   fMainConnection.Free;
   FillZero(fPassword);
   inherited;
+  fMainConnectionLock.Done; // mandatory for TOSLightLock
 end;
 
 function TSqlDBConnectionProperties.Execute(const aSql: RawUtf8;
@@ -4924,7 +4923,7 @@ end;
 
 function TSqlDBConnectionProperties.SqlDateToIso8601Quoted(DateTime: TDateTime): RawUtf8;
 begin
-  result := DateTimeToIso8601(DateTime, true, DateTimeFirstChar, false, '''');
+  DateTimeToIso8601Var(DateTime, true, false, DateTimeFirstChar, '''', result);
 end;
 
 function TSqlDBConnectionProperties.SqlCreate(const aTableName: RawUtf8;
@@ -5674,7 +5673,7 @@ end;
 class function TSqlDBConnectionProperties.CreateFromFile(
   const aJsonFile: TFileName; aKey: cardinal): TSqlDBConnectionProperties;
 begin
-  result := CreateFromJson(AnyTextFileToRawUtf8(aJsonFile, true), aKey);
+  result := CreateFromJson(RawUtf8FromFile(aJsonFile), aKey);
 end;
 
 
@@ -5855,8 +5854,8 @@ begin
     case VType of
       varNull:
         BindNull(Param, IO);
-      varboolean:
-        if Vboolean then
+      varBoolean:
+        if VBoolean then
           Bind(Param, 1, IO)
         else
           Bind(Param, 0, IO);
@@ -7032,6 +7031,7 @@ procedure TSqlDBStatement.Reset;
 begin
   fSqlWithInlinedParams := '';
   fSqlLogTimer.Init; // reset timer (for cached statement for example)
+  ClearDbError;
 end;
 
 procedure TSqlDBStatement.ReleaseRows;
@@ -7127,7 +7127,7 @@ end;
 procedure TSqlDBConnection.CheckConnection;
 begin
   if self = nil then
-    raise ESqlDBException.Create('CheckConnection: TSqlDBConnection=nil');
+    raise ESqlDBException.CreateU('TSqlDBConnection(nil).CheckConnection');
   if not Connected then
     raise ESqlDBException.CreateUtf8('% on %/% should be connected',
       [self, Properties.ServerName, Properties.DataBaseName]);
@@ -7471,7 +7471,10 @@ begin
     else if RaiseExceptionOnError and
             (fErrorException <> nil) then
       // propagate error not related to connection (e.g. SQL syntax error)
-      raise fErrorException.Create(Utf8ToString(fErrorMessage));
+      if fErrorException.InheritsFrom(ESynException) then
+        raise ECoreDBException.CreateU(fErrorMessage)
+      else
+        raise fErrorException.Create(Utf8ToString(fErrorMessage));
   end
   else
     // regular preparation, with no connection error interception
@@ -7601,7 +7604,6 @@ begin
       fMainConnectionLock.UnLock;
       fConnectionPool.ClearFromLast; // to use FreeAndNilSafe
     end;
-    fLatestConnectionRetrievedInPool := -1;
     fConnectionPoolDeprecatedTix := 0; // trigger ThreadSafeConnection() release
   finally
     fConnectionPool.Safe.WriteUnLock;
@@ -7612,11 +7614,13 @@ constructor TSqlDBConnectionPropertiesThreadSafe.Create(
   const aServerName, aDatabaseName, aUserID, aPassWord: RawUtf8);
 begin
   fConnectionPool := TSynObjectListLightLocked.Create;
-  fLatestConnectionRetrievedInPool := -1;
   inherited Create(aServerName, aDatabaseName, aUserID, aPassWord);
 end;
 
-function TSqlDBConnectionPropertiesThreadSafe.LockedPerThreadIndex: PtrInt;
+threadvar
+  PerThreadConnectionIndex: integer; // for GetLockedPerThreadIndex O(1) lookup
+
+function TSqlDBConnectionPropertiesThreadSafe.GetLockedPerThreadIndex: PtrInt;
 var
   id: TThreadID;
   conn: ^TSqlDBConnectionThreadSafe;
@@ -7626,18 +7630,18 @@ begin
   begin
     // we just search for the TThreadID and won't check for IsOutdated()
     id := GetCurrentThreadId;
-    // most of the time, we are from the same thread: use simple cache
-    result := fLatestConnectionRetrievedInPool;
+    // most of the time, we have the index in the threadvar
+    result := PerThreadConnectionIndex;
     if (PtrUInt(result) < PtrUInt(fConnectionPool.Count)) and
        (TSqlDBConnectionThreadSafe(fConnectionPool.List[result]).
          fThreadID = id) then
         exit;
-    // search for connection pool for this TThreadID
+    // search for this TThreadID connection (should almost never happen)
     conn := pointer(fConnectionPool.List);
     for result := 0 to fConnectionPool.Count - 1 do
       if conn^.fThreadID = id then
       begin
-        fLatestConnectionRetrievedInPool := result;
+        PerThreadConnectionIndex := result;
         exit;
       end
       else
@@ -7659,11 +7663,11 @@ begin
   fConnectionPool.Safe.WriteLock;
   try
     // do nothing if this thread has no active connection
-    i := LockedPerThreadIndex;
+    i := GetLockedPerThreadIndex;
     if i >= 0 then
     begin
       fConnectionPool.Delete(i); // release thread's TSqlDBConnection instance
-      fLatestConnectionRetrievedInPool := -1;
+      PerThreadConnectionIndex := -1;
     end;
   finally
     fConnectionPool.Safe.WriteUnLock;
@@ -7701,10 +7705,7 @@ begin
                 while i < fConnectionPool.Count do
                   if TSqlDBConnectionThreadSafe(fConnectionPool.List[i]).
                         IsOutdated(tix) then
-                  begin
-                    fConnectionPool.Delete(i);
-                    fLatestConnectionRetrievedInPool := -1;
-                  end
+                    fConnectionPool.Delete(i)
                   else
                     inc(i);
               finally
@@ -7716,7 +7717,7 @@ begin
         // search for an existing connection
         result := nil;
         fConnectionPool.Safe.ReadLock; // concurrent non blocking search
-        i := LockedPerThreadIndex;
+        i := GetLockedPerThreadIndex;
         if i >= 0 then
           result := fConnectionPool.List[i];
         fConnectionPool.Safe.ReadUnLock;
@@ -7735,13 +7736,14 @@ begin
         (result as TSqlDBConnectionThreadSafe).fThreadID := GetCurrentThreadId;
         fConnectionPool.Safe.WriteLock;
         try
-          fLatestConnectionRetrievedInPool := fConnectionPool.Add(result)
+          i := fConnectionPool.Add(result)
         finally
           fConnectionPool.Safe.WriteUnLock;
         end;
+        PerThreadConnectionIndex := i; // store in a threadvar for O(1) lookup
       end;
     tmMainConnection:
-      result := inherited GetMainConnection; // has its own TLightLock
+      result := inherited GetMainConnection; // has its own TOSLightLock
   else
     result := nil;
   end;
@@ -7754,7 +7756,7 @@ function TSqlDBStatementWithParams.CheckParam(Param: integer;
   NewType: TSqlDBFieldType; IO: TSqlDBParamInOutType): PSqlDBParam;
 begin
   if self = nil then
-    raise ESqlDBException.Create('self=nil for TSqlDBStatement.Bind*()');
+    raise ESqlDBException.CreateU('TSqlDBStatementWithParams(nil).Bind');
   if Param > fParamCount then
     fParam.Count := Param; // resize fParams[] dynamic array if necessary
   result := @fParams[Param - 1];
@@ -7969,6 +7971,7 @@ procedure TSqlDBStatementWithParams.BindArray(Param: integer;
 var
   i: PtrInt;
   p: PSqlDBParam;
+  dt: TDateTime;
 begin
   inherited; // raise an exception in case of invalid parameter
   p := CheckParam(Param, ParamType, paramIn);
@@ -7979,9 +7982,12 @@ begin
     for i := 0 to ValuesCount - 1 do // fix e.g. for PostgreSQL
       if (p^.VArray[i] <> '') and
          (p^.VArray[i][1] = '''') then
+      begin
         // not only replace 'T'->timeseparator, but force expanded format
-        DateTimeToIso8601(Iso8601ToDateTime(p^.VArray[i]), {expanded=}true,
-          Connection.Properties.DateTimeFirstChar, {ms=}fForceDateWithMS, '''');
+        dt := Iso8601ToDateTime(p^.VArray[i]);
+        DateTimeToIso8601Var(dt, {expanded=}true, {ms=}fForceDateWithMS,
+          Connection.Properties.DateTimeFirstChar, '''', p^.VArray[i]);
+      end;
   fParamsArrayCount := ValuesCount;
 end;
 
@@ -8163,7 +8169,8 @@ constructor TSqlDBStatementWithParamsAndColumns.Create(
   aConnection: TSqlDBConnection);
 begin
   inherited Create(aConnection);
-  if aConnection.Properties.EnsureColumnNameUnique then
+  if (aConnection <> nil) and
+     aConnection.Properties.EnsureColumnNameUnique then
     fColumn.InitSpecific(TypeInfo(TSqlDBColumnPropertyDynArray),
       fColumns, ptRawUtf8, @fColumnCount, {caseinsens=}true)
   else
@@ -8171,19 +8178,40 @@ begin
       fColumns, @fColumnCount); // no hash index created nor unicity check
 end;
 
+function TSqlDBStatementWithParamsAndColumns.StepToJson(W: TJsonWriter;
+  SeekFirst: boolean): boolean;
+var
+  col: integer;
+begin
+  result := Step(SeekFirst);
+  if not result then
+    exit;
+  W.Add('{');
+  for col := 0 to fColumnCount - 1 do
+  begin
+    W.AddFieldName(fColumns[col].ColumnName); // add '"ColumnName":'
+    ColumnToJson(col, W);
+    W.AddComma;
+  end;
+  W.CancelLastComma; // cancel last ','
+  W.Add('}');
+end;
+
 procedure TSqlDBStatementWithParamsAndColumns.ClearColumns;
 begin
   if fColumnCount = 0 then
     exit;
   fColumn.Clear;
-  if fConnection.Properties.EnsureColumnNameUnique then
+  if (fConnection <> nil) and
+     fConnection.Properties.EnsureColumnNameUnique then
     fColumn.ForceReHash;
 end;
 
 function TSqlDBStatementWithParamsAndColumns.AddColumn(
   const ColName: RawUtf8): PSqlDBColumnProperty;
 begin
-  if fConnection.Properties.EnsureColumnNameUnique then
+  if (fConnection <> nil) and
+     fConnection.Properties.EnsureColumnNameUnique then
     result := fColumn.AddAndMakeUniqueName(ColName)
   else
   begin
@@ -8197,7 +8225,8 @@ function TSqlDBStatementWithParamsAndColumns.ColumnIndex(
 var
   c: PSqlDBColumnProperty;
 begin
-  if fConnection.Properties.EnsureColumnNameUnique then
+  if (fConnection <> nil) and
+     fConnection.Properties.EnsureColumnNameUnique then
     result := fColumn.FindHashed(aColumnName)
   else
   begin

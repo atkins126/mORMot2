@@ -68,7 +68,7 @@ const
   MAX_THREADS = 50; // 1, 2, 5, 10, 30, 50
   MAX_CLIENTS = 50;
 
-// may be implemented in the future
+// unlikely to be implemented in the future (can't work from Services)
 {.$define HAS_NAMEDPIPES}
 {.$define HAS_MESSAGES}
 
@@ -251,6 +251,9 @@ var
   Rest: array of TRest;
   Rec: TOrmPeople;
   i, n, r: PtrInt;
+  infoUri, peopleUri: RawUtf8;
+  http: THttpClientSocket;
+  id: TID;
   log: ISynLog;
 begin
   SetCurrentThreadName('% #%', [self, fID]);
@@ -263,6 +266,20 @@ begin
       if Terminated or
          fProcessFinished then // from Destroy
         break;
+      infoUri := '';
+      if fTest.fHttpServer <> nil then
+        if fTest.fHttpServer.HttpServer.Router = nil then
+        begin
+          infoUri := '/root/timestamp/info';
+          peopleUri := '/root/people/';
+        end
+        else
+        begin
+          // Route.Get('/info', '/root/timestamp/info');
+          // Route.Get('/people/<id>', '/root/people/<id>');
+          infoUri := '/info';
+          peopleUri := '/people/';
+        end;
       try
         try
           SetLength(Rest, fTest.ClientPerThread);
@@ -274,6 +291,7 @@ begin
           begin
             n := 0;
             r := 0;
+            log.Log(sllTrace, 'Execute Add', self);
             for i := 0 to fIterationCount - 1 do
             begin
               Rec.FirstName := FormatUTF8('%/%', [i, fIterationCount - 1]);
@@ -288,6 +306,30 @@ begin
                 break;
               inc(n);
             end;
+            log.Log(sllTrace, 'Execute http.Get', self);
+            if (infoUri <> '') and
+               not IdemPChar(pointer(fTest.fClientOnlyPort), 'UNIX:') and
+               (fTest.fHttpServer.Use in [useHttpSocket, useHttpAsync]) then
+            begin
+              http := OpenHttp('127.0.0.1', fTest.fClientOnlyPort);
+              if not fTest.CheckFailed(http <> nil, 'openhttp') then
+                try
+                  fTest.CheckEqual(
+                    http.Get(infoUri, 1000), HTTP_SUCCESS, infoUri);
+                  fTest.CheckUtf8(http.Content <> '', infoUri);
+                  for i := 0 to (n div 5) - 1 do
+                  begin
+                    fTest.CheckEqual(
+                      http.Get(peopleUri + Int64ToUtf8(fIDs[i]), 1000),
+                      HTTP_SUCCESS, peopleUri);
+                    fTest.CheckUtf8(JsonGetID(pointer(Http.Content), id), peopleUri);
+                    fTest.CheckEqual(id, fIDs[i]);
+                  end;
+                finally
+                  http.Free;
+                end;
+            end;
+            log.Log(sllTrace, 'Execute Retrieve', self);
             for i := 0 to n - 1 do
               if fTest.CheckFailed(Rest[r].Orm.Retrieve(fIDs[i], Rec), 'get') then
                 break
@@ -301,8 +343,10 @@ begin
                 else
                   inc(r);
               end;
+            log.Log(sllTrace, 'Execute wait', self);
           end;
         finally
+          log.Log(sllTrace, 'Execute finally', self);
           for i := 0 to high(Rest) do
             if Rest[i] <> fTest.fDatabase then
               FreeAndNil(Rest[i]);
@@ -451,6 +495,7 @@ var
   i, j: integer;
   allFinished: boolean;
   Thread: TTestMultiThreadProcessThread;
+  longstandingclient: TRest;
   {$ifdef HAS_MESSAGES}
   aMsg: TMsg;
   {$endif HAS_MESSAGES}
@@ -459,6 +504,7 @@ begin
     exit;
   fTestClass := aClass;
   fClientOnlyPort := aPort;
+  longstandingclient := nil;
   // 1. Prepare a new blank SQLite3 database in high speed mode
   if fClientOnlyServerIP = '' then
   begin
@@ -491,16 +537,26 @@ begin
         {threads=}8, secNone, '', '', HTTPSERVER_DEFAULT_OPTIONS + [rsoLogVerbose] );
       if aHttp in HTTP_BIDIR then
         fHttpServer.WebSocketsEnable(fDatabase, WS_KEY, WS_JSON, WS_BIN)^.SetFullLog;
+      if aHttp in HTTP_SOCKET_MODES then // http.sys may have not /* registered
+      begin
+        fHttpServer.Route.Get('/info', '/root/timestamp/info');
+        fHttpServer.Route.Get('/people/<id>', '/root/people/<id>');
+      end;
       //writeln('server running on ',fDatabase.Model.Root,':',fHttpserver.Port); readln;
     end;
   end;
   // 2. Perform the tests
+  if fTestClass.InheritsFrom(TRestHttpClientGeneric) then
+    longstandingclient := CreateClient;
   fRunningThreadCount := fMinThreads;
   repeat
     // 2.1. Reset the DB content between loops
     if (fRunningThreadCount > 1) and
        (fDatabase <> nil) then
       fDatabase.DB.Execute('delete from people');
+    if longstandingclient <> nil then
+      Check(not longstandingclient.Orm.MemberExists(TOrmPeople,
+        TTestMultiThreadProcessThread(fThreads.List[0]).fIDs[0]), 'client 1');
     // 2.2. Launch the background client threads
     fPendingThreadFinished.ResetEvent;
     fPendingThreadCount := fRunningThreadCount;
@@ -537,6 +593,9 @@ begin
     //WriteLn(' ',fTimer.PerSec(fOperationCount * 2));
     fRunConsole := FormatString('%%=%/s  ',
       [fRunConsole, fRunningThreadCount, fTimer.PerSec(fOperationCount * 2)]);
+    if longstandingclient <> nil then
+      Check(longstandingclient.Orm.MemberExists(TOrmPeople,
+        TTestMultiThreadProcessThread(fThreads.List[0]).fIDs[0]), 'client 2');
     // 2.4. Check INSERTed IDs consistency
     for n := 0 to fRunningThreadCount - 1 do
       with TTestMultiThreadProcessThread(fThreads.List[n]) do
@@ -579,6 +638,12 @@ begin
   // 3. Cleanup for this protocol (but reuse the same threadpool)
   DatabaseClose;
   Check(fDatabase = nil);
+  if longstandingclient <> nil then
+  begin
+    // validate server shutdown with connected client
+    with TSynLog.Enter(longstandingclient, 'Free') do
+      longstandingclient.Free;
+  end;
 end;
 
 procedure TTestMultiThreadProcess.Locked;

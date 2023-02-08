@@ -478,13 +478,13 @@ begin
     fEngineLastID := result;
     exit;
   end;
-  EnterCriticalSection(fStorageCriticalSection);
+  fStorageSafe.Lock;
   if (fEngineLastID = 0) or
      (fEngineAddCompute in [eacLastIDEachTime, eacMaxIDEachTime]) then
     ComputeMax_ID;
   inc(fEngineLastID);
   result := fEngineLastID;
-  LeaveCriticalSection(fStorageCriticalSection);
+  fStorageSafe.UnLock;
 end;
 
 function TRestStorageMongoDB.DocFromJson(const Json: RawUtf8;
@@ -606,7 +606,7 @@ begin
                     js := ''
                   else
                     // try to store dynamic array as BSON array (via Json)
-                    js := DynArrayBlobSaveJson(rtti.Info, pointer(blob));
+                    js := DynArrayBlobSaveJson(rtti.Info, pointer(blob), length(blob));
                   if (js <> '') and
                      (PInteger(js)^ and $00ffffff <> JSON_BASE64_MAGIC_C) then
                     BsonVariantType.FromJson(pointer(js), Variant(V^))
@@ -629,10 +629,10 @@ begin
       if fEngineAddCompute = eacSynUniqueIdentifier then
         raise EOrmMongoDB.CreateUtf8('%.DocFromJson: unexpected set ' +
           '%.ID=% with %', [self, fStoredClass, result, fEngineGenerator]);
-      EnterCriticalSection(fStorageCriticalSection);
+      fStorageSafe.Lock;
       if result > fEngineLastID then
         fEngineLastID := result;
-      LeaveCriticalSection(fStorageCriticalSection);
+      fStorageSafe.UnLock;
     end;
   if fStoredClassRecordProps.RecordVersionField <> nil then
   begin

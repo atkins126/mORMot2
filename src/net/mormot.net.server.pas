@@ -7,6 +7,7 @@ unit mormot.net.server;
   *****************************************************************************
 
    HTTP Server Classes
+   - Custom URI Routing using an efficient Radix Tree
    - Shared Server-Side HTTP Process
    - THttpServerSocket/THttpServer HTTP/1.1 Server
    - THttpApiServer HTTP/1.1 Server Over Windows http.sys Module
@@ -42,6 +43,224 @@ uses
   mormot.crypt.secure;
 
 
+{ ******************** Custom URI Routing using an efficient Radix Tree }
+
+type
+  /// one HTTP method supported by TUriRouter
+  // - only supports RESTful GET/POST/PUT/DELETE/OPTIONS/HEAD by default
+  // - each method would have its dedicated TUriTree parser in TUriRouter
+  TUriRouterMethod = (
+    urmGet,
+    urmPost,
+    urmPut,
+    urmDelete,
+    urmOptions,
+    urmHead);
+
+  /// the HTTP methods supported by TUriRouter
+  TUriRouterMethods = set of TUriRouterMethod;
+
+  /// context information, as cloned by TUriTreeNode.Split()
+  TUriTreeNodeData = record
+    /// the Rewrite() URI text
+    ToUri: RawUtf8;
+    /// [pos1,len1,valndx1,pos2,len2,valndx2,...] trios from ToUri content
+    ToUriPosLen: TIntegerDynArray;
+    /// the size of all ToUriPosLen[] static content
+    ToUriStaticLen: integer;
+    /// the URI method to be used after ToUri rewrite
+    ToUriMethod: TUriRouterMethod;
+    /// the HTTP error code for a Rewrite() with an integer ToUri (e.g. '404")
+    ToUriErrorStatus: {$ifdef CPU32} word {$else} cardinal {$endif};
+    /// the callback registered by Run() for this URI
+    Execute: TOnHttpServerRequest;
+  end;
+
+  /// implement a Radix Tree node to hold one URI registration
+  TUriTreeNode = class(TRadixTreeNodeParams)
+  protected
+    function LookupParam(Ctxt: TObject; Pos: PUtf8Char; Len: integer): boolean;
+      override;
+    procedure RewriteUri(Ctxt: THttpServerRequestAbstract);
+  public
+    /// all context information, as cloned by Split()
+    Data: TUriTreeNodeData;
+    /// overriden to support the additional Data fields
+    function Split(const Text: RawUtf8): TRadixTreeNode; override;
+  end;
+
+  /// implement a Radix Tree to hold all registered URI for a given HTTP method
+  TUriTree = class(TRadixTreeParams)
+  protected
+    procedure SetNodeClass; override;
+  public
+    /// access to the root node of this tree
+    function Root: TUriTreeNode;
+      {$ifdef HASINLINE}inline;{$endif}
+  end;
+
+  /// exception class raised during TUriRouter.Rewrite/Run registration
+  EUriRouter = class(ERadixTree);
+
+  /// store per-method URI multiplexing Radix Tree in TUriRouter
+  // - each HTTP method would have its dedicated TUriTree parser in TUriRouter
+  TUriRouterTree = array[urmGet .. high(TUriRouterMethod)] of TUriTree;
+
+  /// efficient server-side URI routing for THttpServerGeneric
+  // - Process() is done with no memory allocation for a static route,
+  // using a very efficient Radix Tree for path lookup, over a thread-safe
+  // non-blocking URI parsing with values extractions for rewrite or execution
+  // - here are some numbers from TNetworkProtocols._TUriTree on my laptop:
+  // $ 1000 URI lookups in 37us i.e. 25.7M/s, aver. 37ns
+  // $ 1000 URI static rewrites in 80us i.e. 11.9M/s, aver. 80ns
+  // $ 1000 URI parametrized rewrites in 117us i.e. 8.1M/s, aver. 117ns
+  // $ 1000 URI static execute in 91us i.e. 10.4M/s, aver. 91ns
+  // $ 1000 URI parametrized execute in 162us i.e. 5.8M/s, aver. 162ns
+  TUriRouter = class(TSynPersistentRWLightLock)
+  protected
+    fTree: TUriRouterTree;
+    fTreeOptions: TRadixTreeOptions;
+    fEntries: array[urmGet .. high(TUriRouterMethod)] of integer;
+    procedure Setup(aFrom: TUriRouterMethod; const aFromUri: RawUtf8;
+      aTo: TUriRouterMethod; const aToUri: RawUtf8;
+      const aExecute: TOnHttpServerRequest);
+  public
+    /// initialize this URI routing engine
+    constructor Create(aOptions: TRadixTreeOptions = []); reintroduce;
+    /// finalize this URI routing engine
+    destructor Destroy; override;
+
+    /// register an URI rewrite with optional <param> place holders
+    // - <param> will be replaced in aToUri
+    // - if aToUri is an '200'..'599' integer, it will return it as HTTP error
+    // - otherwise, the URI will be rewritten into aToUri, e.g.
+    // $ Rewrite(urmGet, '/info', urmGet, 'root/timestamp/info');
+    // $ Rewrite(urmGet, '/path/from/<from>/to/<to>', urmPost,
+    // $  '/root/myservice/convert?from=<from>&to=<to>'); // for IMyService.Convert
+    // $ Rewrite(urmGet, '/index.php', '400'); // to avoid fuzzing
+    // $ Rewrite(urmGet, '/*', '/static/*' // '*' synonymous to '<path:path>'
+    procedure Rewrite(aFrom: TUriRouterMethod; const aFromUri: RawUtf8;
+      aTo: TUriRouterMethod; const aToUri: RawUtf8);
+    /// just a wrapper around Rewrite(urmGet, aFrom, aToMethod, aTo)
+    // - e.g. Route.Get('/info', 'root/timestamp/info');
+    // - e.g. Route.Get('/user/<id>', '/root/userservice/new?id=<id>'); will
+    // rewrite internally '/user/1234' URI as '/root/userservice/new?id=1234'
+    // - e.g. Route.Get('/user/<int:id>', '/root/userservice/new?id=<id>');
+    // to ensure id is a real integer before redirection
+    // - e.g. Route.Get('/admin.php', '403');
+    // - e.g. Route.Get('/*', '/static/*'); with '*' synonymous to '<path:path>'
+    procedure Get(const aFrom, aTo: RawUtf8;
+      aToMethod: TUriRouterMethod = urmGet); overload;
+    /// just a wrapper around Rewrite(urmPost, aFrom, aToMethod, aTo)
+    // - e.g. Route.Post('/doconvert', '/root/myservice/convert');
+    procedure Post(const aFrom, aTo: RawUtf8;
+      aToMethod: TUriRouterMethod = urmPost); overload;
+    /// just a wrapper around Rewrite(urmPut, aFrom, aToMethod, aTo)
+    // - e.g. Route.Put('/domodify', '/root/myservice/update', urmPost);
+    procedure Put(const aFrom, aTo: RawUtf8;
+      aToMethod: TUriRouterMethod = urmPut); overload;
+    /// just a wrapper around Rewrite(urmDelete, aFrom, aToMethod, aTo)
+    // - e.g. Route.Delete('/doremove', '/root/myservice/delete', urmPost);
+    procedure Delete(const aFrom, aTo: RawUtf8;
+      aToMethod: TUriRouterMethod = urmDelete); overload;
+    /// just a wrapper around Rewrite(urmOptions, aFrom, aToMethod, aTo)
+    // - e.g. Route.Options('/doremove', '/root/myservice/Options', urmPost);
+    procedure Options(const aFrom, aTo: RawUtf8;
+      aToMethod: TUriRouterMethod = urmOptions); overload;
+    /// just a wrapper around Rewrite(urmHead, aFrom, aToMethod, aTo)
+    // - e.g. Route.Head('/doremove', '/root/myservice/Head', urmPost);
+    procedure Head(const aFrom, aTo: RawUtf8;
+      aToMethod: TUriRouterMethod = urmHead); overload;
+
+    /// assign a TOnHttpServerRequest callback with a given URI
+    // - <param> place holders will be parsed and available in callback
+    // as Ctxt['param'] default property or Ctxt.RouteInt64/RouteEquals methods
+    // - could be used e.g. for standard REST process as
+    // $ Route.Run([urmGet], '/user/<user>/pic', DoUserPic) // retrieve a list
+    // $ Route.Run([urmGet, urmPost, urmPut, urmDelete],
+    // $    '/user/<user>/pic/<id>', DoUserPic) // CRUD picture access
+    procedure Run(aFrom: TUriRouterMethods; const aFromUri: RawUtf8;
+      const aExecute: TOnHttpServerRequest);
+    /// just a wrapper around Run([urmGet], aUri, aExecute) registration method
+    // - e.g. Route.Get('/plaintext', DoPlainText);
+    procedure Get(const aUri: RawUtf8; const aExecute: TOnHttpServerRequest); overload;
+    /// just a wrapper around Run([urmPost], aUri, aExecute) registration method
+    procedure Post(const aUri: RawUtf8; const aExecute: TOnHttpServerRequest); overload;
+    /// just a wrapper around Run([urmPut], aUri, aExecute) registration method
+    procedure Put(const aUri: RawUtf8; const aExecute: TOnHttpServerRequest); overload;
+    /// just a wrapper around Run([urmDelete], aUri, aExecute) registration method
+    procedure Delete(const aUri: RawUtf8; const aExecute: TOnHttpServerRequest); overload;
+    /// just a wrapper around Run([urmOptions], aUri, aExecute) registration method
+    procedure Options(const aUri: RawUtf8; const aExecute: TOnHttpServerRequest); overload;
+    /// just a wrapper around Run([urmHead], aUri, aExecute) registration method
+    procedure Head(const aUri: RawUtf8; const aExecute: TOnHttpServerRequest); overload;
+    /// assign the published methods of a class instance to their URI via RTTI
+    // - the signature of each method should match TOnHttpServerRequest
+    // - the method name is used for the URI, e.g. Instance.user as '/user',
+    // with exact case matching, and replacing _ in the method name by '-', e.g.
+    // Instance.cached_query as '/cached-query'
+    procedure RunMethods(RouterMethods: TUriRouterMethods; Instance: TObject;
+      const Prefix: RawUtf8 = '/');
+
+    /// perform URI parsing and rewrite/execution within HTTP server Ctxt members
+    // - should return 0 to continue the process, on a HTTP status code to abort
+    // if the request has been handled by a TOnHttpServerRequest callback
+    function Process(Ctxt: THttpServerRequestAbstract): integer;
+    /// erase all previous registrations, optionally for a given HTTP method
+    // - currently, there is no way to delete a route once registered, to
+    // optimize the process thread-safety: use Clear then re-register
+    procedure Clear(aMethods: TUriRouterMethods = [urmGet .. high(TUriRouterMethod)]);
+    /// access to the internal per-method TUriTree instance
+    // - some Tree[] may be nil if the HTTP method has not been registered yet
+    property Tree: TUriRouterTree
+      read fTree;
+    /// how the TUriRouter instance should be created
+    // - should be set before calling Run/Rewrite registration methods
+    property TreeOptions: TRadixTreeOptions
+      read fTreeOptions write fTreeOptions;
+  published
+    /// how many GET rules have been registered
+    property Gets: integer
+      read fEntries[urmGet];
+    /// how many POST rules have been registered
+    property Posts: integer
+      read fEntries[urmPost];
+    /// how many PUT rules have been registered
+    property Puts: integer
+      read fEntries[urmPut];
+    /// how many DELETE rules have been registered
+    property Deletes: integer
+      read fEntries[urmDelete];
+    /// how many HEAD rules have been registered
+    property Heads: integer
+      read fEntries[urmHead];
+    /// how many OPTIONS rules have been registered
+    property Optionss: integer
+      read fEntries[urmOptions];
+  end;
+
+const
+  /// convert TUriRouterMethod into its standard HTTP text
+  // - see UriMethod() function for the reverse conversion
+  URIROUTERMETHOD: array[TUriRouterMethod] of RawUtf8 = (
+    'GET',     // urmGet
+    'POST',    // urmPost
+    'PUT',     // urmPut
+    'DELETE',  // urmDelete
+    'OPTIONS', // urmOptions
+    'HEAD');   // urmHead
+
+/// quickly recognize most HTTP text methods into a TUriRouterMethod enumeration
+// - may replace cascaded IsGet() IsPut() IsPost() IsDelete() function calls
+// - see URIROUTERMETHOD[] constant for the reverse conversion
+function UriMethod(const Text: RawUtf8; out Method: TUriRouterMethod): boolean;
+
+/// check if the supplied text contains only valid characters for a root URI
+// - excluding the parameters, i.e. rejecting the ? and % characters
+// - but allowing <param> place holders as recognized by TUriRouter
+function IsValidUriRoute(p: PUtf8Char): boolean;
+
+
 { ******************** Shared Server-Side HTTP Process }
 
 type
@@ -71,7 +290,7 @@ type
       aConnectionOpaque: PHttpServerConnectionOpaque); virtual;
     /// could be called before Prepare() to reuse an existing instance
     procedure Recycle(aConnectionID: THttpServerConnectionID;
-      aConnectionFlags: THttpServerRequestFlags);
+      aConnectionThread: TSynThread; aConnectionFlags: THttpServerRequestFlags);
     /// prepare one reusable HTTP State Machine for sending the response
     function SetupResponse(var Context: THttpRequestContext;
       CompressGz, MaxSizeAtOnce: integer): PRawByteStringBuffer;
@@ -108,6 +327,15 @@ type
   // Windows SChannel API or OpenSSL - call WaitStarted() to set the certificates
   // - hsoBan40xIP will reject any IP for a few seconds after a 4xx error code
   // is returned (but 401/403) - only implemented by THttpAsyncServer for now
+  // - either hsoThreadCpuAffinity or hsoThreadSocketAffinity could be set: to
+  // force thread affinity to one CPU logic core, or CPU HW socket; see
+  // TNotifiedThread corresponding methods - not available on http.sys
+  // - hsoReusePort will set SO_REUSEPORT on POSIX, allowing to bind several
+  // THttpServerGeneric on the same port, either within the same process, or as
+  // separated processes (e.g. to set process affinity to one CPU HW socket)
+  // - hsoThreadSmooting will change the TAsyncConnections.ThreadPollingWakeup()
+  // algorithm to focus the process on the first threads of the pool - by design,
+  // this will disable both hsoThreadCpuAffinity and hsoThreadSocketAffinity
   THttpServerOption = (
     hsoHeadersUnfiltered,
     hsoHeadersInterning,
@@ -117,7 +345,11 @@ type
     hsoLogVerbose,
     hsoIncludeDateHeader,
     hsoEnableTls,
-    hsoBan40xIP);
+    hsoBan40xIP,
+    hsoThreadCpuAffinity,
+    hsoThreadSocketAffinity,
+    hsoReusePort,
+    hsoThreadSmooting);
 
   /// how a THttpServerGeneric class is expected to process incoming requests
   THttpServerOptions = set of THttpServerOption;
@@ -126,8 +358,9 @@ type
   // - do not use it, but rather THttpServer/THttpAsyncServer or THttpApiServer
   THttpServerGeneric = class(TNotifiedThread)
   protected
-    fShutdownInProgress: boolean;
+    fShutdownInProgress, fFavIconRouted: boolean;
     fOptions: THttpServerOptions;
+    fRoute: TUriRouter;
     /// optional event handlers for process interception
     fOnRequest: TOnHttpServerRequest;
     fOnBeforeBody: TOnHttpServerBeforeBody;
@@ -145,6 +378,7 @@ type
     fRemoteIPHeader, fRemoteIPHeaderUpper: RawUtf8;
     fRemoteConnIDHeader, fRemoteConnIDHeaderUpper: RawUtf8;
     fOnSendFile: TOnHttpServerSendFile;
+    fFavIcon: RawByteString;
     function GetApiVersion: RawUtf8; virtual; abstract;
     procedure SetServerName(const aName: RawUtf8); virtual;
     procedure SetOnRequest(const aRequest: TOnHttpServerRequest); virtual;
@@ -166,10 +400,35 @@ type
     procedure ParseRemoteIPConnID(const Headers: RawUtf8;
       var RemoteIP: RawUtf8; var RemoteConnID: THttpServerConnectionID);
     procedure AppendHttpDate(var Dest: TRawByteStringBuffer); virtual;
+    function GetFavIcon(Ctxt: THttpServerRequestAbstract): cardinal;
   public
     /// initialize the server instance
     constructor Create(const OnStart, OnStop: TOnNotifyThread;
       const ProcessName: RawUtf8; ProcessOptions: THttpServerOptions); reintroduce; virtual;
+    /// release all memory and handlers used by this server
+    destructor Destroy; override;
+    /// specify URI routes for internal URI rewrites or callback execution
+    // - rules registered here will be processed before main Request/OnRequest
+    // - URI rewrites allow to extend the default routing, e.g. from TRestServer
+    // - callbacks execution allow efficient server-side processing with parameters
+    // - static routes could be defined e.g. Route.Get('/', '/root/default')
+    // - <param> place holders could be defined for proper URI rewrite
+    // e.g. Route.Post('/user/<id>', '/root/userservice/new?id=<id>') will
+    // rewrite internally '/user/1234' URI as '/root/userservice/new?id=1234'
+    // - could be used e.g. for standard REST process via event callbacks with
+    // Ctxt['user'] or Ctxt.RouteInt64('id') parameter extraction in DoUserPic:
+    // $ Route.Run([urmGet], '/user/<user>/pic', DoUserPic) // retrieve a list
+    // $ Route.Run([urmGet, urmPost, urmPut, urmDelete],
+    // $    '/user/<user>/pic/<id>', DoUserPic) // CRUD picture access
+    // - warning: with the THttpApiServer, URIs will be limited by the actual
+    // root URI registered at http.sys level - there is no such limitation with
+    // the socket servers, which bind to a port, so handle all URIs on it
+    function Route: TUriRouter;
+    /// will route a GET to /favicon.ico to the given .ico file content
+    // - if none is supplied, the default Synopse/mORMot icon is used
+    // - if '' is supplied, /favicon.ico will return a 404 error status
+    // - warning: with THttpApiServer, may require a proper URI registration
+    procedure SetFavIcon(const FavIconContent: RawByteString = 'default');
     /// override this function to customize your http server
     // - InURL/InMethod/InContent properties are input parameters
     // - OutContent/OutContentType/OutCustomHeader are output parameters
@@ -205,21 +464,26 @@ type
       aCompressMinSize: integer = 1024); virtual;
     /// you can call this method to prepare the HTTP server for shutting down
     procedure Shutdown;
-    /// event handler called by the default implementation of the
-    // virtual Request method
+    /// main event handler called by the default implementation of the
+    // virtual Request method to process a given request
+    // - OutCustomHeader will handle Content-Type/Location
+    // - if OutContentType is STATICFILE_CONTENT_TYPE (i.e. '!STATICFILE'),
+    // then OutContent is the UTF-8 filename of a file to be sent directly
+    // to the client via http.sys or NGINX's X-Accel-Redirect; the
+    // OutCustomHeader should contain the eventual 'Content-type: ....' value
     // - warning: this process must be thread-safe (can be called by several
     // threads simultaneously)
     property OnRequest: TOnHttpServerRequest
       read fOnRequest write SetOnRequest;
     /// event handler called just before the body is retrieved from the client
     // - should return HTTP_SUCCESS=200 to continue the process, or an HTTP
-    // error code to reject the request immediatly, and close the connection
+    // error code to reject the request immediately, and close the connection
     property OnBeforeBody: TOnHttpServerBeforeBody
       read fOnBeforeBody write SetOnBeforeBody;
-    /// event handler called after HTTP body has been retrieved, before OnProcess
+    /// event handler called after HTTP body has been retrieved, before OnRequest
     // - may be used e.g. to return a HTTP_ACCEPTED (202) status to client and
-    // continue a long-term job inside the OnProcess handler in the same thread;
-    // or to modify incoming information before passing it to main businnes logic,
+    // continue a long-term job inside the OnRequest handler in the same thread;
+    // or to modify incoming information before passing it to main business logic,
     // (header preprocessor, body encoding etc...)
     // - if the handler returns > 0 server will send a response immediately,
     // unless return code is HTTP_ACCEPTED (202), then OnRequest will be called
@@ -230,7 +494,7 @@ type
     /// event handler called after request is processed but before response
     // is sent back to client
     // - main purpose is to apply post-processor, not part of request logic
-    // - if handler returns value > 0 it will override the OnProcess response code
+    // - if handler returns value > 0 it will override the OnRequest response code
     // - warning: this handler must be thread-safe (can be called by several
     // threads simultaneously)
     property OnAfterRequest: TOnHttpServerRequest
@@ -313,10 +577,6 @@ type
     //  $ proxy_set_header      X-Conn-ID       $connection
     property RemoteConnIDHeader: RawUtf8
       read fRemoteConnIDHeader write SetRemoteConnIDHeader;
-    /// allow to customize this HTTP server instance
-    // - some inherited classes may have only partial support of those options
-    property Options: THttpServerOptions
-      read fOptions write fOptions;
   published
     /// returns the API version used by the inherited implementation
     property ApiVersion: RawUtf8
@@ -330,6 +590,15 @@ type
     /// the associated process name
     property ProcessName: RawUtf8
       read fProcessName write fProcessName;
+    /// allow to customize this HTTP server instance
+    // - some inherited classes may have only partial support of those options
+    property Options: THttpServerOptions
+      read fOptions write fOptions;
+    /// read access to the URI router, as published property (e.g. for logs)
+    // - use the Route function to actually setup the routing
+    // - may be nil if Route has never been accessed, i.e. no routing was set
+    property Router: TUriRouter
+      read fRoute;
   end;
 
 
@@ -338,6 +607,7 @@ const
   HTTP_TLS_FLAGS: array[{tls=}boolean] of THttpServerRequestFlags = (
     [],
     [hsrHttps, hsrSecured]);
+
   /// used to compute the request ConnectionFlags from connection: upgrade header
   HTTP_UPG_FLAGS: array[{tls=}boolean] of THttpServerRequestFlags = (
     [],
@@ -359,13 +629,16 @@ function PrivKeyCertPfx: RawByteString;
 procedure InitNetTlsContextSelfSignedServer(var TLS: TNetTlsContext;
   Algo: TCryptAsymAlgo = caaRS256);
 
+/// used by THttpServerGeneric.SetFavIcon to return a nice /favicon.ico
+function FavIconBinary: RawByteString;
+
 
 { ******************** THttpServerSocket/THttpServer HTTP/1.1 Server }
 
 type
   /// results of THttpServerSocket.GetRequest virtual method
   // - return grError if the socket was not connected any more, or grException
-  // if any exception occured during the process
+  // if any exception occurred during the process
   // - grOversizedPayload is returned when MaximumAllowedContentLength is reached
   // - grRejected is returned when OnBeforeBody returned not 200
   // - grTimeout is returned when HeaderRetrieveAbortDelay is reached
@@ -394,7 +667,7 @@ type
     fRemoteConnectionID: THttpServerConnectionID;
     fServer: THttpServer;
     fKeepAliveClient: boolean;
-    fConnectionOpaque: THttpServerConnectionOpaque;
+    fConnectionOpaque: THttpServerConnectionOpaque; // two PtrUInt tags
     // from TSynThreadPoolTHttpServer.Task
     procedure TaskProcess(aCaller: TSynThreadPoolWorkThread); virtual;
     function TaskProcessBody(aCaller: TSynThreadPoolWorkThread;
@@ -1119,13 +1392,17 @@ type
 
   PHttpApiWebSocketConnectionVector = ^THttpApiWebSocketConnectionVector;
 
-  /// Event handlers for WebSocket
+  /// Event handler on THttpApiWebSocketServerProtocol Accepted connection
   TOnHttpApiWebSocketServerAcceptEvent = function(Ctxt: THttpServerRequest;
     var Conn: THttpApiWebSocketConnection): boolean of object;
-  TOnHttpApiWebSocketServerMessageEvent = procedure(const Conn: THttpApiWebSocketConnection;
+  /// Event handler on THttpApiWebSocketServerProtocol Message received
+  TOnHttpApiWebSocketServerMessageEvent = procedure(var Conn: THttpApiWebSocketConnection;
     aBufferType: WEB_SOCKET_BUFFER_TYPE; aBuffer: Pointer; aBufferSize: ULONG) of object;
-  TOnHttpApiWebSocketServerConnectEvent = procedure(const Conn: THttpApiWebSocketConnection) of object;
-  TOnHttpApiWebSocketServerDisconnectEvent = procedure(const Conn: THttpApiWebSocketConnection;
+  /// Event handler on THttpApiWebSocketServerProtocol connection
+  TOnHttpApiWebSocketServerConnectEvent = procedure(
+    var Conn: THttpApiWebSocketConnection) of object;
+  /// Event handler on THttpApiWebSocketServerProtocol disconnection
+  TOnHttpApiWebSocketServerDisconnectEvent = procedure(var Conn: THttpApiWebSocketConnection;
     aStatus: WEB_SOCKET_CLOSE_STATUS; aBuffer: Pointer; aBufferSize: ULONG) of object;
 
   /// Protocol Handler of websocket endpoints events
@@ -1324,6 +1601,418 @@ type
 implementation
 
 
+
+{ ******************** Custom URI Routing using an efficient Radix Tree }
+
+function UriMethod(const Text: RawUtf8; out Method: TUriRouterMethod): boolean;
+begin
+  result := false;
+  if Text = '' then
+    exit;
+  case PCardinal(Text)^ of
+    ord('G') + ord('E') shl 8 + ord('T') shl 16:
+      Method := urmGet;
+    ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24:
+      Method := urmPost;
+    ord('P') + ord('U') shl 8 + ord('T') shl 16:
+      Method := urmPut;
+    ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24:
+      Method := urmDelete;
+    ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24:
+      Method := urmOptions;
+    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24:
+      Method := urmHead;
+  else
+    exit;
+  end;
+  result := true;
+end;
+
+function IsValidUriRoute(p: PUtf8Char): boolean;
+begin
+  result := false;
+  if p = nil then
+    exit;
+  repeat
+    if p^ = '<' then // parse <param> or <path:param> place-holders
+    begin
+      inc(p);
+      while p^ <> '>' do
+        if p^ = #0 then
+          exit
+        else
+          inc(p);
+    end
+    else if not (p^ in ['/', '_', '-', '.', '0'..'9', 'a'..'z', 'A'..'Z']) then
+      exit; // not a valid plain URI character
+    inc(p);
+  until p^ = #0;
+  result := true;
+end;
+
+
+{ TUriTreeNode }
+
+function TUriTreeNode.Split(const Text: RawUtf8): TRadixTreeNode;
+begin
+  result := inherited Split(Text);
+  TUriTreeNode(result).Data := Data;
+  Finalize(Data);
+  FillCharFast(Data, SizeOf(Data), 0);
+end;
+
+function TUriTreeNode.LookupParam(Ctxt: TObject; Pos: PUtf8Char; Len: integer): boolean;
+var
+  req: THttpServerRequest absolute Ctxt;
+  n: PtrInt;
+  v: PIntegerArray;
+begin
+  result := false;
+  if Len < 0 then // Pos^ = '?par=val&par=val&...'
+  begin
+    req.fUrlParamPos := Pos;
+    exit;
+  end;
+  req.fRouteName := pointer(Names); // fast assign as pointer reference
+  n := length(Names) * 2; // length(Names[]) = current parameter index
+  if length(req.fRouteValuePosLen) < n then
+    SetLength(req.fRouteValuePosLen, n + 24); // alloc once by 12 params
+  v := @req.fRouteValuePosLen[n - 2];
+  n := Pos - pointer(req.Url);
+  if PtrUInt(n) > PtrUInt(length(req.Url)) then
+    exit; // paranoid check to avoid any overflow
+  v[0] := n;   // value position (0-based) in Ctxt.Url
+  v[1] := Len; // value length in Ctxt.Url
+  result := true;
+end;
+
+procedure TUriTreeNode.RewriteUri(Ctxt: THttpServerRequestAbstract);
+var
+  n: TDALen;
+  len: integer;
+  t, v: PIntegerArray;
+  p: PUtf8Char;
+  new: pointer; // fast temporary RawUtf8
+begin
+  // compute length of the new URI with injected values
+  t := pointer(Data.ToUriPosLen); // [pos1,len1,valndx1,...] trio rules
+  n := PDALen(PAnsiChar(t) - _DALEN)^ + _DAOFF;
+  v := pointer(THttpServerRequest(Ctxt).fRouteValuePosLen);
+  if v = nil then
+     exit; // paranoid
+  len := Data.ToUriStaticLen;
+  repeat
+    if t[2] >= 0 then
+      inc(len, v[t[2] * 2 + 1]); // value length
+    t := @t[3];
+    dec(n, 3)
+  until n = 0;
+  // compute the new URI with injected values
+  new := FastNewString(len, CP_UTF8);
+  t := pointer(Data.ToUriPosLen);
+  n := PDALen(PAnsiChar(t) - _DALEN)^ + _DAOFF;
+  p := new; // write new URI
+  repeat
+    if t[1] <> 0 then
+    begin
+      MoveFast(PByteArray(Data.ToUri)[t[0]], p^, t[1]); // static
+      inc(p, t[1]);
+    end;
+    if t[2] >= 0 then
+    begin
+      v := @THttpServerRequest(Ctxt).fRouteValuePosLen[t[2] * 2];
+      MoveFast(PByteArray(Ctxt.Url)[v[0]], p^, v[1]); // value [pos,len] pair
+      inc(p, v[1]);
+    end;
+    t := @t[3];
+    dec(n, 3)
+  until n = 0;
+  Ctxt.Url := '';
+  pointer(THttpServerRequest(Ctxt).fUrl) := new; // replace
+  //if p - new <> len then raise EUriRouter.Create('??');
+end;
+
+
+{ TUriTree }
+
+procedure TUriTree.SetNodeClass;
+begin
+  fDefaultNodeClass := TUriTreeNode;
+end;
+
+function TUriTree.Root: TUriTreeNode;
+begin
+  result := fRoot as TUriTreeNode;
+end;
+
+
+{ TUriRouter }
+
+destructor TUriRouter.Destroy;
+var
+  m: TUriRouterMethod;
+begin
+  inherited Destroy;
+  for m := low(fTree) to high(fTree) do
+    fTree[m].Free;
+end;
+
+procedure TUriRouter.Clear(aMethods: TUriRouterMethods);
+var
+  m: TUriRouterMethod;
+begin
+  if self = nil then
+    exit; // avoid unexpected GPF
+  fSafe.WriteLock;
+  try
+    FillCharFast(fEntries, SizeOf(fEntries), 0);
+    for m := low(fTree) to high(fTree) do
+      if m in aMethods then
+        FreeAndNil(fTree[m]);
+  finally
+    fSafe.WriteUnLock;
+  end;
+end;
+
+procedure TUriRouter.Setup(aFrom: TUriRouterMethod; const aFromUri: RawUtf8;
+  aTo: TUriRouterMethod; const aToUri: RawUtf8;
+  const aExecute: TOnHttpServerRequest);
+var
+  n: TUriTreeNode;
+  u: PUtf8Char;
+  fromU, toU, item: RawUtf8;
+  names: TRawUtf8DynArray;
+  pos: PtrInt;
+begin
+  if self = nil then
+    exit; // avoid unexpected GPF
+  fromU := StringReplaceAll(aFromUri, '*', '<path:path>');
+  toU := StringReplaceAll(aToUri, '*', '<path:path>');
+  if not IsValidUriRoute(pointer(fromU)) then
+    raise EUriRouter.CreateUtf8('Invalid char in %.Setup(''%'')',
+      [self, aFromUri]);
+  fSafe.WriteLock;
+  try
+    if fTree[aFrom] = nil then
+      fTree[aFrom] := TUriTree.Create(fTreeOptions);
+    n := fTree[aFrom].Setup(fromU, names) as TUriTreeNode;
+    if n = nil then
+      exit;
+    // the leaf should have the Rewrite/Run information to process on match
+    if n.Data.ToUri <> '' then
+      if toU = n.Data.ToUri then
+        exit // same redirection: do nothing
+      else
+        raise EUriRouter.CreateUtf8('%.Setup(''%''): already redirect to %',
+          [self, aFromUri, n.Data.ToUri]);
+    if Assigned(n.Data.Execute) then
+      if CompareMem(@n.Data.Execute, @aExecute, SizeOf(TMethod)) then
+        exit // same callback: do nothing
+      else
+        raise EUriRouter.CreateUtf8('%.Setup(''%''): already registered',
+          [self, aFromUri]);
+    if Assigned(aExecute) then
+      // this URI should redirect to a TOnHttpServerRequest callback
+      n.Data.Execute := aExecute
+    else
+    begin
+      n.Data.ToUriMethod := aTo;
+      n.Data.ToUri := toU;
+      n.Data.ToUriPosLen := nil; // store [pos1,len1,valndx1,...] trios
+      n.Data.ToUriStaticLen := 0;
+      n.Data.ToUriErrorStatus := Utf8ToInteger(toU, 200, 599, 0);
+      if n.Data.ToUriErrorStatus = 0 then // a true URI, not an HTTP error code
+      begin
+        // pre-compute the rewritten URI into Data.ToUriPosLen[]
+        u := pointer(toU);
+        if u = nil then
+          raise EUriRouter.CreateUtf8('No ToUri in %.Setup(''%'')',
+            [self, aFromUri]);
+        if PosExChar('<', toU) <> 0 then // n.Data.ToUriPosLen=nil to use ToUri
+          repeat
+            pos := u - pointer(toU);
+            GetNextItem(u, '<', item); // static
+            AddInteger(n.Data.ToUriPosLen, pos);          // position
+            AddInteger(n.Data.ToUriPosLen, length(item)); // length (may be 0)
+            inc(n.Data.ToUriStaticLen, length(item));
+            if (u = nil) or
+               (u^ = #0) then
+              pos := -1
+            else
+            begin
+              GetNextItem(u, '>', item); // <name>
+              pos := PosExChar(':', item);
+              if pos <> 0 then
+                system.delete(item, 1, pos);
+              if item = '' then
+                raise EUriRouter.CreateUtf8('Void <> in %.Setup(''%'')',
+                  [self, aToUri]);
+              pos := FindRawUtf8(names, item);
+              if pos < 0 then
+                raise EUriRouter.CreateUtf8('Unknown <%> in %.Setup(''%'')',
+                  [item, self, aToUri]);
+            end;
+            AddInteger(n.Data.ToUriPosLen, pos);  // value index in Names[]
+          until (u = nil) or
+                (u^ = #0);
+      end;
+    end;
+    inc(fEntries[aFrom]);
+  finally
+    fSafe.WriteUnLock;
+  end;
+end;
+
+constructor TUriRouter.Create(aOptions: TRadixTreeOptions);
+begin
+  fTreeOptions := aOptions;
+  inherited Create;
+end;
+
+procedure TUriRouter.Rewrite(aFrom: TUriRouterMethod; const aFromUri: RawUtf8;
+  aTo: TUriRouterMethod; const aToUri: RawUtf8);
+begin
+  Setup(aFrom, aFromUri, aTo, aToUri, nil);
+end;
+
+procedure TUriRouter.Run(aFrom: TUriRouterMethods; const aFromUri: RawUtf8;
+  const aExecute: TOnHttpServerRequest);
+var
+  m: TUriRouterMethod;
+begin
+  for m := low(fTree) to high(fTree) do
+    if m in aFrom then
+      Setup(m, aFromUri, m, '', aExecute);
+end;
+
+procedure TUriRouter.Get(const aFrom, aTo: RawUtf8; aToMethod: TUriRouterMethod);
+begin
+  Rewrite(urmGet, aFrom, aToMethod, aTo);
+end;
+
+procedure TUriRouter.Post(const aFrom, aTo: RawUtf8; aToMethod: TUriRouterMethod);
+begin
+  Rewrite(urmPost, aFrom, aToMethod, aTo);
+end;
+
+procedure TUriRouter.Put(const aFrom, aTo: RawUtf8; aToMethod: TUriRouterMethod);
+begin
+  Rewrite(urmPut, aFrom, aToMethod, aTo);
+end;
+
+procedure TUriRouter.Delete(const aFrom, aTo: RawUtf8; aToMethod: TUriRouterMethod);
+begin
+  Rewrite(urmDelete, aFrom, aToMethod, aTo);
+end;
+
+procedure TUriRouter.Options(const aFrom, aTo: RawUtf8;
+  aToMethod: TUriRouterMethod);
+begin
+  Rewrite(urmOptions, aFrom, aToMethod, aTo);
+end;
+
+procedure TUriRouter.Head(const aFrom, aTo: RawUtf8; aToMethod: TUriRouterMethod);
+begin
+  Rewrite(urmHead, aFrom, aToMethod, aTo);
+end;
+
+procedure TUriRouter.Get(const aUri: RawUtf8;
+  const aExecute: TOnHttpServerRequest);
+begin
+  Run([urmGet], aUri, aExecute);
+end;
+
+procedure TUriRouter.Post(const aUri: RawUtf8;
+  const aExecute: TOnHttpServerRequest);
+begin
+  Run([urmPost], aUri, aExecute);
+end;
+
+procedure TUriRouter.Put(const aUri: RawUtf8;
+  const aExecute: TOnHttpServerRequest);
+begin
+  Run([urmPut], aUri, aExecute);
+end;
+
+procedure TUriRouter.Delete(const aUri: RawUtf8;
+  const aExecute: TOnHttpServerRequest);
+begin
+  Run([urmDelete], aUri, aExecute);
+end;
+
+procedure TUriRouter.Options(const aUri: RawUtf8;
+  const aExecute: TOnHttpServerRequest);
+begin
+  Run([urmOptions], aUri, aExecute);
+end;
+
+procedure TUriRouter.Head(const aUri: RawUtf8;
+  const aExecute: TOnHttpServerRequest);
+begin
+  Run([urmHead], aUri, aExecute);
+end;
+
+procedure TUriRouter.RunMethods(RouterMethods: TUriRouterMethods;
+  Instance: TObject; const Prefix: RawUtf8);
+var
+  methods: TPublishedMethodInfoDynArray;
+  m: PtrInt;
+begin
+  if (self <> nil) and
+     (Instance <> nil) and
+     (RouterMethods <> []) then
+    for m := 0 to GetPublishedMethods(Instance, methods) - 1 do
+      with methods[m] do
+        Run(RouterMethods, Prefix + StringReplaceChars(Name, '_', '-'),
+          TOnHttpServerRequest(Method));
+end;
+
+function TUriRouter.Process(Ctxt: THttpServerRequestAbstract): integer;
+var
+  m: TUriRouterMethod;
+  t: TUriTree;
+  found: TUriTreeNode;
+begin
+  result := 0; // nothing to process
+  if (self = nil) or
+     (Ctxt = nil) or
+     (Ctxt.Url = '') or
+     not UriMethod(Ctxt.Method, m) then
+    exit;
+  THttpServerRequest(Ctxt).fRouteName := nil; // paranoid: if called w/o Prepare
+  t := fTree[m];
+  if t = nil then
+    exit; // this method has no registration yet
+  fSafe.ReadLock;
+  {$ifdef HASFASTTRYFINALLY}
+  try
+  {$else}
+  begin
+  {$endif HASFASTTRYFINALLY}
+    // fast recursive parsing - may return nil, but never raises exception
+    found := pointer(TUriTreeNode(t.fRoot).Lookup(pointer(Ctxt.Url), Ctxt));
+  {$ifdef HASFASTTRYFINALLY}
+  finally
+  {$endif HASFASTTRYFINALLY}
+    fSafe.ReadUnLock;
+  end;
+  if found <> nil then
+    if Assigned(found.Data.Execute) then
+      result := found.Data.Execute(Ctxt)
+    else if found.Data.ToUri <> '' then
+    begin
+      if m <> found.Data.ToUriMethod then
+        Ctxt.Method := URIROUTERMETHOD[found.Data.ToUriMethod];
+      if found.Data.ToUriErrorStatus <> 0 then
+        result := found.Data.ToUriErrorStatus // redirect to an error code
+      else if found.Data.ToUriPosLen = nil then
+        Ctxt.Url := found.Data.ToUri    // only static -> just replace URI
+      else
+        found.RewriteUri(Ctxt);         // compute new URI with injected values
+    end;
+end;
+
+
 { ******************** Shared Server-Side HTTP Process }
 
 { THttpServerRequest }
@@ -1355,9 +2044,10 @@ begin
 end;
 
 procedure THttpServerRequest.Recycle(aConnectionID: THttpServerConnectionID;
-  aConnectionFlags: THttpServerRequestFlags);
+  aConnectionThread: TSynThread; aConnectionFlags: THttpServerRequestFlags);
 begin
   fConnectionID := aConnectionID;
+  fConnectionThread := aConnectionThread;
   fConnectionFlags := aConnectionFlags;
   fErrorMessage := '';
 end;
@@ -1366,7 +2056,7 @@ const
   _CMD_200: array[boolean] of string[17] = (
     'HTTP/1.1 200 OK'#13#10,
     'HTTP/1.0 200 OK'#13#10);
-  _CMD_ERR: array[boolean] of string[9] = (
+  _CMD_XXX: array[boolean] of string[9] = (
     'HTTP/1.1 ',
     'HTTP/1.0 ');
 
@@ -1422,8 +2112,8 @@ begin
   if fRespStatus = HTTP_SUCCESS then // optimistic approach
     h^.AppendShort(_CMD_200[hfConnectionClose in Context.HeaderFlags])
   else
-  begin
-    h^.AppendShort(_CMD_ERR[hfConnectionClose in Context.HeaderFlags]);
+  begin // other less common cases
+    h^.AppendShort(_CMD_XXX[hfConnectionClose in Context.HeaderFlags]);
     StatusCodeToReason(fRespStatus, fRespReason);
     h^.Append(fRespStatus);
     h^.Append(' ');
@@ -1501,6 +2191,55 @@ begin
   SetServerName('mORMot2 (' + OS_TEXT + ')');
   fOptions := ProcessOptions;
   inherited Create(hsoCreateSuspended in fOptions, OnStart, OnStop, ProcessName);
+end;
+
+destructor THttpServerGeneric.Destroy;
+begin
+  inherited Destroy;
+  FreeAndNil(fRoute);
+end;
+
+function THttpServerGeneric.Route: TUriRouter;
+begin
+  if self = nil then
+    result := nil // avoid GPF
+  else
+  begin
+    if fRoute = nil then
+    begin
+      GlobalLock; // paranoid thread-safety
+      try
+        if fRoute = nil then
+          fRoute := TUriRouter.Create;
+      finally
+        GlobalUnLock;
+      end;
+    end;
+    result := fRoute;
+  end;
+end;
+
+procedure THttpServerGeneric.SetFavIcon(const FavIconContent: RawByteString);
+begin
+  if FavIconContent = 'default' then
+    fFavIcon := FavIconBinary
+  else
+    fFavIcon := FavIconContent;
+  if fFavIconRouted then
+    exit; // need to register the route once, but allow custom ico
+  Route.Get('/favicon.ico', GetFavIcon);
+  fFavIconRouted := true;
+end;
+
+function THttpServerGeneric.GetFavIcon(Ctxt: THttpServerRequestAbstract): cardinal;
+begin
+  if fFavIcon = '' then
+    result := HTTP_NOTFOUND
+  else begin
+    Ctxt.OutContent := fFavIcon;
+    Ctxt.OutContentType := 'image/x-icon';
+    result := HTTP_SUCCESS;
+  end;
 end;
 
 procedure THttpServerGeneric.RegisterCompress(aFunction: THttpSocketCompress;
@@ -1844,6 +2583,30 @@ begin
   InitNetTlsContext(TLS, {server=}true, certfile, keyfile, keypass);
 end;
 
+const
+  /// decoded into FavIconBinary function result
+  // - using Base64 encoding is the easiest with Delphi and RawByteString :)
+  _FAVICON_BINARY: RawUtf8 =
+    'aQOi9AjOyJ+H/gMAAAEAAQAYGBAAAQAEAOgBAAAWAAAAKAAAABgAAAAwAAAAAQAEWhEAEFoH' +
+    'AAEC7wAFBQgAVVVVAAMDwwCMjIwA////AG1tcQCjo6sACQmbADU1NgAAACsACAhPAMvLywAA' +
+    'AHEADy34AABu/QBaEFVXYiJnWgdVUmd8zHdmWgVVVmRCERESRGRaBFUiYVoEERlmZVVVUiIR' +
+    'ERqqERESJlVVdiERq93d26ERIsVVZBEa2DMziNoRFiVUdhGtgzAAM42hFHzCQRG4MAAAADix' +
+    'EUJCYRrTWgQAM9oRYiIhG4MAAOAAA4oRIpKRG4MAD/4AA4oRIpKRG4MADv4AA4oRIiIhGoMA' +
+    'AAAOA9oRKUlhStMwAAAAONERKVJhmbgzDuADOLF5ZlxEERuDMzMzixmUZVVEkRG9Z3eNsREk' +
+    'RVVWQRGWu7u2kRlGVVVcJJGUzMzEESQlVVVVwndaBBGXcsVaBFVnd3REd3RlWgZVR3zMdEVV' +
+    'VVX///8A/4D/AP4APwD4AA8A8AAHAOAAAwDAAAEAwAABAIBaHwCAAAAAgAABAMAAAQDgAAMA' +
+    '4AAHAPAABwD8AB8A/wB/AA==';
+
+var
+  _FavIconBinary: RawByteString;
+
+function FavIconBinary: RawByteString;
+begin
+  if _FavIconBinary = '' then
+    _FavIconBinary := AlgoRle.Decompress(Base64ToBin(_FAVICON_BINARY));
+  result := _FavIconBinary;
+end;
+
 
 { ******************** THttpServerSocket/THttpServer HTTP/1.1 Server }
 
@@ -1960,10 +2723,26 @@ var
 begin
   result := false; // error
   try
+    if fRoute <> nil then // URI rewrite or callback execution
+    begin
+      Ctxt.RespStatus := fRoute.Process(Ctxt);
+      if Ctxt.RespStatus <> 0 then
+      begin
+        if (Ctxt.OutContent = '') and
+           not StatusCodeIsSuccess(Ctxt.RespStatus) then
+        begin
+          Ctxt.fErrorMessage := 'Wrong route';
+          IncStat(grRejected);
+        end;
+        result := true; // a callback was executed
+        exit;
+      end;
+    end;
     Ctxt.RespStatus := DoBeforeRequest(Ctxt);
     if Ctxt.RespStatus > 0 then
     begin
-      Ctxt.SetErrorMessage('Rejected % Request', [Ctxt.Url]);
+      if Ctxt.OutContent = '' then
+        Ctxt.fErrorMessage := 'Rejected request';
       IncStat(grRejected);
     end
     else
@@ -2071,6 +2850,10 @@ begin
   begin
     fThreadPool := TSynThreadPoolTHttpServer.Create(self, ServerThreadPoolCount);
     fHttpQueueLength := 1000;
+    if hsoThreadCpuAffinity in ProcessOptions then
+      SetServerThreadsAffinityPerCpu(nil, TThreadDynArray(fThreadPool.WorkThread))
+    else if hsoThreadSocketAffinity in ProcessOptions then
+      SetServerThreadsAffinityPerSocket(nil, TThreadDynArray(fThreadPool.WorkThread));
   end
   else if ServerThreadPoolCount < 0 then
     fMonoThread := true; // accept() + recv() + send() in a single thread
@@ -2155,10 +2938,12 @@ begin
   NotifyThreadStart(self);
   // main server process loop
   try
-    fSock := TCrtSocket.Bind(fSockPort); // BIND + LISTEN (TLS is done later)
+    // BIND + LISTEN (TLS is done later)
+    fSock := TCrtSocket.Bind(fSockPort, nlTcp, 5000, hsoReusePort in fOptions);
     fExecuteState := esRunning;
     if not fSock.SockIsDefined then // paranoid check
       raise EHttpServer.CreateUtf8('%.Execute: %.Bind failed', [self, fSock]);
+    // main ACCEPT loop
     while not Terminated do
     begin
       res := Sock.Sock.Accept(cltsock, cltaddr, {async=}false);
@@ -2960,12 +3745,12 @@ begin
   fReceiveBufferSize := From.fReceiveBufferSize;
   if From.fLogData <> nil then
     fLogData := pointer(fLogDataStorage);
-  SetServerName(From.fServerName);
-  SetRemoteIPHeader(From.RemoteIPHeader);
-  SetRemoteConnIDHeader(From.RemoteConnIDHeader);
+  SetServerName(From.fServerName); // setters are sometimes needed
+  SetRemoteIPHeader(From.fRemoteIPHeader);
+  SetRemoteConnIDHeader(From.fRemoteConnIDHeader);
   fLoggingServiceName := From.fLoggingServiceName;
   inherited Create(From.fOnThreadStart, From.fOnThreadTerminate,
-   From.ProcessName, From.Options - [hsoCreateSuspended]);
+    From.fProcessName, From.fOptions - [hsoCreateSuspended]);
 end;
 
 procedure THttpApiServer.DestroyMainThread;
@@ -3087,9 +3872,10 @@ var
   outcontenc, outstat: RawUtf8;
   outstatcode, afterstatcode: cardinal;
   respsent: boolean;
+  router: TUriRouter;
   ctxt: THttpServerRequest;
   filehandle: THandle;
-  reps: PHTTP_RESPONSE;
+  resp: PHTTP_RESPONSE;
   bufread, V: PUtf8Char;
   heads: HTTP_UNKNOWN_HEADERs;
   rangestart, rangelen: ULONGLONG;
@@ -3099,20 +3885,21 @@ var
   logdata: PHTTP_LOG_FIELDS_DATA;
   contrange: ShortString;
 
-  procedure SendError(StatusCode: cardinal; const ErrorMsg: string; E: Exception = nil);
+  procedure SendError(StatusCode: cardinal; const ErrorMsg: RawUtf8;
+    E: Exception = nil);
   var
     msg: RawUtf8;
   begin
     try
-      reps^.SetStatus(StatusCode, outstat);
+      resp^.SetStatus(StatusCode, outstat);
       logdata^.ProtocolStatus := StatusCode;
       FormatUtf8('<html><body style="font-family:verdana;"><h1>Server Error %: %</h1><p>',
         [StatusCode, outstat], msg);
       if E <> nil then
         msg := FormatUtf8('%% Exception raised:<br>', [msg, E]);
-      msg := msg + HtmlEscapeString(ErrorMsg) + ('</p><p><small>' + XPOWEREDVALUE);
-      reps^.SetContent(datachunkmem, msg, 'text/html; charset=utf-8');
-      Http.SendHttpResponse(fReqQueue, req^.RequestId, 0, reps^, nil,
+      msg := msg + HtmlEscape(ErrorMsg) + ('</p><p><small>' + XPOWEREDVALUE);
+      resp^.SetContent(datachunkmem, msg, 'text/html; charset=utf-8');
+      Http.SendHttpResponse(fReqQueue, req^.RequestId, 0, resp^, nil,
         bytessent, nil, 0, nil, fLogData);
     except
       on Exception do
@@ -3129,7 +3916,7 @@ var
     if not result then
       exit;
     respsent := true;
-    reps^.SetStatus(outstatcode, outstat);
+    resp^.SetStatus(outstatcode, outstat);
     if Terminated then
       exit;
     // update log information
@@ -3154,7 +3941,7 @@ var
           ReferrerLength := RawValueLength;
           Referrer := pRawValue;
         end;
-        ProtocolStatus := reps^.StatusCode;
+        ProtocolStatus := resp^.StatusCode;
         ClientIp := pointer(ctxt.fRemoteIP);
         ClientIpLength := length(ctxt.fRemoteip);
         Method := pointer(ctxt.fMethod);
@@ -3163,12 +3950,12 @@ var
         UserNameLength := Length(ctxt.fAuthenticatedUser);
       end;
     // send response
-    reps^.Version := req^.Version;
-    reps^.SetHeaders(pointer(ctxt.OutCustomHeaders),
+    resp^.Version := req^.Version;
+    resp^.SetHeaders(pointer(ctxt.OutCustomHeaders),
       heads, hsoNoXPoweredHeader in fOptions);
     if fCompressAcceptEncoding <> '' then
-      reps^.AddCustomHeader(pointer(fCompressAcceptEncoding), heads, false);
-    with reps^.headers.KnownHeaders[respServer] do
+      resp^.AddCustomHeader(pointer(fCompressAcceptEncoding), heads, false);
+    with resp^.headers.KnownHeaders[respServer] do
     begin
       pRawValue := pointer(fServerName);
       RawValueLength := length(fServerName);
@@ -3177,10 +3964,10 @@ var
     begin
       // response is file -> OutContent is UTF-8 file name to be served
       filehandle := FileOpen(Utf8ToString(ctxt.OutContent),
-        fmOpenRead or fmShareDenyNone);
+        fmOpenReadDenyNone);
       if not ValidHandle(filehandle)  then
       begin
-        SendError(HTTP_NOTFOUND, SysErrorMessage(GetLastError));
+        SendError(HTTP_NOTFOUND, WinErrorText(GetLastError, nil));
         result := false; // notify fatal error
       end;
       try // http.sys will serve then close the file from kernel
@@ -3216,19 +4003,19 @@ var
               FormatShort('Content-range: bytes %-%/%'#0, [rangestart,
                 rangestart + datachunkfile.ByteRange.Length.QuadPart - 1,
                 outcontlen.QuadPart], contrange);
-              reps^.AddCustomHeader(@contrange[1], heads, false);
-              reps^.SetStatus(HTTP_PARTIALCONTENT, outstat);
+              resp^.AddCustomHeader(@contrange[1], heads, false);
+              resp^.SetStatus(HTTP_PARTIALCONTENT, outstat);
             end;
           end;
-          with reps^.headers.KnownHeaders[respAcceptRanges] do
+          with resp^.headers.KnownHeaders[respAcceptRanges] do
           begin
             pRawValue := 'bytes';
             RawValueLength := 5;
           end;
         end;
-        reps^.EntityChunkCount := 1;
-        reps^.pEntityChunks := @datachunkfile;
-        Http.SendHttpResponse(fReqQueue, req^.RequestId, flags, reps^, nil,
+        resp^.EntityChunkCount := 1;
+        resp^.pEntityChunks := @datachunkfile;
+        Http.SendHttpResponse(fReqQueue, req^.RequestId, flags, resp^, nil,
           bytessent, nil, 0, nil, fLogData);
       finally
         FileClose(filehandle);
@@ -3241,7 +4028,7 @@ var
         ctxt.OutContentType := ''; // true HTTP always expects a response
       if fCompress <> nil then
       begin
-        with reps^.headers.KnownHeaders[reqContentEncoding] do
+        with resp^.headers.KnownHeaders[reqContentEncoding] do
           if RawValueLength = 0 then
           begin
             // no previous encoding -> try if any compression
@@ -3251,10 +4038,10 @@ var
             RawValueLength := length(outcontenc);
           end;
       end;
-      reps^.SetContent(datachunkmem, ctxt.OutContent, ctxt.OutContentType);
+      resp^.SetContent(datachunkmem, ctxt.OutContent, ctxt.OutContentType);
       flags := GetSendResponseFlags(ctxt);
       EHttpApiServer.RaiseOnError(hSendHttpResponse,
-        Http.SendHttpResponse(fReqQueue, req^.RequestId, flags, reps^, nil,
+        Http.SendHttpResponse(fReqQueue, req^.RequestId, flags, resp^, nil,
           bytessent, nil, 0, nil, fLogData));
     end;
   end;
@@ -3269,7 +4056,7 @@ begin
     // reserve working buffers
     SetLength(heads, 64);
     SetLength(respbuf, SizeOf(HTTP_RESPONSE));
-    reps := pointer(respbuf);
+    resp := pointer(respbuf);
     SetLength(reqbuf, 16384 + SizeOf(HTTP_REQUEST)); // req^ + 16 KB of headers
     req := pointer(reqbuf);
     logdata := pointer(fLogDataStorage);
@@ -3409,7 +4196,7 @@ begin
                 until incontlenread = incontlen;
                 if err <> NO_ERROR then
                 begin
-                  SendError(HTTP_NOTACCEPTABLE, SysErrorMessagePerModule(err, HTTPAPI_DLL));
+                  SendError(HTTP_NOTACCEPTABLE, WinErrorText(err, HTTPAPI_DLL));
                   continue;
                 end;
                 // optionally uncompress input body
@@ -3424,17 +4211,28 @@ begin
             end;
             try
               // compute response
-              FillcharFast(reps^, SizeOf(reps^), 0);
+              FillcharFast(resp^, SizeOf(resp^), 0);
               respsent := false;
-              outstatcode := DoBeforeRequest(ctxt);
-              if outstatcode > 0 then
-                if not SendResponse or
-                   (outstatcode <> HTTP_ACCEPTED) then
-                  continue;
-              outstatcode := Request(ctxt); // call OnRequest for main process
-              afterstatcode := DoAfterRequest(ctxt);
-              if afterstatcode > 0 then
-                outstatcode := afterstatcode;
+              outstatcode := 0;
+              if fOwner = nil then
+                router := fRoute
+              else
+                router := fOwner.fRoute; // field not propagated in clones
+              if router <> nil then // URI rewrite or callback execution
+                outstatcode := router.Process(Ctxt);
+              if outstatcode = 0 then // no router callback was executed
+              begin
+                // regular server-side request evaluation
+                outstatcode := DoBeforeRequest(ctxt);
+                if outstatcode > 0 then
+                  if not SendResponse or
+                     (outstatcode <> HTTP_ACCEPTED) then
+                    continue;
+                outstatcode := Request(ctxt); // call OnRequest for main process
+                afterstatcode := DoAfterRequest(ctxt);
+                if afterstatcode > 0 then
+                  outstatcode := afterstatcode;
+              end;
               // send response
               if not respsent then
                 if not SendResponse then
@@ -3446,7 +4244,7 @@ begin
                 if not respsent then
                   if not E.InheritsFrom(EHttpApiServer) or // ensure still connected
                     (EHttpApiServer(E).LastApiError <> HTTPAPI_ERROR_NONEXISTENTCONNECTION) then
-                    SendError(HTTP_SERVERERROR, E.Message, E);
+                    SendError(HTTP_SERVERERROR, StringToUtf8(E.Message), E);
             end;
           finally
             reqid := 0; // reset Request ID to handle the next pending request

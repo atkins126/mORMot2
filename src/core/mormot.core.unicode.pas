@@ -9,6 +9,7 @@ unit mormot.core.unicode;
    Efficient Unicode Conversion Classes shared by all framework units
    - UTF-8 Efficient Encoding / Decoding
    - UTF-8 / UTF-16 / Ansi Conversion Classes
+   - Text File Loading with BOM/Unicode Support
    - Low-Level String Conversion Functions
    - Text Case-(in)sensitive Conversion and Comparison
    - Operating-System Independent Unicode Process
@@ -119,7 +120,7 @@ function Utf16CharToUtf8(Dest: PUtf8Char; var Source: PWord): integer;
 /// UTF-8 encode one UCS4 CodePoint into Dest
 // - return the number of bytes written into Dest (i.e. from 1 up to 6)
 // - this method DOES properly handle UTF-16 surrogate pairs
-function Ucs4ToUtf8(ucs4: cardinal; Dest: PUtf8Char): PtrInt;
+function Ucs4ToUtf8(ucs4: Ucs4CodePoint; Dest: PUtf8Char): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
 type
@@ -128,20 +129,20 @@ type
     ccfNoTrailingZero,
     ccfReplacementCharacterForUnmatchedSurrogate);
 
-/// convert a RawUnicode PWideChar into a UTF-8 string
+/// convert a UTF-16 PWideChar buffer into a UTF-8 string
 procedure RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
   var result: RawUtf8; Flags: TCharConversionFlags = [ccfNoTrailingZero]); overload;
 
-/// convert a RawUnicode PWideChar into a UTF-8 temporary buffer
+/// convert a UTF-16 PWideChar buffer into a UTF-8 temporary buffer
 procedure RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
   var result: TSynTempBuffer; Flags: TCharConversionFlags); overload;
 
-/// convert a RawUnicode PWideChar into a UTF-8 string
+/// convert a UTF-16 PWideChar buffer into a UTF-8 string
 function RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
   Flags: TCharConversionFlags = [ccfNoTrailingZero]): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// convert a RawUnicode UTF-16 PWideChar into a UTF-8 buffer
+/// convert a UTF-16 PWideChar buffer into a UTF-8 buffer
 // - replace system.UnicodeToUtf8 implementation, which is rather slow
 // since Delphi 2009+
 // - append a trailing #0 to the ending PUtf8Char, unless ccfNoTrailingZero is set
@@ -151,7 +152,7 @@ function RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
 function RawUnicodeToUtf8(Dest: PUtf8Char; DestLen: PtrInt;
   Source: PWideChar; SourceLen: PtrInt; Flags: TCharConversionFlags): PtrInt; overload;
 
-/// convert a RawUnicode PWideChar into a UTF-8 string
+/// convert a UTF-16 PWideChar buffer into a UTF-8 string
 // - this version doesn't resize the resulting RawUtf8 string, but return
 // the new resulting RawUtf8 byte count into Utf8Length
 function RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
@@ -253,7 +254,7 @@ function Utf8FirstLineToUtf16Length(source: PUtf8Char): PtrInt;
 
 
 
-{ **************** UTF-8 / Unicode / Ansi Conversion Classes }
+{ **************** UTF-8 / UTF-16 / Ansi Conversion Classes }
 
 type
   /// Exception raised by this unit in case of fatal conversion issue
@@ -292,6 +293,7 @@ type
     // - this default implementation will use the Operating System APIs
     function AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PUtf8Char; overload; virtual;
+    {$ifndef PUREMORMOT2}
     /// convert any Ansi Text into an UTF-16 Unicode String
     // - returns a value using our RawUnicode kind of string
     function AnsiToRawUnicode(const AnsiText: RawByteString): RawUnicode; overload;
@@ -299,6 +301,7 @@ type
     // - returns a value using our RawUnicode kind of string
     function AnsiToRawUnicode(
       Source: PAnsiChar; SourceChars: cardinal): RawUnicode; overload; virtual;
+    {$endif PUREMORMOT2}
     /// convert any Ansi buffer into an Unicode String
     // - returns a SynUnicode, i.e. Delphi 2009+ UnicodeString or a WideString
     function AnsiToUnicodeString(
@@ -315,6 +318,7 @@ type
       SourceChars: cardinal; out Value: RawUtf8); overload; virtual;
     /// direct conversion of an Unicode buffer into a PAnsiChar buffer
     // - Dest^ buffer must be reserved with at least SourceChars*3 bytes
+    // - will detect and ignore any trailing UTF-16LE BOM marker
     // - this default implementation will rely on the Operating System for
     // all non ASCII-7 chars
     function UnicodeBufferToAnsi(Dest: PAnsiChar; Source: PWideChar;
@@ -324,7 +328,12 @@ type
       SourceChars: cardinal): RawByteString; overload; virtual;
     /// convert any Unicode-encoded String into Ansi Text
     // - internally calls UnicodeBufferToAnsi virtual method
+    function UnicodeStringToAnsi(const Source: SynUnicode): RawByteString;
+    {$ifndef PUREMORMOT2}
+    /// convert any Unicode-encoded String into Ansi Text
+    // - internally calls UnicodeBufferToAnsi virtual method
     function RawUnicodeToAnsi(const Source: RawUnicode): RawByteString;
+    {$endif PUREMORMOT2}
     /// direct conversion of an UTF-8 encoded buffer into a PAnsiChar buffer
     // - Dest^ buffer must be reserved with at least SourceChars bytes
     // - no trailing #0 is appended to the buffer
@@ -393,12 +402,15 @@ type
     // NoTrailingZero is set
     function AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PUtf8Char; override;
+    {$ifndef PUREMORMOT2}
     /// convert any Ansi buffer into an Unicode String
     // - returns a value using our RawUnicode kind of string
     function AnsiToRawUnicode(Source: PAnsiChar;
       SourceChars: cardinal): RawUnicode; override;
+    {$endif PUREMORMOT2}
     /// direct conversion of an Unicode buffer into a PAnsiChar buffer
     // - Dest^ buffer must be reserved with at least SourceChars*3 bytes
+    // - will detect and ignore any trailing UTF-16LE BOM marker
     // - this overridden version will use internal lookup tables for fast process
     function UnicodeBufferToAnsi(Dest: PAnsiChar;
       Source: PWideChar; SourceChars: cardinal): PAnsiChar; override;
@@ -443,9 +455,6 @@ type
   // - match the TSynAnsiConvert signature, for code page CP_UTF8
   // - this class is mostly a non-operation for conversion to/from UTF-8
   TSynAnsiUtf8 = class(TSynAnsiConvert)
-  protected
-    function UnicodeBufferToUtf8(Dest: PAnsiChar; DestChars: cardinal;
-      Source: PWideChar; SourceChars: cardinal): PAnsiChar;
   public
     /// initialize the internal conversion engine
     constructor Create(aCodePage: cardinal); override;
@@ -461,11 +470,14 @@ type
     // NoTrailingZero is set
     function AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PUtf8Char; override;
+    {$ifndef PUREMORMOT2}
     /// convert any UTF-8 Ansi buffer into an Unicode String
     // - returns a value using our RawUnicode kind of string
     function AnsiToRawUnicode(Source: PAnsiChar;
       SourceChars: cardinal): RawUnicode; override;
+    {$endif PUREMORMOT2}
     /// direct conversion of an Unicode buffer into a PAnsiChar UTF-8 buffer
+    // - will detect and ignore any trailing UTF-16LE BOM marker
     // - Dest^ buffer must be reserved with at least SourceChars*3 bytes
     function UnicodeBufferToAnsi(Dest: PAnsiChar; Source: PWideChar;
       SourceChars: cardinal): PAnsiChar; override;
@@ -512,10 +524,12 @@ type
     // NoTrailingZero is set
     function AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PUtf8Char; override;
+    {$ifndef PUREMORMOT2}
     /// convert any UTF-16 Ansi buffer into an Unicode String
     // - returns a value using our RawUnicode kind of string
     function AnsiToRawUnicode(Source: PAnsiChar;
       SourceChars: cardinal): RawUnicode; override;
+    {$endif PUREMORMOT2}
     /// direct conversion of an Unicode buffer into a PAnsiChar UTF-16 buffer
     // - Dest^ buffer must be reserved with at least SourceChars*3 bytes
     function UnicodeBufferToAnsi(Dest: PAnsiChar; Source: PWideChar;
@@ -549,6 +563,58 @@ var
   /// global TSynAnsiConvert instance with no encoding (RawByteString/RawBlob)
   RawByteStringConvert: TSynAnsiFixedWidth;
 
+
+{ *************** Text File Loading with BOM/Unicode Support }
+
+type
+  /// text file layout, as returned by BomFile() and StringFromBomFile()
+  // - bomNone means there was no BOM recognized
+  // - bomUnicode stands for UTF-16 LE encoding (as on Windows products)
+  // - bomUtf8 stands for a UTF-8 BOM (as on Windows products)
+  TBomFile = (
+    bomNone,
+    bomUnicode,
+    bomUtf8);
+
+const
+  /// UTF-16LE BOM WideChar marker, as existing e.g. in some UTF-16 Windows files
+  BOM_UTF16LE = #$FEFF;
+
+/// check the file BOM at the beginning of a file buffer
+// - BOM is common only with Microsoft products
+// - returns bomNone if no BOM was recognized
+// - returns bomUnicode or bomUtf8 if UTF-16LE or UTF-8 BOM were recognized:
+// and will adjust Buffer/BufferSize to ignore the leading 2 or 3 bytes
+function BomFile(var Buffer: pointer; var BufferSize: PtrInt): TBomFile;
+
+/// read a file into a temporary variable, check the BOM, and adjust the buffer
+function StringFromBomFile(const FileName: TFileName; out FileContent: RawByteString;
+  out Buffer: pointer; out BufferSize: PtrInt): TBomFile;
+
+/// read a File content into a RawUtf8, detecting any leading BOM
+// - will assume text file with no BOM is already UTF-8 encoded
+// - an alternative to StringFromFile() if you want to handle UTF-8 content
+// and the files are likely to be natively UTF-8 encoded, or with a BOM
+function RawUtf8FromFile(const FileName: TFileName): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// read a File content into a RawUtf8, detecting any leading BOM
+// - assume file with no BOM is encoded with the current Ansi code page, not
+// UTF-8, unless AssumeUtf8IfNoBom is true and it behaves like RawUtf8FromFile()
+function AnyTextFileToRawUtf8(const FileName: TFileName;
+  AssumeUtf8IfNoBom: boolean = false): RawUtf8;
+
+/// read a File content into a VCL/LCL string, detecting any leading BOM
+// - assume file with no BOM is encoded with the current Ansi code page, not UTF-8
+// - if ForceUtf8 is true, won't detect the BOM but assume whole file is UTF-8
+function AnyTextFileToString(const FileName: TFileName;
+  ForceUtf8: boolean = false): string;
+
+/// read a File content into SynUnicode string, detecting any leading BOM
+// - assume file with no BOM is encoded with the current Ansi code page, not UTF-8
+// - if ForceUtf8 is true, won't detect the BOM but assume whole file is UTF-8
+function AnyTextFileToSynUnicode(const FileName: TFileName;
+  ForceUtf8: boolean = false): SynUnicode;
 
 
 { *************** Low-Level String Conversion Functions }
@@ -614,7 +680,27 @@ procedure AnyAnsiToUtf8(const s: RawByteString; var result: RawUtf8); overload;
 // UTF-8 encoded String
 // - will assume CurrentAnsiConvert.CodePage prior to Delphi 2009
 // - newer UNICODE versions of Delphi will retrieve the code page from string
+// - use AnsiToUtf8() if you want to specify the codepage
 function AnyAnsiToUtf8(const s: RawByteString): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert an AnsiString (of a given code page) into a UTF-8 string
+// - use AnyAnsiToUtf8() if you want to use the codepage of the input string
+// - wrapper around TSynAnsiConvert.Engine(CodePage).AnsiToUtf8()
+function AnsiToUtf8(const Ansi: RawByteString; CodePage: integer): RawUtf8;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert an AnsiChar buffer (of a given code page) into a UTF-8 string
+// - the destination code page should be supplied
+// - wrapper around TSynAnsiConvert.Engine(CodePage).AnsiBufferToRawUtf8()
+procedure AnsiCharToUtf8(P: PAnsiChar; L: integer; var result: RawUtf8;
+  CodePage: integer);
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert an AnsiString (of a given code page) into a generic string
+// - the destination code page should be supplied
+// - wrapper around TSynAnsiConvert.Engine(CodePage) and string conversion
+function AnsiToString(const Ansi: RawByteString; CodePage: integer): string;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// direct conversion of a WinAnsi (CodePage 1252) string into a UTF-8 encoded String
@@ -641,10 +727,6 @@ function WinAnsiBufferToUtf8(Dest: PUtf8Char;
 function ShortStringToUtf8(const source: ShortString): RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// direct conversion of a WinAnsi (CodePage 1252) string into a Unicode encoded String
-// - very fast, by using a fixed pre-calculated array for individual chars conversion
-function WinAnsiToRawUnicode(const S: WinAnsiString): RawUnicode;
-
 /// direct conversion of a WinAnsi (CodePage 1252) string into a Unicode buffer
 // - very fast, by using a fixed pre-calculated array for individual chars conversion
 // - text will be truncated if necessary to avoid buffer overflow in Dest[]
@@ -666,6 +748,15 @@ procedure Utf8ToRawUtf8(P: PUtf8Char; var result: RawUtf8);
 
 /// direct conversion of a UTF-8 encoded buffer into a WinAnsi PAnsiChar buffer
 function Utf8ToWinPChar(dest: PAnsiChar; source: PUtf8Char; count: integer): integer;
+  {$ifdef HASINLINE}inline;{$endif}
+
+{$ifndef PUREMORMOT2}
+/// direct conversion of a WinAnsi (CodePage 1252) string into a Unicode encoded String
+// - very fast, by using a fixed pre-calculated array for individual chars conversion
+function WinAnsiToRawUnicode(const S: WinAnsiString): RawUnicode;
+
+/// convert a UTF-16 string into a WinAnsi (code page 1252) string
+function RawUnicodeToWinAnsi(const Unicode: RawUnicode): WinAnsiString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a UTF-8 encoded buffer into a RawUnicode string
@@ -695,6 +786,33 @@ function Utf8DecodeToRawUnicodeUI(const S: RawUtf8;
 /// convert a RawUnicode string into a UTF-8 string
 function RawUnicodeToUtf8(const Unicode: RawUnicode): RawUtf8; overload;
 
+/// convert any RawUnicode String into a generic SynUnicode Text
+function RawUnicodeToSynUnicode(const Unicode: RawUnicode): SynUnicode; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert any generic VCL Text into a RawUnicode encoded String
+// - it's prefered to use TLanguageFile.StringToUtf8() method in mORMoti18n,
+// which will handle full i18n of your application
+// - it will work as is with Delphi 2009+ (direct unicode conversion)
+// - under older version of Delphi (no unicode), it will use the
+// current RTL codepage, as with WideString conversion (but without slow
+// WideString usage)
+function StringToRawUnicode(const S: string): RawUnicode; overload;
+
+/// convert any generic VCL Text into a RawUnicode encoded String
+// - it's prefered to use TLanguageFile.StringToUtf8() method in mORMoti18n,
+// which will handle full i18n of your application
+// - it will work as is with Delphi 2009+ (direct unicode conversion)
+// - under older version of Delphi (no unicode), it will use the
+// current RTL codepage, as with WideString conversion (but without slow
+// WideString usage)
+function StringToRawUnicode(P: PChar; L: integer): RawUnicode; overload;
+
+/// convert any RawUnicode encoded string into a generic VCL Text
+// - uses StrLenW() and not length(U) to handle case when was used as buffer
+function RawUnicodeToString(const U: RawUnicode): string; overload;
+{$endif PUREMORMOT2}
+
 /// convert a SynUnicode string into a UTF-8 string
 function SynUnicodeToUtf8(const Unicode: SynUnicode): RawUtf8;
 
@@ -702,32 +820,21 @@ function SynUnicodeToUtf8(const Unicode: SynUnicode): RawUtf8;
 function WideStringToUtf8(const aText: WideString): RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// direct conversion of a Unicode encoded buffer into a WinAnsi PAnsiChar buffer
+/// direct conversion of a UTF-16 encoded buffer into a WinAnsi PAnsiChar buffer
 procedure RawUnicodeToWinPChar(dest: PAnsiChar;
   source: PWideChar; WideCharCount: integer);
   {$ifdef HASINLINE}inline;{$endif}
 
-/// convert a RawUnicode PWideChar into a WinAnsi (code page 1252) string
+/// convert a UTF-16 PWideChar buffer into a WinAnsi (code page 1252) string
 function RawUnicodeToWinAnsi(
   WideChar: PWideChar; WideCharCount: integer): WinAnsiString; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// convert a RawUnicode string into a WinAnsi (code page 1252) string
-function RawUnicodeToWinAnsi(const Unicode: RawUnicode): WinAnsiString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert a WideString into a WinAnsi (code page 1252) string
 function WideStringToWinAnsi(const Wide: WideString): WinAnsiString;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// convert an AnsiChar buffer (of a given code page) into a UTF-8 string
-procedure AnsiCharToUtf8(P: PAnsiChar; L: integer; var result: RawUtf8; ACP: integer);
-
-/// convert any Raw Unicode encoded String into a generic SynUnicode Text
-function RawUnicodeToSynUnicode(const Unicode: RawUnicode): SynUnicode; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// convert any Raw Unicode encoded String into a generic SynUnicode Text
+/// convert any UTF-16 buffer into a generic SynUnicode Text
 function RawUnicodeToSynUnicode(
   WideChar: PWideChar; WideCharCount: integer): SynUnicode; overload;
   {$ifdef HASINLINE}inline;{$endif}
@@ -738,6 +845,10 @@ procedure UnicodeBufferToWinAnsi(source: PWideChar; out Dest: WinAnsiString);
 /// convert an Unicode buffer into a generic VCL string
 function UnicodeBufferToString(source: PWideChar): string;
 
+/// convert an Unicode buffer into a UTF-8 string
+function UnicodeBufferToUtf8(source: PWideChar): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
 {$ifdef HASVARUSTRING}
 
 /// convert a Delphi 2009+ or FPC Unicode string into our UTF-8 string
@@ -747,7 +858,7 @@ function UnicodeStringToUtf8(const S: UnicodeString): RawUtf8; inline;
 // but is faster, since it uses no Win32 API call
 function Utf8DecodeToUnicodeString(const S: RawUtf8): UnicodeString; overload; inline;
 
-/// convert our UTF-8 encoded buffer into a Delphi 2009+ or FPC Unicode string
+/// convert an UTF-8 encoded buffer into a Delphi 2009+ or FPC Unicode string
 // - this function is the same as direct assignment, since RawUtf8=AnsiString(CP_UTF8),
 // but is faster, since use no Win32 API call
 procedure Utf8DecodeToUnicodeString(P: PUtf8Char; L: integer;
@@ -770,6 +881,22 @@ function WinAnsiToUnicodeString(WinAnsi: PAnsiChar; WinAnsiLen: PtrInt): Unicode
 function WinAnsiToUnicodeString(const WinAnsi: WinAnsiString): UnicodeString; inline; overload;
 
 {$endif HASVARUSTRING}
+
+/// convert an UTF-8 encoded buffer into a UTF-16 encoded RawByteString buffer
+// - could be used instead of deprecated RawUnicode when a temp UTF-16 buffer is needed
+function Utf8DecodeToUnicodeRawByteString(P: PUtf8Char; L: integer): RawByteString;
+
+/// convert an UTF-8 encoded buffer into a UTF-16 encoded stream of bytes
+function Utf8DecodeToUnicodeStream(P: PUtf8Char; L: integer): TStream;
+
+/// convert a Win-Ansi encoded buffer into a Delphi 2009+ or FPC Unicode string
+// - this function is faster than default RTL, since use no Win32 API call
+function WinAnsiToSynUnicode(WinAnsi: PAnsiChar; WinAnsiLen: PtrInt): SynUnicode; overload;
+
+/// convert a Win-Ansi string into a Delphi 2009+ or FPC Unicode string
+// - this function is faster than default RTL, since use no Win32 API call
+function WinAnsiToSynUnicode(const WinAnsi: WinAnsiString): SynUnicode;
+  {$ifdef HASINLINE}inline;{$endif} overload;
 
 /// convert any generic VCL Text into an UTF-8 encoded String
 // - in the VCL context, it's prefered to use TLanguageFile.StringToUtf8()
@@ -833,15 +960,6 @@ function StringBufferToUtf8(Dest: PUtf8Char;
 // WideString usage)
 procedure StringBufferToUtf8(Source: PChar; out result: RawUtf8); overload;
 
-/// convert any generic VCL Text into a Raw Unicode encoded String
-// - it's prefered to use TLanguageFile.StringToUtf8() method in mORMoti18n,
-// which will handle full i18n of your application
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
-function StringToRawUnicode(const S: string): RawUnicode; overload;
-
 /// convert any generic VCL Text into a SynUnicode encoded String
 // - it's prefered to use TLanguageFile.StringToUtf8() method in mORMoti18n,
 // which will handle full i18n of your application
@@ -857,23 +975,10 @@ function StringToSynUnicode(const S: string): SynUnicode; overload;
 procedure StringToSynUnicode(const S: string; var result: SynUnicode); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// convert any generic VCL Text into a Raw Unicode encoded String
-// - it's prefered to use TLanguageFile.StringToUtf8() method in mORMoti18n,
-// which will handle full i18n of your application
-// - it will work as is with Delphi 2009+ (direct unicode conversion)
-// - under older version of Delphi (no unicode), it will use the
-// current RTL codepage, as with WideString conversion (but without slow
-// WideString usage)
-function StringToRawUnicode(P: PChar; L: integer): RawUnicode; overload;
-
-/// convert any Raw Unicode encoded string into a generic VCL Text
-// - uses StrLenW() and not length(U) to handle case when was used as buffer
-function RawUnicodeToString(const U: RawUnicode): string; overload;
-
-/// convert any Raw Unicode encoded buffer into a generic VCL Text
+/// convert any UTF-16 encoded buffer into a generic VCL Text
 function RawUnicodeToString(P: PWideChar; L: integer): string; overload;
 
-/// convert any Raw Unicode encoded buffer into a generic VCL Text
+/// convert any UTF-16 encoded buffer into a generic VCL Text
 procedure RawUnicodeToString(P: PWideChar; L: integer; var result: string); overload;
 
 /// convert any SynUnicode encoded string into a generic VCL Text
@@ -1049,6 +1154,11 @@ function PropNameValid(P: PUtf8Char): boolean;
 // the same way than PropNameValid() which refuses digits as pascal convention
 function PropNamesValid(const Values: array of RawUtf8): boolean;
 
+/// try to generate a PropNameValid() output from an incoming text
+// - will trim all spaces, and replace most special chars by '_'
+// - if it is not PropNameValid() after those replacements, will return fallback
+function PropNameSanitize(const text, fallback: RawUtf8): RawUtf8;
+
 /// case insensitive comparison of ASCII 7-bit identifiers
 // - use it with property names values (i.e. only including A..Z,0..9,_ chars)
 // - behavior is undefined with UTF-8 encoding (some false positive may occur)
@@ -1084,7 +1194,7 @@ function IdemPropNameU(const P1: RawUtf8; P2: PUtf8Char; P2Len: PtrInt): boolean
 // IdemPropNameU(const P1,P2: RawUtf8), which would be slightly faster by
 // using the length stored before the actual text buffer of each RawUtf8
 function IdemPropNameUSameLenNotNull(P1, P2: PUtf8Char; P1P2Len: PtrInt): boolean;
-  {$ifdef FPC}inline;{$endif} { Delphi is not efficient at inlining this }
+  {$ifdef FPC}inline;{$endif} // Delphi does not like to inline labels/goto
 
 /// case insensitive comparison of ASCII 7-bit identifiers
 // - use it with property names values (i.e. only including A..Z,0..9,_ chars)
@@ -1299,7 +1409,7 @@ function ContainsUtf8(p, up: PUtf8Char): boolean;
 
 /// returns TRUE if the supplied uppercased text is contained in the text buffer
 function GetLineContains(p, pEnd, up: PUtf8Char): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef FPC}inline;{$endif} // Delphi does not like inlining goto+label
 
 /// copy source into a 256 chars dest^ buffer with 7-bit upper case conversion
 // - used internally for short keys match or case-insensitive hash
@@ -1352,6 +1462,7 @@ function UpperCopyShort(dest: PAnsiChar; const source: ShortString): PAnsiChar;
 /// fast UTF-8 comparison handling WinAnsi CP-1252 case folding
 // - this version expects u1 and u2 to be zero-terminated
 // - decode the UTF-8 content before using NormToUpper[] lookup table
+// - match the our SYSTEMNOCASE custom (and default) SQLite 3 collation
 // - consider Utf8ICompReference() for Unicode 10.0 support
 function Utf8IComp(u1, u2: PUtf8Char): PtrInt;
 
@@ -1719,8 +1830,15 @@ begin
   result := PtrInt(Dest);
   inc(DestLen, PtrInt(Dest));
   if (Source <> nil) and
+     (SourceLen > 0) and
      (Dest <> nil) then
   begin
+    // ignore any trailing BOM (do exist on Windows files)
+    if Source^ = BOM_UTF16LE then
+    begin
+      inc(Source);
+      dec(SourceLen);
+    end;
     // first handle 7-bit ASCII WideChars, by pairs (Sha optimization)
     SourceLen := SourceLen * 2 + PtrInt(PtrUInt(Source));
     Tail := PWideChar(SourceLen) - 2;
@@ -2550,6 +2668,8 @@ end;
 // UTF-8 is AT MOST 50% bigger than UTF-16 in bytes in range U+0800..U+FFFF
 // see http://stackoverflow.com/a/7008095 -> bytes=WideCharCount*3 below
 
+{$ifndef PUREMORMOT2}
+
 function TSynAnsiConvert.AnsiToRawUnicode(const AnsiText: RawByteString): RawUnicode;
 begin
   result := AnsiToRawUnicode(pointer(AnsiText), length(AnsiText));
@@ -2571,6 +2691,8 @@ begin
     tmp.Done;
   end;
 end;
+
+{$endif PUREMORMOT2}
 
 function TSynAnsiConvert.AnsiToUnicodeString(Source: PAnsiChar;
   SourceChars: cardinal): SynUnicode;
@@ -2683,7 +2805,7 @@ end;
 
 class function TSynAnsiConvert.Engine(aCodePage: cardinal): TSynAnsiConvert;
 begin
-  if aCodePage <> 0 then
+  if aCodePage <> CP_ACP then
   begin
     result := GetEngine(aCodePage);
     if result = nil then
@@ -2701,31 +2823,41 @@ function TSynAnsiConvert.UnicodeBufferToAnsi(Dest: PAnsiChar;
 var
   c: cardinal;
 begin
-  // first handle trailing 7-bit ASCII chars, by pairs (Sha optimization)
-  if SourceChars >= 2 then
-    repeat
-      c := PCardinal(Source)^;
-      if c and $ff80ff80 <> 0 then
-        break; // break on first non ASCII pair
-      dec(SourceChars, 2);
-      inc(Source, 2);
-      c := c shr 8 or c;
-      PWord(Dest)^ := c;
-      inc(Dest, 2);
-    until SourceChars < 2;
-  if (SourceChars > 0) and
-     (ord(Source^) < 128) then
-    repeat
-      Dest^ := AnsiChar(ord(Source^));
-      dec(SourceChars);
+  if (Source <> nil) and
+     (SourceChars <> 0) then
+  begin
+    // ignore any trailing BOM (do exist on Windows files)
+    if Source^ = BOM_UTF16LE then
+    begin
       inc(Source);
-      inc(Dest);
-    until (SourceChars = 0) or
-          (ord(Source^) >= 128);
-  // rely on the Operating System for all remaining ASCII characters
-  if SourceChars > 0 then
-    inc(Dest,
-      Unicode_WideToAnsi(Source, Dest, SourceChars, SourceChars, fCodePage));
+      dec(SourceChars);
+    end;
+    // first handle trailing 7-bit ASCII chars, by pairs (Sha optimization)
+    if SourceChars >= 2 then
+      repeat
+        c := PCardinal(Source)^;
+        if c and $ff80ff80 <> 0 then
+          break; // break on first non ASCII pair
+        dec(SourceChars, 2);
+        inc(Source, 2);
+        c := c shr 8 or c;
+        PWord(Dest)^ := c;
+        inc(Dest, 2);
+      until SourceChars < 2;
+    if (SourceChars > 0) and
+       (ord(Source^) < 128) then
+      repeat
+        Dest^ := AnsiChar(ord(Source^));
+        dec(SourceChars);
+        inc(Source);
+        inc(Dest);
+      until (SourceChars = 0) or
+            (ord(Source^) >= 128);
+    // rely on the Operating System for all remaining ASCII characters
+    if SourceChars <> 0 then
+      inc(Dest,
+        Unicode_WideToAnsi(Source, Dest, SourceChars, SourceChars, fCodePage));
+  end;
   result := Dest;
 end;
 
@@ -2824,10 +2956,17 @@ begin
   end;
 end;
 
+function TSynAnsiConvert.UnicodeStringToAnsi(const Source: SynUnicode): RawByteString;
+begin
+  result := UnicodeBufferToAnsi(pointer(Source), length(Source));
+end;
+
+{$ifndef PUREMORMOT2}
 function TSynAnsiConvert.RawUnicodeToAnsi(const Source: RawUnicode): RawByteString;
 begin
   result := UnicodeBufferToAnsi(pointer(Source), length(Source) shr 1);
 end;
+{$endif PUREMORMOT2}
 
 function TSynAnsiConvert.AnsiToAnsi(From: TSynAnsiConvert;
   const Source: RawByteString): RawByteString;
@@ -2997,6 +3136,7 @@ by1:    c := byte(Source^);
   {$endif ISDELPHI104}
 end;
 
+{$ifndef PUREMORMOT2}
 function TSynAnsiFixedWidth.AnsiToRawUnicode(Source: PAnsiChar;
   SourceChars: cardinal): RawUnicode;
 begin
@@ -3008,6 +3148,7 @@ begin
     AnsiBufferToUnicode(pointer(result), Source, SourceChars);
   end;
 end;
+{$endif PUREMORMOT2}
 
 const
   /// reference set for WinAnsi to Unicode conversion
@@ -3221,34 +3362,44 @@ var
   c: cardinal;
   tab: PAnsiChar;
 begin
-  // first handle trailing 7-bit ASCII chars, by pairs (Sha optimization)
-  if SourceChars >= 2 then
-    repeat
-      c := PCardinal(Source)^;
-      if c and $ff80ff80 <> 0 then
-        break; // break on first non ASCII pair
-      dec(SourceChars, 2);
-      inc(Source, 2);
-      c := c shr 8 or c;
-      PWord(Dest)^ := c;
-      inc(Dest, 2);
-    until SourceChars < 2;
-  // use internal lookup tables for fast process of remaining chars
-  tab := pointer(fWideToAnsi);
-  for c := 1 to SourceChars shr 2 do
+  if (Source <> nil) and
+     (SourceChars <> 0) then
   begin
-    Dest[0] := tab[Ord(Source[0])];
-    Dest[1] := tab[Ord(Source[1])];
-    Dest[2] := tab[Ord(Source[2])];
-    Dest[3] := tab[Ord(Source[3])];
-    inc(Source, 4);
-    inc(Dest, 4);
-  end;
-  for c := 1 to SourceChars and 3 do
-  begin
-    Dest^ := tab[Ord(Source^)];
-    inc(Dest);
-    inc(Source);
+    // ignore any trailing BOM (do exist on Windows files)
+    if Source^ = BOM_UTF16LE then
+    begin
+      inc(Source);
+      dec(SourceChars);
+    end;
+    // first handle trailing 7-bit ASCII chars, by pairs (Sha optimization)
+    if SourceChars >= 2 then
+      repeat
+        c := PCardinal(Source)^;
+        if c and $ff80ff80 <> 0 then
+          break; // break on first non ASCII pair
+        dec(SourceChars, 2);
+        inc(Source, 2);
+        c := c shr 8 or c;
+        PWord(Dest)^ := c;
+        inc(Dest, 2);
+      until SourceChars < 2;
+    // use internal lookup tables for fast process of remaining chars
+    tab := pointer(fWideToAnsi);
+    for c := 1 to SourceChars shr 2 do
+    begin
+      Dest[0] := tab[Ord(Source[0])];
+      Dest[1] := tab[Ord(Source[1])];
+      Dest[2] := tab[Ord(Source[2])];
+      Dest[3] := tab[Ord(Source[3])];
+      inc(Source, 4);
+      inc(Dest, 4);
+    end;
+    for c := 1 to SourceChars and 3 do
+    begin
+      Dest^ := tab[Ord(Source^)];
+      inc(Dest);
+      inc(Source);
+    end;
   end;
   result := Dest;
 end;
@@ -3381,11 +3532,13 @@ begin
   result := Dest + SourceChars;
 end;
 
+{$ifndef PUREMORMOT2}
 function TSynAnsiUtf8.AnsiToRawUnicode(Source: PAnsiChar;
   SourceChars: cardinal): RawUnicode;
 begin
   result := Utf8DecodeToRawUniCode(PUtf8Char(Source), SourceChars);
 end;
+{$endif PUREMORMOT2}
 
 constructor TSynAnsiUtf8.Create(aCodePage: cardinal);
 begin
@@ -3394,17 +3547,11 @@ begin
   inherited Create(aCodePage);
 end;
 
-function TSynAnsiUtf8.UnicodeBufferToUtf8(Dest: PAnsiChar;
-  DestChars: cardinal; Source: PWideChar; SourceChars: cardinal): PAnsiChar;
-begin
-  result := Dest + RawUnicodeToUtf8(PUtf8Char(Dest), DestChars,
-    Source, SourceChars, [ccfNoTrailingZero]);
-end;
-
 function TSynAnsiUtf8.UnicodeBufferToAnsi(Dest: PAnsiChar;
   Source: PWideChar; SourceChars: cardinal): PAnsiChar;
 begin
-  result := UnicodeBufferToUtf8(Dest, SourceChars, Source, SourceChars);
+  result := Dest + RawUnicodeToUtf8(PUtf8Char(Dest), SourceChars * 3,
+    Source, SourceChars, [ccfNoTrailingZero]);
 end;
 
 function TSynAnsiUtf8.UnicodeBufferToAnsi(Source: PWideChar;
@@ -3418,8 +3565,8 @@ begin
   else
   begin
     tmp.Init(SourceChars * 3);
-    FastSetStringCP(result, tmp.buf, UnicodeBufferToUtf8(tmp.buf,
-      SourceChars * 3, Source, SourceChars) - PAnsiChar(tmp.buf), fCodePage);
+    FastSetStringCP(result, tmp.buf, RawUnicodeToUtf8(tmp.buf,
+      SourceChars * 3, Source, SourceChars, [ccfNoTrailingZero]), fCodePage);
     tmp.Done;
   end;
 end;
@@ -3439,17 +3586,17 @@ end;
 
 function TSynAnsiUtf8.Utf8ToAnsi(const u: RawUtf8): RawByteString;
 begin
-  result := u;
+  result := u; // may be read-only: no FastAssignUtf8/FakeCodePage
   {$ifdef HASCODEPAGE}
-  SetCodePage(result, CP_UTF8, false);
+  SetCodePage(result, CP_UTF8, {convert=}false);
   {$endif HASCODEPAGE}
 end;
 
 function TSynAnsiUtf8.AnsiToUtf8(const AnsiText: RawByteString): RawUtf8;
 begin
-  result := AnsiText;
+  result := AnsiText; // may be read-only: no FastAssignUtf8/FakeCodePage
   {$ifdef HASCODEPAGE}
-  SetCodePage(RawByteString(result), CP_UTF8, false);
+  SetCodePage(RawByteString(result), CP_UTF8, {convert=}false);
   {$endif HASCODEPAGE}
 end;
 
@@ -3483,11 +3630,13 @@ begin
     SourceChars * 3, PWideChar(Source), SourceChars, NOTRAILING[NoTrailingZero]);
 end;
 
+{$ifndef PUREMORMOT2}
 function TSynAnsiUtf16.AnsiToRawUnicode(Source: PAnsiChar;
   SourceChars: cardinal): RawUnicode;
 begin
   SetString(result, Source, SourceChars); // byte count
 end;
+{$endif PUREMORMOT2}
 
 constructor TSynAnsiUtf16.Create(aCodePage: cardinal);
 begin
@@ -3510,27 +3659,125 @@ begin
   result := Dest + Utf8ToWideChar(PWideChar(Dest), Source, SourceChars, true);
 end;
 
-function AnsiBufferToTempUtf8(var temp: TSynTempBuffer;
-  Buf: PAnsiChar; BufLen, CodePage: cardinal): PUtf8Char;
+
+{ *************** Text File Loading with BOM/Unicode Support }
+
+function BomFile(var Buffer: pointer; var BufferSize: PtrInt): TBomFile;
 begin
-  if (BufLen = 0) or
-     (CodePage = CP_UTF8) or
-     (CodePage >= CP_RAWBLOB) or
-     IsAnsiCompatible(Buf, BufLen) then
-  begin
-    temp.Buf := nil;
-    temp.len := BufLen;
-    result := PUtf8Char(Buf);
-  end
-  else
-  begin
-    temp.Init(BufLen * 3);
-    Buf := pointer(TSynAnsiConvert.Engine(CodePage).
-      AnsiBufferToUtf8(temp.Buf, Buf, BufLen));
-    temp.len := Buf - PAnsiChar(temp.Buf);
-    result := temp.Buf;
+  result := bomNone;
+  if (Buffer <> nil) and
+     (BufferSize >= 2) then
+    case PWord(Buffer)^ of
+      ord(BOM_UTF16LE):
+        begin
+          inc(PByte(Buffer), 2);
+          dec(BufferSize, 2);
+          result := bomUnicode; // UTF-16 LE
+        end;
+      $BBEF:
+        if (BufferSize >= 3) and
+           (PByteArray(Buffer)[2] = $BF) then
+        begin
+          inc(PByte(Buffer), 3);
+          dec(BufferSize, 3);
+          result := bomUtf8;
+        end;
+    end;
+end;
+
+function StringFromBomFile(const FileName: TFileName; out FileContent: RawByteString;
+  out Buffer: pointer; out BufferSize: PtrInt): TBomFile;
+begin
+  FileContent := StringFromFile(FileName);
+  Buffer := pointer(FileContent);
+  BufferSize := length(FileContent);
+  result := BomFile(Buffer, BufferSize);
+end;
+
+function RawUtf8FromFile(const FileName: TFileName): RawUtf8;
+begin
+  result := AnyTextFileToRawUtf8(FileName, {AssumeUtf8IfNoBom=}true);
+end;
+
+function AnyTextFileToRawUtf8(const FileName: TFileName; AssumeUtf8IfNoBom: boolean): RawUtf8;
+var
+  tmp: RawByteString;
+  buf: pointer;
+  len: PtrInt;
+begin
+  case StringFromBomFile(FileName, tmp, buf, len) of
+    bomNone:
+      if AssumeUtf8IfNoBom then
+        FastAssignUtf8(result, tmp)
+      else
+        CurrentAnsiConvert.AnsiBufferToRawUtf8(buf, len, result);
+    bomUnicode:
+      RawUnicodeToUtf8(PWideChar(buf), len shr 1, result);
+    bomUtf8:
+      if len = 0 then
+        result := ''
+      else
+      begin
+        MoveFast(buf^, pointer(tmp)^, len); // fast in-place delete(bom)
+        FakeLength(tmp, len);
+        FastAssignUtf8(result, tmp)
+      end;
   end;
 end;
+
+function AnyTextFileToSynUnicode(const FileName: TFileName; ForceUtf8: boolean): SynUnicode;
+var
+  tmp: RawByteString;
+  buf: pointer;
+  len: PtrInt;
+begin
+  if ForceUtf8 then
+    Utf8ToSynUnicode(StringFromFile(FileName), result)
+  else
+    case StringFromBomFile(FileName, tmp, buf, len) of
+      bomNone:
+        result := CurrentAnsiConvert.AnsiToUnicodeString(buf, len);
+      bomUnicode:
+        SetString(result, PWideChar(buf), len shr 1);
+      bomUtf8:
+        Utf8ToSynUnicode(buf, len, result);
+    end;
+end;
+
+function AnyTextFileToString(const FileName: TFileName; ForceUtf8: boolean): string;
+var
+  tmp: RawByteString;
+  buf: pointer;
+  len: PtrInt;
+begin
+
+  {$ifdef UNICODE}
+  if ForceUtf8 then
+    Utf8ToStringVar(StringFromFile(FileName), result)
+  else
+    case StringFromBomFile(FileName, tmp, buf, len) of
+      bomNone:
+        result := CurrentAnsiConvert.AnsiToUnicodeString(buf, len);
+      bomUnicode:
+        SetString(result, PWideChar(buf), len shr 1);
+      bomUtf8:
+        Utf8DecodeToString(buf, len, result);
+    end;
+  {$else}
+  if ForceUtf8 then
+    result := CurrentAnsiConvert.Utf8ToAnsi(StringFromFile(FileName))
+  else
+    case StringFromBomFile(FileName, tmp, buf, len) of
+      bomNone:
+        SetString(result, PAnsiChar(buf), len);
+      bomUnicode:
+        result := CurrentAnsiConvert.UnicodeBufferToAnsi(buf, len shr 1);
+      bomUtf8:
+        result := CurrentAnsiConvert.Utf8BufferToAnsi(buf, len);
+    end;
+  {$endif UNICODE}
+end;
+
 
 
 { *************** Low-Level String Conversion Functions }
@@ -3547,13 +3794,27 @@ begin
   {$ifdef HASCODEPAGE}
   begin
     cp := GetCodePage(s);
+    if cp = CP_ACP then
+    begin
+      cp := Unicode_CodePage;
+      {$ifdef FPC}
+      if cp = CP_UTF8 then // happens on POSIX and with Lazarus - so FPC only
+      begin
+        if PStrRec(PAnsiChar(pointer(s)) - _STRRECSIZE)^.refCnt >= 0 then
+        begin
+          result := s; // not a read-only constant: assign by ref
+          FakeCodePage(RawByteString(result), cp); // override 0 by CP_UTF8
+        end
+        else
+          FastSetString(result, pointer(s), length(s)); // realloc constant
+        exit;
+      end;
+      {$endif FPC}
+    end;
     if cp = CP_UTF8 then
       result := s
     else if cp >= CP_RAWBLOB then
-    begin
-      result := s;
-      SetCodePage(RawByteString(result), CP_UTF8, false);
-    end
+      FastSetString(result, pointer(s), length(s)) // no convert, just copy
     else
       TSynAnsiConvert.Engine(cp).AnsiBufferToRawUtf8(pointer(s), length(s), result);
   end;
@@ -3594,10 +3855,12 @@ begin
     Dest^[0] := 0;
 end;
 
+{$ifndef PUREMORMOT2}
 function WinAnsiToRawUnicode(const S: WinAnsiString): RawUnicode;
 begin
   result := WinAnsiConvert.AnsiToRawUnicode(S);
 end;
+{$endif PUREMORMOT2}
 
 function WinAnsiToUtf8(const S: WinAnsiString): RawUtf8;
 begin
@@ -3664,6 +3927,8 @@ begin
   FastSetString(result, P, StrLen(P));
 end;
 
+{$ifndef PUREMORMOT2}
+
 function Utf8DecodeToRawUnicode(P: PUtf8Char; L: integer): RawUnicode;
 var
   tmp: TSynTempBuffer;
@@ -3709,20 +3974,26 @@ begin
   result := Utf8ToWideChar(pointer(Dest), Pointer(S), result);
 end;
 
-/// convert a RawUnicode string into a UTF-8 string
 function RawUnicodeToUtf8(const Unicode: RawUnicode): RawUtf8;
 begin
   RawUnicodeToUtf8(pointer(Unicode), Length(Unicode) shr 1, result);
 end;
 
-function SynUnicodeToUtf8(const Unicode: SynUnicode): RawUtf8;
-begin
-  RawUnicodeToUtf8(pointer(Unicode), Length(Unicode), result);
-end;
-
 function RawUnicodeToSynUnicode(const Unicode: RawUnicode): SynUnicode;
 begin
   SetString(result, PWideChar(pointer(Unicode)), Length(Unicode) shr 1);
+end;
+
+function RawUnicodeToWinAnsi(const Unicode: RawUnicode): WinAnsiString;
+begin
+  result := WinAnsiConvert.UnicodeBufferToAnsi(pointer(Unicode), Length(Unicode) shr 1);
+end;
+
+{$endif PUREMORMOT2}
+
+function SynUnicodeToUtf8(const Unicode: SynUnicode): RawUtf8;
+begin
+  RawUnicodeToUtf8(pointer(Unicode), Length(Unicode), result);
 end;
 
 function RawUnicodeToSynUnicode(WideChar: PWideChar; WideCharCount: integer): SynUnicode;
@@ -3738,11 +4009,6 @@ end;
 function RawUnicodeToWinAnsi(WideChar: PWideChar; WideCharCount: integer): WinAnsiString;
 begin
   result := WinAnsiConvert.UnicodeBufferToAnsi(WideChar, WideCharCount);
-end;
-
-function RawUnicodeToWinAnsi(const Unicode: RawUnicode): WinAnsiString;
-begin
-  result := WinAnsiConvert.UnicodeBufferToAnsi(pointer(Unicode), Length(Unicode) shr 1);
 end;
 
 function WideStringToWinAnsi(const Wide: WideString): WinAnsiString;
@@ -3764,9 +4030,57 @@ begin
   result := RawUnicodeToString(source, StrLenW(source));
 end;
 
-procedure AnsiCharToUtf8(P: PAnsiChar; L: integer; var result: RawUtf8; ACP: integer);
+function UnicodeBufferToUtf8(source: PWideChar): RawUtf8;
 begin
-  TSynAnsiConvert.Engine(ACP).AnsiBufferToRawUtf8(P, L, result);
+  RawUnicodeToUtf8(source, StrLenW(source), result);
+end;
+
+procedure AnsiCharToUtf8(P: PAnsiChar; L: integer; var result: RawUtf8;
+  CodePage: integer);
+begin
+  TSynAnsiConvert.Engine(CodePage).AnsiBufferToRawUtf8(P, L, result);
+end;
+
+function AnsiToUtf8(const Ansi: RawByteString; CodePage: integer): RawUtf8;
+begin
+  if Ansi = '' then
+    result := ''
+  else
+    result := TSynAnsiConvert.Engine(CodePage).AnsiToUtf8(Ansi);
+end;
+
+function AnsiToString(const Ansi: RawByteString; CodePage: integer): string;
+begin
+  if Ansi = '' then
+    result := ''
+  else
+    {$ifdef UNICODE}
+    result := TSynAnsiConvert.Engine(CodePage).AnsiToUnicodeString(Ansi);
+    {$else}
+    result := CurrentAnsiConvert.AnsiToAnsi(TSynAnsiConvert.Engine(CodePage), Ansi);
+    {$endif UNICODE}
+end;
+
+function AnsiBufferToTempUtf8(var Temp: TSynTempBuffer; Buf: PAnsiChar; BufLen,
+  CodePage: cardinal): PUtf8Char;
+begin
+  if (BufLen = 0) or
+     (CodePage = CP_UTF8) or
+     (CodePage >= CP_RAWBLOB) or
+     IsAnsiCompatible(Buf, BufLen) then
+  begin
+    temp.Buf := nil;
+    temp.len := BufLen;
+    result := PUtf8Char(Buf);
+  end
+  else
+  begin
+    temp.Init(BufLen * 3);
+    Buf := pointer(TSynAnsiConvert.Engine(CodePage).
+      AnsiBufferToUtf8(temp.Buf, Buf, BufLen));
+    temp.len := Buf - PAnsiChar(temp.Buf);
+    result := temp.Buf;
+  end;
 end;
 
 {$ifdef UNICODE}
@@ -3847,10 +4161,25 @@ begin
   RawUnicodeToUtf8(pointer(Text), Length(Text), result);
 end;
 
+{$ifndef PUREMORMOT2}
+
 function StringToRawUnicode(const S: string): RawUnicode;
 begin
   SetString(result, PAnsiChar(pointer(S)), length(S) * 2 + 1); // +1 for last wide #0
 end;
+
+function StringToRawUnicode(P: PChar; L: integer): RawUnicode;
+begin
+  SetString(result, PAnsiChar(P), L * 2 + 1); // +1 for last wide #0
+end;
+
+function RawUnicodeToString(const U: RawUnicode): string;
+begin
+  // uses StrLenW() and not length(U) to handle case when was used as buffer
+  SetString(result, PWideChar(pointer(U)), StrLenW(Pointer(U)));
+end;
+
+{$endif PUREMORMOT2}
 
 function StringToSynUnicode(const S: string): SynUnicode;
 begin
@@ -3862,11 +4191,6 @@ begin
   result := S;
 end;
 
-function StringToRawUnicode(P: PChar; L: integer): RawUnicode;
-begin
-  SetString(result, PAnsiChar(P), L * 2 + 1); // +1 for last wide #0
-end;
-
 function RawUnicodeToString(P: PWideChar; L: integer): string;
 begin
   SetString(result, P, L);
@@ -3875,12 +4199,6 @@ end;
 procedure RawUnicodeToString(P: PWideChar; L: integer; var result: string);
 begin
   SetString(result, P, L);
-end;
-
-function RawUnicodeToString(const U: RawUnicode): string;
-begin
-  // uses StrLenW() and not length(U) to handle case when was used as buffer
-  SetString(result, PWideChar(pointer(U)), StrLenW(Pointer(U)));
 end;
 
 function SynUnicodeToString(const U: SynUnicode): string;
@@ -3920,7 +4238,7 @@ begin
   result := Text; // if we are SURE this text is 7-bit Ansi -> direct assign
   {$ifdef FPC} // if Text is CP_RAWBYTESTRING then FPC won't handle it properly
   SetCodePage(RawByteString(result), DefaultSystemCodePage, false);
-  {$endif FPC}
+  {$endif FPC} // no FakeCodePage() since Text may be read-only
 end;
 
 function Ansi7ToString(Text: PWinAnsiChar; Len: PtrInt): string;
@@ -3986,10 +4304,25 @@ begin
   result := CurrentAnsiConvert.AnsiToUtf8(Text);
 end;
 
+{$ifndef PUREMORMOT2}
+
 function StringToRawUnicode(const S: string): RawUnicode;
 begin
   result := CurrentAnsiConvert.AnsiToRawUnicode(S);
 end;
+
+function StringToRawUnicode(P: PChar; L: integer): RawUnicode;
+begin
+  result := CurrentAnsiConvert.AnsiToRawUnicode(P, L);
+end;
+
+function RawUnicodeToString(const U: RawUnicode): string;
+begin
+  // uses StrLenW() and not length(U) to handle case when was used as buffer
+  result := CurrentAnsiConvert.UnicodeBufferToAnsi(Pointer(U), StrLenW(Pointer(U)));
+end;
+
+{$endif PUREMORMOT2}
 
 function StringToSynUnicode(const S: string): SynUnicode;
 begin
@@ -4001,11 +4334,6 @@ begin
   result := CurrentAnsiConvert.AnsiToUnicodeString(pointer(S), length(S));
 end;
 
-function StringToRawUnicode(P: PChar; L: integer): RawUnicode;
-begin
-  result := CurrentAnsiConvert.AnsiToRawUnicode(P, L);
-end;
-
 function RawUnicodeToString(P: PWideChar; L: integer): string;
 begin
   result := CurrentAnsiConvert.UnicodeBufferToAnsi(P, L);
@@ -4014,12 +4342,6 @@ end;
 procedure RawUnicodeToString(P: PWideChar; L: integer; var result: string);
 begin
   result := CurrentAnsiConvert.UnicodeBufferToAnsi(P, L);
-end;
-
-function RawUnicodeToString(const U: RawUnicode): string;
-begin
-  // uses StrLenW() and not length(U) to handle case when was used as buffer
-  result := CurrentAnsiConvert.UnicodeBufferToAnsi(Pointer(U), StrLenW(Pointer(U)));
 end;
 
 function SynUnicodeToString(const U: SynUnicode): string;
@@ -4108,6 +4430,38 @@ begin
 end;
 
 {$endif HASVARUSTRING}
+
+function Utf8DecodeToUnicodeRawByteString(P: PUtf8Char; L: integer): RawByteString;
+begin
+  if (P <> nil) and
+     (L <> 0) then
+  begin
+    FastSetRawByteString(result, nil, L * 3);
+    L := Utf8ToWideChar(pointer(result), P, L);
+    if L = 0 then
+      result := ''
+    else
+      FakeLength(result, L);
+  end
+  else
+    result := '';
+end;
+
+function Utf8DecodeToUnicodeStream(P: PUtf8Char; L: integer): TStream;
+begin
+  result := TRawByteStringStream.Create(Utf8DecodeToUnicodeRawByteString(P, L));
+end;
+
+function WinAnsiToSynUnicode(WinAnsi: PAnsiChar; WinAnsiLen: PtrInt): SynUnicode;
+begin
+  SetString(result, nil, WinAnsiLen);
+  WinAnsiConvert.AnsiBufferToUnicode(pointer(result), WinAnsi, WinAnsiLen);
+end;
+
+function WinAnsiToSynUnicode(const WinAnsi: WinAnsiString): SynUnicode;
+begin
+  result := WinAnsiToSynUnicode(pointer(WinAnsi), Length(WinAnsi));
+end;
 
 procedure UniqueRawUtf8ZeroToTilde(var u: RawUtf8; MaxSize: PtrInt);
 var
@@ -4349,6 +4703,21 @@ begin
       if not (tcIdentifier in tab[Values[i][j]]) then
         exit; // not ['_', '0'..'9', 'a'..'z', 'A'..'Z']
   result := true;
+end;
+
+function PropNameSanitize(const text, fallback: RawUtf8): RawUtf8;
+var
+  i: PtrInt;
+begin
+  result := text;
+  for i := length(result) downto 1 do
+    if result[i] in [#0 .. ' ', '#', '"', '''', '*'] then
+      delete(result, i, 1);
+  for i := 1 to length(result) do
+    if result[i] in ['[', ']', '/', '\', '&', '@', '+', '-', '.'] then
+      result[i] := '_';
+  if not PropNameValid(pointer(result)) then
+    result := fallback; // it was not good enough
 end;
 
 function IdemPropName(const P1, P2: ShortString): boolean;
@@ -7156,10 +7525,10 @@ begin
   SortDynArrayAnsiStringByCase[true] := @SortDynArrayAnsiStringI;
   // setup basic Unicode conversion engines
   SetLength(SynAnsiConvertListCodePage, 16); // no resize -> more thread safe
-  CurrentAnsiConvert := TSynAnsiConvert.Engine(Unicode_CodePage);
-  WinAnsiConvert := TSynAnsiConvert.Engine(CODEPAGE_US) as TSynAnsiFixedWidth;
-  Utf8AnsiConvert := TSynAnsiConvert.Engine(CP_UTF8) as TSynAnsiUtf8;
-  RawByteStringConvert := TSynAnsiConvert.Engine(CP_RAWBYTESTRING) as TSynAnsiFixedWidth;
+  CurrentAnsiConvert   := NewEngine(Unicode_CodePage);
+  WinAnsiConvert       := NewEngine(CODEPAGE_US) as TSynAnsiFixedWidth;
+  Utf8AnsiConvert      := NewEngine(CP_UTF8) as TSynAnsiUtf8;
+  RawByteStringConvert := NewEngine(CP_RAWBYTESTRING) as TSynAnsiFixedWidth;
   // setup optimized ASM functions
   IsValidUtf8Buffer := @IsValidUtf8Pas;
   {$ifdef ASMX64AVXNOCONST}

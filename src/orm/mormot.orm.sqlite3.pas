@@ -704,7 +704,9 @@ begin
         costPrimaryIndex:
           pInfo.estimatedRows := 1;
       else
-        raise EOrmException.Create('vt_BestIndex: unexpected EstimatedCost');
+        raise EOrmException.CreateUtf8(
+          'vt_BestIndex: unexpected EstimatedCost=%',
+          [ord(prepared^.EstimatedCost)]);
       end;
     pInfo.idxStr := pointer(prepared);
     pInfo.needToFreeIdxStr := 1; // will do sqlite3.free(idxStr) when needed
@@ -1090,18 +1092,23 @@ end;
 function TRestStorageShardDB.InitNewShard: TRestOrm;
 var
   db: TRestOrmServerDB;
+  root: RawUtf8;
+  fn: TFileName;
   cachesize: integer;
   model: TOrmModel;
 begin
   inc(fShardLast);
-  model := TOrmModel.Create([fStoredClass], FormatUtf8('shard%', [fShardLast]));
+  FormatUtf8('shard%', [fShardLast], root);
+  fn := DBFileName(fShardLast);
+  InternalLog('InitNewShard % on %', [root, fn]);
+  model := TOrmModel.Create([fStoredClass], root);
   if fInitShardsIsLast then
     // last/new .dbs = 2MB cache, previous 1MB only
     cachesize := fCacheSizeLast
   else
     cachesize := fCacheSizePrevious;
-  db := TRestOrmServerDB.CreateStandalone(model, fRest,
-    DBFileName(fShardLast), DBPassword(fShardLast), fSynchronous, cachesize);
+  db := TRestOrmServerDB.CreateStandalone(
+    model, fRest, fn, DBPassword(fShardLast), fSynchronous, cachesize);
   db._AddRef;
   result := db;
   SetLength(fShards, fShardLast + 1);
@@ -1128,6 +1135,7 @@ begin
   else
     mask := fShardRootFileName + '*.dbs';
   db := FindFiles(ExtractFilePath(mask), ExtractFileName(mask), '', [ffoSortByName]);
+  InternalLog('InitShards mask=% db=%', [mask, length(db)]);
   if db = nil then
     exit; // no existing data
   fShardOffset := -1;
@@ -1930,6 +1938,7 @@ function TRestOrmServerDB.MainEngineRetrieve(TableModelIndex: integer;
   ID: TID): RawUtf8;
 var
   WR: TJsonWriter;
+  tmp: TTextWriterStackBuffer;
 begin
   // faster direct access with no ID inlining
   result := '';
@@ -1945,7 +1954,7 @@ begin
       Model.TableProps[TableModelIndex].Sql.SelectOneWithID, 1);
     fStatement^.Bind(1, ID);
     // faster than fStatement^.ExecuteJson()
-    WR := AcquireJsonWriter;
+    WR := AcquireJsonWriter(tmp);
     if fStatement^.ExecuteStepJson(DB.DB, WR) then
       WR.SetText(result);
   finally
@@ -2362,7 +2371,8 @@ var
 begin
   info.Json := GotoNextNotSpace(P);
   if info.Json^ <> '[' then
-    raise EOrmBatchException.Create('Invalid simple batch');
+    raise EOrmBatchException.CreateUtf8(
+      'Invalid simple batch - start with % instead of [', [info.Json^]);
   inc(info.Json);
   if id <> nil then
     id^ := GetNextItemInt64(info.Json);
@@ -2370,7 +2380,7 @@ begin
   prop := pointer(Props.List);
   for f := 0 to Props.Count - 1 do
   begin
-    if GetBitPtr(@Fields, f) then
+    if FieldBitGet(Fields, f) then
     begin
       inc(result);
       // regular in-place JSON decoding
@@ -2510,8 +2520,8 @@ begin
                 SetLength(b^.Values, b^.ValuesCount);
               props.SaveFieldsFromJsonArray(b^.Simples[ndx], b^.SimpleFields,
                 @b^.ID[ndx], nil, [sfoExtendedJson], b^.Values[ndx]);
-              encoding := encPost;
             end;
+            encoding := encPost;
           end
           else
           begin
