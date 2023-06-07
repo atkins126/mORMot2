@@ -28,6 +28,7 @@ uses
   {$endif PUREMORMOT2}
   mormot.core.base,
   mormot.core.os,
+  mormot.core.unicode,
   mormot.core.text,
   mormot.core.rtti,
   mormot.core.buffers,
@@ -742,8 +743,9 @@ type
     // made by TRestBackgroundTimer.Create
     constructor Create(const aThreadName: RawUtf8;
       const aOnBeforeExecute: TOnNotifyThread = nil;
-      const aOnAfterExecute: TOnNotifyThread = nil;
-      aStats: TSynMonitorClass = nil); reintroduce; virtual;
+      aOnAfterExecute: TOnNotifyThread = nil;
+      aStats: TSynMonitorClass = nil;
+      aLogClass: TSynLogClass = nil); reintroduce; virtual;
     /// finalize the thread
     destructor Destroy; override;
     /// define a process method for a task running on a periodic number of seconds
@@ -824,13 +826,13 @@ type
     procedure ResetInternal; virtual; // override to reset associated params
   public
     /// initialize the semaphore instance
-    // - specify a time out millliseconds period after which blocking execution
+    // - specify a time out milliseconds period after which blocking execution
     // should be handled as failure (if 0 is set, default 3000 would be used)
     // - an associated mutex shall be supplied
     constructor Create(aTimeOutMs: integer; aSafe: PSynLocker);
       reintroduce; overload; virtual;
     /// initialize the semaphore instance
-    // - specify a time out millliseconds period after which blocking execution
+    // - specify a time out milliseconds period after which blocking execution
     // should be handled as failure (if 0 is set, default 3000 would be used)
     // - an associated mutex would be created and owned by this instance
     constructor Create(aTimeOutMs: integer); reintroduce; overload; virtual;
@@ -1063,12 +1065,16 @@ type
   public
     /// initialize the server instance, in non suspended state
     constructor Create(CreateSuspended: boolean; Logger: TSynLogClass;
-      const ProcessName: RawUtf8); reintroduce; virtual;
+      const ProcName: RawUtf8); reintroduce; virtual;
     /// notify the thread to be terminated, and wait for DoExecute to finish
     procedure TerminateAndWaitFinished(TimeOutMs: integer = 5000); virtual;
     /// the associated logging class
     property LogClass: TSynLogClass
       read fLogClass;
+  published
+    /// the name of this thread, as supplied to SetCurrentThreadName()
+    property ProcessName: RawUtf8
+      read fProcessName;
   end;
 
   /// a class able to run some process in a background thread
@@ -1111,7 +1117,7 @@ type
 
   TSynThreadPoolWorkThreads = array of TSynThreadPoolWorkThread;
 
-  /// a simple Thread Pool, used e.g. for fast handling HTTP requests
+  /// a simple Thread Pool, used e.g. for fast handling HTTP/1.0 requests
   // - implemented over I/O Completion Ports under Windows, or a classical
   // Event-driven approach under Linux/POSIX
   TSynThreadPool = class
@@ -1306,7 +1312,7 @@ end;
 
 function TSynQueue.Pending: boolean;
 begin
-  // allow some false positive in heavily multi-threaded context
+  // some false positive are by design allowed in heavily multi-threaded context
   result := (self <> nil) and
             (fFirst >= 0);
 end;
@@ -2407,12 +2413,16 @@ var
   ProcessSystemUse: TSystemUse;
 
 constructor TSynBackgroundTimer.Create(const aThreadName: RawUtf8;
-  const aOnBeforeExecute: TOnNotifyThread;
-  const aOnAfterExecute: TOnNotifyThread; aStats: TSynMonitorClass);
+  const aOnBeforeExecute: TOnNotifyThread; aOnAfterExecute: TOnNotifyThread;
+  aStats: TSynMonitorClass; aLogClass: TSynLogClass);
 begin
   fTasks.DynArray.Init(TypeInfo(TSynBackgroundTimerTaskDynArray),
     fTask, @fTasks.Count);
-  inherited Create(aThreadName, EverySecond, 1000, aOnBeforeExecute, aOnAfterExecute, aStats);
+  if not Assigned(aOnAfterExecute) and
+     Assigned(aLogClass) then // minimal TSynLog support
+    aOnAfterExecute := aLogClass.Family.OnThreadEnded;
+  inherited Create(
+    aThreadName, EverySecond, 1000, aOnBeforeExecute, aOnAfterExecute, aStats);
 end;
 
 destructor TSynBackgroundTimer.Destroy;
@@ -3137,12 +3147,12 @@ end;
 { TLoggedThread }
 
 constructor TLoggedThread.Create(CreateSuspended: boolean;
-  Logger: TSynLogClass; const ProcessName: RawUtf8);
+  Logger: TSynLogClass; const ProcName: RawUtf8);
 begin
   if Logger = nil then
     Logger := TSynLog;
   fLogClass := Logger;
-  fProcessName := ProcessName;
+  fProcessName := ProcName;
   inherited Create(CreateSuspended);
 end;
 
@@ -3205,6 +3215,7 @@ begin
   fSender := Sender;
   fOnExecute := OnExecute;
   fOnExecuted := OnExecuted;
+  FreeOnTerminate := true;
   inherited Create({suspended=}false, Logger, ProcessName);
 end;
 

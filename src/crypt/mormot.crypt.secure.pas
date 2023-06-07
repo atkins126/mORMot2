@@ -10,6 +10,7 @@ unit mormot.crypt.secure;
     - TSyn***Password and TSynConnectionDefinition Classes
     - Reusable Authentication Classes
     - High-Level TSynSigner/TSynHasher Multi-Algorithm Wrappers
+    - Client and Server HTTP Access Authentication
     - 64-bit TSynUniqueIdentifier and its efficient Generator
     - IProtocol Safe Communication with Unilateral or Mutual Authentication
     - TBinaryCookieGenerator Simple Cookie Generator
@@ -17,7 +18,7 @@ unit mormot.crypt.secure;
     - Minimal PEM/DER Encoding/Decoding
     - Windows Executable Digital Signature Stuffing
 
-   Uses optimized mormot.crypt.core.pas for its actual process.
+   Uses optimized mormot.crypt.core.pas for its actual cryptographic process.
 
   *****************************************************************************
 }
@@ -602,6 +603,7 @@ type
     hfSHA256,
     hfSHA384,
     hfSHA512,
+    hfSHA512_256,
     hfSHA3_256,
     hfSHA3_512);
 
@@ -625,12 +627,19 @@ type
     /// hash the supplied string content
     procedure Update(const aBuffer: RawByteString); overload;
       {$ifdef HASINLINE}inline;{$endif}
+    /// hash the supplied strings content
+    procedure Update(const aBuffer: array of RawByteString); overload;
     /// returns the resulting hash as lowercase hexadecimal string
-    function Final: RawUtf8; overload;
+    procedure Final(var aResult: RawUtf8); overload;
     /// set the resulting hash into a binary buffer, and the size as result
     function Final(out aDigest: THash512Rec): integer; overload;
     /// one-step hash computation of a buffer as lowercase hexadecimal string
     function Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUtf8; overload;
+    /// one-step hash computation of a buffer as lowercase hexadecimal string
+    function Full(aAlgo: THashAlgo; const aBuffer: RawByteString): RawUtf8; overload;
+    /// one-step hash computation of several buffers as lowercase hexadecimal string
+    procedure Full(aAlgo: THashAlgo; const aBuffer: array of RawByteString;
+      var aResult: RawUtf8); overload;
     /// one-step hash computation of a buffer as a binary buffer
     function Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer;
       out aDigest: THash512Rec): integer; overload;
@@ -680,6 +689,12 @@ type
 
   /// TStreamRedirect with SHA-512 cryptographic hashing
   TStreamRedirectSha512 = class(TStreamRedirectSynHasher)
+  protected
+    class function GetAlgo: THashAlgo; override;
+  end;
+
+  /// TStreamRedirect with SHA-512/256 cryptographic hashing
+  TStreamRedirectSha512_256 = class(TStreamRedirectSynHasher)
   protected
     class function GetAlgo: THashAlgo; override;
   end;
@@ -754,6 +769,10 @@ function HashFileSha384(const FileName: TFileName): RawUtf8;
 // - this function maps the THashFile signature as defined in mormot.core.buffers
 function HashFileSha512(const FileName: TFileName): RawUtf8;
 
+/// compute the SHA-512/256 checksum of a given file
+// - this function maps the THashFile signature as defined in mormot.core.buffers
+function HashFileSha512_256(const FileName: TFileName): RawUtf8;
+
 /// compute the SHA-3-256 checksum of a given file
 // - this function maps the THashFile signature as defined in mormot.core.buffers
 function HashFileSha3_256(const FileName: TFileName): RawUtf8;
@@ -762,6 +781,354 @@ function HashFileSha3_256(const FileName: TFileName): RawUtf8;
 // - this function maps the THashFile signature as defined in mormot.core.buffers
 function HashFileSha3_512(const FileName: TFileName): RawUtf8;
 
+
+{ **************** Client and Server HTTP Access Authentication }
+
+type
+  /// the exception class raised during Digest access authentication
+  EDigest = class(ESynException);
+
+  /// the Digest access authentication supported algorithms
+  // - match the three official algorithms as registered by RFC 7616, with the
+  // addition of the unstandard (but safe) SHA3-256 algorithm
+  TDigestAlgo = (
+    daUndefined,
+    daMD5,
+    daMD5_Sess,
+    daSHA256,
+    daSHA256_Sess,
+    daSHA512_256,
+    daSHA512_256_Sess,
+    daSHA3_256,
+    daSHA3_256_Sess);
+
+/// compute the Digest access authentication client code for a given algorithm
+// - as defined in https://en.wikipedia.org/wiki/Digest_access_authentication
+// - FromServer is the 'xxx' encoded value from 'WWW-Authenticate: Digest xxx'
+// - may return '' if Algo does not match algorithm=... value (MD5 or SHA-256)
+// - DigestUriName is customized as "digest-uri" e.g. for LDAP digest auth
+function DigestClient(Algo: TDigestAlgo;
+  const FromServer, DigestMethod, DigestUri, UserName: RawUtf8;
+  const Password: SpiUtf8; const DigestUriName: RawUtf8 = 'uri'): RawUtf8;
+
+/// extract the Digest access authentication realm on client side
+// - FromServer is the 'xxx' encoded value from 'WWW-Authenticate: Digest xxx'
+// - could be proposed to the user interation UI to specify the auth context
+function DigestRealm(const FromServer: RawUtf8): RawUtf8;
+
+/// compute the Basic access authentication client code
+// - as defined in https://en.wikipedia.org/wiki/Basic_access_authentication
+function BasicClient(const UserName: RawUtf8; const Password: SpiUtf8): RawUtf8;
+
+/// extract the Basic access authentication realm on client side
+// - FromServer is the 'xxx' encoded value from 'WWW-Authenticate: Basic xxx'
+// - could be proposed to the user interation UI to specify the auth context
+function BasicRealm(const FromServer: RawUtf8): RawUtf8;
+
+/// compute the HA0 for a given set of Digest access credentials
+function DigestHA0(Algo: TDigestAlgo; const UserName, Realm: RawUtf8;
+  const Password: SpiUtf8; out HA0: THash512Rec): integer;
+
+const
+  /// the Digest access authentication processing cryptographic algorithms
+  DIGEST_ALGO: array[daMD5.. high(TDigestAlgo)] of THashAlgo = (
+    hfMD5,          // daMD5
+    hfMD5,          // daMD5_Sess
+    hfSHA256,       // daSHA256
+    hfSHA256,       // daSHA256_Sess
+    hfSHA512_256,   // daSHA512_256
+    hfSHA512_256,   // daSHA512_256_Sess
+    hfSHA3_256,     // daSHA3_256
+    hfSHA3_256);    // daSHA3_256_Sess
+
+  /// the Digest access authentication algorithm name as used during handshake
+  DIGEST_NAME: array[daMD5.. high(TDigestAlgo)] of RawUtf8 = (
+    'MD5',                // daMD5
+    'MD5-sess',           // daMD5_Sess
+    'SHA-256',            // daSHA256
+    'SHA-256-sess',       // daSHA256_Sess
+    'SHA-512-256',        // daSHA512_256
+    'SHA-512-256-sess',   // daSHA512_256_Sess
+    'SHA3-256',           // daSHA3_256
+    'SHA3-256-sess');     // daSHA3_256_Sess
+
+  /// the Digest access authentication algorithms which hashes the session info
+  // - i.e. includes nonce, cnonce (and authzid) to the hashed response
+  // - it is slightly slower, but much safer, and recommended in our use case
+  // of authentication, not authorization
+  DIGEST_SESS = [daMD5_Sess, daSHA256_Sess, daSHA512_256_Sess, daSHA3_256_Sess];
+
+/// initiate a Digest access authentication from server side for a given algorithm
+// - Opaque could be e.g. an obfuscated HTTP connection ID to avoid MiM attacks
+// - Prefix/Suffix are typically 'WWW-Authenticate: Digest ' and #13#10 to
+// construct a HTTP header
+function DigestServerInit(Algo: TDigestAlgo;
+  const QuotedRealm, Prefix, Suffix: RawUtf8; Opaque: Int64; Tix64: Int64 = 0): RawUtf8;
+
+type
+  /// the result of IBasicAuthServer.CreckCredential() internal method
+  TAuthServerResult = (
+    asrUnknownUser,
+    asrIncorrectPassword,
+    asrRejected,
+    asrMatch);
+
+  /// callback event able to return the HA0 binary from a username
+  // - called by DigestServerAuth() e.g. to lookup from a local .htdigest file
+  // - should return the hash size in bytes, or 0 if User is unknown
+  // - is typically implemented via DigestHA0() wrapper function
+  TOnDigestServerAuthGetUserHash = function(
+    const User, Realm: RawUtf8; out HA0: THash512Rec): TAuthServerResult of object;
+
+/// validate a Digest access authentication on server side
+// - returns true and the user/uri from a valid input token, or false on error
+function DigestServerAuth(Algo: TDigestAlgo; const Realm, Method: RawUtf8;
+  FromClient: PUtf8Char; Opaque: Int64;
+  const OnSearchUser: TOnDigestServerAuthGetUserHash;
+  out User, Url: RawUtf8; NonceExpSec: PtrUInt; Tix64: Qword = 0): TAuthServerResult;
+
+/// parse a Basic access authentication on server side
+// - returns true and the user/password from a valid input, or false on error
+function BasicServerAuth(FromClient: PUtf8Char;
+  out User, Password: RawUtf8): boolean;
+
+type
+  /// callback event used by TBasicAuthServer.OnBeforeAuth/OnAfterAuth
+  // - allow to reject an user before or after its credentials are checked
+  // - should return true to continue, or false to abort the authentication
+  // and let TBasicAuthServer.CheckCredential return asrRejected
+  TOnAuthServer = function(Sender: TObject; const User: RawUtf8): boolean of object;
+
+  /// parent abstract HTTP access authentication on server side
+  // - as used e.g. by THttpServerSocketGeneric for its optional authentication
+  // - you should use inherited IBasicAuthServer or IDigestAuthServer interfaces
+  IHttpAuthServer = interface
+    ['{036B2802-56BE-422F-9146-773702C86387}']
+    /// the realm associated with this access authentication
+    function Realm: RawUtf8;
+    /// retrieve the implementation class instance
+    function Instance: TObject;
+  end;
+
+  /// HTTP BASIC access authentication on server side
+  // - as used e.g. by THttpServerSocketGeneric for its BASIC authentication
+  IBasicAuthServer = interface(IHttpAuthServer)
+    ['{5C301470-39BB-4CBB-8366-01A7F23032F2}']
+    /// compute a Basic server authentication request header
+    // - return e.g. 'WWW-Authenticate: Basic realm="Realm"'#13#10
+    function BasicInit: RawUtf8;
+    /// validate a Basic client authentication response
+    // - FromClient typically follow 'Authorization: Basic ' header text
+    function BasicAuth(FromClient: PUtf8Char; out ClientUser: RawUtf8): boolean;
+    /// check the stored credentials as for the TOnHttpServerBasicAuth callback
+    // - used for the BASIC authentication scheme in THttpServerSocketGeneric
+    function OnBasicAuth(aSender: TObject;
+      const aUser: RawUtf8; const aPassword: SpiUtf8): boolean;
+    /// check the credentials stored for a given user
+    // - returns true if supplied aUser/aPassword are correct, false otherwise
+    function CheckCredential(const aUser: RawUtf8;
+      const aPassword: SpiUtf8): TAuthServerResult;
+  end;
+
+  /// HTTP DIGEST access authentication on server side
+  // - as used e.g. by THttpServerSocketGeneric for its DIGEST authentication
+  IDigestAuthServer = interface(IHttpAuthServer)
+    ['{75B1B7B8-4981-4C09-BD8C-E938A2802ED1}']
+    /// compute a Digest server authentication request
+    // - used for the DIGEST authentication scheme in THttpServerSocketGeneric
+    // - returns the standard HTTP header with the default Prefix/Suffix
+    // - Opaque is a 64-bit number, typically the THttpServerConnectionID
+    // - properly implemented in TDigestAuthServer: THttpAuthServer raise EDigest
+    function DigestInit(Opaque, Tix64: Int64;
+      const Prefix: RawUtf8 = 'WWW-Authenticate: Digest ';
+      const Suffix: RawUtf8 = #13#10): RawUtf8;
+    /// validate a Digest client authentication response
+    // - used for the DIGEST authentication scheme in THttpServerSocketGeneric
+    // - FromClient typically follow 'Authorization: Digest ' header text
+    // - Opaque should match the value supplied on previous ServerInit() call
+    // - properly implemented in TDigestAuthServer: THttpAuthServer raise EDigest
+    function DigestAuth(FromClient: PUtf8Char; const Method: RawUtf8;
+      Opaque, Tix64: Int64; out ClientUser, ClientUrl: RawUtf8): TAuthServerResult;
+    /// quickly check if the supplied client response is likely to be compatible
+    // - FromClient is typically a HTTP header
+    // - will just search for the 'algorithm=xxx,' text pattern
+    function DigestAlgoMatch(const FromClient: RawUtf8): boolean;
+  end;
+
+  /// abstract BASIC access authentication on server side
+  // - don't use this class but e.g. TDigestAuthServerMem or TDigestAuthServerFile
+  // - will implement the IBasicAuthServer process in an abstract way
+  TBasicAuthServer = class(TInterfacedObjectWithCustomCreate, IBasicAuthServer)
+  protected
+    fRealm, fQuotedRealm, fBasicInit: RawUtf8;
+    fOnBeforeAuth, fOnAfterAuth: TOnAuthServer;
+    fOnAfterAuthDelayed: boolean;
+    function BeforeAuth(Sender: TObject; const User: RawUtf8): boolean;
+      {$ifdef HASINLINE}inline;{$endif}
+    function AfterAuth(Sender: TObject; const User: RawUtf8): boolean;
+      {$ifdef HASINLINE}inline;{$endif}
+  public
+    /// initialize the HTTP access authentication engine
+    constructor Create(const aRealm: RawUtf8); reintroduce;
+    /// check the credentials stored for a given user
+    // - this is the main abstract virtual method to override for BASIC auth
+    // - will also trigger OnBeforeAuth/OnAfterAuth callbacks
+    // - returns true if supplied aUser/aPassword are correct, false otherwise
+    function CheckCredential(const aUser: RawUtf8;
+      const aPassword: SpiUtf8): TAuthServerResult; virtual; abstract;
+    { -- IHttpAuthServer and IBasicAuthServer methods }
+    /// retrieve the realm associated with this access authentication
+    // - a good practice is to use the server host name or UUID as realm
+    function Realm: RawUtf8;
+    /// retrieve the implementation class instance
+    function Instance: TObject;
+    /// compute a Basic server authentication request header
+    // - return e.g. 'WWW-Authenticate: Basic realm="Realm"'#13#10
+    function BasicInit: RawUtf8;
+    /// validate a Basic client authentication response
+    function BasicAuth(FromClient: PUtf8Char; out ClientUser: RawUtf8): boolean;
+    /// check the stored credentials as for the TOnHttpServerBasicAuth callback
+    function OnBasicAuth(aSender: TObject;
+      const aUser: RawUtf8; const aPassword: SpiUtf8): boolean;
+    /// allow to reject an user before its credentials are checked
+    // - can implement e.g. the "search and bind" pattern on a slow LDAP server
+    property OnBeforeAuth: TOnAuthServer
+      read fOnBeforeAuth write fOnBeforeAuth;
+    /// allow to reject an user after its credentials are checked
+    property OnAfterAuth: TOnAuthServer
+      read fOnAfterAuth write fOnAfterAuth;
+  end;
+
+  /// abstract DIGEST and BASIC access authentication on server side
+  // - should be inherited with proper persistence of users credentials
+  // - notice: won't maintain sessions in memory, just check the credentials each
+  // time so these classes should be used for authentication not authorization;
+  // a typical usage is with our TRestServer sessions or to generate a JWT bearer
+  // - the RFC expects in-memory sessions, especially for nonce counters but we
+  // store a THttpServerConnectionID to the Opaque parameter to compensate, and
+  // we implement an expiration delay with each ServerInit request
+  // - BasicInit and BasicAuth methods could be used to implement Basic access
+  // authentication calling the very same GetUserHash() virtual method
+  TDigestAuthServer = class(TBasicAuthServer, IDigestAuthServer)
+  protected
+    fAlgo: TDigestAlgo;
+    fAlgoSize: byte;
+    fRequestExpSec: integer;
+    fOpaqueObfuscate: Int64;
+    // this is the main abstract virtual method to override for DIGEST auth
+    function GetUserHash(const aUser, aRealm: RawUtf8;
+      out aDigest: THash512Rec): TAuthServerResult; virtual; abstract;
+    function GetUserHashWithCallback(const aUser, aRealm: RawUtf8;
+      out aDigest: THash512Rec): TAuthServerResult;
+    procedure ComputeDigest(const aUser: RawUtf8; const aPassword: SpiUtf8;
+      out Digest: THash512Rec);
+  public
+    /// initialize the Digest access authentication engine
+    constructor Create(const aRealm: RawUtf8; aAlgo: TDigestAlgo); reintroduce; virtual;
+    /// check the credentials stored for a given user
+    function CheckCredential(const aUser: RawUtf8;
+      const aPassword: SpiUtf8): TAuthServerResult; override;
+    { -- IDigestAuthServer methods }
+    /// compute a Digest server authentication request
+    function DigestInit(Opaque, Tix64: Int64;
+      const Prefix, Suffix: RawUtf8): RawUtf8;
+    /// validate a Digest client authentication response
+    function DigestAuth(FromClient: PUtf8Char; const Method: RawUtf8;
+      Opaque, Tix64: Int64; out ClientUser, ClientUrl: RawUtf8): TAuthServerResult;
+    /// quickly check if the supplied client response is likely to be compatible
+    function DigestAlgoMatch(const FromClient: RawUtf8): boolean;
+  published
+    /// the Digest algorithm used with this instance
+    property Algo: TDigestAlgo
+      read fAlgo;
+    /// how many seconds a ServerInit() request is valid for ServerAuth()
+    // - default is 60 seconds
+    property RequestExpSec: integer
+      read fRequestExpSec write fRequestExpSec;
+  end;
+
+  /// meta-class of server side Digest access authentication
+  TDigestAuthServerClass = class of TDigestAuthServer;
+
+  /// Digest access authentication on server side using in-memory storage
+  TDigestAuthServerMem = class(TDigestAuthServer)
+  protected
+    fUsers: TSynDictionary; // UserName:RawUtf8 / HA0:TDigestAuthHash
+    fModified: boolean;
+    function GetUserHash(const aUser, aRealm: RawUtf8;
+      out aDigest: THash512Rec): TAuthServerResult; override;
+    function GetCount: integer;
+  public
+    /// initialize the Digest access authentication engine
+    constructor Create(const aRealm: RawUtf8; aAlgo: TDigestAlgo); override;
+    /// finalize the Digest access authentication engine
+    destructor Destroy; override;
+    /// retrieve all user names as a single array
+    // - could be used e.g. to display a user list in the UI
+    function GetUsers: TRawUtf8DynArray;
+    /// change the credentials of a given user
+    // - if aUser does not exist, the credential will be added
+    // - if aUser does exist, the credential will be modified
+    // - if aPassword is '', the credential will be deleted
+    procedure SetCredential(const aUser: RawUtf8; const aPassword: SpiUtf8);
+    /// safely delete all stored credentials
+    // - also fill TDigestAuthHash stored memory with zeros, against forensic
+    procedure ClearCredentials;
+    /// low-level access to the internal TSynDictionary storage
+    // - to set e.g. Users.TimeOutSeconds or call Users.DeleteAll if this class
+    // is used as cache
+    property Users: TSynDictionary
+      read fUsers;
+  published
+    /// how many items are currently stored in memory
+    property Count: integer
+      read GetCount;
+    /// flag set if SetCredential() was called but not persisted yet
+    property Modified: boolean
+      read fModified;
+  end;
+
+  /// Digest access authentication on server side using a .htdigest file
+  // - can also add, delete or update credentials
+  // - file content is refreshed from disk when it has been modified
+  // - only a single Realm is allowed per .htdigest file
+  // - this class is thread-safe, with an efficient R/W lock
+  // - file can be AES256-GCM encrypted on disk (non-standard but much safer)
+  TDigestAuthServerFile = class(TDigestAuthServerMem)
+  protected
+    fFileName: TFileName;
+    fFileLastTime: TUnixTime;
+    fAesKey: TSha256Digest;
+    function GetAes: TAesAbstract;
+    function GetEncrypted: boolean;
+  public
+    /// initialize the Digest access authentication engine from a .htdigest file
+    // - aFilePassword can optionally encrypt the .htdigest file using AES256-GCM
+    // - default algorithm is MD5 with sessions - as used by NGINX auth_digest module
+    constructor Create(const aRealm: RawUtf8; const aFileName: TFileName;
+      const aFilePassword: SpiUtf8 = ''; aAlgo: TDigestAlgo = daMD5_Sess); reintroduce;
+    /// finalize the Digest access authentication engine
+    destructor Destroy; override;
+    /// force (re)reading the .htdigest file content
+    procedure LoadFromFile;
+    // save any SetCredential() pending modification to the .htdigest file
+    procedure SaveToFile;
+    /// update or refresh file if needed
+    // - typically called every few seconds in a background thread
+    // - write any pending SetCredential() new/updated values
+    // - reload the file if it has been modified on disk - on-disk modifications
+    // will be ignored if SetCredential() has been called in-between
+    function RefreshFile: boolean;
+  published
+    /// the .htdigest file name associated with this instance
+    property FileName: TFileName
+      read fFileName;
+    /// flag if aFilePassword was specified at create, i.e. AES256-GCM is used
+    property Encrypted: boolean
+      read GetEncrypted;
+  end;
+
+function ToText(res: TAuthServerResult): PShortString; overload;
 
 
 { ****** IProtocol Safe Communication with Unilateral or Mutual Authentication }
@@ -890,8 +1257,8 @@ type
   // its content, and with very efficiently binary-based serialization
   // - stores a session ID, cookie name, and encryption and signature keys
   // - can optionally store any associated record as efficient binary
-  // - it is NOT cryptographic secure, because cookies are not, but it is
-  // strong enough to avoid most attacks, and uses less space than a JWT
+  // - it is NOT cryptographic secure, because cookies are not, but it is strong
+  // enough to avoid most attacks, and uses much less space than a JWT
   {$ifdef USERECORDWITHMETHODS}
   TBinaryCookieGenerator = record
   {$else}
@@ -924,7 +1291,8 @@ type
       SignAlgo: TCrc32Algo = caCrc32c);
     /// will initialize a new Base64Uri-encoded session cookie
     // - with an optional record data
-    // - will return the 32-bit internal session ID and a Base64Uri cookie
+    // - will return the 32-bit internal session ID and a Base64Uri cookie,
+    // ready to be used as HTTP cookie or a temporary URI
     // - you can supply a time period, after which the session will expire -
     // default 0 will use DefaultTimeOutMinutes as supplied to Init()
     function Generate(out Cookie: RawUtf8; TimeOutMinutes: cardinal = 0;
@@ -1230,7 +1598,8 @@ type
 
   /// the known Key Usages for a given Certificate
   // - is an exact match of TX509Usage enumerate in mormot.lib.openssl11.pas
-  // - stored as a 16-bit memory block, with CU_ALL = 65535
+  // and TWinCertUsage in mormot.lib.sspi
+  // - usually stored as a 16-bit set
   TCryptCertUsage = (
     cuCA,
     cuEncipherOnly,
@@ -1250,6 +1619,7 @@ type
     cuTimestamp);
 
   /// set of Key Usages for a given Certificate - stored as a 16-bit word
+  // - stored as its own 16-bit value, with CU_ALL = 65535
   TCryptCertUsages = set of TCryptCertUsage;
 
   /// the RFC5280-compatible reasons why a Certificate could be revoked
@@ -1284,6 +1654,8 @@ type
     cvInvalidSignature,
     cvRevoked,
     cvWrongUsage);
+  /// a set of Digital Signature results
+  TCryptCertValidities = set of TCryptCertValidity;
 
   /// convenient wrapper of X509 Certificate subject name fields
   // - not always implemented - mainly our 'syn-es256' certificate won't
@@ -1373,7 +1745,8 @@ type
     /// the maximum Validity timestamp of this Certificate
     function GetNotAfter: TDateTime;
     /// check GetNotBefore/GetNotAfter validity
-    function IsValidDate: boolean;
+    // - validate against current UTC date/time if none is specified
+    function IsValidDate(date: TDateTime = 0): boolean;
     /// returns true e.g. after TCryptCertAlgo.New but before Generate()
     function IsVoid: boolean;
     /// the Key Usages of this Certificate
@@ -1434,16 +1807,23 @@ type
     // - will use the public key of this certificate
     // - this certificate should have the cuDigitalSignature usage
     // - see ICryptStore.Verify() for a complete CA chain validation
-    function Verify(Sign, Data: pointer;
-      SignLen, DataLen: integer): TCryptCertValidity; overload;
+    // - depending on the engine, some errors can be ignored, e.g.
+    // cvWrongUsage and cvDeprecatedAuthority with OpenSSL
+    // - certificate expiration date can be specified instead of current time
+    function Verify(Sign, Data: pointer; SignLen, DataLen: integer;
+      IgnoreError: TCryptCertValidities = [];
+      TimeUtc: TDateTime = 0): TCryptCertValidity; overload;
     /// verify a digital signature of some digital content
     // - just a wrapper around the overloaded Verify() function
-    function Verify(
-      const Signature, Data: RawByteString): TCryptCertValidity; overload;
+    function Verify(const Signature, Data: RawByteString;
+      IgnoreError: TCryptCertValidities = [];
+      TimeUtc: TDateTime = 0): TCryptCertValidity; overload;
     /// verify another certificate signature with this certificate public key
     // (if self-signed), or a supplied Authority reference
     // - Authority certificate should have the cuKeyCertSign usage
-    function Verify(const Authority: ICryptCert): TCryptCertValidity; overload;
+    function Verify(const Authority: ICryptCert;
+      IgnoreError: TCryptCertValidities = [];
+      TimeUtc: TDateTime = 0): TCryptCertValidity; overload;
     /// compute a new JWT for a given payload using this certificate private key
     // - will use the private key and Sign() to compute the signature
     // - this certificate should have the cuDigitalSignature usage
@@ -1457,7 +1837,9 @@ type
     // - this certificate should have the cuDigitalSignature usage
     // - can optionally return the payload fields and/or the signature
     function JwtVerify(const Jwt: RawUtf8; Issuer, Subject, Audience: PRawUtf8;
-      Payload: PDocVariantData = nil; Signature: PRawByteString = nil): TCryptCertValidity;
+      Payload: PDocVariantData = nil; Signature: PRawByteString = nil;
+      IgnoreError: TCryptCertValidities = [];
+      TimeUtc: TDateTime = 0): TCryptCertValidity;
     /// encrypt a message using the public key of this certificate
     // - only RSA and ES256 support this method by now
     // - 'x509-rs*' and 'x509-ps*' RSA algorithms use OpenSSL Envelope key
@@ -1534,7 +1916,7 @@ type
     function IsSelfSigned: boolean; virtual; abstract;
     function GetNotBefore: TDateTime; virtual; abstract;
     function GetNotAfter: TDateTime; virtual; abstract;
-    function IsValidDate: boolean; virtual;
+    function IsValidDate(date: TDateTime): boolean; virtual;
     function IsVoid: boolean; virtual;
     function GetUsage: TCryptCertUsages; virtual; abstract;
     function GetPeerInfo: RawUtf8; virtual; abstract;
@@ -1558,17 +1940,21 @@ type
       overload; virtual; abstract;
     function Sign(const Data: RawByteString): RawByteString; overload; virtual;
     procedure Sign(const Authority: ICryptCert); overload; virtual; abstract;
-    function Verify(Sign, Data: pointer; SignLen, DataLen: integer): TCryptCertValidity;
+    function Verify(Sign, Data: pointer; SignLen, DataLen: integer;
+      IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
       overload; virtual; abstract;
-    function Verify(const Signature, Data: RawByteString): TCryptCertValidity;
+    function Verify(const Signature, Data: RawByteString;
+      IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
       overload; virtual;
-    function Verify(const Authority: ICryptCert): TCryptCertValidity;
+    function Verify(const Authority: ICryptCert;
+      IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
       overload; virtual; abstract;
     function JwtCompute(const DataNameValue: array of const;
       const Issuer, Subject, Audience: RawUtf8; NotBefore: TDateTime;
       ExpirationMinutes: integer; Signature: PRawByteString): RawUtf8; virtual;
     function JwtVerify(const Jwt: RawUtf8; Issuer, Subject, Audience: PRawUtf8;
-      Payload: PDocVariantData; Signature: PRawByteString): TCryptCertValidity; virtual;
+      Payload: PDocVariantData; Signature: PRawByteString;
+      IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity; virtual;
     function Encrypt(const Message: RawByteString;
       const Cipher: RawUtf8): RawByteString; virtual; abstract;
     function Decrypt(const Message: RawByteString;
@@ -1682,8 +2068,8 @@ type
     // the associated signing authority (which should be in this Store)
     // - warning: only supported by our 'syn-store' algorithm: OpenSSL Store
     // has no way to lookup the X509 certificate which actually signed the buffer
-    function Verify(const Signature: RawByteString;
-      Data: pointer; Len: integer): TCryptCertValidity;
+    function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
+      IgnoreError: TCryptCertValidities = []; TimeUtc: TDateTime = 0): TCryptCertValidity;
     /// how many certificates are currently stored
     function Count: integer;
     /// how many CRLs are currently stored
@@ -1711,8 +2097,9 @@ type
     function Revoke(const Cert: ICryptCert; RevocationDate: TDateTime;
       Reason: TCryptCertRevocationReason): boolean; virtual; abstract;
     function IsValid(const cert: ICryptCert): TCryptCertValidity; virtual; abstract;
-    function Verify(const Signature: RawByteString;
-      Data: pointer; Len: integer): TCryptCertValidity; virtual; abstract;
+    function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
+      IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
+        virtual; abstract;
     function Count: integer; virtual; abstract;
     function CrlCount: integer; virtual; abstract;
     function DefaultCertAlgo: TCryptCertAlgo; virtual; abstract;
@@ -1750,6 +2137,9 @@ type
     Index: array[TCryptCertUsage] of byte;
     /// reset all storage and indexes
     procedure Clear;
+    /// quickly check if there is no stored certificate
+    function IsVoid: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     /// register the certificate to the internal list
     // - returns the duplicated usages
     // - if no usage(s) was already set as in the added one, returns []
@@ -1761,16 +2151,19 @@ type
     // is returned by PerUsage/GetUsage for the actual process
     function Add(const cert: ICryptCert): TCryptCertUsages;
     /// fast lookup of a certificate per its usage
-    function GetUsage(u: TCryptCertUsage; out cert: ICryptCert): boolean;
+    // - i.e. returns the last/weakest certificate having the supplied usage
+    function GetUsage(u: TCryptCertUsage; var cert: ICryptCert): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     /// fast lookup of a certificate per its usage
+    // - i.e. returns the last/weakest certificate having the supplied usage
     function PerUsage(u: TCryptCertUsage): ICryptCert;
       {$ifdef HASINLINE} inline; {$endif}
-    /// save all items as a CRLF separated list of cccCertOnly PEM certificates
+    /// save all items as a cccCertOnly CRLF separated list of PEM certificates
     function AsPem: RawUtf8;
     /// clear and load a CRLF separated list of PEM certificates
     // - returns the duplicated usages found during adding certificates
     function FromPem(algo: TCryptCertAlgo; const pem: RawUtf8): TCryptCertUsages;
-    /// save all items as a single binary blob of cccCertOnly certificates
+    /// save all items as a cccCertOnly binary blob of certificates
     // - binary layout is TBufferWriter.WriteVar() of all DER serialization
     function AsBinary: RawByteString;
     /// clear and load a binary blob of certificates saved by AsBinary
@@ -1832,6 +2225,26 @@ const
     'cs',  //  cuCodeSign
     'os',  //  cuOcspSign
     'tm'); //  cuTimestamp
+
+  /// standard long identifier of Certificate usage
+  // - i.e. match X509.ExtendedKeyUsage/KeyUsage text
+  CU_FULLTEXT: array[TCryptCertUsage] of RawUtf8 = (
+    'CA',                            // cuCA
+    'Encipher Only',                 // cuEncipherOnly
+    'CRL Sign',                      // cuCrlSign
+    'Certificate Sign',              // cuKeyCertSign
+    'Key Agreement',                 // cuKeyAgreement
+    'Data Encipherment',             // cuDataEncipherment
+    'Key Encipherment',              // cuKeyEncipherment
+    'Non Repudiation',               // cuNonRepudiation
+    'Digital Signature',             // cuDigitalSignature
+    'Decipher Only',                 // cuDecipherOnly
+    'TLS Web Server Authentication', // cuTlsServer
+    'TLS Web Client Authentication', // cuTlsClient
+    'E-mail Protection',             // cuEmail
+    'Code Signing',                  // cuCodeSign
+    'OCSP Signing',                  // cuOcspSign
+    'Time Stamping');                // cuTimestamp
 
 function ToText(r: TCryptCertRevocationReason): PShortString; overload;
 function ToText(u: TCryptCertUsage): PShortString; overload;
@@ -1937,6 +2350,7 @@ function Asym(const name: RawUtf8): TCryptAsym;
 function CertAlgo(const name: RawUtf8): TCryptCertAlgo;
 
 /// main factory of the Certificates instances as returned by CertAlgo()
+// - name is typically 'syn-es256' or 'x509-es256'
 function Cert(const name: RawUtf8): ICryptCert;
 
 /// main resolver for Certificates Store engines
@@ -2087,9 +2501,14 @@ function PemToDer(const pem: TCertPem; kind: PPemKind = nil): TCertDer;
 
 /// parse a multi-PEM text input and return the next PEM content
 // - search and identify any PEM_BEGIN/PEM_END markers
-// - ready to be decoded via PemToDer()
 // - optionally returning the recognized TPemKind (maybe pemUnspecified)
+// - see also NextPemToDer()
 function NextPem(var P: PUtf8Char; Kind: PPemKind = nil): TCertPem;
+
+/// parse a multi-PEM text input and return the next PEM content as binary DER
+// - search and identify any PEM_BEGIN/PEM_END markers
+// - optionally returning the recognized TPemKind (maybe pemUnspecified)
+function NextPemToDer(var P: PUtf8Char; Kind: PPemKind = nil): TCertDer;
 
 /// quickly check the begin/end of a single-instance PEM text
 // - do not validate the internal Base64 encoding, just the trailer/ending lines
@@ -2108,6 +2527,24 @@ function DerAppend(P: PAnsiChar; buf: PByteArray; buflen: PtrUInt): PAnsiChar;
 // - only support a single DER_INTEGER sequence format as generated by DerAppend()
 function DerParse(P: PAnsiChar; buf: PByteArray; buflen: PtrInt): PAnsiChar;
 
+type
+  /// output of the X509Parse() function
+  TX509Parsed = record
+    Serial, SubjectDN, IssuerDN, SubjectID, IssuerID, SigAlg, PubAlg, PeerInfo: RawUtf8;
+    Usage: TCryptCertUsages;
+    NotBefore, NotAfter: TDateTime;
+    PubKey: RawByteString;
+  end;
+
+/// return some multi-line text of the main TX509Parsed fields
+// - in a layout similar to X509_print() OpenSSL formatting
+function ToText(const c: TX509Parsed): RawUtf8; overload;
+
+/// high-level function to decode X509 certificate main properties
+// - properly implemented by mormot.crypt.openssl.pas, but this unit will
+// register our mormot.lib.sspi parser as failover on Windows
+var
+  X509Parse: function(const Cert: RawByteString; out Info: TX509Parsed): boolean;
 
 
 { ************** Windows Executable Digital Signature Stuffing }
@@ -2148,6 +2585,9 @@ function FindStuffExeCertificate(const FileName: TFileName): RawUtf8;
 
 implementation
 
+uses
+  mormot.lib.sspi; // for WinCertDecode() - void unit on non-Windows
+
 
 { **************** High-Level TSynSigner/TSynHasher Multi-Algorithm Wrappers }
 
@@ -2168,6 +2608,8 @@ begin
       PSha384(@ctxt)^.Init;
     hfSHA512:
       PSha512(@ctxt)^.Init;
+    hfSHA512_256:
+      PSha512_256(@ctxt)^.Init;
     hfSHA3_256:
       PSha3(@ctxt)^.Init(SHA3_256);
     hfSHA3_512:
@@ -2190,6 +2632,8 @@ begin
       PSha384(@ctxt)^.Update(aBuffer, aLen);
     hfSHA512:
       PSha512(@ctxt)^.Update(aBuffer, aLen);
+    hfSHA512_256:
+      PSha512_256(@ctxt)^.Update(aBuffer, aLen);
     hfSHA3_256:
       PSha3(@ctxt)^.Update(aBuffer, aLen);
     hfSHA3_512:
@@ -2202,19 +2646,32 @@ begin
   Update(pointer(aBuffer), length(aBuffer));
 end;
 
-function TSynHasher.Final: RawUtf8;
+procedure TSynHasher.Update(const aBuffer: array of RawByteString);
+var
+  i: PtrInt;
+begin
+  for i := 0 to length(aBuffer) - 1 do
+    Update(pointer(aBuffer[i]), length(aBuffer[i]));
+end;
+
+procedure TSynHasher.Final(var aResult: RawUtf8);
 var
   dig: THash512Rec;
 begin
-  BinToHexLower(@dig, Final(dig), result);
+  BinToHexLower(@dig, Final(dig), aResult);
   FillZero(dig.b);
 end;
 
 const
   HASH_SIZE: array[THashAlgo] of integer = (
-    SizeOf(TMd5Digest), SizeOf(TSHA1Digest), SizeOf(TSHA256Digest),
-    SizeOf(TSHA384Digest), SizeOf(TSHA512Digest), SizeOf(THash256),
-    SizeOf(THash512));
+    SizeOf(TMd5Digest),    // hfMD5
+    SizeOf(TSHA1Digest),   // hfSHA1
+    SizeOf(TSHA256Digest), // hfSHA256
+    SizeOf(TSHA384Digest), // hfSHA384
+    SizeOf(TSHA512Digest), // hfSHA512
+    SizeOf(THash256),      // hfSHA512_256
+    SizeOf(THash256),      // hfSHA3_256
+    SizeOf(THash512));     // hfSHA3_512
 
 function TSynHasher.HashSize: integer;
 begin
@@ -2234,6 +2691,8 @@ begin
       PSha384(@ctxt)^.Final(aDigest.b384);
     hfSHA512:
       PSha512(@ctxt)^.Final(aDigest.b);
+    hfSHA512_256:
+      PSha512_256(@ctxt)^.Final(aDigest.Lo);
     hfSHA3_256:
       PSha3(@ctxt)^.Final(aDigest.Lo);
     hfSHA3_512:
@@ -2246,7 +2705,22 @@ function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): Raw
 begin
   Init(aAlgo);
   Update(aBuffer, aLen);
-  result := Final;
+  Final(result);
+end;
+
+function TSynHasher.Full(aAlgo: THashAlgo; const aBuffer: RawByteString): RawUtf8;
+begin
+  Init(aAlgo);
+  Update(aBuffer);
+  Final(result);
+end;
+
+procedure TSynHasher.Full(aAlgo: THashAlgo;
+  const aBuffer: array of RawByteString; var aResult: RawUtf8);
+begin
+  Init(aAlgo);
+  Update(aBuffer);
+  Final(aResult);
 end;
 
 function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer;
@@ -2273,18 +2747,19 @@ end;
 
 function TStreamRedirectSynHasher.GetHash: RawUtf8;
 begin
-  result := fHash.Final;
+  fHash.Final(result);
 end;
 
 const
   HASH_EXT: array[THashAlgo] of RawUtf8 = (
-    '.md5',
-    '.sha1',
-    '.sha256',
-    '.sha384',
-    '.sha512',
-    '.sha3-256',
-    '.sha3-512');
+    '.md5',        // hfMD5
+    '.sha1',       // hfSHA1
+    '.sha256',     // hfSHA256
+    '.sha384',     // hfSHA384
+    '.sha512',     // hfSHA512
+    '.sha512-256', // hfSHA512_256
+    '.sha3-256',   // hfSHA3_256
+    '.sha3-512');  // hfSHA3_512
 
 class function TStreamRedirectSynHasher.GetHashFileExt: RawUtf8;
 begin
@@ -2311,6 +2786,13 @@ end;
 class function TStreamRedirectSha512.GetAlgo: THashAlgo;
 begin
   result := hfSHA512;
+end;
+
+{ TStreamRedirectSha512_256 }
+
+class function TStreamRedirectSha512_256.GetAlgo: THashAlgo;
+begin
+  result := hfSHA512_256;
 end;
 
 { TStreamRedirectSha384 }
@@ -2421,7 +2903,7 @@ begin
     end;
     SetLength(result, n + 1);
     for h := 0 to n do
-      result[h] := hasher[h].Final;
+      hasher[h].Final(result[h]);
   finally
     FileClose(F);
   end;
@@ -2439,14 +2921,15 @@ begin
 end;
 
 const
-  ALGO_EXT: array[THashAlgo] of string[8] = (
-    'md5',
-    'sha1',
-    'sha256',
-    'sha384',
-    'sha512',
-    'sha3_256',
-    'sha3_512');
+  ALGO_EXT: array[THashAlgo] of string[10] = (
+    'md5',          // hfMD5
+    'sha1',         // hfSHA1
+    'sha256',       // hfSHA256
+    'sha384',       // hfSHA384
+    'sha512',       // hfSHA512
+    'sha512_256',   // hfSHA512_256
+    'sha3_256',     // hfSHA3_256
+    'sha3_512');    // hfSHA3_512
 
 procedure HashFile(const aFileName: TFileName; aAlgos: THashAlgos);
 var
@@ -2494,6 +2977,11 @@ begin
   result := HashFile(FileName, hfSHA512);
 end;
 
+function HashFileSha512_256(const FileName: TFileName): RawUtf8;
+begin
+  result := HashFile(FileName, hfSHA512_256);
+end;
+
 function HashFileSha3_256(const FileName: TFileName): RawUtf8;
 begin
   result := HashFile(FileName, hfSHA3_256);
@@ -2503,7 +2991,6 @@ function HashFileSha3_512(const FileName: TFileName): RawUtf8;
 begin
   result := HashFile(FileName, hfSHA3_512);
 end;
-
 
 
 { TSynSigner }
@@ -2766,6 +3253,748 @@ begin
 end;
 
 
+{ **************** Client and Server HTTP Access Authentication }
+
+function ToText(res: TAuthServerResult): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TAuthServerResult), ord(res));
+end;
+
+type
+  // reusable state machine for DIGEST on both client and server sides
+  {$ifdef USERECORDWITHMETHODS}
+  TDigestProcess = record
+  {$else}
+  TDigestProcess = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    Algo: TDigestAlgo;
+    Hash: THashAlgo;
+    HashLen: byte;
+    UserName: RawUtf8;
+    Password: SpiUtf8;
+    Realm: RawUtf8;
+    Nonce: RawUtf8;
+    NC: RawUtf8;
+    CNonce: RawUtf8;
+    Qop: RawUtf8;
+    AuthzID: RawUtf8;
+    Opaque: RawUtf8;
+    AlgResp: RawUtf8;
+    Url: RawUtf8;
+    HA1: RawUtf8;
+    HA2: RawUtf8;
+    Response: RawUtf8;
+    tmp: RawByteString;
+    Hasher: TSynHasher;
+    HA0: THash512Rec;
+    procedure Init(DigestAlgo: TDigestAlgo); {$ifdef HASINLINE} inline; {$endif}
+    function Parse(var p: PUtf8Char): boolean;
+    procedure DigestHa0;
+    procedure DigestResponse(const Method: RawUtf8);
+    function ClientResponse(const UriName: RawUtf8): RawUtf8;
+  end;
+
+procedure TDigestProcess.Init(DigestAlgo: TDigestAlgo);
+begin
+  Algo := DigestAlgo;
+  Hash := DIGEST_ALGO[DigestAlgo]; // caller ensured DigestAlgo <> daUndefined
+  HashLen := HASH_SIZE[Hash];
+end;
+
+const
+  DIGEST_KEYS: array[0..11] of PAnsiChar = (
+    'REALM=',     // 0
+    'QOP=',       // 1
+    'URI=',       // 2
+    'ALGORITHM=', // 3
+    'NONCE=',     // 4
+    'NC=',        // 5
+    'CNONCE=',    // 6
+    'RESPONSE=',  // 7
+    'OPAQUE=',    // 8
+    'USERNAME=',  // 9
+    'AUTHZID=',   // 10
+    nil);
+
+  DIGEST_NAME_RESP: array[daMD5.. high(TDigestAlgo)] of RawUtf8 = (
+    'algorithm=MD5,',                // daMD5
+    'algorithm=MD5-sess,',           // daMD5_Sess
+    'algorithm=SHA-256,',            // daSHA256
+    'algorithm=SHA-256-sess,',       // daSHA256_Sess
+    'algorithm=SHA-512-256,',        // daSHA512_256
+    'algorithm=SHA-512-256-sess,',   // daSHA512_256_Sess
+    'algorithm=SHA3-256,',           // daSHA3_256
+    'algorithm=SHA3-256-sess,');     // daSHA3_256_Sess
+
+function TDigestProcess.Parse(var p: PUtf8Char): boolean;
+var
+  n: PUtf8Char;
+begin
+  result := false;
+  n := GotoNextNotSpace(p);
+  p := PosChar(n, '=');
+  if p = nil then
+    exit;
+  inc(p);
+  GetNextItem(p, ',', '"', RawUtf8(tmp));
+  if tmp = '' then
+    exit;
+  case IdemPPChar(n, @DIGEST_KEYS) of
+    0: // realm="http-auth@example.org"
+      FastAssignUtf8(Realm, tmp);
+    1: // qop=auth
+      FastAssignUtf8(Qop, tmp);
+    2: // uri="/dir/index.html"
+      FastAssignUtf8(Url, tmp);
+    3: // algorithm=MD5
+      if PropNameEquals(DIGEST_NAME[Algo], tmp) then
+        AlgResp := DIGEST_NAME_RESP[Algo]
+      else
+        exit;
+    4: // nonce="xxx"
+      FastAssignUtf8(Nonce, tmp);
+    5: // nc=xxx
+      FastAssignUtf8(NC, tmp);
+    6: // cnonce="xxx"
+      FastAssignUtf8(CNonce, tmp);
+    7: // response="xxx"
+      FastAssignUtf8(Response, tmp);
+    8: // opaque="xxx"
+      FastAssignUtf8(Opaque, tmp);
+    9: // username="xxx"'
+      FastAssignUtf8(UserName, tmp);
+    10: // authzid="xxx"
+      FastAssignUtf8(AuthzID, tmp);
+  end;
+  if (p <> nil) and
+     (p^ in [#10, #13]) then
+    p := nil; // also end at line feed (e.g. if input is from HTTP headers)
+  result := true;
+end;
+
+procedure TDigestProcess.DigestHa0;
+begin
+  Hasher.Init(Hash);
+  Hasher.Update([UserName, ':', Realm, ':', Password]);
+  Hasher.Final(HA0);
+end;
+
+procedure TDigestProcess.DigestResponse(const Method: RawUtf8);
+begin
+  BinToHexLower(@HA0, HashLen, HA1); // into lowercase hexadecimal
+  if Algo in DIGEST_SESS then
+  begin
+    Hasher.Init(Hash);
+    Hasher.Update([HA1, ':', Nonce, ':', CNonce]);
+    if AuthzID <> '' then
+      Hasher.Update([':', AuthzID]);
+    Hasher.Final(HA1);
+  end;
+  Hasher.Init(Hash);
+  if Method = '' then
+    Hasher.Update('AUTHENTICATE')
+  else
+    Hasher.Update(Method);
+  Hasher.Update([':', Url]);
+  Hasher.Final(HA2);
+  hasher.Full(Hash,
+    [HA1, ':', nonce, ':', nc, ':', cnonce, ':', qop, ':', HA2], Response);
+end;
+
+function TDigestProcess.ClientResponse(const UriName: RawUtf8): RawUtf8;
+begin
+  FormatUtf8('username="%",realm=%,nonce="%",cnonce="%",nc=%,qop=%,' +
+    '%%="%",response="%"',
+    [UserName, QuotedStr(Realm, '"'), Nonce, CNonce, NC, Qop,
+     AlgResp, UriName, Url, Response], result);
+  if Opaque <> '' then
+    Append(result, [',opaque="', Opaque, '"']);
+end;
+
+
+function DigestHA0(Algo: TDigestAlgo; const UserName, Realm: RawUtf8;
+  const Password: SpiUtf8; out HA0: THash512Rec): integer;
+var
+  h: TSynHasher;
+begin
+  result := 0;
+  if (Algo = daUndefined) or
+     (UserName = '') or
+     (Realm = '') then
+    exit;
+  h.Init(DIGEST_ALGO[Algo]);
+  h.Update([UserName, ':', Realm, ':', Password]);
+  result := h.Final(HA0);
+end;
+
+function DigestRealm(const FromServer: RawUtf8): RawUtf8;
+var
+  p: PUtf8Char;
+  dp: TDigestProcess;
+begin
+  result := '';
+  dp.Algo := daMD5; // something is needed 
+  p := pointer(FromServer);
+  while p <> nil do
+    dp.Parse(p); // ignore algorithm error
+  result := dp.Realm;
+end;
+
+function DigestClient(Algo: TDigestAlgo;
+  const FromServer, DigestMethod, DigestUri, UserName: RawUtf8;
+  const Password: SpiUtf8; const DigestUriName: RawUtf8): RawUtf8;
+var
+  p: PUtf8Char;
+  dp: TDigestProcess;
+begin
+  result := '';
+  if Algo = daUndefined then
+    exit;
+  // parse server token
+  dp.Init(Algo);
+  p := pointer(FromServer);
+  while p <> nil do
+    if not dp.Parse(p) then // invalid algorithm
+      exit;
+  if (dp.Realm = '') or
+     (dp.Nonce = '') then
+    exit;
+  // compute the client response
+  dp.Url := DigestUri;
+  dp.UserName := UserName;
+  dp.Password := Password;
+  dp.CNonce := Int64ToHexLower(Random64);
+  dp.NC := '00000001';
+  dp.Qop := 'auth';
+  dp.DigestHa0;
+  dp.DigestResponse(DigestMethod);
+  result := dp.ClientResponse(DigestUriName);
+end;
+
+function BasicClient(const UserName: RawUtf8; const Password: SpiUtf8): RawUtf8;
+var
+  ha: RawUtf8;
+begin
+  FormatUtf8('%:%', [UserName, Password], ha);
+  result := BinToBase64(ha);
+  FillZero(ha);
+end;
+
+function BasicRealm(const FromServer: RawUtf8): RawUtf8;
+var
+  p: PUtf8Char;
+begin
+  result := '';
+  p := pointer(FromServer);
+  if IdemPChar(p, 'REALM="') then
+    UnQuoteSqlStringVar(p + 6, result);
+end;
+
+function DigestServerInit(Algo: TDigestAlgo;
+  const QuotedRealm, Prefix, Suffix: RawUtf8; Opaque, Tix64: Int64): RawUtf8;
+var
+  h: THash128Rec;
+  noncehex, opaquehex: string[32];
+begin
+  result := '';
+  if (Algo = daUndefined) or
+     (QuotedRealm = '') then
+    exit; // missing some mandatory context
+  if Tix64 = 0 then
+    Tix64 := GetTickCount64; // ms resolution, update period of 4..16 ms
+  h.L := Tix64;
+  h.w[3] := Opaque xor 7777; // upper 16-bit of the nonce map lowest Opaque bits
+  h.H := Random64;
+  h.L := h.L xor bswap64(h.H); // 48-bit ms would overflow after 8900 years
+  noncehex[0] := #32;
+  BinToHexLower(@h, @noncehex[1], SizeOf(h));
+  DefaultHasher128(@h, @Opaque, SizeOf(Opaque)); // likely to be AesNiHash128()
+  opaquehex[0] := #32;
+  BinToHexLower(@h, @opaquehex[1], SizeOf(h));
+  FormatUtf8('%realm=%,qop="auth",%nonce="%",opaque="%"%',
+    [Prefix, QuotedRealm, DIGEST_NAME_RESP[Algo], noncehex, opaquehex, Suffix],
+    result);
+end;
+
+function DigestServerAuth(Algo: TDigestAlgo; const Realm, Method: RawUtf8;
+  FromClient: PUtf8Char; Opaque: Int64;
+  const OnSearchUser: TOnDigestServerAuthGetUserHash;
+  out User, Url: RawUtf8; NonceExpSec: PtrUInt; Tix64: Qword): TAuthServerResult;
+var
+  resp: RawUtf8;
+  dp: TDigestProcess;
+  created: QWord;
+  nonce128, opaque128: THash128Rec;
+begin
+  result := asrRejected;
+  if (FromClient = nil) or
+     (Algo = daUndefined) or
+     (Realm = '') or
+     not Assigned(OnSearchUser) then
+    exit;
+  // parse the input parameters
+  dp.Init(Algo);
+  while FromClient <> nil do
+    if not dp.Parse(FromClient) then
+      exit; // invalid input (e.g. unexpected algorithm)
+  // validate the parameters
+  if (dp.UserName = '') or
+     (dp.Realm  <> Realm) or
+     (dp.Url = '') or
+     (dp.Nonce = '') or
+     (dp.NC = '') or
+     (dp.Qop = '') or
+     (dp.CNonce = '') or
+     (dp.Opaque = '') or
+     (dp.Response = '') or
+     not mormot.core.text.HexToBin(
+       pointer(dp.Nonce), @nonce128, SizeOf(nonce128)) or
+     not mormot.core.text.HexToBin(
+       pointer(dp.Opaque), @opaque128, SizeOf(opaque128)) then
+    exit;
+  // verify the nonce is not deprecated, and matches lowest 16-bit of Opaque
+  created := nonce128.L xor bswap64(nonce128.H);
+  if ((created shr 48) xor 7777) and $ffff <> Opaque and $ffff then
+    exit;
+  if NonceExpSec = 0 then
+    NonceExpSec := 1;
+  if Tix64 = 0 then
+    Tix64 := GetTickCount64;
+  created := created and pred(QWord(1) shl 48);
+  if Tix64 - created > NonceExpSec shl 10 then
+    exit;
+  // fast challenge against the 64-bit Opaque value (typically a connection ID)
+  DefaultHasher128(@nonce128, @Opaque, SizeOf(Opaque)); // see DigestServerInit
+  if not IsEqual(nonce128.b, opaque128.b) then
+    exit;
+  result := OnSearchUser(dp.UserName, dp.Realm, dp.HA0);
+  if result <> asrMatch then
+    exit;
+  // validate the cryptographic challenge
+  resp := dp.Response;
+  dp.DigestResponse(Method);
+  FillZero(dp.HA0.b);
+  result := asrIncorrectPassword;
+  if not PropNameEquals(dp.Response, resp) then
+    exit;
+  // successfully authenticated
+  User := dp.UserName;
+  Url := dp.Url;
+  result := asrMatch;
+end;
+
+function BasicServerAuth(FromClient: PUtf8Char;
+  out User, Password: RawUtf8): boolean;
+var
+  l: PtrInt;
+begin
+  result := false;
+  if FromClient = nil then
+    exit;
+  while FromClient^ = ' ' do
+    inc(FromClient);
+  l := 0;
+  while FromClient[l] > ' ' do
+    inc(l);
+  if l < 4 then
+    exit;
+  Split(Base64ToBin(PAnsiChar(FromClient), l), ':', User, Password);
+  result := (User <> '') and
+            (Password <> '') and
+            (PosExChar(':', User) = 0);
+end;
+
+
+{ TBasicAuthServer }
+
+function TBasicAuthServer.BeforeAuth(
+  Sender: TObject; const User: RawUtf8): boolean;
+begin
+  result := not Assigned(fOnBeforeAuth) or
+            fOnBeforeAuth(Sender, User);
+end;
+
+function TBasicAuthServer.AfterAuth(
+  Sender: TObject; const User: RawUtf8): boolean;
+begin
+  result := not Assigned(fOnAfterAuth) or
+            fOnAfterAuthDelayed or
+            fOnAfterAuth(Sender, User);
+end;
+
+constructor TBasicAuthServer.Create(const aRealm: RawUtf8);
+begin
+  if aRealm = '' then
+    raise EDigest.CreateUtf8('%.Create: void Realm', [self]);
+  fRealm := aRealm;
+  QuotedStr(fRealm, '"', fQuotedRealm);
+  FormatUtf8('WWW-Authenticate: Basic realm="%"'#13#10, [fRealm], fBasicInit);
+end;
+
+function TBasicAuthServer.Realm: RawUtf8;
+begin
+  result := fRealm;
+end;
+
+function TBasicAuthServer.Instance: TObject;
+begin
+  result := self;
+end;
+
+function TBasicAuthServer.BasicInit: RawUtf8;
+begin
+  result := fBasicInit;
+end;
+
+function TBasicAuthServer.BasicAuth(FromClient: PUtf8Char;
+  out ClientUser: RawUtf8): boolean;
+var
+  user, pass: RawUtf8;
+begin
+  result := BasicServerAuth(FromClient, user, pass) and
+            OnBasicAuth(self, user, pass);
+  if not result then
+    exit;
+  ClientUser := user;
+  FillZero(pass);
+end;
+
+function TBasicAuthServer.OnBasicAuth(aSender: TObject;
+  const aUser: RawUtf8; const aPassword: SpiUtf8): boolean;
+begin
+  result := CheckCredential(aUser, aPassword) = asrMatch;
+end;
+
+
+{ TDigestAuthServer }
+
+type
+  // storing 256-bit in memory is enough to match current TDigestAlgo
+  TDigestAuthHash = THash256;
+  TDigestAuthHashs = array of TDigestAuthHash;
+
+constructor TDigestAuthServer.Create(const aRealm: RawUtf8; aAlgo: TDigestAlgo);
+begin
+  if aAlgo = daUndefined then
+    raise EDigest.CreateUtf8('%.Create: undefined Algo', [self]);
+  inherited Create(aRealm);
+  fAlgo := aAlgo;
+  fAlgoSize := HASH_SIZE[DIGEST_ALGO[aAlgo]];
+  if fAlgoSize > SizeOf(TDigestAuthHash) then // paranoid
+    raise EDigest.CreateUtf8('%.Create: % %-bit digest is too big',
+      [self, fAlgoSize shl 3, DIGEST_NAME[aAlgo]]);
+  fRequestExpSec := 60;
+  fOpaqueObfuscate := Random64; // changes at each server restart
+end;
+
+function TDigestAuthServer.GetUserHashWithCallback(const aUser,
+  aRealm: RawUtf8; out aDigest: THash512Rec): TAuthServerResult;
+begin
+  if (self <> nil) and
+     BeforeAuth(self, aUser) then
+    result := GetUserHash(aUser, aRealm, aDigest)
+  else
+    result := asrRejected;
+end;
+
+procedure TDigestAuthServer.ComputeDigest(const aUser: RawUtf8;
+  const aPassword: SpiUtf8; out Digest: THash512Rec);
+begin
+  if PosExChar(':', aUser) <> 0 then
+    raise EDigest.CreateUtf8(
+      '%.ComputeDigest: unexpected '':'' in user=%', [self, aUser]);
+  if DigestHA0(fAlgo, aUser, fRealm, aPassword, Digest) <> fAlgoSize then
+    raise EDigest.CreateUtf8('%.ComputeDigest: DigestHA0?', [self]);
+end;
+
+function TDigestAuthServer.DigestInit(Opaque, Tix64: Int64;
+  const Prefix, Suffix: RawUtf8): RawUtf8;
+begin
+  Opaque := Opaque xor fOpaqueObfuscate;
+  result := DigestServerInit(fAlgo, fQuotedRealm, Prefix, Suffix, Opaque, Tix64);
+end;
+
+function TDigestAuthServer.DigestAlgoMatch(const FromClient: RawUtf8): boolean;
+var
+  p: PUtf8Char;
+  alg: ShortString;
+begin
+  result := false;
+  p := StrPosI('ALGORITHM=', pointer(FromClient));
+  if p = nil then
+    exit;
+  inc(p, 10);
+  GetNextItemShortString(p, @alg);
+  result := IdemPropNameU(DIGEST_NAME[fAlgo], @alg[1], ord(alg[0]));
+end;
+
+function TDigestAuthServer.DigestAuth(FromClient: PUtf8Char;
+  const Method: RawUtf8; Opaque, Tix64: Int64;
+  out ClientUser, ClientUrl: RawUtf8): TAuthServerResult;
+begin
+  Opaque := Opaque xor fOpaqueObfuscate;
+  result := DigestServerAuth(fAlgo, fRealm, Method, FromClient, Opaque,
+    GetUserHashWithCallback, ClientUser, ClientUrl, fRequestExpSec, Tix64);
+end;
+
+function TDigestAuthServer.CheckCredential(const aUser: RawUtf8;
+  const aPassword: SpiUtf8): TAuthServerResult;
+var
+  dig, stored: THash512Rec;
+begin
+  result := GetUserHashWithCallback(aUser, fRealm, stored);
+  if result <> asrMatch then
+    exit;
+  if (DigestHA0(fAlgo, aUser, fRealm, aPassword, dig) = fAlgoSize) and
+     CompareMem(@dig, @stored, fAlgoSize) then
+    if AfterAuth(self, aUser) then
+      result := asrMatch
+    else
+      result := asrRejected
+  else
+    result := asrIncorrectPassword;
+  FillZero(dig.b);
+  FillZero(stored.b);
+end;
+
+
+{ TDigestAuthServerMem }
+
+constructor TDigestAuthServerMem.Create(const aRealm: RawUtf8;
+  aAlgo: TDigestAlgo);
+begin
+  inherited Create(aRealm, aAlgo);
+  fUsers := TSynDictionary.Create(
+    TypeInfo(TRawUtf8DynArray), TypeInfo(TDigestAuthHashs));
+  fUsers.Safe.RWUse := uRWLock; // multi-read / single-write thread-safe access
+end;
+
+destructor TDigestAuthServerMem.Destroy;
+begin
+  inherited Destroy;
+  FreeAndNil(fUsers);
+end;
+
+function TDigestAuthServerMem.GetUserHash(const aUser, aRealm: RawUtf8;
+  out aDigest: THash512Rec): TAuthServerResult;
+begin
+  // no need to validate aRealm: DigestServerAuth caller already dit it
+  if fUsers.FindAndCopy(aUser, aDigest, {updtimeout=}false) then
+    result := asrMatch
+  else
+    result := asrUnknownUser;
+end;
+
+function TDigestAuthServerMem.GetCount: integer;
+begin
+  if self = nil then
+    result := 0
+  else
+    result := fUsers.Count;
+end;
+
+function TDigestAuthServerMem.GetUsers: TRawUtf8DynArray;
+begin
+  result := nil;
+  if self = nil then
+    exit;
+  fUsers.Safe.ReadLock;
+  try
+    fUsers.Keys.{$ifdef UNDIRECTDYNARRAY}InternalDynArray.{$endif}CopyTo(result);
+  finally
+    fUsers.Safe.ReadUnLock;
+  end;
+end;
+
+procedure TDigestAuthServerMem.SetCredential(const aUser: RawUtf8;
+  const aPassword: SpiUtf8);
+var
+  dig: THash512Rec;
+begin
+  if (aUser = '') or
+     (self = nil) then
+    exit;
+  if aPassword = '' then
+  begin
+    if fUsers.Delete(aUser) >= 0 then
+      fModified := true;
+  end
+  else
+  begin
+    ComputeDigest(aUser, aPassword, dig);
+    fUsers.AddOrUpdate(aUser, dig);
+    fModified := true;
+  end;
+  FillZero(dig.b);
+end;
+
+procedure TDigestAuthServerMem.ClearCredentials;
+begin
+  if (self = nil) or
+     (fUsers = nil) then
+    exit;
+  fUsers.Safe.Lock; // within write lock
+  try
+    fUsers.Values.FillZero; // TDigestAuthHash anti-forensic
+    fUsers.DeleteAll;
+  finally
+    fUsers.Safe.UnLock;
+  end;
+end;
+
+
+{ TDigestAuthServerFile }
+
+constructor TDigestAuthServerFile.Create(const aRealm: RawUtf8;
+  const aFileName: TFileName; const aFilePassword: SpiUtf8; aAlgo: TDigestAlgo);
+begin
+  inherited Create(aRealm, aAlgo);
+  if PosExChar(':', aRealm) <> 0 then
+    raise EDigest.CreateUtf8(
+      '%.Create: unexpected '':'' in realm=%', [self, aRealm]);
+  if aFileName = '' then
+    raise EDigest.CreateUtf8('%.Create: void filename', [self]);
+  fFileName := ExpandFileName(aFileName);
+  if aFilePassword <> '' then
+    Pbkdf2HmacSha256(aFilePassword, aRealm, 1000, fAesKey);
+  LoadFromFile;
+end;
+
+destructor TDigestAuthServerFile.Destroy;
+begin
+  if fModified then // persist any pending changes
+    SaveToFile;
+  ClearCredentials; // safely fill in memory against forensic
+  FillZero(fAesKey);   // anti-forensic
+  inherited Destroy;
+end;
+
+function TDigestAuthServerFile.GetEncrypted: boolean;
+begin
+  result := not IsZero(fAesKey);
+end;
+
+function TDigestAuthServerFile.GetAes: TAesAbstract;
+begin
+  if IsZero(fAesKey) then
+    result := nil
+  else
+    result := TAesFast[mGCM].Create(fAesKey);
+end;
+
+procedure TDigestAuthServerFile.LoadFromFile;
+var
+  tmp: RawByteString;
+  p, l: PUtf8Char;
+  u, r: RawUtf8;
+  h: TDigestAuthHash;
+  aes: TAesAbstract;
+begin
+  ClearCredentials;
+  fUsers.Safe.Lock; // within write lock
+  try
+    fFileLastTime := FileAgeToUnixTimeUtc(fFileName);
+    if fFileLastTime <> 0 then
+    begin
+      tmp := StringFromFile(fFileName);
+      aes := GetAes;
+      try
+        if aes <> nil then
+          tmp := aes.DecryptPkcs7(tmp, {iv=}true, {raise=}true);
+        p := pointer(tmp);
+        while p <> nil do
+        begin
+          l := pointer(GetNextLine(p, p, {trim=}true));
+          if l <> nil then
+          begin
+            // line format is username:realm:5f111290c3bea272bc72f98218fe4e15
+            GetNextItemTrimed(l, ':', u);
+            if aes = nil then // no realm stored in encrypted file
+              GetNextItemTrimed(l, ':', r);
+            if (u <> '') and
+               ((aes <> nil) or (r = fRealm)) and
+               mormot.core.text.HexToBin(pointer(l), @h, fAlgoSize) then
+              fUsers.Add(u, h);
+          end;
+        end;
+      finally
+        aes.Free;
+      end;
+    end;
+  finally
+    fUsers.Safe.UnLock;
+  end;
+end;
+
+procedure TDigestAuthServerFile.SaveToFile;
+var
+  i: PtrInt;
+  w: TTextWriter;
+  tmp: TTextWriterStackBuffer;
+  txt: RawUtf8;
+  u: PRawUtf8;
+  d: ^TDigestAuthHash;
+  aes: TAesAbstract;
+begin
+  aes := GetAes;
+  try
+    fUsers.Safe.ReadLock;
+    try
+      if not fModified then
+        exit;
+      fModified := false;
+      if aes = nil then
+        txt := ':' + fRealm + ':'
+      else
+        txt := ':'; // no need to store the realm in the encrypted file
+      w := TTextWriter.CreateOwnedStream(tmp);
+      try
+        u := fUsers.Keys.Value^;
+        d := fUsers.Values.Value^;
+        for i := 0 to fUsers.Count - 1 do
+        begin
+          w.AddNoJsonEscapeUtf8(u^);
+          w.AddNoJsonEscapeUtf8(txt);
+          w.AddBinToHex(d, fAlgoSize, true);
+          w.Add(#10);
+          inc(u);
+          inc(d);
+        end;
+        w.SetText(txt);
+      finally
+        w.Free;
+      end;
+    finally
+      fUsers.Safe.ReadUnLock;
+    end;
+    if aes <> nil then
+      txt := aes.EncryptPkcs7(txt, {iv=}true);
+  finally
+    aes.Free;
+  end;
+  FileFromString(txt, fFileName);
+  fFileLastTime := FileAgeToUnixTimeUtc(fFileName);
+end;
+
+function TDigestAuthServerFile.RefreshFile: boolean;
+var
+  ondisk: TUnixTime;
+begin
+  result := false;
+  if fModified then
+  begin
+    SaveToFile;
+    exit;
+  end;
+  ondisk := FileAgeToUnixTimeUtc(fFileName);
+  if (ondisk = 0) or
+     (ondisk = fFileLastTime) then
+    exit;
+  LoadFromFile;
+  result := true;
+end;
+
 
 { ***************** TSyn***Password and TSynConnectionDefinition Classes }
 
@@ -2821,7 +4050,8 @@ end;
 class function TSynPersistentWithPassword.ComputePassword(PlainPassword: pointer;
   PlainPasswordLen: integer; CustomKey: cardinal): SpiUtf8;
 begin
-  result := ComputePassword(BinToBase64uri(PlainPassword, PlainPasswordLen));
+  result := ComputePassword(
+    BinToBase64uri(PlainPassword, PlainPasswordLen), CustomKey);
 end;
 
 class function TSynPersistentWithPassword.ComputePlainPassword(
@@ -2850,7 +4080,11 @@ end;
 
 function TSynPersistentWithPassword.GetPassWordPlain: SpiUtf8;
 begin
-  result := GetPassWordPlainInternal('');
+  if (self = nil) or
+     (fPassWord = '') then
+    result := ''
+  else
+    result := GetPassWordPlainInternal('');
 end;
 
 function TSynPersistentWithPassword.GetPassWordPlainInternal(
@@ -3534,6 +4768,7 @@ constructor TProtocolAes.CreateFrom(aAnother: TProtocolAes);
 begin
   inherited Create;
   fAes[false] := aAnother.fAes[false].Clone;
+  fAheadMode := aAnother.fAheadMode;
   fAes[true] := fAes[false].CloneEncryptDecrypt;
 end;
 
@@ -3638,7 +4873,7 @@ begin
       'Unsupported TBinaryCookieGenerator.Init(%)', [ToText(SignAlgo)^]);
   CrcAlgo := SignAlgo;
   Padding := 0;
-  // cryptographic randomness
+  // 256 bytes of cryptographic randomness
   MainAesPrng.FillRandom(@Crypt, SizeOf(Crypt));
 end;
 
@@ -3788,7 +5023,7 @@ begin
   end;
   result := Last; // simple but efficient cache
   if (result <> nil) and
-     IdemPropNameU(TCryptAlgo(result).fName, name) then
+     PropNameEquals(TCryptAlgo(result).fName, name) then
     exit;
   result := GlobalCryptAlgo.GetObjectFrom(name); // thread-safe lookup
   if result <> nil then
@@ -3950,7 +5185,7 @@ type
 
 const
   /// CSV text of TAesPrngGetEntropySource items
-  RndAlgosText: PUTF8Char =
+  RndAlgosText: PUtf8Char =
     'rnd-entropy,rnd-entropysys,rnd-entropysysblocking,rnd-entropyuser';
 
 constructor TCryptRandomEntropy.Create(const name: RawUtf8);
@@ -4676,16 +5911,17 @@ begin
   RaiseError('Generate: % error', [api]); // raise ECryptCert
 end;
 
-function TCryptCert.IsValidDate: boolean;
+function TCryptCert.IsValidDate(date: TDateTime): boolean;
 var
-  na, nb, now: TDateTime;
+  na, nb: TDateTime;
 begin
-  now := NowUtc;
+  if date = 0 then
+    date := NowUtc;
   na := GetNotAfter;
   nb := GetNotBefore;
   result := (not IsVoid) and
-            ((na <= 0) or (na > now)) and
-            ((nb <= 0) or (nb <= now));
+            ((na <= 0) or (na > date)) and
+            ((nb <= 0) or (nb <= date));
 end;
 
 function TCryptCert.IsVoid: boolean;
@@ -4744,10 +5980,11 @@ begin
   result := Sign(pointer(Data), length(Data));
 end;
 
-function TCryptCert.Verify(const Signature, Data: RawByteString): TCryptCertValidity;
+function TCryptCert.Verify(const Signature, Data: RawByteString;
+  IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
 begin
   result := Verify(pointer(Signature), pointer(Data),
-                   length(Signature), length(Data));
+                   length(Signature), length(Data), IgnoreError, TimeUtc);
 end;
 
 function TCryptCert.JwtCompute(const DataNameValue: array of const;
@@ -4789,7 +6026,8 @@ end;
 
 function TCryptCert.JwtVerify(const Jwt: RawUtf8;
   Issuer, Subject, Audience: PRawUtf8;
-  Payload: PDocVariantData; Signature: PRawByteString): TCryptCertValidity;
+  Payload: PDocVariantData; Signature: PRawByteString;
+  IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
 var
   P, S: PUtf8Char;
   pl: TDocVariantData;
@@ -4826,7 +6064,8 @@ begin
   if pl.GetAsInt64('nbf', ms) and
      (UnixTimeUtc + 15 < ms) then
     exit;
-  result := Verify(pointer(sig), pointer(Jwt), length(sig), S - 1 - pointer(Jwt));
+  result := Verify(pointer(sig), pointer(Jwt),
+              length(sig), S - 1 - pointer(Jwt), IgnoreError, TimeUtc);
   if not (result in CV_VALIDSIGN) then
     exit;
   if Issuer <> nil then
@@ -4935,6 +6174,11 @@ begin
   FillCharFast(self, SizeOf(self), 0);
 end;
 
+function TCryptCertPerUsage.IsVoid: boolean;
+begin
+  result := List = nil;
+end;
+
 function TCryptCertPerUsage.Add(const cert: ICryptCert): TCryptCertUsages;
 var
   u: TCryptCertUsage;
@@ -4963,13 +6207,19 @@ begin
 end;
 
 function TCryptCertPerUsage.GetUsage(u: TCryptCertUsage;
-  out cert: ICryptCert): boolean;
+  var cert: ICryptCert): boolean;
 var
   i: PtrInt;
 begin
-  i := Index[u]; // contains index + 1
+  if List = nil then
+    i := 0
+  else
+    i := Index[u]; // contains index + 1
   if i = 0 then
-    result := false
+  begin
+    cert := nil; // circumvent FPC inlining bug for "out cert"
+    result := false;
+  end
   else
   begin
     cert := List[i - 1];
@@ -5098,7 +6348,7 @@ begin
     if GlobalCryptAlgo <> nil then
       exit;
     GlobalCryptAlgo := RegisterGlobalShutdownRelease(
-      TRawUtf8List.CreateEx([fObjectsOwned, fNoDuplicate]));
+      TRawUtf8List.CreateEx([fObjectsOwned, fNoDuplicate, fThreadSafe]));
     // register mormot.crypt.core engines into our factories
     TCryptRandomEntropy.Implements(RndAlgosText);
     TCryptRandomAesPrng.Implements('rnd-default,rnd-aes');
@@ -5368,21 +6618,29 @@ end;
 function PemToDer(const pem: TCertPem; kind: PPemKind): TCertDer;
 var
   P: PUtf8Char;
-  len: PtrInt;
-  base64: TSynTempBuffer; // pem is small, so a 4KB temp buffer is fine enough
 begin
   P := pointer(pem);
-  P := ParsePem(P, kind, len, {excludemarkers=}true);
-  if P <> nil then
+  result := NextPemToDer(P, kind);
+  if result = '' then
+    result := pem;
+end;
+
+function NextPemToDer(var P: PUtf8Char; Kind: PPemKind): TCertDer;
+var
+  len: PtrInt;
+  pem: PUtf8Char;
+  base64: TSynTempBuffer; // pem is small, so a 4KB temp buffer is fine enough
+begin
+  pem := ParsePem(P, kind, len, {excludemarkers=}true);
+  if pem <> nil then
   begin
     base64.Init(len);
-    len := Base64IgnoreLineFeeds(P, base64.buf) - base64.buf;
+    len := Base64IgnoreLineFeeds(pem, base64.buf) - base64.buf;
     result := Base64ToBinSafe(base64.buf, len);
     base64.Done;
-    if result <> '' then
-      exit;
-  end;
-  result := pem;
+  end
+  else
+    result := '';
 end;
 
 function NextPem(var P: PUtf8Char; Kind: PPemKind): TCertPem;
@@ -5504,9 +6762,7 @@ begin
         SetLength(result, certlen);
         if cardinal(M.Read(pointer(result)^, certlen)) <> certlen then
           raise EStuffExe.CreateUtf8('% certificate reading', [MainFile]);
-        while result[certlen] = #0 do
-          dec(certlen);
-        FakeLength(result, certlen); // trim ending #0 used for padding
+        // note: don't remove ending #0 padding because some may be needed
         if lenoffs <> nil then
           lenoffs^ := certlenoffs;
         if offs <> nil then
@@ -5756,6 +7012,101 @@ begin
 end;
 
 
+function ToText(const c: TX509Parsed): RawUtf8;
+var
+  pub: RawUtf8;
+
+  procedure KeyUsage(l, h: TCryptCertUsage; const ext: RawUtf8);
+  var
+    cu: TCryptCertUsage;
+    usage: RawUtf8;
+  begin
+    for cu := l to h do
+      if cu in c.Usage then
+        begin
+        if usage <> '' then
+          usage := usage + ', ';
+        usage := usage + CU_FULLTEXT[cu];
+      end;
+    if usage <> '' then
+      result := result +   '    X509v3 ' + ext + #13#10 +
+                           '      ' + usage + #13#10;
+  end;
+
+begin
+  // roughly follow X509_print() OpenSSL formatting
+  ToHumanHex(pub, pointer(c.PubKey), length(c.PubKey));
+  result := 'Certificate:'#13#10 +
+            '  Serial Number:'#13#10 +
+            '    ' + c.Serial + #13#10 +
+            '  Signature Algorithm: ' + c.SigAlg + #13#10 +
+            '  Issuer: ' + c.IssuerDN + #13#10 +
+            '  Validity'#13#10 +
+            '    Not Before: ' + DateTimeToHttpDate(c.NotBefore) + #13#10 +
+            '    Not After : ' + DateTimeToHttpDate(c.NotAfter)  + #13#10 +
+            '  Subject: ' + c.SubjectDN + #13#10 +
+            '  Subject Public Key Info:'#13#10 +
+            '    Public Key Algorithm: ' + c.PubAlg + #13#10 +
+            '    Public Key:'#13#10 +
+            '      ' + pub + #13#10;
+  if (c.Usage <> []) or
+     (c.SubjectID <> '') or
+     (c.IssuerID <> '') then
+  begin
+    // append the known extensions
+    result := result + '  X509v3 extensions:'#13#10;
+    if cuCA in c.Usage then
+      result := result + '    X509v3 Basic Constraints: critical'#13#10 +
+                         '      CA:TRUE'#13#10;
+    if c.SubjectID <> '' then
+      result := result + '    X509v3 Subject Key Identifier:'#13#10 +
+                         '      ' + c.SubjectID + #13#10;
+    if c.IssuerID <> '' then
+      result := result + '    X509v3 Authority Key Identifier:'#13#10 +
+                         '      ' + c.IssuerID + #13#10;
+    KeyUsage(cuCrlSign, cuDigitalSignature, 'Key Usage: critical');
+    KeyUsage(cuTlsServer, cuTimestamp, 'Extended Key Usage:');
+  end;
+end;
+
+{$ifdef OSWINDOWS}
+
+procedure WinInfoToParse(const c: TWinCertInfo; out Info: TX509Parsed);
+begin
+  Info.Serial := c.Serial;
+  Info.SubjectDN := c.SubjectName;
+  Info.IssuerDN := c.IssuerName;
+  Info.SubjectID := c.SubjectID;
+  Info.IssuerID := c.IssuerID;
+  Info.SigAlg := c.AlgorithmName;
+  Info.PubAlg := c.PublicKeyAlgorithmName;
+  Info.Usage := TCryptCertUsages(c.Usage); // match TWinCertUsages 16-bit
+  Info.NotBefore := c.NotBefore;
+  Info.NotAfter := c.NotAfter;
+  Info.PubKey := c.PublicKeyContent;
+  Info.PeerInfo := ToText(Info); // should be the last
+end;
+
+function WinX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
+var
+  c: TWinCertInfo;
+begin
+  result := WinCertDecode(Cert, c);
+  if result then
+    WinInfoToParse(c, Info);
+end;
+
+function Win2Text(const c: TWinCertInfo): RawUtf8;
+var
+  nfo: TX509Parsed;
+begin
+  WinInfoToParse(c, nfo);
+  result := nfo.PeerInfo;
+end;
+
+{$endif OSWINDOWS}
+
+
 procedure InitializeUnit;
 begin
   Rtti.RegisterType(TypeInfo(TSignAlgo));
@@ -5763,6 +7114,10 @@ begin
     'algo:TSignAlgo secret,salt:RawUtf8 rounds:integer');
   // Rnd/Sign/Hash/Cipher/Asym/Cert/Store are registered in GlobalCryptAlgoInit
   CreateDummyCertificate := _CreateDummyCertificate;
+  {$ifdef OSWINDOWS}
+  X509Parse := @WinX509Parse; // use mormot.lib.sspi.pas WinCertDecode()
+  WinCertInfoToText := @Win2Text;
+  {$endif OSWINDOWS}
 end;
 
 procedure FinalizeUnit;

@@ -61,8 +61,8 @@ type
     constructor Create(const aServerName, aDatabaseName, aUserID, aPassWord: RawUtf8);
       overload; override;
     /// initialize access to an existing SQLite3 engine
-    // - this overloaded constructor allows to access via SynDB methods to an
-    // existing SQLite3 database, e.g. TRestServerDB.DB (from mormot.orm.sqlite3.pas)
+    // - overloaded constructor to access via mormot.db.sql methods an existing
+    // SQLite3 database, e.g. TRestServerDB.DB (from mormot.orm.sqlite3.pas)
     constructor Create(aDB: TSqlDatabase); reintroduce; overload;
     /// create a new connection
     // - call this method if the shared MainConnection is not enough (e.g. for
@@ -277,9 +277,12 @@ type
 
 /// direct export of a DB statement rows into a SQLite3 database
 // - the corresponding table will be created within the specified DB file
-// - is a wrapper around TSqlDBConnection.NewTableFromRows()
+// - is a wrapper around TSqlDBConnection.NewTableFromRows() with fallback to
+// NewTableFrom() if SourceTableNameIfNoRows is set
 function RowsToSqlite3(const Dest: TFileName; const TableName: RawUtf8;
-  Rows: TSqlDBStatement; UseMormotCollations: boolean): integer;
+  Rows: TSqlDBStatement; UseMormotCollations: boolean;
+  const SourceTableNameIfNoRows: RawUtf8 = '';
+  SourcePropertiesIfNoRows: TSqlDBConnectionProperties = nil): integer;
 
 
 implementation
@@ -672,7 +675,7 @@ begin
     // INSERT/UPDATE/DELETE (i.e. not SELECT) -> try to execute directly now
     repeat // Execute all steps of the first statement
     until fStatement.Step <> SQLITE_ROW;
-    fUpdateCount := fDB.LastChangeCount;
+    fUpdateCount := sqlite3.changes(fDB.DB);
   finally
     fDB.UnLock;
     if fShouldLogSQL then
@@ -802,15 +805,16 @@ end;
 
 
 function RowsToSqlite3(const Dest: TFileName; const TableName: RawUtf8;
-  Rows: TSqlDBStatement; UseMormotCollations: boolean): integer;
+  Rows: TSqlDBStatement; UseMormotCollations: boolean;
+  const SourceTableNameIfNoRows: RawUtf8;
+  SourcePropertiesIfNoRows: TSqlDBConnectionProperties): integer;
 var
-  DB: TSqlDBSQLite3ConnectionProperties;
+  DB, srcDB: TSqlDBSQLite3ConnectionProperties;
   Conn: TSqlDBSQLite3Connection;
 begin
   result := 0;
   if (Dest = '') or
-     (Rows = nil) or
-     (Rows.ColumnCount = 0) then
+     (Rows = nil) then
     exit;
   // we do not call DeleteFile(Dest) since DB may be completed on purpose
   DB := TSqlDBSQLite3ConnectionProperties.Create(StringToUtf8(Dest), '', '', '');
@@ -818,7 +822,34 @@ begin
     DB.UseMormotCollations := UseMormotCollations;
     Conn := DB.MainConnection as TSqlDBSQLite3Connection;
     Conn.Connect;
-    result := Conn.NewTableFromRows(TableName, Rows, true);
+    result := Conn.NewTableFromRows(TableName, Rows, {withintransaction=}true);
+    if (result = 0) and
+       (SourceTableNameIfNoRows <> '') then
+    begin
+      srcDB := nil;
+      try
+        // there are no data to copy: initialize a void table
+        // circumvent when Rows.Connection is nil
+        if (SourcePropertiesIfNoRows = nil) and
+           (Rows.Connection <> nil) then
+          SourcePropertiesIfNoRows := Rows.Connection.Properties;
+        if (SourcePropertiesIfNoRows = nil) and
+           Rows.InheritsFrom(TSqlDBSQLite3Statement) then
+        begin
+          // is likely to come from TSqlDBSQLite3Statement.CreateFrom
+          srcDB := TSqlDBSQLite3ConnectionProperties.Create(
+            TSqlDBSQLite3Statement(Rows).fDB);
+          SourcePropertiesIfNoRows := srcDB; // use a temporary props instance
+        end;
+        if (SourcePropertiesIfNoRows <> nil) and
+           not DB.TableExists(TableName) then
+          // no rows: just copy the table structure from supplied name
+          Conn.NewTableFrom(
+            TableName, SourceTableNameIfNoRows, SourcePropertiesIfNoRows);
+      finally
+        srcDB.Free;
+      end;
+    end;
     Conn.Disconnect;
   finally
     DB.Free;

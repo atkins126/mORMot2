@@ -784,6 +784,7 @@ var
   crc: cardinal;
 begin
   crc := Hash32(data);
+  //if crc <> expectedhash32 then ConsoleWrite(data);
   CheckUtf8(crc = expectedhash32, 'Hash32()=$% expected=$% %',
     [CardinalToHexShort(crc), CardinalToHexShort(expectedhash32), msg]);
 end;
@@ -838,7 +839,7 @@ end;
 class function TSynTestCase.RandomUri(CharCount: integer): RawByteString;
 const
   URL_CHARS: array[0..63] of AnsiChar =
-    'abcdefghijklmnopqrstuvwxyz0123456789-abCdEfGH.JKlmnOP.RsTuVWxyz.';
+    'abcdefghijklmnopqrstuvwxyz0123456789-ABCDEFGH.JKLMNOP-RSTUVWXYZ.';
 begin
   InitRandom64(@URL_CHARS, CharCount, result);
 end;
@@ -1386,7 +1387,7 @@ begin
     if workdir <> '' then
       tests.WorkDir := workdir;
     tests.Options := options;
-    if ParamCount <> 0 then
+    if ParamCount > 0 then
     begin
       tests.SaveToFile(paramstr(1)); // export to file if named on command line
       {$I-} // minimal console output during blind regression tests
@@ -1441,7 +1442,7 @@ begin
       result := GetLastError
     else
       result := 0;
-    AppendBufferToRawUtf8(PPRawUtf8(@t.UserData)^^, t.BufPtr, t.Bufpos);
+    Append(PPRawUtf8(@t.UserData)^^, t.BufPtr, t.Bufpos);
     t.BufPos := 0;
   end;
 end;

@@ -26,7 +26,7 @@ uses
   variants,
   contnrs,
   {$ifdef DOMAINRESTAUTH}
-  mormot.lib.sspi, // do-nothing units on non compliant system
+  mormot.lib.sspi, // do-nothing units on non compliant OS
   mormot.lib.gssapi,
   {$endif DOMAINRESTAUTH}
   mormot.core.base,
@@ -170,8 +170,8 @@ type
   // - default suaCRC32 format of session_signature is
   // !Hexa8(SessionID)+
   // !Hexa8(Timestamp)+
-  // !Hexa8(crc32('SessionID+HexaSessionPrivateKey'+Sha256('salt'+PassWord)+
-  // !            Hexa8(Timestamp)+url))
+  // !Hexa8(crc32(SessionID + HexaSessionPrivateKey +
+  // !            Sha256('salt' + PassWord) + Hexa8(Timestamp) + url))
   TRestClientAuthenticationSignedUri = class(TRestClientAuthenticationUri)
   protected
     // class functions implementing TRestAuthenticationSignedUriAlgo
@@ -406,6 +406,9 @@ type
       ctxt: TRestClientSideInvoke;
       const method, params, clientDrivenID: RawUtf8;
       out sent, head: RawUtf8); virtual; abstract;
+    /// could be overriden to notify advances routing features
+    // - default returns [] but TRestClientRoutingRest includes csiAsOctetStream
+    class function Supports: TRestClientSideInvoke; virtual;
   end;
 
   /// class used to define the Client side expected routing
@@ -429,6 +432,8 @@ type
       ctxt: TRestClientSideInvoke;
       const method, params, clientDrivenID: RawUtf8;
       out sent, head: RawUtf8); override;
+    /// overriden to include csiAsOctetStream
+    class function Supports: TRestClientSideInvoke; override;
   end;
 
   /// client calling context using simple REST for interface-based services
@@ -554,6 +559,7 @@ type
     fConnectRetrySeconds: integer; // used by IsOpen
     fMaximumAuthentificationRetry: integer;
     fRetryOnceOnTimeout: boolean;
+    fServiceRoutingSupports: TRestClientSideInvoke;
     fInternalState: set of (isDestroying, isInAuth, isNotImplemented);
     fLastErrorCode: integer;
     fLastErrorMessage: RawUtf8;
@@ -783,7 +789,7 @@ type
     // - this methods is the reverse from ServicePublishOwnInterfaces: it allows
     // to guess an associated REST server which may implement a given service
     function ServiceRetrieveAssociated(const aServiceName: RawUtf8;
-      out URI: TRestServerURIDynArray): boolean; overload;
+      out URI: TRestServerUriDynArray): boolean; overload;
     /// return all REST server URI associated to this client, for a given service
     // - here the service is specified as its TGuid, e.g. IMyInterface
     // - this method expects the interface to have been registered previously:
@@ -804,6 +810,9 @@ type
     // - NEVER set the abstract TRestClientRouting class on this property
     property ServicesRouting: TRestClientRoutingClass
       read fServicesRouting write SetRoutingClass;
+    /// direct copy of ServicesRouting.Supports flags
+    property ServiceRoutingSupports: TRestClientSideInvoke
+      read fServiceRoutingSupports;
     // internal methods used by mormot.soa.client
     function FakeCallbackRegister(Sender: TServiceFactory;
       const Method: TInterfaceMethod; const ParamInfo: TInterfaceMethodArgument;
@@ -1145,7 +1154,7 @@ type
     function GetEvent: TBlockingEvent;
   public
     /// initialize the callback instance
-    // - specify a time out millliseconds period after which blocking execution
+    // - specify a time out milliseconds period after which blocking execution
     // should be handled as failure (if 0 is set, default 3000 will be used)
     // - you can optionally set a REST and callback interface for automatic
     // notification when this TInterfacedCallback will be released
@@ -1312,19 +1321,23 @@ end;
 
 { TRestClientAuthenticationSignedUri }
 
-{ Some Numbers - Indicative only!
-  - Client side REST sign with crc32: 794,759 assertions passed  730.86ms
-  - Client side REST sign with crc32c: 794,753 assertions passed  718.26ms
-  - Client side REST sign with xxhash: 794,753 assertions passed  717.63ms
-  - Client side REST sign with md5: 794,753 assertions passed  741.87ms
-  - Client side REST sign with sha256: 794,753 assertions passed  767.58ms
-  - Client side REST sign with sha512: 794,753 assertions passed  800.34ms
+{ Some Numbers on Linux x86_64 with HW CRC32 + SHA256 opcodes - Indicative only!
+  - Client side REST sign with crc32: 1,853,135 assertions passed  176.03ms
+  - Client side REST sign with crc32c: 1,853,129 assertions passed  171.55ms
+  - Client side REST sign with xxhash: 1,853,129 assertions passed  172.18ms
+  - Client side REST sign with md5: 1,853,129 assertions passed  183.11ms
+  - Client side REST sign with sha-1: 1,853,129 assertions passed  177.91ms
+  - Client side REST sign with sha-256: 1,853,129 assertions passed  178.25ms
+  - Client side REST sign with sha-512: 1,853,129 assertions passed  200.60ms
+  - Client side REST sign with sha3-256: 1,853,129 assertions passed  221.02ms
+  - Client side REST weak authentication: 1,853,129 assertions passed  165.02ms
+  - Client side REST basic authentication: 1,853,129 assertions passed  222.01ms
 }
 
 class function TRestClientAuthenticationSignedUri.ComputeSignatureCrc32(
   privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
 begin
-  // historical algorithm, from zlib crc32 polynom
+  // historical algorithm, from zlib polynom - HW accelerated with libdeflate
   result := crc32(crc32(privatesalt, timestamp, 8), url, urllen);
 end;
 
@@ -1364,7 +1377,7 @@ class function TRestClientAuthenticationSignedUri.ComputeSignatureSha1(
   privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
 var
   digest: array[0..(SizeOf(TSha1Digest) div 4) - 1] of cardinal;
-  SHA1: TSha1;
+  SHA1: TSha1; // use Intel/AMD SHA-1 HW opcodes if available
   i: PtrInt;
 begin
   SHA1.Init;
@@ -1382,7 +1395,7 @@ class function TRestClientAuthenticationSignedUri.ComputeSignatureSha256(
   privatesalt: cardinal; timestamp, url: PAnsiChar; urllen: integer): cardinal;
 var
   digest: THash256Rec;
-  SHA256: TSha256;
+  SHA256: TSha256; // use Intel/AMD SHA-1 HW opcodes if available
   i: PtrInt;
 begin
   SHA256.Init;
@@ -1594,12 +1607,12 @@ begin
   Sender.fSession.Data := '';
   try
     repeat
-      if WithPassword then
-        ClientSspiAuthWithPassword(SecCtx,
-          Sender.fSession.Data, User.LogonName, User.PasswordHashHexa, OutData)
+      if WithPassword then // will use ClientForceSpn() value
+        ClientSspiAuthWithPassword(SecCtx, Sender.fSession.Data,
+          User.LogonName, User.PasswordHashHexa, {spn=}'', OutData)
       else
-        ClientSspiAuth(SecCtx,
-          Sender.fSession.Data, User.PasswordHashHexa, OutData);
+        ClientSspiAuth(SecCtx, Sender.fSession.Data,
+          {passKerberosSpn=} User.PasswordHashHexa, OutData);
       if OutData = '' then
         break;
       if result <> '' then
@@ -1628,7 +1641,20 @@ end;
 
 { ************ TRestClientRoutingRest/TRestClientRoutingJsonRpc Routing Schemes }
 
+{ TRestClientRouting }
+
+class function TRestClientRouting.Supports: TRestClientSideInvoke;
+begin
+  result := []; // no advanced process by default
+end;
+
+
 { TRestClientRoutingRest }
+
+class function TRestClientRoutingRest.Supports: TRestClientSideInvoke;
+begin
+  result := [csiAsOctetStream];
+end;
 
 class procedure TRestClientRoutingRest.ClientSideInvoke(var uri: RawUtf8;
   ctxt: TRestClientSideInvoke; const method, params, clientDrivenID: RawUtf8;
@@ -1639,16 +1665,22 @@ begin
   else
     uri := uri + '.' + method;
   if (csiAsOctetStream in ctxt) and
-     (length(params) > 2) and
-     (params[1] = '"') then
-  begin
-    sent := Base64ToBin(@params[2], length(params) - 2);
-    if sent <> '' then
+     (params <> '') then
+    if PCardinalArray(params)[0] = JSON_BIN_MAGIC_C then
     begin
+      sent := PRawByteString(@PCardinalArray(params)[1])^; // pass by reference
       head := BINARY_CONTENT_TYPE_HEADER;
       exit;
+    end
+    else if params[1] = '"' then // base64-encoded parameter
+    begin
+      sent := Base64ToBin(@params[2], length(params) - 2);
+      if sent <> '' then
+      begin
+        head := BINARY_CONTENT_TYPE_HEADER;
+        exit;
+      end;
     end;
-  end;
   sent := '[' + params + ']'; // we may also encode them within the URI
 end;
 
@@ -1893,7 +1925,10 @@ begin
          raise EServiceException.CreateUtf8('Unexpected %.SetRoutingClass(%)',
            [self, aServicesRouting])
       else
-         fServicesRouting := aServicesRouting;
+      begin
+        fServicesRouting := aServicesRouting;
+        fServiceRoutingSupports := aServicesRouting.Supports;
+      end;
 end;
 
 procedure TRestClientUri.SetSessionHeartbeatSeconds(timeout: integer);
@@ -2226,11 +2261,11 @@ begin
     end;
     FreeAndNilSafe(fSession.User);
     try
+      InternalClose; // e.g. websockets calls OnWebSocketsClosed to unregister
+    finally
       inherited Destroy; // fModel.Free if owned by this TRest instance
       FreeAndNilSafe(fBackgroundThread); // should be done after fServices.Free
       fOnIdle := nil;
-    finally
-      InternalClose;
     end;
   end;
 end;
@@ -2398,7 +2433,7 @@ begin
   Split(interfmethod, '.', interf, method);
   methodIndex := callback.Factory.FindMethodIndex(method);
   if (methodIndex >= 0) and
-     IdemPropNameU(interfmethod,
+     PropNameEquals(interfmethod,
       callback.Factory.Methods[methodIndex].InterfaceDotMethodName) then
   try
     // execute the method using JSON as data representation
@@ -2504,7 +2539,8 @@ begin
     if (Call.OutStatus = HTTP_TIMEOUT) and
        RetryOnceOnTimeout then
     begin
-      InternalLog('% % returned "408 Request Timeout" -> RETRY', [method, url], sllError);
+      InternalLog('% % returned "408 Request Timeout" -> RETRY',
+        [method, url], sllError);
       CallInternalUri;
     end
     else if (Call.OutStatus = HTTP_FORBIDDEN) and
@@ -2736,7 +2772,7 @@ begin
 end;
 
 function TRestClientUri.ServiceRetrieveAssociated(const aServiceName: RawUtf8;
-  out URI: TRestServerURIDynArray): boolean;
+  out URI: TRestServerUriDynArray): boolean;
 var
   json: RawUtf8;
 begin

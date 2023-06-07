@@ -772,8 +772,8 @@ type
     function AdaptSqlForEngineList(var SQL: RawUtf8): boolean; override;
     /// overridden methods for direct in-memory database engine thread-safe process
     function EngineRetrieve(TableModelIndex: integer; ID: TID): RawUtf8; override;
-    function EngineList(const SQL: RawUtf8; ForceAjax: boolean = false;
-      ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
+    function EngineList(TableModelIndex: integer; const SQL: RawUtf8;
+      ForceAjax: boolean = false; ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
     function EngineUpdate(TableModelIndex: integer; ID: TID;
       const SentData: RawUtf8): boolean; override;
     function EngineRetrieveBlob(TableModelIndex: integer; aID: TID;
@@ -1264,8 +1264,8 @@ type
     fRemoteTableIndex: integer;
   public
     function EngineRetrieve(TableModelIndex: integer; ID: TID): RawUtf8; override;
-    function EngineList(const SQL: RawUtf8; ForceAjax: boolean = false;
-      ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
+    function EngineList(TableModelIndex: integer; const SQL: RawUtf8;
+      ForceAjax: boolean = false; ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
     function EngineExecute(const aSql: RawUtf8): boolean; override;
     function EngineAdd(TableModelIndex: integer;
       const SentData: RawUtf8): TID; override;
@@ -1349,8 +1349,8 @@ type
   public
     // overriden methods which will handle all ORM process
     function EngineRetrieve(TableModelIndex: integer; ID: TID): RawUtf8; override;
-    function EngineList(const SQL: RawUtf8; ForceAjax: boolean = false;
-      ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
+    function EngineList(TableModelIndex: integer; const SQL: RawUtf8;
+      ForceAjax: boolean = false; ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
     function EngineExecute(const aSql: RawUtf8): boolean; override;
     function EngineAdd(TableModelIndex: integer;
       const SentData: RawUtf8): TID; override;
@@ -2034,11 +2034,11 @@ begin
     result := false
   else
   begin
-    result := IdemPropNameU(fStoredClassProps.Sql.SelectAllWithRowID, SQL);
+    result := PropNameEquals(fStoredClassProps.Sql.SelectAllWithRowID, SQL);
     if result then
-      SQL := fStoredClassProps.SQL.SelectAllWithID
+      SQL := fStoredClassProps.Sql.SelectAllWithID
     else
-      result := IdemPropNameU(fStoredClassProps.Sql.SelectAllWithID, SQL);
+      result := PropNameEquals(fStoredClassProps.Sql.SelectAllWithID, SQL);
   end;
 end;
 
@@ -2593,15 +2593,15 @@ begin
   if result then
     // 'select * from table'
     exit;
-  if IdemPropNameU(fBasicSqlCount, SQL) or
-     IdemPropNameU(fBasicSqlHasRows[false], SQL) or
-     IdemPropNameU(fBasicSqlHasRows[true], SQL) then
+  if PropNameEquals(fBasicSqlCount, SQL) or
+     PropNameEquals(fBasicSqlHasRows[false], SQL) or
+     PropNameEquals(fBasicSqlHasRows[true], SQL) then
   begin
     // 'select count(*) from table' will be handled as static
     result := true;
     exit;
   end;
-  if fBasicUpperSqlSelect[false] = '' then
+  if fBasicUpperSqlSelect[false] = '' then // = upper SelectAllWith[Row]ID
     exit;
   if IdemPChar(pointer(SQL), pointer(fBasicUpperSqlSelect[false])) then
     WithoutRowID := false
@@ -3244,8 +3244,8 @@ begin
   end;
 end;
 
-function TRestStorageInMemory.EngineList(const SQL: RawUtf8; ForceAjax: boolean;
-  ReturnedRowCount: PPtrInt): RawUtf8;
+function TRestStorageInMemory.EngineList(TableModelIndex: integer;
+  const SQL: RawUtf8; ForceAjax: boolean; ReturnedRowCount: PPtrInt): RawUtf8;
 // - GetJsonValues/FindWhere(Equal) will handle basic REST commands (not all SQL)
 // - note: sufficient for OneFieldValue() and MultiFieldValue() to work
 var
@@ -3263,10 +3263,10 @@ var
 begin
   result := '';
   ResCount := 0;
-  if IdemPropNameU(fBasicSqlCount, SQL) then
+  if PropNameEquals(fBasicSqlCount, SQL) then
     SetCount(TableRowCount(fStoredClass))
-  else if IdemPropNameU(fBasicSqlHasRows[false], SQL) or
-          IdemPropNameU(fBasicSqlHasRows[true], SQL) then
+  else if PropNameEquals(fBasicSqlHasRows[false], SQL) or
+          PropNameEquals(fBasicSqlHasRows[true], SQL) then
     if TableHasRows(fStoredClass) then
     begin
       // return one expanded row with fake ID=1 - enough for the ORM usecase
@@ -3288,7 +3288,7 @@ begin
     try
       if (Stmt.SqlStatement = '') or // parsing failed
          (length(Stmt.Where) > 1) or // only a SINGLE expression is allowed yet
-         not IdemPropNameU(Stmt.TableName, fStoredClassRecordProps.SqlTableName) then
+         not PropNameEquals(Stmt.TableName, fStoredClassRecordProps.SqlTableName) then
         // invalid request -> return ''
         exit;
       if Stmt.SelectFunctionCount = 0 then
@@ -3588,7 +3588,7 @@ begin
       // check header: expect same exact RTTI
       R.VarUtf8(s);
       if (s <> '') and // 0='' in recent mORMot format
-         not IdemPropNameU(s, 'TSqlRecordProperties') then // old buggy format
+         not PropNameEquals(s, 'TSqlRecordProperties') then // old buggy format
         exit;
       if not fStoredClassRecordProps.CheckBinaryHeader(R) then
         exit;
@@ -4799,10 +4799,11 @@ begin
   result := fRemoteRest.EngineExecute(aSql);
 end;
 
-function TRestStorageRemote.EngineList(const SQL: RawUtf8; ForceAjax: boolean;
-  ReturnedRowCount: PPtrInt): RawUtf8;
+function TRestStorageRemote.EngineList(TableModelIndex: integer;
+  const SQL: RawUtf8; ForceAjax: boolean; ReturnedRowCount: PPtrInt): RawUtf8;
 begin
-  result := fRemoteRest.EngineList(SQL, ForceAjax, ReturnedRowCount);
+  result := fRemoteRest.EngineList(
+    TableModelIndex, SQL, ForceAjax, ReturnedRowCount);
 end;
 
 function TRestStorageRemote.EngineRetrieve(TableModelIndex: integer;
@@ -5151,8 +5152,8 @@ begin
       inc(result, fShards[i].TableRowCount(fStoredClass));
 end;
 
-function TRestStorageShard.EngineList(const SQL: RawUtf8;
-  ForceAjax: boolean; ReturnedRowCount: PPtrInt): RawUtf8;
+function TRestStorageShard.EngineList(TableModelIndex: integer;
+  const SQL: RawUtf8; ForceAjax: boolean; ReturnedRowCount: PPtrInt): RawUtf8;
 var
   ResCount: PtrInt;
 begin
@@ -5160,13 +5161,13 @@ begin
   StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'ShardList' {$endif});
   try
     ResCount := 0;
-    if IdemPropNameU(fBasicSqlCount, SQL) then
+    if PropNameEquals(fBasicSqlCount, SQL) then
     begin
       FormatUtf8('[{"Count(*)":%}]'#$A, [TableRowCount(fStoredClass)], result);
       ResCount := 1;
     end
-    else if IdemPropNameU(fBasicSqlHasRows[false], SQL) or
-            IdemPropNameU(fBasicSqlHasRows[true], SQL) then
+    else if PropNameEquals(fBasicSqlHasRows[false], SQL) or
+            PropNameEquals(fBasicSqlHasRows[true], SQL) then
       if fShards <> nil then
       begin
         // return one row with fake ID=1
@@ -5179,7 +5180,8 @@ begin
     begin
       if (fShardLast >= 0) and
          not (ssoNoList in fOptions) then
-        result := fShards[fShardLast].EngineList(SQL, ForceAjax, @ResCount);
+        result := fShards[fShardLast].EngineList(
+          TableModelIndex, SQL, ForceAjax, @ResCount);
     end;
     if ReturnedRowCount <> nil then
       ReturnedRowCount^ := ResCount;

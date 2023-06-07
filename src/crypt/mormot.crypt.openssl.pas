@@ -641,6 +641,10 @@ function ToText(u: TX509Usage): RawUtf8; overload;
 function ToText(u: TX509Usages): ShortString; overload;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// high-level function to decode X509 certificate main properties using OpenSSL
+// - assigned to mormot.core.secure X509Parse() redirection by RegisterOpenSsl
+function OpenSslX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
+
 /// call once at program startup to use OpenSSL when its performance matters
 // - redirects TAesGcmFast (and TAesCtrFast on i386) globals to OpenSSL
 // - redirects raw mormot.crypt.ecc256r1 functions to use OpenSSL which is much
@@ -1142,7 +1146,14 @@ var
 
 const
   _HASHALGONAME: array[THashAlgo] of PUtf8Char = (
-    'MD5', 'SHA1', 'SHA256', 'SHA384', 'SHA512', 'SHA3-256', 'SHA3-512');
+    'md5',        // hfMD5
+    'sha1',       // hfSHA1
+    'sha256',     // hfSHA256
+    'sha384',     // hfSHA384
+    'sha512',     // hfSHA512
+    'sha512-256', // hfSHA512_256
+    'sha3-256',   // hfSHA3_256
+    'sha3-512');  // hfSHA3_512
 
 function OpenSslGetMd(Algorithm: THashAlgo): PEVP_MD;
 var
@@ -1361,7 +1372,7 @@ begin
   FillZero(PrivateKey); // may be padded with zeros anyway
   if k = nil then
     exit;
-  priv := EC_KEY_get0_private_key(k);
+  priv := EC_KEY_get0_private_key(k); // use EVP_PKEY_get_bn_param() instead?
   privlen := priv.Size;
   if (privlen <= 0) or
      (privlen > SizeOf(PrivateKey)) then
@@ -1441,6 +1452,32 @@ begin
       0, @Hash, SizeOf(Hash), pointer(der), length(der), key) = OPENSSLSUCCESS;
   end;
   EC_POINT_free(pt);
+  EC_KEY_free(key);
+end;
+
+function ecdsa_verify_uncompressed_osl(const PublicKey: TEccPublicKeyUncompressed;
+  const Hash: TEccHash; const Signature: TEccSignature): boolean;
+var
+  key: PEC_KEY;
+  pub: THash512Rec;
+  x, y: PBIGNUM;
+  der: RawByteString;
+begin
+  result := false;
+  if not NewPrime256v1Key(key) then
+    exit;
+  _bswap256(@pub.l, @THash512Rec(PublicKey).l);
+  _bswap256(@pub.h, @THash512Rec(PublicKey).h);
+  x := BN_bin2bn(@pub.l, SizeOf(pub.l), nil);
+  y := BN_bin2bn(@pub.h, SizeOf(pub.h), nil);
+  if EC_KEY_set_public_key_affine_coordinates(key, x, y) = OPENSSLSUCCESS then
+  begin
+    der := EccToDer(Signature);
+    result := ECDSA_verify(
+      0, @Hash, SizeOf(Hash), pointer(der), length(der), key) = OPENSSLSUCCESS;
+  end;
+  x.Free;
+  y.Free;
   EC_KEY_free(key);
 end;
 
@@ -1813,9 +1850,10 @@ type
     function SetPrivateKey(const saved: RawByteString): boolean; override;
     function Sign(Data: pointer; Len: integer): RawByteString; override;
     procedure Sign(const Authority: ICryptCert); override;
-    function Verify(Sign, Data: pointer;
-      SignLen, DataLen: integer): TCryptCertValidity; override;
-    function Verify(const Authority: ICryptCert): TCryptCertValidity; override;
+    function Verify(Sign, Data: pointer; SignLen, DataLen: integer;
+      IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity; override;
+    function Verify(const Authority: ICryptCert; IgnoreError: TCryptCertValidities;
+      TimeUtc: TDateTime): TCryptCertValidity; override;
     function Encrypt(const Message: RawByteString;
       const Cipher: RawUtf8): RawByteString; override;
     function Decrypt(const Message: RawByteString;
@@ -1849,8 +1887,8 @@ type
     function Revoke(const Cert: ICryptCert; RevocationDate: TDateTime;
       Reason: TCryptCertRevocationReason): boolean; override;
     function IsValid(const cert: ICryptCert): TCryptCertValidity; override;
-    function Verify(const Signature: RawByteString;
-      Data: pointer; Len: integer): TCryptCertValidity; override;
+    function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
+      IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity; override;
     function Count: integer; override;
     function CrlCount: integer; override;
     function DefaultCertAlgo: TCryptCertAlgo; override;
@@ -2276,31 +2314,32 @@ begin
     RaiseError('Sign: not a CA');
 end;
 
-function CanVerify(auth: PX509; usage: TX509Usage;
-  selfsigned: boolean): TCryptCertValidity;
-var
-  now: TDateTime;
+function CanVerify(auth: PX509; usage: TX509Usage; selfsigned: boolean;
+  IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
 begin
-  now := NowUtc;
+  if TimeUtc = 0 then
+    TimeUtc := NowUtc;
   if auth = nil then
     result := cvUnknownAuthority
-  else if not (selfsigned or auth.HasUsage(usage)) then
+  else if (not (cvWrongUsage in IgnoreError)) and
+          (not (selfsigned or auth.HasUsage(usage))) then
     result := cvWrongUsage
-  else if (now >= auth.NotAfter) or
-          (now < auth.NotBefore) then
+  else if (not (cvDeprecatedAuthority in IgnoreError)) and
+          ((TimeUtc >= auth.NotAfter) or
+           (TimeUtc < auth.NotBefore)) then
     result := cvDeprecatedAuthority
   else
     result := cvValidSigned;
 end;
 
-function TCryptCertOpenSsl.Verify(Sign, Data: pointer;
-  SignLen, DataLen: integer): TCryptCertValidity;
+function TCryptCertOpenSsl.Verify(Sign, Data: pointer; SignLen, DataLen: integer;
+  IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
 begin
   if (SignLen <= 0) or
      (DataLen <= 0) then
     result := cvBadParameter
   else
-    result := CanVerify(fX509, kuDigitalSignature, false);
+    result := CanVerify(fX509, kuDigitalSignature, false, IgnoreError, TimeUtc);
   if result = cvValidSigned then
     if fX509.GetPublicKey.Verify(GetMD, Sign, Data, SignLen, DataLen) then
       if fX509.IsSelfSigned then
@@ -2311,7 +2350,8 @@ begin
       result := cvInvalidSignature;
 end;
 
-function TCryptCertOpenSsl.Verify(const Authority: ICryptCert): TCryptCertValidity;
+function TCryptCertOpenSsl.Verify(const Authority: ICryptCert;
+  IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
 var
   auth: PX509;
 begin
@@ -2331,7 +2371,7 @@ begin
       exit
   else
     auth := nil;
-  result := CanVerify(auth, kuKeyCertSign, auth = fX509);
+  result := CanVerify(auth, kuKeyCertSign, auth = fX509, IgnoreError, TimeUtc);
   if result = cvValidSigned then
     if X509_verify(fX509, auth.GetPublicKey) <> 1 then
       result := cvInvalidSignature
@@ -2692,7 +2732,8 @@ begin
 end;
 
 function TCryptStoreOpenSsl.Verify(const Signature: RawByteString;
-  Data: pointer; Len: integer): TCryptCertValidity;
+  Data: pointer; Len: integer; IgnoreError: TCryptCertValidities;
+  TimeUtc: TDateTime): TCryptCertValidity;
 begin
   result := cvNotSupported;
 end;
@@ -2789,34 +2830,70 @@ begin
   x.Free;
 end;
 
+function OpenSslX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
+var
+  x: PX509;
+begin
+  result := false;
+  x := LoadCertificate(Cert);
+  if x <> nil then
+    try
+      Info.Serial := x.SerialNumber;
+      Info.SubjectDN := x.SubjectName;
+      Info.IssuerDN := x.IssuerName;
+      Info.SubjectID := x.SubjectKeyIdentifier;
+      Info.IssuerID := x.AuthorityKeyIdentifier;
+      Info.SigAlg := x.GetSignatureAlgo;
+      Info.PubAlg := x.GetPublicKey.AlgoName;
+      Info.PubKey := x.GetPublicKey.PublicToDer;
+      Info.PeerInfo := x.PeerInfo; // call X509_print()
+      TX509Usages(Info.Usage) := x.GetUsage; // match TX509Usages 16-bit
+      Info.NotBefore := x.NotBefore;
+      Info.NotAfter := x.NotAfter;
+      result := true;
+    finally
+      x.Free;
+    end;
+end;
+
+
 
 procedure RegisterOpenSsl;
 var
   osa: TCryptAsymAlgo;
 begin
-  if (TAesFast[mGcm] = TAesGcmOsl) or
+  if HasOpenSsl or
      not OpenSslIsAvailable then
     exit;
+  HasOpenSsl := true; // global mormot.crypt.core flag
   // set the fastest AES implementation classes according to the actual platform
-  TAesFast[mGcm] := TAesGcmOsl;
   {$ifdef HASAESNI}
-    // mormot.crypt.core x86_64 asm is faster than OpenSSL - but GCM
-    {$ifndef CPUX64}
-    // our AES-CTR x86_64 asm is faster than OpenSSL's
-    TAesFast[mCtr] := TAesCtrOsl;
-    {$endif CPUX64}
-  {$else}
-  // ARM/Aarch64 would rather use OpenSSL than our purepascal code
-  TAesFast[mEcb] := TAesEcbOsl;
-  TAesFast[mCbc] := TAesCbcOsl;
-  TAesFast[mCfb] := TAesCfbOsl;
-  TAesFast[mOfb] := TAesOfbOsl;
-  TAesFast[mCtr] := TAesCtrOsl;
+  if (OpenSslVersion < OPENSSL3_VERNUM) or
+     (OpenSslVersion >= OPENSSL31_VERNUM) then
+     // OpenSSL 3.0 has a performance regression (as API overhead)
   {$endif HASAESNI}
+  begin
+    TAesFast[mGcm] := TAesGcmOsl;
+    {$ifdef HASAESNI}
+      // mormot.crypt.core x86_64 asm is faster than OpenSSL - but GCM
+      {$ifndef CPUX64}
+      // our AES-CTR x86_64 asm is faster than OpenSSL's
+      TAesFast[mCtr] := TAesCtrOsl;
+      {$endif CPUX64}
+    {$else}
+    // ARM/Aarch64 would rather use OpenSSL than our purepascal code
+    TAesFast[mEcb] := TAesEcbOsl;
+    TAesFast[mCbc] := TAesCbcOsl;
+    TAesFast[mCfb] := TAesCfbOsl;
+    TAesFast[mOfb] := TAesOfbOsl;
+    TAesFast[mCtr] := TAesCtrOsl;
+    {$endif HASAESNI}
+  end;
   // redirects raw mormot.crypt.ecc256r1 functions to faster OpenSSL wrappers
   @Ecc256r1MakeKey := @ecc_make_key_osl;
   @Ecc256r1Sign := @ecdsa_sign_osl;
   @Ecc256r1Verify := @ecdsa_verify_osl;
+  @Ecc256r1VerifyUncomp := @ecdsa_verify_uncompressed_osl;
   @Ecc256r1SharedSecret := @ecdh_shared_secret_osl;
   TEcc256r1Verify := TEcc256r1VerifyOsl;
   // register OpenSSL methods to our high-level cryptographic catalog
@@ -2829,6 +2906,8 @@ begin
   CryptStoreAlgoOpenSsl := TCryptStoreAlgoOpenSsl.Implements(['x509-store']);
   // we can use OpenSSL for StuffExeCertificate() stuffed certificate generation
   CreateDummyCertificate := _CreateDummyCertificate;
+  // and also for X509 parsing
+  X509Parse := @OpenSslX509Parse;
 end;
 
 procedure FinalizeUnit;

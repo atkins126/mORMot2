@@ -54,6 +54,9 @@ uses
 { ************ TRestOrmServer Abstract Server }
 
 type
+  /// per-table TRecordVersion, indexed over TOrmModel.Tables[]
+  TRecordVersionDynArray = array of TRecordVersion;
+
   /// a generic REpresentational State Transfer (REST) ORM server
   // - inherit to provide its main storage capabilities, e.g. our in-memory
   // engine for TRestOrmServerFullMemory or SQlite3 for TRestOrmServerDB
@@ -75,7 +78,7 @@ type
     fStaticVirtualTable: TRestOrmDynArray;
     fVirtualTableDirect: boolean;
     fCreateMissingTablesOptions: TOrmInitializeTableOptions;
-    fRecordVersionMax: TRecordVersion;
+    fRecordVersionMax: TRecordVersionDynArray;
     fRecordVersionDeleteIgnore: boolean;
     fOrmVersionDeleteTable: TOrmTableDeletedClass;
     // TOrmHistory.ModifiedRecord handles up to 64 (=1 shl 6) tables
@@ -89,13 +92,15 @@ type
     end;
     function MaxUncompressedBlobSize(Table: TOrmClass): integer;
     /// will retrieve the monotonic value of a TRecordVersion field from the DB
-    procedure InternalRecordVersionMaxFromExisting(RetrieveNext: PID); virtual;
+    function InternalRecordVersionMaxFromExisting(TableIndex: integer;
+      RetrieveNext: boolean): TRecordVersion; virtual;
     procedure InternalRecordVersionDelete(TableIndex: integer; ID: TID;
       Batch: TRestBatch); virtual;
     /// will compute the next monotonic value for a TRecordVersion field
     // - you may override this method to customize the returned Int64 value
     // (e.g. to support several synchronization nodes)
-    function InternalRecordVersionComputeNext: TRecordVersion; virtual;
+    function InternalRecordVersionComputeNext(
+      TableIndex: PtrInt): TRecordVersion; virtual;
   public
     /// overridden methods which will perform CRUD operations
     // - will call any static TRestStorage, or call MainEngine*() virtual methods
@@ -103,8 +108,8 @@ type
       const SentData: RawUtf8): TID; override;
     function EngineRetrieve(TableModelIndex: integer;
       ID: TID): RawUtf8; override;
-    function EngineList(const SQL: RawUtf8; ForceAjax: boolean = false;
-      ReturnedRowCount: PPtrInt=nil): RawUtf8; override;
+    function EngineList(TableModelIndex: integer; const SQL: RawUtf8;
+      ForceAjax: boolean = false; ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
     function EngineUpdate(TableModelIndex: integer; ID: TID;
       const SentData: RawUtf8): boolean; override;
     function EngineDelete(TableModelIndex: integer; ID: TID): boolean; override;
@@ -310,10 +315,12 @@ type
     // ensure that the updated ID fields will be computed as expected
     function InternalUpdateEventNeeded(aEvent: TOrmEvent; aTableIndex: integer): boolean;
     /// will compute the next monotonic value for a TRecordVersion field
-    function RecordVersionCompute: TRecordVersion;
+    function RecordVersionCompute(aTableIndex: integer): TRecordVersion;
     /// read only access to the current monotonic value for a TRecordVersion field
     // - only useful for testing purposes
-    function RecordVersionCurrent: TRecordVersion;
+    function RecordVersionCurrent(aTableIndex: integer): TRecordVersion; overload;
+    /// read only access to the current monotonic value for a TRecordVersion field
+    function RecordVersionCurrent(aTable: TOrmClass): TRecordVersion; overload;
     /// synchronous master/slave replication from a slave TRest
     // - apply all the updates from another (distant) master TRestOrm for a given
     // TOrm table, using its TRecordVersion field, to the calling slave
@@ -369,11 +376,14 @@ type
     // - has been associated by the TOrmModel.VirtualTableRegister method or
     // the OrmMapExternal() global function
     function GetVirtualStorage(aClass: TOrmClass): TRestOrmParent;
+    /// initialize the RecordVersionMax[TableIndex] to the specified Value
+    procedure SetRecordVersionMax(TableIndex: integer; Value: TRecordVersion);
     /// access to the associated TRestServer main instance
     property Owner: TRestServer
       read fOwner;
-    /// low-level value access to process TRecordVersion field
-    property RecordVersionMax: TRecordVersion
+    /// low-level value access to process TRecordVersion field for each table
+    // - may equal nil if not TRecordVersion field is defined
+    property RecordVersionMax: TRecordVersionDynArray
       read fRecordVersionMax write fRecordVersionMax;
     /// you can force this property to TRUE so that any Delete() will not
     // write to the TOrmTableDelete table for TRecordVersion tables
@@ -750,45 +760,57 @@ begin
     result := 0;
 end;
 
-procedure TRestOrmServer.InternalRecordVersionMaxFromExisting(RetrieveNext: PID);
-var
-  m: PtrInt;
-  field: TOrmPropInfoRttiRecordVersion;
-  current, max, mDeleted: Int64;
+procedure TRestOrmServer.SetRecordVersionMax(
+  TableIndex: integer; Value: TRecordVersion);
 begin
+  if cardinal(TableIndex) >= cardinal(Model.TablesMax) then
+    raise ERestStorage.CreateUtf8('%.SetRecordVersionMax(%)', [self, TableIndex]);
   fRest.AcquireExecution[execOrmWrite].Safe.Lock;
   try
-    if fRecordVersionMax = 0 then // check twice to avoid race condition
+    if high(fRecordVersionMax) <> Model.TablesMax then
+      SetLength(fRecordVersionMax, Model.TablesMax + 1);
+    fRecordVersionMax[TableIndex] := Value;
+  finally
+    fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
+  end;
+end;
+
+function TRestOrmServer.InternalRecordVersionMaxFromExisting(
+  TableIndex: integer; RetrieveNext: boolean): TRecordVersion;
+var
+  T: TOrmClass;
+  field: TOrmPropInfoRttiRecordVersion;
+  max, mDeleted: Int64;
+begin
+  if cardinal(TableIndex) > cardinal(fModel.TablesMax) then
+    raise ERestStorage.CreateUtf8('%.RecordVersionMaxFromExisting(%)', [self, TableIndex]);
+  fRest.AcquireExecution[execOrmWrite].Safe.Lock;
+  try
+    if high(fRecordVersionMax) <> fModel.TablesMax then // checked within lock
+      SetLength(fRecordVersionMax, fModel.TablesMax + 1);
+    result := fRecordVersionMax[TableIndex];
+    if result = 0 then
     begin
-      current := 0;
-      for m := 0 to fModel.TablesMax do
+      // need to retrieve the current TRecordVersion of this table from DB
+      T := fModel.Tables[TableIndex];
+      field := T.OrmProps.RecordVersionField;
+      if field = nil then
+        raise ERestStorage.CreateUtf8('% has no RecordVersion', [T]);
+      if OneFieldValue(T, 'max(' + field.Name + ')', '', [], [], max) then
+        if max > result then
+          result := max;
+      mDeleted := Int64(TableIndex) shl ORMVERSION_DELETEID_SHIFT;
+      if OneFieldValue(fOrmVersionDeleteTable, 'max(ID)', 'ID>? and ID<?',
+          [], [mDeleted, mDeleted + ORMVERSION_DELETEID_RANGE], max) then
       begin
-        field := fModel.Tables[m].OrmProps.RecordVersionField;
-        if field <> nil then
-        begin
-          if OneFieldValue(fModel.Tables[m],
-              'max(' + field.Name + ')', '', [], [], max) then
-            if max > current then
-              current := max;
-          mDeleted := Int64(m) shl ORMVERSION_DELETEID_SHIFT;
-          if OneFieldValue(fOrmVersionDeleteTable, 'max(ID)', 'ID>? and ID<?',
-              [], [mDeleted, mDeleted + ORMVERSION_DELETEID_RANGE], max) then
-          begin
-            max := max and pred(ORMVERSION_DELETEID_RANGE);
-            if max > current then
-              current := max;
-          end;
-        end;
+        max := max and pred(ORMVERSION_DELETEID_RANGE);
+        if max > result then
+          result := max;
       end;
-    end
-    else
-      current := fRecordVersionMax;
-    if RetrieveNext <> nil then
-    begin
-      inc(current);
-      RetrieveNext^ := current;
     end;
-    fRecordVersionMax := current;
+    if RetrieveNext then
+      inc(result);
+    fRecordVersionMax[TableIndex] := result;
   finally
     fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
   end;
@@ -804,7 +826,7 @@ begin
     exit;
   deleted := fOrmVersionDeleteTable.Create;
   try
-    revision := RecordVersionCompute;
+    revision := RecordVersionCompute(TableIndex);
     deleted.IDValue := revision +
       Int64(TableIndex) shl ORMVERSION_DELETEID_SHIFT;
     deleted.Deleted := ID;
@@ -821,63 +843,77 @@ begin
   end;
 end;
 
-function TRestOrmServer.InternalRecordVersionComputeNext: TRecordVersion;
+function TRestOrmServer.InternalRecordVersionComputeNext(
+  TableIndex: PtrInt): TRecordVersion;
 begin
-  if fRecordVersionMax = 0 then
-    InternalRecordVersionMaxFromExisting(@result)
+  if (PtrUInt(length(fRecordVersionMax)) <= PtrUInt(TableIndex)) or
+     (fRecordVersionMax[TableIndex] = 0) then
+    // need to initialize fRecordVersionMax[] and/or access the DB
+    result := InternalRecordVersionMaxFromExisting(TableIndex, {next=}true)
   else
   begin
+    // quick compute the TRecordVersion of this table within the write lock
     fRest.AcquireExecution[execOrmWrite].Safe.Lock;
-    inc(fRecordVersionMax);
-    result := fRecordVersionMax;
+    inc(fRecordVersionMax[TableIndex]);
+    result := fRecordVersionMax[TableIndex];
     fRest.AcquireExecution[execOrmWrite].Safe.UnLock;
   end;
 end;
 
-function TRestOrmServer.RecordVersionCompute: TRecordVersion;
+function TRestOrmServer.RecordVersionCompute(aTableIndex: integer): TRecordVersion;
 begin
-  result := InternalRecordVersionComputeNext;
+  result := InternalRecordVersionComputeNext(aTableIndex);
   if result >= ORMVERSION_DELETEID_RANGE then
     raise EOrmException.CreateUtf8(
      '%.InternalRecordVersionCompute=% overflow: %.ID should be < 2^%)',
      [self, result, fOrmVersionDeleteTable, ORMVERSION_DELETEID_SHIFT]);
 end;
 
-function TRestOrmServer.RecordVersionCurrent: TRecordVersion;
+function TRestOrmServer.RecordVersionCurrent(aTableIndex: integer): TRecordVersion;
+begin
+  if self = nil then
+    result := 0
+  else if (cardinal(length(fRecordVersionMax)) <= cardinal(aTableIndex)) or
+          (fRecordVersionMax[aTableIndex] = 0) then
+    result := InternalRecordVersionMaxFromExisting(aTableIndex, {next=}false)
+  else
+    result := fRecordVersionMax[aTableIndex];
+end;
+
+function TRestOrmServer.RecordVersionCurrent(aTable: TOrmClass): TRecordVersion;
 begin
   if self = nil then
     result := 0
   else
-  begin
-    if fRecordVersionMax = 0 then
-      InternalRecordVersionMaxFromExisting(nil);
-    result := fRecordVersionMax;
-  end;
+    result := RecordVersionCurrent(fModel.GetTableIndexExisting(aTable));
 end;
 
 function TRestOrmServer.RecordVersionSynchronizeSlave(
   Table: TOrmClass; const Master: IRestOrm; ChunkRowLimit: integer;
   const OnWrite: TOnBatchWrite): TRecordVersion;
 var
+  t: PtrInt;
   batch: TRestBatch;
   ids: TIDDynArray;
   status: integer;
   {%H-}log: ISynLog;
 begin
   log := fRest.LogClass.Enter('RecordVersionSynchronizeSlave %', [Table], self);
+  t := fModel.GetTableIndexExisting(Table);
   result := -1; // error
-  if fRecordVersionMax = 0 then
-    InternalRecordVersionMaxFromExisting(nil);
+  if (PtrUInt(length(fRecordVersionMax)) <= PtrUInt(t)) or
+     (fRecordVersionMax[t] = 0) then
+    InternalRecordVersionMaxFromExisting(t, {next=}false);
   repeat
     batch := RecordVersionSynchronizeSlaveToBatch(Table, Master,
-      fRecordVersionMax, ChunkRowLimit, OnWrite);
+      fRecordVersionMax[t], ChunkRowLimit, OnWrite);
     if batch = nil then
       // error
       exit;
     if batch.Count = 0 then
     begin
       // nothing new (e.g. reached last chunk)
-      result := fRecordVersionMax;
+      result := fRecordVersionMax[t];
       batch.Free;
       break;
     end;
@@ -893,7 +929,7 @@ begin
            Master], sllDebug);
         if ChunkRowLimit = 0 then
         begin
-          result := fRecordVersionMax;
+          result := fRecordVersionMax[t];
           break;
         end;
       end
@@ -901,7 +937,7 @@ begin
       begin
         InternalLog('RecordVersionSynchronize(%) BatchSend=%',
           [Table, status], sllError);
-        fRecordVersionMax := 0; // force recompute the maximum from DB
+        fRecordVersionMax[t] := 0; // force recompute the maximum from DB
         break;
       end;
     finally
@@ -912,8 +948,8 @@ begin
   until false; // continue synch until nothing new is found
 end;
 
-function TRestOrmServer.RecordVersionSynchronizeSlaveToBatch(
-  Table: TOrmClass; const Master: IRestOrm; var RecordVersion: TRecordVersion;
+function TRestOrmServer.RecordVersionSynchronizeSlaveToBatch(Table: TOrmClass;
+  const Master: IRestOrm; var RecordVersion: TRecordVersion;
   MaxRowLimit: integer; const OnWrite: TOnBatchWrite): TRestBatch;
 var
   tableindex, sourcetableindex, updatedrow, deletedrow: integer;
@@ -924,6 +960,7 @@ var
   rec: TOrm;
   deletedminid: TID;
   deleted: TOrmTableDeleted;
+  opt: TRestBatchOptions;
   {%H-}log: ISynLog;
 begin
   log := fRest.LogClass.Enter(
@@ -961,7 +998,11 @@ begin
          deletedminid + ORMVERSION_DELETEID_RANGE]);
       if listdeleted = nil then
         exit; // DB error
-      result := TRestBatch.Create(self, nil, 10000);
+      opt := [boExtendedJson]; // default options
+      if (listupdated.RowCount <> 0) and
+         (props.BlobFields <> nil) then
+        include(opt, boMayHaveBlob);
+      result := TRestBatch.Create(self, nil, 10000, opt);
       result.OnWrite := OnWrite;
       if (listupdated.RowCount = 0) and
          (listdeleted.RowCount = 0) then
@@ -1057,19 +1098,21 @@ begin
     result := rest.EngineRetrieve(TableModelIndex, ID);
 end;
 
-function TRestOrmServer.EngineList(const SQL: RawUtf8; ForceAjax: boolean;
-  ReturnedRowCount: PPtrInt): RawUtf8;
+function TRestOrmServer.EngineList(TableModelIndex: integer; const SQL: RawUtf8;
+  ForceAjax: boolean; ReturnedRowCount: PPtrInt): RawUtf8;
 var
   rest: TRestOrm;
   sqladapted: RawUtf8;
 begin
   sqladapted := SQL;
-  rest := InternalAdaptSql(
-    fModel.GetTableIndexFromSqlSelect(SQL, false), sqladapted);
+  if TableModelIndex < 0 then
+    TableModelIndex := fModel.GetTableIndexFromSqlSelect(SQL, false);
+  rest := InternalAdaptSql(TableModelIndex, sqladapted);
   if rest = nil then
     result := MainEngineList(SQL, ForceAjax, ReturnedRowCount)
   else
-    result := rest.EngineList(sqladapted, ForceAjax, ReturnedRowCount);
+    result := rest.EngineList(
+      TableModelIndex, sqladapted, ForceAjax, ReturnedRowCount);
 end;
 
 function TRestOrmServer.EngineUpdate(TableModelIndex: integer;
@@ -1495,7 +1538,7 @@ begin
   Rest := InternalAdaptSql(TableIndex, aSql);
   if Rest <> nil then
      // this SQL statement is handled by direct connection, faster adaptation
-    result := Rest.EngineList(aSql)
+    result := Rest.EngineList(TableIndex, aSql)
   else
     // complex TOrmVirtualTableJson/External queries will rely on virtual table
     result := MainEngineList(SQL, false, nil);
@@ -1908,7 +1951,7 @@ begin
   fOrm := aRest;
   fTable := aTable;
   fData := aData;
-  fUriContext := ServiceRunningContext^.Request;
+  fUriContext := ServiceRunningRequest;
   fRunningBatchEncoding := encPost;
   fRunTableIndex := -1;
 end;
@@ -1992,8 +2035,9 @@ function TRestOrmServerBatchSend.IsNotAllowed: boolean;
 begin
   result := (fUriContext <> nil) and
             (fUriContext.Command = execOrmWrite) and
-            not fUriContext.CanExecuteOrmWrite(BATCH_METHOD[fEncoding],
-    fRunTable, fRunTableIndex, fValueID, fUriContext.Call.RestAccessRights^);
+            not fUriContext.CanExecuteOrmWrite(
+              BATCH_METHOD[fEncoding], fRunTable, fRunTableIndex,
+              fValueID, fUriContext.Call.RestAccessRights^);
 end;
 
 procedure TRestOrmServerBatchSend.ParseCommand;
@@ -2349,7 +2393,7 @@ begin
     tablename := GetJsonPropName(fParse.Json);
     if (tablename = '') or
        (fParse.Json = nil) or
-       not IdemPropNameU(tablename,
+       not PropNameEquals(tablename,
          fOrm.Model.TableProps[fMainTableIndex].Props.SqlTableName) then
       raise EOrmBatchException.CreateUtf8(
         '%.EngineBatchSend(%): Wrong "Table":"%"', [self, fTable, tablename]);
@@ -2373,10 +2417,10 @@ begin
   if IdemPChar(fParse.Json, '"OPTIONS",') then
   begin
     inc(fParse.Json, 10);
-    byte(fBatchOptions) := GetNextItemCardinal(fParse.Json, ',');
+    word(fBatchOptions) := GetNextItemCardinal(fParse.Json, ',');
   end
   else
-    byte(fBatchOptions) := 0;
+    word(fBatchOptions) := 0;
 end;
 
 procedure TRestOrmServerBatchSend.ParseAndExecute;

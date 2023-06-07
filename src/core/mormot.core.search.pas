@@ -269,13 +269,17 @@ type
 // - note that the CsvPattern instance should remain in memory, since it will
 // be pointed to by the Match[].Pattern private field
 function SetMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
-  out Match: TMatchDynArray): integer; overload;
+  out Match: TMatchDynArray; CsvSep: AnsiChar = ','): integer; overload;
 
 /// fill the Match[0..MatchMax] static array with all glob patterns supplied as CSV
 // - note that the CsvPattern instance should remain in memory, since it will
 // be pointed to by the Match[].Pattern private field
 function SetMatchs(CsvPattern: PUtf8Char; CaseInsensitive: boolean;
-  Match: PMatch; MatchMax: integer): integer; overload;
+  Match: PMatch; MatchMax: integer; CsvSep: AnsiChar = ','): integer; overload;
+
+/// fill a TMatch instance with the next glob pattern supplied as CSV
+function SetNextMatch(P: PUtf8Char; var Dest: TMatch;
+  CaseInsensitive, Reuse: boolean; CsvSep: AnsiChar): PUtf8Char;
 
 /// search if one TMach is already registered in the Several[] dynamic array
 function MatchExists(const One: TMatch; const Several: TMatchDynArray): boolean;
@@ -288,13 +292,15 @@ function MatchAny(const Match: TMatchDynArray; const Text: RawUtf8): boolean;
 
 /// apply the CSV-supplied glob patterns to an array of RawUtf8
 // - any text not matching the pattern will be deleted from the array
+// - the patterns are specified as CSV, separated by ','
 procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
-  var Values: TRawUtf8DynArray); overload;
+  var Values: TRawUtf8DynArray; CsvSep: AnsiChar = ','); overload;
 
 /// apply the CSV-supplied glob patterns to an array of string
 // - any text not matching the pattern will be deleted from the array
+// - the patterns are specified as CSV, separated by ','
 procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
-  var Values: TStringDynArray); overload;
+  var Values: TStringDynArray; CsvSep: AnsiChar = ','); overload;
 
 /// return TRUE if the supplied content matches a glob pattern
 // - ?  Matches any single character
@@ -316,6 +322,15 @@ function IsMatch(const Pattern, Text: RawUtf8;
 function IsMatchString(const Pattern, Text: string;
   CaseInsensitive: boolean = false): boolean;
 
+/// return TRUE if the supplied content matches one or several glob patterns
+// - the patterns are specified as CSV, separated by ','
+function IsMatchs(const CsvPattern, Text: RawUtf8;
+  CaseInsensitive: boolean = false; CsvSep: AnsiChar = ','): boolean; overload;
+
+/// return TRUE if the supplied content matches one or several glob patterns
+// - the patterns are specified as CSV, separated by ','
+function IsMatchs(CsvPattern, Text: PUtf8Char; TextLen: PtrInt;
+  CaseInsensitive: boolean = false; CsvSep: AnsiChar = ','): boolean; overload;
 
 type
   /// available pronunciations for our fast Soundex implementation
@@ -955,7 +970,7 @@ type
     // generic error message from clas name ('"Validate email" rule failed'
     // for TSynValidateEmail class e.g.)
     // - if the validation passed, will return TRUE
-    function Process(FieldIndex: integer; const Value: RawUtf8; var ErrorMsg: string): boolean;
+    function Process(aFieldIndex: integer; const Value: RawUtf8; var ErrorMsg: string): boolean;
       virtual; abstract;
   end;
 
@@ -2797,8 +2812,52 @@ begin
   result := match.Match(txt);
 end;
 
+function SetNextMatch(P: PUtf8Char; var Dest: TMatch;
+  CaseInsensitive, Reuse: boolean; CsvSep: AnsiChar): PUtf8Char;
+begin
+  result := P;
+  repeat
+    while not (result^ in [#0, CsvSep]) do
+      inc(result);
+    if result <> P then
+    begin
+      Dest.Prepare(P, result - P, CaseInsensitive, Reuse);
+      if result^ = CsvSep then
+        inc(result); // go to next CSV
+      exit;
+    end;
+  until result^ = #0;
+  result := nil; // indicates Dest.Prepare() was not called
+end;
+
+function IsMatchs(CsvPattern, Text: PUtf8Char; TextLen: PtrInt;
+  CaseInsensitive: boolean; CsvSep: AnsiChar): boolean;
+var
+  match: TMatch;
+begin
+  result := (CsvPattern <> nil) and (TextLen > 0);
+  if not result then
+    exit;
+  repeat
+    CsvPattern := SetNextMatch(
+      CsvPattern, match, CaseInsensitive, {reuse=}false, CsvSep);
+    if CsvPattern = nil then
+      break;
+    if match.Search(@match, Text, TextLen) then
+      exit;
+  until CsvPattern^ = #0;
+  result := false;
+end;
+
+function IsMatchs(const CsvPattern, Text: RawUtf8; CaseInsensitive: boolean;
+  CsvSep: AnsiChar): boolean;
+begin
+  result := IsMatchs(pointer(CsvPattern), pointer(Text), length(Text),
+    CaseInsensitive, CsvSep);
+end;
+
 function SetMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
-  out Match: TMatchDynArray): integer;
+  out Match: TMatchDynArray; CsvSep: AnsiChar): integer;
 var
   P, S: PUtf8Char;
 begin
@@ -2807,7 +2866,7 @@ begin
   if P <> nil then
     repeat
       S := P;
-      while not (P^ in [#0, ',']) do
+      while not (P^ in [#0, CsvSep]) do
         inc(P);
       if P <> S then
       begin
@@ -2822,7 +2881,7 @@ begin
 end;
 
 function SetMatchs(CsvPattern: PUtf8Char; CaseInsensitive: boolean;
-  Match: PMatch; MatchMax: integer): integer;
+  Match: PMatch; MatchMax: integer; CsvSep: AnsiChar): integer;
 var
   S: PUtf8Char;
 begin
@@ -2831,7 +2890,7 @@ begin
      (MatchMax >= 0) then
     repeat
       S := CsvPattern;
-      while not (CsvPattern^ in [#0, ',']) do
+      while not (CsvPattern^ in [#0, CsvSep]) do
         inc(CsvPattern);
       if CsvPattern <> S then
       begin
@@ -2889,12 +2948,12 @@ begin
 end;
 
 procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
-  var Values: TRawUtf8DynArray);
+  var Values: TRawUtf8DynArray; CsvSep: AnsiChar);
 var
   match: TMatchDynArray;
   m, n, i: PtrInt;
 begin
-  if SetMatchs(CsvPattern, CaseInsensitive, match) = 0 then
+  if SetMatchs(CsvPattern, CaseInsensitive, match, CsvSep) = 0 then
     exit;
   n := 0;
   for i := 0 to high(Values) do
@@ -2911,12 +2970,12 @@ begin
 end;
 
 procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
-  var Values: TStringDynArray);
+  var Values: TStringDynArray; CsvSep: AnsiChar);
 var
   match: TMatchDynArray;
   m, n, i: PtrInt;
 begin
-  if SetMatchs(CsvPattern, CaseInsensitive, match) = 0 then
+  if SetMatchs(CsvPattern, CaseInsensitive, match, CsvSep) = 0 then
     exit;
   n := 0;
   for i := 0 to high(Values) do
@@ -3476,7 +3535,7 @@ begin
   if (fCurrentWord = '') or
      (fCurrentWord = ')') then
     exit;
-  if IdemPropNameU(fCurrentWord, fAndWord) then
+  if PropNameEquals(fCurrentWord, fAndWord) then
   begin
     // w1 & w2 = w1 AND w2
     ParseNextCurrentWord;
@@ -3484,7 +3543,7 @@ begin
       result.Append(TExprNode.Create(entAnd));
     exit;
   end
-  else if IdemPropNameU(fCurrentWord, fOrWord) then
+  else if PropNameEquals(fCurrentWord, fOrWord) then
   begin
     // w1 + w2 = w1 OR w2
     ParseNextCurrentWord;
@@ -3501,7 +3560,7 @@ function TParserAbstract.ParseFactor: TExprNode;
 begin
   if fCurrentError <> eprSuccess then
     result := nil
-  else if IdemPropNameU(fCurrentWord, fNotWord) then
+  else if PropNameEquals(fCurrentWord, fNotWord) then
   begin
     ParseNextCurrentWord;
     result := ParseFactor;
@@ -4366,7 +4425,7 @@ end;
 {$else} // eax = a, edx = b, ecx = len
 function Comp(a, b: PAnsiChar; len: PtrInt): PtrInt;
 asm // the 'rep cmpsb' version is slower on Intel Core CPU (not AMD)
-        OR      ecx, ecx
+        or      ecx, ecx
         push    ebx
         push    ecx
         jz      @ok
@@ -4527,7 +4586,7 @@ begin
           with PHash128Rec(OldBuf + ofs)^ do
             // always test 8 bytes at once
             {$ifdef CPU64}
-            if PHash128Rec(NewBuf)^.Lo=Lo then
+            if PHash128Rec(NewBuf)^.Lo = Lo then
             {$else}
             if (PHash128Rec(NewBuf)^.c0 = c0) and
                (PHash128Rec(NewBuf)^.c1 = c1) then
@@ -4720,8 +4779,8 @@ begin
   bigfile := OldSize > BufSize;
   if BufSize > NewSize then
     BufSize := NewSize;
-  if BufSize > $ffffff then
-    BufSize := $ffffff; // we store offsets with 2..3 bytes -> max 16MB chunk
+  if BufSize > HListMask then
+    BufSize := HListMask; // we store offsets with 2..3 bytes -> max 16MB chunk
   Trailing := 0;
   Getmem(workbuf, BufSize); // compression temporary buffers
   Getmem(HList, BufSize * SizeOf({%H-}HList[0]));

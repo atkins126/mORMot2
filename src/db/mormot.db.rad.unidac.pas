@@ -168,7 +168,7 @@ const
   /// UniDAC provider names corresponding to mormot.db.sql recognized SQL engines
   UNIDAC_PROVIDER: array[dOracle..high(TSqlDBDefinition)] of RawUtf8 = (
     'Oracle', 'SQL Server', 'Access', 'MySQL', 'SQLite', 'InterBase', 
-    'NexusDB', 'PostgreSQL', 'DB2', '');
+    'NexusDB', 'PostgreSQL', 'DB2', '', 'MySQL');
 
 
 implementation
@@ -244,7 +244,8 @@ begin
         fSpecificOptions.Values['Direct'] := 'true';
         fSpecificOptions.Values['HOMENAME'] := '';
       end;
-    dMySQL:
+    dMySQL,
+    dMariaDB:
       begin
         {$ifdef FPC}
         fSpecificOptions.Values['UseUnicode'] := 'true'; // FPC strings do like UTF8
@@ -427,7 +428,8 @@ begin
   { TODO : get FOREIGN KEYS from UniDAC metadata ? }
 end;
 
-procedure TSqlDBUniDACConnectionProperties.GetTableNames(out Tables: TRawUtf8DynArray);
+procedure TSqlDBUniDACConnectionProperties.GetTableNames(
+  out Tables: TRawUtf8DynArray);
 var
   List: TStringList;
 begin
@@ -507,14 +509,14 @@ begin
   fDatabase.LoginPrompt := false;
   fDatabase.ProviderName := Utf8ToString(fProperties.ServerName);
   case aProperties.Dbms of
-    dSQLite, dFirebird, dPostgreSQL, dMySQL, dDB2, dMSSQL:
+    dSQLite, dFirebird, dPostgreSQL, dMySQL, dMariaDB, dDB2, dMSSQL:
       fDatabase.Database := Utf8ToString(fProperties.DatabaseName);
   else
     fDatabase.Server := Utf8ToString(fProperties.DatabaseName);
   end;
   fDatabase.Username := Utf8ToString(fProperties.UserID);
   fDatabase.Password := Utf8ToString(fProperties.PassWord);
-  if aProperties.Dbms = dMySQL then
+  if aProperties.Dbms in [dMySQL, dMariaDB] then
     // s.d. 30.11.19 Damit der Connect schneller geht
     fDatabase.SpecificOptions.Add('MySQL.ConnectionTimeout=0');
   if aProperties.Dbms = dMSSQL then
@@ -563,12 +565,12 @@ begin
     end;
     fDatabase.Open;
     inherited Connect; // notify any re-connection
-    Log.Log(sllDB, 'Connected to % (%)',
-      [fDatabase.ProviderName, fDatabase.ServerVersionFull]);
+    if Log <> nil then
+      Log.Log(sllDB, 'Connected to % (%)',
+        [fDatabase.ProviderName, fDatabase.ServerVersionFull]);
   except
     on E: Exception do
     begin
-      Log.Log(sllError, E);
       Disconnect; // clean up on fail
       raise;
     end;

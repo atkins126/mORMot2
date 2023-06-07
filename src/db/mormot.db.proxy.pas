@@ -123,7 +123,7 @@ type
   // - set by TSqlDBProxyStatement.ParamsToCommand() protected method
   TSqlDBProxyConnectionCommandExecute = packed record
     /// the associated SQL statement
-    SQL: RawUtf8;
+    Sql: RawUtf8;
     /// input parameters
     // - trunked to the exact number of parameters
     Params: TSqlDBParamDynArray;
@@ -649,7 +649,7 @@ type
     // - aServerName should be the HTTP server address as 'server:port'
     // - aDatabaseName would be used to compute the URI as in TSqlDBServerAbstract
     // - the user/password credential should match server-side authentication
-    constructor Create(const aServerName,aDatabaseName, aUserID,aPassWord: RawUtf8); override;
+    constructor Create(const aServerName, aDatabaseName, aUserID,aPassWord: RawUtf8); override;
     /// released used memory
     destructor Destroy; override;
     /// low-level direct access to the Socket implementation instance
@@ -920,15 +920,14 @@ begin
                 [self]);
           end;
           PRemoteMessageHeader(msgout)^.sessionID := session;
-          AppendCharToRawUtf8(msgout, AnsiChar(Connection.Properties.Dbms));
+          Append(msgout, AnsiChar(Connection.Properties.Dbms));
         end;
       cConnect:
         Connection.Connect;
       cDisconnect:
         Connection.Disconnect;
       cTryStartTransaction:
-        AppendCharToRawUtf8(msgout,
-          AnsiChar(TransactionStarted(Connection, header.SessionID)));
+        Append(msgout, AnsiChar(TransactionStarted(Connection, header.SessionID)));
       cCommit:
         begin
           TransactionEnd(header.SessionID);
@@ -944,25 +943,25 @@ begin
       cGetFields:
         begin
           Connection.Properties.GetFields(P, colarr);
-          AppendToRawUtf8(msgout, DynArraySave(
+          Append(msgout, DynArraySave(
             colarr, TypeInfo(TSqlDBColumnDefineDynArray)));
         end;
       cGetIndexes:
         begin
           Connection.Properties.GetIndexes(P, defarr);
-          AppendToRawUtf8(msgout, DynArraySave(
+          Append(msgout, DynArraySave(
             defarr, TypeInfo(TSqlDBIndexDefineDynArray)));
         end;
       cGetTableNames:
         begin
           Connection.Properties.GetTableNames(outarr);
-          AppendToRawUtf8(msgout, DynArraySave(
+          Append(msgout, DynArraySave(
             outarr, TypeInfo(TRawUtf8DynArray)));
         end;
       cGetForeignKeys:
         begin
           Connection.Properties.GetForeignKey('', ''); // ensure Dest.fForeignKeys exists
-          AppendToRawUtf8(msgout, Connection.Properties.ForeignKeysData);
+          Append(msgout, Connection.Properties.ForeignKeysData);
         end;
       cExecute,
       cExecuteToBinary,
@@ -972,7 +971,7 @@ begin
           RecordLoad(exec, P, TypeInfo(TSqlDBProxyConnectionCommandExecute),
             nil, PAnsiChar(pointer(msgin)) + length(msgin));
           execwithres := header.Command <> cExecute;
-          stmt := Connection.NewStatementPrepared(exec.SQL,
+          stmt := Connection.NewStatementPrepared(exec.Sql,
             execwithres, true);
           if fBlobAsNull in exec.Force then
             stmt.ForceBlobAsNull := true;
@@ -1023,7 +1022,7 @@ begin
             end;
           end
           else if not (fNoUpdateCount in exec.Force) then
-            AppendToRawUtf8(msgout, UInt32ToUtf8(stmt.UpdateCount));
+            Append(msgout, UInt32ToUtf8(stmt.UpdateCount));
         end;
       cQuit:
         begin
@@ -1040,7 +1039,7 @@ begin
     on E: Exception do
     begin
       PRemoteMessageHeader(msgout)^.Command := cExceptionRaised;
-      AppendToRawUtf8(msgout, StringToUtf8(E.ClassName + #0 + E.Message));
+      Append(msgout, StringToUtf8(E.ClassName + #0 + E.Message));
     end;
   end;
   Output := HandleOutput(msgout);
@@ -1122,9 +1121,9 @@ var
   msgin, msgout, msgRaw: RawUtf8;
   header: TRemoteMessageHeader;
   outheader: PRemoteMessageHeader;
+  msg, msgmax: PAnsiChar;
   intext: RawUtf8                             absolute Input;
   inexec: TSqlDBProxyConnectionCommandExecute absolute Input;
-  msg, msgmax: PAnsiChar;
   outdef: TSqlDBDefinition                    absolute Output;
   outint64: Int64                             absolute Output;
   outboolean: boolean                         absolute Output;
@@ -1154,12 +1153,12 @@ begin
     cGetDbms,
     cGetFields,
     cGetIndexes:
-      AppendToRawUtf8(msgin, intext);
+      Append(msgin, intext);
     cExecute,
     cExecuteToBinary,
     cExecuteToJson,
     cExecuteToExpandedJson:
-      AppendToRawUtf8(msgin,
+      Append(msgin,
         RecordSave(inexec, TypeInfo(TSqlDBProxyConnectionCommandExecute)));
   else
     raise ESqlDBRemote.CreateUtf8('Unknown %.Process() input command % (%)',
@@ -1680,7 +1679,7 @@ begin
   if (fColumnCount > 0) or
      (fDataInternalCopy <> '') then
     raise ESqlDBRemote.CreateUtf8('Invalid %.ExecutePrepared* call', [self]);
-  Input.SQL := fSql;
+  Input.Sql := fSql;
   if length(fParams) <> fParamCount then // strip to only needed memory
     SetLength(fParams, fParamCount);
   Input.Params := fParams;
@@ -1910,7 +1909,7 @@ var
 begin
   if (Ctxt.InContent = '') or
      not IsPost(Ctxt.Method) or
-     not IdemPropNameU(TrimU(Ctxt.InContentType), BINARY_CONTENT_TYPE) then
+     not PropNameEquals(TrimU(Ctxt.InContentType), BINARY_CONTENT_TYPE) then
   begin
     result := HTTP_NOTFOUND;
     exit;

@@ -210,6 +210,8 @@ type
     procedure _GUID;
     /// test ParseCommandArguments() function
     procedure _ParseCommandArguments;
+    /// test TExecutableCommandLine class
+    procedure _TExecutableCommandLine;
     /// test IsMatch() function
     procedure _IsMatch;
     /// test TExprParserMatch class
@@ -2247,10 +2249,10 @@ var
   lic: TLicenseData;
 begin
   CheckEqual(lic.CustomerName, '');
-  FillZero(TypeInfo(TLicenseData), lic);
+  FillZeroRtti(TypeInfo(TLicenseData), lic);
   CheckEqual(lic.CustomerName, '');
   lic.CustomerName := '1234';
-  FillZero(TypeInfo(TLicenseData), lic);
+  FillZeroRtti(TypeInfo(TLicenseData), lic);
   CheckEqual(lic.CustomerName, '');
   FillCharFast(A, SizeOf(A), 0);
   FillCharFast(B, SizeOf(B), 0);
@@ -2430,16 +2432,16 @@ begin
   Check(IsEqualGuid(Guid2, Guid));
   Check(IsEqualGuid(@Guid2, @Guid));
   Check(U.From('toto.com'));
-  Check(U.Uri = 'http://toto.com/');
+  CheckEqual(U.Uri, 'http://toto.com/');
   Check(not U.Https);
   Check(U.From('toto.com:123'));
-  Check(U.Uri = 'http://toto.com:123/');
+  CheckEqual(U.Uri, 'http://toto.com:123/');
   Check(not U.Https);
   Check(U.From('https://toto.com:123/tata/titi'));
-  Check(U.Uri = 'https://toto.com:123/tata/titi');
+  CheckEqual(U.Uri, 'https://toto.com:123/tata/titi');
   Check(U.Https);
   Check(U.From('https://toto.com:123/tata/tutu:tete'));
-  Check(U.Uri = 'https://toto.com:123/tata/tutu:tete');
+  CheckEqual(U.Uri, 'https://toto.com:123/tata/tutu:tete');
   Check(U.From('http://user:password@server:port/address'));
   Check(not U.Https);
   CheckEqual(U.Uri, 'http://server:port/address');
@@ -2625,6 +2627,68 @@ begin
   Test('"one one" two', ['one one', 'two'], [], false);
 end;
 
+procedure TTestCoreBase._TExecutableCommandLine;
+var
+  c: TExecutableCommandLine;
+  f: RawUtf8;
+  t: integer;
+begin
+  c := TExecutableCommandLine.Create;
+  try
+    c.RawParams := CsvToRawUtf8DynArray('one two three', ' ');
+    c.Parse(#10, '-', '--');
+    CheckEqual(length(c.Args), 3);
+    CheckEqual(length(c.Options), 0);
+    CheckEqual(length(c.Names), 0);
+    CheckEqual(length(c.Values), length(c.Names));
+    Check(c.Arg('one', 'this is 1'));
+    Check(c.Arg('two', 'this is 2'));
+    Check(c.Arg('three', 'this is 3'));
+    CheckEqual(c.DetectUnknown, '');
+    CheckHash(c.FullDescription('this is test #1 executable', 'exename'), $9147E5C5);
+    c.Clear;
+    c.RawParams := CsvToRawUtf8DynArray('one two three', ' ');
+    c.Parse(#10, '-', '--');
+    CheckEqual(length(c.Args), 3);
+    CheckEqual(length(c.Options), 0);
+    CheckEqual(length(c.Names), 0);
+    CheckEqual(length(c.Values), length(c.Names));
+    Check(c.Arg(0, 'this is the main verb'));
+    Check(c.Arg(1, 'the #directory name to process'));
+    Check(c.Arg(2, 'some #comment text to add'));
+    CheckHash(c.FullDescription('this is test #2 executable', 'exename'), $DDDDB7D4);
+    Check(not c.Option(['v', 'verbose'], 'generate verbose output'));
+    CheckHash(c.FullDescription('this is test #2 executable', 'exename'), $2293B264);
+    Check(not c.Get('logfolder', f, 'optional log #folder to write to'));
+    Check(not c.Option('log', 'log the process to a local file'));
+    Check(not c.Get(['t', 'threads'], t, '#number of threads to run'));
+    CheckEqual(c.DetectUnknown, '');
+    CheckHash(c.FullDescription('this is test #2 executable', 'exename'), $3CFE0EB3);
+    c.Clear;
+    c.RawParams := CsvToRawUtf8DynArray('-t=10 --dest toto -v --wrong -p=4', ' ');
+    c.Parse(#10, '-', '--');
+    CheckEqual(length(c.Args), 0);
+    CheckEqual(length(c.Options), 2);
+    CheckEqual(length(c.Names), 3);
+    CheckEqual(length(c.Values), length(c.Names));
+    Check(c.Option(['v', 'verbose'], 'generate verbose output'));
+    Check(not c.Option('log', 'log the process to a local file'));
+    t := 0;
+    Check(c.Get(['t', 'threads'], t, '#number of threads to run', 5));
+    CheckEqual(t, 10);
+    f := c.Param('dest', 'destination #folder', 'c:\');
+    CheckEqual(f, 'toto');
+    Check(not c.Get('logdest', f, 'optional log #folder'));
+    CheckEqual(f, '');
+    CheckHash(c.DetectUnknown, $5EA096A5);
+    CheckHash(c.FullDescription('this is test #3 executable', 'exename'), $DFE40A21);
+//writeln(c.FullDescription('this is test #3 executable', 'exename'));
+  finally
+    c.Free;
+  end;
+//ConsoleWaitForEnterKey;
+end;
+
 procedure TTestCoreBase._IsMatch;
 var
   i, j: integer;
@@ -2758,6 +2822,33 @@ begin
   Check(not IsMatch(V, 'this is a zest', false));
   Check(not IsMatch(V, 'this as a test', false));
   Check(not IsMatch(V, 'this as a rest', false));
+  Check(IsMatchs('test*', 'test', false));
+  Check(IsMatchs('test*', 'test', true));
+  Check(IsMatchs('test*', 'teste', false));
+  Check(IsMatchs('test*', 'teste', true));
+  Check(IsMatchs('test*', 'tester', false));
+  Check(IsMatchs('test*', 'tester', true));
+  Check(IsMatchs('a*', 'anything', true));
+  Check(IsMatchs('a*', 'a', true));
+  Check(IsMatchs('*', 'anything', true));
+  Check(IsMatchs('*.pas', 'Bidule.pas', true));
+  Check(IsMatchs('*.pas', 'Bidule.pas', false));
+  Check(IsMatchs('*.PAS', 'Bidule.pas', true));
+  Check(not IsMatchs('*.PAS', 'Bidule.pas', false));
+  Check(IsMatchs('toto,test*', 'test', false));
+  Check(IsMatchs('test*,toto', 'test', true));
+  Check(IsMatchs('toto,titi,test*', 'teste', false));
+  Check(IsMatchs('test*,titi,toto', 'teste', true));
+  Check(IsMatchs('toto,test*,titi', 'tester', false));
+  Check(IsMatchs('tata,test*', 'tester', true));
+  Check(IsMatchs('a*,toto', 'anything', true));
+  Check(IsMatchs('toto,a*', 'a', true));
+  Check(IsMatchs('*,titi', 'anything', true));
+  Check(IsMatchs('*.pas,*.txt', 'Bidule.pas', true));
+  Check(IsMatchs('*.txt,*.pas', 'Bidule.pas', false));
+  Check(IsMatchs('*.PAS,*.pas', 'Bidule.pas', false));
+  Check(IsMatchs('*.txt,*.PAS', 'Bidule.pas', true));
+  Check(not IsMatchs('*.PAS,*.pAs,*.PAs', 'Bidule.pas', false));
   for reuse := false to true do
   begin  // ensure very same behavior
     match.Prepare(V, false, reuse);
@@ -3777,15 +3868,15 @@ begin
   for i := 11 to 150 do
     AppendShortCardinal(i, a);
   CheckHash(a, $1CDCEE09, 'AppendShortCardinal');
-  Check(_oskb(0) = '0KB');
-  Check(_oskb(1 shl 10 - 1) = '0KB');
-  Check(_oskb(1 shl 10) = '1KB');
+  Check(_oskb(0)            = '0KB');
+  Check(_oskb(1 shl 10 - 1) = '1KB');
+  Check(_oskb(1 shl 10)     = '1KB');
   Check(_oskb(1 shl 10 + 1) = '1KB');
-  Check(_oskb(1 shl 20 - 1) = '1023KB');
-  Check(_oskb(1 shl 20) = '1MB');
+  Check(_oskb(1 shl 20 - 1) = '1MB');
+  Check(_oskb(1 shl 20)     = '1MB');
   Check(_oskb(1 shl 20 + 1) = '1MB');
-  Check(_oskb(1 shl 30 - 1) = '1023MB');
-  Check(_oskb(1 shl 30) = '1GB');
+  Check(_oskb(1 shl 30 - 1) = '1GB');
+  Check(_oskb(1 shl 30)     = '1GB');
   Check(_oskb(1 shl 30 + 1) = '1GB');
   n := 100000;
   Timer.Start;
@@ -4440,9 +4531,7 @@ begin
   check(u = 'abc');
   b := AsciiToBaudot('mORMot.net');
   check(BaudotToAscii(b) = 'mormot.net');
-  {$ifdef FPC}
-  SetCodePage(b, CP_UTF8);
-  {$endif FPC}
+  EnsureRawUtf8(b);
   b := b + #0#0#0;
   u := BaudotToAscii(b);
   check(u = 'mormot.net');
@@ -4466,6 +4555,21 @@ begin
   end;
 end;
 
+function ARawSetString: RawByteString;
+var
+  S: RawByteString;
+begin
+  S := '123456';
+  SetString(result, PAnsiChar(pointer(S)), Length(S));
+end;
+
+function ARawFastSetString: RawByteString;
+var
+  S: RawByteString;
+begin
+  S := '123456';
+  FastSetRawByteString(result, pointer(S), Length(S));
+end;
 
 procedure TTestCoreBase._UTF8;
 
@@ -4544,7 +4648,7 @@ var
   bak: AnsiChar;
   W: WinAnsiString;
   WS: WideString;
-  SU: SynUnicode;
+  SU, SU2: SynUnicode;
   str: string;
   up4: RawUcs4;
   U, U2, res, Up, Up2, json, json1, json2: RawUtf8;
@@ -4554,6 +4658,7 @@ var
   q: RawUtf8;
   Unic: RawByteString;
   WA: Boolean;
+  rb1, rb2, rb3: RawByteString;
 const
   ROWIDS: array[0..17] of PUtf8Char = ('id', 'ID', 'iD', 'rowid', 'ROWid',
     'ROWID', 'rowiD', 'ROWId', // ok
@@ -4562,7 +4667,25 @@ const
     'tes', 'test', 'TeSt', 'teS', 'tesT', 'testE', 'T', 'T', '1', 'teste');
   IDPA: array[0..15] of PAnsiChar = (nil, 'T', '1', 'TE', 'TE', 'TE', 'TES',
     'TEST', 'TEST', 'TES', 'TEST', 'TESTE', 't', 'U', '2', 'TESTe');
+  CHINESE_TEXT: array[0..8] of byte = (
+    $e4, $b8, $ad, $e6, $96, $87, $61, $62, $63);
 begin
+  // + on RawByteString seems buggy on FPC - at least inconsistent with Delphi
+  rb2 := ARawSetString;
+  rb1 := rb2 + RawByteString('test');
+  Check(rb1 = '123456test', 'ARawSetString1');
+  Append(rb2, 'test');
+  Check(rb2 = '123456test', 'ARawSetString2');
+  rb2 := ARawFastSetString;
+  rb3 := 'test';
+  {$ifdef FPC} // circumvent FPC RTL oddity on Win32 :(
+  SetCodePage(rb3, CP_RAWBYTESTRING, false);
+  {$endif FPC}
+  rb1 := rb2 + rb3;
+  Check(rb1 = '123456test', 'ARawFastSetString1');
+  rb1 := ARawFastSetString;
+  Append(rb1, 'test');
+  Check(rb1 = '123456test', 'ARawFastSetString2');
   Check(SafeFileName(''));
   Check(SafePathName(''));
   Check(SafeFileName('toto'));
@@ -4744,6 +4867,17 @@ begin
   Check(MakePath([1], true, '/') = '1/');
   Check(MakePath([1, 2, '3'], false, '/') = '1/2/3');
   Check(MakePath([1, 2, 3], true, '/') = '1/2/3/');
+  Check(MakeFileName([]) = '');
+  Check(MakeFileName(['toto', 'doc']) = 'toto.doc');
+  {$ifdef OSWINDOWS}
+  Check(MakeFileName([1, 2, 'doc'], false) = '1\2\doc');
+  Check(MakeFileName([1, 2, 'doc'], true) = '1\2.doc');
+  Check(MakeFileName([1, 2, '.doc'], true) = '1\2.doc');
+  {$else}
+  Check(MakeFileName([1, 2, 'doc'], false) = '1/2/doc');
+  Check(MakeFileName([1, 2, 'doc'], true) = '1/2.doc');
+  Check(MakeFileName([1, 2, '.doc'], true) = '1/2.doc');
+  {$endif OSWINDOWS}
   Check(MakeCsv([]) = '');
   Check(MakeCsv([], true) = '');
   Check(MakeCsv([1]) = '1');
@@ -4919,7 +5053,7 @@ begin
     Check(IsAnsiCompatible(U) or (PosEx('\u', json1) > 0));
     json2 := JsonReformat(json1, jsonNoEscapeUnicode);
     Check(json2 = json, 'jeu2');
-    Unic := Utf8DecodeToUnicodeRawByteString(pointer(U), length(U));
+    Unic := Utf8DecodeToUnicodeRawByteString(U);
     {$ifndef FPC_HAS_CPSTRING} // buggy FPC
     Check(Utf8ToWinAnsi(U) = W);
     Check(WinAnsiConvert.Utf8ToAnsi(WinAnsiConvert.AnsiToUtf8(W)) = W);
@@ -5052,6 +5186,8 @@ begin
     Check(PCardinal(U)^ = $92b3a8f0);
   U := TSynAnsiConvert.Engine(CP_UTF8).UnicodeBufferToAnsi(pointer(SU), length(SU));
   Check(length(U) = 4);
+  if not CheckFailed(length(U) = 4) then
+    Check(PCardinal(U)^ = $92b3a8f0);
   SetLength(res, 10);
   PB := pointer(res);
   PB := ToVarString(U, PB);
@@ -5062,6 +5198,18 @@ begin
   PB := pointer(res);
   FromVarString(PB, U2);
   check(U2 = U);
+  FastSetString(U, @CHINESE_TEXT, 9);
+  CheckEqual(StrLen(pointer(U)), 9);
+  SU := Utf8ToSynUnicode(U);
+  rb1 := TSynAnsiConvert.Engine(936).UnicodeStringToAnsi(SU); // GB2312_CHARSET
+  CheckEqual(length(rb1), 7);
+  SU2 := TSynAnsiConvert.Engine(936).AnsiToUnicodeString(rb1);
+  Check(SU = SU2);
+  rb1 := '';
+  rb1 := TSynAnsiConvert.Engine(936).Utf8ToAnsi(U);
+  CheckEqual(length(rb1), 7);
+  U2 := TSynAnsiConvert.Engine(936).AnsiToUtf8(rb1);
+  CheckEqual(U, U2);
   Check(UnQuoteSqlStringVar('"one two"', U) <> nil);
   Check(U = 'one two');
   Check(UnQuoteSqlStringVar('one two', U) <> nil);
@@ -5107,19 +5255,43 @@ begin
   Check(UpperCaseUnicode('abcdefABCD') = 'ABCDEFABCD');
   Check(LowerCaseUnicode('abcdefABCD') = 'abcdefabcd');
   {$endif OSWINDOWS}
-  Check(StringReplaceAll('abcabcabc', 'toto', 'toto') = 'abcabcabc');
-  Check(StringReplaceAll('abcabcabc', 'toto', 'titi') = 'abcabcabc');
-  Check(StringReplaceAll('abcabcabc', 'ab', 'AB') = 'ABcABcABc');
-  Check(StringReplaceAll('abcabcabc', 'bc', '') = 'aaa');
-  Check(StringReplaceAll('abcabcabc', 'bc', 'B') = 'aBaBaB');
-  Check(StringReplaceAll('abcabcabc', 'bc', 'bcd') = 'abcdabcdabcd');
-  Check(StringReplaceAll('abcabcabc', 'c', 'C') = 'abCabCabC');
-  Check(StringReplaceAll('abcabcabc', []) = 'abcabcabc');
-  Check(StringReplaceAll('abcabcabc', ['c']) = 'abcabcabc');
-  Check(StringReplaceAll('abcabcabc', ['c', 'C']) = 'abCabCabC');
-  Check(StringReplaceAll('abcabcabc', ['c', 'C', 'a']) = 'abcabcabc');
-  Check(StringReplaceAll('abcabcabc', ['c', 'C', 'toto', 'titi', 'ab', 'AB']) =
-    'ABCABCABC');
+  CheckEqual(StringReplaceAll('abcabcabc', 'toto', 'toto'), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'toto', 'titi'), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'ab', 'AB'), 'ABcABcABc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'AB', 'toto'), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'Bc', 'titi'), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bc', ''), 'aaa');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bc', 'B'), 'aBaBaB');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bc', 'bcd'), 'abcdabcdabcd');
+  CheckEqual(StringReplaceAll('abcabcabc', 'c', 'C'), 'abCabCabC');
+  CheckEqual(StringReplaceAll('abcabcabc', []), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', ['c']), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', ['c', 'C']), 'abCabCabC');
+  CheckEqual(StringReplaceAll('abcabcabc', ['c', 'C', 'a']), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc',
+    ['c', 'C', 'toto', 'titi', 'ab', 'AB']), 'ABCABCABC');
+  CheckEqual(StringReplaceAll('abcabcabc', 'toto', 'toto', false), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'toto', 'titi', false), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'ab', 'AB', false), 'ABcABcABc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'AB', 'toto', false), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'Bc', 'titi', false), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bc', '', false), 'aaa');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bc', 'B', false), 'aBaBaB');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bc', 'bcd', false), 'abcdabcdabcd');
+  CheckEqual(StringReplaceAll('abcabcabc', 'c', 'C', false), 'abCabCabC');
+  CheckEqual(StringReplaceAll('abcabcabc', 'c', '', false), 'ababab');
+  CheckEqual(StringReplaceAll('abcabcabc', 'C', '', false), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'toto', 'toto', true), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'toto', 'titi', true), 'abcabcabc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'ab', 'AB', true), 'ABcABcABc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'AB', 'toto', true), 'totoctotoctotoc');
+  CheckEqual(StringReplaceAll('abcabcabc', 'Bc', 't', true), 'atatat');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bC', '', true), 'aaa');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bc', 'B', true), 'aBaBaB');
+  CheckEqual(StringReplaceAll('abcabcabc', 'bc', 'bcd', true), 'abcdabcdabcd');
+  CheckEqual(StringReplaceAll('abcabcabc', 'c', 'C', true), 'abCabCabC');
+  CheckEqual(StringReplaceAll('abcabcabc', 'c', '', true), 'ababab');
+  CheckEqual(StringReplaceAll('abcabcabc', 'C', '', true), 'ababab');
   for i := -10 to 50 do
     for j := -10 to 50 do
     begin
@@ -5665,21 +5837,21 @@ begin
   CheckEqual(SizeOf(TSid), 1032, 'TSid');
   for k := low(k) to high(k) do
   begin
-    s1 := KnownSid(k);
+    s1 := KnownRawSid(k);
     Check(SidToKnown(pointer(s1)) = k);
     Check(SidCompare(pointer(s1), pointer(s1)) = 0);
-    s := SidToText(s1);
+    s := RawSidToText(s1);
     CheckEqual(s, RawUtf8(KnownSidToText(k)^));
     CheckUtf8(SidToKnown(s) = k, s);
-    s2 := TextToSid(s);
-    CheckEqual(s, SidToText(s2));
+    s2 := TextToRawSid(s);
+    CheckEqual(s, RawSidToText(s2));
     CheckUtf8(SidCompare(pointer(s1), pointer(s2)) = 0, s);
   end;
   {$ifdef OSWINDOWS}
-  CurrentSid(s1, wttProcess);
-  CurrentSid(s2, wttThread);
+  CurrentRawSid(s1, wttProcess);
+  CurrentRawSid(s2, wttThread);
   Check(SidCompare(pointer(s1), pointer(s2)) = 0);
-  s := SidToText(s1);
+  s := RawSidToText(s1);
   CheckUtf8(IdemPChar(pointer(s), 'S-1-5-21-'), s);
   sids := CurrentGroupsSid;
   Check(sids <> nil);
@@ -5687,7 +5859,7 @@ begin
   Check(known <> []);
   for k := low(k) to high(k) do
   begin
-    s := SidToText(KnownSid(k));
+    s := RawSidToText(KnownRawSid(k));
     if k in known then
     begin
       Check(FindRawUtf8(sids, s) >= 0);
@@ -5883,13 +6055,7 @@ type
   end;
 
 begin
-  {$ifndef PUREPASCAL}
-  {$ifndef LVCL}
-  {$ifndef FPC}
   Test(TSynFilterTrim, TrimU);
-  {$endif FPC}
-  {$endif LVCL}
-  {$endif PUREPASCAL}
   Test(TSynFilterLowerCase, LowerCase);
   Test(TSynFilterUpperCase, UpperCase);
   Test(TSynFilterLowerCaseU, LowerCaseU);
@@ -7293,7 +7459,6 @@ begin
   result := StrIComp(
     pointer(TOrmPeople(A).FirstName), pointer(TOrmPeople(B).FirstName));
 end;
-
 
 
 initialization

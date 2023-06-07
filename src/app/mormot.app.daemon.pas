@@ -205,6 +205,15 @@ type
     procedure Resume; virtual;
     /// call Stop, finalize the instance, and its settings
     destructor Destroy; override;
+    /// the folder which was defined to contain this daemon's data
+    property WorkFolderName: TFileName
+      read fWorkFolderName;
+    /// the folder which was defined to contain this daemon's settings
+    // - just a wrapper around ExtractFilePath(fSettings.FileName)
+    function SettingsFolderName: TFileName;
+    /// the folder which was defined to contain this daemon's logs
+    // - just a wrapper to retrieve fSettings.LogPath
+    function LogFolderName: TFileName;
   published
     /// if this instance was run as /console or /verb
     property ConsoleMode: boolean
@@ -289,7 +298,7 @@ begin
   if aWorkFolder = '' then
     fWorkFolderName := Executable.ProgramFilePath
   else
-    fWorkFolderName := EnsureDirectoryExists(aWorkFolder, true);
+    fWorkFolderName := NormalizeDirectoryExists(aWorkFolder, true);
   if aSettingsClass = nil then
     aSettingsClass := TSynDaemonSettings;
   fSettings := aSettingsClass.Create;
@@ -297,7 +306,7 @@ begin
   fn := aSettingsFolder;
   if fn = '' then
     fn := {$ifdef OSWINDOWS}fWorkFolderName{$else}'/etc/'{$endif};
-  fn :=  EnsureDirectoryExists(fn);
+  fn :=  NormalizeDirectoryExists(fn);
   if aSettingsName = '' then
     fn := fn + Utf8ToString(Executable.ProgramName)
   else
@@ -308,14 +317,17 @@ begin
       fSettings.LogPath :=
         {$ifdef OSWINDOWS}fWorkFolderName{$else}GetSystemPath(spLog){$endif}
     else
-      fSettings.LogPath := EnsureDirectoryExists(aLogFolder);
+      fSettings.LogPath := NormalizeDirectoryExists(aLogFolder);
   fShowExceptionWaitEnter := true; // default/legacy behavior
   AfterCreate;
 end;
 
 procedure TSynDaemon.AfterCreate;
 begin
-  fSettings.SetLog(TSynLog);
+  if RunFromSynTests then
+    fSettings.fLogClass := TSynLog // share the same TSynLog for all daemons
+  else
+    fSettings.SetLog(TSynLog); // real world logging
 end;
 
 destructor TSynDaemon.Destroy;
@@ -325,6 +337,24 @@ begin
   Stop;
   inherited Destroy;
   FreeAndNil(fSettings);
+end;
+
+function TSynDaemon.SettingsFolderName: TFileName;
+begin
+  if (self = nil) or
+     (fSettings = nil) then
+    result := ''
+  else
+    result := fSettings.FolderName;
+end;
+
+function TSynDaemon.LogFolderName: TFileName;
+begin
+  if (self = nil) or
+     (fSettings = nil) then
+    result := ''
+  else
+    result := fSettings.LogPath;
 end;
 
 procedure TSynDaemon.Resume;

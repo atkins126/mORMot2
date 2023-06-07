@@ -31,8 +31,8 @@ uses
   mormot.core.os,
   mormot.core.rtti,
   mormot.core.data,
-  mormot.core.text,
   mormot.core.unicode,
+  mormot.core.text,
   mormot.core.datetime,
   mormot.core.buffers,
   mormot.core.threads,
@@ -209,7 +209,7 @@ begin
   fLog := aLog;
   fRtspServer := aRtspServer;
   fRtspPort := aRtspPort;
-  fPendingGet := TRawUtf8List.CreateEx([fObjectsOwned, fCaseSensitive]);
+  fPendingGet := TRawUtf8List.CreateEx([fObjectsOwned, fCaseSensitive, fThreadSafe]);
   inherited Create(aHttpPort, aOnStart, aOnStop, TPostConnection, 'rtsp/http',
     aLog, aOptions, aThreadPoolCount);
 end;
@@ -326,7 +326,7 @@ begin
                 log.Log(sllDebug, 'ConnectionCreate rejected on unknown %',
                   [sock], self)
             end
-            else if not IdemPropNameU(sock.Http.ContentType, RTSP_MIME) then
+            else if not PropNameEquals(sock.Http.ContentType, RTSP_MIME) then
               PendingDelete(found, sock.Http.ContentType)
             else
             begin
@@ -414,7 +414,7 @@ begin
   if (self <> nil) and
      IdemPChar(pointer(RtspUri), 'RTSP://') and
      uri.From(copy(RtspUri, 8, maxInt), fRtspPort) and
-     IdemPropNameU(uri.Port, fRtspPort) then
+     PropNameEquals(uri.Port, fRtspPort) then
     FormatUtf8('http://%:%/%', [uri.Server, fServer.Port, uri.Address], result)
   else
     result := RtspUri;
@@ -426,7 +426,7 @@ var
 begin
   if (self <> nil) and
      uri.From(HttpUri, fServer.Port) and
-     IdemPropNameU(uri.Port, fServer.Port) then
+     PropNameEquals(uri.Port, fServer.Port) then
     FormatUtf8('rtsp://%:%/%', [uri.Server, fRtspPort, uri.Address], result)
   else
     result := HttpUri;

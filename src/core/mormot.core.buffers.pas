@@ -716,6 +716,9 @@ type
     /// read the next 2 bytes from the buffer as a 16-bit unsigned value
     function Next2: cardinal;
       {$ifdef HASINLINE}inline;{$endif}
+    /// read the next 2 bytes from the buffer as a 16-bit big-endian value
+    function Next2BigEndian: cardinal;
+      {$ifdef HASINLINE}inline;{$endif}
     /// read the next 4 bytes from the buffer as a 32-bit unsigned value
     function Next4: cardinal;
       {$ifdef HASINLINE}inline;{$endif}
@@ -852,6 +855,9 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// append 2 bytes of data at the current position
     procedure Write2(Data: cardinal);
+      {$ifdef HASINLINE}inline;{$endif}
+    /// append 2 bytes of data, encoded as BigEndian,  at the current position
+    procedure Write2BigEndian(Data: cardinal);
       {$ifdef HASINLINE}inline;{$endif}
     /// append 4 bytes of data at the current position
     procedure Write4(Data: integer);
@@ -1503,6 +1509,10 @@ function UrlDecode(const s: RawUtf8; i: PtrInt = 1; len: PtrInt = -1): RawUtf8; 
 
 /// decode a string compatible with URI encoding into its original value
 function UrlDecode(U: PUtf8Char): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// decode a string compatible with URI encoding into its original value
+procedure UrlDecode(U: PUtf8Char; var result: RawUtf8); overload;
 
 /// decode a specified parameter compatible with URI encoding into its original
 // textual value
@@ -1837,34 +1847,20 @@ type
   end;
   {$M-}
 
-
-/// fast add some content to a RawByteString buffer
+{$ifndef PUREMORMOT2} // just redirect to mormot.core.text Append(...) overloads
 procedure AppendBufferToRawByteString(var Content: RawByteString;
   const Buffer; BufferLen: PtrInt); overload;
-
-/// fast add some content to a RawByteString buffer
 procedure AppendBufferToRawByteString(var Content: RawByteString;
-  const Buffer: RawByteString); overload;
-
-/// fast add some characters to a RawUtf8 string
-// - faster than SetString(tmp,Buffer,BufferLen); Text := Text+tmp;
-procedure AppendBufferToRawUtf8(var Text: RawUtf8;
-  Buffer: pointer; BufferLen: PtrInt);
-
-/// fast add one character to a RawUtf8 string
-// - avoid a temporary memory allocation of a string, so slightly faster than
-// ! Text := Text + ch;
-procedure AppendCharToRawUtf8(var Text: RawUtf8; Ch: AnsiChar);
-
-/// fast add one Ansi String to a RawUtf8 string
-// - append "After" directly, with no code page conversion (needed on FPC)
-// ! Text := Text + After;
+  const Buffer: RawByteString); overload; {$ifdef HASINLINE} inline; {$endif}
 procedure AppendToRawUtf8(var Text: RawUtf8; const After: RawByteString); overload;
-
-/// fast add two Ansi Strings to a RawUtf8 string
-// - append After1 and After2 directly, with no code page conversion (needed on FPC)
-// ! Text := Text + After1 + After2;
-procedure AppendToRawUtf8(var Text: RawUtf8; const After1, After2: RawByteString); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+procedure AppendBufferToRawUtf8(var Text: RawUtf8;
+  Buffer: PUtf8Char; BufferLen: PtrInt); {$ifdef HASINLINE} inline; {$endif}
+procedure AppendCharToRawUtf8(var Text: RawUtf8; Ch: AnsiChar);
+  {$ifdef HASINLINE} inline; {$endif}
+procedure AppendToRawUtf8(var Text: RawUtf8; const After1, After2: RawByteString);
+  overload; {$ifdef HASINLINE} inline; {$endif}
+{$endif PUREMORMOT2}
 
 /// fast add one character to a RawUtf8 string, if not already present
 // - avoid a temporary memory allocation of a string, so faster alternative to
@@ -2233,7 +2229,7 @@ type
     /// finalize the nested TStream instance
     destructor Destroy; override;
     /// append a nested TStream instance
-    // - you could use a TFileStream here for efficient chunked reading
+    // - you could use a TFileStreamEx here for efficient chunked reading
     function NewStream(Stream: TStream): TStream;
     /// get the last TRawByteStringStream, or append a new one if needed
     function ForText: TRawByteStringStream;
@@ -2576,12 +2572,14 @@ type
     fBuffer: RawByteString;
     fLen: PtrInt;
     fCapacity: PtrInt; // may not be length(fBuffer) after AsText(UseMainBuffer)
+    procedure GrowBuffer(needed: PtrInt);
   public
     /// set Len to 0, but doesn't clear/free the Buffer itself
     procedure Reset;
       {$ifdef HASINLINE}inline;{$endif}
     /// release/free the internal Buffer storage
     procedure Clear;
+      {$ifdef HASINLINE}inline;{$endif}
     /// a convenient wrapper to pointer(fBuffer) for direct Buffer/Len use
     function Buffer: pointer;
       {$ifdef HASINLINE}inline;{$endif}
@@ -2593,6 +2591,7 @@ type
       read fCapacity;
     /// add some UTF-8 buffer content to the Buffer, resizing it if needed
     procedure Append(P: pointer; PLen: PtrInt); overload;
+      {$ifdef HASINLINE}inline;{$endif}
     /// add some UTF-8 string content to the Buffer, resizing it if needed
     procedure Append(const Text: RawUtf8); overload;
       {$ifdef HASINLINE}inline;{$endif}
@@ -2609,6 +2608,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// add some UTF-8 buffer content to the Buffer, without resizing it
     function CanAppend(P: pointer; PLen: PtrInt): boolean;
+      {$ifdef HASINLINE}inline;{$endif}
     /// ensure the internal Buffer has at least MaxSize bytes and return it
     // - also reset the internal Len to 0
     function Reserve(MaxSize: PtrInt): pointer;
@@ -3402,6 +3402,14 @@ begin
   if P + 1 >= Last then
     ErrorOverflow;
   result := PWord(P)^;
+  inc(P, 2);
+end;
+
+function TFastReader.Next2BigEndian: cardinal;
+begin
+  if P + 1 >= Last then
+    ErrorOverflow;
+  result := swap(PWord(P)^);
   inc(P, 2);
 end;
 
@@ -4352,6 +4360,11 @@ begin
     InternalFlush;
   PWord(@fBuffer^[fPos])^ := Data;
   inc(fPos, SizeOf(Word));
+end;
+
+procedure TBufferWriter.Write2BigEndian(Data: cardinal);
+begin
+  Write2(swap(word(Data)));
 end;
 
 procedure TBufferWriter.Write4(Data: integer);
@@ -6142,6 +6155,37 @@ begin
   AlgoSynLZ.Decompress(pointer(Data), length(Data), result);
 end;
 
+procedure AppendBufferToRawByteString(
+  var Content: RawByteString; const Buffer; BufferLen: PtrInt);
+begin
+  Append(Content, @Buffer, BufferLen);
+end;
+
+procedure AppendBufferToRawByteString(var Content: RawByteString; const Buffer: RawByteString);
+begin
+  Append(Content, Buffer);
+end;
+
+procedure AppendToRawUtf8(var Text: RawUtf8; const After: RawByteString);
+begin
+  Append(Text, After);
+end;
+
+procedure AppendBufferToRawUtf8(var Text: RawUtf8; Buffer: PUtf8Char; BufferLen: PtrInt);
+begin
+  Append(Text, Buffer, BufferLen);
+end;
+
+procedure AppendCharToRawUtf8(var Text: RawUtf8; Ch: AnsiChar);
+begin
+  Append(Text, @Ch, 1);
+end;
+
+procedure AppendToRawUtf8(var Text: RawUtf8; const After1, After2: RawByteString);
+begin
+  Append(Text, After1, After2);
+end;
+
 {$endif PUREMORMOT2}
 
 
@@ -7516,7 +7560,7 @@ begin
             part.ContentType := TEXT_CONTENT_TYPE;
           FakeCodePage(part.Content, CP_UTF8); // ensure value is UTF-8
         end;
-        if IdemPropNameU(part.Encoding, 'base64') then
+        if PropNameEquals(part.Encoding, 'base64') then
           part.Content := Base64ToBin(part.Content);
         // note: "quoted-printable" not yet handled here
         n := length(MultiPart);
@@ -7969,15 +8013,22 @@ begin
 end;
 
 function UrlDecode(U: PUtf8Char): RawUtf8;
+begin
+  UrlDecode(U, result);
+end;
+
+procedure UrlDecode(U: PUtf8Char; var result: RawUtf8); overload;
 var
   P: PUtf8Char;
   L: integer;
   tmp: TSynTempBuffer;
 begin
-  result := '';
   L := StrLen(U);
   if L = 0 then
+  begin
+    result := '';
     exit;
+  end;
   P := tmp.Init(L);
   repeat
     case U^ of
@@ -8511,7 +8562,7 @@ begin
     delete(ext, 1, 1);
     if length(ext) = 1 then // IdemPPChar() supports 2 chars len minimum
       case ext[1] of
-        'x':
+        'x', 'X':
           result := mtXcomp;
       end
     else
@@ -8830,6 +8881,8 @@ procedure TMemoryMapText.LoadFromMap(AverageLineLength: integer = 32);
 var
   P: PUtf8Char;
 begin
+  if fMap.Buffer = nil then
+    exit;
   fLinesMax := fMap.FileSize div AverageLineLength + 8;
   GetMem(fLines, fLinesMax * SizeOf(pointer));
   P := pointer(fMap.Buffer);
@@ -8860,38 +8913,6 @@ begin
   fAppendedLines := nil;
 end;
 
-
-procedure AppendCharToRawUtf8(var Text: RawUtf8; Ch: AnsiChar);
-var
-  L: PtrInt;
-begin
-  L := length(Text);
-  SetLength(Text, L + 1); // reallocate - most MM keep in-place with no move
-  PByteArray(Text)[L] := ord(Ch);
-end;
-
-procedure AppendToRawUtf8(var Text: RawUtf8; const After: RawByteString);
-var
-  L, A: PtrInt;
-begin
-  L := length(Text);
-  A := length(After);
-  SetLength(Text, L + A);
-  MoveFast(pointer(After)^, PByteArray(Text)[L], A);
-end;
-
-procedure AppendToRawUtf8(var Text: RawUtf8; const After1, After2: RawByteString);
-var
-  L, A1, A2: PtrInt;
-begin
-  L := length(Text);
-  A1 := length(After1);
-  A2 := length(After2);
-  SetLength(Text, L + A1 + A2);
-  MoveFast(pointer(After1)^, PByteArray(Text)[L], A1);
-  MoveFast(pointer(After2)^, PByteArray(Text)[L + A1], A2);
-end;
-
 procedure AppendCharOnceToRawUtf8(var Text: RawUtf8; Ch: AnsiChar);
 var
   L: PtrInt;
@@ -8902,17 +8923,6 @@ begin
     exit;
   SetLength(Text, L + 1);
   PByteArray(Text)[L] := ord(Ch);
-end;
-
-procedure AppendBufferToRawUtf8(var Text: RawUtf8; Buffer: pointer; BufferLen: PtrInt);
-var
-  L: PtrInt;
-begin
-  if BufferLen <= 0 then
-    exit;
-  L := length(Text);
-  SetLength(Text, L + BufferLen);
-  MoveFast(Buffer^, PByteArray(Text)[L], BufferLen);
 end;
 
 procedure AppendBuffersToRawUtf8(var Text: RawUtf8; const Buffers: array of PUtf8Char);
@@ -8977,6 +8987,7 @@ var
   P: PAnsiChar;
   tmp: array[0..23] of AnsiChar;
 begin
+  {$ifndef ASMINTEL} // our StrUInt32 asm has less CPU cache pollution
   if Value <= high(SmallUInt32Utf8) then
   begin
     P := pointer(SmallUInt32Utf8[Value]);
@@ -8984,36 +8995,13 @@ begin
     MoveByOne(P, Buffer, L);
   end
   else
+  {$endif ASMINTEL}
   begin
     P := StrUInt32(@tmp[23], Value);
     L := @tmp[23] - P;
     MoveFast(P^, Buffer^, L);
   end;
   result := Buffer + L;
-end;
-
-procedure AppendBufferToRawByteString(
-  var Content: RawByteString; const Buffer; BufferLen: PtrInt);
-var
-  ContentLen: PtrInt;
-begin
-  if BufferLen <= 0 then
-    exit;
-  ContentLen := length(Content);
-  SetLength(Content, ContentLen + BufferLen);
-  MoveFast(Buffer, PByteArray(Content)^[ContentLen], BufferLen);
-end;
-
-procedure AppendBufferToRawByteString(var Content: RawByteString;
-  const Buffer: RawByteString);
-var
-  ContentLen: PtrInt;
-begin
-  if Buffer = '' then
-    exit;
-  ContentLen := length(Content);
-  SetLength(Content, ContentLen + length(Buffer));
-  MoveFast(pointer(Buffer)^, PByteArray(Content)^[ContentLen], length(Buffer));
 end;
 
 function Plural(const itemname: ShortString; itemcount: cardinal): ShortString;
@@ -10820,26 +10808,34 @@ begin
   result := pointer(fBuffer);
 end;
 
+procedure TRawByteStringBuffer.GrowBuffer(needed: PtrInt);
+begin
+  if fCapacity = 0 then
+    inc(needed, 128) // small overhead at first
+  else
+    inc(needed, needed shr 3 + 2048); // generous overhead
+  fCapacity := needed;
+  SetLength(fBuffer, needed);
+end;
+
 procedure TRawByteStringBuffer.Append(P: pointer; PLen: PtrInt);
 var
   needed: PtrInt;
 begin
   needed := fLen + PLen + 2;
   if needed > fCapacity then
-  begin
-    if fCapacity = 0 then
-      fCapacity := needed + 128 // small overhead at first
-    else
-      fCapacity := needed + needed shr 3 + 2048; // generous overhead
-    SetLength(fBuffer, fCapacity);
-  end;
+    GrowBuffer(needed);
   MoveFast(P^, PByteArray(fBuffer)[fLen], PLen);
   inc(fLen, PLen);
 end;
 
 procedure TRawByteStringBuffer.Append(const Text: RawUtf8);
+var
+  P: PAnsiChar;
 begin
-  Append(pointer(Text), length(Text));
+  P := pointer(Text);
+  if P <> nil then
+    Append(P, PStrLen(P - _STRLEN)^);
 end;
 
 procedure TRawByteStringBuffer.Append(Value: QWord);
@@ -10847,9 +10843,11 @@ var
   tmp: array[0..23] of AnsiChar;
   P: PAnsiChar;
 begin
+  {$ifndef ASMINTEL} // our StrUInt64 asm has less CPU cache pollution
   if Value <= high(SmallUInt32Utf8) then
     Append(SmallUInt32Utf8[Value])
   else
+  {$endif ASMINTEL}
   begin
     P := StrUInt64(@tmp[23], Value);
     Append(P, @tmp[23] - P);

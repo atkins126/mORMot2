@@ -13,7 +13,7 @@ unit mormot.orm.base;
    - TOrmPropInfo ORM / RTTI Classes
    - Abstract TOrmTableAbstract Parent Class
    - TOrmTableRowVariant Custom Variant Type
-   - TOrmLocks and TOrmCacheEntry Basic Structures
+   - TOrmLocks and TOrmCacheTable Basic Structures
    - Abstract TOrmPropertiesAbstract Parent Class
 
   *****************************************************************************
@@ -581,9 +581,9 @@ type
   // OrmMapExternal() from mormot.orm.sql unit
   TOrmVirtualKind = (
     ovkSQLite3,
-    ovkFTS3,
-    ovkFTS4,
-    ovkFTS5,
+    ovkFts3,
+    ovkFts4,
+    ovkFts5,
     ovkRTree,
     ovkRTreeInteger,
     ovkCustomForcedID,
@@ -596,13 +596,13 @@ type
   // hold the TOrmMany instance
   // - jkDestID and jkPivotID will retrieve only DestTable.ID and PivotTable.ID
   // - jkDestFields will retrieve DestTable.* simple fields, or the fields
-  // specified by aCustomFieldsCsv (the Dest table name will be added: e.g.
-  // for aCustomFieldsCsv='One,Two', will retrieve DestTable.One, DestTable.Two)
+  // specified by FieldsCsv (the Dest table name will be added: e.g.
+  // for FieldsCsv='One,Two', will retrieve DestTable.One, DestTable.Two)
   // - jkPivotFields will retrieve PivotTable.* simple fields, or the fields
-  // specified by aCustomFieldsCsv (the Pivot table name will be added: e.g.
-  // for aCustomFieldsCsv='One,Two', will retrieve PivotTable.One, PivotTable.Two)
+  // specified by FieldsCsv (the Pivot table name will be added: e.g.
+  // for FieldsCsv='One,Two', will retrieve PivotTable.One, PivotTable.Two)
   // - jkPivotAndDestAllFields for PivotTable.* and DestTable.* simple fields,
-  // or will retrieve the specified aCustomFieldsCsv fields (with
+  // or will retrieve the specified FieldsCsv fields (with
   // the table name associated: e.g. 'PivotTable.One, DestTable.Two')
   TOrmManyJoinKind = (
     jkDestID,
@@ -613,12 +613,12 @@ type
 
   /// pre-computed SQL statements for ORM operations for a given
   // TOrmModelProperties instance
-  // - those statements will work for internal tables, not for external
-  // tables with mapped table or fields names
+  // - those statements will work for internal tables, not for external DB with
+  // mapped table or fields names, which needs proper adaptation
   TOrmModelPropertiesSql = record
     /// the simple field names in a SQL SELECT compatible format: 'COL1,COL2' e.g.
     // - format is
-    // ! SQL.TableSimpleFields[withID: boolean; withTableName: boolean]
+    // ! Sql.TableSimpleFields[withID: boolean; withTableName: boolean]
     // - returns '*' if no field is of RawBlob/TOrmMany kind
     // - returns 'COL1,COL2' with all COL* set to simple field names if withID is false
     // - returns 'ID,COL1,COL2' with all COL* set to simple field names if withID is true
@@ -676,17 +676,15 @@ type
 
 const
   /// if the TOrmVirtual table kind is a FTS virtual table
-  IS_FTS =
-    [ovkFTS3, ovkFTS4, ovkFTS5];
+  IS_FTS = [ovkFts3, ovkFts4, ovkFts5];
 
   /// if the TOrmVirtual table kind is not an embedded type
   // - can be set for a TOrm after a OrmMapExternal call
-  IS_CUSTOM_VIRTUAL =
-    [ovkCustomForcedID, ovkCustomAutoID];
+  IS_CUSTOM_VIRTUAL = [ovkCustomForcedID, ovkCustomAutoID];
 
   /// if the TOrmVirtual table kind expects the ID to be set on INSERT
   INSERT_WITH_ID =
-    [ovkFTS3, ovkFTS4, ovkFTS5, ovkRTree, ovkRTreeInteger, ovkCustomForcedID];
+    [ovkFts3, ovkFts4, ovkFts5, ovkRTree, ovkRTreeInteger, ovkCustomForcedID];
 
   /// if a TOrmVirtualTablePreparedConstraint.Column is to be ignored
   VIRTUAL_TABLE_IGNORE_COLUMN = -2;
@@ -925,6 +923,7 @@ type
     fPropInfoClass: TOrmPropInfoClassType;
     fFieldWidth: integer;
     fPropertyIndex: integer;
+    fJsonName: RawUtf8;
     function GetNameDisplay: string; virtual;
     /// those two protected methods allow custom storage of binary content as text
     // - default implementation is to use hexa (ToSql=true) or Base64 encodings
@@ -946,7 +945,10 @@ type
     /// the property definition Name
     property Name: RawUtf8
       read fName;
-    /// the property definition Name, afer un-camelcase and translation
+    /// the property definition Name, for TOrm.RttiJsonWrite serialization
+    property JsonName: RawUtf8
+      read fJsonName;
+    /// the property definition Name, after un-camelcase and translation
     property NameDisplay: string
       read GetNameDisplay;
     /// the property definition Name, with full path name if has been flattened
@@ -1913,6 +1915,7 @@ type
     fOptions: TOrmPropInfoListOptions;
     fOrderedByName: TByteDynArray;
     fLast: TOrmPropInfo;
+    fIDJsonName: RawUtf8;
     function GetItem(aIndex: PtrInt): TOrmPropInfo;
     procedure QuickSortByName(L, R: PtrInt);
     procedure InternalAddParentsFirst(aClassType: TClass); overload;
@@ -1972,6 +1975,8 @@ type
     /// fill a TRawUtf8DynArray instance from the field names
     // - excluding ID
     procedure NamesToRawUtf8DynArray(var Names: TRawUtf8DynArray);
+    /// rename the properties for custom TOrm.RttiJsonWrite serialization
+    procedure JsonRenameProperties(const OriginalNewPairs: array of RawUtf8);
     /// returns the number of TOrmPropInfo in the list, i.e. length(List)
     property Count: integer
       read fCount;
@@ -1985,6 +1990,9 @@ type
     // - will raise an exception if out of range
     property Items[aIndex: PtrInt]: TOrmPropInfo
       read GetItem;
+    /// ID field name for TOrm.RttiJsonWrite serialization - 'RowID' by default
+    property IDJsonName: RawUtf8
+      read fIDJsonName;
   end;
 
 
@@ -2733,7 +2741,7 @@ type
 
 
 
-{ ************ TOrmLocks and TOrmCacheEntry Basic Structures }
+{ ************ TOrmLocks and TOrmCacheTable Basic Structures }
 
 type
   /// used to store the locked record list, in a specified table
@@ -2777,40 +2785,39 @@ type
 
   TOrmLocksDynArray = array of TOrmLocks;
 
-  /// for TOrmCache, stores one ORM value serialized as binary
-  TOrmCacheEntryValue = packed record
+  /// for TOrmCache, stores one ORM value
+  TOrmCacheTableValue = packed record
     /// corresponding TOrm ID
     // - stored in increasing order for efficient O(log(n)) binary search
+    // within L1/L2 CPU cache
     ID: TID;
     /// GetTickCount64 shr 9 timestamp when this cached value was stored
     // - resulting time period has therefore a resolution of 512 ms, and
     // overflows after 70 years without computer reboot
     // - equals 0 after SetCache(ID) but there is no JSON value cached
     Timestamp512: cardinal;
-    /// some associated unsigned integer value
-    // - not used by TOrmCache, but available at TOrmCacheEntry level
-    Tag: cardinal;
-    /// binary serialization of the cached ORM instance
-    // - i.e. serialize all its simple fields, excluding the ID
-    Binary: RawByteString;
+    /// the TOrm cached instance, with all simple fields
+    Value: TObject;
   end;
-  POrmCacheEntryValue = ^TOrmCacheEntryValue;
+  POrmCacheTableValue = ^TOrmCacheTableValue;
 
   /// for TOrmCache, stores all tables values
-  TOrmCacheEntryValueDynArray = array of TOrmCacheEntryValue;
+  TOrmCacheTableValueDynArray = array of TOrmCacheTableValue;
 
 const
-  /// fake value returned by TOrmCacheEntry.RetrieveEntry()
-  ORMCACHE_DEPRECATED = POrmCacheEntryValue(1);
+  /// fake value returned by TOrmCacheTable.RetrieveEntry()
+  ORMCACHE_DEPRECATED = POrmCacheTableValue(1);
 
 type
   /// for TOrmCache, stores a table cache settings and ORM cached values
-  // - use a TOrmCacheEntryValue array sorted by ID for O(log(n)) search
+  // - use a TOrmCacheTableValue array sorted by ID for O(log(n)) search
   {$ifdef USERECORDWITHMETHODS}
-  TOrmCacheEntry = record
+  TOrmCacheTable = record
   {$else}
-  TOrmCacheEntry = object
+  TOrmCacheTable = object
   {$endif USERECORDWITHMETHODS}
+  private
+    procedure ClearValue;
   public
     /// TRUE if this table should use caching
     // - i.e. if was not set, or worth it for this table (e.g. in-memory table)
@@ -2824,17 +2831,18 @@ type
     TimeOutMS: cardinal;
     /// the number of entries stored in Values[]
     Count: integer;
+    /// all cached IDs and ORM content
+    Value: TOrmCacheTableValueDynArray;
     /// used to R/W lock the table cache for multi-thread safety
     Safe: TRWLightLock;
-    /// all cached IDs and ORM content
-    Value: TOrmCacheEntryValueDynArray;
     /// TDynArray wrapper around the Value[] array
     Values: TDynArray;
     /// initialize this table cache
     // - will set Values wrapper - other fields should have been cleared by
-    // caller (is the case for a TOrmCacheEntryDynArray)
+    // caller (is the case for a TOrmCacheTableDynArray)
     procedure Init;
     /// reset all settings corresponding to this table cache
+    // - warning: owner Destroy should call it to release stored TOrm instances
     procedure Clear;
     /// returns 0 if TimeOutMS is 0, or the deprecated Value[].Timestamp512
     function GetOutdatedTimestamp512: cardinal;
@@ -2847,7 +2855,7 @@ type
     /// flush cache for a given Value[]
     procedure FlushCacheEntries(const aID: array of TID);
     /// flush cache for all deprecated Value[]
-    function FlushCacheOutdatedEntries(aOutdatedTime512: cardinal = 0): cardinal;
+    function FlushCacheOutdatedEntries: cardinal;
     /// flush cache for all Value[]
     procedure FlushCacheAllEntries;
     /// activate the internal caching for a whole Table
@@ -2857,30 +2865,27 @@ type
     // - will be stored into the Value[] array, with Timestamp512 = 0
     // - do nothing if CacheAll is true, i.e. SetCacheAll was called
     procedure SetCache(aID: TID);
-    /// update/refresh the cached binary ORM value of a given ID
-    procedure SetBinary(aID: TID; const aOrm: RawByteString;
-      aTag: cardinal = 0); overload;
+    /// update/refresh the cached ORM value of a given ID, making its own copy
+    procedure SetValue(aID: TID; aOrm: TObject);
     /// check if a record specified by its ID is in cache
     function Exists(aID: TID): boolean;
-    /// retrieve the cached TOrm binary of a given ID
-    function RetrieveBinary(aID: TID; var aOrm: RawByteString;
-      aTag: PCardinal = nil): boolean; overload;
+    /// return the TOrm instance stored in the cache
+    // - warning: not thread-safe - use TOrmCache.Retrieve to get a proper copy
+    // - returns nil if not found or SetTimeOut was called
+    function Get(aID: TID): pointer;
     /// low-level retrieve of a cached TOrm entry
     // - returns nil if not found, ORMCACHE_DEPRECATED if deprecated
     // - warning: should be called within proper Safe lock/unlock
-    function RetrieveEntry(aID: TID): POrmCacheEntryValue;
-    /// compute how much memory stored entries are using
-    // - will also flush outdated entries
-    function CachedMemory(FlushedEntriesCount: PInteger = nil): cardinal;
+    function RetrieveEntry(aID: TID): POrmCacheTableValue;
     /// returns the number of TOrm instances within this cache
     function CachedEntries: cardinal;
   end;
-  POrmCacheEntry = ^TOrmCacheEntry;
+  POrmCacheTable = ^TOrmCacheTable;
 
   /// for TOrmCache, stores per-table settings and JSON values
   // - this dynamic array will follow TRest.Model.Tables[] layout, i.e. one
   // entry per TOrm class in the data model
-  TOrmCacheEntryDynArray = array of TOrmCacheEntry;
+  TOrmCacheTableDynArray = array of TOrmCacheTable;
 
 
 
@@ -4034,6 +4039,7 @@ begin
     fName := copy(aName, 2, MaxInt)
   else
     fName := aName;
+  fJsonName := fName;
   fNameUnflattened := fName;
   fOrmFieldType := aOrmFieldType;
   fOrmFieldTypeStored := aOrmFieldType;
@@ -4395,10 +4401,14 @@ var
     begin
       // Birth.Date -> Birth or Address.Country.Iso -> Address_Country
       res.fName := ToUtf8(aFlattenedProps[max]^.Name^);
+      res.fJsonName := res.fName;
       dec(max);
     end;
     for i := max downto 0 do
+    begin
       res.fName := ToUtf8(aFlattenedProps[i]^.Name^) + '_' + result.Name;
+      res.fJsonName := res.fName;
+    end;
   end;
 
 begin
@@ -4769,7 +4779,8 @@ begin
   if err <> 0 then
     // we allow a value stated as text
     if fOrmFieldType = oftBoolean then
-      i := Ord(IdemPropNameU(Value, 'TRUE') or IdemPropNameU(Value, 'YES'))
+      i := ord(PropNameEquals(Value, 'TRUE') or
+               PropNameEquals(Value, 'YES'))
     else
       i := fEnumType^.GetEnumNameValue(pointer(Value), length(Value))
   else if fOrmFieldType = oftBoolean then // normalize boolean values range to 0,1
@@ -7207,6 +7218,7 @@ begin
     InternalAddParentsFirst(aTable, nil)
   else
     InternalAddParentsFirst(aTable);
+  fIDJsonName := 'RowID'; // default name for TOrm.RttiJsonWrite
 end;
 
 destructor TOrmPropInfoList.Destroy;
@@ -7297,7 +7309,7 @@ begin
         [self, fTable, aItem.Name]);
   // check that this property name is not already defined
   for f := 0 to fCount - 1 do
-    if IdemPropNameU(fList[f].Name, aItem.Name) then
+    if PropNameEquals(fList[f].Name, aItem.Name) then
       raise EOrmException.CreateUtf8(
         '%.Add: % has duplicated name [%]', [self, fTable, aItem.Name]);
   // add to the internal list
@@ -7523,13 +7535,27 @@ begin
     Names[i] := fList[i].Name;
 end;
 
+procedure TOrmPropInfoList.JsonRenameProperties(const OriginalNewPairs: array of RawUtf8);
+var
+  i, p: PtrInt;
+begin
+  for i := 0 to (length(OriginalNewPairs) shr 1) - 1 do
+  begin
+    p := IndexByNameOrExcept(OriginalNewPairs[i * 2]);
+    if p < 0 then // ID
+      fIDJsonName := OriginalNewPairs[i * 2 + 1]
+    else
+      List[p].fJsonName := OriginalNewPairs[i * 2 + 1];
+  end;
+end;
+
 function TOrmPropInfoList.IndexByNameUnflattenedOrExcept(const aName: RawUtf8): integer;
 begin
   if pilSubClassesFlattening in fOptions then
   begin
     // O(n) iteration over unflattened field names
     for result := 0 to Count - 1 do
-      if IdemPropNameU(List[result].NameUnflattened, aName) then
+      if IdemPropNameU(List[result].NameUnflattened, aName) then // inlined
         exit;
   end
   else
@@ -7739,7 +7765,8 @@ begin // very fast, thanks to the TypeInfo() compiler-generated function
         exit;
       end;
     {$ifdef PUBLISHRECORD}
-    rkRecord {$ifdef FPC}, rkObject{$endif}:
+    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
+    rkRecord:
       begin
         result := oftUtf8Custom;
         exit;
@@ -9283,7 +9310,7 @@ end;
 
 type
   /// a static object is used for smaller recursive stack size and faster code
-  // - these special sort implementation do the comparison first by the
+  // - these special sort implementations do the comparison first by the
   // designed field, and, if the field value is identical, the ID value is
   // used (it will therefore sort by time all identical values)
   // - code generated is very optimized: stack and memory usage, CPU registers
@@ -10336,7 +10363,7 @@ begin
 end;
 
 
-{ ************ TOrmLocks and TOrmCacheEntry Basic Structures }
+{ ************ TOrmLocks and TOrmCacheTable Basic Structures }
 
 { TOrmLocks }
 
@@ -10498,19 +10525,28 @@ begin
 end;
 
 
-{ TOrmCacheEntry }
+{ TOrmCacheTable }
 
-procedure TOrmCacheEntry.Init;
+procedure TOrmCacheTable.Init;
 begin
-  Values.InitSpecific(TypeInfo(TOrmCacheEntryValueDynArray),
+  Values.InitSpecific(TypeInfo(TOrmCacheTableValueDynArray),
     Value, ptInt64, @Count); // will search/sort by first field ID: TID/ptInt64
 end;
 
-procedure TOrmCacheEntry.Clear;
+procedure TOrmCacheTable.ClearValue;
+var
+  i: PtrInt;
+begin
+  for i := 0 to Count - 1 do
+    Value[i].Value.Free;
+  Values.Clear;
+end;
+
+procedure TOrmCacheTable.Clear;
 begin
   Safe.WriteLock;
   try
-    Values.Clear;
+    ClearValue;
     CacheAll := false;
     CacheEnable := false;
     TimeOutMS := 0;
@@ -10519,21 +10555,23 @@ begin
   end;
 end;
 
-procedure TOrmCacheEntry.LockedFlushCacheEntry(Index: integer);
+procedure TOrmCacheTable.LockedFlushCacheEntry(Index: integer);
 begin
   if cardinal(Index) < cardinal(Count) then
     if CacheAll then
-      Values.FastDeleteSorted(Index)
+    begin
+      Value[Index].Value.Free;
+      Values.FastDeleteSorted(Index);
+    end
     else
       with Value[Index] do
       begin // keep ID as registered by SetCache(ID), clear all other fields
         Timestamp512 := 0;
-        Tag := 0;
-        Binary := '';
+        FreeAndNil(Value);
       end;
 end;
 
-function SortFind(const P: TOrmCacheEntryValueDynArray; V: TID; R: PtrInt): PtrInt;
+function SortFind(const P: TOrmCacheTableValueDynArray; V: TID; R: PtrInt): PtrInt;
 var
   m, L: PtrInt;
   res: integer;
@@ -10556,9 +10594,9 @@ begin
   result := -1;
 end;
 
-procedure TOrmCacheEntry.FlushCacheEntry(aID: TID);
+procedure TOrmCacheTable.FlushCacheEntry(aID: TID);
 begin
-  if not CacheEnable then
+  if (@self = nil) or not CacheEnable then
     exit;
   Safe.WriteLock;
   try
@@ -10569,11 +10607,11 @@ begin
   end;
 end;
 
-procedure TOrmCacheEntry.FlushCacheEntries(const aID: array of TID);
+procedure TOrmCacheTable.FlushCacheEntries(const aID: array of TID);
 var
   i: PtrInt;
 begin
-  if not CacheEnable then
+  if (@self = nil) or not CacheEnable then
     exit;
   Safe.WriteLock;
   try
@@ -10585,28 +10623,46 @@ begin
   end;
 end;
 
-function TOrmCacheEntry.FlushCacheOutdatedEntries(aOutdatedTime512: cardinal): cardinal;
+function TOrmCacheTable.FlushCacheOutdatedEntries: cardinal;
 var
+  tix512: cardinal;
   i: integer;
-  v: POrmCacheEntryValue;
+  v: POrmCacheTableValue;
 begin
   result := 0;
-  if aOutdatedTime512 = 0 then
-    aOutdatedTime512 := GetOutdatedTimestamp512;
-  if (aOutdatedTime512 = 0) or
+  tix512 := GetOutdatedTimestamp512;
+  if (tix512 = 0) or
      (Count = 0) or
      not CacheEnable then
     exit;
-  Safe.WriteLock; // caller is likely to have detected deprecates in a ReadLock
+  Safe.ReadLock; // make a first quick loop without full write blocking
+  try
+    v := pointer(Value);
+    for i := 1 to Count do
+    begin
+      if (v^.Timestamp512 <> 0) and
+         (v^.Timestamp512 < tix512) then
+      begin
+        v := nil; // there are some deprecated entries
+        break;
+      end;
+      inc(v);
+    end;
+  finally
+    Safe.ReadUnLock;
+  end;
+  if v <> nil then
+    exit; // nothing to flush
+  Safe.WriteLock;
   try
     v := @Value[Count];
     for i := Count - 1 downto 0 do // backwards: LockedFlushCacheEntry deletion
     begin
       dec(v);
       if (v^.Timestamp512 <> 0) and
-         (v^.Timestamp512 < aOutdatedTime512) then
+         (v^.Timestamp512 < tix512) then // older than current threshold
       begin
-        LockedFlushCacheEntry(i); // older than current threshold
+        LockedFlushCacheEntry(i);
         inc(result);
         if CacheAll then
           v := @Value[i]; // may have been reallocated/moved
@@ -10617,25 +10673,24 @@ begin
   end;
 end;
 
-procedure TOrmCacheEntry.FlushCacheAllEntries;
+procedure TOrmCacheTable.FlushCacheAllEntries;
 var
   i: integer;
-  v: POrmCacheEntryValue;
+  v: POrmCacheTableValue;
 begin
-  if not CacheEnable then
+  if (@self = nil) or not CacheEnable then
     exit;
   Safe.WriteLock;
   try
     if CacheAll then
-      Values.Clear
+      ClearValue
     else
     begin // keep ID as registered by SetCache(ID), clear all other fields
       v := pointer(Value);
       for i := 1 to Count do
       begin
         v^.Timestamp512 := 0;
-        v^.Tag := 0;
-        v^.Binary := '';
+        FreeAndNil(v^.Value);
         inc(v);
       end;
     end;
@@ -10644,21 +10699,21 @@ begin
   end;
 end;
 
-procedure TOrmCacheEntry.SetCacheAll;
+procedure TOrmCacheTable.SetCacheAll;
 begin
   Safe.WriteLock;
   try
     CacheEnable := true;
     CacheAll := true;
-    Values.Clear;
+    ClearValue;
   finally
     Safe.WriteUnLock;
   end;
 end;
 
-procedure TOrmCacheEntry.SetCache(aID: TID);
+procedure TOrmCacheTable.SetCache(aID: TID);
 var
-  Rec: TOrmCacheEntryValue;
+  Rec: TOrmCacheTableValue;
   i: integer; // FastLocateSorted() requires integer
 begin
   if CacheAll then
@@ -10671,7 +10726,7 @@ begin
     begin
       Rec.ID := aID;
       Rec.Timestamp512 := 0; // indicates no value cache yet
-      Rec.Tag := 0;
+      Rec.Value := nil;
       Values.FastAddSorted(i, Rec);
     end; // do nothing if aID is already in Value[]
   finally
@@ -10679,43 +10734,47 @@ begin
   end;
 end;
 
-function TOrmCacheEntry.GetOutdatedTimestamp512: cardinal;
+function TOrmCacheTable.GetOutdatedTimestamp512: cardinal;
 var
   graceperiod: Int64;
 begin
   result := 0; // means no deprecation (either TimeOutMS=0 or too soon)
-  if TimeOutMS = 0 then
+  if (@self = nil) or (TimeOutMS = 0) then
     exit;
   graceperiod := GetTickCount64 - Int64(TimeOutMS);
   if graceperiod > 0 then // may be < 0 if the computer just started
     result := graceperiod shr 9;
 end;
 
-procedure TOrmCacheEntry.SetBinary(aID: TID; const aOrm: RawByteString;
-  aTag: cardinal);
+procedure TOrmCacheTable.SetValue(aID: TID; aOrm: TObject);
 var
-  new: TOrmCacheEntryValue;
+  new: TOrmCacheTableValue;
   i: integer; // FastLocateSorted() requires integer
 begin
   if not CacheEnable then
     exit;
   new.ID := aID;
-  new.Binary := aOrm;
   new.Timestamp512 := GetTickCount64 shr 9; // 512ms resolution
-  new.Tag := aTag;
   Safe.WriteLock;
   try
     if Values.FastLocateSorted(new, i) then
+    begin
+      Value[i].Value.Free;
+      new.Value := CopyObject(aOrm);
       Value[i] := new // replace existing or registered ID
+    end
     else if CacheAll and
             (i >= 0) then
+    begin
+      new.Value := CopyObject(aOrm);
       Values.FastAddSorted(i, new); // for SetCache(aID) or SetCacheAll
+    end;
   finally
     Safe.WriteUnLock;
   end;
 end;
 
-function TOrmCacheEntry.RetrieveEntry(aID: TID): POrmCacheEntryValue;
+function TOrmCacheTable.RetrieveEntry(aID: TID): POrmCacheTableValue;
 var
   i: PtrInt;
 begin
@@ -10726,45 +10785,15 @@ begin
   if i < 0 then
     exit;
   result := @Value[i];
-  if result^.Timestamp512 = 0 then
-    result := nil // 0 when there is no binary value cached
-  else if (TimeOutMS <> 0) and
-          (result^.Timestamp512 < GetOutdatedTimestamp512) then
+  if (TimeOutMS <> 0) and
+     (result^.Timestamp512 <> 0) and
+     (result^.Timestamp512 < GetOutdatedTimestamp512) then
     result := ORMCACHE_DEPRECATED; // too old
 end;
 
-function TOrmCacheEntry.RetrieveBinary(aID: TID; var aOrm: RawByteString;
-  aTag: PCardinal): boolean;
+function TOrmCacheTable.Exists(aID: TID): boolean;
 var
-  e: POrmCacheEntryValue;
-begin
-  result := false;
-  if (Count <= 0) or
-     (aID <= 0) or
-     not CacheEnable then
-    exit;
-  Safe.ReadLock;
-  try
-    e := RetrieveEntry(aID);
-    if (e <> nil) and
-       (e <> ORMCACHE_DEPRECATED) then
-    begin
-      if aTag <> nil then
-        aTag^ := e^.Tag;
-      aOrm := e^.Binary;
-      result := true; // found a non outdated serialized value in cache
-      exit;
-    end;
-  finally
-    Safe.ReadUnLock;
-  end;
-  if e = ORMCACHE_DEPRECATED then // happens at most every 512 ms
-    FlushCacheEntry(aID); // Safe.WriteLock outside Safe.ReadLock
-end;
-
-function TOrmCacheEntry.Exists(aID: TID): boolean;
-var
-  e: POrmCacheEntryValue;
+  e: POrmCacheTableValue;
 begin
   result := false;
   if (Count <= 0) or
@@ -10775,7 +10804,9 @@ begin
   try
     e := RetrieveEntry(aID);
     result := (e <> nil) and
-              (e <> ORMCACHE_DEPRECATED);
+              (e <> ORMCACHE_DEPRECATED) and
+              (e^.Timestamp512 <> 0) and
+              (e^.Value <> nil);
   finally
     Safe.ReadUnLock;
   end;
@@ -10783,41 +10814,22 @@ begin
     FlushCacheEntry(aID); // Safe.WriteLock outside Safe.ReadLock
 end;
 
-function TOrmCacheEntry.CachedMemory(FlushedEntriesCount: PInteger): cardinal;
+function TOrmCacheTable.Get(aID: TID): pointer;
 var
-  i: integer;
-  tix512, deprecated: cardinal;
-  v: POrmCacheEntryValue;
+  e: POrmCacheTableValue;
 begin
-  result := 0;
-  if (Count <= 0) or
-     not CacheEnable then
+  result := nil;
+  if (@self = nil) or
+     not CacheEnable or
+     (TimeOutMS <> 0) then // by safety: TimeOutMS may delete the instance
     exit;
-  tix512 := GetOutdatedTimestamp512;
-  deprecated := 0;
-  Safe.ReadLock;
-  try
-    v := pointer(Value);
-    for i := 1 to Count do
-    begin
-      if v^.Timestamp512 <> 0 then
-        if (tix512 <> 0) and
-           (v^.Timestamp512 < tix512) then
-          inc(deprecated) // too old
-        else
-          inc(result, length(v^.Binary) + (SizeOf(v^) + 16));
-      inc(v);
-    end;
-  finally
-    Safe.ReadUnLock;
-  end;
-  if deprecated <> 0 then // happens at most every 512 ms
-    deprecated := FlushCacheOutdatedEntries(tix512); // WriteLock after ReadLock
-  if FlushedEntriesCount <> nil then
-    inc(FlushedEntriesCount^, deprecated);
+  e := RetrieveEntry(aID);
+  if (e <> nil) and
+     (e <> ORMCACHE_DEPRECATED) then
+    result := e^.Value; // no copy
 end;
 
-function TOrmCacheEntry.CachedEntries: cardinal;
+function TOrmCacheTable.CachedEntries: cardinal;
 var
   i: PtrInt;
 begin
@@ -10870,7 +10882,7 @@ begin
   if (self <> nil) and
      (PropName <> '') then
     for i := 0 to high(BlobFields) do
-      if IdemPropNameU(BlobFields[i].Name, PropName) then
+      if IdemPropNameU(BlobFields[i].Name, PropName) then // inlined
       begin
         result := BlobFields[i].PropInfo;
         exit;
@@ -10919,9 +10931,9 @@ begin
     with Fields.List[FieldIndex] do
     begin
       Attributes := Attributes - [aBinaryCollation, aUnicodeNoCaseCollation];
-      if IdemPropNameU(aCollationName, 'BINARY') then
+      if PropNameEquals(aCollationName, 'BINARY') then
         Attributes := Attributes + [aBinaryCollation]
-      else if IdemPropNameU(aCollationName, 'UNICODENOCASE') then
+      else if PropNameEquals(aCollationName, 'UNICODENOCASE') then
         Attributes := Attributes + [aUnicodeNoCaseCollation];
     end;
   end;

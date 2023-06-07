@@ -16,6 +16,7 @@ interface
 
 {$define JSONBENCHMARK_FPJSON}         // fpjson = 24 MB/s
 {.$define JSONBENCHMARK_JSONTOOLS}     // jsontools = 38 MB /s
+{.$define JSONBENCHMARK_LGENERICS}     // lgenerics = 48 MB /s
 
 {.$define JSONBENCHMARK_DELPHIJSON}    // Delphi system.json = 5.8 MB/s on XE8
 {.$define JSONBENCHMARK_JDO}           // JsonDataObjects = 103 MB/s
@@ -65,6 +66,10 @@ uses
   {$ifdef JSONBENCHMARK_WSFT}
   WinJson,
   {$endif JSONBENCHMARK_WSFT}
+  {$ifdef JSONBENCHMARK_LGENERICS}
+  lgUtils,
+  lgJson,
+  {$endif JSONBENCHMARK_LGENERICS}
   mormot.core.base,
   mormot.core.os,
   mormot.core.text,
@@ -86,6 +91,9 @@ uses
   mormot.core.test,
   mormot.lib.z,
   mormot.lib.lizard,
+  {$ifdef OSWINDOWS}
+  mormot.lib.win7zip,
+  {$endif OSWINDOWS}
   mormot.net.sock,
   mormot.db.core,
   mormot.db.nosql.bson,
@@ -139,6 +147,11 @@ type
     DataFile: TFileName; // (may be truncated) mormot2tests executable copy
     M: TMemoryStream;
     crc0, crc1: cardinal; // crc0=plain crc1=deflated
+    ZipFile: TFileName;
+    {$ifdef OSWINDOWS}
+    Tot7z: Int64;
+    function Callback7z(const sender: I7zArchive; current, total: Int64): HRESULT;
+    {$endif OSWINDOWS}
   public
     procedure Setup; override;
     procedure CleanUp; override;
@@ -149,6 +162,10 @@ type
     procedure GZIPFormat;
     /// .zip archive handling
     procedure ZIPFormat;
+    {$ifdef OSWINDOWS}
+    /// validate the 7z.dll wrapper in mormot.lib.win7zip
+    procedure _7Zip;
+    {$endif OSWINDOWS}
     /// SynLZ internal format
     procedure _SynLZ;
     /// TAlgoCompress classes
@@ -979,7 +996,6 @@ begin
 end;
 
 type
-  {$M+} // TPersistent has no RTTI for LVCL!
   TPersistentToJson = class(TPersistent)
   protected
     fName: RawUtf8;
@@ -993,7 +1009,6 @@ type
     property Sets: TSynBackgroundThreadProcessSteps
       read fSets write fSets default[];
   end;
-  {$M-}
 
   TRange = record
     Min, Max: Integer;
@@ -1274,6 +1289,7 @@ var
   J, J2, U, U2: RawUtf8;
   info: TGetJsonField;
   P: PUtf8Char;
+  vv: variant;
   binary, zendframeworkJson, discogsJson: RawByteString;
   V: array[0..4] of TValuePUtf8Char;
   i, a, n, err: integer;
@@ -1874,8 +1890,13 @@ var
     J := ObjectToJson(GDtoObject, [woDontStoreVoid]);
     CheckEqual(J, U);
     Check(G2.NestedObject.FieldInteger = 0);
+    Check(GetValueObject(G2, 'nestedobject.fieldinteger', vv));
+    Check(vv = 0);
     Check(SetValueObject(G2, 'nestedobject.fieldinteger', 10));
     Check(G2.NestedObject.FieldInteger = 10);
+    Check(GetValueObject(G2, 'nestedobject.fieldinteger', vv));
+    Check(vv = 10);
+    Check(not GetValueObject(G2, 'nestedobject.wrongfield', vv));
 
     ClearObject(G2);
     U := ObjectToIni(G2);
@@ -3263,6 +3284,9 @@ var
   {$ifdef JSONBENCHMARK_WSFT}
   ws: WinJson.TJson;
   {$endif JSONBENCHMARK_WSFT}
+  {$ifdef JSONBENCHMARK_LGENERICS}
+  lg: lgJson.TJsonNode;
+  {$endif JSONBENCHMARK_LGENERICS}
 begin
   people := StringFromFile(WorkDir + 'People.json');
   if people = '' then
@@ -3572,6 +3596,18 @@ begin
   end;
   NotifyTestSpeed('WinSoft WinJson', c div 10, len div 10, @timer, ONLYLOG);
   {$endif JSONBENCHMARK_WSFT}
+  {$ifdef JSONBENCHMARK_LGENERICS}
+  timer.Start;
+  for i := 1 to ITER div 10 do
+  begin
+    if CheckFailed(lgJson.TJsonNode.TryParse(peoples, lg)) then
+      continue;
+    CheckEqual(lg.Count, Count);
+    lg.Free;
+  end;
+  NotifyTestSpeed('LGenerics', c div 10, len div 10, @timer, ONLYLOG);
+  {$endif JSONBENCHMARK_LGENERICS}
+
   sample := StringFromFile(WorkDir + 'sample.json');
   if sample <> '' then
     begin
@@ -5153,6 +5189,27 @@ type
   TSetMyEnum = set of TMyEnum;
   TSetMyEnumPart = set of TMyEnumPart; // validate partial sets
 
+  TComplexClass = class(TSynPersistent)
+  private
+    csv: RawUtf8;
+    function GetArray: TRawUtf8DynArray;
+    procedure SetArray(const AValue: TRawUtf8DynArray);
+  published
+    property arr: TRawUtf8DynArray
+      read GetArray write SetArray;
+  end;
+
+function TComplexClass.GetArray: TRawUtf8DynArray;
+begin
+  result := nil;
+  CsvToRawUtf8DynArray(pointer(csv), result);
+end;
+
+procedure TComplexClass.SetArray(const AValue: TRawUtf8DynArray);
+begin
+  csv := RawUtf8ArrayToCsv(AValue);
+end;
+
 procedure TTestCoreProcess._RTTI;
 var
   i: Integer;
@@ -5164,7 +5221,21 @@ var
   eoo: AnsiChar;
   e: TEmoji;
   ep: TSetMyEnumPart;
+  cc: TComplexClass;
+  v: variant;
 begin
+  cc := TComplexClass.Create;
+  try
+    CheckEqual(RawUtf8ArrayToCsv(cc.arr), '');
+    Check(GetValueObject(cc, 'arr', v));
+    CheckEqual(_Safe(v)^.ToJson, '[]');
+    cc.arr := TRawUtf8DynArrayFrom(['win32', 'win64']);
+    CheckEqual(RawUtf8ArrayToCsv(cc.arr), 'win32,win64');
+    Check(GetValueObject(cc, 'arr', v));
+    CheckEqual(_Safe(v)^.ToJson, '["win32","win64"]');
+  finally
+    cc.Free;
+  end;
   ep := [enTwo];
   CheckEqual(byte(ep), 2);
   tmp := '["enTwo"]';
@@ -6004,7 +6075,17 @@ begin
       json[i] := WorkDir + json[i];
     ZipAppendFiles(DataFile, FN2, TFileNameDynArray(json), false, 1);
     Check(ZipTest(FN2), 'zipjson2');
-    DeleteFile(FN);
+    {$ifdef OSWINDOWS}
+    if ZipFile = '' then
+    begin
+      // to be used by TTestCoreCompression._7Zip below
+      ZipFile := WorkDir + 'test1.zip';
+      DeleteFile(ZipFile);
+      RenameFile(FN, ZipFile);
+    end
+    else
+    {$endif OSWINDOWS}
+      DeleteFile(FN);
     DeleteFile(FN2);
   end;
 end;
@@ -6168,25 +6249,147 @@ begin
   Check(AlgoDeflateFast.AlgoName = 'deflatefast');
 end;
 
-{ FPC Linux x86-64 (in VM) with static linked library for a 53MB log file:
-     TAlgoSynLz 53 MB->5 MB: comp 650:62MB/s decomp 90:945MB/s
-     TAlgoLizard 53 MB->3.9 MB: comp 55:4MB/s decomp 139:1881MB/s
-     TAlgoLizardFast 53 MB->6.8 MB: comp 695:89MB/s decomp 196:1522MB/s
-     TAlgoDeflate 53 MB->4.8 MB: comp 71:6MB/s decomp 48:540MB/s
-     TAlgoDeflateFast 53 MB->7 MB: comp 142:18MB/s decomp 56:428MB/s
-  Delphi Win64 with external lizard1-64.dll:
-     TAlgoSynLz 53 MB->5 MB: comp 667:63MB/s decomp 103:1087MB/s
-     TAlgoLizard 53 MB->3.9 MB: comp 61:4MB/s decomp 169:2290MB/s
-     TAlgoLizardFast 53 MB->6.8 MB: comp 690:89MB/s decomp 263:2039MB/s
-     TAlgoLizardHuffman 53 MB->2 MB: comp 658:25MB/s decomp 86:2200MB/s
-     TAlgoDeflate 53 MB->4.8 MB: comp 25:2MB/s decomp 19:214MB/s
-     TAlgoDeflateFast 53 MB->7 MB: comp 52:6MB/s decomp 23:176MB/s
-  speed difference may come from the FPC/Delphi heap manager, and/or the Linux VM
+{$ifdef OSWINDOWS}
 
-  From realistic tests, SynLZ may focus on small buffers, or very compressible
-  log files like above. But Lizard/LizardFast seem a better candidate for
-  fast decompression of any kind of data, especially large JSON/binary buffers.
-}
+const
+  ZIP_EXTS = '*.zip;*.jar;*.docx;*.pptx;*.xlsx;*.xpi;*.odt;*.ods';
+  
+procedure TTestCoreCompression._7Zip;
+var
+  s: RawByteString;
+  lib, folder, newfile1, newfile2: TFileName;
+  i: PtrInt;
+  tot1, tot2: Int64;
+  zlib: I7zLib;
+  zin: I7zReader;
+  zout: I7zWriter;
+  files: TFindFilesDynArray;
+begin
+  ZipFile := WorkDir + 'test1.zip';
+  CheckEqual(ToUtf8(T7zLib.FormatGuid(fhGZip)),
+    '23170F69-40C1-278A-1000-000110EF0000');
+  Check(T7zLib.FormatDetect(Zipfile, {onlyext=}true) = fhZip);
+  Check(T7zLib.FormatDetect(Zipfile, false) = fhZip);
+  Check(T7zLib.FormatDetect(Executable.ProgramFileName, true) = fhPe);
+  Check(T7zLib.FormatDetect(Executable.ProgramFileName, false) = fhPe);
+  Check(T7zLib.FormatFileExtension(fhZip) = 'zip');
+  Check(T7zLib.FormatFileExtensions(fhZip) = ZIP_EXTS);
+  lib := Executable.ProgramFilePath + '7z.dll';
+  if FileExists(lib) then
+    begin
+      // validate I7zReader
+      zin := New7zReader(ZipFile, fhUndefined, lib);
+      Check(zin.Format = fhZip);
+      Check(zin.FormatExt = 'zip');
+      Check(zin.FormatExts = ZIP_EXTS);
+      CheckEqual(zin.Count, 5, 'count');
+      tot1 := 0;
+      for i := 0 to zin.Count - 1 do
+        inc(tot1, zin.Size[i]);
+      {with zin do
+        for i := 0 to Count - 1 do
+           writeln('fullname=',FullName[i], ' zipname=',ZipName[i],
+          ' size=',Size[i], ' packsize=',packsize[i], ' method=',Method[i],
+          ' date=', DateTimeToIso8601text(ModDate[i]));}
+      zin.SetProgressCallback(Callback7z);
+      Tot7z := 0;
+      s := zin.Extract('REP1\ONE.exe');
+      Check(s = Data, 'one');
+      CheckEqual(length(s), Tot7z, 'callbacksizeone');
+      Tot7z := 0;
+      s := zin.Extract('exe.1mb');
+      Check(s = Data, 'exe');
+      CheckEqual(length(s), Tot7z, 'callbacksizeexe');
+      Tot7z := 0;
+      zin.ExtractAll;
+      CheckEqual(tot1, Tot7z, 'callbacksize1');
+      folder := WorkDir + '7zipout';
+      DirectoryDelete(folder);
+      Check(FindFiles(folder) = nil);
+      Tot7z := 0;
+      zin.ExtractAll(folder, {nosubfolder=}true);
+      CheckEqual(tot1, Tot7z, 'callbacksize2');
+      files := FindFiles(folder);
+      CheckEqual(length(files), zin.Count, 'extractto');
+      tot2 := 0;
+      for i := 0 to high(files) do
+        inc(tot2, files[i].Size);
+      CheckEqual(tot1, tot2, 'extractsize');
+      DirectoryDelete(folder);
+      Check(FindFiles(folder) = nil);
+      Tot7z := 0;
+      zin.Extract('exe.1mb', folder);
+      CheckEqual(length(Data), Tot7z, 'extractfileto');
+      Check(length(FindFiles(folder)) = 1);
+      // validate I7zWriter
+      newfile1 := WorkDir + 'from7zadd.zip';
+      newfile2 := WorkDir + 'from7zupd.zip';
+      zout := New7ZWriter(fhZip, lib);
+      zout.AddFile(folder + '\exe.1mb', 'A.1mb');
+      zout.AddBuffer('B.1mb', data);
+      zout.SaveToFile(newfile1);
+      zin := New7zReader(newfile1, fhUndefined, lib);
+      CheckEqual(zin.Count, 2);
+      zin.SetProgressCallback(Callback7z);
+      Tot7z := 0;
+      s := zin.Extract('A.1mb');
+      Check(s = Data, 'a');
+      CheckEqual(length(s), Tot7z, 'callbacksizeexe');
+      s := zin.Extract('B.1mb');
+      Check(s = Data, 'b');
+      s := zin.Extract('C.1mb');
+      Check(s = '', 'c');
+      zin := nil; // so that we could change the file
+      zout := nil;
+      zout := New7zWriter(newfile1, fhUndefined, lib);
+      zout.SetProgressCallback(Callback7z);
+      Tot7z := 0;
+      zout.AddFile(folder + '\exe.1mb', 'C.1mb');
+      zout.AddBuffer('A.1mb', copy(Data, 1, 200));
+      zout.AddBuffer('void.txt', '');
+      {with zout do
+        for i := 0 to Count - 1 do
+           writeln('fullname=',FullName[i], ' zipname=',ZipName[i],
+          ' size=',Size[i], ' packsize=',packsize[i], ' method=',Method[i],
+          ' date=', DateTimeToIso8601text(ModDate[i]));}
+      CheckEqual(Tot7z, 0);
+      Tot7z := 0;
+      zout.SaveToFile(newfile2);
+      Check(Tot7z <> 0);
+      zout := nil; // so that we could read the file
+      zlib := T7zLib.Create(lib);
+      zin := zlib.NewReader(newfile2);
+      CheckEqual(zin.Count, 4);
+      s := zin.Extract('A.1mb');
+      Check(length(s) = 200, 'ua1');
+      Check(CompareMem(pointer(Data), pointer(s), 200), 'ua2');
+      s := zin.Extract('B.1mb');
+      Check(s = Data, 'ub');
+      s := zin.Extract('C.1mb');
+      Check(s = Data, 'uc');
+      s := zin.Extract('void.txt');
+      Check(s = '', 'uv');
+      zin := nil; // so that we could delete the file
+      Check(DeleteFile(newfile1));
+      Check(DeleteFile(newfile2));
+      DirectoryDelete(folder);
+      Check(FindFiles(folder) = nil);
+    end;
+  Check(DeleteFile(ZipFile));
+end;
+
+function TTestCoreCompression.Callback7z(const sender: I7zArchive;
+  current, total: Int64): HRESULT;
+begin
+  result := S_OK;
+  Check(current <= total);
+  if Tot7z = 0 then
+    Tot7z := total
+  else
+    CheckEqual(Tot7z, total);
+end;
+
+{$endif OSWINDOWS}
 
 
 end.

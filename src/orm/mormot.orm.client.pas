@@ -119,7 +119,7 @@ type
       const CustomFields: TFieldBits = []): integer;
     function BatchUpdate(Value: TOrm; const CustomFields: TFieldBits = [];
       DoNotAutoComputeFields: boolean = false): integer; overload;
-    function BatchUpdate(Value: TOrm; const CustomFieldsCsv: RawUtf8;
+    function BatchUpdate(Value: TOrm; const FieldsCsv: RawUtf8;
       DoNotAutoComputeFields: boolean = false): integer; overload;
     function BatchDelete(ID: TID): integer; overload;
     function BatchDelete(Table: TOrmClass; ID: TID): integer; overload;
@@ -297,8 +297,8 @@ type
     function ClientRetrieve(TableModelIndex: integer; ID: TID;
       ForUpdate: boolean; var InternalState: cardinal;
       var Resp: RawUtf8): boolean; override;
-    function EngineList(const SQL: RawUtf8; ForceAjax: boolean = false;
-      ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
+    function EngineList(TableModelIndex: integer; const SQL: RawUtf8;
+      ForceAjax: boolean = false; ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
     function EngineExecute(const SQL: RawUtf8): boolean; override;
     function EngineAdd(TableModelIndex: integer;
       const SentData: RawUtf8): TID; override;
@@ -448,7 +448,7 @@ begin
     result := fBatchCurrent.Update(Value, CustomFields, DoNotAutoComputeFields);
 end;
 
-function TRestOrmClient.BatchUpdate(Value: TOrm; const CustomFieldsCsv: RawUtf8;
+function TRestOrmClient.BatchUpdate(Value: TOrm; const FieldsCsv: RawUtf8;
   DoNotAutoComputeFields: boolean): integer;
 var
   bits: TFieldBits;
@@ -458,7 +458,7 @@ begin
      (fBatchCurrent = nil) or
      (Value.IDValue <= 0) or
      not BeforeUpdateEvent(Value) or
-     not Value.Orm.FieldBitsFromCsv(CustomFieldsCsv, bits) then
+     not Value.Orm.FieldBitsFromCsv(FieldsCsv, bits) then
     result := -1
   else
     result := fBatchCurrent.Update(Value, bits, DoNotAutoComputeFields);
@@ -712,8 +712,8 @@ begin
     result := false;
 end;
 
-function TRestOrmClientUri.EngineList(const SQL: RawUtf8; ForceAjax: boolean;
-  ReturnedRowCount: PPtrInt): RawUtf8;
+function TRestOrmClientUri.EngineList(TableModelIndex: integer;
+  const SQL: RawUtf8; ForceAjax: boolean; ReturnedRowCount: PPtrInt): RawUtf8;
 begin
   if ReturnedRowCount <> nil then
     raise EOrmException.CreateUtf8(

@@ -23,7 +23,7 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
-  mormot.core.unicode, // for efficient UTF-8 text process within HTTP
+  mormot.core.unicode,
   mormot.core.text,
   mormot.core.data,
   mormot.core.log,
@@ -52,6 +52,7 @@ type
   TWebSocketAsyncProcess = class(TWebSocketProcess)
   protected
     fConnection: TWebSocketAsyncConnection;
+    // non-blocking state machine to parse incoming frames
     fProcessPos: PtrInt;   // index in fConnection.fHttp.Process.Buffer/Len
     fReadPos: PtrInt;      // index in fConnection.fRd.Buffer/Len
     fOnRead: TWebProcessInFrame;
@@ -65,15 +66,15 @@ type
     // - other parameters should reflect the client or server expectations
     constructor Create(aConnection: TWebSocketAsyncConnection;
                        aProtocol: TWebSocketProtocol); reintroduce;
-    /// first step of the low level incoming WebSockets framing protocol over TCrtSocket
-    // - in practice, just call fSocket.SockInPending to check for pending data
+    /// first step of the low level incoming WebSockets framing protocol
+    // - check fConnection buffers for pending data
     function CanGetFrame(TimeOut: cardinal;
                          ErrorWithoutException: PInteger): boolean; override;
-    /// low level receive incoming WebSockets frame data over TCrtSocket
-    // - in practice, just call fSocket.SockInRead to check for pending data
+    /// low level receive incoming WebSockets frame data
+    // - check fConnection buffers for pending data
     function ReceiveBytes(P: PAnsiChar; count: PtrInt): integer; override;
-    /// low level receive incoming WebSockets frame data over TCrtSocket
-    // - in practice, just call fSocket.TrySndLow to send pending data
+    /// low level receive incoming WebSockets frame data
+    // - redirect to fConnection.Owner.Write()
     function SendBytes(P: pointer; Len: PtrInt): boolean; override;
     /// delayed process of outgoing WebSockets framing protocol
     // - will notify TWebSocketAsyncConnections.ProcessIdleTix sending
@@ -134,6 +135,7 @@ type
     fSettings: TWebSocketProcessSettings;
     fProcessClass: TWebSocketAsyncProcessClass;
     fOnWSUpgraded: TOnWebSocketProtocolUpgraded;
+    fOnWSClose: TOnWebSocketProtocolClosed;
     fOnWSConnect, fOnWSDisconnect: TOnWebSocketAsyncServerEvent;
     function DoUpgrade(Protocol: TWebSocketProtocol): integer; virtual;
     procedure DoConnect(Context: TWebSocketAsyncConnection); virtual;
@@ -182,6 +184,9 @@ type
     // - just after the main processing WebSockets frames process finished
     property OnWebSocketDisconnect: TOnWebSocketAsyncServerEvent
       read fOnWSDisconnect write fOnWSDisconnect;
+    /// same as OnWebSocketDisconnect, but using TWebSocketProtocol as parameter
+    property OnWebSocketClose: TOnWebSocketProtocolClosed
+      read fOnWSClose write fOnWSClose;
   end;
 
 
@@ -289,7 +294,7 @@ function TWebSocketAsyncConnection.DecodeHeaders: integer;
     // similar to TWebSocketServer.WebSocketProcessUpgrade
     serv := fServer as TWebSocketAsyncServer;
     result := serv.fProtocols.
-      ServerUpgrade(fHttp, fRemoteIP, fHandle, @fConnectionOpaque,
+      ServerUpgrade(fHttp, fRemoteIP, fHandle, GetConnectionOpaque,
       {out:} proto, {out:} resp);
     if result <> HTTP_SUCCESS then
       exit;
@@ -650,6 +655,11 @@ begin
     try
       fOnWSDisconnect(Context);
     except // ignore any external callback error during shutdown
+    end;
+  if Assigned(fOnWSClose) then
+    try
+      fOnWSClose(Context.fProcess.Protocol);
+    finally
     end;
 end;
 

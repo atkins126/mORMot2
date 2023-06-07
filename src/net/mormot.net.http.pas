@@ -25,13 +25,12 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
-  mormot.core.unicode, // for efficient UTF-8 text process within HTTP
+  mormot.core.unicode,
   mormot.core.text,
-  mormot.core.data,
-  mormot.core.buffers,
-  mormot.core.zip,
-  mormot.core.threads,
   mormot.core.rtti,
+  mormot.core.buffers,
+  mormot.core.data,
+  mormot.core.zip,
   mormot.net.sock;
 
 
@@ -159,6 +158,10 @@ function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
 function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
   out Value: Int64): boolean; overload;
 
+/// extract a 64-bit value from a 'Range: xxx-xxx ' input
+// - returned P^ points to the first non digit char - not as GetNextItemQWord()
+function GetNextRange(var P: PUtf8Char): Qword;
+
 const
   /// pseudo-header containing the current Synopse mORMot framework version
   XPOWEREDNAME = 'X-Powered-By';
@@ -184,6 +187,7 @@ type
     hrsGetBodyChunkedDataLastLine,
     hrsGetBodyContentLength,
     hrsWaitProcessing,
+    hrsWaitAsyncProcessing,
     hrsSendBody,
     hrsResponseDone,
     hrsUpgraded,
@@ -191,6 +195,7 @@ type
     hrsErrorRejected,
     hrsErrorMisuse,
     hrsErrorUnsupportedFormat,
+    hrsErrorUnsupportedRange,
     hrsErrorAborted,
     hrsErrorShutdownInProgress);
 
@@ -210,7 +215,16 @@ type
     hfConnectionKeepAlive,
     hfExpect100,
     hfHasRemoteIP,
-    hfContentStreamNeedFree);
+    hfHasAuthorization);
+
+  /// map the output state for THttpRequestContext.ResponseFlags
+  // - separated from THttpRequestHeaderFlags so that they would both be stored
+  // and accessed as one byte - which is faster than word on Intel CPUs
+  THttpRequestReponseFlags = set of (
+    rfAcceptRange,
+    rfRange,
+    rfContentStreamNeedFree,
+    rfAsynchronous);
 
   PHttpRequestContext = ^THttpRequestContext;
 
@@ -257,6 +271,8 @@ type
     State: THttpRequestState;
     /// map the presence of some HTTP headers, but retrieved during ParseHeader
     HeaderFlags: THttpRequestHeaderFlags;
+    /// define some flags when sending the response
+    ResponseFlags: THttpRequestReponseFlags;
     /// customize the HTTP process
     Options: THttpRequestOptions;
     /// could be set so that ParseHeader/GetTrimmed will intern RawUtf8 values
@@ -286,13 +302,22 @@ type
     // but retrieved during ParseHeader
     // - is the raw Token, excluding 'Authorization: Bearer ' trailing chars
     BearerToken: RawUtf8;
+    /// decoded 'Range: bytes=..' start value - default is 0
+    // - e.g. 1024 for 'Range: bytes=1024-1025'
+    // - equals -1 in case on unsupported multipart range requests
+    RangeOffset: Int64;
+    /// decoded 'Range: bytes=...' end value - default is -1 (until end of file)
+    // - e.g. 2 for 'Range: bytes=1024-1025'
+    // - e.g. -1 for 'Range: bytes=1024-'
+    // - contains size for CompressContentAndFinalizeHead Content-Range: header
+    RangeLength: Int64;
     /// will contain the data retrieved from the server, after all ParseHeader
     Content: RawByteString;
     /// same as HeaderGetValue('CONTENT-LENGTH'), but retrieved during ParseHeader
     // - is overridden with real Content length during HTTP body retrieval
     ContentLength: Int64;
     /// stream-oriented alternative to the Content in-memory buffer
-    // - is typically a TFileStream
+    // - is typically a TFileStreamEx
     ContentStream: TStream;
     /// same as HeaderGetValue('SERVER-INTERNALSTATE'), but retrieved by ParseHeader
     // - proprietary header, used with our RESTful ORM access
@@ -327,6 +352,9 @@ type
     // - note that GetHeader(HeadersUnFiltered=false) will set ContentType field
     // but let HeaderGetValue('CONTENT-TYPE') return ''
     function HeaderGetValue(const aUpperName: RawUtf8): RawUtf8;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// search if a value exists from the internal parsed Headers
+    function HeaderHasValue(const aUpperName: RawUtf8): boolean;
       {$ifdef HASINLINE} inline; {$endif}
     /// initialize ContentStream/ContentLength from a given file name
     // - if CompressGz is set, would also try for a cached local FileName+'.gz'
@@ -406,7 +434,7 @@ type
     // and HeaderFlags fields since HeaderGetValue() would return ''
     // - force HeadersUnFiltered=true to store all headers including the
     // connection-related fields, but increase memory and reduce performance
-    procedure GetHeader(HeadersUnFiltered: boolean = false);
+    function GetHeader(HeadersUnFiltered: boolean = false): boolean;
     /// retrieve the HTTP body (after uncompression if necessary)
     // - into Content or DestStream
     procedure GetBody(DestStream: TStream = nil);
@@ -441,7 +469,7 @@ type
 
 
 
-{ ******************** Abstract Server-Side Types used e.g. for Client-Server Protocol }
+{ ******************** Abstract Server-Side Types e.g. for Client-Server Protocol }
 
 type
   {$M+} // to have existing RTTI for published properties
@@ -496,19 +524,21 @@ type
     hraKerberos);
 
   /// available THttpServerRequest connection attributes
-  // - hsrHttps will indicates that the communication was made over HTTPS
-  // - hsrSecured is set if the transmission is encrypted or in-process, using
+  // - hsrHttps is set if the communication was made over HTTPS
+  // - hsrSecured if the transmission is encrypted or in-process, using
   // e.g. HTTPS/TLS or our proprietary AES/ECDHE algorithm over WebSockets
-  // - hsrWebsockets communication was made using WebSockets
-  // - hsrInProcess is done when run from the same process, i.e. on server side
-  // - hsrConnectionUpgrade is set when "connection: upgrade" is within headers
+  // - hsrWebsockets if communication was made using WebSockets
+  // - hsrInProcess when run from the same process, i.e. on server side
+  // - hsrConnectionUpgrade when "connection: upgrade" is within headers
+  // - hsrAuthorized when a valid "authorization:" header is set
   // - should exactly match TRestUriParamsLowLevelFlag in mormot.rest.core
   THttpServerRequestFlag = (
     hsrHttps,
     hsrSecured,
     hsrWebsockets,
     hsrInProcess,
-    hsrConnectionUpgrade);
+    hsrConnectionUpgrade,
+    hsrAuthorized);
 
   /// the THttpServerRequest connection attributes
   THttpServerRequestFlags = set of THttpServerRequestFlag;
@@ -517,9 +547,12 @@ type
   // - if defined, is called just before the body is retrieved from the client
   // - supplied parameters reflect the current input state, and could be
   // modified on the fly to adapt to the expected behavior
-  // - should return HTTP_SUCCESS=200 to continue the process, or an HTTP
-  // error code (e.g. HTTP_FORBIDDEN or HTTP_PAYLOADTOOLARGE) to reject
-  // the request
+  // - aBearerToken is either the "Authorization: Bearer xxxx" token, or
+  // the authenticated user name if the hsrAuthorized flag is set
+  // - should return HTTP_SUCCESS=200 to continue the process, or an HTTP error
+  // code (e.g. HTTP_FORBIDDEN or HTTP_PAYLOADTOOLARGE) to reject the request
+  // - returning HTTP_UNAUTHORIZED triggers the internal authentication process
+  // available on some servers (e.g. THttpApiServer or THttpAsyncServer)
   TOnHttpServerBeforeBody = function(var aUrl, aMethod, aInHeaders,
     aInContentType, aRemoteIP, aBearerToken: RawUtf8; aContentLength: Int64;
     aFlags: THttpServerRequestFlags): cardinal of object;
@@ -555,12 +588,11 @@ type
     fRespReason: RawUtf8;
     fInContent,
     fOutContent: RawByteString;
-    fRequestID: integer;
     fConnectionID: THttpServerConnectionID;
     fConnectionFlags: THttpServerRequestFlags;
     fAuthenticationStatus: THttpServerRequestAuthentication;
     fRespStatus: integer;
-    fConnectionThread: TSynThread;
+    fConnectionThread: TThread;
     fConnectionOpaque: PHttpServerConnectionOpaque;
     fUrlParamPos: PUtf8Char; // may be set by TUriTreeNode.LookupParam
     fRouteName: pointer; // = pointer(TUriTreeNodeData.Names)
@@ -571,8 +603,10 @@ type
   public
     /// prepare an incoming request from a parsed THttpRequestContext
     // - will set input parameters URL/Method/InHeaders/InContent/InContentType
-    // - will reset output parameters
-    procedure Prepare(const aHttp: THttpRequestContext; const aRemoteIP: RawUtf8); overload;
+    // - won't reset other parameters: should come after a plain Create or
+    // an explicit THttpServerRequest.Recycle()
+    procedure Prepare(const aHttp: THttpRequestContext; const aRemoteIP: RawUtf8;
+      aAuthorize: THttpServerRequestAuthentication); overload;
     /// prepare an incoming request from explicit values
     // - could be used for non-HTTP execution, e.g. from a WebSockets link
     procedure Prepare(const aUrl, aMethod, aInHeaders: RawUtf8;
@@ -593,7 +627,7 @@ type
     /// the thread which owns the connection of this execution context
     // - may be nil, depending on the HTTP server used
     // - depending on the HTTP server used, may not follow ConnectionID
-    property ConnectionThread: TSynThread
+    property ConnectionThread: TThread
       read fConnectionThread;
     /// some HTTP servers support a per-connection pointer storage
     // - may be nil if unsupported, e.g. by the http.sys servers
@@ -671,9 +705,6 @@ type
     /// the "User-Agent" HTTP header token, as specified to Prepare()
     property UserAgent: RawUtf8
       read fUserAgent write fUserAgent;
-    /// a 31-bit sequential number identifying this instance on the server
-    property RequestID: integer
-      read fRequestID;
     /// the ID of the connection which called this execution context
     // - e.g. mormot.net.websocket's TWebSocketProcess.NotifyCallback method
     // would use this property to specify the client connection to be notified
@@ -687,14 +718,14 @@ type
     /// contains the THttpServer-side authentication status
     // - e.g. when using http.sys authentication with HTTP API 2.0
     property AuthenticationStatus: THttpServerRequestAuthentication
-      read fAuthenticationStatus;
+      read fAuthenticationStatus write fAuthenticationStatus;
     /// contains the THttpServer-side authenticated user name, UTF-8 encoded
     // - e.g. when using http.sys authentication with HTTP API 2.0, the
     // domain user name is retrieved from the supplied AccessToken
     // - could also be set by the THttpServerGeneric.Request() method, after
     // proper authentication, so that it would be logged as expected
     property AuthenticatedUser: RawUtf8
-      read fAuthenticatedUser;
+      read fAuthenticatedUser write fAuthenticatedUser;
   end;
   {$M-}
 
@@ -726,7 +757,7 @@ type
     /// fast check if this IP4 is to be rejected
     // - no RW lock is needed, since is done in the main socket accept() thread
     function IsBanned(const addr: TNetAddr): boolean;
-    /// register an IP4 if status in >= 400 (but not 401/403)
+    /// register an IP4 if status in >= 400 (but not 401 HTTP_UNAUTHORIZED)
     function ShouldBan(status, ip4: cardinal): boolean;
       {$ifdef HASINLINE} inline; {$endif}
     /// to be called every second to remove deprecated bans from the list
@@ -950,7 +981,6 @@ begin
     ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24;
 end;
 
-
 function IsUrlFavIcon(P: PUtf8Char): boolean;
 begin
   result := (P <> nil) and
@@ -1160,6 +1190,21 @@ begin
   result := false;
 end;
 
+function GetNextRange(var P: PUtf8Char): Qword;
+var
+  c: PtrUInt;
+begin
+  result := 0;
+  if P <> nil then
+    repeat
+      c := byte(P^) - 48;
+      if c > 9 then
+        break
+      else
+        result := result * 10 + Qword(c);
+      inc(P);
+    until false;
+end;
 
 
 { ******************** Reusable HTTP State Machine }
@@ -1172,12 +1217,15 @@ begin
   Process.Reset;
   State := hrsNoStateMachine;
   HeaderFlags := [];
+  ResponseFlags := [];
   Options := [];
   Headers := '';
   ContentType := '';
   Upgrade := '';
   BearerToken := '';
   UserAgent := '';
+  RangeOffset := 0;
+  RangeLength := -1;
   Content := '';
   ContentLength := -1;
   ServerInternalState := 0;
@@ -1210,7 +1258,7 @@ procedure THttpRequestContext.ParseHeader(P: PUtf8Char;
   HeadersUnFiltered: boolean);
 var
   i, len: PtrInt;
-  P2: PUtf8Char;
+  P1, P2: PUtf8Char;
 begin
   if P = nil then
     exit; // avoid unexpected GPF in case of wrong usage
@@ -1266,13 +1314,13 @@ begin
             begin
               // 'CONTENT-ENCODING:'
               P := GotoNextNotSpace(P + 17);
-              P2 := P;
+              P1 := P;
               while P^ > ' ' do
                 inc(P); // no control char should appear in any header
-              len := P - P2;
+              len := P - P1;
               if len <> 0 then
                 for i := 0 to length(Compress) - 1 do
-                  if IdemPropNameU(Compress[i].Name, P2, len) then
+                  if IdemPropNameU(Compress[i].Name, P1, len) then
                   begin
                     CompressContentEncoding := i; // will handle e.g. gzip
                     if not HeadersUnFiltered then
@@ -1334,7 +1382,7 @@ begin
               begin
                 repeat
                   inc(P);
-                until P^ <= ' ';
+                until P^ <> ' ';
                 if PCardinal(P)^ or $20202020 =
                   ord('u') + ord('p') shl 8 + ord('g') shl 16 + ord('r') shl 24 then
                   // 'CONNECTION: KEEP-ALIVE, UPGRADE'
@@ -1401,15 +1449,51 @@ begin
       if (PCardinal(P + 4)^ or $20202020 =
         ord('o') + ord('r') shl 8 + ord('i') shl 16 + ord('z') shl 24) and
          (PCardinal(P + 8)^ or $20202020 =
-        ord('a') + ord('t') shl 8 + ord('i') shl 16 + ord('o') shl 24) and
-         (PCardinal(P + 12)^ or $20202020 =
-        ord('n') + ord(':') shl 8 + ord(' ') shl 16 + ord('b') shl 24) and
-         (PCardinal(P + 16)^ or $20202020 =
-        ord('e') + ord('a') shl 8 + ord('r') shl 16 + ord('e') shl 24) and
-         (PWord(P + 20)^ or $2020 = ord('r') + ord(' ') shl 8) then
-        // 'AUTHORIZATION: BEARER '
-        GetTrimmed(P + 22, BearerToken, {nointern=}true);
+        ord('a') + ord('t') shl 8 + ord('i') shl 16 + ord('o') shl 24) then
+      begin
+        include(HeaderFlags, hfHasAuthorization);
+        if (PCardinal(P + 12)^ or $20202020 =
+          ord('n') + ord(':') shl 8 + ord(' ') shl 16 + ord('b') shl 24) and
+           (PCardinal(P + 16)^ or $20202020 =
+          ord('e') + ord('a') shl 8 + ord('r') shl 16 + ord('e') shl 24) and
+           (PWord(P + 20)^ or $2020 = ord('r') + ord(' ') shl 8) then
+          // 'AUTHORIZATION: BEARER '
+          GetTrimmed(P + 22, BearerToken, {nointern=}true);
         // always allow FindNameValue(..., HEADER_BEARER_UPPER, ...) search
+      end;
+    ord('r') + ord('a') shl 8 + ord('n') shl 16 + ord('g') shl 24:
+      if (PCardinal(P + 4)^ or $20202020 =
+        ord('e') + ord(':') shl 8 + ord(' ') shl 16 + ord('b') shl 24) and
+         (PCardinal(P + 8)^ or $20202020 =
+        ord('y') + ord('t') shl 8 + ord('e') shl 16 + ord('s') shl 24) and
+         (P[12] = '=') then
+        if (RangeLength >= 0) or
+           (RangeOffset <> 0) then
+          State := hrsErrorUnsupportedRange // no multipart range
+        else
+        begin
+          // 'RANGE: '
+          P1 := GotoNextNotSpace(P + 13); // use pointer on stack
+          RangeOffset := GetNextRange(P1);
+          if P1^ = '-' then
+          begin
+            inc(P1);
+            if P1^ in ['0'..'9'] then
+            begin
+              // "bytes=0-499" -> start=0, len=500
+              RangeLength := Int64(GetNextRange(P1)) - RangeOffset + 1;
+              if RangeLength < 0 then
+                RangeLength := 0;
+            end;
+            // "bytes=1000-" -> start=1000, keep RangeLength=-1 to eof
+            if P1^ = ',' then
+              State := hrsErrorUnsupportedRange; // no multipart range
+          end
+          else
+            State := hrsErrorUnsupportedRange;
+          if not HeadersUnFiltered then
+            exit;
+        end;
     ord('u') + ord('p') shl 8 + ord('g') shl 16 + ord('r') shl 24:
       if PCardinal(P + 4)^ or $20202020 =
         ord('a') + ord('d') shl 8 + ord('e') shl 16 + ord(':') shl 24 then
@@ -1436,6 +1520,11 @@ end;
 function THttpRequestContext.HeaderGetValue(const aUpperName: RawUtf8): RawUtf8;
 begin
   FindNameValue(Headers, pointer(aUpperName), result{%H-}, false, ':');
+end;
+
+function THttpRequestContext.HeaderHasValue(const aUpperName: RawUtf8): boolean;
+begin
+  result := FindNameValue(pointer(Headers), pointer(aUpperName)) <> nil;
 end;
 
 procedure THttpRequestContext.ParseHeaderFinalize;
@@ -1486,7 +1575,10 @@ begin
           exit
         else
           inc(P);
-      SetRawUtf8(CommandMethod, B, P - B, {nointern=}false);
+      L := P - B;
+      if L > 10 then
+        exit; // clearly invalid input (method name should be short)
+      SetRawUtf8(CommandMethod, B, L, {nointern=}false);
       inc(P);
     end;
   end;
@@ -1508,7 +1600,7 @@ begin
     exit;
   if not (hfConnectionClose in HeaderFlags) then
     if not (hfConnectionKeepAlive in HeaderFlags) and
-       (P[8] <> '1') then
+       (P[8] <> '1') then // HTTP/1.1 is keep-alive by default
       include(HeaderFlags, hfConnectionClose);
   result := true;
 end;
@@ -1537,6 +1629,7 @@ procedure THttpRequestContext.SetRawUtf8(var res: RawUtf8;
   P: pointer; PLen: PtrInt; nointern: boolean);
 begin
   if (Interning <> nil) and
+     (PLen < 256) and
      not nointern then
     Interning^.UniqueFromBuffer(res, P, PLen, InterningHasher(0, P, PLen))
   else
@@ -1599,10 +1692,10 @@ begin
       hrsGetHeaders:
         if ProcessParseLine(st) then
           if st.LineLen <> 0 then
-            // Headers end with a void line
+            // Headers continue as long as text lines appear
             ParseHeader(st.Line, hroHeadersUnfiltered in Options)
           else
-            // we reached end of headers
+            // void line: we reached end of headers
             if hfTransferChunked in HeaderFlags then
               // process chunked body
               State := hrsGetBodyChunkedHexFirst
@@ -1724,6 +1817,8 @@ begin
     CompressContent(CompressAcceptHeader, Compress, ContentType,
       Content, ContentEncoding);
   result := @Head;
+  if rfAcceptRange in ResponseFlags then
+    result^.AppendShort('Accept-Ranges: bytes'#13#10);
   if ContentEncoding <> '' then
   begin
     result^.AppendShort('Content-Encoding: ');
@@ -1734,10 +1829,19 @@ begin
   begin
     ContentPos := pointer(Content);
     ContentLength := length(Content);
-  end
-  else if ContentLength = 0 then
-    // maybe set by SetupResponse for local file (also for HEAD responses)
-    ContentLength := ContentStream.Size - ContentStream.Position;
+    // ContentLength has been set by ContentFromFile (also for HEAD responses)
+  end;
+  if rfRange in ResponseFlags then
+  begin
+    // Content-Range: bytes 0-1023/146515
+    result^.AppendShort('Content-Range: bytes ');
+    result^.Append(RangeOffset);
+    result^.Append('-');
+    result^.Append(RangeOffset + ContentLength - 1);
+    result^.Append('/');
+    result^.Append(RangeLength); // = FileSize after ContentFromFile()
+    result^.AppendCRLF;
+  end;
   result^.AppendShort('Content-Length: ');
   result^.Append(ContentLength);
   result^.AppendCRLF;
@@ -1757,7 +1861,7 @@ begin
       result^.Append(CompressAcceptEncoding);
       result^.AppendCRLF;
     end;
-    result^.AppendShort('Connection: Keep-Alive'#13#10#13#10);
+    result^.AppendCRLF; // 'Connection: Keep-Alive' is implicit with HTTP/1.1
   end;
   Process.Reset;
   if ContentStream = nil then
@@ -1826,7 +1930,7 @@ end;
 
 procedure THttpRequestContext.ProcessDone;
 begin
-  if hfContentStreamNeedFree in HeaderFlags then
+  if rfContentStreamNeedFree in ResponseFlags then
     FreeAndNilSafe(ContentStream);
 end;
 
@@ -1834,10 +1938,16 @@ function THttpRequestContext.ContentFromFile(
   const FileName: TFileName; CompressGz: integer): boolean;
 var
   gz: TFileName;
+  tosend: Int64;
+  hasRange: boolean;
 begin
   Content := '';
+  hasRange := (RangeLength >= 0) or
+              (RangeOffset > 0);
   if (CompressGz >= 0) and
-     (CompressGz in CompressAcceptHeader) then
+     (CompressGz in CompressAcceptHeader) and
+     (CommandMethod <> 'HEAD') and
+     not hasRange then
   begin
     // try locally cached gzipped static content
     gz := FileName + '.gz';
@@ -1847,17 +1957,33 @@ begin
       // there is an already-compressed .gz file to send away
       ContentStream := TFileStreamEx.Create(gz, fmOpenReadDenyNone);
       ContentEncoding := 'gzip';
-      include(HeaderFlags, hfContentStreamNeedFree);
+      include(ResponseFlags, rfContentStreamNeedFree);
       result := true;
       exit; // only use ContentStream to bypass recompression
     end;
   end;
   ContentLength := FileSize(FileName);
   result := ContentLength <> 0;
+  if result and hasRange then
+    if RangeOffset >= ContentLength then
+      result := false // invalid offset
+    else
+    begin
+      tosend := RangeLength;
+      if (tosend < 0) or // -1 for end of file 'Range: 1024-'
+         (RangeOffset + tosend > ContentLength) then
+        tosend := ContentLength - RangeOffset; // truncate
+      RangeLength := ContentLength; // contains size for Content-Range: header
+      ContentLength := tosend;
+      include(ResponseFlags, rfRange);
+    end;
   if not result then
-    // there is no such file available
+    // there is no such file available, or range clearly wrong
     exit;
+  include(ResponseFlags, rfAcceptRange);
   ContentStream := TFileStreamEx.Create(FileName, fmOpenReadDenyNone);
+  if RangeOffset <> 0 then
+    ContentStream.Seek(RangeOffset, soBeginning);
   if (ContentLength < 1 shl 20) and
      (CommandMethod <> 'HEAD') then
   begin
@@ -1867,8 +1993,10 @@ begin
     FreeAndNilSafe(ContentStream);
   end
   else
-    // stream existing big file by chunks (also used for HEAD responses)
-    include(HeaderFlags, hfContentStreamNeedFree);
+  begin
+    // stream existing big file by chunks (also used for HEAD or Range)
+    include(ResponseFlags, rfContentStreamNeedFree);
+  end;
 end;
 
 
@@ -1934,13 +2062,14 @@ begin
   until b = 0;
 end;
 
-procedure THttpSocket.GetHeader(HeadersUnFiltered: boolean);
+function THttpSocket.GetHeader(HeadersUnFiltered: boolean): boolean;
 var
   s: RawUtf8;
   err: integer;
   line: array[0..4095] of AnsiChar; // avoid most memory allocations
 begin
   // parse the headers
+  result := false;
   HttpStateReset;
   if SockIn <> nil then
     repeat
@@ -1953,6 +2082,8 @@ begin
       if line[0] = #0 then
         break; // HTTP headers end with a void line
       Http.ParseHeader(@line, HeadersUnFiltered);
+      if Http.State <> hrsNoStateMachine then
+        exit; // error
     until false
   else
     repeat
@@ -1960,8 +2091,11 @@ begin
       if s = '' then
         break;
       Http.ParseHeader(pointer(s), HeadersUnFiltered);
+      if Http.State <> hrsNoStateMachine then
+        exit; // error
     until false;
   // finalize the headers
+  result := true;
   Http.ParseHeaderFinalize; // compute all meaningful headers
   if Assigned(OnLog) then
     OnLog(sllTrace, 'GetHeader % % flags=% len=% %', [Http.CommandMethod,
@@ -2075,11 +2209,6 @@ begin
     Http.UncompressData;
   if Assigned(OnLog) then
     OnLog(sllTrace, 'GetBody len=%', [Http.ContentLength], self);
-  {$ifdef SYNCRTDEBUGLOW}
-  TSynLog.Add.Log(sllCustom2, 'GetBody sock=% pending=% sockin=% len=% %',
-    [fSock, SockInPending(0), PTextRec(SockIn)^.BufEnd - PTextRec(SockIn)^.bufpos,
-    ContentLength, LogEscapeFull(Content)], self);
-  {$endif SYNCRTDEBUGLOW}
   if SockIn <> nil then
   begin
     err := ioresult;
@@ -2092,7 +2221,7 @@ end;
 procedure THttpSocket.HeaderAdd(const aValue: RawUtf8);
 begin
   if aValue <> '' then
-    Http.Headers := Http.Headers + aValue + #13#10;
+    Http.Headers := NetConcat([Http.Headers, aValue, #13#10]);
 end;
 
 procedure THttpSocket.HeaderSetText(const aText: RawUtf8;
@@ -2106,7 +2235,7 @@ begin
     Http.Headers := aText;
   if (aForcedContentType <> '') and
      (FindNameValue(pointer(aText), 'CONTENT-TYPE:') = nil) then
-    Http.Headers := Http.Headers + 'Content-Type: ' + aForcedContentType + #13#10;
+    Http.Headers := NetConcat([Http.Headers, 'Content-Type: ', aForcedContentType, #13#10]);
 end;
 
 procedure THttpSocket.HeadersPrepare(const aRemoteIP: RawUtf8);
@@ -2115,7 +2244,7 @@ begin
      not (hfHasRemoteIP in Http.HeaderFlags) then
   begin
     // Http.ParseHeaderFinalize did reserve 40 bytes for fast realloc
-    Http.Headers := Http.Headers + 'RemoteIP: ' + aRemoteIP + #13#10;
+    Http.Headers := NetConcat([Http.Headers, 'RemoteIP: ', aRemoteIP, #13#10]);
     include(Http.HeaderFlags, hfHasRemoteIP);
   end;
 end;
@@ -2133,7 +2262,7 @@ begin
 end;
 
 
-{ ******************** Abstract Server-Side Types used e.g. for Client-Server Protocol }
+{ ******************** Abstract Server-Side Types e.g. for Client-Server Protocol }
 
 { THttpServerRequestAbstract }
 
@@ -2141,37 +2270,34 @@ procedure THttpServerRequestAbstract.Prepare(
   const aUrl, aMethod, aInHeaders: RawUtf8; const aInContent: RawByteString;
   const aInContentType, aRemoteIP: RawUtf8);
 begin
+  // Create or Recycle() would have zeroed other fields
+  fRemoteIP := aRemoteIP;
   fUrl := aUrl;
   fMethod := aMethod;
-  fRemoteIP := aRemoteIP;
   fInHeaders := aInHeaders;
-  fHost := '';
-  fAuthBearer := '';
-  fUserAgent := '';
-  fInContent := aInContent;
   fInContentType := aInContentType;
-  fOutContent := '';
-  fOutContentType := '';
-  fOutCustomHeaders := '';
-  fRouteName := nil; // no fRouteValuePosLen := nil (safe to reuse)
+  fInContent := aInContent;
 end;
 
 procedure THttpServerRequestAbstract.Prepare(const aHttp: THttpRequestContext;
-  const aRemoteIP: RawUtf8);
+  const aRemoteIP: RawUtf8; aAuthorize: THttpServerRequestAuthentication);
 begin
+  fRemoteIP := aRemoteIP;
   fUrl := aHttp.CommandUri;
   fMethod := aHttp.CommandMethod;
-  fRemoteIP := aRemoteIP;
   fInHeaders := aHttp.Headers;
+  fInContentType := aHttp.ContentType;
   fHost := aHttp.Host;
-  fAuthBearer := aHttp.BearerToken;
+  if hsrAuthorized in fConnectionFlags then
+  begin
+    // reflect the current valid "authorization:" header
+    fAuthenticationStatus := aAuthorize;
+    fAuthenticatedUser := aHttp.BearerToken; // set by fServer.Authorization()
+  end
+  else
+    fAuthBearer := aHttp.BearerToken;
   fUserAgent := aHttp.UserAgent;
   fInContent := aHttp.Content;
-  fInContentType := aHttp.ContentType;
-  fOutContent := '';
-  fOutContentType := '';
-  fOutCustomHeaders := '';
-  fRouteName := nil;
 end;
 
 procedure THttpServerRequestAbstract.AddInHeader(AppendedHeader: RawUtf8);
@@ -2181,7 +2307,7 @@ begin
     if fInHeaders = '' then
       fInHeaders := AppendedHeader
     else
-      fInHeaders := fInHeaders + #13#10 + AppendedHeader;
+      fInHeaders := NetConcat([fInHeaders, #13#10, AppendedHeader]);
 end;
 
 procedure THttpServerRequestAbstract.AddOutHeader(const Values: array of const);
@@ -2298,7 +2424,8 @@ end;
 
 { THttpAcceptBan }
 
-constructor THttpAcceptBan.Create(banseconds, maxpersecond, banwhiteip: cardinal);
+constructor THttpAcceptBan.Create(
+  banseconds, maxpersecond, banwhiteip: cardinal);
 begin
   fMax := maxpersecond;
   SetSeconds(banseconds);
@@ -2390,7 +2517,9 @@ procedure THttpAcceptBan.BanIP(const ip4: RawUtf8);
 var
   c: cardinal;
 begin
-  if IPToCardinal(pointer(ip4), c) then
+  if NetIsIP4(pointer(ip4), @c) and
+     ({%H-}c <> 0) and
+     (c <> $0100007f) then
     BanIP(c);
 end;
 
@@ -2438,8 +2567,8 @@ end;
 function THttpAcceptBan.ShouldBan(status, ip4: cardinal): boolean;
 begin
   result := (self <> nil) and
-            ((status = HTTP_BADREQUEST) or  // naive heuristic
-             (status > HTTP_FORBIDDEN)) and // allow 401/403 retry
+            ((status = HTTP_BADREQUEST) or  // disallow 400,402..xxx
+             (status > HTTP_UNAUTHORIZED)) and // allow 401 response
             BanIP(ip4)
 end;
 

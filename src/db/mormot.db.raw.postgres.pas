@@ -37,67 +37,66 @@ const
   // see pg_type.h
   BOOLOID = 16;
   BYTEAOID = 17;
+  CHAROID = 18;
+  NAMEOID = 19;
   INT8OID = 20;
   INT2OID = 21;
+  INT2VECTOROID	= 22;
   INT4OID = 23;
   REGPROCOID = 24;
   TEXTOID = 25;
   OIDOID = 26;
-  FLOAT4OID = 700;
-  FLOAT8OID = 701;
-  ABSTIMEOID = 702;
-  CASHOID = 790;
-  DATEOID = 1082;
-  TIMEOID = 1083;
-  TIMESTAMPOID = 1114;
-  TIMESTAMPTZOID = 1184;
-  TIMETZOID = 1266;
-  NUMERICOID = 1700;
-
-  CHAROID = 18;
-  NAMEOID = 19;
-  INT2VECTOROID	= 22;
   TIDOID = 27;
   XIDOID = 28;
   CIDOID = 29;
   OIDVECTOROID	= 30;
+  PGDDLCOMMANDOID = 32;
   JSONOID = 114;
   XMLOID = 142;
   PGNODETREEOID	= 194;
-  PGDDLCOMMANDOID = 32;
   POINTOID= 600;
   LSEGOID = 601;
   PATHOID = 602;
   BOXOID = 603;
   POLYGONOID = 604;
   LINEOID = 628;
+  CIDROID = 650;
+  FLOAT4OID = 700;
+  FLOAT8OID = 701;
+  ABSTIMEOID = 702;
   RELTIMEOID = 703;
   TINTERVALOID = 704;
   UNKNOWNOID = 705;
   CIRCLEOID = 718;
+  CASHOID = 790;
   MACADDROID = 829;
   INETOID = 869;
-  CIDROID = 650;
   INT2ARRAYOID = 1005;
   INT4ARRAYOID = 1007;
-  TEXTARRAYOID= 1009;
-  OIDARRAYOID = 1028;
+  TEXTARRAYOID = 1009;
+  INT8ARRAYOID = 1016;
   FLOAT4ARRAYOID = 1021;
+  FLOAT8ARRAYOID = 1022;
+  OIDARRAYOID = 1028;
   ACLITEMOID = 1033;
-  CSTRINGARRAYOID = 1263;
   BPCHAROID = 1042;
   VARCHAROID = 1043;
+  DATEOID = 1082;
+  TIMEOID = 1083;
+  TIMESTAMPOID = 1114;
+  TIMESTAMPTZOID = 1184;
   INTERVALOID = 1186;
+  CSTRINGARRAYOID = 1263;
+  TIMETZOID = 1266;
   BITOID = 1560;
   VARBITOID = 1562;
-  REFCURSOROID= 1790;
+  NUMERICOID = 1700;
+  REFCURSOROID = 1790;
   REGPROCEDUREOID = 2202;
   REGOPEROID = 2203;
   REGOPERATOROID = 2204;
   REGCLASSOID = 2205;
   REGTYPEOID = 2206;
-  REGROLEOID = 4096;
-  REGNAMESPACEOID = 4089;
   REGTYPEARRAYOID = 2211;
   UUIDOID = 2950;
   LSNOID = 3220;
@@ -107,7 +106,9 @@ const
   REGCONFIGOID = 3734;
   REGDICTIONARYOID = 3769;
   JSONBOID = 3802;
-  INT4RANGEOID	  = 3904;
+  INT4RANGEOID = 3904;
+  REGNAMESPACEOID = 4089;
+  REGROLEOID = 4096;
 
 const
   PGRES_EMPTY_QUERY = 0;
@@ -118,10 +119,10 @@ const
   PGRES_BAD_RESPONSE = 5;
   PGRES_NONFATAL_ERROR = 6;
   PGRES_FATAL_ERROR = 7;
-  PGRES_COPY_BOTH = 8;        // Copy In/Out data transfer in progress
-  PGRES_SINGLE_TUPLE = 9;     // single tuple from larger resultset
-  PGRES_PIPELINE_SYNC = 10;   // pipeline synchronization point
-  PGRES_PIPELINE_ABORTED= 11; // Command didn't run because of an abort
+  PGRES_COPY_BOTH = 8;         // Copy In/Out data transfer in progress
+  PGRES_SINGLE_TUPLE = 9;      // single tuple from larger resultset
+  PGRES_PIPELINE_SYNC = 10;    // pipeline synchronization point
+  PGRES_PIPELINE_ABORTED = 11; // Command didn't run because of an abort
 
   PQ_PIPELINE_OFF = 0;
 
@@ -136,7 +137,12 @@ const
   CONNECTION_NEEDED = 8;
 
   PGFMT_TEXT = 0;
-  PGFMT_BIN = 1;
+  PGFMT_BIN  = 1;
+
+/// compute the PostgreSQL raw binary to encode an array of (integer) parameters
+function ToArrayOid(Values: PByte; ArrayOid, ValueCount, ValueSize: integer;
+  var Bin: RawByteString): boolean;
+
 
 
 { ************ PostgreSQL Client Library Loading }
@@ -154,7 +160,6 @@ type
   /// direct access to the libpq native Postgres protocol 3 library
   // - only the endpoints needed by this unit are imported
   TSqlDBPostgresLib = class(TSynLibrary)
-  protected
   public
     LibVersion: function: integer; cdecl;
     IsThreadSafe: function: integer; cdecl;
@@ -172,6 +177,9 @@ type
     Exec: function(conn: PPGconn; query: PUtf8Char): PPGresult; cdecl;
     Prepare: function(conn: PPGconn; stmtName, query: PUtf8Char; nParams: integer;
       paramTypes: PCardinal): PPGresult; cdecl;
+    DescribePrepared: function(conn: PPGconn; stmtName: PUtf8Char): PPGresult; cdecl;
+    NParams: function(res: PPGresult): integer; cdecl;
+    ParamType: function(res: PPGresult; param_number: integer): word; cdecl;
     ExecPrepared: function(conn: PPGconn; stmtName: PUtf8Char; nParams: integer;
       paramValues: PPchar; paramLengths, paramFormats: PInteger;
       resultFormat: integer): PPGresult; cdecl;
@@ -201,18 +209,23 @@ type
       paramValues: PPchar; paramLengths, paramFormats: PInteger;
       resultFormat: integer): integer; cdecl;
     getResult: function(conn: PPGconn): PPGresult; cdecl;
+    socket: function(conn: PPGconn): integer; cdecl;
   public
     /// try to dynamically load the libpq library
-    // - raise ESqlDBPostgres if the expected library is not found
+    // - raise an ESqlDBPostgres if the expected library is not found
     constructor Create;
     /// just a wrapper around FastSetString + GetValue/GetLength
     procedure GetRawUtf8(res: PPGresult; tup_num, field_num: integer;
       var result: RawUtf8);
-    /// raise an exception on error and clean result
+    /// raise an ESqlDBPostgres on error and clean result
     // - will set pRes to nil if passed
     // - if andClear is true - will call always PQ.Clear(res)
-    procedure Check(conn: PPGconn; res: PPGresult;
-      pRes: PPPGresult = nil; andClear: boolean = true);
+    procedure Check(conn: PPGconn; const ctxt: ShortString; res: PPGresult;
+      pRes: PPPGresult = nil; andClear: boolean = true); overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// raise an ESqlDBPostgres and clean result
+    procedure RaiseError(conn: PPGconn; const ctxt: ShortString;
+      res: PPGresult = nil);
   end;
 
 var
@@ -232,10 +245,86 @@ procedure PostgresLibraryInitialize;
 
 implementation
 
+
+{ ************ Native PostgreSQL Client Library Constants }
+
+// see https://stackoverflow.com/a/66499392/458259
+
+function ToArrayOid(Values: PByte; ArrayOid, ValueCount, ValueSize: integer;
+  var Bin: RawByteString): boolean;
+var
+  len: PtrInt;
+  v: Int64;
+  p: PCardinal;
+begin
+  result := false;
+  if (ValueCount <= 0) or
+     not (ValueSize in [4, 8]) then
+    exit;
+  case ArrayOid of
+    INT4ARRAYOID:
+      begin
+        ArrayOid := INT4OID;
+        len := (5 * 4) + ValueCount * (4 + 4);
+      end;
+    INT8ARRAYOID:
+      begin
+        ArrayOid := INT8OID;
+        len := (5 * 4) + ValueCount * (4 + 8);
+      end;
+  else
+    exit; // unsupported
+  end;
+  FastSetRawByteString(Bin, nil, len);
+  p := pointer(Bin);
+  p^ := $01000000;           // dimensions
+  inc(p);
+  p^ := $00000000;           // has null
+  inc(p);
+  p^ := bswap32(ArrayOid);   // items type
+  inc(p);
+  p^ := bswap32(ValueCount); // items count
+  inc(p);
+  p^ := $01000000;           // offset
+  inc(p);
+  if ArrayOid = INT4OID then
+    repeat
+      p^ := $04000000;        // item length
+      inc(p);
+      p^ := bswap32(PCardinal(Values)^); // item value (maybe truncated)
+      inc(p);
+      inc(Values, ValueSize);
+      dec(ValueCount)
+    until ValueCount = 0
+  else if ValueSize = 4 then
+    repeat
+      p^ := $08000000;          // item length
+      inc(p);
+      v := PInteger(Values)^;   // expand sign to 64-bit
+      PInt64(p)^ := bswap64(v); // item value
+      inc(PInt64(p));
+      inc(PInteger(Values));
+      dec(ValueCount)
+    until ValueCount = 0
+  else // ValueSize = 8
+    repeat
+      p^ := $08000000;
+      inc(p);
+      PInt64(p)^ := bswap64(PInt64(Values)^);
+      inc(PInt64(p));
+      inc(PInt64(Values));
+      dec(ValueCount)
+    until ValueCount = 0;
+  //if PAnsiChar(p) - pointer(Bin) <> length(Bin) then
+  //  raise ESqlDBPostgres.Create('ToIntArrayOid');
+  result := true;
+end;
+
+
 { ************ PostgreSQL Client Library Loading }
 
 const
-  PQ_ENTRIES: array[0..32] of RawUtf8 = (
+  PQ_ENTRIES: array[0..36] of RawUtf8 = (
     'libVersion',
     'isthreadsafe',
     'setdbLogin',
@@ -249,6 +338,9 @@ const
     'freemem',
     'exec',
     'prepare',
+    'describePrepared',
+    'nparams',
+    'paramtype',
     'execPrepared',
     'execParams',
     'nfields',
@@ -269,7 +361,8 @@ const
     'sendQueryParams',
     'sendPrepare',
     'sendQueryPrepared',
-    'getResult'
+    'getResult',
+    'socket'
     );
 
 
@@ -315,25 +408,33 @@ begin
     GetLength(res, tup_num, field_num));
 end;
 
-procedure TSqlDBPostgresLib.Check(conn: PPGconn; res: PPGresult;
-  pRes: PPPGresult; andClear: boolean);
+procedure TSqlDBPostgresLib.RaiseError(conn: PPGconn; const ctxt: ShortString;
+  res: PPGresult);
 var
   errMsg, errCode: PUtf8Char;
 begin
-  if (res = nil) or // nil in case of very fatal error, out of emory for example
+  errMsg := ErrorMessage(conn);
+  if res <> nil then
+  begin
+    errCode := ResultErrorField(res, ord('C'){PG_DIAG_SQLSTATE});
+    Clear(res);
+  end
+  else
+    errCode := nil;
+  raise ESqlDBPostgres.CreateUtf8(
+          '% % failed: % [%]', [self, ctxt, errCode, errMsg]);
+end;
+
+procedure TSqlDBPostgresLib.Check(conn: PPGconn; const ctxt: ShortString;
+  res: PPGresult; pRes: PPPGresult; andClear: boolean);
+begin
+  if (res = nil) or // nil in case of very fatal error, e.g. out of memory
      (ResultStatus(res) in
        [PGRES_BAD_RESPONSE, PGRES_NONFATAL_ERROR, PGRES_FATAL_ERROR]) then
   begin
-    errMsg := ErrorMessage(conn);
-    if res <> nil then
-      errCode := ResultErrorField(res, Ord('C'){PG_DIAG_SQLSTATE})
-    else
-      errCode := nil;
-    Clear(res);
     if pRes <> nil then
       pRes^ := nil;
-    raise ESqlDBPostgres.CreateUtf8(
-            '% PGERRCODE: %, %', [self, errCode, errMsg]);
+    RaiseError(conn, ctxt, res);
   end
   else if andClear then
     Clear(res);

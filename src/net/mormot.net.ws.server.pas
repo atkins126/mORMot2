@@ -23,7 +23,7 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
-  mormot.core.unicode, // for efficient UTF-8 text process within HTTP
+  mormot.core.unicode,
   mormot.core.text,
   mormot.core.data,
   mormot.core.log,
@@ -96,6 +96,7 @@ type
     fSettings: TWebSocketProcessSettings;
     fProcessClass: TWebSocketProcessServerClass;
     fOnWSUpgraded: TOnWebSocketProtocolUpgraded;
+    fOnWSClose: TOnWebSocketProtocolClosed;
     fOnWSConnect, fOnWSDisconnect: TOnWebSocketServerEvent;
     function DoUpgrade(Protocol: TWebSocketProtocol): integer; virtual;
     procedure DoConnect(Context: TWebSocketServerSocket); virtual;
@@ -167,6 +168,9 @@ type
     // - when the main processing WebSockets frames processing loop finishes
     property OnWebSocketDisconnect: TOnWebSocketServerEvent
       read fOnWSDisconnect write fOnWSDisconnect;
+    /// same as OnWebSocketDisconnect, but using TWebSocketProtocol as parameter
+    property OnWebSocketClose: TOnWebSocketProtocolClosed
+      read fOnWSClose write fOnWSClose;
   end;
 
 
@@ -334,6 +338,11 @@ begin
       fOnWSDisconnect(Context);
     except // ignore any external callback error during shutdown
     end;
+  if Assigned(fOnWSClose) then
+    try
+      fOnWSClose(Context.fProcess.Protocol);
+    finally
+    end;
 end;
 
 procedure TWebSocketServer.Process(ClientSock: THttpServerSocket;
@@ -344,7 +353,7 @@ begin
   if (hfConnectionUpgrade in ClientSock.Http.HeaderFlags) and
      ClientSock.KeepAliveClient and
      IsGet(ClientSock.Method) and
-     IdemPropNameU(ClientSock.Http.Upgrade, 'websocket') then
+     PropNameEquals(ClientSock.Http.Upgrade, 'websocket') then
   begin
     // upgrade and run fProcess.ProcessLoop
     err := WebSocketProcessUpgrade(ClientSock);
@@ -379,12 +388,10 @@ type
 function FastFindConnection(c: PWebSocketProcessServer; n: integer;
   id: THttpServerConnectionID): TWebSocketProcessServer;
 begin
-  // speedup brute force check in case of high number of connections
-  // - since we have one thread per connection, number won't be so high ;)
   if n > 0 then
     repeat
       result := c^;
-      if result.Protocol.ConnectionID = id then
+      if result.fConnectionID = id then // brute force search
         exit;
       inc(c);
       dec(n);

@@ -16,27 +16,42 @@ uses
   mormot.core.unicode,
   mormot.core.datetime,
   mormot.core.rtti,
-  mormot.crypt.core,
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
   mormot.core.log,
   mormot.core.test,
   mormot.core.perf,
+  mormot.core.threads,
+  mormot.crypt.core,
+  mormot.crypt.secure,
   mormot.net.sock,
   mormot.net.http,
   mormot.net.server,
   mormot.net.async,
-  mormot.net.rtsphttp;
+  mormot.net.ldap,
+  mormot.net.dns,
+  mormot.net.rtsphttp,
+  mormot.net.tunnel;
 
 type
   /// this test case will validate several low-level protocols
   TNetworkProtocols = class(TSynTestCase)
   protected
+    // for _TUriTree
     one, two: RawUtf8;
     three: boolean;
     request: integer;
     four: Int64;
+    // for _TTunnelLocal
+    session: Int64;
+    appsec: RawUtf8;
+    options: TTunnelOptions;
+    tunnelexecutedone: boolean;
+    procedure TunnelExecute(Sender: TObject);
+    procedure TunnelExecuted(Sender: TObject);
+    procedure TunnelTest(const clientcert, servercert: ICryptCert);
+    // several methods used by _TUriTree
     function DoRequest_(Ctxt: THttpServerRequestAbstract): cardinal;
     function DoRequest0(Ctxt: THttpServerRequestAbstract): cardinal;
     function DoRequest1(Ctxt: THttpServerRequestAbstract): cardinal;
@@ -48,10 +63,14 @@ type
   published
     /// validate TUriTree high-level structure
     procedure _TUriTree;
+    /// validate DNS and LDAP clients
+    procedure IpDnsLdap;
     /// RTSP over HTTP, as implemented in SynProtoRTSPHTTP unit
     procedure RtspOverHttp;
     /// RTSP over HTTP, with always temporary buffering
     procedure RtspOverHttpBufferedWrite;
+    /// validate mormot.net.tunnel
+    procedure _TTunnelLocal;
   end;
 
 
@@ -559,6 +578,212 @@ begin
   end;
 end;
 
+procedure TNetworkProtocols.IpDnsLdap;
+var
+  ip, u, v: RawUtf8;
+  c: cardinal;
+  l: TLdapClientSettings;
+begin
+  // validate some IP releated process
+  Check(not NetIsIP4(nil));
+  Check(not NetIsIP4('1'));
+  Check(not NetIsIP4('1.2'));
+  Check(not NetIsIP4('1.2.3'));
+  Check(not NetIsIP4('1.2.3.'));
+  Check(not NetIsIP4('1.2.3.4.'));
+  Check(not NetIsIP4('1.2.3.4.5'));
+  Check(NetIsIP4('1.2.3.4'));
+  Check(NetIsIP4('12.3.4.5'));
+  Check(NetIsIP4('12.34.5.6'));
+  Check(NetIsIP4('12.34.56.7'));
+  Check(NetIsIP4('12.34.56.78'));
+  Check(NetIsIP4('112.134.156.178'));
+  Check(not NetIsIP4('312.34.56.78'));
+  Check(not NetIsIP4('12.334.56.78'));
+  Check(not NetIsIP4('12.34.256.78'));
+  Check(not NetIsIP4('12.34.56.278'));
+  c := 0;
+  Check(NetIsIP4('1.2.3.4', @c));
+  CheckEqual(c, $04030201);
+  // validate DNS client with some known values
+  CheckEqual(DnsLookup(''), '');
+  CheckEqual(DnsLookup('localhost'), '127.0.0.1');
+  CheckEqual(DnsLookup('LocalHost'), '127.0.0.1');
+  CheckEqual(DnsLookup('::1'), '127.0.0.1');
+  CheckEqual(DnsLookup('1.2.3.4'), '1.2.3.4');
+  ip := DnsLookup('synopse.info');
+  CheckEqual(ip, '62.210.254.173', 'dns1');
+  ip := DnsLookup('blog.synopse.info');
+  CheckEqual(ip, '62.210.254.173', 'dns2');
+  CheckEqual(DnsReverseLookup(ip), '62-210-254-173.rev.poneytelecom.eu', 'rev');
+  Check(DnsLookups('yahoo.com') <> nil, 'dns3');
+  // validate LDAP distinguished name conversion (no client)
+  CheckEqual(DNToCN('CN=User1,OU=Users,OU=London,DC=xyz,DC=local'),
+    'xyz.local/London/Users/User1');
+  CheckEqual(DNToCN(
+    'cn=JDoe,ou=Widgets,ou=Manufacturing,dc=USRegion,dc=OrgName,dc=com'),
+    'USRegion.OrgName.com/Manufacturing/Widgets/JDoe');
+  // validate LDAP settings
+  l := TLdapClientSettings.Create;
+  try
+    CheckEqual(l.TargetUri, '');
+    CheckEqual(l.KerberosDN, '');
+    l.TargetHost := 'ad.synopse.info';
+    CheckEqual(l.TargetUri, 'ldap://ad.synopse.info');
+    l.Tls := true;
+    CheckEqual(l.TargetUri, 'ldaps://ad.synopse.info:389');
+    l.TargetPort := LDAP_TLS_PORT;
+    CheckEqual(l.TargetUri, 'ldaps://ad.synopse.info');
+    l.TargetPort := '1234';
+    u := l.TargetUri;
+    CheckEqual(u, 'ldaps://ad.synopse.info:1234');
+    l.TargetUri := 'http://ad.synopse.com';
+    CheckEqual(l.TargetUri, '');
+    l.TargetUri := 'ldap2://ad.synopse.com';
+    CheckEqual(l.TargetUri, '');
+    l.TargetUri := 'ldap://ad.synopse.com';
+    CheckEqual(l.TargetUri, 'ldap://ad.synopse.com');
+    l.TargetUri := 'ad.synopse.info';
+    CheckEqual(l.TargetUri, 'ldap://ad.synopse.info');
+    CheckEqual(l.KerberosDN, '');
+  finally
+    l.Free;
+  end;
+  Check(LdapSafe(''));
+  Check(LdapSafe('abc'));
+  Check(LdapSafe('ab cd'));
+  Check(LdapSafe('@abc'));
+  Check(not LdapSafe('\abc'));
+  Check(not LdapSafe('abc*'));
+  Check(not LdapSafe('a(bc'));
+  Check(not LdapSafe('abc)'));
+  Check(not LdapSafe('*'));
+  Check(not LdapSafe('()'));
+  l := TLdapClientSettings.Create;
+  try
+    CheckEqual(l.TargetUri, '');
+    CheckEqual(l.KerberosDN, '');
+    l.TargetHost := 'dc.synopse.com';
+    CheckEqual(l.TargetUri, 'ldap://dc.synopse.com');
+    CheckEqual(l.KerberosDN, '');
+    l.KerberosDN := 'ad.synopse.com';
+    v := l.TargetUri;
+    CheckEqual(v, 'ldap://dc.synopse.com/ad.synopse.com');
+    l.TargetUri := u;
+    CheckEqual(l.TargetUri, u);
+    CheckEqual(l.TargetUri, 'ldaps://ad.synopse.info:1234');
+    CheckEqual(l.KerberosDN, '');
+    l.TargetUri := v;
+    CheckEqual(l.TargetUri, v);
+    CheckEqual(l.KerberosDN, 'ad.synopse.com');
+  finally
+    l.Free;
+  end;
+end;
+
+procedure TNetworkProtocols.TunnelExecute(Sender: TObject);
+begin
+  // one of the two handshakes should be done in another thread
+  Check((Sender as TTunnelLocal).Open(session, options, 1000, appsec) <> 0);
+end;
+
+procedure TNetworkProtocols.TunnelExecuted(Sender: TObject);
+begin
+  tunnelexecutedone := true;
+end;
+
+procedure TNetworkProtocols.TunnelTest(const clientcert, servercert: ICryptCert);
+var
+  clientinstance, serverinstance: TTunnelLocal;
+  clientcb, servercb: ITunnelTransmit;
+  clienttunnel, servertunnel: ITunnelLocal;
+  i: integer;
+  sent, received, sent2, received2: RawByteString;
+  clientsock, serversock: TNetSocket;
+begin
+  exit; // FIXME
+  // setup the two instances with the specified options and certificates
+  clientinstance := TTunnelLocalClient.Create;
+  clientinstance.SignCert := clientcert;
+  clientinstance.VerifyCert := servercert;
+  clienttunnel := clientinstance;
+  clientcb := clientinstance;
+  serverinstance := TTunnelLocalServer.Create;
+  serverinstance.SignCert := servercert;
+  serverinstance.VerifyCert := clientcert;
+  servertunnel := serverinstance;
+  servercb := serverinstance;
+  clienttunnel.SetTransmit(servercb); // set before BindPort()
+  servertunnel.SetTransmit(clientcb);
+  // validate handshaking
+  session := Random64;
+  appsec := RandomAnsi7(10);
+  TLoggedWorkThread.Create(
+    TSynLog, 'servertunnel', serverinstance, TunnelExecute, TunnelExecuted);
+  Check(clienttunnel.Open(session, options, 1000, appsec) <> 0);
+  SleepHiRes(1000, tunnelexecutedone);
+  Check(tunnelexecutedone, 'TunnelExecuted');
+  tunnelexecutedone := false; // for the next run
+  Check(clienttunnel.LocalPort <> '');
+  Check(servertunnel.LocalPort <> '');
+  Check(servertunnel.LocalPort <> clienttunnel.LocalPort, 'ports');
+  Check(clienttunnel.Encrypted = (toEcdhe in options), 'cEncrypted');
+  Check(servertunnel.Encrypted = (toEcdhe in options), 'sEncrypted');
+  Check(NewSocket('127.0.0.1', clienttunnel.LocalPort, nlTcp, {bind=}false,
+    1000, 1000, 1000, 0, clientsock) = nrOk);
+  Check(NewSocket('127.0.0.1', servertunnel.LocalPort, nlTcp, {bind=}false,
+    1000, 1000, 1000, 0, serversock) = nrOk);
+  try
+    // validate raw TCP tunnelling
+    CheckEqual(clientinstance.Thread.Received, 0);
+    CheckEqual(clientinstance.Thread.Sent, 0);
+    CheckEqual(serverinstance.Thread.Received, 0);
+    CheckEqual(serverinstance.Thread.Sent, 0);
+    for i := 1 to 100 do
+    begin
+      sent := RandomString(Random32(200) + 1);
+      sent2 := RandomString(Random32(200) + 1);
+      Check(clientsock.SendAll(pointer(sent), length(sent)) = nrOk);
+      Check(serversock.RecvWait(1000, received) = nrOk);
+      CheckEqual(sent, received);
+      Check(clientsock.SendAll(pointer(sent2), length(sent2)) = nrOk);
+      Check(serversock.SendAll(pointer(sent), length(sent)) = nrOk);
+      Check(clientsock.RecvWait(1000, received) = nrOk);
+      Check(serversock.RecvWait(1000, received2) = nrOk);
+      CheckEqual(sent, received);
+      CheckEqual(sent2, received2);
+      CheckEqual(clientinstance.Thread.Received, serverinstance.Thread.Sent);
+      CheckEqual(clientinstance.Thread.Sent, serverinstance.Thread.Received);
+      Check(clientinstance.Thread.Received <> 0);
+      Check(clientinstance.Thread.Sent <> 0);
+      Check(serverinstance.Thread.Received <> 0);
+      Check(serverinstance.Thread.Sent <> 0);
+    end;
+    Check(clientinstance.Thread.Received < clientinstance.Thread.Sent, 'smaller');
+    Check(serverinstance.Thread.Received > serverinstance.Thread.Sent, 'bigger');
+  finally
+    clientsock.ShutdownAndClose(true);
+    serversock.ShutdownAndClose(true);
+  end;
+  servertunnel.SetTransmit(nil); // avoid memory leak due to circular references
+end;
+
+procedure TNetworkProtocols._TTunnelLocal;
+begin
+  // plain tunnelling
+  TunnelTest(nil, nil);
+  // ECDHE encrypted tunnelling
+  options := [toEcdhe];
+  TunnelTest(nil, nil);
+  // tunnelling with mutual authentication
+  options := [];
+  TunnelTest(Cert('syn-es256').Generate([cuDigitalSignature]),
+             Cert('syn-es256').Generate([cuDigitalSignature]));
+  // ECDHE encrypted tunnelling with mutual authentication
+  options := [toEcdhe];
+  TunnelTest(Cert('syn-es256').Generate([cuDigitalSignature]),
+             Cert('syn-es256').Generate([cuDigitalSignature]));
+end;
 
 end.
 

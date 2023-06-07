@@ -112,8 +112,8 @@ type
   public
     // overridden methods calling the MongoDB external server
     function EngineRetrieve(TableModelIndex: integer; ID: TID): RawUtf8; override;
-    function EngineList(const SQL: RawUtf8; ForceAjax: boolean = false;
-      ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
+    function EngineList(TableModelIndex: integer; const SQL: RawUtf8;
+      ForceAjax: boolean = false; ReturnedRowCount: PPtrInt = nil): RawUtf8; override;
     function EngineAdd(TableModelIndex: integer;
       const SentData: RawUtf8): TID; override;
     function EngineUpdate(TableModelIndex: integer; ID: TID;
@@ -645,7 +645,8 @@ begin
           [self, fStoredClass, fStoredClassRecordProps.RecordVersionField.Name])
       else
         // compute new monotonic TRecordVersion value if not supplied by sender
-        Doc.AddValue(RecordVersionName, Owner.RecordVersionCompute);
+        Doc.AddValue(RecordVersionName,
+          Owner.RecordVersionCompute(fStoredClassProps.TableIndex));
     if (Owner <> nil) and
        (Owner.Owner <> nil) and
        (Owner.Owner.Services <> nil) then
@@ -1030,7 +1031,7 @@ begin
     for f := 0 to high(fStoredClassRecordProps.BlobFields) do
     begin
       if (f < docv^.Count) and // optimistic O(1) search
-         IdemPropNameU(docv^.Names[f], fBsonProjectionBlobFieldsNames[f]) then
+         PropNameEquals(docv^.Names[f], fBsonProjectionBlobFieldsNames[f]) then
         BsonVariantType.ToBlob(docv^.Values[f], blobRaw)
       else if docv^.GetVarData(fBsonProjectionBlobFieldsNames[f], blob) then
         BsonVariantType.ToBlob(variant(blob), blobRaw)
@@ -1189,8 +1190,8 @@ end;
 const
   ORDERBY_FIELD: array[boolean] of Integer = (1, -1);
 
-function TRestStorageMongoDB.EngineList(const SQL: RawUtf8; ForceAjax: boolean;
-  ReturnedRowCount: PPtrInt): RawUtf8;
+function TRestStorageMongoDB.EngineList(TableModelIndex: integer;
+  const SQL: RawUtf8; ForceAjax: boolean; ReturnedRowCount: PPtrInt): RawUtf8;
 var
   ResCount: PtrInt;
   Stmt: TSelectStatement;
@@ -1335,7 +1336,7 @@ var
   begin
     distinct := -1;
     for i := 0 to high(Stmt.Select) do
-      if IdemPropNameU(Stmt.Select[i].FunctionName, 'distinct') then
+      if PropNameEquals(Stmt.Select[i].FunctionName, 'distinct') then
         if distinct >= 0 then
         begin
           InternalLog('%.EngineList: distinct() only allowed once in [%]',
@@ -1479,10 +1480,10 @@ begin
   InternalLog(SQL, sllSQL);
   StorageLock(false {$ifdef DEBUGSTORAGELOCK}, 'MongoList' {$endif});
   try
-    if IdemPropNameU(fBasicSqlCount, SQL) then
+    if PropNameEquals(fBasicSqlCount, SQL) then
       SetCount(TableRowCount(fStoredClass))
-    else if IdemPropNameU(fBasicSqlHasRows[false], SQL) or
-            IdemPropNameU(fBasicSqlHasRows[true], SQL) then
+    else if PropNameEquals(fBasicSqlHasRows[false], SQL) or
+            PropNameEquals(fBasicSqlHasRows[true], SQL) then
       if TableRowCount(fStoredClass) = 0 then
       begin
         // collection is void
@@ -1502,13 +1503,13 @@ begin
         fStoredClassRecordProps.SimpleFieldSelect);
       try
         if (Stmt.SqlStatement = '') or // parsing failed
-          not IdemPropNameU(Stmt.TableName, fStoredClassRecordProps.SqlTableName) then
+          not PropNameEquals(Stmt.TableName, fStoredClassRecordProps.SqlTableName) then
           // invalid request -> return '' to mark error
           exit;
         if Stmt.SelectFunctionCount <> 0 then
           if (length(Stmt.Select) = 1) and
              (Stmt.Select[0].Alias = '') and
-             IdemPropNameU(Stmt.Select[0].FunctionName, 'count') then
+             PropNameEquals(Stmt.Select[0].FunctionName, 'count') then
             if Stmt.Where = nil then
               // was "SELECT Count(*) FROM TableName;"
               SetCount(TableRowCount(fStoredClass))

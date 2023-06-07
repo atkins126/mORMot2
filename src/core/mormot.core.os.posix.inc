@@ -154,10 +154,6 @@ end;
 
 
 { ****************** Unicode, Time, File process }
-var
-  /// contains the current Linux kernel revision, as one 24-bit integer
-  // - e.g. $030d02 for 3.13.2, or $020620 for 2.6.32
-  KernelRevision: cardinal;
 
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
 begin
@@ -1024,6 +1020,21 @@ begin
   {$endif HAS_PTHREADSETAFFINITY}
 end;
 
+{$ifdef HAS_PTHREADSETAFFINITY}
+function sched_getaffinity(pid: integer;
+  cpusetsize: SizeUInt; cpuset: pointer): integer;
+    cdecl external clib name 'sched_getaffinity';
+{$endif HAS_PTHREADSETAFFINITY}
+
+function GetMaskAffinity(out CpuSet: TCpuSet): boolean;
+begin
+  {$ifdef HAS_PTHREADSETAFFINITY}
+  result := sched_getaffinity(0, SizeOf(CpuSet), @CpuSet) = 0;
+  {$else}
+  result := false; // unsupported by now
+  {$endif HAS_PTHREADSETAFFINITY}
+end;
+
 
 {$ifndef NOEXCEPTIONINTERCEPT}
 
@@ -1230,6 +1241,17 @@ begin
   end;
 end;
 
+function WaitReadPending(fd, timeout: integer): boolean;
+var
+  p: TPollFD; // select() limits process to 1024 sockets in POSIX -> use poll()
+  // https://moythreads.com/wordpress/2009/12/22/select-system-call-limitation
+begin
+  p.fd := fd;
+  p.events := POLLIN or POLLPRI;
+  p.revents := 0;
+  result := FpPoll(@p, 1, timeout) > 0;
+end;
+
 {$I-}
 procedure DisplayFatalError(const title, msg: RawUtf8);
 var
@@ -1247,6 +1269,16 @@ function FileOpenSequentialRead(const FileName: TFileName): integer;
 begin
   // SysUtils.FileOpen = fpOpen + fpFlock
   result := fpOpen(pointer(FileName), O_RDONLY); // no fpFlock() call
+end;
+
+function IsFileReadable(const aFileName: TFileName): boolean;
+var
+  fd: integer;
+begin
+  fd := fpOpen(pointer(aFileName), O_RDONLY); // no fpFlock() call
+  result := ValidHandle(fd);
+  if result then
+    FpClose(fd);
 end;
 
 procedure SetEndOfFile(F: THandle);
@@ -1342,37 +1374,84 @@ begin
 end;
 
 
+{$undef HASEVENTFD}
+{$ifdef OSLINUX}
+  {$ifdef CPUX64}
+    {$define HASEVENTFD}
+  {$endif CPUX64}
+  {$ifdef CPUX86}
+    {.$define HASEVENTFD} // untested
+  {$endif CPUX86}
+  {$ifdef CPUAARCH64}
+    {.$define HASEVENTFD} // untested
+  {$endif CPUAARCH64}
+{$endif OSLINUX}
+
+
 { TSynEvent }
 
 constructor TSynEvent.Create;
 begin
-  fHandle := RTLEventCreate;
+  {$ifdef HASEVENTFD}
+  fFD := LinuxEventFD({nonblocking=}false, {semaphore=}false);
+  if fFD = 0 then // fallback to PRTLEvent on oldest kernel
+  {$endif HASEVENTFD}
+    fHandle := RTLEventCreate;
 end;
 
 destructor TSynEvent.Destroy;
 begin
-  RTLEventDestroy(fHandle);
+  {$ifdef HASEVENTFD}
+  if fFD <> 0 then
+  begin
+    LinuxEventFDWrite(fFD, 1); // release the lock
+    fpClose(fFD);
+  end
+  else
+  {$endif HASEVENTFD}
+    RTLEventDestroy(fHandle);
   inherited Destroy;
 end;
 
 procedure TSynEvent.ResetEvent;
 begin
-  RTLEventResetEvent(fHandle);
+  {$ifdef HASEVENTFD}
+  if fFD = 0 then // no need to reset the eventfd() handle
+  {$endif HASEVENTFD}
+    RTLEventResetEvent(fHandle);
 end;
 
 procedure TSynEvent.SetEvent;
 begin
-  RTLEventSetEvent(fHandle);
+  {$ifdef HASEVENTFD}
+  if fFD <> 0 then
+    LinuxEventFDWrite(fFD, 1)
+  else
+  {$endif HASEVENTFD}
+    RTLEventSetEvent(fHandle);
 end;
 
 procedure TSynEvent.WaitFor(TimeoutMS: integer);
 begin
-  RTLEventWaitFor(fHandle, TimeoutMS);
+  {$ifdef HASEVENTFD}
+  if fFD <> 0 then
+  begin
+    if LinuxEventFDWait(fFD, TimeoutMS) then
+      LinuxEventFDRead(fFD);
+  end
+  else
+  {$endif HASEVENTFD}
+    RTLEventWaitFor(fHandle, TimeoutMS);
 end;
 
 procedure TSynEvent.WaitForEver;
 begin
-  RTLEventWaitFor(fHandle);
+  {$ifdef HASEVENTFD}
+  if fFD <> 0 then
+    LinuxEventFDRead(fFD)
+  else
+  {$endif HASEVENTFD}
+    RTLEventWaitFor(fHandle);
 end;
 
 
@@ -1491,6 +1570,76 @@ begin
   end;
 end;
 
+{$ifdef HASEVENTFD}
+
+const
+  EFD_SEMAPHORE = $00000001;
+  EFD_NONBLOCK  = O_NONBLOCK;
+  EFD_CLOEXEC   = O_CLOEXEC;
+
+  // exists since Kernel 2.6.27
+  {$ifdef CPUX64}
+  syscall_nr_eventfd2 = 290;
+  {$endif CPUX64}
+  {$ifdef CPUX86}
+  syscall_nr_eventfd2 = 328;
+  {$endif CPUX86}
+  {$ifdef CPUAARCH64}
+  syscall_nr_eventfd2 = 356;
+  {$endif CPUAARCH64}
+
+function eventfd(initval, flags: cardinal): integer; inline;
+begin
+  result := do_syscall(syscall_nr_eventfd2, TSysParam(initval), TSysParam(flags));
+end;
+
+function LinuxEventFD(nonblocking, semaphore: boolean): integer;
+var
+  flags: cardinal;
+begin
+  result := 0;
+  if KernelRevision < $02061b then
+    exit; // not available prior to kernel 2.6.27
+  flags := 0;
+  if nonblocking then
+    flags := EFD_NONBLOCK;
+  if semaphore then
+    flags := flags or EFD_SEMAPHORE;
+  result := eventfd(0, flags);
+  if not ValidHandle(result) then
+    result := 0;
+end;
+
+{$else}
+
+function LinuxEventFD(nonblocking, semaphore: boolean): integer;
+begin
+  result := 0; // non implemented (not tested, infact) on this CPU
+end;
+
+{$endif HASEVENTFD}
+
+function LinuxEventFDRead(fd: integer): Int64;
+begin
+  { If EFD_SEMAPHORE was specified and the eventfd counter has a nonzero value,
+    then a read returns 8 bytes containing the value 1, and the counter's value
+    is decremented by 1 }
+  result := 0;
+  if do_syscall(syscall_nr_read, fd, TSysParam(@result), 8) <> 8 then
+    result := -1;
+end;
+
+procedure LinuxEventFDWrite(fd: integer; count: QWord);
+begin
+  if count <> 0 then
+    do_syscall(syscall_nr_write, fd, TSysParam(@count), SizeOf(count));
+end;
+
+function LinuxEventFDWait(fd: integer; ms: integer): boolean;
+begin
+  result := WaitReadPending(fd, ms);
+end;
+
 {$endif OSLINUX}
 
 
@@ -1548,17 +1697,6 @@ begin
   finally
     ConsoleCriticalSection.UnLock;
   end;
-end;
-
-function WaitReadPending(fd, timeout: integer): boolean;
-var
-  p: TPollFD; // select() limits process to 1024 sockets in POSIX -> use poll()
-  // https://moythreads.com/wordpress/2009/12/22/select-system-call-limitation
-begin
-  p.fd := fd;
-  p.events := POLLIN or POLLPRI;
-  p.revents := 0;
-  result := FpPoll(@p, 1, timeout) > 0;
 end;
 
 function UnixKeyPending: boolean;
@@ -2021,6 +2159,7 @@ var
   guid: THash128Rec absolute mem;
   {$endif OSDARWIN}
 begin
+  // this is the very minimal OS entropy we could get for BSD/Darwin
   QueryPerformanceMicroSeconds(us);
   e.i[0] := e.i[0] xor us;
   getloadavg(avg, 3);
@@ -2130,26 +2269,41 @@ begin
   result := StringFromFile('/proc/loadavg', {nosize=}true);
 end;
 
+function FindMemInfo(const meminfo, up: RawUtf8): PtrUInt;
+var
+  v: RawUtf8;
+begin
+  FindNameValue(meminfo, up, v);
+  result := GetCardinal(pointer(v)) shl 10;
+end;
+
 function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
 var
-  si: TSysInfo; // Linuxism
+  proc: RawUtf8;
   P: PUtf8Char;
-  mu: PtrUInt;
 begin
+  result := false;
   FillCharFast(info, SizeOf(info), 0);
-  result := SysInfo(@si) = 0;
-  mu := si.mem_unit;
-  if si.totalram <> 0 then // avoid div per 0 exception
-    info.percent := ((si.totalram - si.freeram) * 100) div si.totalram;
-  info.memtotal := si.totalram * mu;
-  info.memfree := si.freeram * mu;
-  info.filetotal := si.totalswap * mu;
-  info.filefree := si.freeswap * mu;
+  proc := StringFromFile('/proc/meminfo', {hasnosize=}true);
+  if proc = '' then
+    exit;
+  info.memtotal := FindMemInfo(proc, 'MEMTOTAL:');
+  info.memfree := FindMemInfo(proc, 'MEMAVAILABLE:'); // MemFree is too low
+  if info.memtotal <> 0 then
+  begin
+    info.percent := ((info.memtotal - info.memfree) * 100) div info.memtotal;
+    result := true;
+  end;
+  info.filetotal := FindMemInfo(proc, 'SWAPTOTAL:');
+  info.filefree := FindMemInfo(proc, 'SWAPFREE:');
+  info.vmtotal := FindMemInfo(proc, 'COMMITLIMIT:');
+  info.vmfree := FindMemInfo(proc, 'MEMFREE:');
   // GetHeapStatus is only about current thread -> use /proc/[pid]/statm
   if withalloc then
   begin
     // virtual memory information is not available under Linux
-    P := pointer(StringFromFile('/proc/self/statm', {hasnosize=}true));
+    proc := StringFromFile('/proc/self/statm', {hasnosize=}true);
+    P := pointer(proc);
     info.allocreserved := GetNextCardinal(P) * SystemInfo.dwPageSize; // VmSize
     info.allocused := GetNextCardinal(P) * SystemInfo.dwPageSize;     // VmRSS
   end;
@@ -2192,14 +2346,15 @@ end;
 {$else} // pure Linux
 
 const
-  // note: reading /sys/class/dmi/id/* is likely to require root access
-  _KNOWN: array[0..14] of record
+  // note: reading some of the /sys/class/dmi/id/* files may require root access
+  _KNOWN: array[0..15] of record
     id: TSmbiosBasicInfo;
     fn: string;
   end = (
     (id: sbiBiosVendor;        fn: 'bios_vendor'),
     (id: sbiBiosVersion;       fn: 'bios_version'),
     (id: sbiBiosDate;          fn: 'bios_date'),
+    (id: sbiBiosRelease;       fn: 'bios_release'),
     (id: sbiManufacturer;      fn: 'sys_vendor'),
     (id: sbiProductName;       fn: 'product_name'),
     (id: sbiVersion;           fn: 'product_version'),
@@ -2232,7 +2387,9 @@ end;
 
 {$endif OSBSDDARWIN}
 
-{$ifndef OSDARWIN} // on POSIX systems, /dev/mem may be available from root
+{$ifndef OSDARWIN}
+// on POSIX systems, /dev/mem may be available from root
+// but sometimes even root can't access it on hardened systems
 function ReadSystemMemory(address, size: PtrUInt): RawByteString;
 var
   mem: cInt;
@@ -2433,7 +2590,7 @@ begin
     {$ifdef USEMPROTECT}
     result := mprotect(addr, size, prot);
     {$else}
-    if Do_SysCall(syscall_nr_mprotect, PtrUInt(addr), size, prot) >= 0 then
+    if Do_SysCall(syscall_nr_mprotect, TSysParam(addr), size, prot) >= 0 then
       result := 0;
     {$endif USEMPROTECT}
   {$endif UNIX}
@@ -2687,20 +2844,22 @@ begin
 end;
 
 function RunUntilSigTerminatedPidFile(ensureWritable: boolean): TFileName;
+var
+  pidpath: TFileName;
 begin
-  result := RunUntilSigTerminatedPidFilePath;
-  if result = '' then
-    result := Executable.ProgramFilePath;
+  pidpath := RunUntilSigTerminatedPidFilePath;
+  if pidpath = '' then
+    pidpath := Executable.ProgramFilePath;
   if not ensureWritable then
   begin
-    result := Format('%s.%s.pid', [result, Executable.ProgramName]);
+    result := Format('%s.%s.pid', [pidpath, Executable.ProgramName]);
     if FileExists(result) then
       exit;
   end;
-  if not IsDirectoryWritable(result) then
+  if not IsDirectoryWritable(pidpath) then
     // if the executable folder is not writable, use the temporary folder
-    result := GetSystemPath(spTempFolder);
-  result := Format('%s.%s.pid', [result, Executable.ProgramName]);
+    pidpath := GetSystemPath(spTempFolder);
+  result := Format('%s.%s.pid', [pidpath, Executable.ProgramName]);
 end;
 
 function RunUntilSigTerminatedState: TServiceState;
@@ -3578,7 +3737,7 @@ begin
                     GetNextCardinal(P) shl 8 +
                     GetNextCardinal(P);
   OSVersion32.os := OS_KIND;
-  MoveByOne(@KernelRevision, @OSVersion32.utsrelease, 3); // 24-bit version
+  MoveByOne(@KernelRevision, @OSVersion32.utsrelease, 3); // 24-bit
   with SystemInfo.uts do
     OSVersionText := sysname + ' ' + release;
   if SystemInfo.release <> '' then

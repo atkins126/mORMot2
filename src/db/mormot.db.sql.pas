@@ -40,7 +40,7 @@ uses
   mormot.db.core;
 
 {.$define SYNDB_SILENCE}
-// if defined, this unit won't log the statement execution to SynDBLog
+// if defined, this unit won't log the statement execution
 
 
 { ************ SQL Fields and Columns Definitions }
@@ -443,7 +443,17 @@ const
      ' decimal(19,4)',                  // ftCurrency
      ' datetime year to fraction(3)',   // ftDate
      ' clob',                           // ftUtf8
-     ' blob'));                         // ftBlob
+     ' blob'),                          // ftBlob
+
+  // dMariaDB
+    (' int',                             // ftUnknown = int32
+     ' varchar(%) character set utf8',   // ftNull    = UTF-8
+     ' bigint',                          // ftInt64
+     ' double',                          // ftDouble
+     ' decimal(19,4)',                   // ftCurrency
+     ' datetime',                        // ftDate
+     ' mediumtext character set utf8',   // ftUtf8
+     ' mediumblob'));                    // ftBlob
 
   /// the known column data types corresponding to our TSqlDBFieldType types
   // - will be used e.g. for TSqlDBConnectionProperties.SqlFieldCreate()
@@ -460,7 +470,8 @@ const
     32767,  // dNexusDB
     0,      // dPostgreSQL
     32700,  // dDB2
-    32700); // dInformix
+    32700,  // dInformix
+    4000);  // dMariaDB
 
   /// the maximum number of bound parameters to a SQL statement
   // - will be used e.g. for Batch process multi-insert
@@ -479,8 +490,8 @@ const
     100,            // dNexusDB      empirical limit (above is slower)
     500,            // dPostgreSQL   theoritical=34000
     500,            // dDB2          empirical value (from ODBC)
-    0);             // dInformix
-
+    0,              // dInformix
+    500);           // dMariaDB
   /// the known SQL statement to retrieve the server date and time
   // - contains '' for the engines with local time
   DB_SERVERTIME: array[TSqlDBDefinition] of RawUtf8 = (
@@ -496,7 +507,8 @@ const
     'SELECT LOCALTIMESTAMP',                           // dPostgreSQL
     'select current timestamp from sysibm.sysdummy1',  // dDB2
     'select CURRENT YEAR TO FRACTION(3) ' +            // dInformix
-       'from SYSTABLES where tabid = 1');
+       'from SYSTABLES where tabid = 1',
+    'select NOW()');                                   // dMariaDB
 
 const
   /// the known SQL syntax to limit the number of returned rows in a SELECT
@@ -552,10 +564,14 @@ const
     ( // dInformix
     Position: posAfter;
     InsertFmt: ' first % '
+  ),
+    ( // dMariaDB
+    Position: posAfter;
+    InsertFmt: ' limit %'
   ));
 
   /// the known database engines handling CREATE INDEX IF NOT EXISTS statement
-  DB_HANDLECREATEINDEXIFNOTEXISTS = [dSQLite, dPostgreSQL];
+  DB_HANDLECREATEINDEXIFNOTEXISTS = [dSQLite, dPostgreSQL, dMariaDB];
 
   /// the known database engines handling CREATE INDEX on BLOB columns
   // - SQLite3 does not have any issue about indexing any column
@@ -577,7 +593,8 @@ const
      posWithColumn,   // dNexusDB
      posWithColumn,   // dPostgreSQL
      posWithColumn,   // dDB2
-     posWithColumn);  // dInformix
+     posWithColumn,   // dInformix
+     posWithColumn);  // dMariaDB
 
   /// the SQL text corresponding to the identified WHERE operators for a SELECT
   DB_SQLOPERATOR: array[opEqualTo..opLike] of RawUtf8 = (
@@ -632,7 +649,11 @@ function ReplaceParamsByNumbers(const aSql: RawUtf8; var aNewSql: RawUtf8;
 // - as used e.g. by PostgreSQL library (note that its syntax as {} not []
 // unless you change the Open/Close optional parameters)
 function BoundArrayToJsonArray(const Values: TRawUtf8DynArray;
-  Open: AnsiChar = '{'; Close: AnsiChar = '}'): RawUtf8;
+  Open: AnsiChar = '{'; Close: AnsiChar = '}'): RawUtf8; overload;
+
+/// create a JSON array from an array of UTF-8 SQL bound values
+procedure BoundArrayToJsonArray(const Values: TRawUtf8DynArray;
+  out Result: RawUtf8; Open: AnsiChar = '{'; Close: AnsiChar = '}'); overload;
 
 /// create an array of UTF-8 SQL bound values from a JSON array
 // - as generated during array binding, i.e. with quoted strings
@@ -1239,7 +1260,8 @@ type
     fBatchSendingAbilities: TSqlDBStatementCRUDs;
     fUseCache, fStoreVoidStringAsNull, fLogSqlStatementOnException,
     fRollbackOnDisconnect, fReconnectAfterConnectionError,
-    fEnsureColumnNameUnique, fFilterTableViewSchemaName: boolean;
+    fEnsureColumnNameUnique, fFilterTableViewSchemaName,
+    fNoBlobBindArray: boolean;
     {$ifndef UNICODE}
     fVariantWideString: boolean;
     {$endif UNICODE}
@@ -1250,8 +1272,8 @@ type
     fOnProcess: TOnSqlDBProcess;
     fOnStatementInfo: TOnSqlDBInfo;
     fStatementCacheReplicates: integer;
-    fSqlCreateField: TSqlDBFieldTypeDefinition;
     fSqlCreateFieldMax: cardinal;
+    fSqlCreateField: TSqlDBFieldTypeDefinition;
     fSharedTransactionsSafe: TLightLock;
     fSharedTransactions: array of TSqlDBConnectionTransaction;
     fExecuteWhenConnected: TRawUtf8DynArray;
@@ -1551,8 +1573,8 @@ type
     // - will fail if the same connection is not used for the whole process,
     // which would induce a potentially incorrect behavior
     // - returns the connection corresponding to the session, nil on error
-    function SharedTransaction(SessionID: cardinal; action:
-      TSqlDBSharedTransactionAction): TSqlDBConnection; virtual;
+    function SharedTransaction(SessionID: cardinal;
+      action: TSqlDBSharedTransactionAction): TSqlDBConnection; virtual;
 
     /// convert a textual column data type, as retrieved e.g. from SqlGetField,
     // into our internal primitive types
@@ -1681,6 +1703,8 @@ type
     // - this default implementation will use protected SqlGetTableNames virtual
     // method to retrieve the table names
     procedure GetTableNames(out Tables: TRawUtf8DynArray); virtual;
+    /// wrapper to call GetTableNames() then check if TableName is part of it
+    function TableExists(const TableName: RawUtf8): boolean;
     /// get all view names
     // - this default implementation will use protected SqlGetViewNames virtual
     // method to retrieve the view names
@@ -1714,8 +1738,11 @@ type
     class function EngineName: RawUtf8;
 
     /// return a shared connection, corresponding to the given database
-    // - call the ThreadSafeConnection method instead e.g. for multi-thread
-    // access, or NewThreadSafeStatement for direct retrieval of a new statement
+    // - the returned instance is shared among calls, so not thread-safe
+    // - for multi-thread access, call the ThreadSafeConnection method instead
+    // or NewThreadSafeStatement for direct retrieval of a new statement
+    // - is mainly used internally by TSqlDBConnectionProperties for reading the
+    // database metadata
     property MainConnection: TSqlDBConnection
       read GetMainConnection;
     /// the associated User Password, as specified at creation
@@ -1871,6 +1898,10 @@ type
     // - as used by SqlDateToIso8601Quoted() and BindArray()
     property DateTimeFirstChar: AnsiChar
       read fDateTimeFirstChar write fDateTimeFirstChar;
+    /// defines if the engine does not support BindArray(ftBlob)
+    // - only set for TSqlDBPostgresConnectionProperties by now
+    property NoBlobBindArray: boolean
+      read fNoBlobBindArray write fNoBlobBindArray;
     {$ifndef UNICODE}
     /// set to true to force all variant conversion to WideString instead of
     // the default faster AnsiString, for pre-Unicode version of Delphi
@@ -1905,22 +1936,22 @@ type
   /// abstract connection created from TSqlDBConnectionProperties
   // - more than one TSqlDBConnection instance can be run for the same
   // TSqlDBConnectionProperties
-  TSqlDBConnection = class(TSynPersistentLock)
+  TSqlDBConnection = class(TSynPersistent)
   protected
     fProperties: TSqlDBConnectionProperties;
     fErrorException: ExceptClass;
     fErrorMessage: RawUtf8;
     fTransactionCount: integer;
     fServerTimestampOffset: TDateTime;
-    fServerTimestampAtConnection: TDateTime;
-    fCache: TRawUtf8List; // statements cache protected by main Safe.Lock/UnLock
-    fOnProcess: TOnSqlDBProcess;
+    fCacheSafe: TOSLightLock; // protect fCache - warning: not reentrant!
+    fCache: TRawUtf8List; // statements cache
     fCacheLast: RawUtf8;
     fCacheLastIndex: integer;
     fTotalConnectionCount: integer;
     fInternalProcessActive: integer;
     fRollbackOnDisconnect: boolean;
     fLastAccessTicks: Int64;
+    fOnProcess: TOnSqlDBProcess;
     function IsOutdated(tix: Int64): boolean; // do not make virtual nor inline
     function GetInTransaction: boolean; virtual;
     function GetServerTimestamp: TTimeLog;
@@ -1993,6 +2024,10 @@ type
     // - will raise an Exception in case of error
     function NewTableFromRows(const TableName: RawUtf8; Rows: TSqlDBStatement;
       WithinTransaction: boolean; ColumnForcedTypes: TSqlDBFieldTypeDynArray = nil): integer;
+    /// create a new table in this database from an existing table on another DB
+    // - could be called instead of NewTableFromRows() if no Rows are available
+    function NewTableFrom(const NewTableName, SourceTableName: RawUtf8;
+      Source: TSqlDBConnectionProperties): boolean;
 
     /// the current Date and Time, as retrieved from the server
     // - note that this value is the DB_SERVERTIME[] constant SQL value, so
@@ -2017,9 +2052,6 @@ type
     /// returns TRUE if the connection was set
     property Connected: boolean
       read IsConnected;
-    /// the time returned by the server when the connection occurred
-    property ServerTimestampAtConnection: TDateTime
-      read fServerTimestampAtConnection;
     /// number of sucessfull connections for this instance
     // - can be greater than 1 in case of re-connection via Disconnect/Connect
     property TotalConnectionCount: integer
@@ -2074,7 +2106,6 @@ type
   TSqlDBStatement = class(TInterfacedObject, ISqlDBRows, ISqlDBStatement)
   protected
     fConnection: TSqlDBConnection;
-    fSql: RawUtf8;
     fParamCount: integer;
     fColumnCount: integer;
     fTotalRowsRetrieved: integer;
@@ -2084,11 +2115,10 @@ type
     fForceBlobAsNull: boolean;
     fForceDateWithMS: boolean;
     fDbms: TSqlDBDefinition;
-    fCache: TSqlDBStatementCache;
-    {$ifndef SYNDB_SILENCE}
     fSqlLogLevel: TSynLogInfo;
+    fSql: RawUtf8;
+    fCache: TSqlDBStatementCache;
     fSqlLogLog: TSynLog;
-    {$endif SYNDB_SILENCE}
     fSqlWithInlinedParams: RawUtf8;
     fSqlLogTimer: TPrecisionTimer;
     fSqlPrepared: RawUtf8;
@@ -2117,10 +2147,16 @@ type
     function GetColumnVariant(const ColName: RawUtf8): Variant;
     /// return the associated statement instance for a ISqlDBRows interface
     function Instance: TSqlDBStatement;
-    /// wrappers to compute sllSQL/sllDB SQL context with a local timer
+    /// wrappers to compute sllSQL/sllDB/sllResult SQL context with a local timer
     function SqlLogBegin(Level: TSynLogInfo): TSynLog;
+      {$ifdef HASINLINE} inline; {$endif}
     function SqlLogEnd(const Fmt: RawUtf8; const Args: array of const): Int64; overload;
     function SqlLogEnd(Msg: PShortString = nil): Int64; overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    {$ifndef SYNDB_SILENCE}
+    function DoSqlLogBegin(Log: TSynLogFamily; Level: TSynLogInfo): TSynLog;
+    function DoSqlLogEnd(Msg: PShortString): Int64;
+    {$endif SYNDB_SILENCE}
   public
     /// create a statement instance
     constructor Create(aConnection: TSqlDBConnection); virtual;
@@ -2540,6 +2576,8 @@ type
     // $ insert into TableName (Col1,Col2) values (?,N)
     // - used e.g. to convert some data on the fly from one database to another,
     // via the TSqlDBConnection.NewTableFromRows method
+    // - returns '' and Fields= nil if there is not enough column information
+    // to compute the SQL
     function ColumnsToSqlInsert(const TableName: RawUtf8;
       var Fields: TSqlDBColumnCreateDynArray): RawUtf8; virtual;
     // append all rows content as a JSON stream
@@ -2633,6 +2671,8 @@ type
     property TotalRowsRetrieved: integer
       read fTotalRowsRetrieved;
     /// the associated database connection
+    // - warning: some constructors may left nil here, e.g. after
+    // TSqlDBSQLite3Statement.CreateFrom
     property Connection: TSqlDBConnection
       read fConnection;
     /// strip last semicolon in query
@@ -2735,8 +2775,8 @@ type
   // this type can be used to implement a generic parameter
   // - used e.g. by TSqlDBStatementWithParams as a dynamic array
   // (and its inherited TSqlDBOracleStatement)
-  // - don't change this structure, since it will be serialized as binary
-  // for TSqlDBProxyConnectionCommandExecute
+  // - warning: don't change this structure, since it will be serialized as
+  // SaveRecord() binary for TSqlDBProxyConnectionCommandExecute
   TSqlDBParam = packed record
     /// storage used for TEXT (ftUtf8) and BLOB (ftBlob) values
     // - ftBlob are stored as RawByteString
@@ -2755,7 +2795,7 @@ type
     VType: TSqlDBFieldType;
     /// define if parameter can be retrieved after a stored procedure execution
     VInOut: TSqlDBParamInOutType;
-    /// used e.g. by TSqlDBOracleStatement
+    /// used e.g. by TSqlDBOracleStatement or TSqlDBPostgresStatement
     VDBType: word;
   end;
 
@@ -3179,6 +3219,12 @@ end;
 
 function BoundArrayToJsonArray(const Values: TRawUtf8DynArray;
   Open, Close: AnsiChar): RawUtf8;
+begin
+  BoundArrayToJsonArray(Values, result, Open, Close);
+end;
+
+procedure BoundArrayToJsonArray(const Values: TRawUtf8DynArray;
+  out Result: RawUtf8; Open, Close: AnsiChar);
 //  'one', 't"wo' -> '{"one","t\"wo"}'  and  1,2,3 -> '{1,2,3}'
 var
   V: ^RawUtf8;
@@ -3188,7 +3234,6 @@ var
 label
   _dq;
 begin
-  result := '';
   // fist compute the resulting length
   n := length(Values);
   if n = 0 then
@@ -3226,8 +3271,8 @@ begin
     dec(n);
   until n = 0;
   // generate the output JSON
-  FastSetString(result, nil, L);
-  d := pointer(result);
+  FastSetString(Result, nil, L);
+  d := pointer(Result);
   d^ := Open;
   inc(d);
   v := pointer(Values);
@@ -3346,7 +3391,7 @@ begin
           fStatement.GetSqlWithInlinedParams;
       except
         fMessageUtf8 := fMessageUtf8 + ' - ' +
-          fStatement.SQL; // if parameter access failed -> append with ?
+          fStatement.Sql; // if parameter access failed -> append with ?
       end;
   end;
   {$endif SYNDB_SILENCE}
@@ -3420,6 +3465,7 @@ begin
     case db of
       dSQlite,
       dMySQL,
+      dMariaDB,
       dPostgreSQL,
       dNexusDB,
       dMSSQL,
@@ -3717,7 +3763,8 @@ procedure TSqlDBConnectionProperties.SetSchemaNameToOwner(out Owner: RawUtf8);
 begin
   if fForcedSchemaName = '' then
     case fDbms of
-      dMySql:
+      dMySql,
+      dMariaDB:
         Owner := DatabaseName;
       dInformix:
         Owner := '';
@@ -3804,6 +3851,7 @@ begin
     dPostgreSQL,
     dMSSQL,
     dMySQL,
+    dMariaDB,
     dOracle,
     dNexusDB:
       // most DB create an implicit index on their primary key,
@@ -3856,9 +3904,28 @@ var
   DB_KEYWORDS: array[TSqlDBDefinition] of TRawUtf8DynArray;
 
 const
+  // reused for MySQL and MariaDB
+  MYSQL_KEYWORDS_CSV = 
+    'accessible,analyze,asensitive,auto_increment,before,bigint,binary,blob,call,change,' +
+    'condition,database,databases,day_hour,day_microsecond,day_minute,day_second,' +
+    'delayed,deterministic,distinctrow,div,dual,each,elseif,enclosed,enum,escaped,exit,' +
+    'explain,float4,float8,force,fulltext,general,high_priority,hour_microsecond,' +
+    'hour_minute,hour_second,if,ignore,ignore_server_ids,infile,inout,int1,int2,int3,int4,' +
+    'int8,iterate,keys,kill,leave,limit,linear,linear,lines,load,localtime,localtimestamp,' +
+    'lock,long,longblob,longtext,loop,low_priority,master_heartbeat_period,' +
+    'master_ssl_verify_server_cert,master_ssl_verify_server_cert,maxvalue,' +
+    'mediumblob,mediumint,mediumtext,middleint,minute_microsecond,minute_second,mod,' +
+    'modifies,no_write_to_binlog,optimize,optionally,out,outfile,purge,range,range,' +
+    'read_only,read_only,read_write,read_write,reads,regexp,release,rename,repeat,replace,' +
+    'require,resignal signal,return,rlike,schemas,second_microsecond,sensitive,' +
+    'separator,show,slow,spatial,specific,sql_big_result,sql_calc_found_rows,' +
+    'sql_small_result,sqlexception,ssl,starting,straight_join,terminated,text,tinyblob,' +
+    'tinyint,tinytext,trigger,undo,unlock,unsigned,use,utc_date,utc_time,utc_timestamp,' +
+    'varbinary,varcharacter,while,x509,xor,year_month,zerofillaccessible';
   /// CSV of the known reserved keywords per database engine, in alphabetic order
   DB_KEYWORDS_CSV: array[TSqlDBDefinition] of PUtf8Char = (
-    '',  // dUnknown
+    // dUnknown
+    '',
     // dDefault = ODBC / SQL-92 keywords (always checked first)
     'absolute,action,ada,add,all,allocate,alter,and,any,are,as,asc,assertion,at,authorization,' +
     'avg,begin,between,bit,bit_length,both,by,cascade,cascaded,case,cast,catalog,char,' +
@@ -3920,22 +3987,7 @@ const
     'single,singlefloat,stdev,stdevp,string,tableid,text,top,transform,unsignedbyte,var,' +
     'varbinary,varp,yesno',
   // dMySQL specific keywords (in addition to dDefault)
-    'accessible,analyze,asensitive,auto_increment,before,bigint,binary,blob,call,change,' +
-    'condition,database,databases,day_hour,day_microsecond,day_minute,day_second,' +
-    'delayed,deterministic,distinctrow,div,dual,each,elseif,enclosed,enum,escaped,exit,' +
-    'explain,float4,float8,force,fulltext,general,high_priority,hour_microsecond,' +
-    'hour_minute,hour_second,if,ignore,ignore_server_ids,infile,inout,int1,int2,int3,int4,' +
-    'int8,iterate,keys,kill,leave,limit,linear,linear,lines,load,localtime,localtimestamp,' +
-    'lock,long,longblob,longtext,loop,low_priority,master_heartbeat_period,' +
-    'master_ssl_verify_server_cert,master_ssl_verify_server_cert,maxvalue,' +
-    'mediumblob,mediumint,mediumtext,middleint,minute_microsecond,minute_second,mod,' +
-    'modifies,no_write_to_binlog,optimize,optionally,out,outfile,purge,range,range,' +
-    'read_only,read_only,read_write,read_write,reads,regexp,release,rename,repeat,replace,' +
-    'require,resignal signal,return,rlike,schemas,second_microsecond,sensitive,' +
-    'separator,show,slow,spatial,specific,sql_big_result,sql_calc_found_rows,' +
-    'sql_small_result,sqlexception,ssl,starting,straight_join,terminated,text,tinyblob,' +
-    'tinyint,tinytext,trigger,undo,unlock,unsigned,use,utc_date,utc_time,utc_timestamp,' +
-    'varbinary,varcharacter,while,x509,xor,year_month,zerofillaccessible',
+     MYSQL_KEYWORDS_CSV,
   // dSQLite keywords (dDefault is not added to this list)
     'abort,after,and,attach,before,cluster,conflict,copy,database,delete,delimiters,detach,' +
     'each,explain,fail,from,glob,ignore,insert,instead,isnull,limit,not,notnull,offset,or,' +
@@ -3959,7 +4011,7 @@ const
     'abort,access,admin,after,aggregate,also,always,analyse,analyze,array,assignment,' +
     'asymmetric,backward,before,bigint,binary,boolean,cache,called,chain,characteristics,' +
     'checkpoint,class,cluster,comment,committed,concurrently,configuration,content,' +
-    'conversion,copy,cost,createdb,createrole,createuser,csv,current_role,cycle,database,' +
+    'conversion,copy,cost,createdb,createrole,createuser,csv,ctid,current_role,cycle,database,' +
     'defaults,definer,delimiter,delimiters,dictionary,disable,discard,do,document,each,' +
     'enable,encoding,encrypted,enum,excluding,exclusive,explain,family,force,forward,' +
     'freeze,function,granted,greatest,handler,header,hold,if,ilike,immutable,implicit,' +
@@ -4011,7 +4063,10 @@ const
     'volatiledefaults,volumesdefinition,whendelete,wheneverdense_rank,wheredenserank,' +
     'whiledescribe,withdescriptor,withoutdeter',
   // dInformix specific keywords (in addition to dDefault)
-    '');
+    '',
+  // dMariaDB specific keywords (in addition to dDefault)
+    MYSQL_KEYWORDS_CSV
+    );
 
 class function TSqlDBConnectionProperties.IsSqlKeyword(aDB: TSqlDBDefinition;
   aWord: RawUtf8): boolean;
@@ -4260,6 +4315,14 @@ begin
   end;
 end;
 
+function TSqlDBConnectionProperties.TableExists(const TableName: RawUtf8): boolean;
+var
+  tables: TRawUtf8DynArray;
+begin
+  GetTableNames(tables);
+  result := FindRawUtf8(tables, TableName, {casesensitive=}false) >= 0;
+end;
+
 procedure TSqlDBConnectionProperties.GetViewNames(out Views: TRawUtf8DynArray);
 var
   sql, table, checkschema: RawUtf8;
@@ -4304,7 +4367,8 @@ begin
         Table := Owner;
         if fForcedSchemaName = '' then
           case fDbms of
-            dMySql:
+            dMySql,
+            dMariaDB:
               Owner := DatabaseName;
           else
             Owner := UserID;
@@ -4396,6 +4460,7 @@ begin
         ' where c.owner like ''%'' and c.table_name like ''%'';';
     dMSSQL,
     dMySQL,
+    dMariaDB,
     dPostgreSQL:
       fmt :=
         'select COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION,' +
@@ -4508,6 +4573,7 @@ begin
         '  and  a.object_name like ''%''' + ' order by position';
     dMSSQL,
     dMySQL,
+    dMariaDB,
     dPostgreSQL:
       fmt :=
         'select PARAMETER_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, PARAMETER_MODE ' +
@@ -4564,6 +4630,7 @@ begin
         'where P.owner = ''%'' and P.SUBPROGRAM_ID > 0 ' + 'order by NAME_ROUTINE';
     dMSSQL,
     dMySQL,
+    dMariaDB,
     dPostgreSQL:
       fmt := 'select R.SPECIFIC_NAME NAME_ROUTINE ' +
         'from INFORMATION_SCHEMA.ROUTINES R ' +
@@ -4595,7 +4662,8 @@ begin
     dMSSQL:
       result := 'select (TABLE_SCHEMA + ''.'' + TABLE_NAME) as name ' +
         'from INFORMATION_SCHEMA.TABLES where TABLE_TYPE=''BASE TABLE'' order by name';
-    dMySQL:
+    dMySQL,
+    dMariaDB:
       result := 'select concat(TABLE_SCHEMA,''.'',TABLE_NAME) as name ' +
         'from INFORMATION_SCHEMA.TABLES where TABLE_TYPE=''BASE TABLE'' order by name';
     dPostgreSQL:
@@ -4623,7 +4691,8 @@ begin
     dMSSQL:
       result := 'select (TABLE_SCHEMA + ''.'' + TABLE_NAME) as name ' +
         'from INFORMATION_SCHEMA.VIEWS order by name';
-    dMySQL:
+    dMySQL,
+    dMariaDB:
       result := 'select concat(TABLE_SCHEMA,''.'',TABLE_NAME) as name ' +
         'from INFORMATION_SCHEMA.VIEWS order by name';
     dPostgreSQL:
@@ -4663,7 +4732,7 @@ end;
 const
   COL_DECIMAL = 18; // change it if you update PCHARS[] below before 'DECIMAL'
   COL_NUMERIC = COL_DECIMAL + 1;
-  COL_NAMES: array[0..56] of PAnsiChar = (
+  COL_NAMES: array[0..57] of PAnsiChar = (
     'TEXT COLLATE ISO8601', // should be before plain 'TEXT'
     'TEXT',
     'CHAR',
@@ -4697,6 +4766,7 @@ const
     'YEAR',
     'TINYTEXT',
     'MEDIUMTEXT',
+    'LONGTEXT',
     'NTEXT',
     'XML',
     'ENUM',
@@ -4756,6 +4826,7 @@ const
     ftInt64,     // 'YEAR'
     ftUtf8,      // 'TINYTEXT'
     ftUtf8,      // 'MEDIUMTEXT'
+    ftUtf8,      // 'LONGTEXT'
     ftUtf8,      // 'NTEXT'
     ftUtf8,      // 'XML'
     ftUtf8,      // 'ENUM'
@@ -4801,7 +4872,7 @@ function TSqlDBConnectionProperties.ColumnTypeNativeToDB(
   begin
     if PosEx('CHAR', aNativeType) > 0 then
       result := ftUtf8
-    else if IdemPropNameU(aNativeType, 'NUMBER') then
+    else if PropNameEquals(aNativeType, 'NUMBER') then
       case aScale of
         0:
           result := ftInt64;
@@ -4811,13 +4882,13 @@ function TSqlDBConnectionProperties.ColumnTypeNativeToDB(
         result := ftDouble;
       end
     else if (PosEx('RAW', aNativeType) > 0) or
-            IdemPropNameU(aNativeType, 'BLOB') or
-            IdemPropNameU(aNativeType, 'BFILE') then
+            PropNameEquals(aNativeType, 'BLOB') or
+            PropNameEquals(aNativeType, 'BFILE') then
       result := ftBlob
     else if IdemPChar(pointer(aNativeType), 'BINARY_') or
-            IdemPropNameU(aNativeType, 'FLOAT') then
+            PropNameEquals(aNativeType, 'FLOAT') then
       result := ftDouble
-    else if IdemPropNameU(aNativeType, 'DATE') or
+    else if PropNameEquals(aNativeType, 'DATE') or
             IdemPChar(pointer(aNativeType), 'TIMESTAMP') then
       result := ftDate
     else    // all other types will be converted to text
@@ -4988,7 +5059,8 @@ begin
       dInformix:
         result := result + ' PRIMARY KEY';
       dDB2,
-      dMySQL:
+      dMySQL,
+      dMariaDB:
         aAddPrimaryKey := aField.Name;
     end;
   result := aField.Name + result;
@@ -5023,7 +5095,7 @@ begin
   begin
     SqlSplitTableName(aTableName, owner, table);
     if (owner <> '') and
-       not (fDbms in [dMSSQL, dPostgreSQL, dMySQL, dFirebird, dDB2, dInformix]) then
+       not (fDbms in [dMSSQL, dPostgreSQL, dMySQL, dMariaDB, dFirebird, dDB2, dInformix]) then
       // some DB engines do not expect any schema in the index name
       indexname := owner + '.';
     fieldscsv := RawUtf8ArrayToCsv(aFieldNames, '');
@@ -5062,7 +5134,8 @@ begin
     dPostgresql:
       if PosExChar('.', aTableName) = 0 then
         needquote := true; // quote if not schema.identifier format
-    dMySQL:
+    dMySQL,
+    dMariaDB:
       begin
         beginquote := '`';  // backtick/grave accent
         endquote := '`';
@@ -5102,7 +5175,7 @@ begin
     colname := TrimU(GetCsvItem(pointer(indexes[i].KeyColumns), 0));
     if colname <> '' then
       for j := 0 to high(Fields) do
-        if IdemPropNameU(Fields[j].ColumnName, colname) then
+        if PropNameEquals(Fields[j].ColumnName, colname) then
         begin
           Fields[j].ColumnIndexed := true;
           break;
@@ -5144,9 +5217,10 @@ begin
       // multiple error codes in the error message
       result := IdemPCharArray(PosErrorNumber(aMessage, '['),
         ['08001', '08S01', '08007', '28000', '42000']) >= 0;
-    dMySQL:
-      result := (PosEx('Lost connection to MySQL server', aMessage) > 0) or
-                (PosEx('MySQL server has gone away', aMessage) > 0);
+    dMySQL,
+    dMariaDB:
+      result := (PosEx('Lost connection to', aMessage) > 0) or
+                (PosEx('server has gone away', aMessage) > 0);
   else
     result := PosI(' CONNE', aMessage) > 0;
   end;
@@ -6745,44 +6819,57 @@ begin
   result := Self;
 end;
 
+{$ifdef SYNDB_SILENCE}
+
 function TSqlDBStatement.SqlLogBegin(Level: TSynLogInfo): TSynLog;
 begin
-  if Level = sllDB then // prepare
+  result := nil;
+  if Level = sllDB then  // sllDB = prepare
     fSqlLogTimer.Start
   else
-    fSqlLogTimer.Resume;
-  {$ifdef SYNDB_SILENCE}
-  result := nil;
-  {$else SYNDB_SILENCE}
-  result := SynDBLog.Add;
-  if result <> nil then
-    if Level in result.Family.Level then
-    begin
-      fSqlLogLevel := Level;
-      if Level = sllSQL then
-        ComputeSqlWithInlinedParams;
-    end
-    else
-      result := nil; // fSqlLogLog=nil if this Level is disabled
-  fSqlLogLog := result;
-  {$endif SYNDB_SILENCE}
+    fSqlLogTimer.Resume; // sllSQL or sllResult
 end;
 
 function TSqlDBStatement.SqlLogEnd(Msg: PShortString): Int64;
-{$ifndef SYNDB_SILENCE}
-var
-  tmp: TShort16;
-{$endif SYNDB_SILENCE}
 begin
   fSqlLogTimer.Pause;
-  {$ifdef SYNDB_SILENCE}
   result := fSqlLogTimer.LastTimeInMicroSec;
-  {$else}
-  result := 0;
-  if fSqlLogLog = nil then // fSqlLogLog=nil if this level is disabled
-    exit;
+end;
+
+{$else}
+
+function TSqlDBStatement.DoSqlLogBegin(Log: TSynLogFamily; Level: TSynLogInfo): TSynLog;
+begin
+  result := Log.SynLog;
+  fSqlLogLevel := Level;
+  if Level = sllSQL then // sllSQL = executeprepared
+    ComputeSqlWithInlinedParams;
+  if Level = sllDB then  // sllDB = prepare
+    fSqlLogTimer.Start
+  else
+    fSqlLogTimer.Resume; // sllSQL or sllResult
+end;
+
+function TSqlDBStatement.SqlLogBegin(Level: TSynLogInfo): TSynLog;
+var
+  fam: TSynLogFamily;
+begin
+  fam := SynDBLog.Family;
+  if (fam <> nil) and
+     (Level in fam.Level) then
+    result := DoSqlLogBegin(fam, Level)
+  else
+    result := nil; // fSqlLogLog=nil if this Level is disabled
+  fSqlLogLog := result;
+end;
+
+function TSqlDBStatement.DoSqlLogEnd(Msg: PShortString): Int64;
+var
+  tmp: TShort16;
+begin
+  fSqlLogTimer.Pause;
   tmp[0] := #0;
-  if fSqlLogLevel = sllSQL then
+  if fSqlLogLevel <> sllDB then // sllSQL or sllResult
   begin
     if Msg = nil then
     begin
@@ -6790,8 +6877,12 @@ begin
         FormatShort16(' wr=%', [UpdateCount], tmp);
       Msg := @tmp;
     end;
-    fSqlLogLog.Log(fSqlLogLevel, 'ExecutePrepared t=%% q=%',
-      [fSqlLogTimer.Time, Msg^, fSqlWithInlinedParams], self)
+    if fSqlLogLevel = sllSQL then
+      fSqlLogLog.Log(sllSQL, 'Execute t=%% q=%',
+        [fSqlLogTimer.Time, Msg^, fSqlWithInlinedParams], self)
+    else // from TSqlDBPostgresStatement.GetPipelineResult
+      fSqlLogLog.Log(fSqlLogLevel, 'Return t=%%',
+        [fSqlLogTimer.Time, Msg^], self);
   end
   else
   begin
@@ -6802,8 +6893,16 @@ begin
   end;
   result := fSqlLogTimer.LastTimeInMicroSec;
   fSqlLogLog := nil;
-  {$endif SYNDB_SILENCE}
 end;
+
+function TSqlDBStatement.SqlLogEnd(Msg: PShortString): Int64;
+begin
+  result := 0;
+  if fSqlLogLog <> nil then // fSqlLogLog=nil if this level is disabled
+    result := DoSqlLogEnd(Msg);
+end;
+
+{$endif SYNDB_SILENCE}
 
 function TSqlDBStatement.SqlLogEnd(const Fmt: RawUtf8;
   const Args: array of const): Int64;
@@ -7022,7 +7121,8 @@ end;
 
 procedure TSqlDBStatement.ExecutePrepared;
 begin
-  if fConnection <> nil then
+  if (fConnection <> nil) and
+     (fConnection.fProperties.fConnectionTimeOutTicks <> 0) then
     fConnection.fLastAccessTicks := GetTickCount64;
   // a do-nothing default method
 end;
@@ -7062,9 +7162,11 @@ begin
       ftNull:
         Fields[F].DBType := ftBlob; // if not identified, assume it is a BLOB
       ftUnknown:
-        raise ESqlDBException.CreateUtf8(
-          '%.ColumnsToSqlInsert: Invalid column %',
-          [self, Fields[F].Name]);
+        begin
+          Fields := nil;
+          result := ''; // not enough information
+          exit;
+        end;
     end;
     result := result + Fields[F].Name + ',';
   end;
@@ -7162,6 +7264,7 @@ end;
 constructor TSqlDBConnection.Create(aProperties: TSqlDBConnectionProperties);
 begin
   inherited Create;
+  fCacheSafe.Init; // mandatory for TOSLightLock
   fProperties := aProperties;
   if aProperties <> nil then
   begin
@@ -7178,12 +7281,6 @@ begin
   InternalProcess(speConnected);
   if fTotalConnectionCount > 1 then
     InternalProcess(speReconnected);
-  if fServerTimestampAtConnection = 0 then
-  try
-    fServerTimestampAtConnection := ServerDateTime;
-  except
-    fServerTimestampAtConnection := Now;
-  end;
   for i := 0 to length(fProperties.ExecuteWhenConnected) - 1 do
     with NewStatement do
     try
@@ -7202,7 +7299,7 @@ begin
   if fCache <> nil then
   begin
     InternalProcess(speActive);
-    fSafe.Lock; // protect fCache access e.g. for a single SQLite3 DB
+    fCacheSafe.Lock; // protect fCache access e.g. for a single SQLite3 DB
     try
       obj := fCache.ObjectPtr;
       if obj <> nil then
@@ -7210,7 +7307,7 @@ begin
           TSqlDBStatement(obj[i]).FRefCount := 0; // force clean release
       FreeAndNilSafe(fCache); // release all cached statements
     finally
-      fSafe.UnLock;
+      fCacheSafe.UnLock;
       InternalProcess(speNonActive);
     end;
   end;
@@ -7235,6 +7332,7 @@ begin
       SynDBLog.Add.Log(sllError, 'e=%', [E]);
   end;
   inherited;
+  fCacheSafe.Done;
 end;
 
 function TSqlDBConnection.IsOutdated(tix: Int64): boolean;
@@ -7322,11 +7420,11 @@ var
         stmt.Prepare(aSql, ExpectResults);
         if tocache then
         begin
-          fSafe.Lock; // protect fCache access
+          fCacheSafe.Lock; // protect fCache access
           try
             if fCache = nil then
               fCache := TRawUtf8List.CreateEx(
-                [fObjectsOwned, fNoDuplicate, fCaseSensitive, fNoThreadLock]);
+                [fObjectsOwned, fNoDuplicate, fCaseSensitive]);
             ndx := fCache.AddObject(cachedsql, stmt);
             if ndx >= 0 then
             begin
@@ -7339,7 +7437,7 @@ var
               SynDBLog.Add.Log(sllWarning, 'NewStatementPrepared: unexpected ' +
                 'cache duplicate for %', [stmt.SqlWithInlinedParams], self);
           finally
-            fSafe.UnLock;
+            fCacheSafe.UnLock;
           end;
         end;
         result := stmt;
@@ -7350,9 +7448,10 @@ var
       on E: Exception do
       begin
         {$ifndef SYNDB_SILENCE}
-        with SynDBLog.Add do
-          if [sllSQL, sllDB, sllException, sllError] * Family.Level <> [] then
-            LogLines(sllSQL, pointer(stmt.SqlWithInlinedParams), self, '--');
+        if SynDBLog <> nil then
+          with SynDBLog.Add do
+            if [sllSQL, sllDB, sllException, sllError] * Family.Level <> [] then
+              LogLines(sllSQL, pointer(stmt.SqlWithInlinedParams), self, '--');
         {$endif SYNDB_SILENCE}
         stmt.Free;
         result := nil;
@@ -7372,17 +7471,17 @@ begin
     exit;
   // first check if could be retrieved from cache
   cachedsql := aSql;
-  fSafe.Lock; // protect fCache access
+  fCacheSafe.Lock; // protect fCache (never lock on per-thread connection)
   try
     stmt := nil;
     if fCache <> nil then
     begin
-      // most common case: we have this statement in cache
+      // fast lookup of the requested SQL in cache
       if (fCacheLast = cachedsql) and
          (fCache.Strings[fCacheLastIndex] = cachedsql) then
         ndx := fCacheLastIndex // no need to use the hash lookup
       else
-        ndx := fCache.IndexOf(cachedsql);
+        ndx := fCache.IndexOf(cachedsql); // O(1) hash lookup from fNoDuplicate
       if ndx >= 0 then
       begin
         stmt := fCache.Objects[ndx];
@@ -7436,7 +7535,7 @@ begin
         tocache := iscacheable;
     end;
   finally
-    fSafe.UnLock;
+    fCacheSafe.UnLock;
   end;
   if result <> nil then
   begin
@@ -7505,19 +7604,46 @@ end;
 function TSqlDBConnection.NewTableFromRows(const TableName: RawUtf8;
   Rows: TSqlDBStatement; WithinTransaction: boolean;
   ColumnForcedTypes: TSqlDBFieldTypeDynArray): integer;
+
+  function CreateDestTableAndComputeSql: RawUtf8;
+  var
+    i, n: PtrInt;
+    tableu: RawUtf8;
+    fields: TSqlDBColumnCreateDynArray;
+  begin
+    tableu := Properties.SqlTableName(TableName);
+    result := Rows.ColumnsToSqlInsert(tableu, fields);
+    n := length(fields);
+    if (result = '') or
+       (n = 0) then
+      exit;
+    if Length(ColumnForcedTypes) <> n then
+    begin
+      SetLength(ColumnForcedTypes, n);
+      for i := 0 to n - 1 do
+        case fields[i].DBType of
+          ftUnknown:
+            ColumnForcedTypes[i] := ftInt64;
+          ftNull:
+            ColumnForcedTypes[i] := ftBlob; // assume NULL is a BLOB
+        else
+          ColumnForcedTypes[i] := fields[i].DBType;
+        end;
+    end;
+    if not Properties.TableExists(TableName) then
+      Properties.ExecuteNoResult(
+        Properties.SqlCreate(tableu, fields, false), []);
+  end;
+
 var
-  fields: TSqlDBColumnCreateDynArray;
-  tableu, sql: RawUtf8;
-  tables: TRawUtf8DynArray;
+  sql: RawUtf8;
   stmt: TSqlDBStatement;
-  i, n: PtrInt;
 begin
   result := 0;
   if (self = nil) or
      (Rows = nil) or
      (Rows.ColumnCount = 0) then
     exit;
-  tableu := Properties.SqlTableName(TableName);
   if WithinTransaction then
     StartTransaction; // MUCH faster within a transaction
   try
@@ -7529,25 +7655,7 @@ begin
         // init when first row of data is available
         if stmt = nil then
         begin
-          sql := Rows.ColumnsToSqlInsert(tableu, fields);
-          n := length(fields);
-          if Length(ColumnForcedTypes) <> n then
-          begin
-            SetLength(ColumnForcedTypes, n);
-            for i := 0 to n - 1 do
-              case fields[i].DBType of
-                ftUnknown:
-                  ColumnForcedTypes[i] := ftInt64;
-                ftNull:
-                  ColumnForcedTypes[i] := ftBlob; // assume NULL is a BLOB
-              else
-                ColumnForcedTypes[i] := fields[i].DBType;
-              end;
-          end;
-          Properties.GetTableNames(tables);
-          if FindRawUtf8(tables, TableName, false) < 0 then
-            with Properties do
-              ExecuteNoResult(SqlCreate(tableu, fields, false), []);
+          sql := CreateDestTableAndComputeSql;
           stmt := NewStatement;
           stmt.Prepare(sql, false);
         end;
@@ -7557,6 +7665,10 @@ begin
         stmt.Reset;
         inc(result);
       end;
+      if (stmt = nil) and
+         not Properties.TableExists(TableName) then
+        // no data was retrieved: but generate the void table anyway
+        CreateDestTableAndComputeSql;
       if WithinTransaction then
         Commit;
     finally
@@ -7574,6 +7686,43 @@ begin
   end;
 end;
 
+function TSqlDBConnection.NewTableFrom(
+  const NewTableName, SourceTableName: RawUtf8;
+  Source: TSqlDBConnectionProperties): boolean;
+var
+  src: TSqlDBColumnDefineDynArray;
+  dst: TSqlDBColumnCreateDynArray;
+  f, n: PtrInt;
+begin
+  result := false;
+  if (self = nil) or
+     (Source = nil) or
+     (NewTableName = '') or
+     (SourceTableName = '') or
+     Properties.TableExists(NewTableName) then
+    exit;
+  Source.GetFields(SourceTableName, src);
+  if src = nil then
+    exit;
+  SetLength(dst, length(src));
+  n := 0;
+  for f := 0 to high(src) do
+  with src[f] do
+    if not (ColumnType in [ftUnknown, ftNull]) then
+    begin
+      dst[n].Name := ColumnName;
+      dst[n].DBType := ColumnType;
+      if ColumnType = ftUtf8 then
+        dst[n].Width := ColumnLength;
+      inc(n);
+    end;
+  if n = 0 then
+    exit;
+  DynArrayFakeLength(dst, n);
+  Properties.ExecuteNoResult(Properties.SqlCreate(
+    Properties.SqlTableName(NewTableName), dst, false), []);
+  result := true;
+end;
 
 
 { ************ Parent Classes for Thread-Safe and Parametrized Connections }

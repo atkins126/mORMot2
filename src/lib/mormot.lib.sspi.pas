@@ -90,6 +90,7 @@ type
     BufferType: cardinal;
     pvBuffer: pointer;
     procedure Init(aType: cardinal; aData: pointer; aSize: cardinal);
+      {$ifdef HASINLINE} inline; {$endif}
   end;
   PSecBuffer = ^TSecBuffer;
 
@@ -105,6 +106,7 @@ type
     pBuffers: PSecBuffer;
     procedure Init(aVersion: cardinal;
       aBuffers: PSecBuffer; aBuffersCount: cardinal);
+      {$ifdef HASINLINE} inline; {$endif}
   end;
   PSecBufferDesc = ^TSecBufferDesc;
 
@@ -212,6 +214,11 @@ type
   /// pointer to SSPI Authority Identify
   PSecWinntAuthIdentityW = ^TSecWinntAuthIdentityW;
 
+  /// SSPI SECPKG_ATTR_C_ACCESS_TOKEN / SECPKG_ATTR_C_FULL_ACCESS_TOKEN result
+  SecPkgContext_AccessToken = record
+    AccessToken: pointer;
+  end;
+
 const
   SECBUFFER_VERSION = 0;
 
@@ -228,40 +235,44 @@ const
   SECPKG_CRED_INBOUND  = 1;
   SECPKG_CRED_OUTBOUND = 2;
 
-  SECPKG_ATTR_SIZES            = 0;
-  SECPKG_ATTR_NAMES            = 1;
-  SECPKG_ATTR_STREAM_SIZES     = 4;
-  SECPKG_ATTR_NEGOTIATION_INFO = 12;
-  SECPKG_ATTR_CONNECTION_INFO  = $5a;
-  SECPKG_ATTR_CIPHER_INFO      = $64; // Vista+ new API
+  SECPKG_ATTR_SIZES               = 0;
+  SECPKG_ATTR_NAMES               = 1;
+  SECPKG_ATTR_STREAM_SIZES        = 4;
+  SECPKG_ATTR_NEGOTIATION_INFO    = 12;
+  SECPKG_ATTR_ACCESS_TOKEN        = 13;
+  SECPKG_ATTR_REMOTE_CERT_CONTEXT = $53;
+  SECPKG_ATTR_CONNECTION_INFO     = $5a;
+  SECPKG_ATTR_CIPHER_INFO         = $64; // Vista+ new API
+  SECPKG_ATTR_C_ACCESS_TOKEN      = $80000012;
+  SECPKG_ATTR_C_FULL_ACCESS_TOKEN = $80000082;
 
   SECPKGCONTEXT_CIPHERINFO_V1 = 1;
 
   SECURITY_NETWORK_DREP = 0;
   SECURITY_NATIVE_DREP  = $10;
 
-  ISC_REQ_DELEGATE           = $00000001;
-  ISC_REQ_MUTUAL_AUTH        = $00000002;
-  ISC_REQ_REPLAY_DETECT      = $00000004;
-  ISC_REQ_SEQUENCE_DETECT    = $00000008;
-  ISC_REQ_CONFIDENTIALITY    = $00000010;
-  ISC_REQ_USE_SESSION_KEY    = $00000020;
-  ISC_REQ_PROMPT_FOR_CREDS   = $00000040;
-  ISC_REQ_USE_SUPPLIED_CREDS = $00000080;
-  ISC_REQ_ALLOCATE_MEMORY    = $00000100;
-  ISC_REQ_USE_DCE_STYLE      = $00000200;
-  ISC_REQ_DATAGRAM           = $00000400;
-  ISC_REQ_CONNECTION         = $00000800;
-  ISC_REQ_CALL_LEVEL         = $00001000;
-  ISC_REQ_FRAGMENT_SUPPLIED  = $00002000;
-  ISC_REQ_EXTENDED_ERROR     = $00004000;
-  ISC_REQ_STREAM             = $00008000;
-  ISC_REQ_INTEGRITY          = $00010000;
-  ISC_REQ_IDENTIFY           = $00020000;
-  ISC_REQ_NULL_SESSION       = $00040000;
+  ISC_REQ_DELEGATE               = $00000001;
+  ISC_REQ_MUTUAL_AUTH            = $00000002;
+  ISC_REQ_REPLAY_DETECT          = $00000004;
+  ISC_REQ_SEQUENCE_DETECT        = $00000008;
+  ISC_REQ_CONFIDENTIALITY        = $00000010;
+  ISC_REQ_USE_SESSION_KEY        = $00000020;
+  ISC_REQ_PROMPT_FOR_CREDS       = $00000040;
+  ISC_REQ_USE_SUPPLIED_CREDS     = $00000080;
+  ISC_REQ_ALLOCATE_MEMORY        = $00000100;
+  ISC_REQ_USE_DCE_STYLE          = $00000200;
+  ISC_REQ_DATAGRAM               = $00000400;
+  ISC_REQ_CONNECTION             = $00000800;
+  ISC_REQ_CALL_LEVEL             = $00001000;
+  ISC_REQ_FRAGMENT_SUPPLIED      = $00002000;
+  ISC_REQ_EXTENDED_ERROR         = $00004000;
+  ISC_REQ_STREAM                 = $00008000;
+  ISC_REQ_INTEGRITY              = $00010000;
+  ISC_REQ_IDENTIFY               = $00020000;
+  ISC_REQ_NULL_SESSION           = $00040000;
   ISC_REQ_MANUAL_CRED_VALIDATION = $00080000;
-  ISC_REQ_RESERVED1          = $00100000;
-  ISC_REQ_FRAGMENT_TO_FIT    = $00200000;
+  ISC_REQ_RESERVED1              = $00100000;
+  ISC_REQ_FRAGMENT_TO_FIT        = $00200000;
   ISC_REQ_FLAGS = ISC_REQ_SEQUENCE_DETECT or
                   ISC_REQ_REPLAY_DETECT or
                   ISC_REQ_CONFIDENTIALITY or
@@ -290,8 +301,12 @@ const
   SEC_I_CONTEXT_EXPIRED	       = $00090317;
   SEC_I_INCOMPLETE_CREDENTIALS = $00090320;
   SEC_I_RENEGOTIATE            = $00090321;
-  SEC_E_INCOMPLETE_MESSAGE     = $80090318;
+  
+  SEC_E_UNSUPPORTED_FUNCTION   = $80090302;
   SEC_E_INVALID_TOKEN          = $80090308;
+  SEC_E_MESSAGE_ALTERED        = $8009030F;
+  SEC_E_INCOMPLETE_MESSAGE     = $80090318;
+  SEC_E_BUFFER_TOO_SMALL       = $80090321;
   SEC_E_ILLEGAL_MESSAGE        = $80090326;
   SEC_E_CERT_UNKNOWN           = $80090327;
   SEC_E_CERT_EXPIRED           = $80090328;
@@ -302,7 +317,26 @@ const
   SCHANNEL_SHUTDOWN = 1;
   SCHANNEL_CRED_VERSION = 4;
 
-function SspiResToText(res: cardinal): string;
+  SCH_CRED_NO_SYSTEM_MAPPER                    = $00000002;
+  SCH_CRED_NO_SERVERNAME_CHECK                 = $00000004;
+  SCH_CRED_MANUAL_CRED_VALIDATION              = $00000008;
+  SCH_CRED_NO_DEFAULT_CREDS                    = $00000010;
+  SCH_CRED_AUTO_CRED_VALIDATION                = $00000020;
+  SCH_CRED_USE_DEFAULT_CREDS                   = $00000040;
+  SCH_CRED_DISABLE_RECONNECTS                  = $00000080;
+  SCH_CRED_REVOCATION_CHECK_END_CERT           = $00000100;
+  SCH_CRED_REVOCATION_CHECK_CHAIN              = $00000200;
+  SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT = $00000400;
+  SCH_CRED_IGNORE_NO_REVOCATION_CHECK          = $00000800;
+  SCH_CRED_IGNORE_REVOCATION_OFFLINE           = $00001000;
+  SCH_CRED_RESTRICTED_ROOTS                    = $00002000;
+  SCH_CRED_REVOCATION_CHECK_CACHE_ONLY         = $00004000;
+  SCH_CRED_CACHE_ONLY_URL_RETRIEVAL            = $00008000;
+  SCH_CRED_MEMORY_STORE_CERT                   = $00010000;
+  SCH_CRED_CACHE_ONLY_URL_RETRIEVAL_ON_CREATE  = $00020000;
+  SCH_SEND_ROOT_CERT                           = $00040000;
+
+function SspiResToText(res: cardinal): TShort31;
 
 
 // secur32.dll API calls
@@ -352,9 +386,6 @@ function FreeCredentialsHandle(phCredential: PSecHandle): integer; stdcall;
 
 
 type
-  HCRYPTPROV = pointer;
-  HCERTSTORE = pointer;
-  PCCERT_CONTEXT = pointer;
   _HMAPPER = pointer;
 
   /// SChannel credential information
@@ -379,9 +410,15 @@ type
 
   /// store a memory buffer during SChannel encryption
   TCryptDataBlob = record
-    cbData: Cardinal;
+    cbData: cardinal;
     pbData: Pointer;
   end;
+
+  CTL_USAGE = record
+    cUsageIdentifier: cardinal;
+    rgpszUsageIdentifier: PPAnsiCharArray;
+  end;
+  PCERT_ENHKEY_USAGE = ^CTL_USAGE;
 
 const
   UNISP_NAME = 'Microsoft Unified Security Protocol Provider';
@@ -397,7 +434,7 @@ const
   SP_PROT_TLS1_2_CLIENT = $800;
   SP_PROT_TLS1_3        = $3000; // Windows Server 2022 ;)
   SP_PROT_TLS1_3_SERVER = $1000;
-  SP_PROT_TLS1_3_CLIENT = $2000 ;
+  SP_PROT_TLS1_3_CLIENT = $2000;
 
   PKCS12_INCLUDE_EXTENDED_PROPERTIES = $10;
 
@@ -409,6 +446,31 @@ const
   CERT_CLOSE_STORE_FORCE_FLAG = 1;
   // checks for nonfreed certificate, CRL, and CTL context to report an error on leak
   CERT_CLOSE_STORE_CHECK_FLAG = 2;
+
+  CRYPT_ASN_ENCODING  = $00000001;
+  CRYPT_NDR_ENCODING  = $00000002;
+  X509_ASN_ENCODING   = $00000001;
+  X509_NDR_ENCODING   = $00000002;
+  PKCS_7_ASN_ENCODING = $00010000;
+  PKCS_7_NDR_ENCODING = $00020000;
+                                          // TCryptCertUsage mormot.crypt.secure
+  CERT_OFFLINE_CRL_SIGN_KEY_USAGE  = $02; // cuCrlSign
+  CERT_KEY_CERT_SIGN_KEY_USAGE     = $04; // cuKeyCertSign
+  CERT_KEY_AGREEMENT_KEY_USAGE     = $08; // cuKeyAgreement
+  CERT_DATA_ENCIPHERMENT_KEY_USAGE = $10; // cuDataEncipherment
+  CERT_KEY_ENCIPHERMENT_KEY_USAGE  = $20; // cuKeyEncipherment
+  CERT_NON_REPUDIATION_KEY_USAGE   = $40; // cuNonRepudiation
+  CERT_DIGITAL_SIGNATURE_KEY_USAGE = $80; // cuDigitalSignature
+
+  CERT_KEY_PROV_INFO_PROP_ID = 2;
+  CERT_HASH_PROP_ID          = 3;
+  CERT_FRIENDLY_NAME_PROP_ID = 11;
+
+  CERT_SIMPLE_NAME_STR = 1;
+  CERT_OID_NAME_STR    = 2;
+  CERT_X500_NAME_STR   = 3;
+
+  CRYPT_OID_INFO_OID_KEY   = 1;
 
 
 // crypt32.dll API calls
@@ -428,7 +490,25 @@ function CertFindCertificateInStore(hCertStore: HCERTSTORE;
 function PFXImportCertStore(pPFX: pointer; szPassword: PWideChar;
   dwFlags: cardinal): HCERTSTORE; stdcall;
 
+function CertCreateCertificateContext(dwCertEncodingType: cardinal;
+  pbCertEncoded: PByte; cbCertEncoded: cardinal): PCCERT_CONTEXT; stdcall;
+
+function CertGetIntendedKeyUsage(dwCertEncodingType: cardinal; pCertInfo: PCERT_INFO;
+  pbKeyUsage: PByte; cbKeyUsage: cardinal): BOOL; stdcall;
+
+function CertGetEnhancedKeyUsage(pCertContext: PCCERT_CONTEXT; dwFlags: cardinal;
+  pUsage: PCERT_ENHKEY_USAGE; var pcbUsage: cardinal): BOOL; stdcall;
+
+function CertGetCertificateContextProperty(pCertContext: PCCERT_CONTEXT;
+  dwPropId: cardinal; pvData: pointer; var pcbData: cardinal): BOOL; stdcall;
+
 function CertFreeCertificateContext(pCertContext: PCCERT_CONTEXT): BOOL; stdcall;
+
+function CertNameToStrW(dwCertEncodingType: cardinal; var pName: CERT_NAME_BLOB;
+  dwStrType: cardinal; psz: PWideChar; csz: cardinal): cardinal; stdcall;
+
+function CryptFindOIDInfo(dwKeyType: cardinal; pvKey: pointer;
+  dwGroupId: cardinal): PCRYPT_OID_INFO; stdcall;
 
 
 { ****************** Middle-Level SSPI Wrappers }
@@ -449,7 +529,7 @@ procedure InvalidateSecContext(var aSecContext: TSecContext;
 /// free aSecContext on client or server side
 procedure FreeSecContext(var aSecContext: TSecContext);
 
-/// encrypt a message
+/// Encrypts a message using 'sign and seal' (i.e. integrity and encryption)
 // - aSecContext must be set e.g. from previous success call to ServerSspiAuth
 // or ClientSspiAuth
 // - aPlain contains data that must be encrypted
@@ -468,6 +548,134 @@ function SecDecrypt(var aSecContext: TSecContext;
 
 /// retrieve the connection information text of a given TLS connection
 function TlsConnectionInfo(var Ctxt: TCtxtHandle): RawUtf8;
+
+type
+  /// each possible key usage of a certificate, as decoded into TWinCertInfo
+  // - match TCryptCertUsage from mormot.crypt.secure
+  TWinCertUsage = (
+    wkuCA,
+    wkuEncipherOnly,
+    wkuCrlSign,
+    wkuKeyCertSign,
+    wkuKeyAgreement,
+    wkuDataEncipherment,
+    wkuKeyEncipherment,
+    wkuNonRepudiation,
+    wkuDigitalSignature,
+    wkuDecipherOnly,
+    wkuTlsServer,
+    wkuTlsClient,
+    wkuEmail,
+    wkuCodeSign,
+    wkuOcspSign,
+    wkuTimestamp);
+
+  /// the key usages of a certificate, as decoded into TWinCertInfo
+  // - match 16-bit TCryptCertUsages from mormot.crypt.secure
+  TWinCertUsages = set of TWinCertUsage;
+
+  /// a X509 certificate extension, as decoded into TWinCertInfo.Extension
+  TWinCertExtension = record
+    /// the OID of this extension
+    OID: RawUtf8;
+    /// if this extension was marked as "critical"
+    Critical: boolean;
+    /// the extension data, stored as 'xx:xx:xx:xx...' hexa text
+    Value: RawUtf8;
+  end;
+  PWinCertExtension = ^TWinCertExtension;
+
+  /// decoded information about a X509 certificate as returned by WinCertDecode
+  TWinCertInfo = record
+    /// the certificate Serial Number, stored as 'xx:xx:xx:xx...' hexa text
+    Serial: RawUtf8;
+    /// the main key usages of this certificate
+    // - match 16-bit TCryptCertUsages from mormot.crypt.secure
+    Usage: TWinCertUsages;
+    /// the friendly name of this certificate
+    // - will try subject CN= O= then CERT_FRIENDLY_NAME_PROP_ID property
+    Name: RawUtf8;
+    /// the certificate Issuer, decoded as RFC 1779 text, with X500 key names
+    // - contains e.g. 'C=FR, O=Certplus, CN=Class 3P Primary CA'
+    // - you can use ExtractX500() to retrieve one actual field value
+    IssuerName: RawUtf8;
+    /// the certificate Subject, decoded as RFC 1779 text, with X500 key names
+    // - contains e.g. 'C=FR, O=Certplus, CN=Class 3P Primary CA'
+    // - you can use ExtractX500() to retrieve one actual field value
+    SubjectName: RawUtf8;
+    /// the certificate Issuer ID, stored as 'xx:xx:xx:xx...' hexa text
+    IssuerID: RawUtf8;
+    /// the certificate Subject ID, stored as 'xx:xx:xx:xx...' hexa text
+    SubjectID: RawUtf8;
+    /// the certificate validity start date
+    NotBefore: TDateTime;
+    /// the certificate validity end date
+    NotAfter: TDateTime;
+    /// the certificate algorithm, as OID text
+    // - e.g. '1.2.840.113549.1.1.5' for 'sha1RSA' AlgorithmName
+    Algorithm: RawUtf8;
+    /// the certificate algorithm name, as converted by WinCertAlgoName()
+    // - typical values are 'md5RSA','sha1RSA','sha256RSA','sha384RSA','sha1ECC'
+    AlgorithmName: RawUtf8;
+    /// the certificate binary SHA1 fingerprint of 20 bytes
+    Hash: RawUtf8;
+    /// the certificate public key algorithm, as OID text
+    // - e.g. ' 1.2.840.113549.1.1.1' for 'RSA' PublicKeyAlgorithmName
+    PublicKeyAlgorithm: RawUtf8;
+    /// the certificate public key algorithm name, converted by WinCertAlgoName()
+    // - is most likely 'RSA', but could be e.g. 'ECC'
+    PublicKeyAlgorithmName: RawUtf8;
+    /// the certificate public key ASN1 raw binary as stored in the certificate
+    // - for 'RSA', is a SEQUENCE of the two exponent + modulus INTEGER
+    // - for 'ECC', is a BITSTRING with a $04 leading byte - see e.g. the
+    // Ecc256r1CompressAsn1() decoder from mormot.crypt.ecc256r1.pas
+    PublicKeyContent: RawByteString;
+    /// the key container name
+    KeyContainer: RawUtf8;
+    /// the key container provider name
+    KeyProvider: RawUtf8;
+    /// the X509 extensions of this certificate
+    Extension: array of TWinCertExtension;
+  end;
+
+const
+  WIN_CERT_USAGE: array[wkuCrlSign .. wkuDigitalSignature] of byte = (
+    CERT_OFFLINE_CRL_SIGN_KEY_USAGE,    // wkuCrlSign
+    CERT_KEY_CERT_SIGN_KEY_USAGE,       // wkuKeyCertSign
+    CERT_KEY_AGREEMENT_KEY_USAGE,       // wkuKeyAgreement
+    CERT_DATA_ENCIPHERMENT_KEY_USAGE,   // wkuDataEncipherment
+    CERT_KEY_ENCIPHERMENT_KEY_USAGE,    // wkuKeyEncipherment
+    CERT_NON_REPUDIATION_KEY_USAGE,     // wkuNonRepudiation
+    CERT_DIGITAL_SIGNATURE_KEY_USAGE);  // wkuDigitalSignature
+
+/// return the whole algorithm name from a OID text
+procedure WinCertAlgoName(OID: PAnsiChar; out Text: RawUtf8);
+
+/// decode a CERT_NAME_BLOB binary blob into RFC 1779 text, with X500 key names
+procedure WinCertName(var Name: CERT_NAME_BLOB; out Text: RawUtf8;
+  StrType: cardinal = CERT_X500_NAME_STR);
+
+/// decode an ASN-1 binary X509 certificate information using the WinCrypto API
+function WinCertDecode(const Asn1: RawByteString; out Cert: TWinCertInfo;
+  StrType: cardinal = CERT_X500_NAME_STR): boolean;
+
+/// decode a raw WinCrypto API PCCERT_CONTEXT struct
+function WinCertCtxtDecode(Ctxt: PCCERT_CONTEXT; out Cert: TWinCertInfo;
+  StrType: cardinal = CERT_X500_NAME_STR): boolean;
+
+/// could be used to extract CERT_X500_NAME_STR values
+// - for instance, in TWinCertInfo Name := ExtractX500('CN=', SubjectName);
+function ExtractX500(const Pattern, Text: RawUtf8): RawUtf8;
+
+/// retrieve the end certificate information of a given TLS connection
+function TlsCertInfo(var Ctxt: TCtxtHandle; out Info: TWinCertInfo): boolean;
+
+/// return some multi-line text of the main TWinCertInfo fields
+// - in a layout similar to X509_print() OpenSSL formatting
+// - fully implemented by mormot.crypt.secure - a cut-down version is set by
+// this unit
+var
+  WinCertInfoToText: function(const c: TWinCertInfo): RawUtf8;
 
 
 { ****************** High-Level Client and Server Authentication using SSPI }
@@ -489,15 +697,16 @@ function ClientSspiAuth(var aSecContext: TSecContext;
 // user credentials (not credentials of logged-in user)
 // - aSecContext holds information between function calls
 // - aInData contains data received from server
-// - aUserName is the domain and user name, in form of
-// 'DomainName\UserName'
+// - aUserName is the domain and user name, in form of 'DomainName\UserName' -
+// if no DomainName is set, it will be extracted from aSecKerberosSpn
 // - aPassword is the user clear text password
 // - aOutData contains data that must be sent to server
 // - if function returns True, client must send aOutData to server
 // and call function again with the data returned from server
 function ClientSspiAuthWithPassword(var aSecContext: TSecContext;
   const aInData: RawByteString; const aUserName: RawUtf8;
-  const aPassword: RawUtf8; out aOutData: RawByteString): boolean;
+  const aPassword: SpiUtf8;  const aSecKerberosSpn: RawUtf8;
+  out aOutData: RawByteString): boolean;
 
 /// server-side authentication procedure
 // - aSecContext holds information between function calls
@@ -515,6 +724,17 @@ function ServerSspiAuth(var aSecContext: TSecContext;
 procedure ServerSspiAuthUser(var aSecContext: TSecContext;
   out aUserName: RawUtf8);
 
+/// Server-side function that return the security token of an authenticated user
+// - returns INVALID_HANDLE_VALUE if QuerySecurityContextToken() failed
+// - otherwise, you can use RawTokenGetInfo/TokenGroupsText/TokenHasGroup()
+// - caller should always make a CloseHandle(result) once done with it
+function ServerSspiAuthToken(var aSecContext: TSecContext): THandle;
+
+/// Server-side function that check if an authenticated user is member of
+// some supplied group SIDs
+function ServerSspiAuthGroup(var aSecContext: TSecContext;
+  const aGroup: RawSidDynArray): boolean;
+
 /// return the name of the security package that has been used
 // during the negotiation process
 // - aSecContext must be received from previous successful call to
@@ -527,8 +747,7 @@ function SecPackageName(var aSecContext: TSecContext): RawUtf8;
 procedure ClientForceSpn(const aSecKerberosSpn: RawUtf8);
 
 /// high-level cross-platform initialization function
-// - as called e.g. by mormot.rest.client/server.pas
-// - in this unit, will just call ServerForceNTLM(false)
+// - as called e.g. by mormot.rest.client/server.pas or mormot.net.client/ldap
 function InitializeDomainAuth: boolean;
 
 
@@ -536,30 +755,30 @@ const
   /// character used as marker in user name to indicates the associated domain
   SSPI_USER_CHAR = '\';
 
-  // SSPI package names. Client always use Negotiate
-  // Server detect Negotiate or NTLM requests and use appropriate package
-  SECPKGNAMENTLM = 'NTLM';
-  SECPKGNAMENEGOTIATE = 'Negotiate';
-
 var
-  /// HTTP Challenge name for SSPI authentication
-  // - call ServerForceNTLM() to specialize this value to 'NTLM' or 'Negotiate'
+  /// HTTP Challenge name for SSPI authentication, typically 'Negotiate'
+  // - as computed by InitializeDomainAuth
+  // - set SspiForceNtlmClient to specialize this value to 'NTLM' or 'Negotiate'
   SECPKGNAMEHTTP: RawUtf8;
 
   /// HTTP Challenge name, converted into uppercase for IdemPChar() pattern
+  // - as computed by InitializeDomainAuth
   SECPKGNAMEHTTP_UPPER: RawUtf8;
 
   /// HTTP header to be set for SSPI authentication
-  // - call ServerForceNTLM() to specialize this value to either
+  // - as computed by InitializeDomainAuth
+  // - set SspiForceNtlmClient to specialize this value to either
   // 'WWW-Authenticate: NTLM' or 'WWW-Authenticate: Negotiate';
   SECPKGNAMEHTTPWWWAUTHENTICATE: RawUtf8;
 
   /// HTTP header pattern received for SSPI authentication
-  // - call ServerForceNTLM() to specialize this value to either
+  // - as computed by InitializeDomainAuth
+  // - set SspiForceNtlmClient to specialize this value to either
   // 'AUTHORIZATION: NTLM ' or 'AUTHORIZATION: NEGOTIATE '
   SECPKGNAMEHTTPAUTHORIZATION: RawUtf8;
 
   /// by default, this unit will use Negotiate/Kerberos for client authentication
+  // - set this flag should be set BEFORE calling InitializeDomainAuth
   // - can be set to TRUE to use the deprecated and unsafe NTLM protocol instead
   // - use case: SPNs not configured properly in domain
   // - see for details https://synopse.info/forum/viewtopic.php?id=931&p=3
@@ -750,7 +969,7 @@ implementation
 
 { ****************** Low-Level SSPI/SChannel Functions }
 
-function SspiResToText(res: cardinal): string;
+function SspiResToText(res: cardinal): TShort31;
 begin
   case res of
     SEC_E_OK:
@@ -775,8 +994,14 @@ begin
       result := 'SEC_E_CERT_EXPIRED';
     SEC_E_ALGORITHM_MISMATCH:
       result := 'SEC_E_ALGORITHM_MISMATCH';
+    SEC_E_UNSUPPORTED_FUNCTION:
+      result := 'SEC_E_UNSUPPORTED_FUNCTION';
+    SEC_E_MESSAGE_ALTERED:
+      result := 'SEC_E_MESSAGE_ALTERED';
+    SEC_E_BUFFER_TOO_SMALL:
+      result := 'SEC_E_BUFFER_TOO_SMALL';
   else
-    result := IntToStr(res);
+    str(res, result);
   end;
 end;
 
@@ -801,12 +1026,18 @@ function FreeCredentialsHandle;      external secur32;
 const
   crypt32 = 'crypt32.dll';
 
-function CertOpenStoreW;             external crypt32;
-function CertOpenSystemStoreW;       external crypt32;
-function CertCloseStore;             external crypt32;
-function CertFindCertificateInStore; external crypt32;
-function PFXImportCertStore;         external crypt32;
-function CertFreeCertificateContext; external crypt32;
+function CertOpenStoreW;                    external crypt32;
+function CertOpenSystemStoreW;              external crypt32;
+function CertCloseStore;                    external crypt32;
+function CertFindCertificateInStore;        external crypt32;
+function PFXImportCertStore;                external crypt32;
+function CertCreateCertificateContext;      external crypt32;
+function CertGetIntendedKeyUsage;           external crypt32;
+function CertGetEnhancedKeyUsage;           external crypt32;
+function CertGetCertificateContextProperty; external crypt32;
+function CertFreeCertificateContext;        external crypt32;
+function CertNameToStrW;                    external crypt32;
+function CryptFindOIDInfo;                  external crypt32;
 
 
 { TSecBuffer }
@@ -968,14 +1199,19 @@ var
   Status: integer;
   BufPtr: PByte;
 begin
+  result := '';
   // Sizes.cbSecurityTrailer is size of the trailer (signature + padding) block
   if QueryContextAttributesW(
        @aSecContext.CtxHandle, SECPKG_ATTR_SIZES, @Sizes) <> 0 then
     raise ESynSspi.CreateLastOSError(aSecContext);
+  if (Sizes.cbSecurityTrailer > SizeOf(Token)) or
+     (Sizes.cbBlockSize > SizeOf(Padding)) then
+    raise ESynSspi.Create('SecEncrypt: invalid ATTR_SIZES');
   // Encrypted data buffer structure:
   //
   // SSPI/Kerberos Interoperability with GSSAPI
   // https://msdn.microsoft.com/library/windows/desktop/aa380496.aspx
+  // https://learn.microsoft.com/en-us/windows/win32/secauthn/sspi-kerberos-interoperability-with-gssapi
   //
   // GSS-API wrapper for Microsoft's Kerberos SSPI in Windows 2000
   // http://www.kerberos.org/software/samples/gsskrb5/gsskrb5/krb5/krb5msg.c
@@ -985,21 +1221,19 @@ begin
   // +-------------------------+----------------+--------------------------+
   // | Trailer                 | Data           | Padding                  |
   // +-------------------------+----------------+--------------------------+
-  Assert(Sizes.cbSecurityTrailer <= High(Token)+1);
   {%H-}InBuf[0].Init(SECBUFFER_TOKEN, @Token[0], Sizes.cbSecurityTrailer);
   // Encoding done in-place, so we copy the data
   SrcLen := Length(aPlain);
   FastSetRawByteString(EncBuffer, pointer(aPlain), SrcLen);
   InBuf[1].Init(SECBUFFER_DATA, pointer(EncBuffer), SrcLen);
-  Assert(Sizes.cbBlockSize <= High(Padding)+1);
   InBuf[2].Init(SECBUFFER_PADDING, @Padding[0], Sizes.cbBlockSize);
-  InDesc.Init(SECBUFFER_VERSION, @InBuf, 3);
+  {%H-}InDesc.Init(SECBUFFER_VERSION, @InBuf, 3);
   Status := EncryptMessage(@aSecContext.CtxHandle, 0, @InDesc, 0);
   if Status < 0 then
     raise ESynSspi.CreateLastOSError(aSecContext);
   EncLen := InBuf[0].cbBuffer + InBuf[1].cbBuffer + InBuf[2].cbBuffer;
   SetLength(result, EncLen);
-  BufPtr := PByte(result);
+  BufPtr := pointer(result);
   MoveFast(PByte(InBuf[0].pvBuffer)^, BufPtr^, InBuf[0].cbBuffer);
   Inc(BufPtr, InBuf[0].cbBuffer);
   MoveFast(PByte(InBuf[1].pvBuffer)^, BufPtr^, InBuf[1].cbBuffer);
@@ -1037,12 +1271,11 @@ begin
   end;
   {%H-}InBuf[0].Init(SECBUFFER_STREAM, BufPtr, EncLen);
   InBuf[1].Init(SECBUFFER_DATA, nil, 0);
-  InDesc.Init(SECBUFFER_VERSION, @InBuf, 2);
+  {%H-}InDesc.Init(SECBUFFER_VERSION, @InBuf, 2);
   Status := DecryptMessage(@aSecContext.CtxHandle, @InDesc, 0, QOP);
   if Status < 0 then
     raise ESynSspi.CreateLastOSError(aSecContext);
   FastSetRawByteString(result, InBuf[1].pvBuffer, InBuf[1].cbBuffer);
-  FreeContextBuffer(InBuf[1].pvBuffer);
 end;
 
 function TlsConnectionInfo(var Ctxt: TCtxtHandle): RawUtf8;
@@ -1070,11 +1303,265 @@ begin
     result := nfo.ToText; // fallback on XP
 end;
 
+function TlsCertInfo(var Ctxt: TCtxtHandle; out Info: TWinCertInfo): boolean;
+var
+  nfo: PCCERT_CONTEXT;
+begin
+  result := false;
+  nfo := nil;
+  if QueryContextAttributesW(
+      @Ctxt, SECPKG_ATTR_REMOTE_CERT_CONTEXT, @nfo) <> SEC_E_OK then
+    exit;
+  result := WinCertCtxtDecode(nfo, Info);
+  CertFreeCertificateContext(nfo);
+end;
+
+const
+  RSA_PREFIX: PAnsiChar = '1.2.840.113549.1.1.'; // len=19
+  ECC_PREFIX: PAnsiChar = '1.2.840.10045.';      // len=14
+  ENU_PREFIX: PAnsiChar = '1.3.6.1.5.5.7.3.';    // len=16
+
+procedure WinCertAlgoName(OID: PAnsiChar; out Text: RawUtf8);
+var
+  nfo: PCRYPT_OID_INFO;
+begin
+  nfo := CryptFindOIDInfo(CRYPT_OID_INFO_OID_KEY, OID, 0);
+  if nfo <> nil then
+    Win32PWideCharToUtf8(nfo^.pwszName, Text)
+  else if OID <> nil then
+    // minimal decoding fallback for Windows XP
+    if CompareMemSmall(OID, RSA_PREFIX, 19) then
+    begin
+      inc(OID, 19);
+      if StrComp(OID, PAnsiChar('4'#0)) = 0 then
+        Text := 'md5RSA'
+      else if StrComp(OID, PAnsiChar('5'#0)) = 0 then
+        Text := 'sha1RSA'
+      else if StrComp(OID, PAnsiChar('11')) = 0 then
+        Text := 'sha256RSA'
+      else if StrComp(OID, PAnsiChar('12')) = 0 then
+        Text := 'sha384RSA'
+      else if StrComp(OID, PAnsiChar('13')) = 0 then
+        Text := 'sha512RSA'
+      else if StrComp(OID, PAnsiChar('14')) = 0 then
+        Text := 'sha224RSA'
+      else
+        Text := 'RSA';
+    end
+    else if CompareMemSmall(OID, ECC_PREFIX, 14) then
+    begin
+      inc(OID, 14);
+      if StrComp(OID, PAnsiChar('4.1')) = 0 then
+        Text := 'sha1ECDSA'
+      else if StrComp(OID, PAnsiChar('4.2')) = 0 then
+        Text := 'sha2ECDSA'
+      else
+        Text := 'ECC';
+    end;
+end;
+
+procedure WinCertName(var Name: CERT_NAME_BLOB; out Text: RawUtf8;
+  StrType: cardinal);
+var
+  len: PtrInt;
+  tmp: TSynTempBuffer;
+begin
+  len := CertNameToStrW(X509_ASN_ENCODING, Name, StrType, nil, 0);
+  len := CertNameToStrW(X509_ASN_ENCODING, Name, StrType, tmp.Init(len), len);
+  Win32PWideCharToUtf8(tmp.buf, len - 1, Text);
+  tmp.Done;
+end;
+
+function WinCertDecode(const Asn1: RawByteString; out Cert: TWinCertInfo;
+  StrType: cardinal): boolean;
+var
+  ctx: PCCERT_CONTEXT;
+begin
+  result := false;
+  ctx := CertCreateCertificateContext(
+    X509_ASN_ENCODING or PKCS_7_ASN_ENCODING, pointer(Asn1), length(Asn1));
+  if ctx = nil then
+    exit; // caller may use GetLastError
+  result := WinCertCtxtDecode(ctx, Cert, StrType);
+  CertFreeCertificateContext(ctx);
+end;
+
+function ExtractX500(const Pattern, Text: RawUtf8): RawUtf8;
+var
+  i, j, o: PtrInt;
+  t: RawUtf8;
+begin
+  result := '';
+  o := 1;
+  repeat
+    i := PosEx(Pattern, Text, o);
+    if i = 0 then
+      exit;
+    o := i + 1;
+  until (i = 1) or
+        (Text[i - 1] in [',', ' ']);
+  inc(i, length(Pattern));
+  t := Text;
+  if t[i] = '"' then
+  begin
+    inc(i);
+    o := i;
+    repeat
+      j := PosEx('"', t, o);
+      if (j = 0) or
+         (t[j + 1] <> '"') then
+        break;
+      delete(t, j, 1); // "" -> "
+      o := j + 1;
+    until false;
+  end
+  else
+    j := PosEx(',', t, i);
+  if j = 0 then
+    j := 1000;
+  TrimCopy(t, i, j - i, result);
+end;
+
+const
+  WIN_CERT_EXT: array[wkuTlsServer..wkuTimestamp] of PAnsiChar = (
+    '1',  // wkuTlsServer
+    '2',  // wkuTlsClient
+    '4',  // wkuEmail
+    '3',  // wkuCodeSign
+    '9',  // wkuOcspSign
+    '8'); // wkuTimestamp
+
+function WinCertCtxtDecode(Ctxt: PCCERT_CONTEXT; out Cert: TWinCertInfo;
+  StrType: cardinal): boolean;
+var
+  nfo: PCERT_INFO;
+  i, o: PtrInt;
+  oid: PAnsiChar;
+  ku: byte;
+  u: TWinCertUsage;
+  len: cardinal;
+  sub: RawUtf8;
+  h: THash160;
+  tmp: TSynTempBuffer;
+begin
+  result := false;
+  if Ctxt = nil then
+    exit;
+  Finalize(Cert);
+  FillcharFast(Cert, SizeOf(Cert), 0);
+  nfo := Ctxt^.pCertInfo;
+  with nfo^.SerialNumber do
+    ToHumanHexReverse(Cert.Serial, pbData, cbData);
+  ku := 0;
+  if CertGetIntendedKeyUsage(X509_ASN_ENCODING, nfo, @ku, SizeOf(ku)) then
+    for u := low(WIN_CERT_USAGE) to high(WIN_CERT_USAGE) do
+      if ku and WIN_CERT_USAGE[u] <> 0 then
+        include(Cert.Usage, u);
+  len := {%H-}tmp.Init;
+  if CertGetEnhancedKeyUsage(Ctxt, 0, tmp.buf, len) then
+    with PCERT_ENHKEY_USAGE(tmp.buf)^ do
+      for i := 0 to integer(cUsageIdentifier) - 1 do
+      begin
+        oid := rgpszUsageIdentifier[i];
+        if not CompareMemSmall(oid, ENU_PREFIX, 16) then
+          continue;
+        inc(oid, 16);
+        for u := low(WIN_CERT_EXT) to high(WIN_CERT_EXT) do
+          if StrComp(oid, WIN_CERT_EXT[u]) = 0 then
+            include(Cert.Usage, u);
+      end;
+  WinCertName(nfo^.Issuer, Cert.IssuerName, StrType);
+  WinCertName(nfo^.Subject, Cert.SubjectName, StrType);
+  if StrType = CERT_X500_NAME_STR then
+    sub := Cert.SubjectName // we already have the expected layout
+  else
+    WinCertName(nfo^.Subject, sub, CERT_X500_NAME_STR);
+  Cert.Name := ExtractX500('CN=', sub);
+  if Cert.Name = '' then
+    Cert.Name := ExtractX500('O=', sub);
+  if Cert.Name = '' then
+  begin
+    len := tmp.Init;
+    if CertGetCertificateContextProperty(
+        Ctxt, CERT_FRIENDLY_NAME_PROP_ID, tmp.buf, len) then
+      Win32PWideCharToUtf8(tmp.buf, Cert.Name);
+  end;
+  with nfo^.IssuerUniqueId do
+    ToHumanHex(Cert.IssuerID, pbData, cbData);
+  with nfo^.SubjectUniqueId do
+    ToHumanHex(Cert.SubjectID, pbData, cbData);
+  Cert.NotBefore := FileTimeToDateTime(nfo^.NotBefore);
+  Cert.NotAfter  := FileTimeToDateTime(nfo^.NotAfter);
+  Cert.Algorithm := nfo^.SignatureAlgorithm.pszObjId;
+  WinCertAlgoName(nfo^.SignatureAlgorithm.pszObjId, Cert.AlgorithmName);
+  Cert.PublicKeyAlgorithm := nfo^.SubjectPublicKeyInfo.Algorithm.pszObjId;
+  WinCertAlgoName(nfo^.SubjectPublicKeyInfo.Algorithm.pszObjId,
+    Cert.PublicKeyAlgorithmName);
+  with nfo^.SubjectPublicKeyInfo.PublicKey do
+    FastSetRawByteString(Cert.PublicKeyContent, pbData, cbData);
+  len := tmp.Init;
+  if CertGetCertificateContextProperty(
+       Ctxt, CERT_KEY_PROV_INFO_PROP_ID, tmp.buf, len) then
+    with PCRYPT_KEY_PROV_INFO(tmp.buf)^ do
+    begin
+      Win32PWideCharToUtf8(pwszContainerName, Cert.KeyContainer);
+      Win32PWideCharToUtf8(pwszProvName, Cert.KeyProvider);
+    end;
+  len := SizeOf(h); // 20 bytes of a SHA-1 hash
+  if CertGetCertificateContextProperty(Ctxt, CERT_HASH_PROP_ID, @h, len) then
+    ToHumanHex(Cert.Hash, @h, len);
+  SetLength(Cert.Extension, nfo^.cExtension);
+  for i := 0 to integer(nfo^.cExtension) - 1 do
+    with nfo^.rgExtension[i],
+         Cert.Extension[i] do
+    begin
+      OID := pszObjId;
+      Critical := fCritical;
+      ToHumanHex(Value, Blob.pbData, Blob.cbData);
+      if (OID = '2.5.29.19') and
+         (PosEx('01:ff', Value) <> 0) then
+        include(Cert.Usage, wkuCA) // X509v3 Basic Constraints: CA:TRUE
+      else if (Cert.SubjectID = '') and
+              (OID = '2.5.29.14') and
+              (copy(Value, 1, 6) = '04:14:') then
+        Cert.SubjectID := copy(Value, 7, 2000) // rough parsing of 20-byte IDs
+      else if (Cert.IssuerID = '') and
+              (OID = '2.5.29.35') and // authorityKeyIdentifier
+              (length(Value) > 60) then
+      begin
+        o := PosEx('80:14:', Value); // rough detection of 20-byte IDs
+        if o <> 0 then
+          Cert.IssuerID := copy(Value, o + 6, 59);
+      end;
+    end;
+  result := true;
+end;
+
+function _WinCertInfoToText(const c: TWinCertInfo): RawUtf8;
+begin
+  // roughly follow X509_print() OpenSSL formatting with basic fields only
+  result :=
+    'Certificate:'#13#10 +
+    '  Serial Number:'#13#10 +
+    '    ' + c.Serial + #13#10 +
+    '  Signature Algorithm: ' + c.AlgorithmName + #13#10 +
+    '  Issuer: ' + c.IssuerName + #13#10 +
+    '  Validity:'#13#10 +
+    '    Not Before: ' + RawUtf8(DateTimeToIsoString(c.NotBefore)) + #13#10 +
+    '    Not After : ' + RawUtf8(DateTimeToIsoString(c.NotAfter)) + #13#10 +
+    '  Subject: ' + c.SubjectName + #13#10 +
+    '  Subject Public Key Info:'#13#10 +
+    '    Public Key Algorithm: ' + c.PublicKeyAlgorithmName + #13#10 +
+    '    OID: ' + c.PublicKeyAlgorithm + #13#10;
+  // known extensions will be properly written by mormot.crypt.secure code
+end;
+
 
 { ****************** High-Level Client and Server Authentication using SSPI }
 
 var
   ForceSecKerberosSpn: SynUnicode;
+  NtlmName, NegotiateName: SynUnicode;
 
 function ClientSspiAuthWorker(var aSecContext: TSecContext;
   const aInData: RawByteString; pszTargetName: PWideChar;
@@ -1083,8 +1570,6 @@ function ClientSspiAuthWorker(var aSecContext: TSecContext;
 var
   InBuf: TSecBuffer;
   InDesc: TSecBufferDesc;
-  InDescPtr: PSecBufferDesc;
-  SecPkgInfo: PSecPkgInfoW;
   LInCtxPtr: PSecHandle;
   OutBuf: TSecBuffer;
   OutDesc: TSecBufferDesc;
@@ -1095,31 +1580,26 @@ begin
   InBuf.BufferType := SECBUFFER_TOKEN;
   InBuf.cbBuffer := Length(aInData);
   InBuf.pvBuffer := PByte(aInData);
+  InDesc.ulVersion := SECBUFFER_VERSION;
+  InDesc.pBuffers := @InBuf;
   if (aSecContext.CredHandle.dwLower = -1) and
      (aSecContext.CredHandle.dwUpper = -1) then
   begin
-    aSecContext.CreatedTick64 := GetTickCount64;
-    if QuerySecurityPackageInfoW(SECPKGNAMENEGOTIATE, SecPkgInfo) <> 0 then
+    aSecContext.CreatedTick64 := mormot.core.os.GetTickCount64;
+    if AcquireCredentialsHandleW(nil, pointer(NegotiateName), SECPKG_CRED_OUTBOUND,
+        nil, pAuthData, nil, nil, @aSecContext.CredHandle, nil) <> 0 then
       raise ESynSspi.CreateLastOSError(aSecContext);
-    try
-      if AcquireCredentialsHandleW(nil, SecPkgInfo^.Name, SECPKG_CRED_OUTBOUND,
-          nil, pAuthData, nil, nil, @aSecContext.CredHandle, nil) <> 0 then
-        raise ESynSspi.CreateLastOSError(aSecContext);
-    finally
-      FreeContextBuffer(SecPkgInfo);
-    end;
-    InDescPtr := nil;
+    InDesc.cBuffers := 0;
     LInCtxPtr := nil;
   end
   else
   begin
-    InDesc.ulVersion := SECBUFFER_VERSION;
     InDesc.cBuffers := 1;
-    InDesc.pBuffers := @InBuf;
-    InDescPtr := @InDesc;
     LInCtxPtr := @aSecContext.CtxHandle;
   end;
-  CtxReqAttr := ISC_REQ_ALLOCATE_MEMORY or ASC_REQ_CONFIDENTIALITY;
+  CtxReqAttr := ISC_REQ_ALLOCATE_MEMORY or
+                ISC_REQ_CONFIDENTIALITY or
+                ISC_REQ_INTEGRITY;
   if pszTargetName <> nil then
     CtxReqAttr := CtxReqAttr or ISC_REQ_MUTUAL_AUTH;
   OutBuf.BufferType := SECBUFFER_TOKEN;
@@ -1129,7 +1609,7 @@ begin
   OutDesc.cBuffers := 1;
   OutDesc.pBuffers := @OutBuf;
   Status := InitializeSecurityContextW(@aSecContext.CredHandle, LInCtxPtr,
-    pszTargetName, CtxReqAttr, 0, SECURITY_NATIVE_DREP, InDescPtr, 0,
+    pszTargetName, CtxReqAttr, 0, SECURITY_NATIVE_DREP, @InDesc, 0,
     @aSecContext.CtxHandle, @OutDesc, CtxAttr, nil);
   result := (Status = SEC_I_CONTINUE_NEEDED) or
             (Status = SEC_I_COMPLETE_AND_CONTINUE);
@@ -1150,35 +1630,49 @@ var
 begin
   if aSecKerberosSpn <> '' then
     TargetName := pointer(SynUnicode(aSecKerberosSpn))
-  else if ForceSecKerberosSpn <> '' then
-    TargetName := pointer(ForceSecKerberosSpn)
   else
-    TargetName := nil;
+    TargetName := pointer(ForceSecKerberosSpn);
   result :=  ClientSspiAuthWorker(
     aSecContext, aInData, TargetName, nil, aOutData);
 end;
 
 function ClientSspiAuthWithPassword(var aSecContext: TSecContext;
   const aInData: RawByteString; const aUserName: RawUtf8;
-  const aPassword: RawUtf8; out aOutData: RawByteString): boolean;
+  const aPassword: SpiUtf8;  const aSecKerberosSpn: RawUtf8;
+  out aOutData: RawByteString): boolean;
 var
-  UserPos: Integer;
+  UserPos, TargetPos: Integer;
   Domain, User, Password: SynUnicode;
   AuthIdentity: TSecWinntAuthIdentityW;
   TargetName: PWideChar;
+  TargetUtf8: RawUtf8;
 begin
+  if aSecKerberosSpn <> '' then
+    TargetName := pointer(SynUnicode(aSecKerberosSpn))
+  else
+    TargetName := pointer(ForceSecKerberosSpn);
   UserPos := PosExChar('\', aUserName);
   if UserPos = 0 then
   begin
-    Domain := '';
-    User := SynUnicode(User);
+    if TargetName <> nil then
+    begin
+      // extract from 'mymormotservice/myserver.mydomain.tld@MYDOMAIN.TLD'
+      TargetUtf8 := RawUtf8(TargetName);
+      TargetPos := PosExChar('@', TargetUtf8);
+      if TargetPos <> 0 then
+        Domain := SynUnicode(copy(TargetUtf8, TargetPos + 1, 100));
+      // Domain is required, otherwise deprecated NTLM is used
+    end;
+    User := SynUnicode(aUserName);
   end
   else
   begin
+    // extract from 'domain\user'
     Domain := SynUnicode(Copy(aUserName, 1, UserPos - 1));
     User := SynUnicode(Copy(aUserName, UserPos + 1, MaxInt));
   end;
   PassWord := SynUnicode(aPassword);
+  FillCharFast(AuthIdentity, SizeOf(AuthIdentity), 0);
   AuthIdentity.Domain := pointer(Domain);
   AuthIdentity.DomainLength := Length(Domain);
   AuthIdentity.User := pointer(User);
@@ -1186,26 +1680,9 @@ begin
   AuthIdentity.Password := pointer(Password);
   AuthIdentity.PasswordLength := Length(Password);
   AuthIdentity.Flags := SEC_WINNT_AUTH_IDENTITY_UNICODE;
-  if ForceSecKerberosSpn <> '' then
-    TargetName := pointer(ForceSecKerberosSpn)
-  else
-    TargetName := nil;
-  result :=  ClientSspiAuthWorker(
+  result := ClientSspiAuthWorker(
     aSecContext, aInData, TargetName, @AuthIdentity, aOutData);
-end;
-
-// mormot.core.unicode is overkill here - avoid a conversion with a temp string
-function UpperCaseU(const S: RawByteString): RawUtf8;
-var
-  i, len: PtrInt;
-  P: PByteArray;
-begin
-  len := length(S);
-  FastSetString(result, pointer(S), len);
-  P := pointer(result);
-  for i := 0 to len - 1 do
-    if P[i] in [ord('a')..ord('z')] then
-      dec(P[i], 32);
+  //FillCharFast(pointer(Password)^, length(Password) * 2, 0); // anti-forensic
 end;
 
 function ServerSspiAuth(var aSecContext: TSecContext;
@@ -1213,7 +1690,7 @@ function ServerSspiAuth(var aSecContext: TSecContext;
 var
   InBuf: TSecBuffer;
   InDesc: TSecBufferDesc;
-  SecPkgInfo: PSecPkgInfoW;
+  PkgName: PWideChar;
   LInCtxPtr: PSecHandle;
   OutBuf: TSecBuffer;
   OutDesc: TSecBufferDesc;
@@ -1229,22 +1706,16 @@ begin
   if (aSecContext.CredHandle.dwLower = -1) and
      (aSecContext.CredHandle.dwUpper = -1) then
   begin
-    aSecContext.CreatedTick64 := GetTickCount64;
-    if UpperCaseU(copy(RawUtf8(aInData), 1, 7)) =  'NTLMSSP' then // no IdemPChar()
-    begin
-      if QuerySecurityPackageInfoW(SECPKGNAMENTLM, SecPkgInfo) <> 0 then
-        raise ESynSspi.CreateLastOSError(aSecContext);
-    end
+    aSecContext.CreatedTick64 := mormot.core.os.GetTickCount64;
+    if (aInData <> '') and
+       (PCardinal(aInData)^ or $20202020 =
+        ord('n') + ord('t') shl 8 + ord('l') shl 16 + ord('m') shl 24) then
+      PkgName := pointer(NtlmName) // backward compatible but unsafe/legacy
     else
-      if QuerySecurityPackageInfoW(SECPKGNAMENEGOTIATE, SecPkgInfo) <> 0 then
-        raise ESynSspi.CreateLastOSError(aSecContext);
-    try
-      if AcquireCredentialsHandleW(nil, SecPkgInfo^.Name, SECPKG_CRED_INBOUND,
-          nil, nil, nil, nil, @aSecContext.CredHandle, nil) <> 0 then
-        raise ESynSspi.CreateLastOSError(aSecContext);
-    finally
-      FreeContextBuffer(SecPkgInfo);
-    end;
+      PkgName := pointer(NegotiateName);
+    if AcquireCredentialsHandleW(nil, PkgName, SECPKG_CRED_INBOUND,
+        nil, nil, nil, nil, @aSecContext.CredHandle, nil) <> 0 then
+      raise ESynSspi.CreateLastOSError(aSecContext);
     LInCtxPtr := nil;
   end
   else
@@ -1277,8 +1748,26 @@ begin
   if QueryContextAttributesW(@aSecContext.CtxHandle,
        SECPKG_ATTR_NAMES, @Names) <> 0 then
     raise ESynSspi.CreateLastOSError(aSecContext);
-  Win32PWideCharToUtf8(Names.sUserName, StrLenW(Names.sUserName), aUserName);
+  Win32PWideCharToUtf8(Names.sUserName, aUserName);
   FreeContextBuffer(Names.sUserName);
+end;
+
+function ServerSspiAuthToken(var aSecContext: TSecContext): THandle;
+begin
+  if QuerySecurityContextToken(@aSecContext.CtxHandle, result) <> 0 then
+    result := INVALID_HANDLE_VALUE;
+end;
+
+function ServerSspiAuthGroup(var aSecContext: TSecContext;
+  const aGroup: RawSidDynArray): boolean;
+var
+  token: THandle;
+begin
+  result := false;
+  if QuerySecurityContextToken(@aSecContext.CtxHandle, token) <> 0 then
+    exit;
+  result := TokenHasAnyGroup(token, aGroup);
+  CloseHandle(token);
 end;
 
 function SecPackageName(var aSecContext: TSecContext): RawUtf8;
@@ -1288,8 +1777,7 @@ begin
   if QueryContextAttributesW(@aSecContext.CtxHandle,
        SECPKG_ATTR_NEGOTIATION_INFO, @NegotiationInfo) <> 0 then
     raise ESynSspi.CreateLastOSError(aSecContext);
-  Win32PWideCharToUtf8(NegotiationInfo.PackageInfo^.Name,
-               StrLenW(NegotiationInfo.PackageInfo^.Name), result);
+  Win32PWideCharToUtf8(NegotiationInfo.PackageInfo^.Name, result);
   FreeContextBuffer(NegotiationInfo.PackageInfo);
 end;
 
@@ -1302,27 +1790,47 @@ var
   DomainAuthMode: (damUndefined, damNtlm, damNegotiate);
 
 procedure SetDomainAuthMode;
+var
+  SecPkgInfo: PSecPkgInfoW;
 begin
+  // set the global variables to the requested authentication mode
   if SspiForceNtlmClient then
   begin
     SECPKGNAMEHTTP := 'NTLM';
+    SECPKGNAMEHTTP_UPPER := 'NTLM';
     DomainAuthMode := damNtlm;
   end
   else
   begin
     SECPKGNAMEHTTP := 'Negotiate';
+    SECPKGNAMEHTTP_UPPER := 'NEGOTIATE';
     DomainAuthMode := damNegotiate;
   end;
-  SECPKGNAMEHTTP_UPPER := UpperCaseU(SECPKGNAMEHTTP);
   SECPKGNAMEHTTPWWWAUTHENTICATE := 'WWW-Authenticate: ' + SECPKGNAMEHTTP;
   SECPKGNAMEHTTPAUTHORIZATION := 'AUTHORIZATION: ' + SECPKGNAMEHTTP_UPPER + ' ';
+  // resolve security package names once at startup
+  if NtlmName = '' then
+  begin
+    if QuerySecurityPackageInfoW('NTLM', SecPkgInfo) = 0 then
+    begin
+      NtlmName := SecPkgInfo^.Name;
+      FreeContextBuffer(SecPkgInfo);
+    end;
+    if QuerySecurityPackageInfoW('Negotiate', SecPkgInfo) = 0 then
+    begin
+      NegotiateName := SecPkgInfo^.Name;
+      FreeContextBuffer(SecPkgInfo);
+    end;
+  end;
 end;
 
 function InitializeDomainAuth: boolean;
 begin
+  // setup the security package to be used
   if (DomainAuthMode = damUndefined) or
      (SspiForceNtlmClient <> (DomainAuthMode = damNtlm)) then
     SetDomainAuthMode;
+  // SSPI comes from standard secur32.dll so is always available
   result := true;
 end;
 
@@ -1369,7 +1877,7 @@ begin
   begin
     SetLength(res, n);
     for i := 0 to high(res) do
-      Win32PWideCharToUtf8(g[i].name, StrLenW(g[i].name), res[i]);
+      Win32PWideCharToUtf8(g[i].name, res[i]);
   end;
   NetAPIBufferFree(g);
 end;
@@ -1448,7 +1956,7 @@ begin
       SetLength(sid^, dwEntriesRead);
       for i := 0 to integer(dwEntriesRead) - 1 do
       begin
-        Win32PWideCharToUtf8(g^.name, StrLenW(g^.name), result[i]);
+        Win32PWideCharToUtf8(g^.name, result[i]);
         sid^[i] := SidToText(g^.group_sid);
         inc(g);
       end;
@@ -1483,7 +1991,7 @@ begin
     g := v;
     while dwEntriesRead <> 0 do
     begin
-      Win32PWideCharToUtf8(g^.name, StrLenW(g^.name), Name);
+      Win32PWideCharToUtf8(g^.name, Name);
       if PropNameEquals(Name, GroupName) then
       begin
         result := SidToText(g^.group_sid);
@@ -1527,6 +2035,12 @@ begin
   srv.Done;
   grp.Done;
 end;
+
+
+initialization
+  WinCertInfoToText := @_WinCertInfoToText;
+
+finalization
 
 {$endif OSPOSIX}
 

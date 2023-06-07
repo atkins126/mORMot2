@@ -26,7 +26,7 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
-  mormot.core.unicode, // for efficient UTF-8 text process within HTTP
+  mormot.core.unicode,
   mormot.core.text,
   mormot.core.data,
   mormot.core.log,
@@ -238,6 +238,7 @@ type
     // - default is 60000, i.e. DEFAULT_ECCROUNDS
     EcdheRounds: integer;
     /// will set the default values
+    // - will also reset the HeartbeatDelay to 0, as expected on client side
     procedure SetDefaults;
     /// will set LogDetails to its highest level of verbosity
     // - used only if WebSocketLog global variable is set
@@ -277,8 +278,7 @@ type
   // $ Sec-WebSocket-Protocol: synopsebin
   TWebSocketProtocol = class(TSynPersistent)
   protected
-    fName: RawUtf8;
-    fUri: RawUtf8;
+    fConnectionID: THttpServerConnectionID;
     fFramesInCount: integer;
     fFramesOutCount: integer;
     fFramesInBytes: QWord;
@@ -286,11 +286,12 @@ type
     fOnBeforeIncomingFrame: TOnWebSocketProtocolIncomingFrame;
     fRemoteLocalhost: boolean;
     fConnectionFlags: THttpServerRequestFlags;
-    fConnectionID: THttpServerConnectionID;
     fConnectionOpaque: PHttpServerConnectionOpaque;
     fRemoteIP: RawUtf8;
     fUpgradeUri: RawUtf8;
     fUpgradeBearerToken: RawUtf8;
+    fName: RawUtf8;
+    fUri: RawUtf8;
     fLastError: string;
     fEncryption: IProtocol;
     // focText/focBinary or focContinuation/focConnectionClose from ProcessStart/Stop
@@ -562,6 +563,9 @@ type
   // - should return HTTP_SUCCESS to continue, or an error code to abort
   TOnWebSocketProtocolUpgraded =
     function(Protocol: TWebSocketProtocol): integer of object;
+  /// event signature trigerred on WS connection close
+  TOnWebSocketProtocolClosed =
+    procedure(Protocol: TWebSocketProtocol) of object;
 
   /// used to maintain a list of websocket protocols (for the server side)
   TWebSocketProtocolList = class(TSynPersistentRWLightLock)
@@ -729,21 +733,22 @@ type
   // updated from the actual processing thread (e.g. as in TWebCrtSocketProcess)
   TWebSocketProcess = class(TSynPersistent)
   protected
-    fProcessName: RawUtf8;
+    fProtocol: TWebSocketProtocol;
+    fConnectionID: THttpServerConnectionID;
     fIncoming: TWebSocketFrameList;
     fOutgoing: TWebSocketFrameList;
     fOwnerThread: TSynThread;
-    fProtocol: TWebSocketProtocol;
     fState: TWebSocketProcessState;
     fMaskSentFrames: byte;
     fProcessEnded: boolean;
     fConnectionCloseWasSent: boolean;
     fNoLastSocketTicks: boolean;
     fProcessCount: integer;
+    fInvalidPingSendCount: cardinal;
     fSettings: PWebSocketProcessSettings;
     fSafeIn, fSafeOut: TRTLCriticalSection;
-    fInvalidPingSendCount: cardinal;
     fLastSocketTicks: Int64;
+    fProcessName: RawUtf8;
     procedure MarkAsInvalid;
     function LastPingDelay: Int64;
     procedure SetLastPingTicks;
@@ -760,8 +765,9 @@ type
     function ProcessLoopStepSend: boolean;
     // blocking process, for one thread handling all WebSocket connection process
     procedure ProcessLoop;
-    function ComputeContext(out RequestProcess: TOnHttpServerRequest
-        ): THttpServerRequestAbstract; virtual; abstract;
+    function ComputeContext(
+      out RequestProcess: TOnHttpServerRequest): THttpServerRequestAbstract;
+        virtual; abstract;
     procedure Log(const frame: TWebSocketFrame; const aMethodName: ShortString;
       aEvent: TSynLogInfo = sllTrace; DisableRemoteLog: boolean = false); virtual;
     function SendPendingOutgoingFrames: integer;
@@ -815,6 +821,7 @@ type
     procedure Shutdown(waitForPong: boolean);
     /// returns the current state of the underlying connection
     function State: TWebSocketProcessState;
+      {$ifdef HASINLINE}inline;{$endif}
     /// the associated 'Remote-IP' HTTP header value
     // - returns '' if Protocol=nil or Protocol.RemoteLocalhost=true
     function RemoteIP: RawUtf8;
@@ -868,14 +875,14 @@ type
       aOwnerThread: TSynThread; aSettings: PWebSocketProcessSettings;
       const aProcessName: RawUtf8); reintroduce; virtual;
     /// first step of the low level incoming WebSockets framing protocol over TCrtSocket
-    // - in practice, just call fSocket.SockInPending to check for pending data
+    // - call fSocket.SockInPending to check for pending data
     function CanGetFrame(TimeOut: cardinal;
       ErrorWithoutException: PInteger): boolean; override;
     /// low level receive incoming WebSockets frame data over TCrtSocket
-    // - in practice, just call fSocket.SockInRead to check for pending data
+    // - call fSocket.SockInRead to check for pending data
     function ReceiveBytes(P: PAnsiChar; count: PtrInt): integer; override;
-    /// low level receive incoming WebSockets frame data over TCrtSocket
-    // - in practice, just call fSocket.TrySndLow to send pending data
+    /// low-level method to send pending output data over TCrtSocket
+    // - call fSocket.TrySndLow to send pending data
     function SendBytes(P: pointer; Len: PtrInt): boolean; override;
     /// the associated communication socket
     // - on the server side, is a THttpServerSocket
@@ -1256,7 +1263,7 @@ begin
   if ExtIn <> nil then
   begin
     for i := 0 to length(ExtIn) - 1 do
-      if IdemPropNameU(ExtIn[i], 'synhk') then
+      if PropNameEquals(ExtIn[i], 'synhk') then
         synhk := true
       else if synhk and
               IdemPChar(pointer(ExtIn[i]), 'HK=') then
@@ -1331,7 +1338,7 @@ end;
 
 function TWebSocketProtocol.SetSubprotocol(const aProtocolName: RawUtf8): boolean;
 begin
-  result := IdemPropNameU(aProtocolName, fName);
+  result := PropNameEquals(aProtocolName, fName);
 end;
 
 function TWebSocketProtocol.GetRemoteIP: RawUtf8;
@@ -1480,8 +1487,8 @@ begin
         Ctxt.AddInHeader(info);  // include JUMBO_INFO[] custom header
       // compute the HTTP answer from the main HTTP server
       status := onRequest(Ctxt);
-      if (Ctxt.OutContentType = NORESPONSE_CONTENT_TYPE) or
-         noAnswer then
+      if noAnswer or
+         (Ctxt.OutContentType = NORESPONSE_CONTENT_TYPE) then
         exit; // custom non-blocking process expects no answer
       // there is a response frame to send back
       OutputToFrame(Ctxt, status, head, answer);
@@ -1512,11 +1519,11 @@ var
   seq: integer;
 begin
   // by convention, defaults are POST and JSON, to reduce frame size for SOA
-  if not IdemPropNameU(Ctxt.Method, 'POST') then
+  if not PropNameEquals(Ctxt.Method, 'POST') then
     Method := Ctxt.Method;
   if (Ctxt.InContent <> '') and
      (Ctxt.InContentType <> '') and
-     not IdemPropNameU(Ctxt.InContentType, JSON_CONTENT_TYPE) then
+     not PropNameEquals(Ctxt.InContentType, JSON_CONTENT_TYPE) then
     InContentType := Ctxt.InContentType;
   // compute the WebSockets frame and corresponding response header
   if fSequencing then
@@ -1565,7 +1572,7 @@ var
   OutContentType: RawByteString;
 begin
   if (Ctxt.OutContent <> '') and
-     not IdemPropNameU(Ctxt.OutContentType, JSON_CONTENT_TYPE) then
+     not PropNameEquals(Ctxt.OutContentType, JSON_CONTENT_TYPE) then
     OutContentType := Ctxt.OutContentType;
   if NormToUpperAnsi7[outhead[3]] = 'Q' then
     // 'request' -> 'answer'
@@ -1637,7 +1644,7 @@ begin
     if Content = '' then
       WR.Add('"', '"')
     else if (ContentType = '') or
-            IdemPropNameU(ContentType, JSON_CONTENT_TYPE) then
+            PropNameEquals(ContentType, JSON_CONTENT_TYPE) then
       WR.AddNoJsonEscape(pointer(Content), length(Content))
     else if IdemPChar(pointer(ContentType), 'TEXT/') then
       WR.AddJsonString(Content)
@@ -1722,7 +1729,7 @@ begin
   if info.Json = nil then
     exit;
   if (contentType = '') or
-     IdemPropNameU(contentType, JSON_CONTENT_TYPE) then
+     PropNameEquals(contentType, JSON_CONTENT_TYPE) then
     GetJsonItemAsRawJson(info.Json, RawJson(content))
   else if IdemPChar(pointer(contentType), 'TEXT/') then
     info.GetJsonValue(content)
@@ -2218,7 +2225,7 @@ begin
     for i := 0 to length(fProtocols) - 1 do
       with fProtocols[i] do
         if ((fUri = '') or
-            IdemPropNameU(fUri, aClientUri)) and
+            PropNameEquals(fUri, aClientUri)) and
            SetSubprotocol(aProtocolName) then
         begin
           result := fProtocols[i].Clone(aClientUri);
@@ -2242,7 +2249,7 @@ begin
   fSafe.ReadLock;
   try
     for i := 0 to length(fProtocols) - 1 do
-      if IdemPropNameU(fProtocols[i].fUri, aClientUri) then
+      if PropNameEquals(fProtocols[i].fUri, aClientUri) then
       begin
         result := fProtocols[i].Clone(aClientUri);
         exit;
@@ -2271,9 +2278,9 @@ begin
   if aName <> '' then
     for result := 0 to length(fProtocols) - 1 do
       with fProtocols[result] do
-        if IdemPropNameU(fName, aName) and
+        if PropNameEquals(fName, aName) and
            ((fUri = '') or
-            IdemPropNameU(fUri, aUri)) then
+            PropNameEquals(fUri, aUri)) then
           exit;
   result := -1;
 end;
@@ -2345,15 +2352,15 @@ function TWebSocketProtocolList.ServerUpgrade(
   ConnectionOpaque: PHttpServerConnectionOpaque;
   out Protocol: TWebSocketProtocol; out Response: RawUtf8): integer;
 var
-  uri, version, prot, subprot, key, extin, extout: RawUtf8;
+  uri, version, prot, subprot, key, extin, extout, protout: RawUtf8;
   extins: TRawUtf8DynArray;
   P: PUtf8Char;
   Digest: TSha1Digest;
 begin
   // validate WebSockets protocol upgrade request
   result := HTTP_BADREQUEST;
-  if not IdemPropNameU(Http.CommandMethod, 'GET') or
-     not IdemPropNameU(Http.Upgrade, 'websocket') then
+  if not IsGet(Http.CommandMethod) or
+     not PropNameEquals(Http.Upgrade, 'websocket') then
     exit;
   version := Http.HeaderGetValue('SEC-WEBSOCKET-VERSION');
   if GetInteger(pointer(version)) < 13 then
@@ -2375,14 +2382,16 @@ begin
       Protocol := CloneByName(subprot, uri);
     until (P = nil) or
           (Protocol <> nil);
-    if (Protocol <> nil) and
-       (Protocol.Uri = '') and
-       not Protocol.ProcessHandshakeUri(uri) then
-    begin
-      Protocol.Free;
-      result := HTTP_NOTFOUND;
-      exit;
-    end;
+    if Protocol <> nil then
+      if (Protocol.Uri = '') and
+         not Protocol.ProcessHandshakeUri(uri) then
+      begin
+        Protocol.Free;
+        result := HTTP_NOTFOUND;
+        exit;
+      end
+      else
+        FormatUtf8('Sec-WebSocket-Protocol: %'#13#10, [Protocol.Name], protout);
   end
   else
     // if no protocol is specified, try to match by URI
@@ -2434,9 +2443,11 @@ begin
              'Upgrade: websocket'#13#10 +
              'Connection: Upgrade'#13#10 +
              'Sec-WebSocket-Connection-ID: %'#13#10 +
-             'Sec-WebSocket-Protocol: %'#13#10 +
+             '%' +
              '%Sec-WebSocket-Accept: %'#13#10#13#10,
-    [ConnectionID, Protocol.Name, extout,
+    [ConnectionID,
+     protout,
+     extout,
      BinToBase64Short(@Digest, SizeOf(Digest))], Response);
   result := HTTP_SUCCESS;
   // on connection upgrade, will never be back to plain HTTP/1.1
@@ -2454,7 +2465,7 @@ begin
   SendDelay := 10;
   DisconnectAfterInvalidHeartbeatCount := 5;
   CallbackAcquireTimeOutMS := 5000;
-  CallbackAnswerTimeOutMS := 5000;
+  CallbackAnswerTimeOutMS := 30000;
   LogDetails := [];
   OnClientConnected := nil;
   OnClientDisconnected := nil;
@@ -2486,6 +2497,7 @@ begin
   inherited Create; // may have been overriden
   fProcessName := aProcessName;
   fProtocol := aProtocol;
+  fConnectionID := aProtocol.ConnectionID;
   fOwnerThread := aOwnerThread;
   fSettings := aSettings;
   fIncoming := TWebSocketFrameList.Create(30 * 60);
@@ -3032,7 +3044,7 @@ var
 begin
   if ErrorWithoutException <> nil then
     ErrorWithoutException^ := 0;
-  pending := fSocket.SockInPending(TimeOut, {PendingAlsoInSocket=}true);
+  pending := fSocket.SockInPending(TimeOut);
   if pending < 0 then // socket error
     if ErrorWithoutException <> nil then
     begin
@@ -3043,7 +3055,7 @@ begin
     else
       raise EWebSockets.CreateUtf8('SockInPending() Error % on %:% - from %',
         [fSocket.LastLowSocketError, fSocket.Server, fSocket.Port, fProtocol.fRemoteIP]);
-  result := (pending >= 2);
+  result := (pending > 0); // assume if we got 1 byte, we are likely to have two
 end;
 
 function TWebCrtSocketProcess.ReceiveBytes(P: PAnsiChar; count: PtrInt): integer;

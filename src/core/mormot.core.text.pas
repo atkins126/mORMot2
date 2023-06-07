@@ -7,14 +7,13 @@ unit mormot.core.text;
   *****************************************************************************
 
    Text Processing functions shared by all framework units
-    - UTF-8 String Manipulation Functions
-    - TRawUtf8DynArray Processing Functions
     - CSV-like Iterations over Text Buffers
     - TTextWriter parent class for Text Generation
     - Numbers (integers or floats) and Variants to Text Conversion
-    - Hexadecimal Text And Binary Conversion
-    - Text Formatting functions and ESynException class
+    - Text Formatting functions
     - Resource and Time Functions
+    - ESynException class
+    - Hexadecimal Text And Binary Conversion
 
   *****************************************************************************
 }
@@ -31,355 +30,6 @@ uses
   mormot.core.base,
   mormot.core.os,
   mormot.core.unicode;
-
-
-{ ************ UTF-8 String Manipulation Functions }
-
-type
-  /// used to store a set of 8-bit encoded characters
-  TSynAnsicharSet = set of AnsiChar;
-
-  /// used to store a set of 8-bit unsigned integers
-  TSynByteSet = set of byte;
-
-  /// a generic callback, which can be used to translate some text on the fly
-  // - maps procedure TLanguageFile.Translate(var English: string) signature
-  // as defined in mORMoti18n.pas
-  // - can be used e.g. for TSynMustache's {{"English text}} callback
-  TOnStringTranslate = procedure(var English: string) of object;
-
-
-/// extract a line from source array of chars
-// - next will contain the beginning of next line, or nil if source if ended
-function GetNextLine(source: PUtf8Char; out next: PUtf8Char;
-  andtrim: boolean = false): RawUtf8;
-
-/// returns n leading characters
-function LeftU(const S: RawUtf8; n: PtrInt): RawUtf8;
-  {$ifdef HASINLINE} inline; {$endif}
-
-/// returns n trailing characters
-function RightU(const S: RawUtf8; n: PtrInt): RawUtf8;
-
-/// trims leading whitespace characters from the string by removing
-// new line, space, and tab characters
-function TrimLeft(const S: RawUtf8): RawUtf8;
-
-/// trims trailing whitespace characters from the string by removing trailing
-// newline, space, and tab characters
-function TrimRight(const S: RawUtf8): RawUtf8;
-
-/// trims leading whitespaces of every lines of the UTF-8 text
-// - also delete void lines
-// - could be used e.g. before FindNameValue() call
-// - modification is made in-place so S will be modified
-procedure TrimLeftLines(var S: RawUtf8);
-
-/// trim some trailing and ending chars
-// - if S is unique (RefCnt=1), will modify the RawUtf8 in place
-// - faster alternative to S := copy(S, Left + 1, length(S) - Left - Right)
-procedure TrimChars(var S: RawUtf8; Left, Right: PtrInt);
-
-/// returns the supplied text content, without any specified char
-// - specify a custom char set to be excluded, e.g. as [#0 .. ' ']
-function TrimChar(const text: RawUtf8; const exclude: TSynAnsicharSet): RawUtf8;
-
-/// returns the supplied text content, without any other char than specified
-// - specify a custom char set to be included, e.g. as ['A'..'Z']
-function OnlyChar(const text: RawUtf8; only: TSynAnsicharSet): RawUtf8;
-
-/// returns the supplied text content, without any control char
-// - here control chars have an ASCII code in [#0 .. ' '], i.e. text[] <= ' '
-function TrimControlChars(const text: RawUtf8): RawUtf8;
-
-/// split a RawUtf8 string into two strings, according to SepStr separator
-// - returns true and LeftStr/RightStr if they were separated by SepStr
-// - if SepStr is not found, LeftStr=Str and RightStr='' and returns false
-// - if ToUpperCase is TRUE, then LeftStr and RightStr will be made uppercase
-function Split(const Str, SepStr: RawUtf8; var LeftStr, RightStr: RawUtf8;
-  ToUpperCase: boolean = false): boolean; overload;
-
-/// split a RawUtf8 string into two strings, according to SepStr separator
-// - this overloaded function returns the right string as function result
-// - if SepStr is not found, LeftStr=Str and result=''
-// - if ToUpperCase is TRUE, then LeftStr and result will be made uppercase
-function Split(const Str, SepStr: RawUtf8; var LeftStr: RawUtf8;
-  ToUpperCase: boolean = false): RawUtf8; overload;
-
-/// split a RawUtf8 string into several strings, according to SepStr separator
-// - this overloaded function will fill a DestPtr[] array of PRawUtf8
-// - if any DestPtr[]=nil, the item will be skipped
-// - if input Str end before al SepStr[] are found, DestPtr[] is set to ''
-// - returns the number of values extracted into DestPtr[]
-function Split(const Str: RawUtf8; const SepStr: array of RawUtf8;
-  const DestPtr: array of PRawUtf8): PtrInt; overload;
-
-/// returns the last occurence of the given SepChar separated context
-// - e.g. SplitRight('01/2/34','/')='34'
-// - if SepChar doesn't appear, will return Str, e.g. SplitRight('123','/')='123'
-// - if LeftStr is supplied, the RawUtf8 it points to will be filled with
-// the left part just before SepChar ('' if SepChar doesn't appear)
-function SplitRight(const Str: RawUtf8; SepChar: AnsiChar; LeftStr: PRawUtf8 = nil): RawUtf8;
-
-/// returns the last occurence of the given SepChar separated context
-// - e.g. SplitRight('path/one\two/file.ext','/\')='file.ext', i.e.
-// SepChars='/\' will be like ExtractFileName() over RawUtf8 string
-// - if SepChar doesn't appear, will return Str, e.g. SplitRight('123','/')='123'
-function SplitRights(const Str, SepChar: RawUtf8): RawUtf8;
-
-/// check all character within text are spaces or control chars
-// - i.e. a faster alternative to  if TrimU(text)='' then
-function IsVoid(const text: RawUtf8): boolean;
-
-/// fill all bytes of this memory buffer with zeros, i.e. 'toto' -> #0#0#0#0
-// - will write the memory buffer directly, if this string instance is not shared
-// (i.e. has refcount = 1), to avoid zeroing still-used values
-// - may be used to cleanup stack-allocated content
-// ! ... finally FillZero(secret); end;
-procedure FillZero(var secret: RawByteString); overload;
-
-/// fill all bytes of this UTF-8 string with zeros, i.e. 'toto' -> #0#0#0#0
-// - will write the memory buffer directly, if this string instance is not shared
-// (i.e. has refcount = 1), to avoid zeroing still-used values
-// - may be used to cleanup stack-allocated content
-// ! ... finally FillZero(secret); end;
-procedure FillZero(var secret: RawUtf8); overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// fill all bytes of this UTF-8 string with zeros, i.e. 'toto' -> #0#0#0#0
-// - SpiUtf8 type has been defined explicitly to store Sensitive Personal
-// Information
-procedure FillZero(var secret: SpiUtf8); overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// fill all bytes of this dynamic array of bytes with zeros
-// - will write the memory buffer directly, if this array instance is not shared
-// (i.e. has refcount = 1), to avoid zeroing still-used values
-procedure FillZero(var secret: TBytes); overload;
-
-{$ifdef HASVARUSTRING}
-/// fill all bytes of this UTF-16 string with zeros, i.e. 'toto' -> #0#0#0#0
-procedure FillZero(var secret: UnicodeString); overload;
-{$endif HASVARUSTRING}
-
-/// actual replacement function called by StringReplaceAll() on first match
-// - not to be called as such, but defined globally for proper inlining
-function StringReplaceAllProcess(const S, OldPattern, NewPattern: RawUtf8;
-  found: integer): RawUtf8;
-
-/// fast version of StringReplace(S, OldPattern, NewPattern,[rfReplaceAll]);
-function StringReplaceAll(const S, OldPattern, NewPattern: RawUtf8): RawUtf8; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// fast version of several cascaded StringReplaceAll()
-function StringReplaceAll(const S: RawUtf8;
-  const OldNewPatternPairs: array of RawUtf8): RawUtf8; overload;
-
-/// fast replace of a specified char by a given string
-function StringReplaceChars(const Source: RawUtf8; OldChar, NewChar: AnsiChar): RawUtf8;
-
-/// fast replace of all #9 chars by a given string
-function StringReplaceTabs(const Source, TabText: RawUtf8): RawUtf8;
-
-/// UTF-8 dedicated (and faster) alternative to StringOfChar((Ch,Count))
-function RawUtf8OfChar(Ch: AnsiChar; Count: integer): RawUtf8;
-
-/// format a text content with SQL-like quotes
-// - this function implements what is specified in the official SQLite3
-// documentation: "A string constant is formed by enclosing the string in single
-// quotes ('). A single quote within the string can be encoded by putting two
-// single quotes in a row - as in Pascal."
-function QuotedStr(const S: RawUtf8; Quote: AnsiChar = ''''): RawUtf8; overload;
-
-/// format a text content with SQL-like quotes
-procedure QuotedStr(const S: RawUtf8; Quote: AnsiChar; var result: RawUtf8); overload;
-
-/// format a text buffer with SQL-like quotes
-procedure QuotedStr(P: PUtf8Char; PLen: PtrInt; Quote: AnsiChar;
-  var result: RawUtf8); overload;
-
-/// unquote a SQL-compatible string
-// - the first character in P^ must be either ' or " then internal double quotes
-// are transformed into single quotes
-// - 'text '' end'   -> text ' end
-// - "text "" end"   -> text " end
-// - returns nil if P doesn't contain a valid SQL string
-// - returns a pointer just after the quoted text otherwise
-function UnQuoteSqlStringVar(P: PUtf8Char; out Value: RawUtf8): PUtf8Char;
-
-/// unquote a SQL-compatible string
-function UnQuoteSqlString(const Value: RawUtf8): RawUtf8;
-
-/// unquote a SQL-compatible symbol name
-// - e.g. '[symbol]' -> 'symbol' or '"symbol"' -> 'symbol'
-function UnQuotedSqlSymbolName(const ExternalDBSymbol: RawUtf8): RawUtf8;
-
-
-/// get the next character after a quoted buffer
-// - the first character in P^ must be either ', either "
-// - it will return the latest quote position, ignoring double quotes within
-function GotoEndOfQuotedString(P: PUtf8Char): PUtf8Char;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// get the next character not in [#1..' ']
-function GotoNextNotSpace(P: PUtf8Char): PUtf8Char;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// get the next character not in [#9,' ']
-function GotoNextNotSpaceSameLine(P: PUtf8Char): PUtf8Char;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// get the next character in [#0..' ']
-function GotoNextSpace(P: PUtf8Char): PUtf8Char;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// check if the next character not in [#1..' '] matchs a given value
-// - first ignore any non space character
-// - then returns TRUE if P^=ch, setting P to the character after ch
-// - or returns FALSE if P^<>ch, leaving P at the level of the unexpected char
-function NextNotSpaceCharIs(var P: PUtf8Char; ch: AnsiChar): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// retrieve the next SQL-like identifier within the UTF-8 buffer
-// - will also trim any space (or line feeds) and trailing ';'
-// - any comment like '/*nocache*/' will be ignored
-// - returns true if something was set to Prop
-function GetNextFieldProp(var P: PUtf8Char; var Prop: RawUtf8): boolean;
-
-/// retrieve the next identifier within the UTF-8 buffer on the same line
-// - GetNextFieldProp() will just handle line feeds (and ';') as spaces - which
-// is fine e.g. for SQL, but not for regular config files with name/value pairs
-// - returns true if something was set to Prop
-function GetNextFieldPropSameLine(var P: PUtf8Char; var Prop: ShortString): boolean;
-
-/// return true if IdemPChar(source,searchUp), and go to the next line of source
-function IdemPCharAndGetNextLine(var source: PUtf8Char; searchUp: PAnsiChar): boolean;
-
-/// search for a value from its uppercased named entry
-// - i.e. iterate IdemPChar(source,UpperName) over every line of the source
-// - returns the text just after UpperName if it has been found at line beginning
-// - returns nil if UpperName was not found at any line beginning
-// - could be used as alternative to FindIniNameValue() and FindIniNameValueInteger()
-// if there is no section, i.e. if search should not stop at '[' but at source end
-function FindNameValue(P: PUtf8Char; UpperName: PAnsiChar): PUtf8Char; overload;
-
-/// search and returns a value from its uppercased named entry
-// - i.e. iterate IdemPChar(source,UpperName) over every line of the source
-// - returns true and the trimmed text just after UpperName into Value
-// if it has been found at line beginning
-// - returns false and set Value := '' if UpperName was not found (or leave
-// Value untouched if KeepNotFoundValue is true)
-// - could be used e.g. to efficently extract a value from HTTP headers, whereas
-// FindIniNameValue() is tuned for [section]-oriented INI files
-// - do TrimLeftLines(NameValuePairs) first if the lines start with spaces/tabs
-function FindNameValue(const NameValuePairs: RawUtf8; UpperName: PAnsiChar;
-  var Value: RawUtf8; KeepNotFoundValue: boolean = false;
-  UpperNameSeparator: AnsiChar = #0): boolean; overload;
-
-/// compute the line length from source array of chars
-// - if PEnd = nil, end counting at either #0, #13 or #10
-// - otherwise, end counting at either #13 or #10
-// - just a wrapper around BufferLineLength() checking PEnd=nil case
-function GetLineSize(P, PEnd: PUtf8Char): PtrUInt;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// returns true if the line length from source array of chars is not less than
-// the specified count
-function GetLineSizeSmallerThan(P, PEnd: PUtf8Char; aMinimalCount: integer): boolean;
-
-{$ifndef PUREMORMOT2}
-/// return next string delimited with #13#10 from P, nil if no more
-// - this function returns a RawUnicode string type
-function GetNextStringLineToRawUnicode(var P: PChar): RawUnicode;
-{$endif PUREMORMOT2}
-
-/// trim first lowercase chars ('otDone' will return 'Done' e.g.)
-// - return a PUtf8Char to avoid any memory allocation
-function TrimLeftLowerCase(const V: RawUtf8): PUtf8Char;
-
-/// trim first lowercase chars ('otDone' will return 'Done' e.g.)
-// - return an RawUtf8 string: enumeration names are pure 7-bit ANSI with Delphi 7
-// to 2007, and UTF-8 encoded with Delphi 2009+
-function TrimLeftLowerCaseShort(V: PShortString): RawUtf8;
-
-/// trim first lowercase chars ('otDone' will return 'Done' e.g.)
-// - return a ShortString: enumeration names are pure 7-bit ANSI with Delphi 7
-// to 2007, and UTF-8 encoded with Delphi 2009+
-function TrimLeftLowerCaseToShort(V: PShortString): ShortString; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// trim first lowercase chars ('otDone' will return 'Done' e.g.)
-// - return a ShortString: enumeration names are pure 7-bit ANSI with Delphi 7
-// to 2007, and UTF-8 encoded with Delphi 2009+
-procedure TrimLeftLowerCaseToShort(V: PShortString; out result: ShortString); overload;
-
-/// fast append some UTF-8 text into a ShortString, with an ending ','
-procedure AppendShortComma(text: PAnsiChar; len: PtrInt; var result: ShortString;
-  trimlowercase: boolean);   {$ifdef FPC} inline; {$endif}
-
-/// fast search of an exact case-insensitive match of a RTTI's PShortString array
-function FindShortStringListExact(List: PShortString; MaxValue: integer;
-  aValue: PUtf8Char; aValueLen: PtrInt): integer;
-
-/// fast case-insensitive search of a left-trimmed lowercase match
-// of a RTTI's PShortString array
-function FindShortStringListTrimLowerCase(List: PShortString; MaxValue: integer;
-  aValue: PUtf8Char; aValueLen: PtrInt): integer;
-
-/// fast case-sensitive search of a left-trimmed lowercase match
-// of a RTTI's PShortString array
-function FindShortStringListTrimLowerCaseExact(List: PShortString; MaxValue: integer;
-  aValue: PUtf8Char; aValueLen: PtrInt): integer;
-
-/// convert a CamelCase string into a space separated one
-// - 'OnLine' will return 'On line' e.g., and 'OnMyLINE' will return 'On my LINE'
-// - will handle capital words at the beginning, middle or end of the text, e.g.
-// 'KLMFlightNumber' will return 'KLM flight number' and 'GoodBBCProgram' will
-// return 'Good BBC program'
-// - will handle a number at the beginning, middle or end of the text, e.g.
-// 'Email12' will return 'Email 12'
-// - '_' char is transformed into ' - '
-// - '__' chars are transformed into ': '
-// - return an RawUtf8 string: enumeration names are pure 7-bit ANSI with Delphi
-// up to 2007, and UTF-8 encoded with Delphi 2009+
-function UnCamelCase(const S: RawUtf8): RawUtf8; overload;
-
-/// convert a CamelCase string into a space separated one
-// - 'OnLine' will return 'On line' e.g., and 'OnMyLINE' will return 'On my LINE'
-// - will handle capital words at the beginning, middle or end of the text, e.g.
-// 'KLMFlightNumber' will return 'KLM flight number' and 'GoodBBCProgram' will
-// return 'Good BBC program'
-// - will handle a number at the beginning, middle or end of the text, e.g.
-// 'Email12' will return 'Email 12'
-// - return the char count written into D^
-// - D^ and P^ are expected to be UTF-8 encoded: enumeration and property names
-// are pure 7-bit ANSI with Delphi 7 to 2007, and UTF-8 encoded with Delphi 2009+
-// - '_' char is transformed into ' - '
-// - '__' chars are transformed into ': '
-function UnCamelCase(D, P: PUtf8Char): integer; overload;
-
-/// convert a string into an human-friendly CamelCase identifier
-// - replacing spaces or punctuations by an uppercase character
-// - as such, it is not the reverse function to UnCamelCase()
-procedure CamelCase(P: PAnsiChar; len: PtrInt; var s: RawUtf8;
-  const isWord: TSynByteSet = [ord('0')..ord('9'),ord('a')..ord('z'),ord('A')..ord('Z')]); overload;
-
-/// convert a string into an human-friendly CamelCase identifier
-// - replacing spaces or punctuations by an uppercase character
-// - as such, it is not the reverse function to UnCamelCase()
-procedure CamelCase(const text: RawUtf8; var s: RawUtf8;
-  const isWord: TSynByteSet = [ord('0')..ord('9'),ord('a')..ord('z'),ord('A')..ord('Z')]); overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-var
-  /// these procedure type must be defined if a default system.pas is used
-  // - expect generic "string" type, i.e. UnicodeString for Delphi 2009+
-  LoadResStringTranslate: procedure(var Text: string) = nil;
-
-/// UnCamelCase and translate a char buffer
-// - P is expected to be #0 ended
-// - return "string" type, i.e. UnicodeString for Delphi 2009+
-procedure GetCaptionFromPCharLen(P: PUtf8Char; out result: string);
 
 
 
@@ -550,12 +200,18 @@ function FindCsvIndex(Csv: PUtf8Char; const Value: RawUtf8; Sep: AnsiChar = ',';
   CaseSensitive: boolean = true; TrimValue: boolean = false): integer;
 
 /// add the strings in the specified CSV text into a dynamic array of UTF-8 strings
+// - warning: will add the strings, so List := nil may be needed before call
 procedure CsvToRawUtf8DynArray(Csv: PUtf8Char; var List: TRawUtf8DynArray;
   Sep: AnsiChar = ','; TrimItems: boolean = false; AddVoidItems: boolean = false); overload;
 
 /// add the strings in the specified CSV text into a dynamic array of UTF-8 strings
+// - warning: will add the strings, so List := nil may be needed before call
 procedure CsvToRawUtf8DynArray(const Csv, Sep, SepEnd: RawUtf8;
   var List: TRawUtf8DynArray); overload;
+
+/// convert the strings in the specified CSV text into a dynamic array of UTF-8 strings
+function CsvToRawUtf8DynArray(const Csv: RawUtf8; const Sep: RawUtf8 = ',';
+  const SepEnd: RawUtf8 = ''): TRawUtf8DynArray; overload;
 
 /// return the corresponding CSV text from a dynamic array of UTF-8 strings
 function RawUtf8ArrayToCsv(const Values: array of RawUtf8;
@@ -883,7 +539,7 @@ type
     function Text: RawUtf8;
       {$ifdef HASINLINE}inline;{$endif}
     /// write pending data, then retrieve the whole text as a UTF-8 string
-    procedure SetText(out result: RawUtf8; reformat: TTextWriterJsonFormat = jsonCompact);
+    procedure SetText(var result: RawUtf8; reformat: TTextWriterJsonFormat = jsonCompact);
     /// set the internal stream content with the supplied UTF-8 text
     procedure ForceContent(const text: RawUtf8);
     /// write pending data to the Stream, with automatic buffer resizal
@@ -901,6 +557,7 @@ type
     // - if you don't call FlushToStream or FlushFinal, some pending characters
     // may not be copied to the Stream: you should call it before using the Stream
     procedure FlushFinal;
+      {$ifdef HASINLINE}inline;{$endif}
 
     /// append one ASCII char to the buffer
     procedure Add(c: AnsiChar); overload;
@@ -1010,7 +667,7 @@ type
     // - don't escapes chars according to the JSON RFC
     procedure AddNoJsonEscape(P: PAnsiChar; Len: PtrInt; CodePage: cardinal); overload;
     /// append some UTF-8 content to the buffer, with no JSON escape
-    // - if supplied json is '', will write 'null'
+    // - if supplied json is '', will write 'null' so that valid JSON is written
     // - redirect to AddNoJsonEscape() otherwise
     procedure AddRawJson(const json: RawJson);
     /// append a line of text with CR+LF at the end
@@ -1123,7 +780,7 @@ type
     procedure AddInstancePointer(Instance: TObject; SepChar: AnsiChar;
       IncludeUnitName, IncludePointer: boolean);
     /// append some binary data as hexadecimal text conversion
-    procedure AddBinToHex(Bin: Pointer; BinBytes: PtrInt);
+    procedure AddBinToHex(Bin: Pointer; BinBytes: PtrInt; LowerHex: boolean = false);
     /// fast conversion from binary data into hexa chars, ready to be displayed
     // - using this function with Bin^ as an integer value will serialize it
     // in big-endian order (most-significant byte first), as used by humans
@@ -1275,7 +932,12 @@ var
 // TRttiJson.RegisterCustomSerializer() class method
 // - call internally TTextWriter.WriteObject() method from DefaultJsonWriter
 function ObjectToJson(Value: TObject;
-  Options: TTextWriterWriteObjectOptions = [woDontStoreDefault]): RawUtf8;
+  Options: TTextWriterWriteObjectOptions = [woDontStoreDefault]): RawUtf8; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// will serialize any TObject into its UTF-8 JSON representation
+procedure ObjectToJson(Value: TObject; var result: RawUtf8;
+  Options: TTextWriterWriteObjectOptions = [woDontStoreDefault]); overload;
 
 /// check if some UTF-8 text would need HTML escaping
 function NeedsHtmlEscape(text: PUtf8Char; fmt: TTextWriterHtmlFormat): boolean;
@@ -1389,172 +1051,6 @@ type
     property EchoPendingExecuteBackground: boolean
       read fEchoPendingExecuteBackground write fEchoPendingExecuteBackground;
   end;
-
-
-{ ************ TRawUtf8DynArray Processing Functions }
-
-/// returns TRUE if Value is nil or all supplied Values[] equal ''
-function IsZero(const Values: TRawUtf8DynArray): boolean; overload;
-
-/// quick helper to initialize a dynamic array of RawUtf8 from some constants
-// - can be used e.g. as:
-// ! MyArray := TRawUtf8DynArrayFrom(['a','b','c']);
-function TRawUtf8DynArrayFrom(const Values: array of RawUtf8): TRawUtf8DynArray;
-
-/// low-level efficient search of Value in Values[]
-// - CaseSensitive=false will use StrICmp() for A..Z / a..z equivalence
-function FindRawUtf8(Values: PRawUtf8; const Value: RawUtf8; ValuesCount: integer;
-  CaseSensitive: boolean): integer; overload;
-
-/// return the index of Value in Values[], -1 if not found
-// - CaseSensitive=false will use StrICmp() for A..Z / a..z equivalence
-function FindRawUtf8(const Values: TRawUtf8DynArray; const Value: RawUtf8;
-  CaseSensitive: boolean = true): integer; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// return the index of Value in Values[], -1 if not found
-// - CaseSensitive=false will use StrICmp() for A..Z / a..z equivalence
-function FindRawUtf8(const Values: array of RawUtf8; const Value: RawUtf8;
-  CaseSensitive: boolean = true): integer; overload;
-
-/// raw internal method called e.g. by TDocVariantData.GetValueIndex()
-function FindNonVoidRawUtf8(n: PPointerArray; name: pointer; len: TStrLen;
-  count: PtrInt): PtrInt;
-
-/// raw internal method called e.g. by TDocVariantData.GetValueIndex()
-function FindNonVoidRawUtf8I(n: PPointerArray; name: pointer; len: TStrLen;
-  count: PtrInt): PtrInt;
-
-type
-  TFindNonVoid =
-    function(p: PPointerArray; n: pointer; l: TStrLen; c: PtrInt): PtrInt;
-const
-  /// raw internal methods called e.g. by TDocVariantData.GetValueIndex()
-  FindNonVoid: array[{casesensitive:}boolean] of TFindNonVoid = (
-    FindNonVoidRawUtf8I,
-    FindNonVoidRawUtf8);
-
-/// true if Value was added successfully in Values[]
-function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
-  NoDuplicates: boolean = false; CaseSensitive: boolean = true): boolean; overload;
-
-/// add the Value to Values[], with an external count variable, for performance
-procedure AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
-  const Value: RawUtf8); overload;
-
-/// add Value[] items to Values[], with an external count variable, for performance
-procedure AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
-  const Value: TRawUtf8DynArray); overload;
-
-/// true if both TRawUtf8DynArray are the same
-// - comparison is case-sensitive
-function RawUtf8DynArrayEquals(const A, B: TRawUtf8DynArray): boolean; overload;
-
-/// true if both TRawUtf8DynArray are the same for a given number of items
-// - A and B are expected to have at least Count items
-// - comparison is case-sensitive
-function RawUtf8DynArrayEquals(const A, B: TRawUtf8DynArray;
-  Count: integer): boolean; overload;
-
-/// add the Value to Values[] string array
-function AddString(var Values: TStringDynArray; const Value: string): PtrInt;
-
-/// convert the string dynamic array into a dynamic array of UTF-8 strings
-procedure StringDynArrayToRawUtf8DynArray(const Source: TStringDynArray;
-  var result: TRawUtf8DynArray);
-
-/// convert the string list into a dynamic array of UTF-8 strings
-procedure StringListToRawUtf8DynArray(Source: TStringList;
-  var result: TRawUtf8DynArray);
-
-/// retrieve the index where to insert a PUtf8Char in a sorted PUtf8Char array
-// - R is the last index of available entries in P^ (i.e. Count-1)
-// - string comparison is case-sensitive StrComp (so will work with any PAnsiChar)
-// - returns -1 if the specified Value was found (i.e. adding will duplicate a value)
-// - will use fast O(log(n)) binary search algorithm
-function FastLocatePUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
-  Value: PUtf8Char): PtrInt; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// retrieve the index where to insert a PUtf8Char in a sorted PUtf8Char array
-// - this overloaded function accept a custom comparison function for sorting
-// - R is the last index of available entries in P^ (i.e. Count-1)
-// - string comparison is case-sensitive (so will work with any PAnsiChar)
-// - returns -1 if the specified Value was found (i.e. adding will duplicate a value)
-// - will use fast O(log(n)) binary search algorithm
-function FastLocatePUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
-  Value: PUtf8Char; Compare: TUtf8Compare): PtrInt; overload;
-
-/// retrieve the index where is located a PUtf8Char in a sorted PUtf8Char array
-// - R is the last index of available entries in P^ (i.e. Count-1)
-// - string comparison is case-sensitive StrComp (so will work with any PAnsiChar)
-// - returns -1 if the specified Value was not found
-// - will use inlined binary search algorithm with optimized x86_64 branchless asm
-// - slightly faster than plain FastFindPUtf8CharSorted(P,R,Value,@StrComp)
-function FastFindPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
-  Value: PUtf8Char): PtrInt; overload;
-
-/// retrieve the index where is located a PUtf8Char in a sorted uppercase array
-// - P[] array is expected to be already uppercased
-// - searched Value is converted to uppercase before search via UpperCopy255Buf(),
-// so is expected to be short, i.e. length < 250
-// - R is the last index of available entries in P^ (i.e. Count-1)
-// - returns -1 if the specified Value was not found
-// - will use fast O(log(n)) binary search algorithm
-// - slightly faster than plain FastFindPUtf8CharSorted(P,R,Value,@StrIComp)
-function FastFindUpperPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
-  Value: PUtf8Char; ValueLen: PtrInt): PtrInt;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// retrieve the index where is located a PUtf8Char in a sorted PUtf8Char array
-// - R is the last index of available entries in P^ (i.e. Count-1)
-// - string comparison will use the specified Compare function
-// - returns -1 if the specified Value was not found
-// - will use fast O(log(n)) binary search algorithm
-function FastFindPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
-  Value: PUtf8Char; Compare: TUtf8Compare): PtrInt; overload;
-
-/// retrieve the index of a PUtf8Char in a PUtf8Char array via a sort indexed
-// - will use fast O(log(n)) binary search algorithm
-function FastFindIndexedPUtf8Char(P: PPUtf8CharArray; R: PtrInt;
-  var SortedIndexes: TCardinalDynArray; Value: PUtf8Char;
-  ItemComp: TUtf8Compare): PtrInt;
-
-/// add a RawUtf8 value in an alphaticaly sorted dynamic array of RawUtf8
-// - returns the index where the Value was added successfully in Values[]
-// - returns -1 if the specified Value was already present in Values[]
-//  (we must avoid any duplicate for O(log(n)) binary search)
-// - if CoValues is set, its content will be moved to allow inserting a new
-// value at CoValues[result] position - a typical usage of CoValues is to store
-// the corresponding ID to each RawUtf8 item
-// - if FastLocatePUtf8CharSorted() has been already called, this index can
-// be set to optional ForceIndex parameter
-// - by default, exact (case-sensitive) match is used; you can specify a custom
-// compare function if needed in Compare optional parameter
-function AddSortedRawUtf8(var Values: TRawUtf8DynArray;
-  var ValuesCount: integer; const Value: RawUtf8;
-  CoValues: PIntegerDynArray = nil; ForcedIndex: PtrInt = -1;
-  Compare: TUtf8Compare = nil): PtrInt;
-
-/// delete a RawUtf8 item in a dynamic array of RawUtf8
-// - if CoValues is set, the integer item at the same index is also deleted
-function DeleteRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
-  Index: integer; CoValues: PIntegerDynArray = nil): boolean; overload;
-
-/// delete a RawUtf8 item in a dynamic array of RawUtf8;
-function DeleteRawUtf8(var Values: TRawUtf8DynArray;
-  Index: integer): boolean; overload;
-
-/// sort a dynamic array of RawUtf8 items
-// - if CoValues is set, the integer items are also synchronized
-// - by default, exact (case-sensitive) match is used; you can specify a custom
-// compare function if needed in Compare optional parameter
-procedure QuickSortRawUtf8(var Values: TRawUtf8DynArray; ValuesCount: integer;
-  CoValues: PIntegerDynArray = nil; Compare: TUtf8Compare = nil); overload;
-
-/// sort a RawUtf8 array, low values first
-procedure QuickSortRawUtf8(Values: PRawUtf8Array; L, R: PtrInt;
-  caseInsensitive: boolean = false); overload;
 
 
 
@@ -1899,6 +1395,68 @@ type
   // - such result type would avoid a string allocation on heap
   TShort4 = string[4];
 
+/// revert the value as encoded by TTextWriter.AddInt18ToChars3() or Int18ToChars3()
+// - no range check is performed: you should ensure that the incoming text
+// follows the expected 3-chars layout
+function Chars3ToInt18(P: pointer): cardinal;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// compute the value as encoded by TTextWriter.AddInt18ToChars3() method
+function Int18ToChars3(Value: cardinal): RawUtf8; overload;
+
+/// compute the value as encoded by TTextWriter.AddInt18ToChars3() method
+procedure Int18ToChars3(Value: cardinal; var result: RawUtf8); overload;
+
+/// creates a 3 digits string from a 0..999 value as '000'..'999'
+// - consider using UInt3DigitsToShort() to avoid temporary memory allocation,
+// e.g. when used as FormatUtf8() parameter
+function UInt3DigitsToUtf8(Value: cardinal): RawUtf8;
+
+/// creates a 4 digits string from a 0..9999 value as '0000'..'9999'
+// - consider using UInt4DigitsToShort() to avoid temporary memory allocation,
+// e.g. when used as FormatUtf8() parameter
+function UInt4DigitsToUtf8(Value: cardinal): RawUtf8;
+
+  /// creates a 4 digits short string from a 0..9999 value
+// - using TShort4 as returned string would avoid a string allocation on heap
+// - could be used e.g. as parameter to FormatUtf8()
+function UInt4DigitsToShort(Value: cardinal): TShort4;
+
+/// creates a 3 digits short string from a 0..999 value
+// - using TShort4 as returned string would avoid a string allocation on heap
+// - could be used e.g. as parameter to FormatUtf8()
+function UInt3DigitsToShort(Value: cardinal): TShort4;
+
+/// creates a 2 digits short string from a 0..99 value
+// - using TShort4 as returned string would avoid a string allocation on heap
+// - could be used e.g. as parameter to FormatUtf8()
+function UInt2DigitsToShort(Value: byte): TShort4;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// creates a 2 digits short string from a 0..99 value
+// - won't test Value>99 as UInt2DigitsToShort()
+function UInt2DigitsToShortFast(Value: byte): TShort4;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert an IPv4 'x.x.x.x' text into its 32-bit value
+// - returns TRUE if the text was a valid IPv4 text, unserialized as 32-bit aValue
+// - returns FALSE on parsing error, also setting aValue=0
+// - '' or '127.0.0.1' will also return false
+function IPToCardinal(aIP: PUtf8Char; out aValue: cardinal): boolean; overload;
+
+/// convert an IPv4 'x.x.x.x' text into its 32-bit value
+// - returns TRUE if the text was a valid IPv4 text, unserialized as 32-bit aValue
+// - returns FALSE on parsing error, also setting aValue=0
+// - '' or '127.0.0.1' will also return false
+function IPToCardinal(const aIP: RawUtf8; out aValue: cardinal): boolean; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// convert an IPv4 'x.x.x.x' text into its 32-bit value, 0 or localhost
+// - returns <> 0 value if the text was a valid IPv4 text, 0 on parsing error
+// - '' or '127.0.0.1' will also return 0
+function IPToCardinal(const aIP: RawUtf8): cardinal; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
 
 { ************ Text Formatting functions }
 
@@ -1984,6 +1542,9 @@ procedure VarRecToInlineValue(const V: TVarRec; var result: RawUtf8);
 function VarRecAsChar(const V: TVarRec): integer;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// check if a supplied "array of const" argument is an instance of a given class
+function VarRecAs(const aArg: TVarRec; aClass: TClass): pointer;
+
 /// fast Format() function replacement, optimized for RawUtf8
 // - only supported token is %, which will be written in the resulting string
 // according to each Args[] supplied items - so you will never get any exception
@@ -2036,10 +1597,33 @@ procedure FormatShort16(const Format: RawUtf8; const Args: array of const;
 function FormatVariant(const Format: RawUtf8; const Args: array of const): variant;
 
 /// append some text items to a RawUtf8 variable
+// - see also AppendLine() below if you need a separator
 procedure Append(var Text: RawUtf8; const Args: array of const); overload;
+
+/// append one text item to a RawUtf8 variable with no code page conversion
+procedure Append(var Text: RawUtf8; const Added: RawByteString); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// append two text items to a RawUtf8 variable with no code page conversion
+procedure Append(var Text: RawUtf8; const Added1, Added2: RawByteString); overload;
+
+/// append one char to a RawUtf8 variable with no code page conversion
+procedure Append(var Text: RawUtf8; Added: AnsiChar); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// append one text buffer to a RawUtf8 variable with no code page conversion
+procedure Append(var Text: RawUtf8; Added: pointer; AddedLen: PtrInt); overload;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// append some text items to a RawByteString variable
 procedure Append(var Text: RawByteString; const Args: array of const); overload;
+
+/// append one text item to a RawByteString variable with no code page conversion
+procedure Append(var Text: RawByteString; const Added: RawByteString); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// append one text buffer to a RawByteString variable with no code page conversion
+procedure Append(var Text: RawByteString; Added: pointer; AddedLen: PtrInt); overload;
 
 /// prepend some text items at the beginning of a RawUtf8 variable
 procedure Prepend(var Text: RawUtf8; const Args: array of const); overload;
@@ -2058,6 +1642,9 @@ procedure AppendLine(var Text: RawUtf8; const Args: array of const;
 // - e.g. on Windows: MakePath(['abc', 1, 'toto.json']) = 'abc\1\toto.json'
 function MakePath(const Part: array of const; EndWithDelim: boolean = false;
   Delim: AnsiChar = PathDelim): TFileName;
+
+/// MakePath() variant which can handle the file extension specifically
+function MakeFileName(const Part: array of const; LastIsExt: boolean = true): TFileName;
 
 /// create a CSV text from some values
 function MakeCsv(const Value: array of const; EndWithComma: boolean = false;
@@ -2269,7 +1856,6 @@ function StatusCodeToErrorMsg(Code: integer): ShortString;
 
 
 { **************** Hexadecimal Text And Binary Conversion }
-
 
 type
   /// lookup table used for fast hexadecimal conversion
@@ -2525,68 +2111,6 @@ function OctToBin(Oct: PAnsiChar; Bin: PByte): PtrInt; overload;
 // - \xxx is converted into a single xxx byte from octal, and \\ into \
 function OctToBin(const Oct: RawUtf8): RawByteString; overload;
 
-/// revert the value as encoded by TTextWriter.AddInt18ToChars3() or Int18ToChars3()
-// - no range check is performed: you should ensure that the incoming text
-// follows the expected 3-chars layout
-function Chars3ToInt18(P: pointer): cardinal;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// compute the value as encoded by TTextWriter.AddInt18ToChars3() method
-function Int18ToChars3(Value: cardinal): RawUtf8; overload;
-
-/// compute the value as encoded by TTextWriter.AddInt18ToChars3() method
-procedure Int18ToChars3(Value: cardinal; var result: RawUtf8); overload;
-
-/// creates a 3 digits string from a 0..999 value as '000'..'999'
-// - consider using UInt3DigitsToShort() to avoid temporary memory allocation,
-// e.g. when used as FormatUtf8() parameter
-function UInt3DigitsToUtf8(Value: cardinal): RawUtf8;
-
-/// creates a 4 digits string from a 0..9999 value as '0000'..'9999'
-// - consider using UInt4DigitsToShort() to avoid temporary memory allocation,
-// e.g. when used as FormatUtf8() parameter
-function UInt4DigitsToUtf8(Value: cardinal): RawUtf8;
-
-  /// creates a 4 digits short string from a 0..9999 value
-// - using TShort4 as returned string would avoid a string allocation on heap
-// - could be used e.g. as parameter to FormatUtf8()
-function UInt4DigitsToShort(Value: cardinal): TShort4;
-
-/// creates a 3 digits short string from a 0..999 value
-// - using TShort4 as returned string would avoid a string allocation on heap
-// - could be used e.g. as parameter to FormatUtf8()
-function UInt3DigitsToShort(Value: cardinal): TShort4;
-
-/// creates a 2 digits short string from a 0..99 value
-// - using TShort4 as returned string would avoid a string allocation on heap
-// - could be used e.g. as parameter to FormatUtf8()
-function UInt2DigitsToShort(Value: byte): TShort4;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// creates a 2 digits short string from a 0..99 value
-// - won't test Value>99 as UInt2DigitsToShort()
-function UInt2DigitsToShortFast(Value: byte): TShort4;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// convert an IPv4 'x.x.x.x' text into its 32-bit value
-// - returns TRUE if the text was a valid IPv4 text, unserialized as 32-bit aValue
-// - returns FALSE on parsing error, also setting aValue=0
-// - '' or '127.0.0.1' will also return false
-function IPToCardinal(aIP: PUtf8Char; out aValue: cardinal): boolean; overload;
-
-/// convert an IPv4 'x.x.x.x' text into its 32-bit value
-// - returns TRUE if the text was a valid IPv4 text, unserialized as 32-bit aValue
-// - returns FALSE on parsing error, also setting aValue=0
-// - '' or '127.0.0.1' will also return false
-function IPToCardinal(const aIP: RawUtf8; out aValue: cardinal): boolean; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// convert an IPv4 'x.x.x.x' text into its 32-bit value, 0 or localhost
-// - returns <> 0 value if the text was a valid IPv4 text, 0 on parsing error
-// - '' or '127.0.0.1' will also return 0
-function IPToCardinal(const aIP: RawUtf8): cardinal; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
 /// append a TGuid binary content as text
 // - will store e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without any {})
 // - this will be the format used for JSON encoding, e.g.
@@ -2704,1308 +2228,6 @@ implementation
 {$endif FPC}
 
  
-{ ************ UTF-8 String Manipulation Functions }
-
-function GetNextLine(source: PUtf8Char; out next: PUtf8Char; andtrim: boolean): RawUtf8;
-var
-  beg: PUtf8Char;
-begin
-  if source = nil then
-  begin
-    {$ifdef FPC}
-    FastAssignNew(result);
-    {$else}
-    result := '';
-    {$endif FPC}
-    next := source;
-    exit;
-  end;
-  if andtrim then // optional trim left
-    while source^ in [#9, ' '] do
-      inc(source);
-  beg := source;
-  repeat // just here to avoid a goto
-    if source[0] > #13 then
-      if source[1] > #13 then
-        if source[2] > #13 then
-          if source[3] > #13 then
-          begin
-            inc(source, 4); // fast process 4 chars per loop
-            continue;
-          end
-          else
-            inc(source, 3)
-        else
-          inc(source, 2)
-      else
-        inc(source);
-    case source^ of
-      #0:
-        next := nil;
-      #10:
-        next := source + 1;
-      #13:
-        if source[1] = #10 then
-          next := source + 2
-        else
-          next := source + 1;
-    else
-      begin
-        inc(source);
-        continue;
-      end;
-    end;
-    if andtrim then // optional trim right
-      while (source > beg) and
-            (source[-1] in [#9, ' ']) do
-        dec(source);
-    FastSetString(result, beg, source - beg);
-    exit;
-  until false;
-end;
-
-function LeftU(const S: RawUtf8; n: PtrInt): RawUtf8;
-begin
-  result := Copy(S, 1, n);
-end;
-
-function RightU(const S: RawUtf8; n: PtrInt): RawUtf8;
-var
-  L: PtrInt;
-begin
-  L := length(S);
-  if n > L then
-    n := L;
-  result := Copy(S, L + 1 - n, n);
-end;
-
-function TrimLeft(const S: RawUtf8): RawUtf8;
-var
-  i, l: PtrInt;
-begin
-  l := Length(S);
-  i := 1;
-  while (i <= l) and
-        (S[i] <= ' ') do
-    inc(i);
-  if i = 1 then
-    result := S
-  else
-    FastSetString(result, @PByteArray(S)[i - 1], l - i);
-end;
-
-function TrimRight(const S: RawUtf8): RawUtf8;
-var
-  i: PtrInt;
-begin
-  i := Length(S);
-  while (i > 0) and
-        (S[i] <= ' ') do
-    dec(i);
-  FastSetString(result, pointer(S), i);
-end;
-
-procedure TrimLeftLines(var S: RawUtf8);
-var
-  P, D: PUtf8Char;
-begin
-  if S = '' then
-    exit;
-  P := UniqueRawUtf8(S);
-  D := P; // in-place process
-  repeat
-    while (P^ <= ' ') and
-          (P^ <> #0) do
-      inc(P);
-    while not (P^ in [#0, #10, #13]) do
-    begin
-      D^ := P^;
-      inc(P);
-      inc(D);
-    end;
-    if P^ = #0 then
-      break;
-    D^ := #10;
-    inc(D);
-  until false;
-  if D = pointer(S) then
-    S := ''
-  else
-    FakeLength(S, D); // no SetLength needed
-end;
-
-procedure TrimChars(var S: RawUtf8; Left, Right: PtrInt);
-var
-  P: PUtf8Char;
-begin
-  P := pointer(S);
-  if P = nil then
-    exit;
-  if Left < 0 then
-    Left := 0;
-  if Right < 0 then
-    Right := 0;
-  inc(Right, Left);
-  if Right = 0 then
-    exit; // nothing to trim
-  Right := PStrLen(P - _STRLEN)^ - Right; // compute new length
-  if Right > 0 then
-    if PStrCnt(P - _STRCNT)^ = 1 then // RefCnt=1 ?
-    begin
-      PStrLen(P - _STRLEN)^ := Right; // we can modify it in-place
-      if Left <> 0 then
-        MoveFast(P[Left], P^, Right);
-      P[Right] := #0;
-    end
-    else
-      FastSetString(S, P + Left, Right) // create a new unique string
-  else
-    FastAssignNew(S);
-end;
-
-function SplitRight(const Str: RawUtf8; SepChar: AnsiChar; LeftStr: PRawUtf8): RawUtf8;
-var
-  i: PtrInt;
-begin
-  for i := length(Str) downto 1 do
-    if Str[i] = SepChar then
-    begin
-      FastSetString(result, @PByteArray(Str)[i], length(Str) - i);
-      if LeftStr <> nil then
-        FastSetString(LeftStr^, pointer(Str), i - 1);
-      exit;
-    end;
-  result := Str;
-  if LeftStr <> nil then
-    FastAssignNew(LeftStr^);
-end;
-
-function SplitRights(const Str, SepChar: RawUtf8): RawUtf8;
-var
-  i, j, sep: PtrInt;
-  c: AnsiChar;
-begin
-  sep := length(SepChar);
-  if sep > 0 then
-    if sep = 1 then
-      result := SplitRight(Str, SepChar[1])
-    else
-    begin
-      for i := length(Str) downto 1 do
-      begin
-        c := Str[i];
-        for j := 1 to sep do
-          if c = SepChar[j] then
-          begin
-            FastSetString(result, @PByteArray(Str)[i], length(Str) - i);
-            exit;
-          end;
-      end;
-    end;
-  result := Str;
-end;
-
-function Split(const Str, SepStr: RawUtf8; var LeftStr, RightStr: RawUtf8;
-  ToUpperCase: boolean): boolean;
-var
-  i: PtrInt;
-  tmp: pointer; // may be called as Split(Str,SepStr,Str,RightStr)
-begin
-  if length(SepStr) = 1 then
-    i := PosExChar(SepStr[1], Str) // may use SSE2 on i386/x86_64
-  else
-    i := PosEx(SepStr, Str);
-  if i = 0 then
-  begin
-    LeftStr := Str;
-    RightStr := '';
-    result := false;
-  end
-  else
-  begin
-    dec(i);
-    tmp := nil;
-    FastSetString(RawUtf8(tmp), pointer(Str), i);
-    inc(i, length(SepStr));
-    FastSetString(RightStr, @PByteArray(Str)[i], length(Str) - i);
-    FastAssignNew(LeftStr, tmp);
-    result := true;
-  end;
-  if ToUpperCase then
-  begin
-    UpperCaseSelf(LeftStr);
-    UpperCaseSelf(RightStr);
-  end;
-end;
-
-function Split(const Str, SepStr: RawUtf8; var LeftStr: RawUtf8;
-  ToUpperCase: boolean): RawUtf8;
-begin
-  Split(Str, SepStr, LeftStr, result, ToUpperCase);
-end;
-
-function Split(const Str: RawUtf8; const SepStr: array of RawUtf8;
-  const DestPtr: array of PRawUtf8): PtrInt;
-var
-  s, i, j: PtrInt;
-  P: pointer;
-begin
-  j := 1;
-  result := 0;
-  s := 0;
-  if high(SepStr) >= 0 then
-    while result <= high(DestPtr) do
-    begin
-      P := @PByteArray(Str)[j - 1];
-      i := PosEx(SepStr[s], Str, j);
-      if i = 0 then
-      begin
-        if DestPtr[result] <> nil then
-          FastSetString(DestPtr[result]^, P, length(Str) - j);
-        inc(result);
-        break;
-      end;
-      if DestPtr[result] <> nil then
-        FastSetString(DestPtr[result]^, P, i - j);
-      inc(result);
-      if s < high(SepStr) then
-        inc(s);
-      j := i + 1;
-    end;
-  for i := result to high(DestPtr) do
-    if DestPtr[i] <> nil then
-      FastAssignNew(DestPtr[i]^);
-end;
-
-function IsVoid(const text: RawUtf8): boolean;
-var
-  i: PtrInt;
-begin
-  result := false;
-  for i := 1 to length(text) do
-    if text[i] > ' ' then
-      exit;
-  result := true;
-end;
-
-function TrimControlChars(const text: RawUtf8): RawUtf8;
-var
-  len, i, j, n: PtrInt;
-  P: PAnsiChar;
-begin
-  len := length(text);
-  for i := 1 to len do
-    if text[i] <= ' ' then
-    begin
-      n := i - 1;
-      FastSetString(result, nil, len);
-      P := pointer(result);
-      if n > 0 then
-        MoveFast(pointer(text)^, P^, n);
-      for j := i + 1 to len do
-        if text[j] > ' ' then
-        begin
-          P[n] := text[j];
-          inc(n);
-        end;
-      if n = 0 then
-        result := ''
-      else
-      begin
-        PStrLen(P - _STRLEN)^ := n; // in-place truncation
-        P[n] := #0;
-      end;
-      exit;
-    end;
-  result := text; // no control char found
-end;
-
-function TrimChar(const text: RawUtf8; const exclude: TSynAnsicharSet): RawUtf8;
-var
-  len, i, j, n: PtrInt;
-  P: PAnsiChar;
-begin
-  len := length(text);
-  for i := 1 to len do
-    if text[i] in exclude then
-    begin
-      n := i - 1;
-      FastSetString(result, nil, len - 1);
-      P := pointer(result);
-      if n > 0 then
-        MoveFast(pointer(text)^, P^, n);
-      for j := i + 1 to len do
-        if not (text[j] in exclude) then
-        begin
-          P[n] := text[j];
-          inc(n);
-        end;
-      if n = 0 then
-        result := ''
-      else
-      begin
-        PStrLen(P - _STRLEN)^ := n; // in-place truncation
-        P[n] := #0;
-      end;
-      exit;
-    end;
-  result := text; // no exclude char found
-end;
-
-function OnlyChar(const text: RawUtf8; only: TSynAnsicharSet): RawUtf8;
-var
-  i: PtrInt;
-begin
-  for i := 0 to SizeOf(only) do
-    PByteArray(@only)[i] := not PByteArray(@only)[i]; // reverse bits
-  result := TrimChar(text, only);
-end;
-
-procedure FillZero(var secret: RawByteString);
-begin
-  if secret <> '' then
-    with PStrRec(Pointer(PtrInt(secret) - _STRRECSIZE))^ do
-      if refCnt = 1 then // avoid GPF if const
-        FillCharFast(pointer(secret)^, length, 0);
-end;
-
-procedure FillZero(var secret: RawUtf8);
-begin
-  FillZero(RawByteString(secret));
-end;
-
-procedure FillZero(var secret: SpiUtf8);
-begin
-  FillZero(RawByteString(secret));
-end;
-
-{$ifdef HASVARUSTRING}
-procedure FillZero(var secret: UnicodeString);
-begin
-  if secret <> '' then
-    with PStrRec(Pointer(PtrInt(secret) - _STRRECSIZE))^ do
-      if refCnt = 1 then // avoid GPF if const
-        FillCharFast(pointer(secret)^, length * SizeOf(WideChar), 0);
-end;
-{$endif HASVARUSTRING}
-
-procedure FillZero(var secret: TBytes);
-begin
-  if secret <> nil then
-    with PDynArrayRec(Pointer(PtrInt(secret) - _DARECSIZE))^ do
-      if refCnt = 1 then // avoid GPF if const
-        FillCharFast(pointer(secret)^, length, 0);
-end;
-
-function StringReplaceAllProcess(const S, OldPattern, NewPattern: RawUtf8;
-  found: integer): RawUtf8;
-var
-  i, last, oldlen, newlen, sharedlen: PtrInt;
-  posCount: integer;
-  pos: TIntegerDynArray;
-  src, dst: PAnsiChar;
-begin
-  oldlen := length(OldPattern);
-  newlen := length(NewPattern);
-  SetLength(pos, 64);
-  pos[0] := found;
-  posCount := 1;
-  repeat
-    found := PosEx(OldPattern, S, found + oldlen);
-    if found = 0 then
-      break;
-    AddInteger(pos, posCount, found);
-  until false;
-  FastSetString(result, nil, Length(S) + (newlen - oldlen) * posCount);
-  last := 1;
-  src := pointer(S);
-  dst := pointer(result);
-  for i := 0 to posCount - 1 do
-  begin
-    sharedlen := pos[i] - last;
-    MoveFast(src^, dst^, sharedlen);
-    inc(src, sharedlen + oldlen);
-    inc(dst, sharedlen);
-    if newlen > 0 then
-    begin
-      MoveByOne(pointer(NewPattern), dst, newlen);
-      inc(dst, newlen);
-    end;
-    last := pos[i] + oldlen;
-  end;
-  MoveFast(src^, dst^, length(S) - last + 1);
-end;
-
-function StringReplaceAll(const S, OldPattern, NewPattern: RawUtf8): RawUtf8;
-var
-  found: integer;
-begin
-  if (S = '') or
-     (OldPattern = '') or
-     (OldPattern = NewPattern) then
-    result := S
-  else
-  begin
-    if length(OldPattern) = 1 then
-      found := ByteScanIndex(pointer(S), PStrLen(PtrUInt(S) - _STRLEN)^,
-        byte(OldPattern[1])) + 1
-    else
-      found := PosEx(OldPattern, S, 1); // our PosEx() is faster than RTL Pos()
-    if found = 0 then
-      result := S
-    else
-      result := StringReplaceAllProcess(S, OldPattern, NewPattern, found);
-  end;
-end;
-
-function StringReplaceAll(const S: RawUtf8;
-  const OldNewPatternPairs: array of RawUtf8): RawUtf8;
-var
-  n, i: PtrInt;
-begin
-  result := S;
-  n := high(OldNewPatternPairs);
-  if (n > 0) and
-     (n and 1 = 1) then
-    for i := 0 to n shr 1 do
-      result := StringReplaceAll(result,
-        OldNewPatternPairs[i * 2], OldNewPatternPairs[i * 2 + 1]);
-end;
-
-function StringReplaceChars(const Source: RawUtf8; OldChar, NewChar: AnsiChar): RawUtf8;
-var
-  i, j, n: PtrInt;
-  P: PAnsiChar;
-begin
-  if (OldChar <> NewChar) and
-     (Source <> '') then
-  begin
-    n := length(Source);
-    i := ByteScanIndex(pointer(Source), n, ord(OldChar));
-    if i >= 0 then
-    begin
-      FastSetString(result, pointer(Source), n);
-      P := pointer(result);
-      for j := i to n - 1 do
-        if P[j] = OldChar then
-          P[j] := NewChar;
-      exit;
-    end;
-  end;
-  result := Source;
-end;
-
-function StringReplaceTabs(const Source, TabText: RawUtf8): RawUtf8;
-
-  procedure Process(S, D, T: PAnsiChar; TLen: integer);
-  begin
-    repeat
-      if S^ = #0 then
-        break
-      else if S^ <> #9 then
-      begin
-        D^ := S^;
-        inc(D);
-        inc(S);
-      end
-      else
-      begin
-        if TLen > 0 then
-        begin
-          MoveByOne(T, D, TLen);
-          inc(D, TLen);
-        end;
-        inc(S);
-      end;
-    until false;
-  end;
-
-var
-  L, i, n, ttl: PtrInt;
-begin
-  ttl := length(TabText);
-  L := Length(Source);
-  n := 0;
-  if ttl <> 0 then
-    for i := 1 to L do
-      if Source[i] = #9 then
-        inc(n);
-  if n = 0 then
-  begin
-    result := Source;
-    exit;
-  end;
-  FastSetString(result, nil, L + n * pred(ttl));
-  Process(pointer(Source), pointer(result), pointer(TabText), ttl);
-end;
-
-function RawUtf8OfChar(Ch: AnsiChar; Count: integer): RawUtf8;
-begin
-  if Count <= 0 then
-    FastAssignNew(result)
-  else
-  begin
-    FastSetString(result, nil, Count);
-    FillCharFast(pointer(result)^, Count, byte(Ch));
-  end;
-end;
-
-function QuotedStr(const S: RawUtf8; Quote: AnsiChar): RawUtf8;
-begin
-  QuotedStr(pointer(S), length(S), Quote, result);
-end;
-
-procedure QuotedStr(const S: RawUtf8; Quote: AnsiChar; var result: RawUtf8);
-var
-  P: PUtf8Char;
-  tmp: pointer; // will hold a RawUtf8 with no try..finally exception block
-begin
-  tmp := nil;
-  P := pointer(S);
-  if (P <> nil) and
-     (P = pointer(result)) then
-  begin
-    RawUtf8(tmp) := S; // make private ref-counted copy for QuotedStr(U,'"',U)
-    P := pointer(tmp);
-  end;
-  QuotedStr(P, length(S), Quote, result);
-  if tmp <> nil then
-    {$ifdef FPC}
-    FastAssignNew(tmp);
-    {$else}
-    RawUtf8(tmp) := '';
-    {$endif FPC}
-end;
-
-procedure QuotedStr(P: PUtf8Char; PLen: PtrInt; Quote: AnsiChar;
-  var result: RawUtf8);
-var
-  i, quote1, nquote: PtrInt;
-  R: PUtf8Char;
-  c: AnsiChar;
-begin
-  nquote := 0;
-  quote1 := ByteScanIndex(pointer(P), PLen, byte(Quote)); // asm if available
-  if quote1 >= 0 then
-    for i := quote1 to PLen - 1 do
-      if P[i] = Quote then
-        inc(nquote);
-  FastSetString(result, nil, PLen + nquote + 2);
-  R := pointer(result);
-  R^ := Quote;
-  inc(R);
-  if nquote = 0 then
-  begin
-    MoveFast(P^, R^, PLen);
-    R[PLen] := Quote;
-  end
-  else
-  begin
-    MoveFast(P^, R^, quote1);
-    inc(R, quote1);
-    inc(PLen, PtrInt(PtrUInt(P))); // efficient use of registers on FPC
-    inc(quote1, PtrInt(PtrUInt(P)));
-    repeat
-      if quote1 = PLen then
-        break;
-      c := PAnsiChar(quote1)^;
-      inc(quote1);
-      R^ := c;
-      inc(R);
-      if c <> Quote then
-        continue;
-      R^ := c;
-      inc(R);
-    until false;
-    R^ := Quote;
-  end;
-end;
-
-function GotoEndOfQuotedString(P: PUtf8Char): PUtf8Char;
-var
-  quote: AnsiChar;
-begin
-  // P^='"' or P^='''' at function call
-  quote := P^;
-  inc(P);
-  repeat
-    if P^ = #0 then
-      break
-    else if P^ <> quote then
-      inc(P)
-    else if P[1] = quote then // allow double quotes inside string
-      inc(P, 2)
-    else
-      break; // end quote
-  until false;
-  result := P;
-end; // P^='"' or P^=#0 at function return
-
-function GotoNextNotSpace(P: PUtf8Char): PUtf8Char;
-begin
-  {$ifdef FPC}
-  while (P^ <= ' ') and
-        (P^ <> #0) do
-    inc(P);
-  {$else}
-  if P^ in [#1..' '] then
-    repeat
-      inc(P)
-    until not (P^ in [#1..' ']);
-  {$endif FPC}
-  result := P;
-end;
-
-function GotoNextNotSpaceSameLine(P: PUtf8Char): PUtf8Char;
-begin
-  while P^ in [#9, ' '] do
-    inc(P);
-  result := P;
-end;
-
-function GotoNextSpace(P: PUtf8Char): PUtf8Char;
-begin
-  if P^ > ' ' then
-    repeat
-      inc(P)
-    until P^ <= ' ';
-  result := P;
-end;
-
-function NextNotSpaceCharIs(var P: PUtf8Char; ch: AnsiChar): boolean;
-begin
-  while (P^ <= ' ') and
-        (P^ <> #0) do
-    inc(P);
-  if P^ = ch then
-  begin
-    inc(P);
-    result := true;
-  end
-  else
-    result := false;
-end;
-
-function GotoNextSqlIdentifier(P: PUtf8Char; tab: PTextCharSet): PUtf8Char;
-  {$ifdef HASINLINE} inline; {$endif}
-begin
-  while tcCtrlNot0Comma in tab[P^] do // in [#1..' ', ';']
-    inc(P);
-  if PWord(P)^ = ord('/') + ord('*') shl 8 then
-  begin
-    // detect and ignore e.g. '/*nocache*/'
-    repeat
-      inc(P);
-      if PWord(P)^ = ord('*') + ord('/') shl 8 then
-      begin
-        inc(P, 2);
-        break;
-      end;
-    until P^ = #0;
-    while tcCtrlNot0Comma in tab[P^] do
-      inc(P);
-  end;
-  result := P;
-end;
-
-function GetNextFieldProp(var P: PUtf8Char; var Prop: RawUtf8): boolean;
-var
-  B: PUtf8Char;
-  tab: PTextCharSet;
-begin
-  tab := @TEXT_CHARS;
-  P := GotoNextSqlIdentifier(P, tab); // handle /*comment*/
-  B := P;
-  while tcIdentifier in tab[P^] do
-    inc(P); // go to end of ['_', '0'..'9', 'a'..'z', 'A'..'Z'] chars
-  FastSetString(Prop, B, P - B);
-  P := GotoNextSqlIdentifier(P, tab);
-  result := Prop <> '';
-end;
-
-function GetNextFieldPropSameLine(var P: PUtf8Char; var Prop: ShortString): boolean;
-var
-  B: PUtf8Char;
-  tab: PTextCharSet;
-begin
-  tab := @TEXT_CHARS;
-  while tcCtrlNotLF in tab[P^] do
-    inc(P); // ignore [#1..#9, #11, #12, #14..' ']
-  B := P;
-  while tcIdentifier in tab[P^] do
-    inc(P); // go to end of field name
-  SetString(Prop, PAnsiChar(B), P - B);
-  while tcCtrlNotLF in TEXT_CHARS[P^] do
-    inc(P);
-  result := Prop <> '';
-end;
-
-function UnQuoteSqlStringVar(P: PUtf8Char; out Value: RawUtf8): PUtf8Char;
-var
-  quote: AnsiChar;
-  PBeg, PS: PUtf8Char;
-  internalquote: PtrInt;
-begin
-  result := nil;
-  if P = nil then
-    exit;
-  quote := P^; // " or '
-  inc(P);
-  // compute unquoted string length
-  PBeg := P;
-  internalquote := 0;
-  P := PosChar(P, quote); // fast SSE2 search on x86_64
-  if P = nil then
-    exit; // we need at least an ending quote
-  while true do
-    if P^ = #0 then
-      exit // where is my quote?
-    else if P^ <> quote then
-      inc(P)
-    else if P[1] = quote then
-    begin
-      inc(P, 2); // allow double quotes inside string
-      inc(internalquote);
-    end
-    else
-      break; // end quote
-  // create unquoted string
-  if internalquote = 0 then
-    // no quote within
-    FastSetString(Value, PBeg, P - PBeg)
-  else
-  begin
-    // unescape internal quotes
-    pointer(Value) := FastNewString(P - PBeg - internalquote, CP_UTF8);
-    P := PBeg;
-    PS := pointer(Value);
-    repeat
-      if P[0] = quote then
-        if P[1] = quote then
-          // allow double quotes inside string
-          inc(P)
-        else
-          // end quote
-          break;
-      PS^ := P[0];
-      inc(PS);
-      inc(P);
-    until false;
-  end;
-  result := P + 1;
-end;
-
-function UnQuoteSqlString(const Value: RawUtf8): RawUtf8;
-begin
-  UnQuoteSqlStringVar(pointer(Value), result);
-end;
-
-function UnQuotedSqlSymbolName(const ExternalDBSymbol: RawUtf8): RawUtf8;
-begin
-  if (ExternalDBSymbol <> '') and
-     (ExternalDBSymbol[1] in ['[', '"', '''', '(']) then
-    // e.g. for ZDBC's GetFields()
-    result := copy(ExternalDBSymbol, 2, length(ExternalDBSymbol) - 2)
-  else
-    result := ExternalDBSymbol;
-end;
-
-function IdemPCharAndGetNextLine(var source: PUtf8Char; searchUp: PAnsiChar): boolean;
-begin
-  if source = nil then
-    result := false
-  else
-  begin
-    result := IdemPChar(source, searchUp);
-    source := GotoNextLine(source);
-  end;
-end;
-
-function FindNameValue(P: PUtf8Char; UpperName: PAnsiChar): PUtf8Char;
-var
-  table: PNormTable; // faster even on i386
-  u: PAnsiChar;
-label
-  eof, eol;
-begin
-  if (P = nil) or
-     (UpperName = nil) then
-    goto eof;
-  table := @NormToUpperAnsi7;
-  repeat
-    if table[P^] <> UpperName^ then // first character is likely not to match
-      repeat // quickly go to end of current line
-        repeat
-eol:      if P^ <= #13 then
-            break;
-          inc(P);
-        until false;
-        if (P^ = #13) or
-           (P^ = #10) then
-        begin
-          repeat
-            inc(P);
-          until (P^ <> #10) and
-                (P^ <> #13);
-          if P^ = #0 then
-            goto eof;
-          break; // handle next line
-        end
-        else if P^ <> #0 then
-          continue; // e.g. #9
-eof:    result := nil; // reached P^=#0 -> not found
-        exit;
-      until false
-    else
-    begin
-      // first char did match -> try other chars
-      inc(P);
-      u := UpperName + 1;
-      repeat
-        if u^ = #0 then
-          break
-        else if u^ <> table[P^] then
-          goto eol;
-        inc(P);
-        inc(u);
-      until false;
-      result := P; // if found, points just after UpperName
-      exit;
-    end;
-  until false;
-end;
-
-function FindNameValue(const NameValuePairs: RawUtf8; UpperName: PAnsiChar;
-  var Value: RawUtf8; KeepNotFoundValue: boolean; UpperNameSeparator: AnsiChar): boolean;
-var
-  P: PUtf8Char;
-  L: PtrInt;
-begin
-  P := FindNameValue(pointer(NameValuePairs), UpperName);
-  if P <> nil then
-    repeat
-      if UpperNameSeparator <> #0 then
-        if P^ = UpperNameSeparator then
-          inc(P) // e.g. THttpSocket.HeaderGetValue uses UpperNameSeparator=':'
-        else
-          break;
-      while P^ in [#9, ' '] do // trim left
-        inc(P);
-      L := 0;
-      while P[L] > #13 do      // end of line/value
-        inc(L);
-      while P[L - 1] = ' ' do  // trim right
-        dec(L);
-      FastSetString(Value, P, L);
-      result := true;
-      exit;
-    until false;
-  if not KeepNotFoundValue then
-    {$ifdef FPC}
-    FastAssignNew(Value);
-    {$else}
-    Value := '';
-    {$endif FPC}
-  result := false;
-end;
-
-function GetLineSize(P, PEnd: PUtf8Char): PtrUInt;
-var
-  c: byte;
-begin
-  {$ifdef CPUX64}
-  if PEnd <> nil then
-  begin
-    result := BufferLineLength(P, PEnd); // use branchless SSE2 on x86_64
-    exit;
-  end;
-  result := PtrUInt(P) - 1;
-  {$else}
-  result := PtrUInt(P) - 1;
-  if PEnd <> nil then
-    repeat // inlined BufferLineLength()
-      inc(result);
-      if PtrUInt(result) < PtrUInt(PEnd) then
-      begin
-        c := PByte(result)^;
-        if (c > 13) or
-           ((c <> 10) and
-            (c <> 13)) then
-          continue;
-      end;
-      break;
-    until false
-  else
-  {$endif CPUX64}
-    repeat // inlined BufferLineLength() ending at #0 for PEnd=nil
-      inc(result);
-      c := PByte(result)^;
-      if (c > 13) or
-         ((c <> 0) and (c <> 10) and (c <> 13)) then
-        continue;
-      break;
-    until false;
-  dec(result, PtrUInt(P)); // returns length
-end;
-
-function GetLineSizeSmallerThan(P, PEnd: PUtf8Char; aMinimalCount: integer): boolean;
-begin
-  result := false;
-  if P <> nil then
-    while (P < PEnd) and
-          (P^ <> #10) and
-          (P^ <> #13) do
-      if aMinimalCount = 0 then
-        exit
-      else
-      begin
-        dec(aMinimalCount);
-        inc(P);
-      end;
-  result := true;
-end;
-
-{$ifndef PUREMORMOT2}
-function GetNextStringLineToRawUnicode(var P: PChar): RawUnicode;
-var
-  S: PChar;
-begin
-  if P = nil then
-    result := ''
-  else
-  begin
-    S := P;
-    while S^ >= ' ' do
-      inc(S);
-    result := StringToRawUnicode(P, S - P);
-    while (S^ <> #0) and
-          (S^ < ' ') do
-      inc(S); // ignore e.g. #13 or #10
-    if S^ <> #0 then
-      P := S
-    else
-      P := nil;
-  end;
-end;
-{$endif PUREMORMOT2}
-
-function TrimLeftLowerCase(const V: RawUtf8): PUtf8Char;
-begin
-  result := Pointer(V);
-  if result <> nil then
-  begin
-    while result^ in ['a'..'z'] do
-      inc(result);
-    if result^ = #0 then
-      result := Pointer(V);
-  end;
-end;
-
-function TrimLeftLowerCaseToShort(V: PShortString): ShortString;
-begin
-  TrimLeftLowerCaseToShort(V, result);
-end;
-
-procedure TrimLeftLowerCaseToShort(V: PShortString; out result: ShortString);
-var
-  P: PAnsiChar;
-  L: integer;
-begin
-  L := length(V^);
-  P := @V^[1];
-  while (L > 0) and
-        (P^ in ['a'..'z']) do
-  begin
-    inc(P);
-    dec(L);
-  end;
-  if L = 0 then
-    result := V^
-  else
-    SetString(result, P, L);
-end;
-
-function TrimLeftLowerCaseShort(V: PShortString): RawUtf8;
-var
-  P: PAnsiChar;
-  L: integer;
-begin
-  L := length(V^);
-  P := @V^[1];
-  while (L > 0) and
-        (P^ in ['a'..'z']) do
-  begin
-    inc(P);
-    dec(L);
-  end;
-  if L = 0 then
-    FastSetString(result, @V^[1], length(V^))
-  else
-    FastSetString(result, P, L);
-end;
-
-procedure AppendShortComma(text: PAnsiChar; len: PtrInt; var result: ShortString;
-  trimlowercase: boolean);
-begin
-  if trimlowercase then
-    while text^ in ['a'..'z'] do
-      if len = 1 then
-        exit
-      else
-      begin
-        inc(text);
-        dec(len);
-      end;
-  if integer(ord(result[0])) + len >= 255 then
-    exit;
-  if len > 0 then
-    MoveByOne(text, @result[ord(result[0]) + 1], len);
-  inc(result[0], len + 1);
-  result[ord(result[0])] := ',';
-end;
-
-function IdemPropNameUSmallNotVoid(P1, P2, P1P2Len: PtrInt): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
-begin
-  inc(P1P2Len, P1);
-  dec(P2, P1);
-  repeat
-    result := (PByte(P1)^ xor ord(PAnsiChar(P1)[P2])) and $df = 0;
-    if not result then
-      exit;
-    inc(P1);
-  until P1 >= P1P2Len;
-end;
-
-function FindShortStringListExact(List: PShortString; MaxValue: integer;
-  aValue: PUtf8Char; aValueLen: PtrInt): integer;
-var
-  PLen: PtrInt;
-begin
-  if aValueLen <> 0 then
-    for result := 0 to MaxValue do
-    begin
-      PLen := PByte(List)^;
-      if (PLen = aValueLen) and
-         IdemPropNameUSmallNotVoid(PtrInt(@List^[1]), PtrInt(aValue), PLen) then
-        exit;
-      List := pointer(@PAnsiChar(PLen)[PtrUInt(List) + 1]); // next
-    end;
-  result := -1;
-end;
-
-function FindShortStringListTrimLowerCase(List: PShortString; MaxValue: integer;
-  aValue: PUtf8Char; aValueLen: PtrInt): integer;
-var
-  PLen: PtrInt;
-begin
-  if aValueLen <> 0 then
-    for result := 0 to MaxValue do
-    begin
-      PLen := ord(List^[0]);
-      inc(PUtf8Char(List));
-      repeat // trim lower case
-        if not (PUtf8Char(List)^ in ['a'..'z']) then
-          break;
-        inc(PUtf8Char(List));
-        dec(PLen);
-      until PLen = 0;
-      if (PLen = aValueLen) and
-         IdemPropNameUSmallNotVoid(PtrInt(aValue), PtrInt(List), PLen) then
-        exit;
-      inc(PUtf8Char(List), PLen); // next
-    end;
-  result := -1;
-end;
-
-function FindShortStringListTrimLowerCaseExact(List: PShortString; MaxValue: integer;
-  aValue: PUtf8Char; aValueLen: PtrInt): integer;
-var
-  PLen: PtrInt;
-begin
-  if aValueLen <> 0 then
-    for result := 0 to MaxValue do
-    begin
-      PLen := ord(List^[0]);
-      inc(PUtf8Char(List));
-      repeat
-        if not (PUtf8Char(List)^ in ['a'..'z']) then
-          break;
-        inc(PUtf8Char(List));
-        dec(PLen);
-      until PLen = 0;
-      if (PLen = aValueLen) and
-         CompareMemFixed(aValue, List, PLen) then
-        exit;
-      inc(PUtf8Char(List), PLen);
-    end;
-  result := -1;
-end;
-
-function UnCamelCase(const S: RawUtf8): RawUtf8;
-var
-  tmp: TSynTempBuffer;
-  destlen: PtrInt;
-begin
-  if S = '' then
-    result := ''
-  else
-  begin
-    destlen := UnCamelCase(tmp.Init(length(S) * 2), pointer(S));
-    tmp.Done(PAnsiChar(tmp.buf) + destlen, result);
-  end;
-end;
-
-function UnCamelCase(D, P: PUtf8Char): integer;
-var
-  Space, SpaceBeg, DBeg: PUtf8Char;
-  CapitalCount: integer;
-  Number: boolean;
-label
-  Next;
-begin
-  DBeg := D;
-  if (D <> nil) and
-     (P <> nil) then
-  begin
-    // avoid GPF
-    Space := D;
-    SpaceBeg := D;
-    repeat
-      CapitalCount := 0;
-      Number := P^ in ['0'..'9'];
-      if Number then
-        repeat
-          inc(CapitalCount);
-          D^ := P^;
-          inc(P);
-          inc(D);
-        until not (P^ in ['0'..'9'])
-      else
-        repeat
-          inc(CapitalCount);
-          D^ := P^;
-          inc(P);
-          inc(D);
-        until not (P^ in ['A'..'Z']);
-      if P^ = #0 then
-        break; // no lowercase conversion of last fully uppercased word
-      if (CapitalCount > 1) and
-         not Number then
-      begin
-        dec(P);
-        dec(D);
-      end;
-      while P^ in ['a'..'z'] do
-      begin
-        D^ := P^;
-        inc(D);
-        inc(P);
-      end;
-      if P^ = '_' then
-        if P[1] = '_' then
-        begin
-          D^ := ':';
-          inc(P);
-          inc(D);
-          goto Next;
-        end
-        else
-        begin
-          PWord(D)^ := ord(' ') + ord('-') shl 8;
-          inc(D, 2);
-Next:     if Space = SpaceBeg then
-            SpaceBeg := D + 1;
-          inc(P);
-          Space := D + 1;
-        end
-      else
-        Space := D;
-      if P^ = #0 then
-        break;
-      D^ := ' ';
-      inc(D);
-    until false;
-    if Space > DBeg then
-      dec(Space);
-    while Space > SpaceBeg do
-    begin
-      if Space^ in ['A'..'Z'] then
-        if not (Space[1] in ['A'..'Z', ' ']) then
-          inc(Space^, 32); // lowercase conversion of not last fully uppercased word
-      dec(Space);
-    end;
-  end;
-  result := D - DBeg;
-end;
-
-procedure CamelCase(P: PAnsiChar; len: PtrInt; var s: RawUtf8; const isWord: TSynByteSet);
-var
-  i: PtrInt;
-  d: PAnsiChar;
-  tmp: array[byte] of AnsiChar;
-begin
-  if len > SizeOf(tmp) then
-    len := SizeOf(tmp);
-  for i := 0 to len - 1 do
-    if not (ord(P[i]) in isWord) then
-    begin
-      if i > 0 then
-      begin
-        MoveFast(P^, tmp, i);
-        inc(P, i);
-        dec(len, i);
-      end;
-      d := @tmp[i];
-      while len > 0 do
-      begin
-        while (len > 0) and
-              not (ord(P^) in isWord) do
-        begin
-          inc(P);
-          dec(len);
-        end;
-        if len = 0 then
-          break;
-        d^ := NormToUpperAnsi7[P^];
-        inc(d);
-        repeat
-          inc(P);
-          dec(len);
-          if not (ord(P^) in isWord) then
-            break;
-          d^ := P^;
-          inc(d);
-        until len = 0;
-      end;
-      P := @tmp;
-      len := d - tmp;
-      break;
-    end;
-  FastSetString(s, P, len);
-end;
-
-procedure CamelCase(const text: RawUtf8; var s: RawUtf8; const isWord: TSynByteSet);
-begin
-  CamelCase(pointer(text), length(text), s, isWord);
-end;
-
-procedure GetCaptionFromPCharLen(P: PUtf8Char; out result: string);
-var
-  Temp: array[byte] of AnsiChar;
-begin
-  if P = nil then
-    exit;
-  {$ifdef UNICODE}
-  Utf8DecodeToUnicodeString(Temp, UnCamelCase(@Temp, P), result);
-  {$else}
-  SetString(result, PAnsiChar(@Temp), UnCamelCase(@Temp, P));
-  {$endif UNICODE}
-  if Assigned(LoadResStringTranslate) then
-    LoadResStringTranslate(result);
-end;
-
-
 { ************ CSV-like Iterations over Text Buffers }
 
 function IdemPCharAndGetNextItem(var source: PUtf8Char; const searchUp: RawUtf8;
@@ -4085,8 +2307,10 @@ begin
     P := UnQuoteSqlStringVar(P, result);
     if P = nil then
       result := ''
+    else if P^ = #0 then
+      P := nil
     else
-      inc(P, ord(P^ <> #0));
+      inc(P);
   end
   else
     GetNextItem(P, Sep, result);
@@ -4712,7 +2936,7 @@ var
   n: integer;
 begin
   n := length(List);
-  while Csv <> nil do
+  while (Csv <> nil) and (Csv^ <> #0) do
   begin
     if TrimItems then
       GetNextItemTrimed(Csv, Sep, s)
@@ -4752,6 +2976,12 @@ begin
   end;
   if List <> nil then
     DynArrayFakeLength(List, n);
+end;
+
+function CsvToRawUtf8DynArray(const Csv, Sep, SepEnd: RawUtf8): TRawUtf8DynArray;
+begin
+  result := nil;
+  CsvToRawUtf8DynArray(Csv, Sep, SepEnd, result);
 end;
 
 function AddPrefixToCsv(Csv: PUtf8Char; const Prefix: RawUtf8; Sep: AnsiChar): RawUtf8;
@@ -4868,7 +3098,7 @@ var
   n: integer;
 begin
   n := length(List);
-  while Csv <> nil do
+  while (Csv <> nil) and (Csv^ <> #0) do
     AddInteger(List, n, GetNextItemInteger(Csv, Sep));
   if List <> nil then
     DynArrayFakeLength(List, n);
@@ -4880,7 +3110,7 @@ var
   n: integer;
 begin
   n := length(List);
-  while Csv <> nil do
+  while (Csv <> nil) and (Csv^ <> #0) do
     AddInt64(List, n, GetNextItemInt64(Csv, Sep));
   if List <> nil then
     DynArrayFakeLength(List, n);
@@ -4891,148 +3121,114 @@ var
   n: integer;
 begin
   n := 0;
-  while Csv <> nil do
+  while (Csv <> nil) and (Csv^ <> #0) do
     AddInt64(result, n, GetNextItemInt64(Csv, Sep));
   if result <> nil then
     DynArrayFakeLength(result, n);
 end;
 
+const // first byte is the len, then 20 bytes buffer for the 64-bit integer text
+  I2T_SIZE = 21; // as TSynTempBuffer = up to 194 integers on stack
+
+procedure IntToText(int: PAnsiChar; len, n: PtrInt; const pref, suf: RawUtf8;
+  inlin: boolean; sep: AnsiChar; var result: RawUtf8);
+var
+  L: PtrUInt;
+  P: PAnsiChar;
+begin
+  inc(len, (n - 1) + length(pref) + length(suf));
+  if inlin then
+    inc(len, n * 4); // :( ): markers
+  FastSetString(result, nil, len);
+  P := pointer(result);
+  if pref <> '' then
+  begin
+    L := length(pref);
+    MoveFast(pointer(pref)^, P^, L);
+    inc(P, L);
+  end;
+  if inlin then
+    repeat
+      PWord(P)^ := ord(':') + ord('(') shl 8;
+      inc(P, 2);
+      MoveFast(int[I2T_SIZE - ord(int^)], P^, ord(int^));
+      inc(P, ord(int^));
+      PWord(P)^ := ord(')') + ord(':') shl 8;
+      inc(P, 2);
+      dec(n);
+      if n = 0 then
+        break;
+      inc(int, I2T_SIZE);
+      P^ := sep;
+      inc(P);
+    until false
+  else
+    repeat
+      L := ord(int^);
+      MoveFast(PAnsiChar(int)[I2T_SIZE - L], P^, L);
+      inc(P, L);
+      dec(n);
+      if n = 0 then
+        break;
+      inc(int, I2T_SIZE);
+      P^ := sep;
+      inc(P);
+    until false;
+  if suf <> '' then
+    MoveFast(pointer(suf)^, P^, length(suf));
+end;
+
 function IntegerDynArrayToCsv(Values: PIntegerArray; ValuesCount: integer;
   const Prefix, Suffix: RawUtf8; InlinedValue: boolean; SepChar: AnsiChar): RawUtf8;
-type // shortstrings are faster (no heap allocation)
-  TInts16 = packed array[word] of string[15];
 var
   i, L, Len: PtrInt;
-  tmp: array[0..15] of AnsiChar;
-  ints: ^TInts16;
-  P: PAnsiChar;
-  tmpbuf: TSynTempBuffer; // faster than a dynamic array
+  int, P: PAnsiChar;
+  temp: TSynTempBuffer; // faster than a dynamic array
 begin
   result := '';
   if ValuesCount = 0 then
     exit;
-  if InlinedValue then
-    Len := 4 * ValuesCount
-  else
-    Len := 0;
-  tmpbuf.Init(ValuesCount * SizeOf({%H-}ints[0]) + Len);
+  int := temp.Init(ValuesCount * I2T_SIZE);
   try
-    ints := tmpbuf.buf;
-     // compute whole result length at once
-    dec(ValuesCount);
-    inc(Len, length(Prefix) + length(Suffix));
-    tmp[15] := SepChar;
-    for i := 0 to ValuesCount do
+    Len := 0;
+    for i := 0 to ValuesCount - 1 do
     begin
-      P := StrInt32(@tmp[15], Values[i]);
-      L := @tmp[15] - P;
-      if i < ValuesCount then
-        inc(L); // append tmp[15]=','
+      P := StrInt32(int + I2T_SIZE, Values[i]);
+      L := int + I2T_SIZE - P;
+      int^ := AnsiChar(L);
       inc(Len, L);
-      SetString(ints[i], P, L);
+      inc(int, I2T_SIZE);
     end;
-    // create result
-    FastSetString(result, nil, Len);
-    P := pointer(result);
-    if Prefix <> '' then
-    begin
-      L := length(Prefix);
-      MoveFast(pointer(Prefix)^, P^, L);
-      inc(P, L);
-    end;
-    for i := 0 to ValuesCount do
-    begin
-      if InlinedValue then
-      begin
-        PWord(P)^ := ord(':') + ord('(') shl 8;
-        inc(P, 2);
-      end;
-      L := ord(ints[i][0]);
-      MoveFast(ints[i][1], P^, L);
-      inc(P, L);
-      if InlinedValue then
-      begin
-        PWord(P)^ := ord(')') + ord(':') shl 8;
-        inc(P, 2);
-      end;
-    end;
-    if Suffix <> '' then
-      MoveFast(pointer(Suffix)^, P^, length(Suffix));
+    IntToText(temp.buf, Len, ValuesCount, Prefix, Suffix, InlinedValue, SepChar, result);
   finally
-    tmpbuf.Done;
+    temp.Done;
   end;
 end;
 
 function Int64DynArrayToCsv(Values: PInt64Array; ValuesCount: integer;
   const Prefix, Suffix: RawUtf8; InlinedValue: boolean; SepChar: AnsiChar): RawUtf8;
-type
-  TInt = packed record
-    Len: byte;
-    Val: array[0..19] of AnsiChar; // Int64: 19 digits, then - sign
-  end;
 var
   i, L, Len: PtrInt;
-  int: ^TInt;
-  P: PAnsiChar;
-  tmp: TSynTempBuffer; // faster than a dynamic array
+  int, P: PAnsiChar;
+  temp: TSynTempBuffer; // faster than a dynamic array
 begin
   result := '';
   if ValuesCount = 0 then
     exit;
-  if InlinedValue then
-    Len := 4 * ValuesCount
-  else
-    Len := 0;
-  int := tmp.Init(ValuesCount * SizeOf(TInt) + Len);
+  int := temp.Init(ValuesCount * I2T_SIZE);
   try
-     // compute whole result length at once
-    dec(ValuesCount);
-    inc(Len, length(Prefix) + length(Suffix));
-    for i := 0 to ValuesCount do
+    Len := 0;
+    for i := 0 to ValuesCount - 1 do
     begin
-      P := StrInt64(PAnsiChar(int) + 21, Values[i]);
-      L := PAnsiChar(int) + 21 - P;
-      int^.Len := L;
-      if i < ValuesCount then
-        inc(L); // for ,
+      P := StrInt64(int + I2T_SIZE, Values[i]);
+      L := int + I2T_SIZE - P;
+      int^ := AnsiChar(L);
       inc(Len, L);
-      inc(int);
+      inc(int, I2T_SIZE);
     end;
-    // create result
-    FastSetString(result, nil, Len);
-    P := pointer(result);
-    if Prefix <> '' then
-    begin
-      L := length(Prefix);
-      MoveFast(pointer(Prefix)^, P^, L);
-      inc(P, L);
-    end;
-    int := tmp.buf;
-    repeat
-      if InlinedValue then
-      begin
-        PWord(P)^ := ord(':') + ord('(') shl 8;
-        inc(P, 2);
-      end;
-      L := int^.Len;
-      MoveFast(PAnsiChar(int)[21 - L], P^, L);
-      inc(P, L);
-      if InlinedValue then
-      begin
-        PWord(P)^ := ord(')') + ord(':') shl 8;
-        inc(P, 2);
-      end;
-      if ValuesCount = 0 then
-        break;
-      inc(int);
-      P^ := SepChar;
-      inc(P);
-      dec(ValuesCount);
-    until false;
-    if Suffix <> '' then
-      MoveFast(pointer(Suffix)^, P^, length(Suffix));
+    IntToText(temp.buf, Len, ValuesCount, Prefix, Suffix, InlinedValue, SepChar, result);
   finally
-    tmp.Done;
+    temp.Done;
   end;
 end;
 
@@ -5386,7 +3582,7 @@ begin
   fTotalFileSize := fInitialStreamPosition + PtrUInt(length(text));
 end;
 
-procedure TTextWriter.SetText(out result: RawUtf8; reformat: TTextWriterJsonFormat);
+procedure TTextWriter.SetText(var result: RawUtf8; reformat: TTextWriterJsonFormat);
 var
   Len: cardinal;
   temp: TTextWriter;
@@ -5394,8 +3590,11 @@ begin
   FlushFinal;
   Len := fTotalFileSize - fInitialStreamPosition;
   if Len = 0 then
-    exit
-  else if fStream.InheritsFrom(TRawByteStringStream) then
+  begin
+    result := '';
+    exit;
+  end;
+  if fStream.InheritsFrom(TRawByteStringStream) then
     TRawByteStringStream(fStream).GetAsText(fInitialStreamPosition, Len, result)
   else if fStream.InheritsFrom(TCustomMemoryStream) then
     with TCustomMemoryStream(fStream) do
@@ -5492,12 +3691,14 @@ var
 begin
   if BEnd - B <= 23 then
     FlushToStream;
+  {$ifndef ASMINTEL} // our StrInt32 asm has less CPU cache pollution
   if PtrUInt(Value) <= high(SmallUInt32Utf8) then
   begin
     P := pointer(SmallUInt32Utf8[Value]);
     Len := PStrLen(P - _STRLEN)^;
   end
   else
+  {$endif ASMINTEL}
   begin
     P := StrInt32(@tmp[23], Value);
     Len := @tmp[23] - P;
@@ -5521,11 +3722,13 @@ begin
     P^ := '-';
     Len := @tmp[23] - P;
   end
+  {$ifndef ASMINTEL} // our StrUInt32 asm has less CPU cache pollution
   else if Value <= high(SmallUInt32Utf8) then
   begin
     P := pointer(SmallUInt32Utf8[Value]);
     Len := PStrLen(P - _STRLEN)^;
   end
+  {$endif ASMINTEL} // our StrInt32 asm has less CPU cache pollution
   else
   begin
     P := StrUInt64(@tmp[23], Value);
@@ -5575,12 +3778,14 @@ var
 begin
   if BEnd - B <= 24 then
     FlushToStream;
+  {$ifndef ASMINTEL} // our StrUInt32 asm has less CPU cache pollution
   if Value <= high(SmallUInt32Utf8) then
   begin
     P := pointer(SmallUInt32Utf8[Value]);
     Len := PStrLen(P - _STRLEN)^;
   end
   else
+  {$endif ASMINTEL}
   begin
     P := StrUInt32(@tmp[23], Value);
     Len := @tmp[23] - P;
@@ -5597,12 +3802,14 @@ var
 begin
   if BEnd - B <= 32 then
     FlushToStream;
+  {$ifndef ASMINTEL} // our StrInt32 asm has less CPU cache pollution
   if Value <= high(SmallUInt32Utf8) then
   begin
     P := pointer(SmallUInt32Utf8[Value]);
     Len := PStrLen(P - _STRLEN)^;
   end
   else
+  {$endif ASMINTEL}
   begin
     P := StrUInt64(@tmp[23], Value);
     Len := @tmp[23] - P;
@@ -5709,7 +3916,8 @@ procedure TTextWriter.AddChars(aChar: AnsiChar; aCount: PtrInt);
 var
   n: PtrInt;
 begin
-  repeat
+  while aCount > 0 do
+  begin
     n := BEnd - B;
     if n <= aCount then
     begin
@@ -5721,7 +3929,7 @@ begin
     FillCharFast(B[1], n, ord(aChar));
     inc(B, n);
     dec(aCount, n);
-  until aCount <= 0;
+  end;
 end;
 
 procedure TTextWriter.Add2(Value: PtrUInt);
@@ -6419,7 +4627,7 @@ begin
   AddBinToHexDisplayLower(@P, DisplayMinChars(@P, SizeOf(P)), QuotedChar);
 end;
 
-procedure TTextWriter.AddBinToHex(Bin: Pointer; BinBytes: PtrInt);
+procedure TTextWriter.AddBinToHex(Bin: Pointer; BinBytes: PtrInt; LowerHex: boolean);
 var
   chunk: PtrInt;
 begin
@@ -6434,7 +4642,10 @@ begin
     if BinBytes < chunk then
       chunk := BinBytes;
     // add hexa characters
-    mormot.core.text.BinToHex(PAnsiChar(Bin), PAnsiChar(B), chunk);
+    if LowerHex then
+      mormot.core.text.BinToHexLower(PAnsiChar(Bin), PAnsiChar(B), chunk)
+    else
+      mormot.core.text.BinToHex(PAnsiChar(Bin), PAnsiChar(B), chunk);
     inc(B, chunk * 2);
     inc(PByte(Bin), chunk);
     dec(BinBytes, chunk);
@@ -6827,659 +5038,26 @@ end;
 
 
 function ObjectToJson(Value: TObject; Options: TTextWriterWriteObjectOptions): RawUtf8;
+begin
+  ObjectToJson(Value, result, Options);
+end;
+
+procedure ObjectToJson(Value: TObject; var Result: RawUtf8;
+  Options: TTextWriterWriteObjectOptions);
 var
   temp: TTextWriterStackBuffer;
 begin
   if Value = nil then
-    result := NULL_STR_VAR
+    Result := NULL_STR_VAR
   else
     with DefaultJsonWriter.CreateOwnedStream(temp) do
     try
       include(fCustomOptions, twoForceJsonStandard);
       WriteObject(Value, Options);
-      SetText(result);
+      SetText(Result);
     finally
       Free;
     end;
-end;
-
-
-{ ************ TRawUtf8DynArray Processing Functions }
-
-function IsZero(const Values: TRawUtf8DynArray): boolean;
-var
-  i: PtrInt;
-begin
-  result := false;
-  for i := 0 to length(Values) - 1 do
-    if Values[i] <> '' then
-      exit;
-  result := true;
-end;
-
-function TRawUtf8DynArrayFrom(const Values: array of RawUtf8): TRawUtf8DynArray;
-var
-  i: PtrInt;
-begin
-  Finalize(result);
-  SetLength(result, length(Values));
-  for i := 0 to high(Values) do
-    result[i] := Values[i];
-end;
-
-function FindRawUtf8(Values: PRawUtf8; const Value: RawUtf8; ValuesCount: integer;
-  CaseSensitive: boolean): integer;
-var
-  ValueLen: TStrLen;
-begin
-  dec(ValuesCount);
-  ValueLen := length(Value);
-  if ValueLen = 0 then
-    for result := 0 to ValuesCount do
-      if Values^ = '' then
-        exit
-      else
-        inc(Values)
-  else if CaseSensitive then
-    for result := 0 to ValuesCount do
-      if (PtrUInt(Values^) <> 0) and
-         (PStrLen(PtrUInt(Values^) - _STRLEN)^ = ValueLen) and
-         CompareMemFixed(pointer(PtrInt(Values^)), pointer(Value), ValueLen) then
-        exit
-      else
-        inc(Values)
-  else
-    for result := 0 to ValuesCount do
-      if (PtrUInt(Values^) <> 0) and // StrIComp() won't change length
-         (PStrLen(PtrUInt(Values^) - _STRLEN)^ = ValueLen) and
-         (StrIComp(pointer(Values^), pointer(Value)) = 0) then
-        exit
-      else
-        inc(Values);
-  result := -1;
-end;
-
-function FindRawUtf8(const Values: TRawUtf8DynArray; const Value: RawUtf8;
-  CaseSensitive: boolean): integer;
-begin
-  result := FindRawUtf8(pointer(Values), Value, length(Values), CaseSensitive);
-end;
-
-function FindRawUtf8(const Values: array of RawUtf8; const Value: RawUtf8;
-  CaseSensitive: boolean): integer;
-begin
-  result := high(Values);
-  if result >= 0 then
-    result := FindRawUtf8(@Values[0], Value, result + 1, CaseSensitive);
-end;
-
-function FindNonVoidRawUtf8(n: PPointerArray; name: pointer; len: TStrLen;
-  count: PtrInt): PtrInt;
-var
-  p: PUtf8Char;
-begin
-  // FPC does proper inlining in this loop
-  result := 0;
-  repeat
-    p := n[result]; // all VName[]<>'' so p=n^<>nil
-    if (PStrLen(p - _STRLEN)^ = len) and
-       CompareMemFixed(p, name, len) then
-      exit;
-    inc(result);
-    dec(count);
-  until count = 0;
-  result := -1;
-end;
-
-function FindNonVoidRawUtf8I(n: PPointerArray; name: pointer; len: TStrLen;
-  count: PtrInt): PtrInt;
-var
-  p1, p2, l: PUtf8Char;
-label
-  no;
-begin
-  result := 0;
-  p2 := name;
-  repeat
-    // inlined IdemPropNameUSameLenNotNull(p, name, len)
-    p1 := n[result]; // all VName[]<>'' so p1<>nil
-    if PStrLen(p1 - _STRLEN)^ = len then
-    begin
-      l := @p1[len - SizeOf(cardinal)];
-      dec(p2, PtrUInt(p1));
-      while PtrUInt(l) >= PtrUInt(p1) do
-        // compare 4 Bytes per loop
-        if (PCardinal(p1)^ xor PCardinal(@p2[PtrUInt(p1)])^) and $dfdfdfdf <> 0 then
-          goto no
-        else
-          inc(PCardinal(p1));
-      inc(PCardinal(l));
-      while PtrUInt(p1) < PtrUInt(l) do
-        // remaining bytes
-        if (ord(p1^) xor ord(p2[PtrUInt(p1)])) and $df <> 0 then
-          goto no
-        else
-          inc(PByte(p1));
-      exit; // match found
-no:   p2 := name;
-    end;
-    inc(result);
-    dec(count);
-  until count = 0;
-  result := -1;
-end;
-
-function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
-  NoDuplicates, CaseSensitive: boolean): boolean;
-var
-  i: PtrInt;
-begin
-  if NoDuplicates then
-  begin
-    i := FindRawUtf8(Values, Value, CaseSensitive);
-    if i >= 0 then
-    begin
-      result := false;
-      exit;
-    end;
-  end;
-  i := length(Values);
-  SetLength(Values, i + 1);
-  Values[i] := Value;
-  result := true;
-end;
-
-procedure AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
-  const Value: RawUtf8);
-var
-  capacity: integer;
-begin
-  capacity := Length(Values);
-  if ValuesCount = capacity then
-    SetLength(Values, NextGrow(capacity));
-  Values[ValuesCount] := Value;
-  inc(ValuesCount);
-end;
-
-procedure AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
-  const Value: TRawUtf8DynArray);
-var
-  n, o, i: PtrInt;
-begin
-  n := length(Value);
-  o := ValuesCount;
-  inc(ValuesCount, n);
-  if ValuesCount > Length(Values) then
-    SetLength(Values, NextGrow(ValuesCount));
-  for i := 0 to n - 1 do
-    Values[o + i] := Value[i];
-end;
-
-function RawUtf8DynArrayEquals(const A, B: TRawUtf8DynArray): boolean;
-var
-  n, i: PtrInt;
-begin
-  result := false;
-  n := length(A);
-  if n <> length(B) then
-    exit;
-  for i := 0 to n - 1 do
-    if A[i] <> B[i] then
-      exit;
-  result := true;
-end;
-
-function RawUtf8DynArrayEquals(const A, B: TRawUtf8DynArray; Count: integer): boolean;
-var
-  i: PtrInt;
-begin
-  result := false;
-  for i := 0 to Count - 1 do
-    if A[i] <> B[i] then
-      exit;
-  result := true;
-end;
-
-function AddString(var Values: TStringDynArray; const Value: string): PtrInt;
-begin
-  result := length(Values);
-  SetLength(Values, result + 1);
-  Values[result] := Value;
-end;
-
-procedure StringDynArrayToRawUtf8DynArray(const Source: TStringDynArray;
-  var Result: TRawUtf8DynArray);
-var
-  i: PtrInt;
-begin
-  Finalize(Result);
-  SetLength(Result, length(Source));
-  for i := 0 to length(Source) - 1 do
-    StringToUtf8(Source[i], Result[i]);
-end;
-
-procedure StringListToRawUtf8DynArray(Source: TStringList; var Result: TRawUtf8DynArray);
-var
-  i: PtrInt;
-begin
-  Finalize(Result);
-  SetLength(Result, Source.Count);
-  for i := 0 to Source.Count - 1 do
-    StringToUtf8(Source[i], Result[i]);
-end;
-
-function FastLocatePUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt; Value: PUtf8Char): PtrInt;
-begin
-  result := FastLocatePUtf8CharSorted(P, R, Value, TUtf8Compare(@StrComp));
-end;
-
-function FastLocatePUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
-  Value: PUtf8Char; Compare: TUtf8Compare): PtrInt;
-var
-  L, i, cmp: PtrInt;
-begin
-  // fast O(log(n)) binary search
-  if (not Assigned(Compare)) or
-     (R < 0) then
-    result := 0
-  else if Compare(P^[R], Value) < 0 then // quick return if already sorted
-    result := R + 1
-  else
-  begin
-    L := 0;
-    result := -1; // return -1 if found
-    repeat
-      {$ifdef CPUX64}
-      i := L + R;
-      i := i shr 1;
-      {$else}
-      i := (L + R) shr 1;
-      {$endif CPUX64}
-      cmp := Compare(P^[i], Value);
-      if cmp = 0 then
-        exit;
-      if cmp < 0 then
-        L := i + 1
-      else
-        R := i - 1;
-    until L > R;
-    while (i >= 0) and (Compare(P^[i], Value) >= 0) do
-      dec(i);
-    result := i + 1; // return the index where to insert
-  end;
-end;
-
-function FastFindPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
-  Value: PUtf8Char; Compare: TUtf8Compare): PtrInt;
-var
-  L, cmp: PtrInt;
-begin
-  // fast O(log(n)) binary search
-  L := 0;
-  if Assigned(Compare) and (R >= 0) then
-    repeat
-      {$ifdef CPUX64}
-      result := L + R;
-      result := result shr 1;
-      {$else}
-      result := (L + R) shr 1;
-      {$endif CPUX64}
-      cmp := Compare(P^[result], Value);
-      if cmp = 0 then
-        exit;
-      if cmp < 0 then
-      begin
-        L := result + 1;
-        if L <= R then
-          continue;
-        break;
-      end;
-      R := result - 1;
-      if L <= R then
-        continue;
-      break;
-    until false;
-  result := -1;
-end;
-
-{$ifdef CPUX64}
-
-function FastFindPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt; Value: PUtf8Char): PtrInt;
-{$ifdef FPC} assembler; nostackframe; asm {$else} asm .noframe {$endif}
-        {$ifdef win64}  // P=rcx/rdi R=rdx/rsi Value=r8/rdx
-        push    rdi
-        mov     rdi, P  // P=rdi
-        {$endif win64}
-        push    r12
-        push    r13
-        xor     r9, r9  // L=r9
-        test    R, R
-        jl      @err
-        test    Value, Value
-        jz      @void
-        mov     cl, byte ptr [Value]  // to check first char (likely diverse)
-@s:     lea     rax, qword ptr [r9 + R]
-        shr     rax, 1
-        lea     r12, qword ptr [rax - 1]  // branchless main loop
-        lea     r13, qword ptr [rax + 1]
-        mov     r10, qword ptr [rdi + rax * 8]
-        test    r10, r10
-        jz      @lt
-        cmp     cl, byte ptr [r10]
-        je      @eq
-        cmovc   R, r12
-        cmovnc  r9, r13
-@nxt:   cmp     r9, R
-        jle     @s
-@err:   mov     rax, -1
-@found: pop     r13
-        pop     r12
-        {$ifdef win64}
-        pop     rdi
-        {$endif win64}
-        ret
-@lt:    mov     r9, r13 // very unlikely P[rax]=nil
-        jmp     @nxt
-@eq:    mov     r11, Value // first char equal -> check others
-@sub:   mov     cl, byte ptr [r10]
-        add     r10, 1
-        add     r11, 1
-        test    cl, cl
-        jz      @found
-        mov     cl, byte ptr [r11]
-        cmp     cl, byte ptr [r10]
-        je      @sub
-        mov     cl, byte ptr [Value]  // reset first char
-        cmovc   R, r12
-        cmovnc  r9, r13
-        cmp     r9, R
-        jle     @s
-        jmp     @err
-@void:  mov     rax, -1
-        cmp     qword ptr [P], 0
-        cmove   rax, Value
-        jmp     @found
-end;
-
-{$else}
-
-function FastFindPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt; Value: PUtf8Char): PtrInt;
-var
-  L: PtrInt;
-  c: byte;
-  piv, val: PByte;
-begin
-  // fast O(log(n)) binary search using inlined StrCompFast()
-  if R >= 0 then
-    if Value <> nil then
-    begin
-      L := 0;
-      repeat
-        result := L + R;
-        result := result shr 1;
-        piv := pointer(P^[result]);
-        if piv <> nil then
-        begin
-          val := pointer(Value);
-          c := piv^;
-          if c = val^ then
-            repeat
-              if c = 0 then
-                exit;  // StrComp(P^[result],Value)=0
-              inc(piv);
-              inc(val);
-              c := piv^;
-            until c <> val^;
-          if c > val^ then
-          begin
-            R := result - 1;  // StrComp(P^[result],Value)>0
-            if L <= R then
-              continue;
-            break;
-          end;
-        end;
-        L := result + 1;  // StrComp(P^[result],Value)<0
-        if L <= R then
-          continue;
-        break;
-      until false;
-    end
-    else if P^[0] = nil then
-    begin
-      // '' should be in lowest P[] slot
-      result := 0;
-      exit;
-    end;
-  result := -1;
-end;
-
-{$endif CPUX64}
-
-function FastFindUpperPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
-  Value: PUtf8Char; ValueLen: PtrInt): PtrInt;
-var
-  tmp: array[byte] of AnsiChar;
-begin
-  UpperCopy255Buf(@tmp, Value, ValueLen)^ := #0;
-  result := FastFindPUtf8CharSorted(P, R, @tmp);
-end;
-
-function FastFindIndexedPUtf8Char(P: PPUtf8CharArray; R: PtrInt;
-  var SortedIndexes: TCardinalDynArray; Value: PUtf8Char;
-  ItemComp: TUtf8Compare): PtrInt;
-var
-  L, cmp: PtrInt;
-begin
-  // fast O(log(n)) binary search
-  L := 0;
-  if 0 <= R then
-    repeat
-      {$ifdef CPUX64}
-      result := L + R;
-      result := result shr 1;
-      {$else}
-      result := (L + R) shr 1;
-      {$endif CPUX64}
-      cmp := ItemComp(P^[SortedIndexes[result]], Value);
-      if cmp = 0 then
-      begin
-        result := SortedIndexes[result];
-        exit;
-      end;
-      if cmp < 0 then
-      begin
-        L := result + 1;
-        if L <= R then
-          continue;
-        break;
-      end;
-      R := result - 1;
-      if L <= R then
-        continue;
-      break;
-    until false;
-  result := -1;
-end;
-
-function AddSortedRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
-  const Value: RawUtf8; CoValues: PIntegerDynArray; ForcedIndex: PtrInt;
-  Compare: TUtf8Compare): PtrInt;
-var
-  n: PtrInt;
-begin
-  if ForcedIndex >= 0 then
-    result := ForcedIndex
-  else
-  begin
-    if not Assigned(Compare) then
-      Compare := @StrComp;
-    result := FastLocatePUtf8CharSorted(pointer(Values), ValuesCount - 1,
-      pointer(Value), Compare);
-    if result < 0 then
-      exit; // Value exists -> fails
-  end;
-  n := Length(Values);
-  if ValuesCount = n then
-  begin
-    n := NextGrow(n);
-    SetLength(Values, n);
-    if CoValues <> nil then
-      SetLength(CoValues^, n);
-  end;
-  n := ValuesCount;
-  if result < n then
-  begin
-    n := (n - result) * SizeOf(pointer);
-    MoveFast(Pointer(Values[result]), Pointer(Values[result + 1]), n);
-    PtrInt(Values[result]) := 0; // avoid GPF
-    if CoValues <> nil then
-    begin
-      {$ifdef CPU64} n := n shr 1; {$endif} // 64-bit pointer to 32-bit integer
-      MoveFast(CoValues^[result], CoValues^[result + 1], n);
-    end;
-  end
-  else
-    result := n;
-  Values[result] := Value;
-  inc(ValuesCount);
-end;
-
-type
-  /// used internally for faster quick sort
-  TQuickSortRawUtf8 = object
-    Compare: TUtf8Compare;
-    CoValues: PIntegerArray;
-    pivot: pointer;
-    procedure Sort(Values: PPointerArray; L, R: PtrInt);
-  end;
-
-procedure TQuickSortRawUtf8.Sort(Values: PPointerArray; L, R: PtrInt);
-var
-  I, J, P: PtrInt;
-  tmp: Pointer;
-  int: integer;
-begin
-  if L < R then
-    repeat
-      I := L;
-      J := R;
-      P := (L + R) shr 1;
-      repeat
-        pivot := Values^[P];
-        while Compare(Values^[I], pivot) < 0 do
-          inc(I);
-        while Compare(Values^[J], pivot) > 0 do
-          dec(J);
-        if I <= J then
-        begin
-          tmp := Values^[J];
-          Values^[J] := Values^[I];
-          Values^[I] := tmp;
-          if CoValues <> nil then
-          begin
-            int := CoValues^[J];
-            CoValues^[J] := CoValues^[I];
-            CoValues^[I] := int;
-          end;
-          if P = I then
-            P := J
-          else if P = J then
-            P := I;
-          inc(I);
-          dec(J);
-        end;
-      until I > J;
-      if J - L < R - I then
-      begin
-        // use recursion only for smaller range
-        if L < J then
-          Sort(Values, L, J);
-        L := I;
-      end
-      else
-      begin
-        if I < R then
-          Sort(Values, I, R);
-        R := J;
-      end;
-    until L >= R;
-end;
-
-procedure QuickSortRawUtf8(var Values: TRawUtf8DynArray; ValuesCount: integer;
-  CoValues: PIntegerDynArray; Compare: TUtf8Compare);
-var
-  QS: TQuickSortRawUtf8;
-begin
-  if Assigned(Compare) then
-    QS.Compare := Compare
-  else
-    QS.Compare := @StrComp;
-  if CoValues = nil then
-    QS.CoValues := nil
-  else
-    QS.CoValues := pointer(CoValues^);
-  QS.Sort(pointer(Values), 0, ValuesCount - 1);
-end;
-
-procedure QuickSortRawUtf8(Values: PRawUtf8Array; L, R: PtrInt;
-  caseInsensitive: boolean);
-var
-  QS: TQuickSortRawUtf8;
-begin
-  QS.Compare := StrCompByCase[caseInsensitive];
-  QS.CoValues := nil;
-  QS.Sort(pointer(Values), L, R);
-end;
-
-function DeleteRawUtf8(var Values: TRawUtf8DynArray; Index: integer): boolean;
-var
-  n: integer;
-begin
-  n := length(Values);
-  if cardinal(Index) >= cardinal(n) then
-    result := false
-  else
-  begin
-    dec(n);
-    if PDACnt(PAnsiChar(pointer(Values)) - _DACNT)^ > 1 then
-      Values := copy(Values); // make unique
-    Values[Index] := ''; // avoid GPF
-    if n > Index then
-    begin
-      MoveFast(pointer(Values[Index + 1]), pointer(Values[Index]),
-        (n - Index) * SizeOf(pointer));
-      PtrUInt(Values[n]) := 0; // avoid GPF
-    end;
-    SetLength(Values, n);
-    result := true;
-  end;
-end;
-
-function DeleteRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
-  Index: integer; CoValues: PIntegerDynArray): boolean;
-var
-  n: integer;
-begin
-  n := ValuesCount;
-  if cardinal(Index) >= cardinal(n) then
-    result := false
-  else
-  begin
-    dec(n);
-    ValuesCount := n;
-    if PDACnt(PAnsiChar(pointer(Values)) - _DACNT)^ > 1 then
-      Values := copy(Values); // make unique
-    Values[Index] := ''; // avoid GPF
-    dec(n, Index);
-    if n > 0 then
-    begin
-      if CoValues <> nil then
-        MoveFast(CoValues^[Index + 1], CoValues^[Index], n * SizeOf(integer));
-      MoveFast(pointer(Values[Index + 1]), pointer(Values[Index]), n * SizeOf(pointer));
-      PtrUInt(Values[ValuesCount]) := 0; // avoid GPF
-    end;
-    result := true;
-  end;
 end;
 
 
@@ -9364,6 +6942,16 @@ begin
           wasString := true;
           RawUnicodeToUtf8(VAny, length(WideString(VAny)), result);
         end;
+      varOlePAnsiChar: // = VT_LPSTR
+        begin
+          wasString := true;
+          CurrentAnsiConvert.AnsiBufferToRawUtf8(VString, StrLen(VString), result);
+        end;
+      varOlePWideChar: // = VT_LPWSTR
+        begin
+          wasString := true;
+          RawUnicodeToUtf8(VAny, StrLenW(VAny), result);
+        end;
     else
       if SetVariantUnRefSimpleValue(V, tmp{%H-}) then
         // simple varByRef
@@ -9458,6 +7046,110 @@ begin
     ' please include mormot.core.datetime to your uses clause');
 end;
 
+function Int18ToChars3(Value: cardinal): RawUtf8;
+begin
+  FastSetString(result, nil, 3);
+  PCardinal(result)^ := ((Value shr 12) and $3f) or
+                        ((Value shr 6) and $3f) shl 8 or
+                        (Value and $3f) shl 16 + $202020;
+end;
+
+procedure Int18ToChars3(Value: cardinal; var result: RawUtf8);
+begin
+  FastSetString(result, nil, 3);
+  PCardinal(result)^ := ((Value shr 12) and $3f) or
+                        ((Value shr 6) and $3f) shl 8 or
+                        (Value and $3f) shl 16 + $202020;
+end;
+
+function Chars3ToInt18(P: pointer): cardinal;
+begin
+  result := PCardinal(P)^ - $202020;
+  result := ((result shr 16) and $3f) or
+            ((result shr 8) and $3f) shl 6 or
+            (result and $3f) shl 12;
+end;
+
+function UInt3DigitsToUtf8(Value: cardinal): RawUtf8;
+begin
+  FastSetString(result, nil, 3);
+  PWordArray(result)[0] := TwoDigitLookupW[Value div 10];
+  PByteArray(result)[2] := (Value mod 10) + 48;
+end;
+
+function UInt4DigitsToUtf8(Value: cardinal): RawUtf8;
+begin
+  FastSetString(result, nil, 4);
+  if Value > 9999 then
+    Value := 9999;
+  YearToPChar(Value, pointer(result));
+end;
+
+function UInt4DigitsToShort(Value: cardinal): TShort4;
+begin
+  result[0] := #4;
+  if Value > 9999 then
+    Value := 9999;
+  YearToPChar(Value, @result[1]);
+end;
+
+function UInt3DigitsToShort(Value: cardinal): TShort4;
+begin
+  if Value > 999 then
+    Value := 999;
+  YearToPChar(Value, @result[0]);
+  result[0] := #3; // override first digit
+end;
+
+function UInt2DigitsToShort(Value: byte): TShort4;
+begin
+  result[0] := #2;
+  if Value > 99 then
+    Value := 99;
+  PWord(@result[1])^ := TwoDigitLookupW[Value];
+end;
+
+function UInt2DigitsToShortFast(Value: byte): TShort4;
+begin
+  result[0] := #2;
+  PWord(@result[1])^ := TwoDigitLookupW[Value];
+end;
+
+function IPToCardinal(aIP: PUtf8Char; out aValue: cardinal): boolean;
+var
+  i, c: cardinal;
+  b: array[0..3] of byte;
+begin
+  aValue := 0;
+  result := false;
+  if (aIP = nil) or
+     (IdemPChar(aIP, '127.0.0.1') and (aIP[9] = #0)) then
+    exit;
+  for i := 0 to 3 do
+  begin
+    c := GetNextItemCardinal(aIP, '.');
+    if (c > 255) or
+       ((aIP = nil) and (i < 3)) then
+      exit;
+    b[i] := c;
+  end;
+  if PCardinal(@b)^ <> $0100007f then // may be e.g. '127.000.000.001'
+  begin
+    aValue := PCardinal(@b)^;
+    result := true;
+  end;
+end;
+
+function IPToCardinal(const aIP: RawUtf8; out aValue: cardinal): boolean;
+begin
+  result := IPToCardinal(pointer(aIP), aValue);
+end;
+
+function IPToCardinal(const aIP: RawUtf8): cardinal;
+begin
+  IPToCardinal(pointer(aIP), result);
+end;
+
 
 { ************ Text Formatting functions }
 
@@ -9471,6 +7163,16 @@ begin
   else
     result := 0;
   end;
+end;
+
+function VarRecAs(const aArg: TVarRec; aClass: TClass): pointer;
+begin
+  if (aArg.VType = vtObject) and
+     (aArg.VObject <> nil) and
+     aArg.VObject.InheritsFrom(aClass) then
+    result := aArg.VObject
+  else
+    result := nil;
 end;
 
 function VarRecToInt64(const V: TVarRec; out value: Int64): boolean;
@@ -9574,12 +7276,14 @@ end;
 procedure PtrIntToTempUtf8(V: PtrInt; var Res: TTempUtf8);
   {$ifdef HASINLINE} inline; {$endif}
 begin
+  {$ifndef ASMINTEL} // our StrInt32 asm has less CPU cache pollution
   if PtrUInt(V) <= high(SmallUInt32Utf8) then
   begin
     Res.Text := pointer(SmallUInt32Utf8[V]);
     Res.Len := PStrLen(Res.Text - _STRLEN)^;
   end
   else
+  {$endif ASMINTEL}
   begin
     Res.Text := PUtf8Char(StrInt32(@Res.Temp[23], V));
     Res.Len := @Res.Temp[23] - Res.Text;
@@ -9609,12 +7313,14 @@ end;
 procedure QWordToTempUtf8(V: PQWord; var Res: TTempUtf8);
   {$ifdef HASINLINE} inline; {$endif}
 begin
+  {$ifndef ASMINTEL} // our StrUInt64 asm has less CPU cache pollution
   if V^ <= high(SmallUInt32Utf8) then
   begin
     Res.Text := pointer(SmallUInt32Utf8[PPtrInt(V)^]);
     Res.Len := PStrLen(Res.Text - _STRLEN)^;
   end
   else
+  {$endif ASMINTEL}
   begin
     Res.Text := PUtf8Char(StrUInt64(@Res.Temp[23], V^));
     Res.Len := @Res.Temp[23] - Res.Text;
@@ -9664,7 +7370,7 @@ begin
         end
         else
         begin
-          Res.Text := @BOOL_STR[false][0];
+          Res.Text := @BOOL_STR[false][1];
           Res.Len := 5;
         end;
       varInteger:
@@ -9999,8 +7705,9 @@ type
     L, argN: PtrInt;
     blocks: array[0..63] of TTempUtf8; // to avoid most heap allocations
     procedure Parse(const Format: RawUtf8; const Args: array of const);
+    procedure Add(const SomeText: RawUtf8);
     procedure DoDelim(const Part: array of const; EndWithDelim: boolean;
-      Delim: AnsiChar);
+      Delim: AnsiChar; HiPart: integer);
     procedure DoAppendLine(var Text: RawUtf8; Arg: PVarRec; ArgCount: integer;
       const Separator: shortstring);
     procedure DoPrepend(var Text: RawUtf8; Arg: PVarRec; ArgCount: integer);
@@ -10066,21 +7773,21 @@ begin
 end;
 
 procedure TFormatUtf8.DoDelim(const Part: array of const; EndWithDelim: boolean;
-  Delim: AnsiChar);
+  Delim: AnsiChar; HiPart: integer);
 var
   c: PTempUtf8;
   p: PtrInt;
 begin
   L := 0;
   c := @blocks;
-  for p := 0 to high(Part) do
+  for p := 0 to HiPart do
   begin
     if PtrUInt(c) > PtrUInt(@blocks[high(blocks)]) then
       raise ESynException.Create('Too many args');
     inc(L, VarRecToTempUtf8(Part[p], c^));
     if (EndWithDelim and
-        (p = high(Part))) or
-       ((p <> high(Part)) and
+        (p = HiPart)) or
+       ((p <> HiPart) and
         (c^.Len <> 0) and
         (c^.Text[c^.Len - 1] <> Delim)) then
     begin
@@ -10096,6 +7803,20 @@ begin
     inc(c);
   end;
   last := c;
+end;
+
+procedure TFormatUtf8.Add(const SomeText: RawUtf8);
+begin
+  if PtrUInt(last) > PtrUInt(@blocks[high(blocks)]) then
+    raise ESynException.Create('Too many args');
+  with last^ do
+  begin
+    Len := length(SomeText);
+    inc(L, Len);
+    Text := pointer(SomeText);
+    TempRawUtf8 := nil;
+  end;
+  inc(last);
 end;
 
 procedure TFormatUtf8.DoAppendLine(var Text: RawUtf8;
@@ -10194,7 +7915,7 @@ begin
           repeat
             if d^.TempRawUtf8 <> nil then
               {$ifdef FPC}
-              FastAssignNew(d^.TempRawUtf8);
+              FastAssignNew(d^.TempRawUtf8); // release temp RawUtf8
               {$else}
               RawUtf8(d^.TempRawUtf8) := '';
               {$endif FPC}
@@ -10355,6 +8076,60 @@ begin
     FakeCodePage(Text, CP_RAWBYTESTRING);
 end;
 
+procedure Append(var Text: RawUtf8; const Added: RawByteString);
+begin
+  if Added <> '' then
+    Append(Text, pointer(Added), PStrLen(PtrUInt(Added) - _STRLEN)^);
+end;
+
+procedure Append(var Text: RawUtf8; const Added1, Added2: RawByteString);
+var
+  l, a1, a2: PtrInt;
+begin
+  l := length(Text);
+  a1 := length(Added1);
+  a2 := length(Added2);
+  SetLength(Text, l + a1 + a2);
+  MoveFast(pointer(Added1)^, PByteArray(Text)[l], a1);
+  MoveFast(pointer(Added2)^, PByteArray(Text)[l + a1], a2);
+end;
+
+procedure Append(var Text: RawUtf8; Added: AnsiChar);
+begin
+  Append(Text, @Added, 1);
+end;
+
+procedure Append(var Text: RawUtf8; Added: pointer; AddedLen: PtrInt);
+var
+  t: PtrInt;
+begin
+  if (Added = nil) or (AddedLen <= 0) then
+    exit;
+  t := length(Text);
+  SetLength(Text, t + AddedLen);
+  MoveFast(pointer(Added)^, PByteArray(Text)[t], AddedLen);
+end;
+
+procedure Append(var Text: RawByteString; const Added: RawByteString);
+begin
+  if Added <> '' then
+    Append(Text, pointer(Added), PStrLen(PtrUInt(Added) - _STRLEN)^);
+end;
+
+procedure Append(var Text: RawByteString; Added: pointer; AddedLen: PtrInt);
+var
+  t: PtrInt;
+begin
+  if (Added = nil) or
+     (AddedLen <= 0) then
+    exit;
+  t := length(Text);
+  SetLength(Text, t + AddedLen);
+  MoveFast(Added^, PByteArray(Text)^[t], AddedLen);
+  if Text <> '' then
+    FakeCodePage(Text, CP_RAWBYTESTRING);
+end;
+
 procedure Prepend(var Text: RawUtf8; const Args: array of const);
 var
   f: TFormatUtf8;
@@ -10376,7 +8151,31 @@ function MakePath(const Part: array of const; EndWithDelim: boolean;
 var
   process: TFormatUtf8;
 begin
-  process.DoDelim(Part, EndWithDelim, Delim);
+  process.DoDelim(Part, EndWithDelim, Delim, high(Part));
+  process.WriteString(string(result));
+end;
+
+function MakeFileName(const Part: array of const; LastIsExt: boolean): TFileName;
+var
+  process: TFormatUtf8;
+  ext: RawUtf8;
+  hipart: integer;
+begin
+  hipart := High(Part);
+  if LastIsExt then
+    if (hipart > 0) and
+       VarRecToUtf8IsString(Part[hipart], ext) then
+      dec(hipart)
+    else
+      LastIsExt := false;
+  process.DoDelim(Part, false, PathDelim, hipart);
+  if LastIsExt and
+     (ext <> '') then
+  begin
+    if ext[1] <> '.' then
+      process.Add('.');
+    process.Add(ext);
+  end;
   process.WriteString(string(result));
 end;
 
@@ -10386,7 +8185,7 @@ var
   process: TFormatUtf8;
 begin
   result := '';
-  process.DoDelim(Value, EndWithComma, Comma);
+  process.DoDelim(Value, EndWithComma, Comma, high(Value));
   process.WriteUtf8(result);
 end;
 
@@ -11317,110 +9116,6 @@ begin
   finally
     tmp.Done;
   end;
-end;
-
-function Int18ToChars3(Value: cardinal): RawUtf8;
-begin
-  FastSetString(result, nil, 3);
-  PCardinal(result)^ := ((Value shr 12) and $3f) or
-                        ((Value shr 6) and $3f) shl 8 or
-                        (Value and $3f) shl 16 + $202020;
-end;
-
-procedure Int18ToChars3(Value: cardinal; var result: RawUtf8);
-begin
-  FastSetString(result, nil, 3);
-  PCardinal(result)^ := ((Value shr 12) and $3f) or
-                        ((Value shr 6) and $3f) shl 8 or
-                        (Value and $3f) shl 16 + $202020;
-end;
-
-function Chars3ToInt18(P: pointer): cardinal;
-begin
-  result := PCardinal(P)^ - $202020;
-  result := ((result shr 16) and $3f) or
-            ((result shr 8) and $3f) shl 6 or
-            (result and $3f) shl 12;
-end;
-
-function UInt3DigitsToUtf8(Value: cardinal): RawUtf8;
-begin
-  FastSetString(result, nil, 3);
-  PWordArray(result)[0] := TwoDigitLookupW[Value div 10];
-  PByteArray(result)[2] := (Value mod 10) + 48;
-end;
-
-function UInt4DigitsToUtf8(Value: cardinal): RawUtf8;
-begin
-  FastSetString(result, nil, 4);
-  if Value > 9999 then
-    Value := 9999;
-  YearToPChar(Value, pointer(result));
-end;
-
-function UInt4DigitsToShort(Value: cardinal): TShort4;
-begin
-  result[0] := #4;
-  if Value > 9999 then
-    Value := 9999;
-  YearToPChar(Value, @result[1]);
-end;
-
-function UInt3DigitsToShort(Value: cardinal): TShort4;
-begin
-  if Value > 999 then
-    Value := 999;
-  YearToPChar(Value, @result[0]);
-  result[0] := #3; // override first digit
-end;
-
-function UInt2DigitsToShort(Value: byte): TShort4;
-begin
-  result[0] := #2;
-  if Value > 99 then
-    Value := 99;
-  PWord(@result[1])^ := TwoDigitLookupW[Value];
-end;
-
-function UInt2DigitsToShortFast(Value: byte): TShort4;
-begin
-  result[0] := #2;
-  PWord(@result[1])^ := TwoDigitLookupW[Value];
-end;
-
-function IPToCardinal(aIP: PUtf8Char; out aValue: cardinal): boolean;
-var
-  i, c: cardinal;
-  b: array[0..3] of byte;
-begin
-  aValue := 0;
-  result := false;
-  if (aIP = nil) or
-     (IdemPChar(aIP, '127.0.0.1') and (aIP[9] = #0)) then
-    exit;
-  for i := 0 to 3 do
-  begin
-    c := GetNextItemCardinal(aIP, '.');
-    if (c > 255) or
-       ((aIP = nil) and (i < 3)) then
-      exit;
-    b[i] := c;
-  end;
-  if PCardinal(@b)^ <> $0100007f then // may be e.g. '127.000.000.001'
-  begin
-    aValue := PCardinal(@b)^;
-    result := true;
-  end;
-end;
-
-function IPToCardinal(const aIP: RawUtf8; out aValue: cardinal): boolean;
-begin
-  result := IPToCardinal(pointer(aIP), aValue);
-end;
-
-function IPToCardinal(const aIP: RawUtf8): cardinal;
-begin
-  IPToCardinal(pointer(aIP), result);
 end;
 
 function GuidToText(P: PUtf8Char; guid: PByteArray): PUtf8Char;

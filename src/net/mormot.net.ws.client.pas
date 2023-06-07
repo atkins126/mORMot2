@@ -23,7 +23,7 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
-  mormot.core.unicode, // for efficient UTF-8 text process within HTTP
+  mormot.core.unicode,
   mormot.core.text,
   mormot.core.data,
   mormot.core.log,
@@ -417,7 +417,7 @@ begin
     if fProcess <> nil then
     begin
       result := 'Already upgraded to WebSockets';
-      if IdemPropNameU(fProcess.Protocol.Uri, aWebSocketsURI) then
+      if PropNameEquals(fProcess.Protocol.Uri, aWebSocketsURI) then
         result := result + ' on this URI'
       else
         result := FormatUtf8('% with URI=[%] but requested [%]',
@@ -453,14 +453,18 @@ begin
       // validate the response as WebSockets upgrade
       SockRecvLn(cmd);
       GetHeader(false);
-      result := cmd;
       if not IdemPChar(pointer(cmd), 'HTTP/1.1 101') then
+      begin
+        result := cmd;
+        if result = '' then
+          result := 'No server response';
         exit; // return the unexpected command line as error message
+      end;
       prot := HeaderGetValue('SEC-WEBSOCKET-PROTOCOL');
       result := 'Invalid HTTP Upgrade Header';
       if not (hfConnectionUpgrade in Http.HeaderFlags) or
          (Http.ContentLength > 0) or
-         not IdemPropNameU(Http.Upgrade, 'websocket') or
+         not PropNameEquals(Http.Upgrade, 'websocket') or
          not aProtocol.SetSubprotocol(prot) then
         exit;
       aProtocol.Name := prot;

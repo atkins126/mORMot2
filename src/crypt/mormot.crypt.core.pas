@@ -15,7 +15,7 @@ unit mormot.crypt.core;
     - HMAC Authentication over SHA and CRC32C
     - PBKDF2 Key Derivation over SHA2 and SHA3
     - Digest/Hash to Hexadecimal Text Conversion
-    - Deprecated MD5 RC4 SHA-1 Algorithms
+    - Deprecated MD4 MD5 RC4 SHA-1 Algorithms
     - Deprecated Weak AES/SHA Process
 
    Validated against OpenSSL. Faster than OpenSSL on x86_64 (but AES-GCM).
@@ -108,8 +108,9 @@ procedure XorBlock16(A, B: PPtrIntArray);
 procedure XorBlock16(A, B, C: PPtrIntArray);
  {$ifdef HASINLINE}inline;{$endif} overload;
 
+{$ifndef PUREMORMOT2}
 /// simple XOR encryption according to Cod - not Compression or Stream compatible
-// - used in AESFull() for KeySize=32
+// - used in deprecated AESFull() for KeySize=32
 // - Cod is used to derivate some pseudo-random content from internal constant
 // tables, so encryption is weak but fast
 procedure XorBlock(p: PIntegerArray; Count, Cod: integer);
@@ -118,7 +119,7 @@ procedure XorBlock(p: PIntegerArray; Count, Cod: integer);
 // - Compression not compatible with this function: should be applied after
 // compress (e.g. as outStream for TAesWriteStream)
 // - Stream compatible (with updated Index)
-// - used in AES() and TAesWriteStream
+// - used in deprecated AES() and TAesWriteStream
 // - Index is used to derivate some pseudo-random content from internal
 // constant tables, so encryption is weak but fast
 procedure XorOffset(P: PByteArray; Index, Count: PtrInt);
@@ -129,6 +130,7 @@ procedure XorOffset(P: PByteArray; Index, Count: PtrInt);
 // - this encryption is very weak, so should be used only for basic
 // obfuscation, not data protection
 procedure XorConst(p: PIntegerArray; Count: integer);
+{$endif PUREMORMOT2}
 
 // little endian fast conversion
 // - 160 bits = 5 integers
@@ -169,16 +171,16 @@ function Adler32Asm(Adler: cardinal; p: pointer; Count: integer): cardinal;
 
 function Adler32SelfTest: boolean;
 
-/// entry point of the raw MD5 transform function - may be used for low-level use
+/// entry point of the raw MD5 transform function - for low-level use
 procedure RawMd5Compress(var Hash; Data: pointer);
 
-/// entry point of the raw SHA-1 transform function - may be used for low-level use
+/// entry point of the raw SHA-1 transform function - for low-level use
 procedure RawSha1Compress(var Hash; Data: pointer);
 
-/// entry point of the raw SHA-256 transform function - may be used for low-level use
+/// entry point of the raw SHA-256 transform function - for low-level use
 procedure RawSha256Compress(var Hash; Data: pointer);
 
-/// entry point of the raw SHA-512 transform function - may be used for low-level use
+/// entry point of the raw SHA-512 transform function - for low-level use
 procedure RawSha512Compress(var Hash; Data: pointer);
 
 var
@@ -209,6 +211,9 @@ var
   // - DefaultHasher128() is assigned to this function, when available on the CPU
   AesNiHash128: procedure(hash: PHash128; data: pointer; len: PtrUInt);
 
+  /// global flag set by mormot.crypt.openssl when the OpenSSL engine is used
+  HasOpenSsl: boolean;
+  
 
 { *************** 256-bit BigInt Low-Level Computation for ECC }
 
@@ -251,6 +256,10 @@ procedure _square256(out Output: THash512Rec; const Left: THash256Rec);
 /// returns sign of 256-bit Left - Right
 function _cmp256(const Left, Right: THash256Rec): integer;
   {$ifdef CPU64}inline;{$endif}
+
+/// move and change endianness of a 256-bit value
+// - warning: this code requires dest <> source
+procedure _bswap256(dest, source: PQWordArray);
 
 /// right shift of 1 bit of a 256-bit value
 procedure _rshift1(var V: THash256Rec);
@@ -537,10 +546,10 @@ type
     // - TAesAbstractOsl.IsAvailable returns false if OpenSSL is not installed
     class function IsAvailable: boolean; virtual;
 
-    /// perform the AES cypher in the corresponding mode
+    /// perform the AES cypher in the corresponding mode to Count bytes
     // - when used in block chaining mode, you should have set the IV property
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); virtual; abstract;
-    /// perform the AES un-cypher in the corresponding mode
+    /// perform the AES un-cypher in the corresponding mode to Count bytes
     // - when used in block chaining mode, you should have set the IV property
     procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); virtual; abstract;
 
@@ -580,7 +589,6 @@ type
     // - if RaiseESynCryptoOnError=false, returns [] on any decryption error
     function DecryptPkcs7(const Input: TBytes; IVAtBeginning: boolean = false;
       RaiseESynCryptoOnError: boolean = true; TrailerLen: PtrInt = 0): TBytes; overload;
-
     /// compute how many bytes would be needed in the output buffer, when
     // encrypte using a PKCS7 padding pattern
     // - could be used to pre-compute the OutputLength for EncryptPkcs7Buffer()
@@ -654,44 +662,31 @@ type
       const Associated: RawByteString = ''): RawByteString;
 
     {$ifndef PUREMORMOT2}
-    /// simple wrapper able to cypher/decypher any in-memory content
-    // - here data variables could be text or binary
-    // - use StringToUtf8() to define the Key parameter from a VCL string
-    // - if IVAtBeginning is TRUE, a random Initialization Vector will be
-    // generated by TAesPrng and stored at the beginning of the output buffer
+    /// deprecated wrapper able to cypher/decypher any in-memory content
+    // - deprecated due to wrong IV process - use AesPkcs7() instead
+    class function SimpleEncrypt(const Input: RawByteString; const Key;
+      KeySize: integer; Encrypt: boolean; IVAtBeginning: boolean = false;
+      RaiseESynCryptoOnError: boolean = true): RawByteString; overload;
+    /// deprecated wrapper able to cypher/decypher any file content
+    // - deprecated due to wrong IV process - use AesPkcs7File() instead
+    class function SimpleEncryptFile(const InputFile, Outputfile: TFileName;
+      const Key; KeySize: integer; Encrypt: boolean; IVAtBeginning: boolean = false;
+      RaiseESynCryptoOnError: boolean = true): boolean; overload;
+    /// deprecated wrapper able to cypher/decypher any in-memory content
+    // - deprecated due to wrong IV process - use AesPkcs7() instead
     // - will use Sha256Weak() and PKCS7 padding with the current class mode,
-    // so is to be considered as deprecated
+    // so is to be considered as **really** deprecated
     class function SimpleEncrypt(const Input, Key: RawByteString;
       Encrypt: boolean; IVAtBeginning: boolean = false;
       RaiseESynCryptoOnError: boolean = true): RawByteString; overload;
-    /// simple wrapper able to cypher/decypher any file content
-    // - just a wrapper around SimpleEncrypt() and StringFromFile/FileFromString
-    // - use StringToUtf8() to define the Key parameter from a VCL string
-    // - if IVAtBeginning is TRUE, a random Initialization Vector will be
-    // generated by TAesPrng and stored at the beginning of the output file
+    /// deprecated wrapper able to cypher/decypher any file content
+    // - deprecated due to wrong IV process - use AesPkcs7File() instead
     // - will use Sha256Weak() and PKCS7 padding with the current class mode,
-    // so is marked as deprecated
+    // so is to be considered as **really** deprecated
     class function SimpleEncryptFile(const InputFile, OutputFile: TFileName;
       const Key: RawByteString; Encrypt: boolean; IVAtBeginning: boolean = false;
       RaiseESynCryptoOnError: boolean = true): boolean; overload; deprecated;
     {$endif PUREMORMOT2}
-    /// simple wrapper able to cypher/decypher any in-memory content
-    // - here data variables could be text or binary
-    // - you could use e.g. THmacSha256 to safely compute the Key/KeySize value
-    // - if IVAtBeginning is TRUE, a random Initialization Vector will be
-    // generated by TAesPrng and stored at the beginning of the output buffer
-    class function SimpleEncrypt(const Input: RawByteString; const Key;
-      KeySize: integer; Encrypt: boolean; IVAtBeginning: boolean = false;
-      RaiseESynCryptoOnError: boolean = true): RawByteString; overload;
-    /// simple wrapper able to cypher/decypher any file content
-    // - just a wrapper around SimpleEncrypt() and StringFromFile/FileFromString
-    // - you could use e.g. THmacSha256 to safely compute the Key/KeySize value
-    // - if IVAtBeginning is TRUE, a random Initialization Vector will be
-    // generated by TAesPrng and stored at the beginning of the output file
-    // - will use Sha256Weak() and PKCS7 padding with the current class mode
-    class function SimpleEncryptFile(const InputFile, Outputfile: TFileName;
-      const Key; KeySize: integer; Encrypt: boolean; IVAtBeginning: boolean = false;
-      RaiseESynCryptoOnError: boolean = true): boolean; overload;
 
     /// OpenSSL-like Cipher name encoding of this AES engine
     // - return e.g. 'aes-128-cfb' or 'aes-256-gcm'
@@ -762,6 +757,7 @@ type
   // - IV property should be set to a fixed value to encode the trailing bytes
   // of the buffer by a simple XOR - but you should better use the PKC7 pattern
   // - this class will use AES-NI hardware instructions, if available
+  // - use TAesFast[mEcb] to retrieve the fastest implementation at runtime
   TAesEcb = class(TAesAbstractSyn)
   public
     /// perform the AES cypher in the ECB mode
@@ -773,6 +769,7 @@ type
   /// handle AES cypher/uncypher with Cipher-block chaining (CBC)
   // - this class will use AES-NI hardware instructions, if available
   // - expect IV to be set before process, or IVAtBeginning=true
+  // - use TAesFast[mCbc] to retrieve the fastest implementation at runtime
   TAesCbc = class(TAesAbstractSyn)
   protected
     procedure AfterCreate; override;
@@ -781,6 +778,31 @@ type
     procedure Encrypt(BufIn, BufOut: pointer; Count: cardinal); override;
     /// perform the AES un-cypher in the CBC mode
     procedure Decrypt(BufIn, BufOut: pointer; Count: cardinal); override;
+
+    /// Kerberos AES-CBC-CTS cypher in the corresponding mode to Count bytes
+    // - follow Kerberos CipherText Stealing (CTS) padding from RFC 3962 (not NIST)
+    // - this method is not re-entrant and should be called once with process tail
+    // - Count is expected to be >= 16 bytes (i.e. at least one block)
+    procedure EncryptCts(BufIn, BufOut: pointer; Count: cardinal); overload;
+    /// Kerberos AES-CBC-CTS un-cypher in the corresponding mode to Count bytes
+    // - follow Kerberos CipherText Stealing (CTS) padding from RFC 3962 (not NIST)
+    // - this method is not re-entrant and should be called once with process tail
+    // - Count is expected to be >= 16 bytes (i.e. at least one block)
+    procedure DecryptCts(BufIn, BufOut: pointer; Count: cardinal); overload;
+    /// Kerberos AES-CBC-CTS cypher in the corresponding mode to a buffer
+    // - follow Kerberos CipherText Stealing (CTS) padding from RFC 3962 (not NIST)
+    // - if IVAtBeginning is TRUE, a random Initialization Vector will be
+    // generated by TAesPrng and stored at the beginning of the output buffer
+    // - length(Input) is expected to be >= 16 bytes (i.e. at least one block)
+    function EncryptCts(const Input: RawByteString;
+      IVAtBeginning: boolean = false): RawByteString; overload;
+    /// Kerberos AES-CBC-CTS un-cypher in the corresponding mode to a buffer
+    // - follow Kerberos CipherText Stealing (CTS) padding from RFC 3962 (not NIST)
+    // - if IVAtBeginning is TRUE, the Initialization Vector will be taken
+    // from the beginning of the input binary buffer
+    // - length(result) is expected to be >= 16 bytes (i.e. at least one block)
+    function DecryptCts(const Input: RawByteString;
+      IVAtBeginning: boolean = false): RawByteString; overload;
   end;
 
   /// abstract parent class for chaining modes using only AES encryption
@@ -797,7 +819,7 @@ type
   /// handle AES cypher/uncypher with Cipher feedback (CFB)
   // - this class will use AES-NI hardware instructions, if available
   // - expect IV to be set before process, or IVAtBeginning=true
-  // - on x86_64, our TAesCfb class is really faster than OpenSSL:
+  // - on x86_64, our TAesCfb class is really faster than OpenSSL 1.1:
   // $  mormot aes-128-cfb in 6.95ms i.e. 359247/s or 764.5 MB/s
   // $  mormot aes-256-cfb in 9.40ms i.e. 265816/s or 565.7 MB/s
   // $  openssl aes-128-cfb in 10.53ms i.e. 237326/s or 505 MB/s
@@ -808,6 +830,7 @@ type
   // $ openssl aes-128-cfb in 12.01ms i.e. 208142/s or 442.9 MB/s
   // $ openssl aes-256-cfb in 14.49ms i.e. 172449/s or 367 MB/s
   // - is used e.g. by CryptDataForCurrentUser or WebSockets ProtocolAesClass
+  // - use TAesFast[mCfb] to retrieve the fastest implementation at runtime
   TAesCfb = class(TAesAbstractEncryptOnly)
   protected
     procedure AfterCreate; override;
@@ -821,7 +844,7 @@ type
   /// handle AES cypher/uncypher with Output feedback (OFB)
   // - this class will use AES-NI hardware instructions, if available
   // - expect IV to be set before process, or IVAtBeginning=true
-  // - on x86_64, our TAesOfb class is faster than OpenSSL:
+  // - on x86_64, our TAesOfb class is faster than OpenSSL 1.1:
   // $  mormot aes-128-ofb in 6.88ms i.e. 363002/s or 772.5 MB/s
   // $  mormot aes-256-ofb in 9.37ms i.e. 266808/s or 567.8 MB/s
   // $  openssl aes-128-ofb in 7.82ms i.e. 319693/s or 680.3 MB/s
@@ -831,6 +854,7 @@ type
   // $ mormot aes-256-ofb in 9.59ms i.e. 260552/s or 554.5 MB/s
   // $ openssl aes-128-ofb in 9.21ms i.e. 271267/s or 577.3 MB/s
   // $ openssl aes-256-ofb in 11.53ms i.e. 216806/s or 461.4 MB/s
+  // - use TAesFast[mOfb] to retrieve the fastest implementation at runtime
   TAesOfb = class(TAesAbstractEncryptOnly)
   protected
     procedure AfterCreate; override;
@@ -877,7 +901,7 @@ type
   // with reference implementations like OpenSSL - see also TAesCtrOsl
   // - WARNING: BREAKING CHANGE mORMot 1.18 SynCrypto's TAESCTR is TAesC64
   // - on x86_64 we use a 8*128-bit interleaved optimized asm which is faster
-  // than OpenSSL 1.1.1 in our benchmarks:
+  // than OpenSSL 1.1 in our benchmarks (and much faster than OpenSSL 3.0):
   // $  mormot aes-128-ctr in 1.99ms i.e. 1254390/s or 2.6 GB/s
   // $  mormot aes-256-ctr in 2.64ms i.e. 945179/s or 1.9 GB/s
   // $  openssl aes-128-ctr in 2.23ms i.e. 1121076/s or 2.3 GB/s
@@ -890,6 +914,7 @@ type
   // $ mormot aes-256-ctr in 12.47ms i.e. 200368/s or 426.4 MB/s
   // $ openssl aes-128-ctr in 3.01ms i.e. 830288/s or 1.7 GB/s
   // $ openssl aes-256-ctr in 3.52ms i.e. 709622/s or 1.4 GB/s
+  // - use TAesFast[mCtr] to retrieve the fastest implementation at runtime
   TAesCtr = class(TAesC64)
   protected
     procedure AfterCreate; override;
@@ -922,6 +947,7 @@ type
 
 
   /// AEAD (authenticated-encryption with associated-data) abstract class
+  // - don't use this abstract class, but actual usable inherited classes
   // - perform AES encryption and on-the-fly MAC computation, i.e. computes
   // a proprietary 256-bit MAC during AES cyphering, as 128-bit CRC of the
   // encrypted data and 128-bit CRC of the plain data, seeded from a Key, then
@@ -999,6 +1025,7 @@ type
   end;
 
   /// AEAD combination of AES and 256-bit MAC with symmetrical Encrypt/Decrypt
+  // - don't use this abstract class, but actual usable TAesOfc or TAesCtc
   TAesSymCrc = class(TAesAbstractAead)
   public
     /// perform the AES uncypher calling Encrypt()
@@ -1053,7 +1080,7 @@ type
   /// abstract parent to handle AES-GCM cypher/uncypher with built-in authentication
   // - implements AEAD (authenticated-encryption with associated-data) process
   // via MacSetNonce/MacEncrypt or AesGcmAad/AesGcmFinal methods
-  // - don't use this abstract class, but TAesGcm or TAesGcmOsl
+  // - don't use this abstract class, but TAesFast[mGcm] - i.e. TAesGcm/TAesGcmOsl
   TAesGcmAbstract = class(TAesAbstract)
   protected
     fStarted: (stNone, stEnc, stDec); // used to call AES.Reset()
@@ -1121,7 +1148,8 @@ type
   // - our TAesGcm class is 8x interleaved for both GMAC and AES-CTR
   // $  mormot aes-128-gcm in 3.45ms i.e. 722752/s or 1.5 GB/s
   // $  mormot aes-256-gcm in 4.11ms i.e. 607385/s or 1.2 GB/s
-  // - OpenSSL is faster since it performs GMAC and AES-CTR in a single pass
+  // - OpenSSL 1.1 is slightly faster since performs GMAC + CTR as single pass
+  // but OpenSSL 3.0 is slower due to higher library overhead
   // $  openssl aes-128-gcm in 2.86ms i.e. 874125/s or 1.8 GB/s
   // $  openssl aes-256-gcm in 3.43ms i.e. 727590/s or 1.5 GB/s
   // - on i386, numbers are much lower, since lacks interleaved asm
@@ -1129,6 +1157,7 @@ type
   // $  mormot aes-256-gcm in 18.23ms i.e. 137083/s or 291.7 MB/s
   // $  openssl aes-128-gcm in 5.49ms i.e. 455290/s or 0.9 GB/s
   // $  openssl aes-256-gcm in 6.11ms i.e. 408630/s or 869.6 MB/s
+  // - use TAesFast[mGcm] to retrieve the fastest implementation at runtime
   TAesGcm = class(TAesGcmAbstract)
   protected
     fGcm: TAesGcmEngine;
@@ -1255,7 +1284,7 @@ type
     fBufPos, fBufAvailable: integer;
   public
     /// initialize AES encryption/decryption stream for a given stream and key
-    // - aStream is typically a TMemoryStream or a TFileStream
+    // - aStream is typically a TMemoryStream or a TFileStreamEx
     // - a trailing random IV is generated/retrieved, unless an IV is supplied
     // - AES is performed on an internal buffer of 128KB by default for efficiency
     constructor Create(aStream: TStream; const key; keySizeBits: cardinal;
@@ -1272,7 +1301,7 @@ type
     destructor Destroy; override;
     /// position change is not allowed: this method will raise an exception
     function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
-    /// access to the associated stream, e.g. a TFileStream instance
+    /// access to the associated stream, e.g. a TFileStreamEx instance
     property Stream: TStream
       read fStream;
   end;
@@ -1283,7 +1312,7 @@ type
   TAesPkcs7Writer = class(TAesPkcs7Abstract)
   public
     /// initialize the AES encryption stream into a given stream and a key
-    // - outStream is typically a TMemoryStream or a TFileStream
+    // - outStream is typically a TMemoryStream or a TFileStreamEx
     // - aesMode should be one of the supported AES_PKCS7WRITER chaining mode
     // - by default, a trailing random IV is generated, unless IV is supplied
     // - see also Create() overload with PBKDF2 password derivation
@@ -1311,7 +1340,7 @@ type
     fStreamSize: Int64;
   public
     /// initialize the AES decryption stream from an intput stream and a key
-    // - inStream is typically a TMemoryStream or a TFileStream
+    // - inStream is typically a TMemoryStream or a TFileStreamEx
     // - inStream size will be checked for proper PKCS7 padding
     // - aesMode should be one of the supported AES_PKCS7WRITER chaining mode
     // - by default, a trailing random IV is read, unless IV is supplied
@@ -1338,7 +1367,7 @@ function AesPkcs7(const src: RawByteString; encrypt: boolean;
   rounds: cardinal = 1000; aesMode: TAesMode = mCtr): RawByteString; overload;
 
 /// cypher/decypher any file using AES and PKCS7 padding, from a key buffer
-// - just a wrapper around TAesPkcs7Writer/TAesPkcs7Reader and TFileStream
+// - just a wrapper around TAesPkcs7Writer/TAesPkcs7Reader and TFileStreamEx
 // - by default, a trailing random IV is expected, unless IV is supplied
 // - if src=dst a temporary .partial file is created, then will replace src
 // - raise an exception on error (e.g. missing or invalid input file)
@@ -1347,7 +1376,7 @@ function AesPkcs7File(const src, dst: TFileName; encrypt: boolean; const key;
   keySizeBits: cardinal; aesMode: TAesMode = mCtr; IV: PAesBlock = nil): Int64; overload;
 
 /// cypher/decypher any file using AES and PKCS7 padding, from a password
-// - just a wrapper around TAesPkcs7Writer/TAesPkcs7Reader and TFileStream
+// - just a wrapper around TAesPkcs7Writer/TAesPkcs7Reader and TFileStreamEx
 // - will derivate the password using PBKDF2 over HMAC-SHA256, using lower
 // 128-bit as AES-CTR-128 key, and the upper 128-bit as IV
 // - returns the number of bytes written to dst file
@@ -1833,6 +1862,7 @@ type
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. for THmacSha256
   // - see TSynHasher if you expect to support more than one algorithm at runtime
+  // - can use several asm versions with HW opcodes support on x86_64 and aarch64
   TSha256 = object
   private
     Context: packed array[1..SHA_CONTEXT_SIZE] of byte;
@@ -1879,19 +1909,19 @@ type
     a, b, c, d, e, f, g, h: QWord;
   end;
 
-  /// abstract parent for implementing both SHA-384 and SHA-512 hashing
+  /// abstract parent for implementing SHA-384, SHA-512/256 and SHA-512 hashing
   TSha384512 = object
   private
     Index: PtrUInt;
     MLen: QWord;
     Hash: TSha512Hash;
     Data: array[0..127] of byte;
-    /// perform the final step of SHA-384 / SHA-512 into Hash private field
+    /// perform the final step into Hash private field
     procedure FinalStep;
   public
-    /// update the SHA-384 / SHA-512 context with some data
+    /// update the SHA-384 / SHA-512/256 /  SHA-512 context with some data
     procedure Update(Buffer: pointer; Len: integer); overload;
-    /// update the SHA-384 / SHA-512 context with some data
+    /// update the SHA-384 / SHA-512/256 / SHA-512 context with some data
     procedure Update(const Buffer: RawByteString); overload;
       {$ifdef HASINLINE} inline; {$endif}
   end;
@@ -1920,6 +1950,29 @@ type
 
   /// points to SHA-384 hashing instance
   PSha384 = ^TSha384;
+
+  /// implements SHA-512/256 hashing
+  // - it is in fact a TSha512 truncated hash, with other initial hash values
+  // - see TSynHasher if you expect to support more than one algorithm at runtime
+  TSha512_256 = object(TSha384512)
+  public
+    /// initialize SHA-512/256 context for hashing
+    procedure Init;
+    /// finalize and compute the resulting SHA-512/256 hash Digest of all data
+    // affected to Update() method
+    // - will also call Init to reset all internal temporary context, for safety
+    procedure Final(out Digest: TSha256Digest; NoInit: boolean = false); overload;
+    /// finalize and compute the resulting SHA-384 hash Digest of all data
+    // affected to Update() method
+    function Final(NoInit: boolean = false): TSha256Digest; overload;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// one method to rule them all
+    // - call Init, then Update(), then Final()
+    procedure Full(Buffer: pointer; Len: integer; out Digest: TSha256Digest);
+  end;
+
+  /// points to SHA-512/256 hashing instance
+  PSha512_256= ^TSha512_256;
 
   /// implements SHA-512 hashing
   // - by design, this algorithm is expected to be much faster on 64-bit CPU,
@@ -2089,7 +2142,7 @@ function ToText(algo: TSha3Algo): PShortString; overload;
 
 
 
-{ ****************** Deprecated MD5 RC4 SHA-1 Algorithms }
+{ ****************** Deprecated MD4 MD5 RC4 SHA-1 Algorithms }
 
 type
   /// 128-bit memory block for MD5 hash digest storage
@@ -2104,24 +2157,27 @@ type
   PMd5In = ^TMd5In;
   TMd5Buf = TBlock128;
 
-  /// implements MD5 hashing
-  // - this algorithm has known weaknesses, so should not be considered as
-  // cryptographic secure, but is available for other purposes
+  /// implements MD5 hashing  - and could also implement MD4 if really needed
+  // - those algorithms have known weaknesses, so should not be considered as
+  // cryptographic secure, but are available for compatibility purposes
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance
   // - see TSynHasher if you expect to support more than one algorithm at runtime
-  // - even if MD5 is now seldom used, it is still faster than SHA alternatives,
-  // when you need a 128-bit cryptographic hash, but can afford some collisions
-  // - this implementation has optimized x86 and x64 assembly, for processing
-  // around 500MB/s, and a pure-pascal fallback code on other platforms
+  // - this implementation has optimized x86 and x64 assembly, and a pure-pascal
+  // fallback code on other CPUs (and for the MD4 algorithm)
   TMd5 = object
   private
     in_: TMd5In;
     bytes: array[0..1] of cardinal;
+    transform: procedure(var mdbuf: TMd5Buf; const mdin: TMd5In);
   public
     buf: TMd5Buf;
     /// initialize MD5 context for hashing
     procedure Init;
+    /// initialize MD4 context for hashing
+    // - will reuse the whole MD5 context but setup the MD4 transform function
+    // - MD4 is clearly deprecated, but available here for compatibility usage
+    procedure InitMD4;
     /// update the MD5 context with some data
     procedure Update(const buffer; Len: cardinal); overload;
     /// update the MD5 context with some data
@@ -2137,8 +2193,9 @@ type
     // affected to Update() method
     function Final: TMd5Digest; overload;
     /// one method to rule them all
-    // - call Init, then Update(), then Final()
-    procedure Full(Buffer: pointer; Len: integer; out Digest: TMd5Digest);
+    // - call Init/InitMD4, Update(), then Final() with a stack-allocated context
+    procedure Full(Buffer: pointer; Len: integer; out Digest: TMd5Digest;
+      ForceMD4: boolean = false);
   end;
   PMd5 = ^TMd5;
 
@@ -2227,6 +2284,9 @@ function Md5Buf(const Buffer; Len: cardinal): TMd5Digest;
 /// compute the HTDigest for a user and a realm, according to a supplied password
 // - apache-compatible: 'agent007:download area:8364d0044ef57b3defcfa141e8f77b65'
 function HTDigest(const user, realm, pass: RawByteString): RawUtf8;
+
+/// direct MD4 hash calculation of some data
+function Md4Buf(const Buffer; Len: cardinal): TMd5Digest;
 
 /// compute the PBKDF2 derivation of a password using HMAC over SHA-1
 // - this function expect the resulting key length to match SHA-1 digest size
@@ -2526,7 +2586,7 @@ procedure Pbkdf2HmacSha256(const password, salt: RawByteString;
   count: integer; out result: TSha256Digest;
   const saltdefault: RawByteString = ''); overload;
 
-/// compute the PBKDF2 derivation of a password using HMAC over SHA-256, into
+/// compute the PBKDF2 derivations of a password using HMAC over SHA-256, into
 // several 256-bit items, so can be used to return any size of output key
 // - this function expect the result array to have the expected output length
 // - allows resulting key length to be more than one SHA-256 digest size, e.g.
@@ -2601,6 +2661,9 @@ function Md5DigestToString(const D: TMd5Digest): RawUtf8;
 // - just a wrapper around mormot.core.text.HexToBin()
 function Md5StringToDigest(const Source: RawUtf8; out Dest: TMd5Digest): boolean;
 
+/// direct MD4 hash calculation of some data (string-encoded)
+// - result is returned in lowercase hexadecimal format
+function Md4(const s: RawByteString): RawUtf8;
 
 /// direct SHA-1 hash calculation of some data (string-encoded)
 // - result is returned in hexadecimal format
@@ -2643,6 +2706,10 @@ function Sha384(const s: RawByteString): RawUtf8;
 /// compute the hexadecimal representation of a SHA-384 digest
 function Sha384DigestToString(const D: TSha384Digest): RawUtf8;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// direct SHA-512/256 hash calculation of some data (string-encoded)
+// - result is returned in hexadecimal format
+function Sha512_256(const s: RawByteString): RawUtf8;
 
 
 /// direct SHA-512 hash calculation of some data (string-encoded)
@@ -2737,7 +2804,7 @@ type
     NoCrypt: boolean; // if KeySize=0
   public
     /// initialize the AES encryption stream for an output stream (e.g.
-    // a TMemoryStream or a TFileStream)
+    // a TMemoryStream or a TFileStreamEx)
     constructor Create(outStream: TStream; const Key; KeySize: cardinal);
     /// finalize the AES encryption stream
     // - internally call the Finish method
@@ -3742,7 +3809,11 @@ begin
     begin
       result := BsrQWord(V.Q[1]) + 1;
       if byte(result) = 0 then
-        result := BsrQWord(V.Q[0])
+      begin
+        result := BsrQWord(V.Q[0]) + 1;
+        if byte(result) = 0 then
+          result := 0;
+      end
       else
         inc(result, 64);
     end
@@ -3781,6 +3852,15 @@ begin
   until digit = 0;
 end;
 {$endif FPC}
+
+procedure _bswap256(dest, source: PQWordArray);
+begin
+  // warning: our code requires dest <> source
+  dest[0] := bswap64(source[3]);
+  dest[1] := bswap64(source[2]);
+  dest[2] := bswap64(source[1]);
+  dest[3] := bswap64(source[0]);
+end;
 
 
 { ********************* AES Encoding/Decoding }
@@ -3862,9 +3942,9 @@ procedure aesencryptpas(const ctxt: TAesContext; bi, bo: PWA4);
  2. Altered source versions must be plainly marked as such, and must not be
     misrepresented as being the original software.
  3. This notice may not be removed or altered from any source distribution.
- -> code has been refactored and tuned by AB especially for FPC x86_64 target }
+ -> code has been refactored and tuned by AB especially for FPC non-Intel/AMD }
 var
-  t: PCardinalArray;       // faster on a PIC system
+  t: PCardinalArray;       // faster on a PIC/RISC systems
   sb: PByteArray;
   s0, s1, s2, s3: PtrUInt; // TAesBlock s# as separate variables
   t0, t1, t2: cardinal;    // TAesBlock t# as separate variables
@@ -4335,22 +4415,29 @@ begin
   iv^ := cv;
 end;
 
-procedure DoBlocksCtrPas(iv: PAesBlock; src, dst: pointer;
-  blockcount: cardinal; const ctxt: TAesContext);
+procedure CtrNistCarryBigEndian(var iv: TAesBlock);
+  {$ifdef HASINLINE} inline; {$endif}
 var
   offs: PtrInt;
+begin
+  offs := 14;
+  repeat
+    inc(iv[offs]);
+    if iv[offs] <> 0 then
+      break;
+    dec(offs);
+  until offs = 0;
+end;
+
+procedure DoBlocksCtrPas(iv: PAesBlock; src, dst: pointer;
+  blockcount: cardinal; const ctxt: TAesContext);
 begin // sub-procedure for better code generation
   if blockcount > 0 then
     repeat
       ctxt.DoBlock(ctxt, iv^, ctxt.buf); // tmp=AES(cv)
-      inc(iv[15]);
-      if iv[15] = 0 then // manual big-endian increment
-        for offs := 14 downto 0 do
-        begin
-          inc(iv[offs]);
-          if iv[offs] <> 0 then
-            break;
-        end;
+      inc(iv^[15]);
+      if iv^[15] = 0 then // manual big-endian increment
+        CtrNistCarryBigEndian(iv^);
       XorBlock16(src, dst, pointer(@ctxt.buf)); // dst := src xor buf
       inc(PAesBlock(src));
       inc(PAesBlock(dst));
@@ -5478,8 +5565,6 @@ begin
   end;
 end;
 
-{$endif PUREMORMOT2}
-
 class function TAesAbstract.SimpleEncrypt(const Input: RawByteString;
   const Key; KeySize: integer; Encrypt, IVAtBeginning,
   RaiseESynCryptoOnError: boolean): RawByteString;
@@ -5512,6 +5597,8 @@ begin
       result := FileFromString(dst, Outputfile);
   end;
 end;
+
+{$endif PUREMORMOT2}
 
 function TAesAbstract.Clone: TAesAbstract;
 begin
@@ -5627,7 +5714,7 @@ var
   tmp: TAesBlock;
 begin
   inherited; // set fIn,fOut
-  if Count >= SizeOf(TAesBlock) then
+  if integer(Count) >= SizeOf(TAesBlock) then
   begin
     if fAesInit <> initDecrypt then
       DecryptInit;
@@ -5670,6 +5757,113 @@ begin
   Count := Count and AesBlockMod;
   if Count <> 0 then
     TrailerBytes(Count);
+end;
+
+// see https://datatracker.ietf.org/doc/html/rfc3962#section-5
+// and https://en.wikipedia.org/wiki/Ciphertext_stealing
+
+procedure TAesCbc.EncryptCts(BufIn, BufOut: pointer; Count: cardinal);
+var
+  pad: cardinal;
+  prev: PAesBlock;
+  padded: TAesBlock;
+begin
+  if fAesInit <> initEncrypt then
+    EncryptInit;
+  if Count < SizeOf(TAesBlock) then
+    // RFC 3962 says it would pad the input with random up to 16 bytes
+    raise ESynCrypto.CreateUtf8('%.EncryptCts with Count=%', [self, Count])
+  else if Count = SizeOf(TAesBlock) then
+  begin
+    fAes.Encrypt(PAesBlock(BufIn)^, PAesBlock(BufOut)^); // RFC says to use ECB
+    exit;
+  end;
+  pad := Count and AesBlockMod;
+  if pad = 0 then
+    pad := SizeOf(TAesBlock); // multiple of AES blocks = just swap the tail
+  Encrypt(BufIn, BufOut, Count - pad); // up to last block
+  prev := fOut;
+  dec(prev);
+  FillZero(padded);
+  MoveFast(fIn^, padded, pad);
+  MoveFast(prev^, fOut^, pad);
+  Encrypt(@padded, prev, SizeOf(TAesBlock)); // last block
+  FillZero(padded); // anti-forensic
+end;
+
+procedure TAesCbc.DecryptCts(BufIn, BufOut: pointer; Count: cardinal);
+var
+  pad: cardinal;
+  tail: array[0..1] of TAesBlock;
+begin
+  if fAesInit <> initDecrypt then
+    DecryptInit;
+  if Count < SizeOf(TAesBlock) then
+    raise ESynCrypto.CreateUtf8('%.DecryptCts with Count=%', [self, Count])
+  else if Count = SizeOf(TAesBlock) then
+  begin
+    fAes.Decrypt(PAesBlock(BufIn)^, PAesBlock(BufOut)^); // ECB
+    exit;
+  end;
+  pad := Count and AesBlockMod;
+  if pad = 0 then
+    pad := SizeOf(TAesBlock);
+  Decrypt(BufIn, BufOut, Count - pad - SizeOf(TAesBlock)); // to second-to-tail
+  fAes.Decrypt(fIn^, {%H-}tail[1]);
+  inc(fIn);
+  FillZero(tail[0]);
+  MoveFast(fIn^, tail[0], pad);
+  XorBlock16(@tail[1], @tail[0]);
+  MoveFast(tail[1][pad], tail[0][pad], SizeOf(TAesBlock) - pad);
+  Decrypt(@tail[0], fOut, SizeOf(TAesBlock));
+  MoveFast(tail[1], fOut^, pad);
+  FillZero(THash256(tail));
+end;
+
+function TAesCbc.EncryptCts(const Input: RawByteString;
+  IVAtBeginning: boolean): RawByteString;
+var
+  len: PtrInt;
+  p: PAesBlock;
+begin
+  result := '';
+  if (self = nil) or
+     (Input = '') then
+    exit;
+  len := length(Input);
+  if IVAtBeginning then
+    inc(len, SizeOf(TAesBlock));
+  FastSetRawByteString(result, nil, len);
+  p := pointer(result);
+  if IVAtBeginning then
+  begin
+    TAesPrng.Main.FillRandom(fIV); // cryptographic PRNG as seed for uniqueness
+    p^ := fIV;
+    inc(p);
+  end;
+  EncryptCts(pointer(Input), p, length(Input));
+end;
+
+function TAesCbc.DecryptCts(const Input: RawByteString;
+  IVAtBeginning: boolean): RawByteString;
+var
+  len: PtrInt;
+  p: PAesBlock;
+begin
+  result := '';
+  if (self = nil) or
+     (Input = '') then
+    exit;
+  p := pointer(Input);
+  len := length(Input);
+  if IVAtBeginning then
+  begin
+    fIV := p^;
+    inc(p);
+    dec(len, SizeOf(p^));
+  end;
+  FastSetRawByteString(result, nil, len);
+  DecryptCts(p, pointer(result), len);
 end;
 
 
@@ -6028,7 +6222,6 @@ end;
 procedure TAesCtc.Encrypt(BufIn, BufOut: pointer; Count: cardinal);
 var
   i: cardinal;
-  offs: PtrInt;
   tmp, iv: TAesBlock;
 begin
   if Count = 0 then
@@ -6054,12 +6247,7 @@ begin
       TAesContext(fAes).DoBlock(fAes, iv, tmp{%H-}); // tmp=AES(fIV)
       inc(iv[15]);
       if iv[15] = 0 then // manual big-endian increment
-        for offs := 14 downto 0 do
-        begin
-          inc(iv[offs]);
-          if iv[offs] <> 0 then
-            break;
-        end;
+        CtrNistCarryBigEndian(iv);
       XorBlock16(pointer(fIn), pointer(fOut), pointer(@tmp));
       crcblock(@fMac.encrypted, pointer(fOut));
       inc(fIn);
@@ -6225,6 +6413,7 @@ begin
         // dedicated pascal code for NIST CTR
         DoBlocksCtrPas(@fIV, BufIn, BufOut, Count shr AesBlockShift, TAesContext(fAes))
     else
+      // fallback to inherited TAesC64 code if our propertary padding is needed
       inherited Encrypt(BufIn, BufOut, Count);
 end;
 
@@ -7491,19 +7680,6 @@ begin
     end;
 end;
 
-procedure CtrNistCarryBigEndian(var iv: TAesBlock); // inlining is not worth it
-var
-  offs: PtrInt;
-begin
-  offs := 14;
-  repeat
-    inc(iv[offs]);
-    if iv[offs] <> 0 then
-      break;
-    dec(offs);
-  until offs = 0;
-end;
-
 procedure TAesPrng.FillRandom(out Block: TAesBlock);
 begin
   if (fSeedAfterBytes <> 0) and
@@ -7749,7 +7925,7 @@ begin
       if key <> '' then
       begin
         try
-          key2 := TAesCfb.SimpleEncrypt(key, k256, 256, false, true);
+          key2 := AesPkcs7(key, {encrypt=}false, k256, 256, mCfb);
         except
           key2 := ''; // handle decryption error
         end;
@@ -7779,7 +7955,7 @@ begin
       // 4KB local chmod 400 hidden .file in $HOME folder under Linux/POSIX
       key2 := key;
       {$endif OSWINDOWS}
-      key := TAesCfb.SimpleEncrypt(key2, k256, 256, true, true);
+      key := AesPkcs7(key2, {encrypt=}true, k256, 256, mCfb);
       if not FileFromString(key, fn) then
         ESynCrypto.CreateUtf8('Unable to write %', [fn]);
       FileSetHidden(fn, {ReadOnly=}true); // chmod 400
@@ -7814,6 +7990,7 @@ begin
   finally
     FillZero(secret);
   end;
+  DetectRawUtf8(result); // detect and mark as CP_UTF8 to circumvent FPC RTL bug
 end;
 
 
@@ -7922,7 +8099,10 @@ procedure RawSha256Compress(var Hash; Data: pointer);
 begin
   {$ifdef ASMX64}
   if K256Aligned <> nil then
-    Sha256Sse4(Data^, Hash, 1) // from optimized Intel's Sha256Sse4.asm
+    if cfSHA in CpuFeatures then
+      Sha256ni(Data^, Hash, 1)   // Intel SHA HW opcodes
+    else
+      Sha256Sse4(Data^, Hash, 1) // Intel SSE4.2 asm
   else
   {$endif ASMX64}
   {$ifdef USEARMCRYPTO}
@@ -7959,18 +8139,6 @@ begin
   if Buffer = nil then
     exit; // avoid GPF
   inc(Data.MLen, QWord(cardinal(Len)) shl 3);
-  {$ifdef ASMX64}
-  if (K256AlignedStore <> '') and
-     (Data.Index = 0) and
-     (Len >= 64) then
-  begin
-    // use optimized Intel's Sha256Sse4.asm for whole blocks
-    Sha256Sse4(Buffer^, Data.Hash, Len shr 6);
-    inc(PByte(Buffer), Len);
-    Len := Len and 63;
-    dec(PByte(Buffer), Len);
-  end;
-  {$endif ASMX64}
   while Len > 0 do
   begin
     aLen := 64 - Data.Index;
@@ -7983,7 +8151,22 @@ begin
         Data.Index := 0;
       end
       else
-        RawSha256Compress(Data.Hash, Buffer); // avoid temporary copy
+        {$ifdef ASMX64}
+        if (K256Aligned <> nil) and
+           (Len >= 64) then
+        begin
+          // use optimized Intel x86_64 asm over whole blocks
+          if cfSHA in CpuFeatures then
+            Sha256ni(Buffer^, Data.Hash, Len shr 6)     // Intel SHA HW opcodes
+          else
+            Sha256Sse4(Buffer^, Data.Hash, Len shr 6);  // Intel SSE4.2 asm
+          aLen := Len and (not 63);
+        end
+        else
+          Sha256CompressPas(Data.Hash, Buffer);
+        {$else}
+        RawSha256Compress(Data.Hash, Buffer); // may be AARCH64 version
+        {$endif ASMX64}
       dec(Len, aLen);
       inc(PtrInt(Buffer), aLen);
     end
@@ -8218,6 +8401,44 @@ begin
 end;
 
 
+{ TSha512_256 }
+
+procedure TSha512_256.Init;
+begin
+  Hash.a := QWord($22312194fc2bf72c);
+  Hash.b := QWord($9f555fa3c84c64c2);
+  Hash.c := QWord($2393b86b6f53b151);
+  Hash.d := QWord($963877195940eabd);
+  Hash.e := QWord($96283ee2a88effe3);
+  Hash.f := QWord($be5e1e2553863992);
+  Hash.g := QWord($2b0199fc2c85b8aa);
+  Hash.h := QWord($0eb72ddc81c52ca2);
+  MLen := 0;
+  Index := 0;
+  FillcharFast(Data, SizeOf(Data), 0);
+end;
+
+procedure TSha512_256.Final(out Digest: TSha256Digest; NoInit: boolean);
+begin
+  FinalStep;
+  bswap64array(@Hash, @Digest, 4);
+  if not NoInit then
+    Init;
+end;
+
+function TSha512_256.Final(NoInit: boolean): TSha256Digest;
+begin
+  Final(result, NoInit);
+end;
+
+procedure TSha512_256.Full(Buffer: pointer; Len: integer; out Digest: TSha256Digest);
+begin
+  Init;
+  Update(Buffer, Len); // final bytes
+  Final(Digest);
+end;
+
+
 { TSha384 }
 
 procedure TSha384.Init;
@@ -8310,11 +8531,12 @@ end;
 
 const
   cKeccakPermutationSize = 1600;
-  cKeccakMaximumRate = 1536;
   cKeccakPermutationSizeInByte = cKeccakPermutationSize div 8;
   cKeccakPermutationSizeInQWord = cKeccakPermutationSize div 64;
+  cKeccakMaximumRate = 1536;
   cKeccakMaximumRateInBytes = cKeccakMaximumRate div 8;
   cKeccakNumberOfRounds = 24;
+
   cRoundConstants: array[0..cKeccakNumberOfRounds - 1] of QWord = (
     QWord($0000000000000001), QWord($0000000000008082), QWord($800000000000808A),
     QWord($8000000080008000), QWord($000000000000808B), QWord($0000000080000001),
@@ -8526,7 +8748,7 @@ type
     procedure Absorb(Data: PByteArray; databitlen: integer);
     procedure AbsorbFinal(Data: PByteArray; databitlen: integer);
     procedure PadAndSwitchToSqueezingPhase;
-    procedure Squeeze(output: PByteArray; outputLength: integer);
+    procedure Squeeze(output: PByteArray; outputLength: PtrInt);
     procedure FinalBit_LSB(bits: byte; bitlen: integer; hashval: pointer;
       numbits: integer);
   end;
@@ -8557,50 +8779,50 @@ end;
 
 procedure TSha3Context.Absorb(data: PByteArray; databitlen: integer);
 var
-  i, j, wholeBlocks, partialBlock, partialByte: integer;
-  curData: pointer;
+  written, blocks, available, chunk, tail: integer; // all lengths are in bits
+  p: PByte;
 begin
   if BitsInQueue and 7 <> 0 then
     raise ESynCrypto.Create('TSha3Context.Absorb: only last can be partial');
   if Squeezing then
     raise ESynCrypto.Create('TSha3Context.Absorb: already squeezed');
-  i := 0;
-  while i < databitlen do
+  written := 0;
+  while written < databitlen do
   begin
+    chunk := databitlen - written;
     if (BitsInQueue = 0) and
-       (databitlen >= Rate) and
-       (i <= (databitlen - Rate)) then
+       (chunk >= Rate) then
     begin
-      wholeBlocks := (databitlen - i) div Rate;
-      curData := @data^[i shr 3];
-      for j := 1 to wholeBlocks do
-      begin
-        XorMemoryPtrInt(@State, curData, Rate shr POINTERSHRBITS);
+      blocks := cardinal(chunk) div cardinal(Rate);
+      p := @data^[written shr 3];
+      inc(written, blocks * Rate);
+      repeat
+        XorMemoryPtrInt(@State, pointer(p), Rate shr POINTERSHRBITS);
         KeccakPermutation(@State);
-        inc(PByte(curData), Rate shr 3);
-      end;
-      inc(i, wholeBlocks * Rate);
+        inc(p, Rate shr 3);
+        dec(blocks);
+      until blocks = 0;
     end
     else
     begin
-      partialBlock := databitlen - i;
-      if partialBlock + BitsInQueue > Rate then
-        partialBlock := Rate - BitsInQueue;
-      partialByte := partialBlock and 7;
-      dec(partialBlock, partialByte);
-      MoveFast(data^[i shr 3], DataQueue[BitsInQueue shr 3], partialBlock shr 3);
-      inc(BitsInQueue, partialBlock);
-      inc(i, partialBlock);
+      available := Rate - BitsInQueue;
+      if chunk > available then
+        chunk := available;
+      tail := chunk and 7;
+      dec(chunk, tail);
+      MoveFast(data^[written shr 3], DataQueue[BitsInQueue shr 3], chunk shr 3);
+      inc(BitsInQueue, chunk);
+      inc(written, chunk);
       if BitsInQueue = Rate then
       begin
         AbsorbQueue;
         BitsInQueue := 0;
       end;
-      if partialByte > 0 then
+      if tail > 0 then
       begin
-        DataQueue[BitsInQueue shr 3] := data^[i shr 3] and ((1 shl partialByte) - 1);
-        inc(BitsInQueue, partialByte);
-        inc(i, partialByte);
+        DataQueue[BitsInQueue shr 3] := data^[written shr 3] and ((1 shl tail) - 1);
+        inc(BitsInQueue, tail);
+        inc(written, tail);
       end;
     end;
   end;
@@ -8648,17 +8870,16 @@ begin
   Squeezing := true;
 end;
 
-procedure TSha3Context.Squeeze(output: PByteArray; outputLength: integer);
+procedure TSha3Context.Squeeze(output: PByteArray; outputLength: PtrInt);
 var
-  i: integer;
-  partialBlock: integer;
+  written, needed, chunk: PtrInt; // all lengths are in bits
 begin
   if not Squeezing then
     PadAndSwitchToSqueezingPhase;
   if outputLength and 7 <> 0 then
     raise ESynCrypto.CreateUtf8('TSha3Context.Squeeze(%?)', [outputLength]);
-  i := 0;
-  while i < outputLength do
+  written := 0;
+  while written < outputLength do
   begin
     if BitsAvailableForSqueezing = 0 then
     begin
@@ -8666,13 +8887,14 @@ begin
       MoveFast(State, DataQueue, Rate shr 3);
       BitsAvailableForSqueezing := Rate;
     end;
-    partialBlock := BitsAvailableForSqueezing;
-    if partialBlock > outputLength - i then
-      partialBlock := outputLength - i;
+    chunk := BitsAvailableForSqueezing;
+    needed := outputLength - written;
+    if chunk > needed then
+      chunk := needed;
     MoveFast(DataQueue[(Rate - BitsAvailableForSqueezing) shr 3],
-      output^[i shr 3], partialBlock shr 3);
-    dec(BitsAvailableForSqueezing, partialBlock);
-    inc(i, partialBlock);
+      output^[written shr 3], chunk shr 3);
+    dec(BitsAvailableForSqueezing, chunk);
+    inc(written, chunk);
   end;
 end;
 
@@ -8682,28 +8904,29 @@ var
   ll: integer;
   lw: cardinal;
 begin
+  // compute the masked bits
   bitlen := bitlen and 7;
   if bitlen = 0 then
     lw := 0
   else
     lw := bits and Pred(cardinal(1) shl bitlen);
-  // 'append' (in LSB language) the domain separation bits
+  // append the domain separation bits
   if Algo >= SHAKE_128 then
   begin
-    // SHAKE: append four bits 1111
-    lw := lw or (cardinal($F) shl bitlen);
+    // SHAKE: append four MSB bits 1111
+    lw := lw or (cardinal($0f) shl bitlen);
     ll := bitlen + 4;
   end
   else
   begin
-    // SHA-3: append two bits 01
-    lw := lw or (cardinal($2) shl bitlen);
+    // SHA-3: append two MSB bits 01
+    lw := lw or (cardinal($02) shl bitlen);
     ll := bitlen + 2;
   end;
   // update state with final bits
   if ll < 9 then
   begin
-    // 0..8-bit, one call to update
+    // 0..8 bits, one call to update
     lw := lw shl (8 - ll);
     AbsorbFinal(@lw, ll);
     // squeeze the digits from the sponge
@@ -9779,8 +10002,97 @@ end;
 
 {$endif CPUINTEL}
 
+{$ifndef FPC} // this operation is an intrinsic with the FPC compiler
+function RolDWord(value: cardinal; count: integer): cardinal;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  result := (value shl count) or (value shr (32 - count));
+end;
+{$endif FPC}
+
+procedure MD4Transform(var buf: TBlock128; const in_: TMd5In);
+var
+  a, b, c, d, e: cardinal;
+begin // fast enough unrolled code - especially with FPC RolDWord() intrinsic
+  a := buf[0];
+  b := buf[1];
+  c := buf[2];
+  d := buf[3];
+  a := RolDWord(a + (d xor (b and (c xor d))) + in_[ 0], 3);
+  d := RolDWord(d + (c xor (a and (b xor c))) + in_[ 1], 7);
+  c := RolDWord(c + (b xor (d and (a xor b))) + in_[ 2], 11);
+  b := RolDWord(b + (a xor (c and (d xor a))) + in_[ 3], 19);
+  a := RolDWord(a + (d xor (b and (c xor d))) + in_[ 4], 3);
+  d := RolDWord(d + (c xor (a and (b xor c))) + in_[ 5], 7);
+  c := RolDWord(c + (b xor (d and (a xor b))) + in_[ 6], 11);
+  b := RolDWord(b + (a xor (c and (d xor a))) + in_[ 7], 19);
+  a := RolDWord(a + (d xor (b and (c xor d))) + in_[ 8], 3);
+  d := RolDWord(d + (c xor (a and (b xor c))) + in_[ 9], 7);
+  c := RolDWord(c + (b xor (d and (a xor b))) + in_[10], 11);
+  b := RolDWord(b + (a xor (c and (d xor a))) + in_[11], 19);
+  a := RolDWord(a + (d xor (b and (c xor d))) + in_[12], 3);
+  d := RolDWord(d + (c xor (a and (b xor c))) + in_[13], 7);
+  c := RolDWord(c + (b xor (d and (a xor b))) + in_[14], 11);
+  b := RolDWord(b + (a xor (c and (d xor a))) + in_[15], 19);
+  e := $5a827999;
+  a := RolDWord(a + ((b and c) or (b and d) or (c and d)) + in_[ 0] + e, 3);
+  d := RolDWord(d + ((a and b) or (a and c) or (b and c)) + in_[ 4] + e, 5);
+  c := RolDWord(c + ((d and a) or (d and b) or (a and b)) + in_[ 8] + e, 9);
+  b := RolDWord(b + ((c and d) or (c and a) or (d and a)) + in_[12] + e, 13);
+  a := RolDWord(a + ((b and c) or (b and d) or (c and d)) + in_[ 1] + e, 3);
+  d := RolDWord(d + ((a and b) or (a and c) or (b and c)) + in_[ 5] + e, 5);
+  c := RolDWord(c + ((d and a) or (d and b) or (a and b)) + in_[ 9] + e, 9);
+  b := RolDWord(b + ((c and d) or (c and a) or (d and a)) + in_[13] + e, 13);
+  a := RolDWord(a + ((b and c) or (b and d) or (c and d)) + in_[ 2] + e, 3);
+  d := RolDWord(d + ((a and b) or (a and c) or (b and c)) + in_[ 6] + e, 5);
+  c := RolDWord(c + ((d and a) or (d and b) or (a and b)) + in_[10] + e, 9);
+  b := RolDWord(b + ((c and d) or (c and a) or (d and a)) + in_[14] + e, 13);
+  a := RolDWord(a + ((b and c) or (b and d) or (c and d)) + in_[ 3] + e, 3);
+  d := RolDWord(d + ((a and b) or (a and c) or (b and c)) + in_[ 7] + e, 5);
+  c := RolDWord(c + ((d and a) or (d and b) or (a and b)) + in_[11] + e, 9);
+  b := RolDWord(b + ((c and d) or (c and a) or (d and a)) + in_[15] + e, 13);
+  e := $6ed9eba1;
+  a := RolDWord(a + (b xor c xor d) + in_[ 0] + e, 3);
+  d := RolDWord(d + (a xor b xor c) + in_[ 8] + e, 9);
+  c := RolDWord(c + (d xor a xor b) + in_[ 4] + e, 11);
+  b := RolDWord(b + (c xor d xor a) + in_[12] + e, 15);
+  a := RolDWord(a + (b xor c xor d) + in_[ 2] + e, 3);
+  d := RolDWord(d + (a xor b xor c) + in_[10] + e, 9);
+  c := RolDWord(c + (d xor a xor b) + in_[ 6] + e, 11);
+  b := RolDWord(b + (c xor d xor a) + in_[14] + e, 15);
+  a := RolDWord(a + (b xor c xor d) + in_[ 1] + e, 3);
+  d := RolDWord(d + (a xor b xor c) + in_[ 9] + e, 9);
+  c := RolDWord(c + (d xor a xor b) + in_[ 5] + e, 11);
+  b := RolDWord(b + (c xor d xor a) + in_[13] + e, 15);
+  a := RolDWord(a + (b xor c xor d) + in_[ 3] + e, 3);
+  d := RolDWord(d + (a xor b xor c) + in_[11] + e, 9);
+  c := RolDWord(c + (d xor a xor b) + in_[ 7] + e, 11);
+  b := RolDWord(b + (c xor d xor a) + in_[15] + e, 15);
+  inc(buf[0], a);
+  inc(buf[1], b);
+  inc(buf[2], c);
+  inc(buf[3], d);
+end;
+
 
 { TMd5 }
+
+procedure TMd5.Init;
+begin
+  buf[0] := $67452301;
+  buf[1] := $efcdab89;
+  buf[2] := $98badcfe;
+  buf[3] := $10325476;
+  bytes[0] := 0;
+  bytes[1] := 0;
+  transform := @MD5Transform;
+end;
+
+procedure TMd5.InitMD4;
+begin
+  Init;
+  transform := @MD4Transform;
+end;
 
 function TMd5.Final: TMd5Digest;
 begin
@@ -9811,7 +10123,7 @@ begin
   begin
     // Padding forces an extra block
     FillcharFast(p^, count + 8, 0);
-    MD5Transform(buf, in_);
+    transform(buf, in_);
     p := @in_;
     count := 56;
   end;
@@ -9819,19 +10131,24 @@ begin
   // Append length in bits and transform
   in_[14] := bytes[0] shl 3;
   in_[15] := (bytes[1] shl 3) or (bytes[0] shr 29);
-  MD5Transform(buf, in_);
+  transform(buf, in_);
 end;
 
-procedure TMd5.Full(Buffer: pointer; Len: integer; out Digest: TMd5Digest);
+procedure TMd5.Full(Buffer: pointer; Len: integer; out Digest: TMd5Digest;
+  ForceMD4: boolean);
 begin
   buf[0] := $67452301;
   buf[1] := $efcdab89;
   buf[2] := $98badcfe;
   buf[3] := $10325476;
   bytes[0] := Len;
+  if ForceMD4 Then
+    transform := @MD4Transform
+  else
+    transform := @MD5Transform;
   while Len >= SizeOf(TMd5In) do
   begin
-    MD5Transform(buf, PMd5In(Buffer)^);
+    transform(buf, PMd5In(Buffer)^);
     inc(PMd5In(Buffer));
     dec(Len, SizeOf(TMd5In));
   end;
@@ -9845,24 +10162,14 @@ begin
   else
   begin
     FillcharFast(Buffer^, Len + 8, 0);
-    MD5Transform(buf, in_);
+    transform(buf, in_);
     FillcharFast(in_, 56, 0);
   end;
   Len := bytes[0];
   in_[14] := Len shl 3;
   in_[15] := Len shr 29;
-  MD5Transform(buf, in_);
+  transform(buf, in_);
   Digest := TMd5Digest(buf);
-end;
-
-procedure TMd5.Init;
-begin
-  buf[0] := $67452301;
-  buf[1] := $efcdab89;
-  buf[2] := $98badcfe;
-  buf[3] := $10325476;
-  bytes[0] := 0;
-  bytes[1] := 0;
 end;
 
 procedure TMd5.Update(const buffer; len: cardinal);
@@ -9887,13 +10194,13 @@ begin
   end;
   // First chunk is an odd size
   MoveFast(p^, PAnsiChar(@in_)[64 - t], t);
-  MD5Transform(buf, in_);
+  transform(buf, in_);
   inc(PByte(p), t);
   dec(len, t);
   // Process data in 64-byte chunks
   for i := 1 to len shr 6 do
   begin
-    MD5Transform(buf, p^);
+    transform(buf, p^);
     inc(p);
   end;
   // Handle any remaining bytes of data.
@@ -9908,9 +10215,9 @@ end;
 
 function Md5Buf(const Buffer; Len: cardinal): TMd5Digest;
 var
-  MD5: TMd5;
+  md: TMd5;
 begin
-  MD5.Full(@Buffer, Len, result);
+  md.Full(@Buffer, Len, result);
 end;
 
 function HTDigest(const user, realm, pass: RawByteString): RawUtf8;
@@ -9924,10 +10231,17 @@ begin
   result := tmp + Md5(tmp + pass);
 end;
 
+function Md4Buf(const Buffer; Len: cardinal): THash128;
+var
+  md: TMd5;
+begin
+  md.Full(@Buffer, Len, result, {forcemd4=}true);
+end;
+
 
 { TSha1 }
 
-procedure sha1Compress(var Hash: TShaHash; Data: PByteArray);
+procedure Sha1CompressPas(var Hash: TShaHash; Data: PByteArray);
 var
   A, B, C, D, E, X: cardinal;
   W: array[0..79] of cardinal;
@@ -10123,17 +10437,22 @@ begin
   // 1. append bit '1' after Buffer
   Data.Buffer[Data.Index] := $80;
   FillcharFast(Data.Buffer[Data.Index + 1], 63 - Data.Index, 0);
-  // 2. Compress if more than 448-bit, (no room for 64 bit length
+  // 2. Compress if more than 448-bit, (no room for 64 bit length)
   if Data.Index >= 56 then
   begin
-    sha1Compress(Data.Hash, @Data.Buffer);
+    RawSha1Compress(Data.Hash, @Data.Buffer);
     FillcharFast(Data.Buffer, 56, 0);
   end;
   // Write 64 bit Buffer length into the last bits of the last block
   // (in big endian format) and do a final compress
   PCardinal(@Data.Buffer[56])^ := bswap32(TQWordRec(Data.MLen).h);
   PCardinal(@Data.Buffer[60])^ := bswap32(TQWordRec(Data.MLen).L);
-  sha1Compress(Data.Hash, @Data.Buffer);
+  {$ifdef ASMX64}
+  if cfSHA in CpuFeatures then
+    Sha1ni(Data.Buffer, Data.Hash, 64)     // Intel SHA HW opcodes
+  else
+  {$endif ASMX64}
+    Sha1CompressPas(Data.Hash, @Data.Buffer); // regular code
   // Hash -> Digest to little endian format
   bswap160(@Data.Hash, @Digest);
   // Clear Data
@@ -10181,12 +10500,20 @@ begin
       if Data.Index <> 0 then
       begin
         MoveFast(Buffer^, Data.Buffer[Data.Index], aLen);
-        sha1Compress(Data.Hash, @Data.Buffer);
+        RawSha1Compress(Data.Hash, @Data.Buffer);
         Data.Index := 0;
       end
       else
         // direct compression to avoid uneeded temporary copy
-        sha1Compress(Data.Hash, Buffer);
+        {$ifdef ASMX64}
+        if cfSHA in CpuFeatures then
+        begin
+          aLen := Len and (not 63);
+          Sha1ni(Buffer^, Data.Hash, aLen);    // Intel SHA HW opcodes
+        end
+        else
+        {$endif ASMX64}
+          Sha1CompressPas(Data.Hash, Buffer); // regular code
       dec(Len, aLen);
       inc(PByte(Buffer), aLen);
     end
@@ -10202,6 +10529,16 @@ end;
 procedure TSha1.Update(const Buffer: RawByteString);
 begin
   Update(pointer(Buffer), length(Buffer));
+end;
+
+procedure RawSha1Compress(var Hash; Data: pointer);
+begin
+  {$ifdef ASMX64}
+  if cfSHA in CpuFeatures then
+    Sha1ni(Data^, Hash, 64)     // Intel SHA HW opcodes
+  else
+  {$endif ASMX64}
+    Sha1CompressPas(TShaHash(Hash), Data); // regular code
 end;
 
 
@@ -10334,11 +10671,6 @@ begin
   MD5Transform(TMd5Buf(Hash), PMd5In(Data)^);
 end;
 
-procedure RawSha1Compress(var Hash; Data: pointer);
-begin
-  sha1Compress(TShaHash(Hash), Data);
-end;
-
 procedure Pbkdf2HmacSha1(const password, salt: RawByteString; count: integer;
   out result: TSha1Digest);
 var
@@ -10347,17 +10679,21 @@ var
   mac: THmacSha1;
   first: THmacSha1;
 begin
-  HmacSha1(password, salt + #0#0#0#1, result);
+  first.Init(pointer(password), length(password));
+  mac := first;
+  mac.Update(pointer(salt), length(salt));
+  PInteger(@tmp)^ := $01000000;
+  mac.Update(@tmp, 4);
+  mac.Done(result); // HmacSha1(password, salt + #0#0#0#1, result);
   if count < 2 then
     exit;
   tmp := result;
-  first.Init(pointer(password), length(password));
   for i := 2 to count do
   begin
     mac := first; // re-use the very same SHA context for best performance
     mac.sha.Update(@tmp, SizeOf(tmp));
     mac.Done(tmp, true);
-    XorMemory(@result, @tmp, SizeOf(result));
+    XorMemory(@result, @tmp, SizeOf(result)); // XorMemoryPtrInt not usable here
   end;
   FillcharFast(mac, SizeOf(mac), 0);
   FillcharFast(first, SizeOf(first), 0);
@@ -10387,10 +10723,10 @@ end;
 
 function Md5(const s: RawByteString): RawUtf8;
 var
-  MD5: TMd5;
+  md: TMd5;
   D: TMd5Digest;
 begin
-  MD5.Full(pointer(s), Length(s), D);
+  md.Full(pointer(s), Length(s), D);
   result := Md5DigestToString(D);
   FillZero(D);
 end;
@@ -10403,6 +10739,16 @@ end;
 function Md5StringToDigest(const Source: RawUtf8; out Dest: TMd5Digest): boolean;
 begin
   result := mormot.core.text.HexToBin(pointer(Source), @Dest, SizeOf(Dest));
+end;
+
+function Md4(const s: RawByteString): RawUtf8;
+var
+  md: TMd5;
+  D: TMd5Digest;
+begin
+  md.Full(pointer(s), Length(s), D, {forcemd4=}true);
+  result := Md5DigestToString(D);
+  FillZero(D);
 end;
 
 
@@ -10473,6 +10819,15 @@ begin
   FillZero(Digest);
 end;
 
+function Sha512_256(const s: RawByteString): RawUtf8;
+var
+  SHA: TSha512_256;
+  Digest: TSha256Digest;
+begin
+  SHA.Full(pointer(s), length(s), Digest);
+  result := Sha256DigestToString(Digest);
+  FillZero(Digest);
+end;
 
 function Sha512DigestToString(const D: TSha512Digest): RawUtf8;
 begin
@@ -11042,8 +11397,6 @@ begin
 end;
 
 
-
-
 procedure InitializeUnit;
 {$ifdef USEARMCRYPTO}
 var
@@ -11052,6 +11405,10 @@ var
   shablock: array[0..63] of byte;
   i: PtrInt;
 {$endif USEARMCRYPTO}
+{$ifdef ASMX64}
+var
+  dummy: THash256;
+{$endif ASMX64}
 begin
   ComputeAesStaticTables;
   {$ifdef ASMX64}
@@ -11070,7 +11427,7 @@ begin
   if (cfSSE41 in CpuFeatures) and   // PINSRD/Q
      (cfSSE3 in CpuFeatures) then   // PSHUFB
   begin
-    // optimized Intel's Sha256Sse4.asm
+    // optimized Intel's .asm using SSE4 or SHA HW opcodes
     K256Aligned := @K256;
     if PtrUInt(K256Aligned) and 15 <> 0 then
     begin
@@ -11079,6 +11436,13 @@ begin
       if PtrUInt(K256Aligned) and 15 <> 0 then
         K256Aligned := nil; // paranoid
     end;
+    if cfSHA in CpuFeatures then // detect cpuid with SSE4.1 + SHA opcodes
+      try
+        Sha256ni(dummy, dummy, 1);
+      except
+        // Intel SHA256 HW opcodes seem not available
+        exclude(CpuFeatures, cfSHA);
+      end;
   end;
   {$endif ASMX64}
   {$ifdef USEAESNIHASH}

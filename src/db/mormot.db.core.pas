@@ -1194,7 +1194,8 @@ type
     dNexusDB,
     dPostgreSQL,
     dDB2,
-    dInformix);
+    dInformix,
+    dMariaDB);
 
   /// set of the available database definitions
   TSqlDBDefinitions = set of TSqlDBDefinition;
@@ -1220,6 +1221,8 @@ type
   // and server TOrmModel tables or fields do not match
   // - boOnlyObjects will force to generate only a JSON array of raw JSON
   // objects with no BATCH prefix nor verbs
+  // - boMayHaveBlob could be set if some BLOB are likely to appear in the data
+  // so that some engines could disabled e.g. array binding
   TRestBatchOption = (
     boInsertOrIgnore,
     boInsertOrReplace,
@@ -1228,7 +1231,8 @@ type
     boPutNoCacheFlush,
     boRollbackOnError,
     boNoModelEncoding,
-    boOnlyObjects);
+    boOnlyObjects,
+    boMayHaveBlob);
 
   /// a set of options for TRest.BatchStart() process
   // - TJsonObjectDecoder will use it to compute the corresponding SQL
@@ -3026,7 +3030,7 @@ var
       P := GotoNextNotSpace(P + 1);
       select.FunctionName := prop;
       inc(fSelectFunctionCount);
-      if IdemPropNameU(prop, 'COUNT') and
+      if PropNameEquals(prop, 'COUNT') and
          (P^ = '*') then
       begin
         select.Field := 0; // count( * ) -> count(ID)
@@ -3035,9 +3039,9 @@ var
       end
       else
       begin
-        if IdemPropNameU(prop, 'DISTINCT') then
+        if PropNameEquals(prop, 'DISTINCT') then
           select.FunctionKnown := funcDistinct
-        else if IdemPropNameU(prop, 'MAX') then
+        else if PropNameEquals(prop, 'MAX') then
           select.FunctionKnown := funcMax;
         select.Field := GetPropIndex;
         if select.Field < 0 then
@@ -3331,7 +3335,7 @@ begin
         inc(P); // trim left
     until not GetNextSelectField; // add other CSV field names
   // 2. get FROM clause
-  if not IdemPropNameU(prop, 'FROM') then
+  if not PropNameEquals(prop, 'FROM') then
     exit; // incorrect SQL statement
   GetNextFieldProp(P, prop);
   fTableName := prop;
@@ -3341,7 +3345,7 @@ begin
   whereNotClause := false;
   whereBefore := '';
   GetNextFieldProp(P, prop);
-  if IdemPropNameU(prop, 'WHERE') then
+  if PropNameEquals(prop, 'WHERE') then
   begin
     repeat
       B := P;
@@ -3359,7 +3363,7 @@ begin
       ndx := GetPropIndex;
       if ndx < 0 then
       begin
-        if IdemPropNameU(prop, 'NOT') then
+        if PropNameEquals(prop, 'NOT') then
         begin
           whereNotClause := true;
           continue;
@@ -3408,9 +3412,9 @@ begin
         exit; // invalid SQL statement
       inc(whereCount);
       GetNextFieldProp(P, prop);
-      if IdemPropNameU(prop, 'OR') then
+      if PropNameEquals(prop, 'OR') then
         whereWithOR := true
-      else if IdemPropNameU(prop, 'AND') then
+      else if PropNameEquals(prop, 'AND') then
         whereWithOR := false
       else
         goto lim2;
@@ -3434,7 +3438,7 @@ lim2: case IdemPPChar(pointer(prop), @ENDCLAUSE) of
           begin
             // ORDER BY
             GetNextFieldProp(P, prop);
-            if IdemPropNameU(prop, 'BY') or
+            if PropNameEquals(prop, 'BY') or
                (fOrderByField <> nil) then
             begin
               repeat
@@ -3446,9 +3450,9 @@ lim2: case IdemPPChar(pointer(prop), @ENDCLAUSE) of
                 begin
                   // check ORDER BY ... ASC/DESC
                   if GetNextFieldProp(P, prop) then
-                    if IdemPropNameU(prop, 'DESC') then
+                    if PropNameEquals(prop, 'DESC') then
                       include(fOrderByFieldDesc, order)
-                    else if not IdemPropNameU(prop, 'ASC') then
+                    else if not PropNameEquals(prop, 'ASC') then
                       goto lim2; // parse LIMIT OFFSET clauses after ORDER
                   if P^ <> ',' then
                     break; // no more fields in this ORDER BY clause
@@ -3463,7 +3467,7 @@ lim2: case IdemPPChar(pointer(prop), @ENDCLAUSE) of
           begin
             // GROUP BY
             GetNextFieldProp(P, prop);
-            if IdemPropNameU(prop, 'BY') then
+            if PropNameEquals(prop, 'BY') then
             begin
               repeat
                 ndx := GetPropIndex; // 0 = ID, otherwise PropertyIndex+1
@@ -3629,7 +3633,7 @@ begin
   if (PInteger(P)^ = NULL_LOW) and
      (P[4] in [#0, #9, #10, #13, ' ', ',', '}', ']']) then
   begin
-    /// GetJsonField('null') returns '' -> check here to make a diff with '""'
+    /// TGetJsonField returns '' for 'null' -> code to make a diff with '""'
     FieldType := ftaNull;
     FieldValue := NULL_STR_VAR;
     inc(P, 4);
@@ -3829,7 +3833,7 @@ begin
   result := false;
   if length(Fields) <> FieldCount then
     exit;
-  for i := 0 to FieldCount - 1 do
+  for i := 0 to FieldCount - 1 do // FPC will use aggressive inlining
     if not IdemPropNameU(Fields[i], FieldNames[i], FieldNamesL[i]) then
       exit;
   result := true;
@@ -4161,7 +4165,8 @@ procedure EncodeInsertPrefix(W: TTextWriter; BatchOptions: TRestBatchOptions;
 begin
   if boInsertOrIgnore in BatchOptions then
     case DB of
-      dMySQL:
+      dMySQL,
+      dMariaDB:
         W.AddShort('insert ignore into ')
     else
       W.AddShort('insert or ignore into '); // SQlite3
@@ -4171,7 +4176,7 @@ begin
       dFirebird:
         W.AddShort('update or insert into ');
     else
-      W.AddShort('replace into '); // SQlite3 and MySQL
+      W.AddShort('replace into '); // SQlite3 and MySQL+MariaDB
     end
   else
     W.AddShort('insert into ');

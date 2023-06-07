@@ -532,7 +532,7 @@ function DateTimeMSToString(HH, MM, SS, MS, Y, M, D: cardinal; Expanded: boolean
 /// convert some date/time to the "HTTP-date" format as defined by RFC 7231
 // - i.e. "Tue, 15 Nov 1994 12:45:26 GMT" to be used as a value of
 // "Date", "Expires" or "Last-Modified" HTTP header
-// - if you care about timezones Value must be converted to UTC first
+// - if you care about timezones, dt value must be converted to UTC first
 // using TSynTimeZone.LocalToUtc, or tz should be properly set
 function DateTimeToHttpDate(dt: TDateTime; const tz: RawUtf8 = 'GMT'): RawUtf8; overload;
 
@@ -1431,9 +1431,17 @@ begin
   result := Dest;
 end;
 
+function VariantToDateTime2(const V: Variant; var Value: TDateTime): boolean;
+var
+  tmp: RawUtf8; // sub-procedure to void hidden try..finally
+begin
+  VariantToUtf8(V, tmp);
+  Iso8601ToDateTimePUtf8CharVar(pointer(tmp), length(tmp), Value);
+  result := Value <> 0;
+end;
+
 function VariantToDateTime(const V: Variant; var Value: TDateTime): boolean;
 var
-  tmp: RawUtf8;
   vd: TVarData;
   vt: cardinal;
 begin
@@ -1444,6 +1452,9 @@ begin
   begin
     result := true;
     case vt of
+      varEmpty,
+      varNull:
+        Value := 0;
       varDouble,
       varDate:
         Value := TVarData(V).VDouble;
@@ -1451,15 +1462,21 @@ begin
         Value := TVarData(V).VSingle;
       varCurrency:
         Value := TVarData(V).VCurrency;
+      {$ifdef OSWINDOWS}
+      varOleFileTime:
+        Value := FileTimeToDateTime(PFileTime(@TVarData(V).VInt64)^);
+      {$endif OSWINDOWS}
+      varString:
+        with TVarData(V) do
+        begin
+          Iso8601ToDateTimePUtf8CharVar(VString, length(RawUtf8(VString)), Value);
+          result := Value <> 0;
+        end;
     else
       if SetVariantUnRefSimpleValue(V, vd{%H-}) then
         result := VariantToDateTime(variant(vd), Value)
       else
-      begin
-        VariantToUtf8(V, tmp);
-        Iso8601ToDateTimePUtf8CharVar(pointer(tmp), length(tmp), Value);
-        result := Value <> 0;
-      end;
+        result := VariantToDateTime2(V, Value);
     end;
   end;
 end;
@@ -3055,6 +3072,7 @@ begin
         V := ord(P[6]) * 10 + ord(P[7]) - (48 + 480 + 1); // Day 1..31 -> 0..30
         if (V <= 30) and
            ((L = 8) or
+            (L = 14) or
             (P[8] in [#0, ' ', 'T'])) then
           inc(result, V shl 17)
         else
@@ -3064,7 +3082,9 @@ begin
         end;
       end;
     end;
-    if L < 15 then
+    if L = 14 then
+      dec(P) // no 'T' or ' ' separator for YYYYMMDDhhmmss
+    else if L < 14 then
     begin
       // not enough place to retrieve a time
       if ContainsNoTime <> nil then

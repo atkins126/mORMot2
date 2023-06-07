@@ -51,7 +51,7 @@ const
 // - varEmpty, varNull or a '' string would be considered as void
 // - varBoolean=false or varDate=0 would be considered as void
 // - a TDocVariantData with Count=0 would be considered as void
-// - any other value (e.g. integer) would be considered as not void
+// - any other value (e.g. floats or integer) would be considered as not void
 function VarIsVoid(const V: Variant): boolean;
 
 /// returns a supplied string as variant, or null if v is void ('')
@@ -181,7 +181,7 @@ function VariantCompareI(const V1, V2: variant): PtrInt;
 /// fast comparison of a Variant and UTF-8 encoded String (or number)
 // - slightly faster than plain V=Str, which computes a temporary variant
 // - here Str='' equals unassigned, null or false
-// - if CaseSensitive is false, will use IdemPropNameU() for comparison
+// - if CaseSensitive is false, will use PropNameEquals() for comparison
 function VariantEquals(const V: Variant; const Str: RawUtf8;
   CaseSensitive: boolean = true): boolean; overload;
 
@@ -1128,7 +1128,7 @@ type
     // objects, e.g. {"Main":{"Second":{"Third":value}}}
     // - if you call Init*() methods in a row, ensure you call Clear in-between
     procedure InitObjectFromPath(const aPath: RawUtf8; const aValue: variant;
-      aOptions: TDocVariantOptions = []);
+      aOptions: TDocVariantOptions = []; aPathDelim: AnsiChar = '.');
     /// initialize a variant instance to store some document-based object content
     // from a supplied JSON array or JSON object content
     // - warning: the incoming JSON buffer will be modified in-place: so you should
@@ -1191,7 +1191,8 @@ type
     // - if you call Init*() methods in a row, ensure you call Clear in-between
     // - will copy Count and Names[] by reference, but Values[] only if CloneValues
     // - returns the first item in Values[]
-    function InitFrom(const CloneFrom: TDocVariantData; CloneValues: boolean): PVariant;
+    function InitFrom(const CloneFrom: TDocVariantData; CloneValues: boolean;
+      MakeUnique: boolean = false): PVariant;
       {$ifdef HASINLINE}inline;{$endif}
     /// initialize a variant instance to store some document-based object content
     // from a supplied CSV UTF-8 encoded text
@@ -1723,7 +1724,9 @@ type
     // ! Assert(TDocVariantData(aVariant).Kind=dvArray);
     // - you can specify an optional index in the array where to insert
     // - returns the index of the corresponding newly added item
-    function AddItem(const aValue: variant; aIndex: integer = -1): integer;
+    function AddItem(const aValue: variant; aIndex: integer = -1): integer; overload;
+    /// add a TDocVariant value to this document, handled as array
+    function AddItem(const aValue: TDocVariantData; aIndex: integer = -1): integer; overload;
     /// add a value to this document, handled as array, from its text representation
     // - this function expects a UTF-8 text for the value, which would be
     // converted to a variant number, if possible (as varInt/varInt64/varCurrency
@@ -2565,7 +2568,7 @@ function ObjectDefaultToVariant(aClass: TClass;
 
 /// low-level function to set a variant from an unescaped JSON number or string
 // - expect the JSON input buffer to be already unescaped and #0 terminated,
-// e.g. by GetJsonField(), and having set properly the wasString flag
+// e.g. by TGetJsonField, and having set properly the wasString flag
 // - set the varString or call GetVariantFromNotStringJson() if TryCustomVariants=nil
 // - or call GetJsonToAnyVariant() to support TryCustomVariants^ complex input
 procedure GetVariantFromJsonField(Json: PUtf8Char; wasString: boolean;
@@ -2574,7 +2577,7 @@ procedure GetVariantFromJsonField(Json: PUtf8Char; wasString: boolean;
 
 /// low-level function to set a variant from an unescaped JSON non string
 // - expect the JSON input buffer to be already unescaped and #0 terminated,
-// e.g. by GetJsonField(), and having returned wasString=false
+// e.g. by TGetJsonField, and having returned wasString=false
 // - is called e.g. by function GetVariantFromJsonField()
 // - will recognize null, boolean, integer, Int64, currency, double
 // (if AllowDouble is true) input, then set Value and return TRUE
@@ -2797,6 +2800,7 @@ begin
         result := VAny = nil;
       varDate:
         result := VInt64 = 0;
+      // note: 0 as integer or float is considered as non-void
     else
       if vt = varVariantByRef then
         result := VarIsVoid(PVariant(VPointer)^)
@@ -3311,7 +3315,7 @@ function VariantEquals(const V: Variant; const Str: RawUtf8;
     if CaseSensitive then
       result := (tmp = Str)
     else
-      result := IdemPropNameU(tmp, Str);
+      result := PropNameEquals(tmp, Str);
   end;
 
 var
@@ -3330,7 +3334,7 @@ begin
         if CaseSensitive then
           result := RawUtf8(VString) = Str
         else
-          result := IdemPropNameU(RawUtf8(VString), Str);
+          result := PropNameEquals(RawUtf8(VString), Str);
     else
       if VariantToInt64(V, v1) then
       begin
@@ -4794,16 +4798,22 @@ begin
   VCount := 0;
 end;
 
-function TDocVariantData.InitFrom(
-  const CloneFrom: TDocVariantData; CloneValues: boolean): PVariant;
+function TDocVariantData.InitFrom(const CloneFrom: TDocVariantData;
+  CloneValues, MakeUnique: boolean): PVariant;
 begin
   TRttiVarData(self).VType := TRttiVarData(CloneFrom).VType; // VType+VOptions
-  VName := CloneFrom.VName;    // byref copy
   VCount := CloneFrom.VCount;
-  if CloneValues then
-    VValue := CloneFrom.VValue // byref copy
+  if MakeUnique then
+    VName := copy(CloneFrom.VName) // new array, but byref names
   else
-    SetLength(VValue, VCount); // setup void values
+    VName := CloneFrom.VName;      // byref copy of the whole array
+  if CloneValues then
+    if MakeUnique then
+      VValue := copy(CloneFrom.VValue) // new array, but byref values
+    else
+      VValue := CloneFrom.VValue       // byref copy of the whole array
+  else
+    SetLength(VValue, VCount);         // setup void values
   result := pointer(VValue);
 end;
 
@@ -5315,7 +5325,7 @@ begin
 end;
 
 procedure TDocVariantData.InitObjectFromPath(const aPath: RawUtf8;
-  const aValue: variant; aOptions: TDocVariantOptions);
+  const aValue: variant; aOptions: TDocVariantOptions; aPathDelim: AnsiChar);
 var
   right: RawUtf8;
 begin
@@ -5327,11 +5337,12 @@ begin
     VCount := 1;
     SetLength(VName, 1);
     SetLength(VValue, 1);
-    Split(aPath, '.', VName[0], right);
+    Split(aPath, aPathDelim, VName[0], right);
     if right = '' then
       VValue[0] := aValue
     else
-      PDocVariantData(@VValue[0])^.InitObjectFromPath(right, aValue, aOptions);
+      PDocVariantData(@VValue[0])^.InitObjectFromPath(
+        right, aValue, aOptions, aPathDelim);
   end;
 end;
 
@@ -6095,6 +6106,12 @@ function TDocVariantData.AddItem(const aValue: variant; aIndex: integer): intege
 begin
   result := InternalAdd('', aIndex);
   InternalSetValue(result, aValue);
+end;
+
+function TDocVariantData.AddItem(const aValue: TDocVariantData; aIndex: integer): integer;
+begin
+  result := InternalAdd('', aIndex);
+  InternalSetValue(result, variant(aValue));
 end;
 
 function TDocVariantData.AddItemFromText(const aValue: RawUtf8;
@@ -7702,7 +7719,7 @@ begin
           'ToNonExpandedJson: Value[%] not expected object', [r]);
       for f := 0 to fieldCount - 1 do
         if (r > 0) and
-           not IdemPropNameU(row^.VName[f], field[f]) then
+           not PropNameEquals(row^.VName[f], field[f]) then
           raise EDocVariant.CreateUtf8(
             'ToNonExpandedJson: Value[%] field=% expected=%',
             [r, row^.VName[f], field[f]])

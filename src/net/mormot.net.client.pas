@@ -42,17 +42,18 @@ uses
   mormot.lib.curl,
   {$endif USELIBCURL}
   {$ifdef DOMAINRESTAUTH}
-  mormot.lib.sspi, // do-nothing units on non compliant system
+  mormot.lib.sspi, // do-nothing units on non compliant systems
   mormot.lib.gssapi,
   {$endif DOMAINRESTAUTH}
-  mormot.core.unicode, // for efficient UTF-8 text process within HTTP
-  mormot.core.buffers,
+  mormot.core.unicode,
   mormot.core.text,
+  mormot.core.buffers,
   mormot.core.data,
   mormot.core.datetime,
   mormot.core.rtti,
   mormot.core.json, // TSynDictionary for THttpRequestCached
-  mormot.core.perf;
+  mormot.core.perf,
+  mormot.crypt.secure;
 
 
 { ******************** THttpMultiPartStream for multipart/formdata HTTP POST }
@@ -97,7 +98,7 @@ type
       const encoding: RawUtf8 = '');
     /// append a file upload section from a local file
     // - the supplied file won't be loaded into memory, but created as an
-    // internal TFileStream to be retrieved by successive Read() calls
+    // internal TFileStreamEx to be retrieved by successive Read() calls
     // - warning: should be called after AddContent
     procedure AddFile(const name: RawUtf8; const filename: TFileName;
       const contenttype: RawUtf8 = '');
@@ -264,6 +265,9 @@ type
     fRedirected: RawUtf8;
     fRangeStart, fRangeEnd: Int64;
     fBasicAuthUserPassword, fAuthBearer: RawUtf8;
+    fDigestAuthUserName: RawUtf8;
+    fDigestAuthPassword: SpiUtf8;
+    fDigestAuthAlgo: TDigestAlgo;
     fOnAuthorize, fOnProxyAuthorize: TOnHttpClientSocketAuthorize;
     fOnBeforeRequest: TOnHttpClientSocketRequest;
     fOnAfterRequest: TOnHttpClientSocketRequest;
@@ -273,6 +277,9 @@ type
     {$endif DOMAINRESTAUTH}
     procedure RequestSendHeader(const url, method: RawUtf8); virtual;
     procedure RequestClear; virtual;
+    function OnAuthorizeDigest(Sender: THttpClientSocket;
+      var Context: TTHttpClientSocketRequestParams;
+      const Authenticate: RawUtf8): boolean;
   public
     /// common initialization of all constructors
     // - this overridden method will set the UserAgent with some default value
@@ -280,6 +287,8 @@ type
     // aTimeout parameters (in ms) if you left the 0 default parameters,
     // it would use global HTTP_DEFAULT_RECEIVETIMEOUT variable values
     constructor Create(aTimeOut: PtrInt = 0); override;
+    /// finalize this instance
+    destructor Destroy; override;
     /// low-level HTTP/1.1 request
     // - called by all Get/Head/Post/Put/Delete REST methods
     // - after an Open(server,port), return 200,202,204 if OK, or an http
@@ -332,6 +341,9 @@ type
     /// after an Open(server,port), return 200,202,204 if OK, http status error otherwise
     function Delete(const url: RawUtf8; KeepAlive: cardinal = 0;
       const header: RawUtf8 = ''): integer;
+    /// setup web authentication using the Digest access algorithm
+    procedure AuthorizeDigest(const UserName: RawUtf8; const Password: SpiUtf8;
+      Algo: TDigestAlgo = daMD5_Sess);
     {$ifdef DOMAINRESTAUTH}
     /// web authentication of the current logged user using Windows Security
     // Support Provider Interface (SSPI) or GSSAPI library on Linux
@@ -426,13 +438,17 @@ type
 
 /// returns the HTTP User-Agent header value of a mORMot client including
 // the Instance class name in its minified/uppercase-only translation
+// - typical value is "Mozilla/5.0 (Linux x64; mORMot) HCS/2.0.4957 Tests/3"
+// for THttpClientSocket from a Tests.exe application in version 3.x
+// - note: the framework would identify the 'mORMot' pattern in the user-agent
+// header to enable advanced behavior e.g. about JSON transmission
 function DefaultUserAgent(Instance: TObject): RawUtf8;
 
 /// create a THttpClientSocket, returning nil on error
 // - useful to easily catch socket error exception ENetSock
 function OpenHttp(const aServer, aPort: RawUtf8; aTLS: boolean = false;
   aLayer: TNetLayer = nlTcp; const aUrlForProxy: RawUtf8 = '';
-  aTimeout: integer = 0): THttpClientSocket; overload;
+  aTimeout: integer = 0; aTLSContext: PNetTlsContext = nil): THttpClientSocket; overload;
 
 /// create a THttpClientSocket, returning nil on error
 // - useful to easily catch socket error exception ENetSock
@@ -1178,7 +1194,7 @@ function SendEmail(const Server, From, CsvDest, Subject: RawUtf8;
   const Pass: RawUtf8 = ''; const Port: RawUtf8 = '25';
   const TextCharSet: RawUtf8  =  'ISO-8859-1'; TLS: boolean = false): boolean; overload;
 
-/// send an email using the SMTP protocol
+/// send an email using the SMTP protocol via a TSmtpConnection definition
 // - retry true on success
 // - the Subject is expected to be in plain 7-bit ASCII, so you could use
 // SendEmailSubject() to encode it as Unicode, if needed
@@ -1186,6 +1202,7 @@ function SendEmail(const Server, From, CsvDest, Subject: RawUtf8;
 // - you can optionally set another encoding charset or force TextCharSet='' to
 // expect the 'Content-Type:' to be set in Headers and Text to be the raw body
 // (e.g. a multi-part encoded message)
+// - TLS will be forced if the port is either 465 or 587
 function SendEmail(const Server: TSmtpConnection;
   const From, CsvDest, Subject: RawUtf8; const Text: RawByteString;
   const Headers: RawUtf8 = ''; const TextCharSet: RawUtf8  = 'ISO-8859-1';
@@ -1279,7 +1296,7 @@ begin
     if content <> '' then
       s := s + #13#10 + content + #13#10
     else
-      s := s + #13#10; // a TFileStream content will be appended
+      s := s + #13#10; // a TFileStreamEx content will be appended
     inc(fFilesCount);
   end;
   Append(s);
@@ -1337,7 +1354,7 @@ var
   P: PShortString;
   name: ShortString;
 begin
-  // instance class THttpClientSocket translated into 'HCS'
+  // instance class translated e.g. THttpClientSocket into 'HCS'
   P := ClassNameShort(Instance);
   name[0] := #0;
   for i := 2 to ord(P^[0]) do
@@ -1347,8 +1364,10 @@ begin
     P := @name;
   // note: the framework would identify 'mORMot' pattern in the user-agent
   // header to enable advanced behavior e.g. about JSON transmission
-  FormatUtf8('Mozilla/5.0 (' + OS_TEXT + '; mORMot ' +
-    SYNOPSE_FRAMEWORK_VERSION + ' %)', [P^], result);
+  FormatUtf8(
+    'Mozilla/5.0 (' + OS_TEXT + ' ' + CPU_ARCH_TEXT + '; mORMot) %/' +
+    SYNOPSE_FRAMEWORK_VERSION + ' %/%',
+    [P^, Executable.ProgramName, Executable.Version.Major], result);
 end;
 
 
@@ -1458,6 +1477,12 @@ begin
   inherited Create(aTimeOut);
   fUserAgent := DefaultUserAgent(self);
   fAccept := '*/*';
+end;
+
+destructor THttpClientSocket.Destroy;
+begin
+  FillZero(fDigestAuthPassword);
+  inherited Destroy;
 end;
 
 procedure THttpClientSocket.RequestInternal(
@@ -1673,6 +1698,9 @@ var
   newuri: TUri;
 begin
   ctxt.url := url;
+  if (url = '') or
+     (url[1] <> '/') then
+    insert('/', ctxt.Url, 1); // normalize URI as in RFC (e.g. for Digest auth)
   ctxt.method := method;
   ctxt.KeepAlive := KeepAlive;
   ctxt.header := TrimU(header);
@@ -1876,7 +1904,7 @@ begin
      (params.Hash <> '') then
     // check if we already got the file from its md5/sha* hash
     if FileExists(destfile) and
-       IdemPropNameU(params.Hasher.HashFile(result), params.Hash) then
+       PropNameEquals(params.Hasher.HashFile(result), params.Hash) then
     begin
       if Assigned(OnLog) then
         OnLog(sllTrace, 'WGet %: % already available', [url, result], self);
@@ -1885,7 +1913,7 @@ begin
     else if cached <> '' then
     begin
       // check from local cache folder
-      if IdemPropNameU(params.Hasher.HashFile(cached), params.Hash) then
+      if PropNameEquals(params.Hasher.HashFile(cached), params.Hash) then
       begin
         if Assigned(OnLog) then
           OnLog(sllTrace, 'WGet %: copy from cached %', [url, cached], self);
@@ -1943,7 +1971,7 @@ begin
     begin
       // check the hash
       if resumed and
-         not IdemPropNameU(parthash, params.Hash) then
+         not PropNameEquals(parthash, params.Hash) then
       begin
         if Assigned(OnLog) then
           OnLog(sllDebug,
@@ -1952,7 +1980,7 @@ begin
         requrl := url; // try again including initial redirection steps
         DoRequestAndFreePartStream;
       end;
-      if not IdemPropNameU(parthash, params.Hash) then
+      if not PropNameEquals(parthash, params.Hash) then
       begin
         DeleteFile(part); // this .part was clearly incorrect
         raise EHttpSocket.CreateUtf8('%.WGet: %:%/% hash failure (% vs %)',
@@ -2011,6 +2039,43 @@ begin
   result := Request(url, 'DELETE', KeepAlive, header);
 end;
 
+procedure THttpClientSocket.AuthorizeDigest(const UserName: RawUtf8;
+  const Password: SpiUtf8; Algo: TDigestAlgo);
+begin
+  fDigestAuthUserName := UserName;
+  fDigestAuthPassword := Password;
+  fDigestAuthAlgo := Algo;
+  if (UserName = '') or
+     (Algo = daUndefined) then
+    OnAuthorize := nil
+  else
+    OnAuthorize := OnAuthorizeDigest;
+end;
+
+function THttpClientSocket.OnAuthorizeDigest(Sender: THttpClientSocket;
+  var Context: TTHttpClientSocketRequestParams;
+  const Authenticate: RawUtf8): boolean;
+var
+  auth: RawUtf8;
+  p: PUtf8Char;
+begin
+  p := pointer(Authenticate);
+  if IdemPChar(p, 'DIGEST ') then
+  begin
+    auth := DigestClient(fDigestAuthAlgo, p + 7, Context.method, Context.url,
+      fDigestAuthUserName, fDigestAuthPassword);
+    if auth <> '' then
+    begin
+      auth := 'Authorization: Digest ' + auth;
+      if Context.header <> '' then
+        Context.header := auth + #13#10 + Context.header
+      else
+        Context.header := auth;
+    end;
+  end;
+  result := true;
+end;
+
 {$ifdef DOMAINRESTAUTH}
 
 // see https://developer.mozilla.org/en-US/docs/Web/HTTP/Authentication
@@ -2027,7 +2092,7 @@ begin
   if (Sender = nil) or
      not IdemPChar(pointer(Authenticate), pointer(SECPKGNAMEHTTP_UPPER)) then
     exit;
-  unauthstatus := Context.status;
+  unauthstatus := Context.status; // either 401 or 407
   bak := Context.header;
   InvalidateSecContext(sc, 0);
   try
@@ -2042,7 +2107,7 @@ begin
         Context.header := Context.header + #13#10 + bak;
       Sender.RequestInternal(Context);
     until Context.status <> unauthstatus;
-    // here Context is the final answer (sucess or auth error) from the server
+    // here Context is the final answer (success or auth error) from the server
   finally
     FreeSecContext(sc);
     if Assigned(Sender.OnLog) then
@@ -2077,13 +2142,13 @@ end;
 
 function OpenHttp(const aServer, aPort: RawUtf8; aTLS: boolean;
   aLayer: TNetLayer; const aUrlForProxy: RawUtf8;
-  aTimeout: integer): THttpClientSocket;
+  aTimeout: integer; aTLSContext: PNetTlsContext): THttpClientSocket;
 var
   temp: TUri;
 begin
   try
     result := THttpClientSocket.Open(aServer, aPort, aLayer, aTimeout,
-      aTLS, nil, GetSystemProxyUri(aUrlForProxy, '', temp));
+      aTLS, aTLSContext, GetSystemProxyUri(aUrlForProxy, '', temp));
   except
     on ENetSock do
       result := nil;
@@ -2504,8 +2569,8 @@ procedure TWinHttp.InternalSendRequest(const aMethod: RawUtf8;
     Bytes, Current, Max, BytesWritten: cardinal;
   begin
     if Assigned(fOnUpload) and
-       (IdemPropNameU(aMethod, 'POST') or
-        IdemPropNameU(aMethod, 'PUT')) then
+       (IsPost(aMethod) or
+        IsPut(aMethod)) then
     begin
       result := WinHttpApi.SendRequest(
         fRequest, nil, 0, nil, 0, L, 0);
@@ -3450,15 +3515,19 @@ var
         raise ESendEmail.CreateUtf8('read error for %', [Res]);
     until (Length(Res) < 4) or
           (Res[4] <> '-'); // - indicates there are other headers following
-    if not IdemPChar(pointer(Res), pointer(Answer)) then
-      raise ESendEmail.CreateU(Res);
+    if IdemPChar(pointer(Res), pointer(Answer)) then
+      exit;
+    if Res = '' then
+      Res := 'Undefined Error';
+    raise ESendEmail.CreateUtf8('Command failed for % at %:% [%]',
+      [User, Server, Port, Res]);
   end;
 
   procedure Exec(const Command, Answer: RawUtf8);
   begin
     TCP.SockSendFlush(Command + #13#10);
     if ioresult <> 0 then
-      raise ESendEmail.CreateUtf8('write error for %', [Command]);
+      raise ESendEmail.CreateUtf8('Write error for %', [Command]);
     Expect(Answer)
   end;
 
@@ -3486,6 +3555,7 @@ begin
     else
       Exec('HELO ' + Server, '25');
     TCP.SockSend(['MAIL FROM:<', From, '>']);
+    TCP.SockSendFlush;
     Expect('250');
     repeat
       GetNextItem(P, ',', rec);
@@ -3589,7 +3659,7 @@ end;
 
 
 initialization
-  NewSocketAddressCache := TNewSocketAddressCache.Create(600); // 10min timeout
+  NewSocketAddressCache := TNewSocketAddressCache.Create(600); // 10 min timeout
 
 finalization
   NewSocketAddressCache := nil;

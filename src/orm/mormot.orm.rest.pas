@@ -74,6 +74,21 @@ type
     dirWriteLock,
     dirWriteNoLock);
 
+  /// abtract state-engine used internally by TRestOrm.NewEngineRetrieveAsync
+  TRestOrmEngineRetrieveAsync = class
+  public
+    Context: TObject;
+    Table: TOrmClass;
+    TableIndex: PtrInt;
+    ID: TID;
+    Sql: RawUtf8;
+    ResultOne: TOnRestOrmRetrieveOne;
+    ResultJson: TOnRestOrmRetrieveJson;
+    ResultArray: TOnRestOrmRetrieveArray;
+    procedure Execute; virtual; abstract; // override calls OnResult then Free
+    procedure OnResult(const Json: RawUtf8);
+  end;
+
   {$M+}
 
   /// implements TRest.ORM process for abstract REST client/server
@@ -87,7 +102,7 @@ type
     fTempJsonWriter: TJsonWriter;
     fTempJsonWriterLock: TLightLock;
     /// compute SELECT ... FROM TABLE WHERE ...
-    function SQLComputeForSelect(Table: TOrmClass;
+    function SqlComputeForSelect(TableModelIndex: integer; Table: TOrmClass;
       const FieldNames, WhereClause: RawUtf8): RawUtf8;
     /// used by all overloaded Add/Delete methods
     procedure GetJsonValuesForAdd(TableIndex: integer; Value: TOrm;
@@ -111,8 +126,8 @@ type
     // - if ReturnedRowCount points to an integer variable, it must be filled with
     // the number of row data returned (excluding field names)
     // - this method must be implemented in a thread-safe manner
-    function EngineList(const SQL: RawUtf8; ForceAjax: boolean = false;
-      ReturnedRowCount: PPtrInt = nil): RawUtf8; virtual; abstract;
+    function EngineList(TableModelIndex: integer; const SQL: RawUtf8;
+      ForceAjax: boolean = false; ReturnedRowCount: PPtrInt = nil): RawUtf8; virtual; abstract;
     /// Execute directly a SQL statement, without any result
     // - implements POST SQL on ModelRoot URI
     // - return true on success
@@ -126,6 +141,10 @@ type
     // - override this method for proper data retrieval from the database engine
     // - this method must be implemented in a thread-safe manner
     function EngineRetrieve(TableModelIndex: integer; ID: TID): RawUtf8; virtual; abstract;
+    /// raw factory from the underlying database engine, using a callback as result
+    // - this default implementation will raise an EOrmAsyncException
+    function NewEngineRetrieveAsync(
+      Context: TObject; Table: TOrmClass): TRestOrmEngineRetrieveAsync; virtual;
     /// create a new member
     // - implements REST POST collection
     // - SentData can contain the JSON object with field values to be added
@@ -239,12 +258,12 @@ type
     destructor Destroy; override;
     /// internal TOrm value serialization to a JSON object
     // - will use shared AcquireJsonWriter instance if available
-    procedure GetJsonValue(Value: TOrm; withID: boolean; const Fields: TFieldBits;
-      out Json: RawUtf8; LowerCaseID: boolean = false); overload;
+    procedure GetJsonValue(Value: TOrm; withID: boolean;
+      const Fields: TFieldBits; out Json: RawUtf8); overload;
     /// internal TOrm value serialization to a JSON object
     // - will use shared AcquireJsonWriter instance if available
     procedure GetJsonValue(Value: TOrm; withID: boolean; Occasion: TOrmOccasion;
-      var Json: RawUtf8; LowerCaseID: boolean = false); overload;
+      var Json: RawUtf8); overload;
       {$ifdef FPC} inline; {$endif} // avoid URW1111 on Delphi 2010
     /// access to a thread-safe internal cached TJsonWriter instance
     function AcquireJsonWriter(var tmp: TTextWriterStackBuffer): TJsonWriter;
@@ -270,10 +289,10 @@ type
     function MemberExists(Table: TOrmClass; ID: TID): boolean; virtual;
     {$ifdef ORMGENERICS}
     function RetrieveIList(T: TOrmClass; var IList;
-      const CustomFieldsCsv: RawUtf8 = ''): boolean; overload;
+      const FieldsCsv: RawUtf8 = ''): boolean; overload;
     function RetrieveIList(T: TOrmClass; var IList;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const CustomFieldsCsv: RawUtf8 = ''): boolean; overload;
+      const FieldsCsv: RawUtf8 = ''): boolean; overload;
     {$endif ORMGENERICS}
     function OneFieldValue(Table: TOrmClass;
       const FieldName, WhereClause: RawUtf8): RawUtf8; overload;
@@ -311,9 +330,9 @@ type
     function MultiFieldValues(Table: TOrmClass; const FieldNames: RawUtf8;
       const WhereClauseFormat: RawUtf8;
       const Args, Bounds: array of const): TOrmTable; overload;
-    function FTSMatch(Table: TOrmFts3Class; const WhereClause: RawUtf8;
+    function FtsMatch(Table: TOrmFts3Class; const WhereClause: RawUtf8;
       var DocID: TIDDynArray): boolean; overload;
-    function FTSMatch(Table: TOrmFts3Class; const MatchClause: RawUtf8;
+    function FtsMatch(Table: TOrmFts3Class; const MatchClause: RawUtf8;
       var DocID: TIDDynArray; const PerFieldWeight: array of double;
       limit: integer = 0; offset: integer = 0): boolean; overload;
     function MainFieldValue(Table: TOrmClass; ID: TID;
@@ -322,44 +341,58 @@ type
     function MainFieldIDs(Table: TOrmClass; const Values: array of RawUtf8;
       out IDs: TIDDynArray): boolean;
     function Retrieve(const SqlWhere: RawUtf8; Value: TOrm;
-      const CustomFieldsCsv: RawUtf8 = ''): boolean; overload; virtual;
+      const FieldsCsv: RawUtf8 = ''): boolean; overload; virtual;
     function Retrieve(const WhereClauseFmt: RawUtf8;
       const Args, Bounds: array of const; Value: TOrm;
-      const CustomFieldsCsv: RawUtf8 = ''): boolean; overload;
+      const FieldsCsv: RawUtf8 = ''): boolean; overload;
     function Retrieve(aID: TID; Value: TOrm;
       ForUpdate: boolean = false): boolean; overload; virtual;
     function Retrieve(Reference: TRecordReference;
       ForUpdate: boolean = false): TOrm; overload;
     function Retrieve(aPublishedRecord, aValue: TOrm): boolean; overload;
+    procedure RetrieveAsync(Context: TObject; Table: TOrmClass; const SqlWhere: RawUtf8;
+      const OnResult: TOnRestOrmRetrieveOne; const FieldsCsv: RawUtf8 = ''); overload;
+    procedure RetrieveAsync(Context: TObject; Table: TOrmClass; const WhereClauseFmt: RawUtf8;
+      const Args, Bounds: array of const; const OnResult: TOnRestOrmRetrieveOne;
+      const FieldsCsv: RawUtf8 = ''); overload;
+    procedure RetrieveAsync(Context: TObject; Table: TOrmClass; ID: TID;
+      const OnResult: TOnRestOrmRetrieveOne); overload;
+    procedure RetrieveAsyncListJson(Context: TObject; Table: TOrmClass;
+      const SqlWhere: RawUtf8; const OnResult: TOnRestOrmRetrieveJson;
+      const FieldsCsv: RawUtf8 = ''; aForceAjax: boolean = false); overload;
+    procedure RetrieveAsyncListObjArray(Context: TObject; Table: TOrmClass;
+      const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
+      const OnResult: TOnRestOrmRetrieveArray; const FieldsCsv: RawUtf8 = '');
+
     function RetrieveList(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const CustomFieldsCsv: RawUtf8 = ''): TObjectList; overload;
+      const FieldsCsv: RawUtf8 = ''): TObjectList; overload;
     function RetrieveListJson(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const CustomFieldsCsv: RawUtf8 = ''; aForceAjax: boolean = false): RawJson; overload;
+      const FieldsCsv: RawUtf8 = ''; aForceAjax: boolean = false): RawJson; overload;
     function RetrieveListJson(Table: TOrmClass;
-      const SqlWhere: RawUtf8; const CustomFieldsCsv: RawUtf8 = '';
+      const SqlWhere: RawUtf8; const FieldsCsv: RawUtf8 = '';
       aForceAjax: boolean = false): RawJson; overload;
     function RetrieveDocVariantArray(Table: TOrmClass;
-      const ObjectName, CustomFieldsCsv: RawUtf8;
+      const ObjectName, FieldsCsv: RawUtf8;
       FirstRecordID: PID = nil; LastRecordID: PID = nil): variant; overload;
     function RetrieveDocVariantArray(Table: TOrmClass;
       const ObjectName: RawUtf8; const FormatSqlWhere: RawUtf8;
-      const BoundsSqlWhere: array of const; const CustomFieldsCsv: RawUtf8;
+      const BoundsSqlWhere: array of const; const FieldsCsv: RawUtf8;
       FirstRecordID: PID = nil; LastRecordID: PID = nil): variant; overload;
     function RetrieveOneFieldDocVariantArray(Table: TOrmClass;
       const FieldName, FormatSqlWhere: RawUtf8;
       const BoundsSqlWhere: array of const): variant;
     function RetrieveDocVariant(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const CustomFieldsCsv: RawUtf8): variant;
+      const FieldsCsv: RawUtf8): variant;
     function RetrieveListObjArray(var ObjArray; Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const CustomFieldsCsv: RawUtf8 = ''): boolean;
+      const FieldsCsv: RawUtf8 = ''): boolean;
     procedure AppendListAsJsonArray(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
       const OutputFieldName: RawUtf8; W: TOrmWriter;
-      const CustomFieldsCsv: RawUtf8 = '');
+      const FieldsCsv: RawUtf8 = '');
     function RTreeMatch(DataTable: TOrmClass;
       const DataTableBlobFieldName: RawUtf8; RTreeTable: TOrmRTreeClass;
       const DataTableBlobField: RawByteString; var DataID: TIDDynArray): boolean;
@@ -595,7 +628,7 @@ begin
   fTempJsonWriter.Free;
 end;
 
-function TRestOrm.SQLComputeForSelect(Table: TOrmClass;
+function TRestOrm.SqlComputeForSelect(TableModelIndex: integer; Table: TOrmClass;
   const FieldNames, WhereClause: RawUtf8): RawUtf8;
 begin
   result := '';
@@ -603,11 +636,13 @@ begin
      (Table = nil) then
     exit;
   if FieldNames = '' then
-    result := fModel.Props[Table].SqlFromSelectWhere('*', WhereClause)
+    result := fModel.TableProps[TableModelIndex].
+      SqlFromSelectWhere('*', WhereClause)
   else
     with Table.OrmProps do
       if FieldNames = '*' then
-        result := SqlFromSelect(SqlTableName, SqlTableRetrieveAllFields, WhereClause, '')
+        result := SqlFromSelect(
+          SqlTableName, SqlTableRetrieveAllFields, WhereClause, '')
       else if (PosExChar(',', FieldNames) = 0) and
               (PosExChar('(', FieldNames) = 0) and
               not IsFieldName(pointer(FieldNames)) then
@@ -637,14 +672,14 @@ begin
 end;
 
 procedure TRestOrm.GetJsonValue(Value: TOrm; withID: boolean;
-  Occasion: TOrmOccasion; var Json: RawUtf8; LowerCaseID: boolean);
+  Occasion: TOrmOccasion; var Json: RawUtf8);
 begin
   GetJsonValue(
-    Value, withID, Value.Orm.SimpleFieldsBits[Occasion], Json, LowerCaseID);
+    Value, withID, Value.Orm.SimpleFieldsBits[Occasion], Json);
 end;
 
 procedure TRestOrm.GetJsonValue(Value: TOrm; withID: boolean;
-  const Fields: TFieldBits; out Json: RawUtf8; LowerCaseID: boolean);
+  const Fields: TFieldBits; out Json: RawUtf8);
 var
   WR: TJsonWriter;
   tmp: TTextWriterStackBuffer;
@@ -656,7 +691,7 @@ begin
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
-    Value.AppendAsJsonObject(WR, Fields, withID, LowerCaseID);
+    Value.AppendAsJsonObject(WR, Fields, withID);
     WR.SetText(Json);
   {$ifdef HASFASTTRYFINALLY}
   finally
@@ -783,14 +818,14 @@ end;
 {$ifdef ORMGENERICS}
 
 function TRestOrm.RetrieveIList(T: TOrmClass; var IList;
-  const CustomFieldsCsv: RawUtf8): boolean;
+  const FieldsCsv: RawUtf8): boolean;
 begin
-  result := RetrieveIList(T, IList, '', [], CustomFieldsCsv);
+  result := RetrieveIList(T, IList, '', [], FieldsCsv);
 end;
 
 function TRestOrm.RetrieveIList(T: TOrmClass; var IList;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const CustomFieldsCsv: RawUtf8): boolean;
+  const FieldsCsv: RawUtf8): boolean;
 var
   table: TOrmTable;
 begin
@@ -798,7 +833,7 @@ begin
   IInterface(IList) := nil;
   if self = nil then
     exit;
-  table := MultiFieldValues(T, CustomFieldsCsv, FormatSqlWhere, BoundsSqlWhere);
+  table := MultiFieldValues(T, FieldsCsv, FormatSqlWhere, BoundsSqlWhere);
   if table <> nil then
     try
       table.ToNewIList(T, IList);
@@ -1198,13 +1233,18 @@ end;
 function TRestOrm.MultiFieldValues(Table: TOrmClass;
   const FieldNames, WhereClause: RawUtf8): TOrmTable;
 var
-  sql: RawUtf8;
+  sql, json: RawUtf8;
+  t: PtrInt;
 begin
-  sql := SQLComputeForSelect(Table, FieldNames, WhereClause);
+  t := Model.GetTableIndexExisting(Table);
+  sql := SqlComputeForSelect(t, Table, FieldNames, WhereClause);
+  result := nil;
   if sql = '' then
-    result := nil
-  else
-    result := ExecuteList([Table], sql);
+    exit;
+  json := EngineList(t, sql, false, nil);
+  if json <> '' then
+    result := TOrmTableJson.CreateFromTables([Table], sql, json,
+      {ownjson=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1)
 end;
 
 function TRestOrm.MultiFieldValues(Table: TOrmClass;
@@ -1227,14 +1267,14 @@ begin
   result := MultiFieldValues(Table, FieldNames, where);
 end;
 
-function TRestOrm.FTSMatch(Table: TOrmFts3Class;
+function TRestOrm.FtsMatch(Table: TOrmFts3Class;
   const WhereClause: RawUtf8; var DocID: TIDDynArray): boolean;
 begin
   // FTS3 tables don't have any ID, but RowID or DocID
   result := OneFieldValues(Table, 'RowID', WhereClause, TInt64DynArray(DocID));
 end;
 
-function TRestOrm.FTSMatch(Table: TOrmFts3Class; const MatchClause: RawUtf8;
+function TRestOrm.FtsMatch(Table: TOrmFts3Class; const MatchClause: RawUtf8;
   var DocID: TIDDynArray; const PerFieldWeight: array of double;
   limit: integer; offset: integer): boolean;
 var
@@ -1253,7 +1293,7 @@ begin
   WhereClause := WhereClause + ') DESC';
   if limit > 0 then
     WhereClause := FormatUtf8('% LIMIT % OFFSET %', [WhereClause, limit, offset]);
-  result := FTSMatch(Table, WhereClause, DocID);
+  result := FtsMatch(Table, WhereClause, DocID);
 end;
 
 function TRestOrm.MainFieldValue(Table: TOrmClass; ID: TID;
@@ -1319,7 +1359,7 @@ begin
 end;
 
 function TRestOrm.Retrieve(const SqlWhere: RawUtf8; Value: TOrm;
-  const CustomFieldsCsv: RawUtf8): boolean;
+  const FieldsCsv: RawUtf8): boolean;
 var
   T: TOrmTable;
   sql: RawUtf8;
@@ -1331,7 +1371,7 @@ begin
   sql := TrimU(SqlWhere);
   if not EndWith(sql, ' LIMIT 1') then
     sql := sql + ' LIMIT 1'; // we keep a single record below
-  T := MultiFieldValues(POrmClass(Value)^, CustomFieldsCsv, sql);
+  T := MultiFieldValues(POrmClass(Value)^, FieldsCsv, sql);
   if T <> nil then
   try
     if T.RowCount >= 1 then
@@ -1348,12 +1388,12 @@ end;
 
 function TRestOrm.Retrieve(const WhereClauseFmt: RawUtf8;
   const Args, Bounds: array of const; Value: TOrm;
-  const CustomFieldsCsv: RawUtf8): boolean;
+  const FieldsCsv: RawUtf8): boolean;
 var
   where: RawUtf8;
 begin
   where := FormatUtf8(WhereClauseFmt, Args, Bounds);
-  result := Retrieve(where, Value, CustomFieldsCsv);
+  result := Retrieve(where, Value, FieldsCsv);
 end;
 
 function TRestOrm.Retrieve(aID: TID; Value: TOrm; ForUpdate: boolean): boolean;
@@ -1423,7 +1463,7 @@ end;
 
 function TRestOrm.RetrieveList(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const CustomFieldsCsv: RawUtf8): TObjectList;
+  const FieldsCsv: RawUtf8): TObjectList;
 var
   T: TOrmTable;
 begin
@@ -1431,7 +1471,7 @@ begin
   if (self = nil) or
      (Table = nil) then
     exit;
-  T := MultiFieldValues(Table, CustomFieldsCsv, FormatSqlWhere, BoundsSqlWhere);
+  T := MultiFieldValues(Table, FieldsCsv, FormatSqlWhere, BoundsSqlWhere);
   if T <> nil then
   try
     result := TObjectList.Create;
@@ -1443,38 +1483,40 @@ end;
 
 function TRestOrm.RetrieveListJson(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const CustomFieldsCsv: RawUtf8; aForceAjax: boolean): RawJson;
+  const FieldsCsv: RawUtf8; aForceAjax: boolean): RawJson;
 var
   where: RawUtf8;
 begin
   where := FormatUtf8(FormatSqlWhere, [], BoundsSqlWhere);
-  result := RetrieveListJson(Table, where, CustomFieldsCsv, aForceAjax)
+  result := RetrieveListJson(Table, where, FieldsCsv, aForceAjax)
 end;
 
 function TRestOrm.RetrieveListJson(Table: TOrmClass;
-  const SqlWhere: RawUtf8; const CustomFieldsCsv: RawUtf8;
+  const SqlWhere: RawUtf8; const FieldsCsv: RawUtf8;
   aForceAjax: boolean): RawJson;
 var
   sql: RawUtf8;
+  t: PtrInt;
 begin
-  sql := SQLComputeForSelect(Table, CustomFieldsCsv, SqlWhere);
+  t := Model.GetTableIndexExisting(Table);
+  sql := SqlComputeForSelect(t, Table, FieldsCsv, SqlWhere);
   if sql = '' then
     result := ''
   else
-    result := EngineList(sql, aForceAjax);
+    result := EngineList(t, sql, aForceAjax);
 end;
 
 function TRestOrm.RetrieveDocVariantArray(Table: TOrmClass;
-  const ObjectName, CustomFieldsCsv: RawUtf8;
+  const ObjectName, FieldsCsv: RawUtf8;
   FirstRecordID, LastRecordID: PID): variant;
 begin
-  result := RetrieveDocVariantArray(Table, ObjectName, '', [], CustomFieldsCsv,
+  result := RetrieveDocVariantArray(Table, ObjectName, '', [], FieldsCsv,
     FirstRecordID, LastRecordID);
 end;
 
 function TRestOrm.RetrieveDocVariantArray(Table: TOrmClass;
   const ObjectName: RawUtf8; const FormatSqlWhere: RawUtf8;
-  const BoundsSqlWhere: array of const; const CustomFieldsCsv: RawUtf8;
+  const BoundsSqlWhere: array of const; const FieldsCsv: RawUtf8;
   FirstRecordID, LastRecordID: PID): variant;
 var
   T: TOrmTable;
@@ -1484,7 +1526,7 @@ begin
   if (self <> nil) and
      (Table <> nil) then
   begin
-    T := MultiFieldValues(Table, CustomFieldsCsv, FormatSqlWhere, BoundsSqlWhere);
+    T := MultiFieldValues(Table, FieldsCsv, FormatSqlWhere, BoundsSqlWhere);
     if T <> nil then
     try
       T.ToDocVariant(v, {readonly=}false); // not readonly -> TDocVariant dvArray
@@ -1530,7 +1572,7 @@ end;
 
 function TRestOrm.RetrieveDocVariant(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const CustomFieldsCsv: RawUtf8): variant;
+  const FieldsCsv: RawUtf8): variant;
 var
   T: TOrmTable;
   bits: TFieldBits;
@@ -1546,9 +1588,9 @@ begin
       if fCache.IsCached(Table) and
          (length(BoundsSqlWhere) = 1) and
          VarRecToInt64(BoundsSqlWhere[0], Int64(ID)) and
-         FieldBitsFromCsv(CustomFieldsCsv, bits) and
-         (IdemPropNameU('RowID=?', FormatSqlWhere) or
-          IdemPropNameU('ID=?', FormatSqlWhere)) then
+         FieldBitsFromCsv(FieldsCsv, bits) and
+         (PropNameEquals('RowID=?', FormatSqlWhere) or
+          PropNameEquals('ID=?', FormatSqlWhere)) then
       begin
         if IsZero(bits) then
           // get all simple fields if none supplied, like MultiFieldValues()
@@ -1564,7 +1606,7 @@ begin
           exit;
         end;
       end;
-    T := MultiFieldValues(Table, CustomFieldsCsv, FormatSqlWhere, BoundsSqlWhere);
+    T := MultiFieldValues(Table, FieldsCsv, FormatSqlWhere, BoundsSqlWhere);
     if T <> nil then
     try
       T.ToDocVariant(1, result)
@@ -1576,7 +1618,7 @@ end;
 
 function TRestOrm.RetrieveListObjArray(var ObjArray; Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const CustomFieldsCsv: RawUtf8): boolean;
+  const FieldsCsv: RawUtf8): boolean;
 var
   T: TOrmTable;
 begin
@@ -1584,7 +1626,10 @@ begin
   if (self = nil) or
      (Table = nil) then
     exit;
-  T := MultiFieldValues(Table, CustomFieldsCsv, FormatSqlWhere, BoundsSqlWhere);
+  if FormatSqlWhere = '' then
+    T := MultiFieldValues(Table, FieldsCsv, '')
+  else
+    T := MultiFieldValues(Table, FieldsCsv, FormatSqlWhere, BoundsSqlWhere);
   if T <> nil then
   try
     result := T.ToObjArray(ObjArray, Table);
@@ -1595,7 +1640,7 @@ end;
 
 procedure TRestOrm.AppendListAsJsonArray(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const OutputFieldName: RawUtf8; W: TOrmWriter; const CustomFieldsCsv: RawUtf8);
+  const OutputFieldName: RawUtf8; W: TOrmWriter; const FieldsCsv: RawUtf8);
 var
   Rec: TOrm;
 begin
@@ -1604,12 +1649,77 @@ begin
      (W = nil) then
     exit;
   Rec := Table.CreateAndFillPrepare(Self, FormatSqlWhere, BoundsSqlWhere,
-    CustomFieldsCsv);
+    FieldsCsv);
   try
     Rec.AppendFillAsJsonArray(OutputFieldName, W, Rec.FillContext.TableMapFields);
   finally
     Rec.Free;
   end;
+end;
+
+function TRestOrm.NewEngineRetrieveAsync(
+  Context: TObject; Table: TOrmClass): TRestOrmEngineRetrieveAsync;
+begin
+  raise EOrmAsyncException.CreateUtf8(
+    '%.RetrieveAsync(%) unsupported on this DB', [self, Table]);
+end;
+
+procedure TRestOrm.RetrieveAsync(Context: TObject; Table: TOrmClass;
+  const SqlWhere: RawUtf8; const OnResult: TOnRestOrmRetrieveOne;
+  const FieldsCsv: RawUtf8);
+var
+  async: TRestOrmEngineRetrieveAsync;
+begin
+  async := NewEngineRetrieveAsync(Context, Table);
+  async.Sql := SqlComputeForSelect(async.TableIndex, Table, FieldsCsv, SqlWhere);
+  async.ResultOne := OnResult;
+  async.Execute;
+end;
+
+procedure TRestOrm.RetrieveAsync(Context: TObject; Table: TOrmClass;
+  const WhereClauseFmt: RawUtf8; const Args, Bounds: array of const;
+  const OnResult: TOnRestOrmRetrieveOne; const FieldsCsv: RawUtf8);
+var
+  where: RawUtf8;
+begin
+  where := FormatUtf8(WhereClauseFmt, Args, Bounds);
+  RetrieveAsync(Context, Table, where, OnResult, FieldsCsv);
+end;
+
+procedure TRestOrm.RetrieveAsync(Context: TObject; Table: TOrmClass; ID: TID;
+  const OnResult: TOnRestOrmRetrieveOne);
+var
+  async: TRestOrmEngineRetrieveAsync;
+begin
+  async := NewEngineRetrieveAsync(Context, Table);
+  async.ID := ID;
+  async.ResultOne := OnResult;
+  async.Execute;
+end;
+
+procedure TRestOrm.RetrieveAsyncListJson(Context: TObject; Table: TOrmClass;
+  const SqlWhere: RawUtf8; const OnResult: TOnRestOrmRetrieveJson;
+  const FieldsCsv: RawUtf8; aForceAjax: boolean);
+var
+  async: TRestOrmEngineRetrieveAsync;
+begin
+  async := NewEngineRetrieveAsync(Context, Table);
+  async.Sql := SqlComputeForSelect(async.TableIndex, Table, FieldsCsv, SqlWhere);
+  async.ResultJson := OnResult;
+  async.Execute;
+end;
+
+procedure TRestOrm.RetrieveAsyncListObjArray(Context: TObject; Table: TOrmClass;
+  const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
+  const OnResult: TOnRestOrmRetrieveArray; const FieldsCsv: RawUtf8);
+var
+  async: TRestOrmEngineRetrieveAsync;
+begin
+  async := NewEngineRetrieveAsync(Context, Table);
+  async.Sql := SqlComputeForSelect(async.TableIndex, Table, FieldsCsv,
+    FormatUtf8(FormatSqlWhere, [], BoundsSqlWhere));
+  async.ResultArray := OnResult;
+  async.Execute;
 end;
 
 function TRestOrm.RTreeMatch(DataTable: TOrmClass;
@@ -1683,7 +1793,7 @@ function TRestOrm.ExecuteList(const Tables: array of TOrmClass;
 var
   json: RawUtf8;
 begin
-  json := EngineList(SQL, false);
+  json := ExecuteJson(Tables, SQL, false, nil);
   if json <> '' then
     result := TOrmTableJson.CreateFromTables(Tables, SQL, json,
       {ownjson=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1)
@@ -1693,8 +1803,14 @@ end;
 
 function TRestOrm.ExecuteJson(const Tables: array of TOrmClass;
   const SQL: RawUtf8; ForceAjax: boolean; ReturnedRowCount: PPtrInt): RawJson;
+var
+  t: integer;
 begin
-  result := EngineList(SQL, ForceAjax, ReturnedRowCount);
+  if length(Tables) = 1 then
+    t := Model.GetTableIndexExisting(Tables[0])
+  else
+    t := -1;
+  result := EngineList(t, SQL, ForceAjax, ReturnedRowCount);
 end;
 
 function TRestOrm.Execute(const aSql: RawUtf8): boolean;
@@ -2461,6 +2577,54 @@ function TRestOrm.GetCurrentSessionUserID: TID;
 begin
   result := fRest.GetCurrentSessionUserID;
 end;
+
+
+{ TRestOrmEngineRetrieveAsync }
+
+procedure TRestOrmEngineRetrieveAsync.OnResult(const Json: RawUtf8);
+var
+  value: TOrm;
+  arr: TOrmObjArray;
+  t: TOrmTable;
+begin
+  try
+    if Assigned(ResultJson) then
+      ResultJson(Json, Context)
+    else if Assigned(ResultOne) then
+      if Json = '' then
+        ResultOne(nil, Context) // db error
+      else
+      begin
+        Value := Table.Create;
+        try
+          Value.FillFrom(Json);
+          Value.IDValue := ID;
+          ResultOne(value, Context);
+        finally
+          Value.Free;
+        end;
+      end
+    else if Assigned(ResultArray) then
+      if Json = '' then
+        ResultArray(nil, Context) // db error
+      else
+      try
+        t := TOrmTableJson.CreateFromTables([Table], Sql, Json,
+          {ownjson=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1);
+        try
+          t.ToObjArray(t, Table);
+        finally
+          t.Free;
+        end;
+        ResultArray(@arr, Context);
+      finally
+        ObjArrayClear(arr);
+      end;
+  except
+  end;
+  Free; // we don't need this temporary instance any more
+end;
+
 
 
 { ************ TOrmTableWritable Read/Write TOrmTable }

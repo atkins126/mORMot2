@@ -57,6 +57,7 @@ type
     fSockAddr: TNetAddr;
     fExecuteMessage: RawUtf8;
     fFrame: PUdpFrame;
+    procedure AfterBind; virtual;
     /// will loop for any pending UDP frame, and execute FrameReceived method
     procedure DoExecute; override;
     // this is the main processing method for all incoming frames
@@ -134,6 +135,7 @@ type
     fConnectionTotal: integer;
     fOptions: TTftpThreadOptions;
     fAsNobody: boolean;
+    fRangeLow, fRangeHigh: word;
     fFileCache: TSynDictionary; // thread-safe <16MB files content cache
     function GetConnectionCount: integer;
     function GetContextOptions: TTftpContextOptions;
@@ -177,6 +179,14 @@ type
     /// the local folder where the files are read or written
     property FileFolder: TFileName
       read fFileFolder write SetFileFolder;
+    /// optional lowest UDP port to be used for the responses
+    // - default 0 will let the OS select an ephemeral port
+    property RangeLow: word
+      read fRangeLow write fRangeLow;
+    /// optional highest UDP port to be used for the responses
+    // - default 0 will let the OS select an ephemeral port
+    property RangeHigh: word
+      read fRangeHigh write fRangeHigh;
   end;
 
 
@@ -214,6 +224,7 @@ begin
     // on binding error, raise exception before the thread is actually created
     raise EUdpServer.Create('%s.Create binding error on %s:%s',
       [ClassNameShort(self)^, BindAddress, BindPort], res);
+  AfterBind;
   inherited Create({suspended=}false, LogClass, ident);
 end;
 
@@ -225,6 +236,11 @@ begin
   if fSock <> nil then
     fSock.ShutdownAndClose({rdwr=}true);
   FreeMem(fFrame);
+end;
+
+procedure TUdpServerThread.AfterBind;
+begin
+  // do nothing by default
 end;
 
 procedure TUdpServerThread.DoExecute;
@@ -587,7 +603,9 @@ var
   op: TTftpOpcode;
   c: TTftpContext;
   res: TTftpError;
+  range, retry: integer;
   nr: TNetResult;
+  local: TNetAddr;
 begin
   // is called from TTftpServerThread.DoExecute context (so fLog is set)
   // with a RRQ/WRQ incoming UDP frame on port 69
@@ -607,13 +625,36 @@ begin
     exit;
   end;
   FillCharFast(c, SizeOf(c), 0);
-  // create new c.Sock on ephemeral port
+  // create new c.Sock
   c.Sock := remote.NewSocket(nlUdp);
   if c.Sock = nil then
   begin
     fLog.Log(sllWarning, 'OnFrameReceived: NewSocket failed as %',
       [NetLastErrorMsg], self);
     exit;
+  end;
+  // fix to a random port in supplied range if OS epĥemeral port is not enough
+  if (fRangeLow or fRangeHigh) <> 0 then
+  begin
+    range := integer(fRangeHigh) - integer(fRangeLow);
+    if (range >= 100) and
+       (fRangeLow > 1024) then
+    begin
+      local := fSockAddr; // server address
+      for retry := 1 to 50 do // avoid endless loop
+      begin
+        local.SetPort(fRangeLow + Random32(range));
+        nr := local.SocketBind(c.Sock);
+        if nr in [nrOk, nrInvalidParameter] then
+          break;
+      end;
+      if nr <> nrOk then
+        fLog.Log(sllWarning, 'OnFrameReceived: SocketBind(%..%) failed as %',
+          [fRangeLow, fRangeHigh, NetLastErrorMsg], self);
+    end
+    else
+      fLog.Log(sllWarning, ': invalid specified RangeLow..RangeHigh %..% ports',
+        [fRangeLow, fRangeHigh], self);
   end;
   // main request parsing method (if TStream exists)
   c.Remote := remote;

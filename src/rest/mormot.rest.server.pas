@@ -249,8 +249,6 @@ type
     function GetInputStringOrVoid(const ParamName: RawUtf8): string;
     function GetResourceFileName: TFileName;
     procedure InternalSetTableFromTableIndex(Index: PtrInt); virtual;
-    procedure InternalSetTableFromTableName(
-      TableName: PUtf8Char; TableNameLen: PtrInt); virtual;
     procedure InternalExecuteSoaByInterface; virtual;
     procedure InternalExecuteSoaByInterfaceComputeResult;
     procedure ComputeStatsAfterCommand;
@@ -258,8 +256,7 @@ type
     function IsRemoteIPBanned: boolean; // as method to avoid temp IP string
     /// register the interface-based SOA URIs to Server.Router multiplexer
     // - abstract implementation which is to be overridden
-    class procedure UriComputeRoutes(
-      Router: TRestRouter; Server: TRestServer); virtual; abstract;
+    class procedure UriComputeRoutes(Router: TRestRouter; Server: TRestServer); virtual;
     /// copy TAuthSession values into the Session* members
     // - this method is not thread-safe: caller should use Sessions.Safe.ReadOnlyLock
     procedure SessionAssign(AuthSession: TAuthSession);
@@ -277,7 +274,7 @@ type
     /// direct launch of an interface-based service
     // - Uri() will ensure that Service<>nil before calling it
     // - abstract implementation which is to be overridden
-    procedure ExecuteSoaByInterface; virtual; abstract;
+    procedure ExecuteSoaByInterface; virtual;
     /// handle GET/LOCK/UNLOCK/STATE verbs for ORM/CRUD process
     procedure ExecuteOrmGet; virtual;
     /// handle POST/PUT/DELETE/BEGIN/END/ABORT verbs for ORM/CRUD process
@@ -439,7 +436,7 @@ type
     property AuthSession: TAuthSession
       read fAuthSession;
     /// the associated routing class on the client side
-    class function ClientRouting: TRestClientRoutingClass; virtual; abstract;
+    class function ClientRouting: TRestClientRoutingClass; virtual;
     /// identify if the request is about a Table containing nested objects or
     // arrays, which could be serialized as JSON objects or arrays, instead
     // of plain JSON string (as stored in the database)
@@ -1512,14 +1509,14 @@ type
 
   /// store per-method URI multiplexing Radix Tree in TRestRouter
   // - each HTTP method would have its dedicated TRestTree parser in TRestRouter
-  TRestRouterTree = array[TUriMethod] of TRestTree;
+  TRestRouterTree = array[mGET .. high(TUriMethod)] of TRestTree;
 
   /// efficient server-side URI routing for TRestServer
   TRestRouter = class(TSynPersistent)
   protected
     fTree: TRestRouterTree;
     fOwner: TRestServer;
-    fTreeCount: array[TUriMethod] of integer;
+    fTreeCount: array[mGET .. high(TUriMethod)] of integer;
     fNodeCount: array[TRestNode] of integer;
   public
     /// initialize this URI routine engine
@@ -1778,10 +1775,10 @@ type
     fSessionCounterMin: cardinal;
     fTimestampInfoCacheTix: cardinal;
     fOnIdleLastTix: cardinal;
-    fPublishedMethodTimestampIndex: byte;
-    fPublishedMethodAuthIndex: byte;
-    fPublishedMethodBatchIndex: byte;
-    fPublishedMethodStatIndex: byte;
+    fPublishedMethodTimestampIndex: ShortInt;
+    fPublishedMethodAuthIndex: ShortInt;
+    fPublishedMethodBatchIndex: ShortInt;
+    fPublishedMethodStatIndex: ShortInt;
     fSessionAuthentication: TRestServerAuthenticationDynArray;
     fPublishedMethod: TRestServerMethods;
     fPublishedMethods: TDynArrayHashed;
@@ -1802,9 +1799,6 @@ type
     procedure SetNoAjaxJson(const Value: boolean);
     function GetNoAjaxJson: boolean;
       {$ifdef HASINLINE}inline;{$endif}
-    function GetRecordVersionMax: TRecordVersion;
-      {$ifdef HASINLINE}inline;{$endif}
-    procedure SetRecordVersionMax(Value: TRecordVersion);
     function GetAuthenticationSchemesCount: integer;
     /// ensure the thread will be taken into account during process
     procedure OnBeginCurrentThread(Sender: TThread); override;
@@ -1994,10 +1988,12 @@ type
     // - is a TRestOrmServer instance
     function OrmInstance: TRestOrm;
       {$ifdef HASINLINE}inline;{$endif}
-    /// access TRestOrmServer.RecordVersionMax property
+    /// read access to the TRestOrmServer.RecordVersionMax[TableIndex] property
     // - used internally by TServiceContainerServer for client/server synchronization
-    property RecordVersionMax: TRecordVersion
-      read GetRecordVersionMax write SetRecordVersionMax;
+    function GetRecordVersionMax(TableIndex: integer): TRecordVersion;
+    /// write access to the TRestOrmServer.RecordVersionMax[TableIndex] property
+    // - used internally by TServiceContainerServer for client/server synchronization
+    procedure SetRecordVersionMax(TableIndex: integer; Value: TRecordVersion);
     /// low-level propagation of a record content
     // - used internally by TServiceContainerServer for client/server synchronization
     procedure RecordVersionHandle(Occasion: TOrmOccasion;
@@ -2405,7 +2401,7 @@ type
     property AuthGroupClass: TAuthGroupClass
       read fAuthGroupClass;
 
-    { standard method-based services }
+    { standard method-based services - not published because added if needed }
   public
     /// REST service accessible from the ModelRoot/Timestamp URI
     // - returns the server time stamp TTimeLog/Int64 value as UTF-8 text
@@ -2527,9 +2523,15 @@ function ToText(n: TRestNode): PShortString; overload;
 function ServiceRunningContext: PServiceRunningContext;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// returns the thread-specific REST server execution context
+// - just a wrapper around ServiceRunningContext^.Request
+function ServiceRunningRequest: TRestServerUriContext;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// returns a safe 256-bit hexadecimal nonce, changing every 5 minutes
 // - as used e.g. by TRestServerAuthenticationDefault.Auth
 // - this function is very fast, even if cryptographically-level SHA-3 secure
+// - Ctxt may be nil (only used for faster GetTickCount64)
 function CurrentNonce(Ctxt: TRestServerUriContext;
   Previous: boolean = false): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
@@ -2537,7 +2539,19 @@ function CurrentNonce(Ctxt: TRestServerUriContext;
 /// returns a safe 256-bit nonce, changing every 5 minutes
 // - can return the (may be cached) value as hexadecimal text or THash256 binary
 procedure CurrentNonce(Ctxt: TRestServerUriContext; Previous: boolean;
-  Nonce: PRawUtf8; Nonce256: PHash256); overload;
+  Nonce: PRawUtf8; Nonce256: PHash256; Tix64: Int64 = 0); overload;
+
+/// returns a safe 256-bit nonce as binary, changing every 5 minutes
+function CurrentNonce256(Previous: boolean): THash256;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// validate a 256-bit binary nonce against current or previous nonce
+function IsCurrentNonce(Ctxt: TRestServerUriContext;
+  const Nonce256: THash256): boolean; overload;
+
+/// validate a 256-bit hexadecimal nonce against current or previous nonce
+function IsCurrentNonce(Ctxt: TRestServerUriContext;
+  const Nonce: RawUtf8): boolean; overload;
 
 /// this function can be exported from a DLL to remotely access to a TRestServer
 // - use TRestServer.ExportServerGlobalLibraryRequest to assign a server to this function
@@ -2740,6 +2754,13 @@ begin
   result := PerThreadRunningContextAddress; // from mormot.core.interfaces.pas
 end;
 
+function ServiceRunningRequest: TRestServerUriContext;
+begin
+  result := PerThreadRunningContextAddress; // from mormot.core.interfaces.pas
+  if result <> nil then
+    result := PServiceRunningContext(result).Request; // avoid GPF
+end;
+
 function ToText(n: TRestNode): PShortString;
 begin
   result := GetEnumName(TypeInfo(TRestNode), ord(n));
@@ -2782,23 +2803,6 @@ begin
   if rsoCookieIncludeRootPath in Server.fOptions then
     // case-sensitive Path=/ModelRoot
     fCall^.OutHead := fCall^.OutHead + '; Path=/';
-end;
-
-procedure TRestServerUriContext.InternalSetTableFromTableName(
-  TableName: PUtf8Char; TableNameLen: PtrInt);
-begin
-  fTableEngine := TRestOrm(Server.fOrmInstance);
-  if rsoNoTableURI in Server.Options then
-    fTableIndex := -1
-  else
-    InternalSetTableFromTableIndex(
-      Server.fModel.GetTableIndexPtrLen(TableName, TableNameLen));
-  if fTableIndex < 0 then
-    exit;
-  fStaticOrm := TRestOrmServer(Server.fOrmInstance).
-    GetStaticTableIndex(TableIndex, fStaticKind);
-  if fStaticOrm <> nil then
-    fTableEngine := StaticOrm;
 end;
 
 procedure TRestServerUriContext.InternalSetTableFromTableIndex(Index: PtrInt);
@@ -2914,6 +2918,7 @@ begin
         else
           Call^.LowLevelConnectionOpaque^.ValueInternal := 0; // paranoid
     end;
+    // parse signature to retrieve the associated session
     Server.fSessions.Safe.ReadOnlyLock; // allow concurrent authentication
     try
       a := pointer(Server.fSessionAuthentication);
@@ -3130,7 +3135,7 @@ var
   fakeid: PtrInt;
 begin
   if not Assigned(Server.OnNotifyCallback) then
-    raise EServiceException.CreateUtf8('% does not implement callbacks for I%',
+    raise EServiceException.CreateUtf8('% does not implement callbacks for %',
       [Server, ParamInterfaceInfo.Name]);
   // Par is the callback ID transmitted from the client side
   fakeid := Ctxt.ParseInteger;
@@ -3387,8 +3392,8 @@ begin
   end;
   if TServiceFactoryServer(Service).ResultAsXMLObjectIfAcceptOnlyXML and
      FindNameValue(Call^.InHead, 'ACCEPT:', fTemp) and
-     (IdemPropNameU(fTemp, 'application/xml') or
-      IdemPropNameU(fTemp, 'text/xml')) then
+     (PropNameEquals(fTemp, 'application/xml') or
+      PropNameEquals(fTemp, 'text/xml')) then
     fForceServiceResultAsXMLObject := true;
   try
     InternalExecuteSoaByInterfaceComputeResult;
@@ -3556,7 +3561,7 @@ begin
                 if StaticOrm <> nil then
                 begin
                   fTableEngine := StaticOrm;
-                  fCall^.OutBody := TableEngine.EngineList(sql);
+                  fCall^.OutBody := StaticOrm.EngineList(tableindexes[0], sql);
                 end
                 else
                   fCall^.OutBody := TRestOrmServer(Server.fOrmInstance).
@@ -4146,7 +4151,7 @@ begin
     FillInput;
   P := pointer(fInput);
   for result := 0 to (length(fInput) shr 1) - 1 do
-    if IdemPropNameU(ParamName, P^) then
+    if IdemPropNameU(ParamName, P^) then // efficiently inlined on FPC
       exit
     else
       inc(P, 2);
@@ -4342,6 +4347,17 @@ begin
     result := true;
 end;
 
+class procedure TRestServerUriContext.UriComputeRoutes(
+  Router: TRestRouter; Server: TRestServer);
+begin
+  raise EParsingException.CreateUtf8('Unexpected %.UriComputeRoutes', [self]);
+end;
+
+procedure TRestServerUriContext.ExecuteSoaByInterface;
+begin
+  raise EParsingException.CreateUtf8('Unexpected %.ExecuteSoaByInterface', [self]);
+end;
+
 function TRestServerUriContext.AuthenticationBearerToken: RawUtf8;
 begin
   result := inherited AuthenticationBearerToken;
@@ -4367,6 +4383,11 @@ begin
     Error('Invalid IP [%]', [fCall^.LowLevelRemoteIP], HTTP_FORBIDDEN);
     result := false;
   end;
+end;
+
+class function TRestServerUriContext.{%H-}ClientRouting: TRestClientRoutingClass;
+begin
+  raise EParsingException.CreateUtf8('Unexpected %.ClientRouting', [self]);
 end;
 
 function TRestServerUriContext.ClientOrmOptions: TOrmWriterOptions;
@@ -4437,7 +4458,6 @@ var
   services: TServiceContainerServer;
   i: PtrInt;
   ndx: integer;
-  noID: boolean;
   sic: TServiceInstanceImplementation;
   rn: TRestNode;
   met: PServiceContainerInterfaceMethod;
@@ -4448,15 +4468,13 @@ begin
   for i := 0 to high(Server.Services.InterfaceMethod) do
   begin
     met := @services.InterfaceMethod[i];
-    nam := met^.InterfaceDotMethodName;
     ndx := met^.InterfaceMethodIndex; // 0..3 are im* pseudo-methods
     sic := met^.InterfaceService.InstanceCreation;
-    noID := true;
-    rn := rnInterface;
+    rn := rnInterface; // with no <clientid> by default
     case ndx of
       // pseudo-methods have a specific URI behavior
       ord(imContract):
-        ; // keep noID = true
+        ; // keep rnInterface with no <clientid>
       ord(imInstance):
         if sic <> sicClientDriven then
           // imInstance is for a new sicClientDriven only
@@ -4470,35 +4488,22 @@ begin
           // imFree need an ID to release the instance
           continue
         else
-        begin
           // imFree can make early release, e.g. from sicThread
-          noID := false;
-          rn := rnInterfaceClientID; // with an ID
-        end
+          rn := rnInterfaceClientID; // free requires a <clientid>
     else
-      begin
-        // interface methods need a /ClientDrivenID only if sicClientDriven
-        noID := sic <> sicClientDriven;
-        if not noID then
-          rn := rnInterfaceClientID;
-      end;
+      // interface methods need a /ClientDrivenID only if sicClientDriven
+      if sic = sicClientDriven then
+        rn := rnInterfaceClientID;
     end;
-    // URI sent as GET/POST /Model/Interface.Method[/ClientDrivenID]
-    if noID then
-      Router.Setup([mGET, mPOST], nam,
-        rn, nil, nil, ndx, met^.InterfaceService)
-    else
-      Router.Setup([mGET, mPOST], nam + '/<int:clientid>',
-        rn, nil, nil, ndx, met^.InterfaceService);
-    // URI sent as GET/POST /Model/Interface/Method[/ClientDrivenID]
-    nam := StringReplaceChars(nam, '.', '/');
-    if nam <> met^.InterfaceDotMethodName then
-      if noID then
-        Router.Setup([mGET, mPOST], nam,
-          rn, nil, nil, ndx, met^.InterfaceService)
-      else
-        Router.Setup([mGET, mPOST], nam + '/<int:clientid>',
-          rn, nil, nil, ndx, met^.InterfaceService);
+    nam := met^.InterfaceDotMethodName;
+    if rn = rnInterfaceClientID then
+      nam := nam + '/<int:clientid>';
+    // URI sent as /Model/Interface.Method[/ClientDrivenID]
+    Router.Setup([mGET, mPOST, mPUT, mDELETE], nam,
+      rn, nil, nil, ndx, met^.InterfaceService);
+    // URI sent as /Model/Interface/Method[/ClientDrivenID]
+    Router.Setup([mGET, mPOST, mPUT, mDELETE], StringReplaceChars(nam, '.', '/'),
+      rn, nil, nil, ndx, met^.InterfaceService);
   end;
 end;
 
@@ -4547,6 +4552,11 @@ end;
 procedure TRestServerRoutingRest.ExecuteSoaByInterface;
 var
   par: PUtf8Char;
+  fake: packed record
+    c: AnsiChar;      // [
+    marker: cardinal; // detected by TInterfaceMethodExecute.ExecuteJson
+    bin: pointer;     // RawByteString passed by reference
+  end;
 begin
   // here Ctxt.Service and ServiceMethod(Index) are set
   if (Server.Services = nil) or
@@ -4560,9 +4570,14 @@ begin
     if (ServiceMethod <> nil) and
        ServiceMethod^.ArgsInputIsOctetStream and
        not ContentTypeIsJson then
-      // encode binary as Base64, as expected by InternalExecuteSoaByInterface
-      // may use AVX2 on FPC x86_64 so performance is not an issue here
-      fCall^.InBody := BinToBase64(fCall^.InBody, '["', '"]', false);
+    begin
+      fake.c := '[';                      // starts like a regular JSON array
+      fake.marker := JSON_BIN_MAGIC_C;    // internal identifier
+      fake.bin := pointer(fCall^.InBody); // pass by reference (not base-64)
+      ServiceParameters := @fake;
+      InternalExecuteSoaByInterface;
+      exit;
+    end;
   end
   else
   begin
@@ -4575,7 +4590,7 @@ begin
       if (par^ = '[') or
          IdemPChar(par, '%5B') then
         // as json array (input is e.g. '+%5B...' for ' [...')
-        fCall^.InBody := UrlDecode(par)
+        UrlDecode(par, RawUtf8(fCall^.InBody))
       else
       begin
         // or as a list of parameters (input is 'Param1=Value1&Param2=Value2...')
@@ -5131,18 +5146,20 @@ begin
 end;
 
 procedure CurrentNonce(Ctxt: TRestServerUriContext; Previous: boolean;
-  Nonce: PRawUtf8; Nonce256: PHash256);
+  Nonce: PRawUtf8; Nonce256: PHash256; Tix64: Int64);
 var
-  ticks: cardinal;
+  tix32: cardinal;
 begin
-  ticks := Ctxt.TickCount64 shr 18; // 4.3 minutes resolution - Ctxt may be nil
+  if Tix64 = 0 then
+    Tix64 := Ctxt.TickCount64;
+  tix32 := Tix64 shr 18; // 4.3 minutes resolution - Ctxt may be nil
   if Previous then
-    dec(ticks);
+    dec(tix32);
   with ServerNonceCache[Previous] do
   begin
     ServerNonceSafe.Lock;
-    if (ticks = tix) and
-       (res <> '') then  // check for res='' since ticks may be 0 at startup
+    if (tix32 = tix) and
+       (res <> '') then  // check for res='' since tix32 may be 0 at startup
     begin
       // fast retrieval from cache as binary or hexadecimal
       if Nonce256 <> nil then
@@ -5154,13 +5171,43 @@ begin
     end;
     ServerNonceSafe.UnLock;
     // we need to (re)compute this value
-    CurrentServerNonceCompute(ticks, Previous, Nonce, Nonce256);
+    CurrentServerNonceCompute(tix32, Previous, Nonce, Nonce256);
   end;
 end;
 
 function CurrentNonce(Ctxt: TRestServerUriContext; Previous: boolean): RawUtf8;
 begin
   CurrentNonce(Ctxt, Previous, @result, nil);
+end;
+
+function CurrentNonce256(Previous: boolean): THash256;
+begin
+  CurrentNonce(nil, Previous, nil, @result, GetTickCount64);
+end;
+
+function IsCurrentNonce(Ctxt: TRestServerUriContext;
+  const Nonce256: THash256): boolean;
+var
+  n: THash256;
+begin
+  result := true;
+  CurrentNonce(Ctxt, {previous=}false, nil, @n);
+  if IsEqual(n, Nonce256) then
+    exit;
+  CurrentNonce(Ctxt, {previous=}true, nil, @n);
+  if IsEqual(n, Nonce256) then
+    exit;
+  result := false;
+end;
+
+function IsCurrentNonce(Ctxt: TRestServerUriContext;
+  const Nonce: RawUtf8): boolean;
+var
+  n: THash256;
+begin
+  result := (length(Nonce) = SizeOf(n) * 2) and
+            mormot.core.text.HexToBin(pointer(nonce), @n, SizeOf(n)) and
+            IsCurrentNonce(Ctxt, n{%H-});
 end;
 
 
@@ -5220,10 +5267,10 @@ var
 begin
   salt := aClientNonce + User.LogonName + User.PasswordHashHexa;
   result := IsHex(aPassWord, SizeOf(THash256)) and
-    (IdemPropNameU(aPassWord,
+    (PropNameEquals(aPassWord,
       Sha256(fServer.Model.Root + CurrentNonce(Ctxt, {prev=}false) + salt)) or
      // if current nonce failed, tries with previous 5 minutes' nonce
-     IdemPropNameU(aPassWord,
+     PropNameEquals(aPassWord,
        Sha256(fServer.Model.Root + CurrentNonce(Ctxt, {prev=}true)  + salt)));
 end;
 
@@ -5327,7 +5374,7 @@ var
 begin
   expected := User.PasswordHashHexa;
   User.PasswordPlain := aPassWord; // override with SHA-256 hash from HTTP header
-  result := IdemPropNameU(User.PasswordHashHexa, expected);
+  result := PropNameEquals(User.PasswordHashHexa, expected);
 end;
 
 function TRestServerAuthenticationHttpBasic.Auth(Ctxt: TRestServerUriContext): boolean;
@@ -5412,6 +5459,9 @@ begin
   inherited Destroy;
 end;
 
+// about Browser support and SPNEGO handshake via HTTP headers, see e.g.
+// https://learn.microsoft.com/en-us/previous-versions/ms995330(v=msdn.10)
+
 function TRestServerAuthenticationSspi.Auth(Ctxt: TRestServerUriContext): boolean;
 var
   i, ndx: PtrInt;
@@ -5438,7 +5488,7 @@ begin
     FindNameValue(Ctxt.Call.InHead, pointer(SECPKGNAMEHTTPAUTHORIZATION), indataenc);
     if indataenc = '' then
     begin
-      // no auth data sent, reply with supported auth methods
+      // no auth data sent, reply with supported auth method(s)
       Ctxt.Call.OutHead := SECPKGNAMEHTTPWWWAUTHENTICATE;
       Ctxt.Call.OutStatus := HTTP_UNAUTHORIZED; // (401)
       StatusCodeToReason(HTTP_UNAUTHORIZED, Ctxt.Call.OutBody);
@@ -5452,7 +5502,7 @@ begin
   fSafe.Lock;
   try
     // thread-safe deletion of deprecated fSspiAuthContext[] pending auths
-    ticks := Ctxt.TickCount64 - 30000;
+    ticks := Ctxt.TickCount64 - 30000; // tokens last for 30 seconds
     for i := fSspiAuthContextCount - 1  downto 0 do
       if ticks > fSspiAuthContext[i].CreatedTick64 then
       begin
@@ -5467,7 +5517,7 @@ begin
       // 1st call: create SecCtxId
       if fSspiAuthContextCount >= MAXSSPIAUTHCONTEXTS then
       begin
-        fServer.InternalLog('Too many Windows Authenticated session in  pending' +
+        fServer.InternalLog('Too many Windows Authenticated session in pending' +
           ' state: MAXSSPIAUTHCONTEXTS=%', [MAXSSPIAUTHCONTEXTS], sllUserAuth);
         exit;
       end;
@@ -5866,12 +5916,13 @@ begin
   case aNode of
     rnTable,
     rnTableID,
-    rnTableIDBlob,
-    rnState:
-      if aFrom in [mGET, mLOCK, mUNLOCK, mHEAD, mSTATE] then
+    rnTableIDBlob:
+      if aFrom in [mGET, mLOCK, mUNLOCK, mHEAD] then
         result.Data.Command := execOrmGet
       else
         result.Data.Command := execOrmWrite;
+    rnState:
+      result.Data.Command := execOrmGet;
     rnTableMethod,
     rnTableIDMethod,
     rnMethod,
@@ -5924,12 +5975,13 @@ begin
      (Ctxt = nil) or
      (Ctxt.Call^.Url = '') or
      (Ctxt.Method < low(fTree)) or
-     (Ctxt.Method > high(fTree)) then
+     (Ctxt.Method > high(fTree)) or
+     (fTree[Ctxt.Method] = nil) then
     exit;
   p := pointer(Ctxt.Call^.Url);
   if p^ = '/' then
     inc(p);
-  result := pointer((fTree[Ctxt.Method].Root as TRestTreeNode).Lookup(p, Ctxt));
+  result := pointer(TRestTreeNode(fTree[Ctxt.Method].Root).Lookup(p, Ctxt));
   if result = nil then
     exit;
   // save the execution node information into Ctxt
@@ -6030,44 +6082,49 @@ constructor TRestServer.Create(aModel: TOrmModel; aHandleUserAuthentication: boo
 begin
   if aModel = nil then
     raise EOrmException.CreateUtf8('%.Create(Model=nil)', [self]);
+  // setup the associated ORM model
   fStatLevels := SERVERDEFAULTMONITORLEVELS;
-  // fSessions is needed by AuthenticationRegister() below
-  fSessions := TSynObjectListSorted.Create(AuthSessionCompare);
   fAuthUserClass := TAuthUser;
   fAuthGroupClass := TAuthGroup;
   fModel := aModel; // we need this property ASAP
-  if fModel.TablesMax < 0 then
-    fOptions := [rsoNoTableURI, rsoNoInternalState]; // no table/state to send
+  // setup Sessions - as needed by AuthenticationRegister() below
+  fSessions := TSynObjectListSorted.Create(AuthSessionCompare);
   fSessionClass := TAuthSession;
+  // (+ 10 to avoid CONST_AUTHENTICATION_* i.e. IDCardinal=0 or 1)
+  fSessionCounterMin := Random32(1 shl 20) + 10; // positive 20-bit integer
+  fSessionCounter := fSessionCounterMin;
+  // setup method-based services list - needed for /auth
+  fPublishedMethods.InitSpecific(
+    TypeInfo(TRestServerMethods), fPublishedMethod, ptRawUtf8, nil, true);
+  fPublishedMethodAuthIndex := -1;
+  fPublishedMethodBatchIndex := -1;
+  // setup default mORMot authentication schemes (if specified)
   if aHandleUserAuthentication then
-    // default mORMot authentication schemes
     AuthenticationRegister([
       TRestServerAuthenticationDefault
       {$ifdef DOMAINRESTAUTH},
       TRestServerAuthenticationSspi
       {$endif DOMAINRESTAUTH}]);
+  // initialize TRestServer
+  fRootRedirectForbiddenToAuth := Model.Root + '/auth';
+  if fModel.TablesMax < 0 then
+    fOptions := [rsoNoTableURI, rsoNoInternalState]; // no table/state to send
   fAssociatedServices := TServicesPublishedInterfacesList.Create(0);
   fServicesRouting := TRestServerRoutingRest;
+  UriPagingParameters := PAGINGPARAMETERS_YAHOO;
+  fStats := TRestServerMonitor.Create(self);
+  // initialize TRest
   inherited Create(aModel);
   fAfterCreation := true;
-  fStats := TRestServerMonitor.Create(self);
-  UriPagingParameters := PAGINGPARAMETERS_YAHOO;
-  // + 10 to avoid CONST_AUTHENTICATION_* i.e. IDCardinal=0 or 1
-  fSessionCounterMin := Random32(1 shl 20) + 10; // positive 31-bit integer
-  fSessionCounter := fSessionCounterMin;
-  fRootRedirectForbiddenToAuth := Model.Root + '/auth';
-  fPublishedMethods.InitSpecific(
-    TypeInfo(TRestServerMethods), fPublishedMethod, ptRawUtf8, nil, true);
+  // setup method-based services (manually adding the default)
   ServiceMethodRegisterPublishedMethods('', self);
-  // manually add default method-based services
   fPublishedMethodTimestampIndex := ServiceMethodRegister(
     'timestamp', Timestamp, true, [mGET]);
-  fPublishedMethodAuthIndex := ServiceMethodRegister(
-    'auth', Auth, {bypassauth=}true, [mGET]);
-  fPublishedMethodBatchIndex := ServiceMethodRegister(
-    'batch', Batch, false, [mPUT, mPOST]);
+  if not (rsoNoTableURI in fOptions) then
+    fPublishedMethodBatchIndex := ServiceMethodRegister(
+      'batch', Batch, false, [mPUT, mPOST]);
   ServiceMethodRegister(
-    'cacheflush', CacheFlush, false, [mGET, mPOST]);
+    'cacheflush', CacheFlush, false, [mGET, mPOST]); // for ORM and callbacks
   fPublishedMethodStatIndex := ServiceMethodRegister(
     'stat', Stat, false, [mGET]);
 end;
@@ -6191,14 +6248,19 @@ begin
   result := length(fSessionAuthentication);
 end;
 
-function TRestServer.GetRecordVersionMax: TRecordVersion;
+function TRestServer.GetRecordVersionMax(TableIndex: integer): TRecordVersion;
 begin
-  result := TRestOrmServer(fOrmInstance).RecordVersionMax;
+  with TRestOrmServer(fOrmInstance) do
+    if cardinal(TableIndex) >= cardinal(length(RecordVersionMax)) then
+      result := 0
+    else
+      result := RecordVersionMax[TableIndex];
 end;
 
-procedure TRestServer.SetRecordVersionMax(Value: TRecordVersion);
+procedure TRestServer.SetRecordVersionMax(
+  TableIndex: integer; Value: TRecordVersion);
 begin
-  TRestOrmServer(fOrmInstance).RecordVersionMax := Value;
+  TRestOrmServer(fOrmInstance).SetRecordVersionMax(TableIndex, Value);
 end;
 
 procedure TRestServer.RecordVersionHandle(Occasion: TOrmOccasion;
@@ -6210,8 +6272,8 @@ begin
     exit;
   if Decoder.FindFieldName(RecordVersionField.Name) < 0 then
     // only compute new monotonic TRecordVersion if not already supplied by sender
-    Decoder.AddFieldValue(RecordVersionField.Name,
-      Int64ToUtf8(TRestOrmServer(fOrmInstance).RecordVersionCompute), ftaNumber);
+    Decoder.AddFieldValue(RecordVersionField.Name, Int64ToUtf8(
+      TRestOrmServer(fOrmInstance).RecordVersionCompute(TableIndex)), ftaNumber);
   if fServices <> nil then
     (fServices as TServiceContainerServer).RecordVersionNotifyAddUpdate(
       Occasion, TableIndex, Decoder);
@@ -6237,7 +6299,11 @@ begin
     // create and initialize new authentication instance
     result := aMethod.Create(self);
     ObjArrayAdd(fSessionAuthentication, result); // will be owned by this array
+    // ensure authentication is enabled
     fHandleAuthentication := true;
+    if fPublishedMethodAuthIndex < 0 then
+      fPublishedMethodAuthIndex := ServiceMethodRegister(
+        'auth', Auth, {bypassauth=}true, [mGET]);
     // we need both AuthUser+AuthGroup tables for authentication -> create now
     fAuthGroupClass := Model.AddTableInherited(TAuthGroup);
     fAuthUserClass := Model.AddTableInherited(TAuthUser);
@@ -6564,8 +6630,8 @@ begin
   W.CancelLastChar('}');
   if fOrm.CacheOrNil <> nil then
   begin
-    W.AddShort(',"cachedMemoryBytes":');
-    W.AddU(fOrm.CacheOrNil.CachedMemory); // will also flush outdated JSON
+    W.AddShort(',"cachedFlush":');
+    W.AddU(fOrm.CacheOrNil.FlushDeprecated);
     W.AddComma;
   end;
   if (fRun.BackgroundTimer <> nil) and
@@ -6758,7 +6824,7 @@ begin
     if (fModel.TablesMax >= 0) and
        not (rsoNoTableURI in fOptions) then
     begin
-      // ModelRoot for
+      // ModelRoot
       r.Setup([mGET, mPOST, mBEGIN, mEND, mABORT], '', rnTable, nil);
       if not (rsoNoInternalState in fOptions) then
         r.Setup(mSTATE, '', rnState);
@@ -7375,7 +7441,7 @@ begin
       [self, {%H-}pointer(Sender.ThreadID), {%H-}pointer(id)]);
   with PServiceRunningContext(PerThreadRunningContextAddress)^ do
     if RunningThread <> Sender then
-      // e.g. if length(TRestHttpServer.fDBServers)>1
+      // e.g. if length(TRestHttpServer.fRestServers)>1
       if RunningThread <> nil then
         raise ERestException.CreateUtf8('%.BeginCurrentThread() twice', [self])
       else
@@ -7412,7 +7478,7 @@ begin
   end;
   with PServiceRunningContext(PerThreadRunningContextAddress)^ do
     if RunningThread <> nil then
-      // e.g. if length(TRestHttpServer.fDBServers)>1
+      // e.g. if length(TRestHttpServer.fRestServers)>1
       if RunningThread <> Sender then
         raise ERestException.CreateUtf8(
           '%.EndCurrentThread(%) should match RunningThread=%',
@@ -7482,7 +7548,8 @@ begin
     fRouterSafe.ReadLock;
     node := fRouter.Lookup(ctxt);
     fRouterSafe.ReadUnLock;
-    if node = nil then
+    if (node = nil) or
+       (ctxt.fNode = rnNone) then
       ctxt.Error('Invalid URI', HTTP_BADREQUEST) // root ok: error 400, not 404
     else if (RootRedirectGet <> '') and
             (ctxt.Method = mGet) and
@@ -7548,9 +7615,10 @@ begin
       if ctxt.fMicroSecondsStart <> 0 then
         fStats.ProcessSuccess(outcomingfile);
     end
-    else
-      // OutStatus is an error code
-      if Call.OutBody = '' then
+    else if (Call.OutStatus < 200) or
+            (Call.OutStatus > 599) then
+        ctxt.Error('Invalid HTTP status %', [Call.OutStatus], HTTP_SERVERERROR)
+    else if Call.OutBody = '' then // OutStatus is an error code
         // if no custom error message, compute it now as JSON
         ctxt.Error(ctxt.CustomErrorMsg, Call.OutStatus);
     // 7. compute returned ORM InternalState indicator
@@ -7625,9 +7693,9 @@ begin
       AssociatedServices.FindServiceAll(name, W);
     W.SetText(json);
     if Ctxt.InputExists['format'] or
-       IdemPropNameU(Ctxt.fUriMethodPath, 'json') then
+       PropNameEquals(Ctxt.fUriMethodPath, 'json') then
       json := JsonReformat(json)
-    else if IdemPropNameU(Ctxt.fUriMethodPath, 'xml') then
+    else if PropNameEquals(Ctxt.fUriMethodPath, 'xml') then
     begin
       JsonBufferToXML(pointer(json), XMLUTF8_HEADER, '<' + name + '>', xml);
       Ctxt.Returns(xml, 200, XML_CONTENT_TYPE_HEADER);
@@ -7661,7 +7729,7 @@ var
   info: TDocVariantData;
   tix: cardinal;
 begin
-  if IdemPropNameU(Ctxt.fUriMethodPath, 'info') and
+  if PropNameEquals(Ctxt.fUriMethodPath, 'info') and
      not (rsoTimestampInfoUriDisable in fOptions) then
   begin
     tix := Ctxt.TickCount64 shr 12; // cache refreshed every 4.096 seconds
@@ -7717,7 +7785,7 @@ begin
         if Ctxt.fUriMethodPath = '_callback_' then
           // POST root/cacheflush/_callback_ with {"ICallbackName":1234} body
           // as called from TRestHttpClientWebsockets.FakeCallbackUnregister
-          (fServices as TServiceContainerServer).FakeCallbackRelease(Ctxt)
+          (fServices as TServiceContainerServer).ReleaseFakeCallback(Ctxt)
         else if Ctxt.fUriMethodPath = '_replaceconn_' then
         begin
           // POST root/cacheflush/_replaceconn_ (over a secured connection)

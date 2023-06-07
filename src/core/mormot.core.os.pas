@@ -44,6 +44,33 @@ uses
 { ****************** Some Cross-System Type and Constant Definitions }
 
 const
+  {$ifdef OSWINDOWS}
+  /// operating-system dependent Line Feed characters
+  CRLF = #13#10;
+  /// operating-system dependent wildchar to match all files in a folder
+  FILES_ALL = '*.*';
+  /// operating-system dependent "inverted" delimiter for NormalizeFileName()
+  InvertedPathDelim = '/';
+  /// operating-system dependent boolean if paths are case-insensitive
+  PathCaseInsensitive = true;
+  {$else}
+  /// operating-system dependent Line Feed characters
+  CRLF = #10;
+  /// operating-system dependent wildchar to match all files in a folder
+  FILES_ALL = '*';
+  /// operating-system dependent "inverted" delimiter for NormalizeFileName()
+  InvertedPathDelim = '\';
+  /// operating-system dependent boolean if paths are case-insensitive
+  PathCaseInsensitive = false;
+  {$endif OSWINDOWS}
+  /// a convenient shortened constant to open a file for reading
+  fmOpenReadDenyNone = fmOpenRead or fmShareDenyNone;
+  /// a convenient shortened constant to open a file for writing
+  fmCreateOrRewrite: array[{rewrite=}boolean] of cardinal = (
+   fmCreate,
+   fmOpenWrite or fmShareDenyNone);
+
+const
   /// void HTTP Status Code (not a standard value, for internal use only)
   HTTP_NONE = 0;
   /// HTTP Status Code for "Continue"
@@ -114,6 +141,10 @@ const
   HTTP_GATEWAYTIMEOUT = 504;
   /// HTTP Status Code for "HTTP Version Not Supported"
   HTTP_HTTPVERSIONNONSUPPORTED = 505;
+
+  /// clearly wrong response code, used by THttpServerRequest.SetAsyncResponse
+  // - for internal THttpAsyncServer asynchronous process
+  HTTP_ASYNCRESPONSE = 777;
 
 /// retrieve the HTTP reason text from its integer code
 // - e.g. StatusCodeToReason(200)='OK'
@@ -408,11 +439,15 @@ type
   /// define a set of well-known SID
   TWellKnownSids = set of TWellKnownSid;
 
-  /// custom binary buffer type which can be used to manage a Windows SID instance
+  /// custom binary buffer type used as convenient Windows SID storage
   RawSid = type RawByteString;
+
+  /// a dynamic array of binary SID storage buffers
+  RawSidDynArray = array of RawSid;
 
 
 /// a wrapper around MemCmp() on two Security IDentifier binary buffers
+// - will first compare by length, then by content
 function SidCompare(a, b: PSid): integer;
 
 /// compute the actual binary length of a Security IDentifier buffer, in bytes
@@ -422,27 +457,44 @@ function SidLength(sid: PSid): PtrInt;
 /// allocate a RawSid instance from a PSid raw handler
 procedure ToRawSid(sid: PSid; out result: RawSid);
 
+/// check if a RawSid binary buffer has the expected length of a valid SID
+function IsValidRawSid(const sid: RawSid): boolean;
+
+/// search within SID dynamic array for a given SID
+function HasSid(const sids: PSids; sid: PSid): boolean;
+
+/// search within SID dynamic array for a given dynamic array of SID buffers
+function HasAnySid(const sids: PSids; const sid: RawSidDynArray): boolean;
+
+/// append a SID buffer pointer to a dynamic array of SID buffers
+procedure AddRawSid(var sids: RawSidDynArray; sid: PSid);
+
 /// convert a Security IDentifier as text, following the standard representation
 procedure SidToTextShort(sid: PSid; var result: shortstring);
 
 /// convert a Security IDentifier as text, following the standard representation
-function SidToText(sid: PSid): RawUtf8; overload;
+function SidToText(sid: PSid): RawUtf8;
+
+/// convert several Security IDentifier as text dynamic array
+function SidsToText(sids: PSids): TRawUtf8DynArray;
 
 /// convert a Security IDentifier as text, following the standard representation
-function SidToText(const sid: RawSid): RawUtf8; overload;
-  {$ifdef HASINLINE} inline; {$endif}
+function RawSidToText(const sid: RawSid): RawUtf8;
 
 /// parse a Security IDentifier text, following the standard representation
 // - won't support hexadecimal IdentifierAuthority, i.e. S-1-0x######-....
-function TextToSid(P: PUtf8Char; out sid: TSid): boolean; overload;
+function TextToSid(P: PUtf8Char; out sid: TSid): boolean;
 
 /// parse a Security IDentifier text, following the standard representation
-function TextToSid(const text: RawUtf8): RawSid; overload;
+function TextToRawSid(const text: RawUtf8): RawSid; overload;
   {$ifdef HASINLINE} inline; {$endif}
+
+/// parse a Security IDentifier text, following the standard representation
+function TextToRawSid(const text: RawUtf8; out sid: RawSid): boolean; overload;
 
 /// returns a Security IDentifier of a well-known SID as binary
 // - is using an internal cache for the returned RawSid instances
-function KnownSid(wks: TWellKnownSid): RawSid;
+function KnownRawSid(wks: TWellKnownSid): RawSid;
 
 /// returns a Security IDentifier of a well-known SID as standard text
 // - e.g. wksBuiltinAdministrators as 'S-1-5-32-544'
@@ -601,8 +653,8 @@ const
      wEightOne,
      wServer2012R2,
      wTen,
-     wEleven,
-     wServer2016];
+     wServer2016,
+     wEleven];
 
   /// translate one operating system (and distribution) into a its common name
   OS_NAME: array[TOperatingSystem] of RawUtf8 = (
@@ -769,7 +821,7 @@ var
   OSVersionInfoEx: RawUtf8;
   /// the current Operating System version, as retrieved for the current process
   // and computed by ToTextOS(OSVersionInt32)
-  // - contains e.g. 'Windows Vista' or 'Ubuntu 5.4.0'
+  // - contains e.g. 'Windows Vista' or 'Ubuntu Linux 5.4.0'
   OSVersionShort: RawUtf8;
 
   /// some textual information about the current CPU
@@ -983,10 +1035,11 @@ const
       {$elseif defined(VER320)} + ' 10.2 Tokyo'
       {$elseif defined(VER330)} + ' 10.3 Rio'
       {$elseif defined(VER340)} + ' 10.4 Sydney'
-      {$elseif defined(VER350)}
-        {$ifdef RTLVersion111} + ' 11.1 Alexandria'
-        {$else}                + ' 11 Alexandria'
-        {$endif RTLVersion111}
+      {$elseif defined(VER350)} + ' 11'
+        {$if declared(RTLVersion113)} + '.3' {$else}
+        {$if declared(RTLVersion112)} + '.2' {$else}
+        {$if declared(RTLVersion111)} + '.1' {$ifend} {$ifend} {$ifend}
+                                + ' Alexandria'
       {$elseif defined(VER360)} + ' 12 Next'
       {$ifend}
     {$endif CONDITIONALEXPRESSIONS}
@@ -1060,7 +1113,9 @@ var
   SystemInfo: record
     /// retrieved from libc's getpagesize() - is expected to not be 0
     dwPageSize: cardinal;
-    /// retrieved from HW_NCPU (BSD) or /proc/cpuinfo (Linux)
+    /// the number of available logical CPUs
+    // - retrieved from HW_NCPU (BSD) or /proc/cpuinfo (Linux)
+    // - see CpuSockets for the number of physical CPU sockets
     dwNumberOfProcessors: cardinal;
     /// meaningful system information, as returned by fpuname()
     uts: record
@@ -1180,7 +1235,174 @@ function UserAgentParse(const UserAgent: RawUtf8;
   out OS: TOperatingSystem): boolean;
 
 type
+  /// the command line switches supported by TExecutableCommandLine
+  // - clkArg is for "exename arg1 arg2 arg3" main indexed arguments
+  // - clkOption is for "exename -o --opt1" boolean flags
+  // - clkParam is for "exename -n value --name value --name2=value2" pairs
+  TExecutableCommandLineKind = (
+    clkUndefined,
+    clkArg,
+    clkOption,
+    clkParam);
+
+  /// implements command-line arguments parsing e.g. for TExecutable.Command
+  // - call Arg() Options() and Get/Param() to define and retrieve the flags
+  // from their names and supply some description text, then call
+  // DetectUnknown and/or FullDescription to interact with the user
+  // - by default, will use -/-- switches on POSIX, and / on Windows
+  TExecutableCommandLine = class
+  protected
+    fNames: array[clkArg .. clkParam] of TRawUtf8DynArray;
+    fRawParams, fValues: TRawUtf8DynArray; // for clkParam
+    fDesc, fDescDetail: array[clkArg .. clkParam] of RawUtf8;
+    fRetrieved: array[clkArg .. clkParam] of TBooleanDynArray;
+    fCaseSensitiveNames: boolean;
+    fSwitch: array[{long=}boolean] of RawUtf8;
+    fLineFeed, fExeDescription: RawUtf8;
+    function Full(const v: RawUtf8): RawUtf8;
+    procedure Describe(const v: array of RawUtf8;
+      k: TExecutableCommandLineKind; d, def: RawUtf8; argindex: integer);
+    function Find(const v: array of RawUtf8;
+      k: TExecutableCommandLineKind = clkUndefined; const d: RawUtf8 = '';
+      const def: RawUtf8 = ''; f: PtrInt = 0): PtrInt;
+  public
+    /// return the "arg" value by 0-based index in Args[]
+    function Arg(index: integer;
+      const description: RawUtf8 = ''): boolean; overload;
+    /// search for "arg" value in Args[]
+    function Arg(const name: RawUtf8;
+      const description: RawUtf8 = ''): boolean; overload;
+    /// search for "arg" value in Args[]
+    function Arg(const name: array of RawUtf8;
+      const description: RawUtf8 = ''): boolean; overload;
+    /// search for "-optionname" switches in Options[]
+    function Option(const name: RawUtf8;
+      const description: RawUtf8 = ''): boolean; overload;
+    /// search for "-optionname" switches in Options[]
+    function Option(const name: array of RawUtf8;
+      const description: RawUtf8 = ''): boolean; overload;
+    /// search for "-parametername" and return its RawUtf8 "parametervalue"
+    function Get(const name: RawUtf8; out value: RawUtf8;
+      const description: RawUtf8 = ''; const default: RawUtf8 = ''): boolean; overload;
+    /// search for "-parametername" and return its RawUtf8 "parametervalue"
+    function Get(const name: array of RawUtf8; out value: RawUtf8;
+      const description: RawUtf8 = ''; const default: RawUtf8 = ''): boolean; overload;
+    /// search for "-parametername" and return all RawUtf8 "parametervalue" occurences
+    function Get(const name: array of RawUtf8; out value: TRawUtf8DynArray;
+      const description: RawUtf8 = ''): boolean; overload;
+    /// search for "-parametername" and return its plain string "parametervalue"
+    function Get(const name: RawUtf8; out value: string;
+      const description: RawUtf8 = ''; const default: string = ''): boolean; overload;
+    /// search for "-parametername" and return all string "parametervalue" occurences
+    function Get(const name: array of RawUtf8; out value: TStringDynArray;
+      const description: RawUtf8 = ''): boolean; overload;
+    /// search for "-parametername" and return its plain string "parametervalue"
+    function Get(const name: array of RawUtf8; out value: string;
+      const description: RawUtf8 = ''; const default: string = ''): boolean; overload;
+    /// search for "-parametername" and return all string "parametervalue" occurences
+    function Get(const name: RawUtf8; out value: TStringDynArray;
+      const description: RawUtf8 = ''): boolean; overload;
+    /// search for "-parametername" and return its integer "parametervalue"
+    function Get(const name: RawUtf8; out value: integer;
+      const description: RawUtf8 = ''; default: integer = maxInt): boolean; overload;
+    /// search for "-parametername" and return its integer "parametervalue"
+    function Get(const name: array of RawUtf8; out value: integer;
+      const description: RawUtf8 = ''; default: integer = maxInt): boolean; overload;
+    /// search for "-parametername" and return its integer "parametervalue"
+    function Get(const name: RawUtf8; min, max: integer; out value: integer;
+      const description: RawUtf8 = ''; default: integer = maxInt): boolean; overload;
+    /// search for "-parametername" and return its integer "parametervalue"
+    function Get(const name: array of RawUtf8; min, max: integer;
+      out value: integer; const description: RawUtf8 = '';
+      default: integer = -1): boolean; overload;
+    /// search for "-parametername" parameter in Names[]
+    function Has(const name: RawUtf8): boolean; overload;
+    /// search for "-parametername" parameter in Names[]
+    function Has(const name: array of RawUtf8): boolean; overload;
+    /// search for "-parametername" and return '' or its RawUtf8 "parametervalue"
+    function Param(const name: RawUtf8; const description: RawUtf8 = '';
+      const default: RawUtf8 = ''): RawUtf8; overload;
+    /// search for "-parametername" and return '' or its RawUtf8 "parametervalue"
+    function Param(const name: array of RawUtf8; const description: RawUtf8 = '';
+      const default: RawUtf8 = ''): RawUtf8; overload;
+    /// search for "-parametername" and return its integer "parametervalue" or default
+    function Param(const name: RawUtf8; default: integer;
+      const description: RawUtf8 = ''): integer; overload;
+    /// search for "-parametername" and return its integer "parametervalue" or default
+    function Param(const name: array of RawUtf8; default: integer;
+      const description: RawUtf8 = ''): integer; overload;
+    /// generate the text from all Arg() Options() and Get/Param() descriptions
+    // and the supplied high-level description of the program
+    // - the parameter <name> would be extracted from any #word in the
+    // description text,
+    // - for instance:
+    // ! with Executable.Command do
+    // ! begin
+    // !   ExeDescription := 'An executable to test mORMot Execute.Command';
+    // !   verbose := Option(['v', 'verbose'], 'generate verbose output');
+    // !   Get(['t', 'threads'], threads, '#number of threads to run', 5);
+    // !   ConsoleWrite(FullDescription);
+    // ! end;
+    // will fill "verbose" and "threads" local variables, and output on Linux:
+    // $ An executable to test mORMot Execute.Command
+    // $
+    // $ Usage: mormot2tests [options] [params]
+    // $
+    // $ Options:
+    // $   -v, --verbose       generate verbose output
+    // $
+    // $ Params:
+    // $   -t, --threads <number> (default 5)
+    // $                       number of threads to run
+    function FullDescription(const customexedescription: RawUtf8 = '';
+      const exename: RawUtf8 = ''): RawUtf8;
+    /// check if the supplied parameters were all registered from previous
+    // Arg() Options() and Get/Param() calls
+    // - return '' if no unexpected flag has been supplied
+    // - return an error message like 'Unexpected --name option' otherwise
+    function DetectUnknown: RawUtf8;
+    /// call DetectUnknown and output any error message to the console
+    // - return false if the parameters are valid
+    // - otherwise, return true and caller should exit the process
+    function ConsoleWriteUnknown(const exedescription: RawUtf8 = ''): boolean;
+    /// fill the stored arguments and options from executable parameters
+    // - called e.g. at unit inialization to set Executable.CommandLine variable
+    // - you can execute it again e.g. to customize the switches characters
+    function Parse(const DescriptionLineFeed: RawUtf8 = CRLF;
+      const ShortSwitch: RawUtf8 = {$ifdef OSWINDOWS} '/' {$else} '-' {$endif};
+      const LongSwitch: RawUtf8 = {$ifdef OSWINDOWS} '/' {$else} '--' {$endif}): boolean;
+    /// remove all recognized arguments and switches
+    procedure Clear;
+    /// the ParamStr(1..ParamCount) arguments as RawUtf8, excluding Options[]
+    // switches and Params[]/Values[] parameters
+    property Args: TRawUtf8DynArray
+      read fNames[clkArg];
+    /// the "-optionname" boolean switches as stored in ParamStr()
+    property Options: TRawUtf8DynArray
+      read fNames[clkOption];
+    /// the names of "-parametername parametervalue" as stored in ParamStr()
+    // - mapping the Values[] associated array
+    property Names: TRawUtf8DynArray
+      read fNames[clkParam];
+    /// the values of "-parametername parametervalue" as stored in ParamStr()
+    // - mapping the Names[] associated array
+    property Values: TRawUtf8DynArray
+      read fValues;
+    /// if search within Args[] Options[] or Names[] should be case-sensitive
+    property CaseSensitiveNames: boolean
+      read fCaseSensitiveNames write fCaseSensitiveNames;
+    /// set a text which describes the executable
+    // - as used by default by FullDescription() and ConsoleWriteUnknown()
+    property ExeDescription: RawUtf8
+      read fExeDescription write fExeDescription;
+    /// map ParamStr(1 .. ParamCount) values, encoded as RawUtf8
+    // - may be used e.g. for regression tests instead of ParamStr()
+    property RawParams: TRawUtf8DynArray
+      read fRawParams write fRawParams;
+  end;
+
   /// stores some global information about the current executable and computer
+  // - as set at unit initialization into the Executable global variable
   TExecutable = record
     /// the main executable name, without any path nor extension
     // - e.g. 'Test' for 'c:\pathto\Test.exe'
@@ -1216,6 +1438,8 @@ type
     // and c3 from InstanceFileName
     // - may be used as an entropy seed, or to identify a process execution
     Hash: THash128Rec;
+    /// the Command Line arguments, parsed during unit initialization
+    Command: TExecutableCommandLine;
   end;
 
 var
@@ -1431,6 +1655,7 @@ function GetSmbios(info: TSmbiosBasicInfo): RawUtf8;
 // - otherwise, will compute a genuine hash from known hardware information
 // (CPU, Bios, MAC) and store it in a local file for the next access, e.g. into
 // '/var/tmp/.synopse.uid' on POSIX
+// - on Mac, include the mormot.core.os.mac unit to properly read this UUID
 // - note: some BIOS have no UUID, so we fallback to our hardware hash on those
 procedure GetComputerUuid(out uuid: TGuid);
 
@@ -1445,6 +1670,8 @@ type
   HWND          = Windows.HWND;
   BOOL          = Windows.BOOL;
   LARGE_INTEGER = Windows.LARGE_INTEGER;
+  TFileTime     = Windows.FILETIME;
+  PFileTime     = ^TFileTime;
 
   /// the known Windows Registry Root key used by TWinRegistry.ReadOpen
   TWinRegistryRoot = (
@@ -1467,23 +1694,27 @@ type
       closefirst: boolean = false): boolean;
     /// finalize low-level read access to the Windows Registry after ReadOpen()
     procedure Close;
-    /// low-level read a UTF-8 string from the Windows Registry after ReadOpen()
+    /// read a UTF-8 string from the Windows Registry after ReadOpen()
     // - in respect to Delphi's TRegistry, will properly handle REG_MULTI_SZ
-    // (return the first value of the multi-list)
+    // (return the first value of the multi-list) - use ReadData to retrieve
+    // all REG_MULTI_SZ values as one blob
     // - we don't use string here since it would induce a dependency to
     // mormot.core.unicode
     function ReadString(const entry: SynUnicode; andtrim: boolean = true): RawUtf8;
-    /// low-level read a Windows Registry content after ReadOpen()
+    /// read a Windows Registry content after ReadOpen()
     // - works with any kind of key, but was designed for REG_BINARY
     function ReadData(const entry: SynUnicode): RawByteString;
-    /// low-level read a Windows Registry 32-bit REG_DWORD value after ReadOpen()
+    /// read a Windows Registry 32-bit REG_DWORD value after ReadOpen()
     function ReadDword(const entry: SynUnicode): cardinal;
-    /// low-level read a Windows Registry 64-bit REG_QWORD value after ReadOpen()
+    /// read a Windows Registry 64-bit REG_QWORD value after ReadOpen()
     function ReadQword(const entry: SynUnicode): QWord;
-    /// low-level read a Windows Registry content as binary buffer after ReadOpen()
+    /// read a Windows Registry content as binary buffer after ReadOpen()
     // - just a wrapper around RegQueryValueExW() API call
     function ReadBuffer(const entry: SynUnicode; Data: pointer; DataLen: DWORD): boolean;
-    /// low-level enumeration of all sub-entries names of a Windows Registry key
+    /// retrieve a Windows Registry content size as binary bytes after ReadOpen()
+    // - returns -1 if the entry is not found
+    function ReadSize(const entry: SynUnicode): integer;
+    /// enumeration of all sub-entries names of a Windows Registry key
     function ReadEnumEntries: TRawUtf8DynArray;
   end;
 
@@ -1658,6 +1889,15 @@ function RawTokenSid(tok: THandle; var buf: TSynTempBuffer): PSid;
 // - so caller should call buf.Done once this PSid value is not needed any more
 function RawTokenGroups(tok: THandle; var buf: TSynTempBuffer): PSids;
 
+/// return the group SIDs of a given token as text dynamic array
+function TokenGroupsText(tok: THandle): TRawUtf8DynArray;
+
+/// check if a group SID is part of a given token
+function TokenHasGroup(tok: THandle; sid: PSid): boolean;
+
+/// check if any group SID is part of a given token
+function TokenHasAnyGroup(tok: THandle; const sid: RawSidDynArray): boolean;
+
 /// return the SID of the current user, from process or thread, as text
 // - e.g. 'S-1-5-21-823746769-1624905683-418753922-1000'
 // - optionally returning the name and domain via LookupSid()
@@ -1665,7 +1905,7 @@ function CurrentSid(wtt: TWinTokenType = wttProcess;
   name: PRawUtf8 = nil; domain: PRawUtf8 = nil): RawUtf8; overload;
 
 /// return the SID of the current user, from process or thread, as raw binary
-procedure CurrentSid(out sid: RawSid; wtt: TWinTokenType = wttProcess;
+procedure CurrentRawSid(out sid: RawSid; wtt: TWinTokenType = wttProcess;
   name: PRawUtf8 = nil; domain: PRawUtf8 = nil); overload;
 
 /// return the SID of the current user groups, from process or thread, as text
@@ -1690,6 +1930,10 @@ function CurrentUserHasGroup(const sid: RawUtf8;
 function CurrentUserHasGroup(sid: PSid;
   wtt: TWinTokenType = wttProcess): boolean; overload;
 
+/// fast check if the current user, from process or thread, has any given group SID
+function CurrentUserHasAnyGroup(const sid: RawSidDynArray;
+  wtt: TWinTokenType = wttProcess): boolean;
+
 /// fast check if the current user, from process or thread, match a group by name
 // - calls LookupSid() on each group SID of this user, and filter with name/domain
 function CurrentUserHasGroup(const name, domain, server: RawUtf8;
@@ -1708,6 +1952,12 @@ function LookupSid(sid: PSid; out name, domain: RawUtf8;
 function LookupSid(const sid: RawUtf8; out name, domain: RawUtf8;
   const server: RawUtf8 = ''): TSidType; overload;
 
+/// retrieve the name and domain of a given Token
+function LookupToken(tok: THandle; out name, domain: RawUtf8;
+  const server: RawUtf8 = ''): boolean; overload;
+
+/// retrieve the 'domain\name' combined value of a given Token
+function LookupToken(tok: THandle; const server: RawUtf8 = ''): RawUtf8; overload;
 
 /// retrieve low-level process information, from the Windows API
 procedure GetProcessInfo(aPid: cardinal;
@@ -1723,15 +1973,63 @@ function ReadRegString(Key: THandle; const Path, Value: string): string;
 
 /// convenient late-binding of any external library function
 // - just wrapper around LoadLibray + GetProcAddress once over a pointer
-function DelayedProc(var api; libname: PChar; procname: PAnsiChar): boolean;
+function DelayedProc(var api; var lib: THandle;
+  libname: PChar; procname: PAnsiChar): boolean;
 
 type
   HCRYPTPROV = pointer;
   HCRYPTKEY = pointer;
   HCRYPTHASH = pointer;
-
-  PCERT_INFO = pointer;
   HCERTSTORE = pointer;
+
+  CRYPTOAPI_BLOB = record
+    cbData: DWORD;
+    pbData: PByteArray;
+  end;
+  CRYPT_INTEGER_BLOB = CRYPTOAPI_BLOB;
+  CERT_NAME_BLOB     = CRYPTOAPI_BLOB;
+  CRYPT_OBJID_BLOB   = CRYPTOAPI_BLOB;
+
+  CRYPT_BIT_BLOB = record
+    cbData: DWORD;
+    pbData: PByteArray;
+    cUnusedBits: DWORD;
+  end;
+
+  CRYPT_ALGORITHM_IDENTIFIER = record
+    pszObjId: PAnsiChar;
+    Parameters: CRYPT_OBJID_BLOB;
+  end;
+
+  CERT_PUBLIC_KEY_INFO = record
+    Algorithm: CRYPT_ALGORITHM_IDENTIFIER;
+    PublicKey: CRYPT_BIT_BLOB;
+  end;
+
+  CERT_EXTENSION = record
+    pszObjId: PAnsiChar;
+    fCritical: BOOL;
+    Blob: CRYPT_OBJID_BLOB;
+  end;
+  PCERT_EXTENSION = ^CERT_EXTENSION;
+  CERT_EXTENSIONS = array[word] of CERT_EXTENSION;
+  PCERT_EXTENSIONS = ^CERT_EXTENSIONS;
+
+  CERT_INFO = record
+    dwVersion: DWORD;
+    SerialNumber: CRYPT_INTEGER_BLOB;
+    SignatureAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
+    Issuer: CERT_NAME_BLOB;
+    NotBefore: TFileTime;
+    NotAfter: TFileTime;
+    Subject: CERT_NAME_BLOB;
+    SubjectPublicKeyInfo: CERT_PUBLIC_KEY_INFO;
+    IssuerUniqueId: CRYPT_BIT_BLOB;
+    SubjectUniqueId: CRYPT_BIT_BLOB;
+    cExtension: DWORD;
+    rgExtension: PCERT_EXTENSIONS;
+  end;
+  PCERT_INFO = ^CERT_INFO;
 
   CERT_CONTEXT = record
     dwCertEncodingType: DWORD;
@@ -1743,21 +2041,43 @@ type
   PCCERT_CONTEXT = ^CERT_CONTEXT;
   PPCCERT_CONTEXT = ^PCCERT_CONTEXT;
 
+  CRYPT_KEY_PROV_PARAM = record
+    dwParam: DWORD;
+    pbData: PByte;
+    cbData: DWORD;
+    dwFlags: DWORD;
+  end;
+  PCRYPT_KEY_PROV_PARAM = ^CRYPT_KEY_PROV_PARAM;
+
+  CRYPT_KEY_PROV_INFO = record
+    pwszContainerName: PWideChar;
+    pwszProvName: PWideChar;
+    dwProvType: DWORD;
+    dwFlags: DWORD;
+    cProvParam: DWORD;
+    rgProvParam: PCRYPT_KEY_PROV_PARAM;
+    dwKeySpec: DWORD;
+  end;
+  PCRYPT_KEY_PROV_INFO = ^CRYPT_KEY_PROV_INFO;
+
+  CRYPT_OID_INFO = record
+    cbSize: DWORD;
+    pszOID: PAnsiChar;
+    pwszName: PWideChar;
+    dwGroupId: DWORD;
+    Union: record
+      case integer of
+        0: (dwValue: DWORD);
+        1: (Algid: DWORD);
+        2: (dwLength: DWORD);
+    end;
+    ExtraInfo: CRYPTOAPI_BLOB;
+  end;
+  PCRYPT_OID_INFO = ^CRYPT_OID_INFO;
+
   PCCRL_CONTEXT = pointer;
   PPCCRL_CONTEXT = ^PCCRL_CONTEXT;
   PCRYPT_ATTRIBUTE = pointer;
-
-  CRYPTOAPI_BLOB = record
-    cbData: DWORD;
-    pbData: PByte;
-  end;
-  CRYPT_OBJID_BLOB = CRYPTOAPI_BLOB;
-
-  PCRYPT_ALGORITHM_IDENTIFIER = ^CRYPT_ALGORITHM_IDENTIFIER;
-  CRYPT_ALGORITHM_IDENTIFIER = record
-    pszObjId: PAnsiChar;
-    Parameters: CRYPT_OBJID_BLOB;
-  end;
 
   CRYPT_SIGN_MESSAGE_PARA = record
     cbSize: DWORD;
@@ -1842,6 +2162,7 @@ type
 
 const
   NO_ERROR = Windows.NO_ERROR;
+
   ERROR_ACCESS_DENIED = Windows.ERROR_ACCESS_DENIED;
   ERROR_INVALID_PARAMETER = Windows.ERROR_INVALID_PARAMETER;
   ERROR_HANDLE_EOF = Windows.ERROR_HANDLE_EOF;
@@ -1850,18 +2171,20 @@ const
   ERROR_CONNECTION_INVALID = Windows.ERROR_CONNECTION_INVALID;
   ERROR_OLD_WIN_VERSION = Windows.ERROR_OLD_WIN_VERSION;
   ERROR_IO_PENDING = Windows.ERROR_IO_PENDING;
-
-  INVALID_HANDLE_VALUE = Windows.INVALID_HANDLE_VALUE; // = HANDLE(-1)
-  ENGLISH_LANGID = $0409;
-
+  ERROR_OPERATION_ABORTED = Windows.ERROR_OPERATION_ABORTED;
   // see http://msdn.microsoft.com/en-us/library/windows/desktop/aa383770
   ERROR_WINHTTP_TIMEOUT = 12002;
   ERROR_WINHTTP_CANNOT_CONNECT = 12029;
   ERROR_WINHTTP_INVALID_SERVER_RESPONSE = 12152;
   ERROR_MUI_FILE_NOT_FOUND = 15100;
 
+  INVALID_HANDLE_VALUE = Windows.INVALID_HANDLE_VALUE; // = HANDLE(-1)
+  ENGLISH_LANGID = $0409;
+
+  PROV_RSA_FULL = 1;
   PROV_RSA_AES = 24;
   CRYPT_NEWKEYSET = 8;
+  CRYPT_VERIFYCONTEXT = DWORD($F0000000);
   PLAINTEXTKEYBLOB = 8;
   CUR_BLOB_VERSION = 2;
   KP_IV = 1;
@@ -1876,8 +2199,6 @@ const
   CRYPT_MODE_CTS = 5;
   HCRYPTPROV_NOTTESTED = HCRYPTPROV(-1);
   NTE_BAD_KEYSET = HRESULT($80090016);
-  PROV_RSA_FULL = 1;
-  CRYPT_VERIFYCONTEXT = DWORD($F0000000);
 
 var
   CryptoApi: TWinCryptoApi;
@@ -2025,6 +2346,11 @@ function DeleteFile(const aFileName: TFileName): boolean;
 // - why did Delphi define this slow RTL function as inlined in SysUtils.pas?
 function RenameFile(const OldName, NewName: TFileName): boolean;
 
+/// redirection to Windows SetFileTime() of a file name from Int64(TFileTime)
+// - if any Int64 is 0, the proper value will be guess from the non-0 values
+function FileSetTime(const FileName: TFileName;
+  const Created, Accessed, Written: Int64): boolean;
+
 {$else}
 
 /// returns how many files could be opened at once on this POSIX system
@@ -2113,8 +2439,13 @@ var
   // - this unit will make icu.Done in its finalization section
   icu: TIcuLibrary;
 
+  /// contains the current POSIX kernel revision, as one 24-bit integer
+  // - allow quick comparison mainly for kernel feature checking
+  // - e.g. on Linux, may equal $030d02 for 3.13.2, or $020620 for 2.6.32
+  KernelRevision: cardinal;
 
-{$ifdef OSLINUX} { the systemd API is Linux-specific }
+
+{$ifdef OSLINUX} { some Linux-specific APIs (e.g. systemd or eventfd) }
 
 const
   /// The first passed file descriptor is fd 3
@@ -2181,6 +2512,26 @@ var
   // - this unit will make sd.Done in its finalization section
   sd: TSystemD;
 
+/// a wrapper to the eventfd() syscall
+// - returns 0 if the kernel does not support eventfd2 (before 2.6.27) or
+// if the platform is not supported (only validated on Linux x86_64 by now)
+// - returns a file descriptor handle on success, which should be fpclose()
+function LinuxEventFD(nonblocking, semaphore: boolean): integer;
+
+/// wrapper to read from a eventfd() file
+// - return 1 and decrement the counter by 1 in semaphore mode
+// - return the current counter value and set it to 0 in non-semaphor mode
+// - may be blocking or not blocking, depending on how LinuxEventFD() was called
+// - return -1 on error
+function LinuxEventFDRead(fd: integer): Int64;
+
+/// wrapper to write to a eventfd() file
+procedure LinuxEventFDWrite(fd: integer; count: QWord);
+
+/// wrapper to wait for a eventfd() file read
+// - return true if was notified for reading, or false on timeout
+function LinuxEventFDWait(fd: integer; ms: integer): boolean;
+
 {$endif OSLINUX}
 
 var
@@ -2242,6 +2593,9 @@ procedure UnixTimeToFileTime(I64: TUnixTime; out FT: TFileTime);
 function FileTimeToUnixTime(const FT: TFileTime): TUnixTime;
   {$ifdef FPC} inline; {$endif}
 
+/// convert a Win32 64-bit FILETIME value into a TDateTime
+function FileTimeToDateTime(const FT: TFileTime): TDateTime;
+
 /// convert a Win32 64-bit FILETIME value into an Unix milliseconds time
 function FileTimeToUnixMSTime(const FT: TFileTime): TUnixMSTime;
   {$ifdef FPC} inline; {$endif}
@@ -2263,7 +2617,7 @@ type
   TOSLightMutex = TRTLCriticalSection;
 
 {$ifdef OSLINUX}
-  {$define OSPTHREADSLIB} // direct pthread calls were tested on Linux only
+  {$define OSPTHREADSLIB}    // direct pthread calls were tested on Linux only
 {$endif OSLINUX}
 {$ifdef OSDARWIN}
   {$define OSPTHREADSSTATIC} // direct pthread calls from the 'c' library
@@ -2275,9 +2629,9 @@ type
 // some pthread_mutex_*() API defined here for proper inlining
 {$ifdef OSPTHREADSLIB}
 var
-  pthread_mutex_lock: function(mutex: pointer): integer; cdecl;
+  pthread_mutex_lock:    function(mutex: pointer): integer; cdecl;
   pthread_mutex_trylock: function(mutex: pointer): integer; cdecl;
-  pthread_mutex_unlock: function(mutex: pointer): integer; cdecl;
+  pthread_mutex_unlock:  function(mutex: pointer): integer; cdecl;
 {$endif OSPTHREADSLIB}
 {$ifdef OSPTHREADSSTATIC}
 function pthread_mutex_lock(mutex: pointer): integer; cdecl;
@@ -2535,6 +2889,8 @@ function UnixMSTimeUtcFast: TUnixMSTime;
 const
   /// number of days offset between the Unix Epoch (1970) and TDateTime origin
   UnixDelta = 25569;
+  /// number of Windows TFileTime ticks (100ns) from year 1601 to 1970
+  UnixFileTimeDelta = 116444736000000000;
 
 /// the number of minutes bias in respect to UTC/GMT date/time
 // - as retrieved via -GetLocalTimeOffset() at startup
@@ -2658,11 +3014,10 @@ function FileSetDateFromWindowsTime(const Dest: TFileName; WinTime: integer): bo
 // - used e.g. by FileSetDateFromWindowsTime() on POSIX
 function WindowsFileTimeToDateTime(WinTime: integer): TDateTime;
 
-/// convert a Windows API File 64-bit TimeStamp into a regular TDateTime
+/// convert a Windows API File 64-bit TimeStamp into a regular TUnixMSTime
 // - i.e. a FILETIME value as returned by GetFileTime() Win32 API
-// - returns 0 if the conversion failed
-// - some binary formats (e.g. ISO 9660) has such FILETIME fields
-function WindowsFileTime64ToDateTime(WinTime: QWord): TDateTime;
+// - some binary formats (e.g. ISO 9660 or LDAP) have such FILETIME fields
+function WindowsFileTime64ToUnixMSTime(WinTime: QWord): TUnixMSTime;
 
 /// low-level conversion of a TDateTime into a Windows File 32-bit TimeStamp
 // - returns 0 if the conversion failed
@@ -2741,29 +3096,6 @@ procedure DisplayFatalError(const title, msg: RawUtf8);
 // - expects the regular Format() layout with %s %d - not the FormatUtf8() %
 procedure DisplayError(const fmt: string; const args: array of const);
 
-const
-  {$ifdef OSWINDOWS}
-  /// operating-system dependent Line Feed characters
-  CRLF = #13#10;
-  /// operating-system dependent wildchar to match all files in a folder
-  FILES_ALL = '*.*';
-  /// operating-system dependent "inverted" delimiter for NormalizeFileName()
-  InvertedPathDelim = '/';
-  /// operating-system dependent boolean if paths are case-insensitive
-  PathCaseInsensitive = true;
-  {$else}
-  /// operating-system dependent Line Feed characters
-  CRLF = #10;
-  /// operating-system dependent wildchar to match all files in a folder
-  FILES_ALL = '*';
-  /// operating-system dependent "inverted" delimiter for NormalizeFileName()
-  InvertedPathDelim = '\';
-  /// operating-system dependent boolean if paths are case-insensitive
-  PathCaseInsensitive = false;
-  {$endif OSWINDOWS}
-  /// a convenient shortened constant to open a file for reading
-  fmOpenReadDenyNone = fmOpenRead or fmShareDenyNone;
-
 /// get a file date and time, from a FindFirst/FindNext search
 // - the returned timestamp is in local time, not UTC
 // - this method would use the F.Timestamp field available since Delphi XE2
@@ -2796,7 +3128,7 @@ type
       read fDontReleaseHandle write fDontReleaseHandle;
   end;
 
-  /// a TFileStream which supports FileName longer than MAX_PATH
+  /// a TFileStream replacement which supports FileName longer than MAX_PATH
   TFileStreamEx = class(TFileStreamFromHandle)
   Private
     fFileName : TFileName;
@@ -2822,22 +3154,30 @@ type
     function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
+/// a wrapper around FileRead() to ensure a whole memory buffer is retrieved
+// - on Windows, will read by 16MB chunks to avoid ERROR_NO_SYSTEM_RESOURCES
+// - will call FileRead() and retry up to Size bytes are filled in the buffer
+// - return true if all memory buffer has been read, or false on error
+function FileReadAll(F: THandle; Buffer: pointer; Size: PtrInt): boolean;
 
 /// overloaded function optimized for one pass reading of a (huge) file
 // - will use e.g. the FILE_FLAG_SEQUENTIAL_SCAN flag under Windows, as stated
 // by http://blogs.msdn.com/b/oldnewthing/archive/2012/01/20/10258690.aspx
-// - on Windows, to avoid ERROR_NO_SYSTEM_RESOURCES problems when calling
-// FileRead() for chunks bigger than 32MB on files opened with this flag, so you
-// should better FileRead() over e.g. 16MB chunks max (as StringFromFile does)
 // - on POSIX, calls fpOpen(pointer(FileName),O_RDONLY) with no fpFlock() call
 // - is used e.g. by StringFromFile() or HashFile() functions
+// - note: you could better use FileReadAll() to retrieve a whole data buffer
 function FileOpenSequentialRead(const FileName: TFileName): integer;
 
-/// returns a TFileStream optimized for one pass file reading
+/// returns a TFileStreamFromHandle optimized for one pass file reading
 // - will use FileOpenSequentialRead(), i.e. FILE_FLAG_SEQUENTIAL_SCAN on Windows
 // - on POSIX, calls fpOpen(pointer(FileName),O_RDONLY) with no fpFlock() call
 // - is used e.g. by TRestOrmServerFullMemory and TAlgoCompress
 function FileStreamSequentialRead(const FileName: TFileName): THandleStream;
+
+/// try to open the file from its name, as fmOpenReadDenyNone
+// - on Windows, calls CreateFileW(aFileName,GENERIC_READ) then CloseHandle
+// - on POSIX, calls fpOpen(pointer(aFileName),O_RDONLY) with no fpFlock() call
+function IsFileReadable(const aFileName: TFileName): boolean;
 
 /// copy all Source content into Dest from current position
 // - on Delphi, Dest.CopyFrom(Source, 0) uses GetSize and ReadBuffer which is
@@ -2916,6 +3256,10 @@ function AnsiCompareFileName(const S1, S2 : TFileName): integer;
 // - returns the full expanded directory name, including trailing path delimiter
 // - returns '' on error, unless RaiseExceptionOnCreationFailure is true
 function EnsureDirectoryExists(const Directory: TFileName;
+  RaiseExceptionOnCreationFailure: boolean = false): TFileName;
+
+/// just a wrapper around EnsureDirectoryExists(NormalizeFileName(Directory))
+function NormalizeDirectoryExists(const Directory: TFileName;
   RaiseExceptionOnCreationFailure: boolean = false): TFileName;
 
 /// delete the content of a specified directory
@@ -3160,6 +3504,11 @@ function RetrieveProcessInfo(PID: cardinal; out KernelTime, UserTime: Int64;
 // - allocreserved and allocused are set only if withalloc is TRUE
 function GetMemoryInfo(out info: TMemoryInfo; withalloc: boolean): boolean;
 
+/// retrieve some human-readable text from GetMemoryInfo
+// - numbers are rounded up to a single GB number with no decimals
+// - returns e.g. 'used 6GB/16GB (35% free)' text
+function GetMemoryInfoText: RawUtf8;
+
 /// retrieve low-level information about a given disk partition
 // - as used by TSynMonitorDisk and GetDiskPartitionsText()
 // - warning: aDriveFolderOrFile may be modified at input
@@ -3261,7 +3610,10 @@ function ConsoleKeyPressed(ExpectedKey: Word): boolean;
 
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt;
-  out res: RawUtf8);
+  out res: RawUtf8); overload;
+
+/// local RTL wrapper function to avoid linking mormot.core.unicode.pas
+procedure Win32PWideCharToUtf8(P: PWideChar; out res: RawUtf8); overload;
 
 /// local RTL wrapper function to avoid linking mormot.core.unicode.pas
 // - returns dest.buf as PWideChar result, and dest.len as length
@@ -3277,7 +3629,8 @@ function PosixParseHex32(p: PAnsiChar): integer;
 {$endif OSWINDOWS}
 
 /// internal function to avoid linking mormot.core.buffers.pas
-function _oskb(Size: cardinal): string;
+// - will round up the value to fit in a single number without decimals
+function _oskb(Size: QWord): string;
 
 /// direct conversion of a UTF-8 encoded string into a console OEM-encoded string
 // - under Windows, will use the CP_OEM encoding
@@ -3691,9 +4044,10 @@ type
   protected
     fSection: TRTLCriticalSection;
     fRW: TRWLock;
-    fLockCount: integer;
+    fPaddingUsedCount: byte;
     fInitialized: boolean;
     fRWUse: TSynLockerUse;
+    fLockCount: integer;
     function GetVariant(Index: integer): Variant;
     procedure SetVariant(Index: integer; const Value: Variant);
     function GetInt64(Index: integer): Int64;
@@ -3716,18 +4070,13 @@ type
     procedure RWUnLock(context: TRWLockContext);
       {$ifdef HASINLINE} inline; {$endif}
   public
-    /// number of values stored in the internal Padding[] array
-    // - equals 0 if no value is actually stored, or a 1..7 number otherwise
-    // - you should not have to use this field, but for optimized low-level
-    // direct access to Padding[] values, within a Lock/UnLock safe block
-    PaddingUsedCount: integer;
     /// internal padding data, also used to store up to 7 variant values
     // - this memory buffer will ensure no CPU cache line mixup occurs
     // - you should not use this field directly, but rather the Locked[],
     // LockedInt64[], LockedUtf8[] or LockedPointer[] methods
     // - if you want to access those array values, ensure you protect them
     // using a Safe.Lock; try ... Padding[n] ... finally Safe.Unlock structure,
-    // and maintain the PaddingUsedCount field accurately
+    // and maintain the PaddingUsedCount property accurately
     Padding: array[0..6] of TVarData;
     /// initialize the mutex
     // - calling this method is mandatory (e.g. in the class constructor owning
@@ -3816,6 +4165,12 @@ type
     // !  end; // local hidden IUnknown will release the lock for the method
     // !end;
     function ProtectMethod: IUnknown;
+    /// number of values stored in the internal Padding[] array
+    // - equals 0 if no value is actually stored, or a 1..7 number otherwise
+    // - you should not have to use this field, but for optimized low-level
+    // direct access to Padding[] values, within a Lock/UnLock safe block
+    property PaddingUsedCount: byte
+      read fPaddingUsedCount write fPaddingUsedCount;
     /// returns true if the mutex is currently locked by another thread
     // - with RWUse=uRWLock, any lock (even ReadOnlyLock) would return true
     property IsLocked: boolean
@@ -3912,14 +4267,16 @@ type
     destructor Destroy; override;
   end;
 
-  /// our light cross-platform TEvent-like component
-  // - on POSIX, FPC will use PRTLEvent which is lighter than TEvent BasicEvent
+  /// our lightweight cross-platform TEvent-like component
+  // - on Linux, will use eventfd() in blocking and non-semaphore mode
+  // - on other POSIX, will use PRTLEvent which is lighter than TEvent BasicEvent
   // - only limitation is that we don't know if WaitFor is signaled or timeout,
-  // but this is not a real one in practice since most code don't need it
-  // or has already its own flag in its implementation logic
+  // but this is not a real one in practice since most code don't need this
+  // information or has already its own flag in its implementation logic
   TSynEvent = class
   protected
     fHandle: pointer; // Windows THandle or FPC PRTLEvent
+    fFD: integer;     // for eventfd()
   public
     /// initialize an instance of cross-platform event
     constructor Create;
@@ -3933,6 +4290,7 @@ type
       {$ifdef OSPOSIX} inline; {$endif}
     /// wait until SetEvent is called from another thread, with a maximum time
     // - does not return if it was signaled or timeout
+    // - WARNING: you should wait from a single thread at once
     procedure WaitFor(TimeoutMS: integer);
       {$ifdef OSPOSIX} inline; {$endif}
     /// wait until SetEvent is called from another thread, with no maximum time
@@ -3940,6 +4298,9 @@ type
       {$ifdef OSPOSIX} inline; {$endif}
     /// calls SleepHiRes() in steps while checking terminated flag and this event
     function SleepStep(var start: Int64; terminated: PBoolean): Int64;
+    /// could be used to tune your algorithm if the eventfd() API is used
+    function IsEventFD: boolean;
+      {$ifdef HASINLINE} inline; {$endif}
   end;
 
 
@@ -4066,6 +4427,13 @@ procedure ResetCpuSet(out CpuSet: TCpuSet);
 
 /// set a particular bit in a mask of CPU cores
 function SetCpuSet(var CpuSet: TCpuSet; CpuIndex: cardinal): boolean;
+
+/// retrieve the current CPU cores masks available of the system
+// - the current process may have been tuned to use only a sub-set of the cores
+// e.g. via "taskset -c" on Linux
+// - return the number of accessible CPU cores - i.e. GetBitCount(CpuSet) or
+// 0 if the function failed
+function CurrentCpuSet(out CpuSet: TCpuSet): integer;
 
 /// try to assign a given thread to a specific set of logical CPU core(s)
 // - on Windows, calls the SetThreadAffinityMask() API
@@ -5045,22 +5413,22 @@ begin
   result := false;
 end;
 
-function _oskb(Size: cardinal): string;
+function _oskb(Size: QWord): string;
 const
   _U: array[0..2] of string[3] = ('GB', 'MB', 'KB');
 var
   u, v: cardinal;
 begin
   u := 0;
-  v := Size shr 30;
+  v := (Size + 1 shl 29) shr 30; // "+ 1 shl ##" to round up the value
   if v = 0 then
   begin
     inc(u);
-    v := Size shr 20;
+    v := (Size + 1 shl 19) shr 20;
     if v = 0 then
     begin
       inc(u);
-      v := Size shr 10;
+      v := (Size + 1 shl 9) shr 10;
     end;
   end;
   result := format('%d%s', [v, _U[u]]);
@@ -5129,9 +5497,64 @@ begin
   FastSetString(result, @tmp[1], ord(tmp[0]));
 end;
 
-function SidToText(const sid: RawSid): RawUtf8;
+function SidsToText(sids: PSids): TRawUtf8DynArray;
+var
+  i: PtrInt;
 begin
-  result := SidToText(pointer(sid));
+  SetLength(result, length(sids));
+  for i := 0 to length(sids) - 1 do
+    result[i] := SidToText(sids[i]);
+end;
+
+function IsValidRawSid(const sid: RawSid): boolean;
+var
+  l: PtrInt;
+begin
+  l := length(sid);
+  result := (l >= SizeOf(TSidAuth) + 2) and
+            (SidLength(pointer(sid)) = l)
+end;
+
+function HasSid(const sids: PSids; sid: PSid): boolean;
+var
+  i: PtrInt;
+begin
+  result := true;
+  if sid <> nil then
+    for i := 0 to length(sids) - 1 do
+      if SidCompare(sid, sids[i]) = 0 then
+        exit;
+  result := false;
+end;
+
+function HasAnySid(const sids: PSids; const sid: RawSidDynArray): boolean;
+var
+  i: PtrInt;
+begin
+  result := true;
+  for i := 0 to length(sid) - 1 do
+    if HasSid(sids, pointer(sid[i])) then
+      exit;
+  result := false;
+end;
+
+procedure AddRawSid(var sids: RawSidDynArray; sid: PSid);
+var
+  n: PtrInt;
+begin
+  if sid = nil then
+    exit;
+  n := length(sids);
+  SetLength(sids, n + 1);
+  ToRawSid(sid, sids[n]);
+end;
+
+function RawSidToText(const sid: RawSid): RawUtf8;
+begin
+  if IsValidRawSid(sid) then
+    result := SidToText(pointer(sid))
+  else
+    result := '';
 end;
 
 // GetNextCardinal() on POSIX does not ignore trailing '-'
@@ -5176,12 +5599,18 @@ begin
   result := P^ = #0
 end;
 
-function TextToSid(const text: RawUtf8): RawSid;
+function TextToRawSid(const text: RawUtf8): RawSid;
+begin
+  TextToRawSid(text, result);
+end;
+
+function TextToRawSid(const text: RawUtf8; out sid: RawSid): boolean;
 var
   tmp: TSid; // maximum size possible on stack (1032 bytes)
 begin
-  if TextToSid(pointer(text), tmp) then
-    ToRawSid(@tmp, result);
+  result := TextToSid(pointer(text), tmp);
+  if result then
+    ToRawSid(@tmp, sid)
 end;
 
 var
@@ -5280,7 +5709,7 @@ begin
   GlobalUnLock;
 end;
 
-function KnownSid(wks: TWellKnownSid): RawSid;
+function KnownRawSid(wks: TWellKnownSid): RawSid;
 begin
   if (wks <> wksNull) and
      (KNOWN_SID[wks] = '') then
@@ -5431,6 +5860,10 @@ begin
     result := OS_NAME[osv.os];
 end;
 
+const
+  LINUX_TEXT: array[boolean] of string[7] = (
+    '', 'Linux ');
+
 function ToTextOS(osint32: integer): RawUtf8;
 var
   osv: TOperatingSystemVersion absolute osint32;
@@ -5448,8 +5881,8 @@ begin
   if (osv.os >= osLinux) and
      (osv.utsrelease[2] <> 0) then
     // include kernel number to the distribution name, e.g. 'Ubuntu Linux 5.4.0'
-    result := _fmt('%s Linux %d.%d.%d', [result, osv.utsrelease[2],
-      osv.utsrelease[1], osv.utsrelease[0]]);
+    result := _fmt('%s %s%d.%d.%d', [result, LINUX_TEXT[osv.os in OS_LINUX],
+      osv.utsrelease[2], osv.utsrelease[1], osv.utsrelease[0]]);
 end;
 
 function MatchOS(os: TOperatingSystem): boolean;
@@ -5801,11 +6234,11 @@ begin
 end;
 
 const
-  DateFileTimeDelta =  94353120000000000; // from year 1601 to 1899
+  FileTimePerMs = 10000; // a tick is 100ns
 
-function WindowsFileTime64ToDateTime(WinTime: QWord): TDateTime;
+function WindowsFileTime64ToUnixMSTime(WinTime: QWord): TUnixMSTime;
 begin
-  result := (Int64(WinTime) - DateFileTimeDelta) / 10000;
+  result := (Int64(WinTime) - UnixFileTimeDelta) div FileTimePerMs;
 end;
 
 function DirectorySize(const FileName: TFileName; Recursive: boolean = false): Int64;
@@ -6001,11 +6434,31 @@ begin
     until false;
 end;
 
+function FileReadAll(F: THandle; Buffer: pointer; Size: PtrInt): boolean;
+var
+  chunk, read: PtrInt;
+begin
+  result := false;
+  repeat
+    chunk := Size;
+    {$ifdef OSWINDOWS}
+    if chunk > 16 shl 20 then
+      chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
+    {$endif OSWINDOWS}
+    read := FileRead(F, Buffer^, chunk);
+    if read <= 0 then
+      exit; // error reading Size bytes
+    inc(PByte(Buffer), read);
+    dec(Size, read);
+  until Size = 0;
+  result := true;
+end;
+
 function StringFromFile(const FileName: TFileName; HasNoSize: boolean): RawByteString;
 var
   F: THandle;
-  read, size, chunk: integer;
-  P: PUtf8Char;
+  size: Int64;
+  read, pos: integer;
   tmp: array[0..$7fff] of AnsiChar; // 32KB stack buffer
 begin
   result := '';
@@ -6016,38 +6469,25 @@ begin
   begin
     if HasNoSize then
     begin
-      size := 0;
+      pos := 0;
       repeat
-        read := FileRead(F, tmp, SizeOf(tmp));
+        read := FileRead(F, tmp, SizeOf(tmp)); // fill per 32KB local buffer
         if read <= 0 then
           break;
-        SetLength(result, size + read); // in-place resize
-        MoveFast(tmp, PByteArray(result)^[size], read);
-        inc(size, read);
+        SetLength(result, pos + read); // in-place resize
+        MoveFast(tmp, PByteArray(result)^[pos], read);
+        inc(pos, read);
       until false;
     end
     else
     begin
       size := FileSize(F);
-      if size > 0 then
+      if (size < MaxInt) and // 2GB seems big enough for a RawByteString
+         (size > 0) then
       begin
         SetLength(result, size);
-        P := pointer(result);
-        repeat
-          chunk := size;
-          {$ifdef OSWINDOWS}
-          if chunk > 16 shl 20 then
-            chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
-          {$endif OSWINDOWS}
-          read := FileRead(F, P^, chunk);
-          if read <= 0 then
-          begin
-            result := '';
-            break;
-          end;
-          inc(P, read);
-          dec(size, read);
-        until size = 0;
+        if not FileReadAll(F, pointer(result), size) then
+          result := ''; // error reading
       end;
     end;
     FileClose(F);
@@ -6304,6 +6744,13 @@ begin
         raise Exception.CreateFmt('Impossible to create folder %s', [result]);
 end;
 
+function NormalizeDirectoryExists(const Directory: TFileName;
+  RaiseExceptionOnCreationFailure: boolean): TFileName;
+begin
+  result := EnsureDirectoryExists(NormalizeFileName(Directory),
+    RaiseExceptionOnCreationFailure);
+end;
+
 function DirectoryDelete(const Directory: TFileName; const Mask: TFileName;
   DeleteOnlyFilesNotDirectory: boolean; DeletedCount: PInteger): boolean;
 var
@@ -6525,8 +6972,9 @@ begin
     // mapping is not worth it for size < 1MB which can be just read at once
     GetMem(fBuf, fBufSize);
     FileSeek64(fFile, aCustomOffset, soFromBeginning);
-    result := PtrUInt(FileRead(fFile, fBuf^, fBufSize)) = fBufSize;
-    if not result then
+    if FileReadAll(fFile, fBuf, fBufSize) then
+      result := true
+    else
     begin
       Freemem(fBuf);
       fBuf := nil;
@@ -6758,6 +7206,17 @@ begin
   result := COMPILER_VERSION;
 end;
 {$endif PUREMORMOT2}
+
+function GetMemoryInfoText: RawUtf8;
+var
+  info: TMemoryInfo;
+begin
+  if GetMemoryInfo(info, false) then
+    _fmt('used %s/%s (%d%s free)', [_oskb(info.memtotal - info.memfree),
+      _oskb(info.memtotal), info.percent, '%'], result)
+  else
+    result := '';
+end;
 
 function ConsoleReadBody: RawByteString;
 var
@@ -7140,6 +7599,8 @@ begin
     if User = '' then
       User := 'unknown';
     Version := TFileVersion.Create(ProgramFileName); // with versions=0
+    Command := TExecutableCommandLine.Create;
+    Command.Parse;
   end;
   ComputeExecutableHash;
 end;
@@ -7149,6 +7610,445 @@ begin
   Executable.Version.SetVersion(aMajor, aMinor, aRelease, aBuild);
   ComputeExecutableHash;
 end;
+
+
+{ TExecutableCommandLine }
+
+function TExecutableCommandLine.Full(const v: RawUtf8): RawUtf8;
+begin
+  result := fSwitch[length(v) > 1] + v;
+end;
+
+procedure TExecutableCommandLine.Describe(const v: array of RawUtf8;
+  k: TExecutableCommandLineKind; d, def: RawUtf8; argindex: integer);
+var
+  i, j: PtrInt;
+  desc, param, pnames: RawUtf8;
+begin
+  if (self = nil) or
+     (d = '') then
+    exit;
+  if k <> clkArg then
+  begin
+    if high(v) < 0 then
+      exit;
+    desc := Full(v[0]);
+    if length(v[0]) <> 1 then
+      desc := '    ' + desc; // right align --#
+    for i := 1 to high(v) do
+      desc := desc + ', ' + Full(v[i]);
+  end;
+  if k <> clkOption then
+  begin
+    i := PosExChar('#', d);
+    if i > 0 then
+    begin
+      j := 1;
+      while d[i + j] > ' ' do
+        inc(j);
+      delete(d, i, 1); // remove #
+      param := copy(d, i, j - 1); // extract parameter value name
+    end
+    else if k = clkArg then
+      if high(v) = 0 then
+        param := v[0]
+      else if argindex > 0 then
+        param := _fmt('arg%d', [argindex])
+      else
+        param := 'arg'
+    else
+      param := 'value';
+    desc := desc + ' <' + param + '>';
+  end;
+  fDesc[k] := fDesc[k] + ' ' + desc;
+  if def <> '' then
+    def := ' (default ' + def + ')';
+  pnames := _fmt('  %0:-20s', [desc + def]);
+  if length(pnames) > 22 then // write description on next line
+    fDescDetail[k] := fDescDetail[k] + pnames + fLineFeed +
+            '                      ' + d + fLineFeed
+  else
+    fDescDetail[k] := fDescDetail[k] + pnames + d + fLineFeed;
+end;
+
+function TExecutableCommandLine.Find(const v: array of RawUtf8;
+  k: TExecutableCommandLineKind; const d, def: RawUtf8; f: PtrInt): PtrInt;
+var
+  i: PtrInt;
+begin
+  if self <> nil then
+  begin
+    if k <> clkUndefined then
+      Describe(v, k, d, def, -1);
+    if (high(v) >= 0) and
+       (fNames[k] <> nil) then
+      for i := 0 to high(v) do
+      begin
+        result := FindNonVoid[fCaseSensitiveNames](
+          @fNames[k][f], pointer(v[i]), length(v[i]), length(fNames[k]) - f);
+        if result >= 0 then
+        begin
+          inc(result, f);
+          fRetrieved[k][result] := true;
+          exit;
+        end;
+      end;
+  end;
+  result := -1
+end;
+
+function TExecutableCommandLine.Arg(index: integer; const description: RawUtf8): boolean;
+begin
+  result := (self <> nil) and
+            (PtrUInt(index) < PtrUInt(length(fNames[clkArg])));
+  if result then
+    fRetrieved[clkArg][index] := true;
+  Describe([], clkArg, description, '', index + 1);
+end;
+
+function TExecutableCommandLine.Arg(const name, description: RawUtf8): boolean;
+begin
+  result := Find([name], clkArg, description) >= 0;
+end;
+
+function TExecutableCommandLine.Arg(const name: array of RawUtf8;
+  const description: RawUtf8): boolean;
+begin
+  result := Find(name, clkArg, description) >= 0;
+end;
+
+function TExecutableCommandLine.Option(const name, description: RawUtf8): boolean;
+begin
+  result := Find([name], clkOption, description) >= 0;
+end;
+
+function TExecutableCommandLine.Option(const name: array of RawUtf8;
+  const description: RawUtf8): boolean;
+begin
+  result := Find(name, clkOption, description) >= 0;
+end;
+
+function TExecutableCommandLine.Get(const name: RawUtf8; out value: RawUtf8;
+  const description, default: RawUtf8): boolean;
+begin
+  result := Get([name], value, description, default);
+end;
+
+procedure AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8);
+var
+  n: PtrInt;
+begin
+  n := length(Values);
+  SetLength(Values, n + 1);
+  Values[n] := Value;
+end;
+
+function TExecutableCommandLine.Get(const name: array of RawUtf8;
+  out value: TRawUtf8DynArray; const description: RawUtf8): boolean;
+var
+  first, i: PtrInt;
+begin
+  result := false;
+  if self = nil then
+    exit;
+  Describe(name, clkParam, description, '', -1);
+  first := 0;
+  repeat
+    i := Find(name, clkParam, '', '', first);
+    if i < 0 then
+      break;
+    AddRawUtf8(value, fValues[i]);
+    result := true;
+    first := i + 1;
+  until first >= length(fValues);
+end;
+
+function TExecutableCommandLine.Get(const name: array of RawUtf8;
+  out value: RawUtf8; const description, default: RawUtf8): boolean;
+var
+  i: PtrInt;
+begin
+  if self = nil then
+    i := -1
+  else
+    i := Find(name, clkParam, description, default);
+  if i >= 0 then
+  begin
+    value := Values[i];
+    result := true;
+  end
+  else
+  begin
+    value := default;
+    result := false;
+  end;
+end;
+
+function TExecutableCommandLine.Get(const name: RawUtf8; out value: string;
+  const description: RawUtf8; const default: string): boolean;
+begin
+  result := Get([name], value, description, default);
+end;
+
+function TExecutableCommandLine.Get(const name: array of RawUtf8;
+  out value: string; const description: RawUtf8; const default: string): boolean;
+var
+  tmp: RawUtf8;
+begin
+  result := Get(name, tmp, description, RawUtf8(default));
+  value := string(tmp);
+end;
+
+function TExecutableCommandLine.Get(const name: RawUtf8;
+  out value: TStringDynarray; const description: RawUtf8): boolean;
+begin
+  result := Get([name], value, description);
+end;
+
+function TExecutableCommandLine.Get(const name: array of RawUtf8;
+  out value: TStringDynarray; const description: RawUtf8): boolean;
+var
+  tmp: TRawUtf8DynArray;
+  i: PtrInt;
+begin
+  result := Get(name, tmp, description);
+  SetLength(value, length(tmp));
+  for i := 0 to length(tmp) - 1 do
+    value[i] := string(tmp[i]);
+end;
+
+function TExecutableCommandLine.Get(const name: RawUtf8;
+  out value: integer; const description: RawUtf8; default: integer): boolean;
+begin
+  result := Get([name], value, description, default);
+end;
+
+function defI(default: integer): RawUtf8;
+begin
+  if default = maxInt then
+    result := ''
+  else
+    result := RawUtf8(IntToStr(default));
+end;
+
+function TExecutableCommandLine.Get(const name: array of RawUtf8;
+  out value: integer; const description: RawUtf8; default: integer): boolean;
+var
+  i: PtrInt;
+begin
+  if self = nil then
+    i := -1
+  else
+    i := Find(name, clkParam, description, defI(default));
+  result := (i >= 0) and
+            ToInteger(Values[i], value);
+  if not result and
+     (default <> maxInt) then
+    value := default;
+end;
+
+function TExecutableCommandLine.Get(const name: RawUtf8; min, max: integer;
+  out value: integer; const description: RawUtf8; default: integer): boolean;
+begin
+  result := Get([name], min, max, value, description, default);
+end;
+
+function TExecutableCommandLine.Get(const name: array of RawUtf8;
+  min, max: integer; out value: integer; const description: RawUtf8;
+  default: integer): boolean;
+begin
+  result := Get(name, value, description, default) and
+            (value >= min) and
+            (value <= max);
+end;
+
+function TExecutableCommandLine.Has(const name: RawUtf8): boolean;
+begin
+  result := Find([name], clkParam) >= 0;
+end;
+
+function TExecutableCommandLine.Has(const name: array of RawUtf8): boolean;
+begin
+  result := Find(name, clkParam) >= 0;
+end;
+
+function TExecutableCommandLine.Param(
+  const name, description, default: RawUtf8): RawUtf8;
+begin
+  Get([name], result, description, default);
+end;
+
+function TExecutableCommandLine.Param(const name: array of RawUtf8;
+  const description, default: RawUtf8): RawUtf8;
+begin
+  Get(name, result, description, default);
+end;
+
+function TExecutableCommandLine.Param(const name: RawUtf8;
+  default: integer; const description: RawUtf8): integer;
+begin
+  Get([name], result, description, default);
+end;
+
+function TExecutableCommandLine.Param(const name: array of RawUtf8;
+  default: integer;const description: RawUtf8): integer;
+begin
+  Get(name, result, description, default);
+end;
+
+const
+  CLK_TXT: array[clkOption .. clkParam] of RawUtf8 = (
+    ' [options]', ' [params]');
+  CLK_DESCR: array[clkOption .. clkParam] of RawUtf8 = (
+    'Options:', 'Params:');
+
+function TExecutableCommandLine.FullDescription(
+  const customexedescription, exename: RawUtf8): RawUtf8;
+var
+  clk: TExecutableCommandLineKind;
+begin
+  if customexedescription <> '' then
+    fExeDescription := customexedescription;
+  result := fExeDescription + fLineFeed + fLineFeed + 'Usage: ';
+  if exename = '' then
+    result := result + Executable.ProgramName
+  else
+    result := result + exename;
+  result := result + fDesc[clkArg];
+  for clk := low(CLK_TXT) to high(CLK_TXT) do
+    if fDesc[clk] <> '' then
+      result := result + CLK_TXT[clk];
+  result := result + fLineFeed;
+  for clk := low(fDescDetail) to high(fDescDetail) do
+    if fDescDetail[clk] <> '' then
+    begin
+      if clk in [low(CLK_TXT) .. high(CLK_TXT)] then
+        result := result + fLineFeed + CLK_DESCR[clk];
+      result := result + fLineFeed + fDescDetail[clk];
+    end;
+end;
+
+function TExecutableCommandLine.DetectUnknown: RawUtf8;
+var
+  clk: TExecutableCommandLineKind;
+  i: PtrInt;
+begin
+  result := '';
+  for clk := low(fRetrieved) to high(fRetrieved) do
+    for i := 0 to length(fRetrieved[clk]) - 1 do
+      if not fRetrieved[clk][i] then
+      begin
+        result := result + 'Unexpected ' + Full(fNames[clk][i]) + ' ';
+        case clk of
+          clkArg:
+            result := result + 'argument';
+          clkOption:
+            result := result + 'option';
+          clkParam:
+            result := result + fValues[i] + ' parameter';
+        end;
+        result := result + fLineFeed;
+      end;
+end;
+
+function TExecutableCommandLine.ConsoleWriteUnknown(
+  const exedescription: RawUtf8): boolean;
+var
+  err: RawUtf8;
+begin
+  err := DetectUnknown;
+  result := err <> '';
+  if not result then
+    exit;
+  ConsoleWrite(err, ccLightRed);
+  ConsoleWrite(FullDescription(exedescription));
+end;
+
+procedure TExecutableCommandLine.Clear;
+begin
+  CleanupInstance; // finalize all TRawUtf8DynArray fields
+end;
+
+function TExecutableCommandLine.Parse(
+  const DescriptionLineFeed, ShortSwitch, LongSwitch: RawUtf8): boolean;
+var
+  i, j, n: PtrInt;
+  swlen: TByteDynArray;
+  s: RawUtf8;
+begin
+  result := false;
+  fLineFeed := DescriptionLineFeed;
+  if (ShortSwitch = '') or
+     (LongSwitch = '') then
+    exit;
+  fSwitch[false] := ShortSwitch;
+  fSwitch[true] := LongSwitch;
+  if fRawParams = nil then
+  begin
+    n := ParamCount;
+    if n <= 0 then
+      exit; // may equal -1 e.g. from a .so on MacOS
+    SetLength(fRawParams, n);
+    for i := 0 to n - 1 do
+      fRawParams[i] := RawUtf8(ParamStr(i + 1));
+  end;
+  n := length(fRawParams);
+  if n = 0 then
+  begin
+    result := true;
+    exit;
+  end;
+  SetLength(swlen, n);
+  for i := 0 to n - 1 do
+  begin
+    s := fRawParams[i];
+    if s <> '' then
+      if CompareMemSmall(pointer(s), pointer(LongSwitch), length(LongSwitch)) then
+        swlen[i] := length(LongSwitch)
+      else if CompareMemSmall(pointer(s), pointer(ShortSwitch), length(ShortSwitch)) then
+        swlen[i] := length(ShortSwitch)
+      {$ifdef OSWINDOWS}
+      else while s[swlen[i] + 1] = '-' do
+        inc(swlen[i]); // allow -v --verbose on Windows for cross-platform run
+      {$endif OSWINDOWS}
+  end;
+  i := 0;
+  repeat
+    s := fRawParams[i];
+    if s <> '' then
+      if swlen[i] <> 0 then
+      begin
+        delete(s, 1, swlen[i]);
+        if s <> '' then
+        begin
+          j := PosExChar('=', s);
+          if j <> 1 then
+            if j <> 0 then
+            begin
+              AddRawUtf8(fNames[clkParam], copy(s, 1, j - 1));
+              AddRawUtf8(fValues, copy(s, j + 1, MaxInt));
+            end
+            else if (i + 1 = n) or
+                    (swlen[i + 1] <> 0) then
+              AddRawUtf8(fNames[clkOption], s)
+            else
+            begin
+              AddRawUtf8(fNames[clkParam], s);
+              inc(i);
+              AddRawUtf8(fValues, fRawParams[i]);
+            end;
+          end;
+      end
+      else
+        AddRawUtf8(fNames[clkArg], s);
+    inc(i);
+  until i = n;
+  SetLength(fRetrieved[clkArg], length(fNames[clkArg]));
+  SetLength(fRetrieved[clkOption], length(fNames[clkOption]));
+  SetLength(fRetrieved[clkParam], length(fNames[clkParam]));
+  result := true;
+end;
+
 
 function _GetExecutableLocation(aAddress: pointer): ShortString;
 var
@@ -7169,7 +8069,7 @@ function GetSystemStoreAsPem(CertStore: TSystemCertificateStore;
   FlushCache: boolean; now: cardinal): RawUtf8;
 begin
   if now = 0 then
-    now := GetTickCount64 shr 18; // div 262.144 seconds = refresh every 4.4 min
+    now := GetTickCount64 shr 18 + 1; // div 262.144 seconds = every 4.4 min
   with _SystemStoreAsPem[ord(CertStore) + 1] do
   begin
     if not FlushCache then
@@ -7195,7 +8095,7 @@ label
   notfound;
 begin
   result := '';
-  now := GetTickCount64 shr 18;
+  now := GetTickCount64 shr 18 + 1;
   // first search if bounded within the application
   with _SystemStoreAsPem[0] do // cached in slot [0]
   begin
@@ -7354,21 +8254,37 @@ function GetRawSmbiosFromMem(var info: TRawSmbiosInfo): boolean;
 var
   mem: RawByteString;
   addr: QWord;
+  {$ifdef OSLINUX}
+  fromsysfs: boolean;
+  {$endif OSLINUX}
 begin
   result := false;
   Finalize(info.Data);
   FillCharFast(info, SizeOf(info), 0);
-  // first try to read system EFI entries
-  mem := GetSmbEfiMem;
+  {$ifdef OSLINUX}
+  // on Linux, first try from sysfs tables
+  fromsysfs := false;
+  mem := StringFromFile('/sys/firmware/dmi/tables/smbios_entry_point', true);
+  if mem <> '' then
+    fromsysfs := true
+  else
+  {$endif OSLINUX}
+    // then try to read system EFI entries
+    mem := GetSmbEfiMem;
   if mem = '' then
-    // fallback to raw memory reading (won't work on modern/EFI systems)
+    // last fallback to raw memory reading (won't work on modern/EFI systems)
     mem := ReadSystemMemory(SMB_START, SMB_STOP - SMB_START);
   if mem = '' then
     exit;
   addr := SearchSmbios(mem, info);
   if addr = 0 then
     exit;
-  info.data := ReadSystemMemory(addr, info.Length);
+  {$ifdef OSLINUX}
+  if fromsysfs then
+    info.data := StringFromFile('/sys/firmware/dmi/tables/DMI', {nosize=}true)
+  else
+  {$endif OSLINUX}
+    info.data := ReadSystemMemory(addr, info.Length);
   result := info.data <> '';
 end;
 
@@ -8009,16 +8925,16 @@ procedure TSynLocker.Init;
 begin
   InitializeCriticalSection(fSection);
   fLockCount := 0;
+  fPaddingUsedCount := 0;
   fInitialized := true;
   fRW.Init;
-  PaddingUsedCount := 0;
 end;
 
 procedure TSynLocker.Done;
 var
   i: PtrInt;
 begin
-  for i := 0 to PaddingUsedCount - 1 do
+  for i := 0 to fPaddingUsedCount - 1 do
     if not (integer(Padding[i].VType) in VTYPE_SIMPLE) then
       VarClearProc(Padding[i]);
   DeleteCriticalSection(fSection);
@@ -8137,7 +9053,7 @@ end;
 
 function TSynLocker.GetVariant(Index: integer): Variant;
 begin
-  if cardinal(Index) < cardinal(PaddingUsedCount) then
+  if cardinal(Index) < cardinal(fPaddingUsedCount) then
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -8159,8 +9075,8 @@ begin
   if cardinal(Index) <= high(Padding) then
   try
     RWLock(cWrite);
-    if Index >= PaddingUsedCount then
-      PaddingUsedCount := Index + 1;
+    if Index >= fPaddingUsedCount then
+      fPaddingUsedCount := Index + 1;
     variant(Padding[Index]) := Value;
   finally
     RWUnLock(cWrite);
@@ -8169,7 +9085,7 @@ end;
 
 function TSynLocker.GetInt64(Index: integer): Int64;
 begin
-  if cardinal(Index) < cardinal(PaddingUsedCount) then
+  if cardinal(Index) < cardinal(fPaddingUsedCount) then
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -8194,7 +9110,7 @@ end;
 
 function TSynLocker.GetBool(Index: integer): boolean;
 begin
-  if cardinal(Index) < cardinal(PaddingUsedCount) then
+  if cardinal(Index) < cardinal(fPaddingUsedCount) then
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -8219,7 +9135,7 @@ end;
 
 function TSynLocker.GetUnlockedInt64(Index: integer): Int64;
 begin
-  if (cardinal(Index) >= cardinal(PaddingUsedCount)) or
+  if (cardinal(Index) >= cardinal(fPaddingUsedCount)) or
      not VariantToInt64(variant(Padding[Index]), result) then
     result := 0;
 end;
@@ -8228,15 +9144,15 @@ procedure TSynLocker.SetUnlockedInt64(Index: integer; const Value: Int64);
 begin
   if cardinal(Index) <= high(Padding) then
   begin
-    if Index >= PaddingUsedCount then
-      PaddingUsedCount := Index + 1;
+    if Index >= fPaddingUsedCount then
+      fPaddingUsedCount := Index + 1;
     variant(Padding[Index]) := Value;
   end;
 end;
 
 function TSynLocker.GetPointer(Index: integer): Pointer;
 begin
-  if cardinal(Index) < cardinal(PaddingUsedCount) then
+  if cardinal(Index) < cardinal(fPaddingUsedCount) then
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -8262,8 +9178,8 @@ begin
   if cardinal(Index) <= high(Padding) then
   try
     RWLock(cWrite);
-    if Index >= PaddingUsedCount then
-      PaddingUsedCount := Index + 1;
+    if Index >= fPaddingUsedCount then
+      fPaddingUsedCount := Index + 1;
     with Padding[Index] do
     begin
       VarClearAndSetType(PVariant(@VType)^, varUnknown);
@@ -8276,7 +9192,7 @@ end;
 
 function TSynLocker.GetUtf8(Index: integer): RawUtf8;
 begin
-  if cardinal(Index) < cardinal(PaddingUsedCount) then
+  if cardinal(Index) < cardinal(fPaddingUsedCount) then
   {$ifdef HASFASTTRYFINALLY}
   try
   {$else}
@@ -8298,8 +9214,8 @@ begin
   if cardinal(Index) <= high(Padding) then
   try
     RWLock(cWrite);
-    if Index >= PaddingUsedCount then
-      PaddingUsedCount := Index + 1;
+    if Index >= fPaddingUsedCount then
+      fPaddingUsedCount := Index + 1;
     RawUtf8ToVariant(Value, variant(Padding[Index]));
   finally
     RWUnLock(cWrite);
@@ -8312,10 +9228,10 @@ begin
   try
     RWLock(cWrite);
     result := 0;
-    if Index < PaddingUsedCount then
+    if Index < fPaddingUsedCount then
       VariantToInt64(variant(Padding[Index]), result)
     else
-      PaddingUsedCount := Index + 1;
+      fPaddingUsedCount := Index + 1;
     variant(Padding[Index]) := Int64(result + Increment);
   finally
     RWUnLock(cWrite);
@@ -8332,10 +9248,10 @@ begin
     RWLock(cWrite);
     with Padding[Index] do
     begin
-      if Index < PaddingUsedCount then
+      if Index < fPaddingUsedCount then
         result := PVariant(@VType)^
       else
-        PaddingUsedCount := Index + 1;
+        fPaddingUsedCount := Index + 1;
       PVariant(@VType)^ := Value;
     end;
   finally
@@ -8350,7 +9266,7 @@ begin
     RWLock(cWrite);
     with Padding[Index] do
     begin
-      if Index < PaddingUsedCount then
+      if Index < fPaddingUsedCount then
         if VType = varUnknown then
           result := VUnknown
         else
@@ -8360,7 +9276,7 @@ begin
         end
       else
       begin
-        PaddingUsedCount := Index + 1;
+        fPaddingUsedCount := Index + 1;
         result := nil;
       end;
       VType := varUnknown;
@@ -8410,6 +9326,15 @@ begin
         exit;
       result := GetTickCount64;
     until result >= endtix;
+end;
+
+function TSynEvent.IsEventFD: boolean;
+begin
+  {$ifdef HASEVENTFD}
+  result := fFD <> 0;
+  {$else}
+  result := false;
+  {$endif HASEVENTFD}
 end;
 
 
@@ -8557,6 +9482,15 @@ begin
     exit;
   SetBitPtr(@CpuSet, CpuIndex);
   result := true;
+end;
+
+function CurrentCpuSet(out CpuSet: TCpuSet): integer;
+begin
+  ResetCpuSet(CpuSet);
+  if GetMaskAffinity(CpuSet) then
+    result := GetBitsCount(CpuSet, SizeOf(CpuSet) shl 3)
+  else
+    result := 0;
 end;
 
 function SetThreadCpuAffinity(Thread: TThread; CpuIndex: cardinal): boolean;
@@ -8895,6 +9829,7 @@ begin
   end;
   ObjArrayClear(CurrentFakeStubBuffers);
   Executable.Version.Free;
+  Executable.Command.Free;
   FinalizeSpecificUnit; // in mormot.core.os.posix/windows.inc files
   ConsoleCriticalSection.Done;
   GlobalCriticalSection.Done;
@@ -8903,7 +9838,6 @@ begin
   RawExceptionIntercepted := true;
   {$endif NOEXCEPTIONINTERCEPT}
 end;
-
 
 
 initialization

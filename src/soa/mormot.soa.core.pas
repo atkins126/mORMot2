@@ -768,7 +768,7 @@ type
     /// will be called when a callback is released on the client side
     // - this method matches the TInterfaceFactory.MethodIndexCallbackReleased
     // signature, so that it will be called with the interface instance by
-    // TServiceContainerServer.FakeCallbackRelease
+    // TServiceContainerServer.ReleaseFakeCallback
     // - you may use it as such - see sample restws_chatserver.dpr:
     // ! procedure TChatService.CallbackReleased(const callback: IInvokable;
     // !   const interfaceName: RawUtf8);
@@ -1471,7 +1471,7 @@ begin
         begin
           m := InterfaceMethodIndex - SERVICE_PSEUDO_METHOD_COUNT;
           if (m >= 0) and
-             IdemPropNameU(method, InterfaceService.fInterface.Methods[m].Uri) then
+             PropNameEquals(method, InterfaceService.fInterface.Methods[m].Uri) then
             include(bits, i);
         end;
     end
@@ -1664,9 +1664,9 @@ end;
 
 function TRestServerUri.Equals(const other: TRestServerUri): boolean;
 begin
-  result := IdemPropNameU(Address, other.Address) and
-            IdemPropNameU(Port, other.Port) and
-            IdemPropNameU(root, other.Root);
+  result := PropNameEquals(Address, other.Address) and
+            PropNameEquals(Port, other.Port) and
+            PropNameEquals(root, other.Root);
 end;
 
 

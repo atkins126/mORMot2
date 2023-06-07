@@ -26,6 +26,7 @@ uses
   mormot.core.base,
   mormot.core.os,
   mormot.core.rtti,
+  mormot.core.unicode,
   mormot.core.text,
   mormot.core.buffers, // for Base64 and baudot encoding
   mormot.core.datetime,
@@ -42,6 +43,7 @@ const
 
   /// Mon, 01 Aug 2016 encoded as COM/TDateTime value
   // - used to compute TEccDate 16-bit values to/from a TDateTime
+  // - 16-bit day resolution allow values from year 2016 to 2196
   ECC_DELTA = 42583;
 
 
@@ -80,6 +82,7 @@ type
   TEccSecretKey = THash256;
 
   PEccPublicKey = ^TEccPublicKey;
+  PEccPublicKeyUncompressed = ^TEccPublicKeyUncompressed;
   PEccPrivateKey = ^TEccPrivateKey;
   PEccHash = ^TEccHash;
   PEccSignature = ^TEccSignature;
@@ -136,9 +139,30 @@ var
   // - returns false if an error occurred
   // - this function is thread-safe and does not perform any memory allocation
   // - it is slightly faster than plain Ecc256r1Verify() using TEccPublicKey,
-  // since public key doesn't need to be uncompressed
+  // with the pascal version since public key doesn't need to be uncompressed,
+  // but it is slower when using the OpenSSL backend
   Ecc256r1VerifyUncomp: function(const PublicKey: TEccPublicKeyUncompressed;
     const Hash: TEccHash; const Signature: TEccSignature): boolean;
+
+/// compress a public key for ECC secp256r1 cryptography
+// - convert its uncompressed/flat form (64 bytes of memory) into its compressed
+// form with its standard byte header (33 bytes of memory)
+// - a pascal version is good enough for this immediate bit copy operation
+procedure Ecc256r1Compress(const Uncompressed: TEccPublicKeyUncompressed;
+  out Compressed: TEccPublicKey);
+
+/// compress an ASN-1 public key for ECC secp256r1 cryptography
+// - input is likely to have a $04 initial byte for ASN-1 uncompressed key
+function Ecc256r1CompressAsn1(const Uncompressed: RawByteString;
+  out Compressed: TEccPublicKey): boolean;
+
+/// compress an ECC secp256r1 cryptography public key as expected by ASN-1
+// - include a $04 initial byte as uncompressed key, and change endianness
+function Ecc256r1UncompressAsn1(const Compressed: TEccPublicKey): RawByteString;
+
+/// just a wrapper around Ecc256r1Verify/Ecc256r1VerifyUncomp depending on pubunc
+function Ecc256r1DoVerify(const pub: TEccPublicKey; pubunc: PEccPublicKeyUncompressed;
+  const hash: TEccHash; const sign: TEccSignature): boolean;
 
 
 /// pascal function to create a secp256r1 public/private key pair
@@ -344,7 +368,7 @@ type
     Head: TEccCertificateContentV1;
     /// new version >= 2 with additional information (up to 512 bytes)
     Info: TEccCertificateContentV2;
-    /// set Certificate usage, as 16-bit TCryptCertUsage value
+    /// set Certificate usage, as 16-bit TCryptCertUsages value
     // - will also force the version to be 2 if maxversion allow it
     procedure SetUsage(usage: integer; maxversion: byte);
     /// get Certificate 16-bit TCryptCertUsage usage
@@ -365,7 +389,8 @@ type
     function Check: boolean;
     /// fast check of the dates stored in a certificate binary buffer
     // - could be validated against EccCheck()
-    function CheckDate(nowdate: PEccDate = nil): boolean;
+    // - you can specify your own UTC timestamp for expiration instead of NowUtc
+    function CheckDate(nowdate: PEccDate = nil; TimeUtc: TDateTime = 0): boolean;
     /// fast check if the binary buffer storage of a certificate was self-signed
     // - a self-signed certificate has its AuthoritySerial field matching Seial
     function IsSelfSigned: boolean;
@@ -424,14 +449,17 @@ type
     // - will verify all internal signature fields according to a supplied authority,
     // then will perform the ECDSA verification of the supplied 256-bit hash with
     // the authority public key
-    function Verify(const hash: THash256;
-      const auth: TEccCertificateContent): TEccValidity; overload;
+    // - optional authuncomp could be the uncompressed auth.Head.Signed.PublicKey
+    function Verify(const hash: THash256; const auth: TEccCertificateContent;
+      authuncomp: PEccPublicKeyUncompressed;
+      TimeUtc: TDateTime = 0): TEccValidity; overload;
     /// low-level verification of a TEccSignatureCertifiedContent binary buffer
     // - will verify all internal signature fields according to a supplied authority
     // key, then perform the ECDSA verification of the supplied 256-bit hash with it
     // - returns ecvValidSigned on success, or an error value otherwise
     function Verify(const hash: THash256; const authkey: TEccPublicKey;
-      valid: TEccValidity = ecvValidSigned): TEccValidity; overload;
+      valid: TEccValidity = ecvValidSigned;
+      TimeUtc: TDateTime = 0): TEccValidity; overload;
   end;
 
   /// points to a TEccSignatureCertified buffer for ECDSA secp256r1 signature
@@ -1121,15 +1149,6 @@ begin
   _mv(a, result);
 end;
 
-procedure _bswap256(dest, source: PQWordArray);
-begin
-  // warning: our code requires dest <> source
-  dest[0] := bswap64(source[3]);
-  dest[1] := bswap64(source[2]);
-  dest[2] := bswap64(source[1]);
-  dest[3] := bswap64(source[0]);
-end;
-
 procedure EccPointDecompress(out Point: TEccPoint; const Compressed: TEccPublicKey);
 begin
   _bswap256(@Point.x, @Compressed[1]);
@@ -1171,11 +1190,60 @@ begin
     EccPointMult(pub, Curve_G_32, priv, nil);
   until not (_isZero({%H-}pub.x) and _isZero(pub.y));
   _bswap256(@PrivateKey, @priv);
-  _bswap256(@PublicKey[1], @pub.x);
-  PublicKey[0] := 2 + (pub.y.B[0] and 1); // standard header for compressed form
+  Ecc256r1Compress(TEccPublicKeyUncompressed(pub), PublicKey);
   result := true;
   FillZero(priv.b); // erase sensitive information from stack
   FillZero(THash512(pub));
+end;
+
+procedure Ecc256r1Compress(const Uncompressed: TEccPublicKeyUncompressed;
+  out Compressed: TEccPublicKey);
+begin
+  // use standard compressed form header and byte order
+  Compressed[0] := 2 + (TEccPoint(Uncompressed).y.B[0] and 1);
+  _bswap256(@Compressed[1], @TEccPoint(Uncompressed).x);
+end;
+
+function Ecc256r1CompressAsn1(const Uncompressed: RawByteString;
+  out Compressed: TEccPublicKey): boolean;
+var
+  len: integer;
+  p: PHash512Rec;
+  u: THash512Rec;
+begin
+  result := false;
+  FillCharFast(Compressed, SizeOf(Compressed), 0);
+  len := length(Uncompressed);
+  p := pointer(Uncompressed);
+  if (len = SizeOf(TEccPublicKeyUncompressed) + 1) and
+     (p.b[0] = 4) then
+  begin
+    inc(PByte(p)); // ignore $04 ASN-1 uncompressed public key marker
+    dec(len);
+  end;
+  if len <> SizeOf(TEccPublicKeyUncompressed) then
+    exit;
+  _bswap256(@u.l, @p.l); // change endianness
+  _bswap256(@u.h, @p.h);
+  Ecc256r1Compress(TEccPublicKeyUncompressed(u), Compressed);
+  result := true;
+end;
+
+function Ecc256r1UncompressAsn1(const Compressed: TEccPublicKey): RawByteString;
+var
+  p: PHash512Rec;
+  u: THash512Rec;
+begin
+  result := '';
+  if IsZero(Compressed) then
+    exit;
+  SetLength(result, SizeOf({%H-}p^) + 1);
+  p := pointer(result);
+  p.b[0] := $04; // ASN-1 uncompressed public key marker
+  inc(PByte(p));
+  Ecc256r1Uncompress(Compressed, PEccPublicKeyUncompressed(@u)^);
+  _bswap256(@p.l, @u.l);
+  _bswap256(@p.h, @u.h);
 end;
 
 function ecdh_shared_secret_uncompressed_pas(
@@ -1692,11 +1760,15 @@ begin
               (ComputeCrc32 = Head.CRC);
 end;
 
-function TEccCertificateContent.CheckDate(nowdate: PEccDate): boolean;
+function TEccCertificateContent.CheckDate(nowdate: PEccDate;
+  TimeUtc: TDateTime): boolean;
 var
   now: TEccDate;
 begin
-  now := NowEccDate;
+  if TimeUtc = 0 then
+    now := NowEccDate // default is to check validity against current timestamp
+  else
+    now := EccDate(TimeUtc);
   if nowdate <> nil then
     nowdate^ := now;
   result := (Head.Signed.IssueDate <= now) and
@@ -1798,8 +1870,18 @@ begin
     result := '';
 end;
 
+function Ecc256r1DoVerify(const pub: TEccPublicKey; pubunc: PEccPublicKeyUncompressed;
+  const hash: TEccHash; const sign: TEccSignature): boolean;
+begin
+  if pubunc = nil then
+    result := Ecc256r1Verify(pub, hash, sign)
+  else
+    result := Ecc256r1VerifyUncomp(pubunc^, hash, sign);
+end;
+
 function TEccSignatureCertifiedContent.Verify(const hash: THash256;
-  const auth: TEccCertificateContent): TEccValidity;
+  const auth: TEccCertificateContent; authuncomp: PEccPublicKeyUncompressed;
+  TimeUtc: TDateTime): TEccValidity;
 var
   now: TEccDate;
 begin
@@ -1809,11 +1891,11 @@ begin
     result := ecvCorrupted
   else if not auth.Check then
     result := ecvUnknownAuthority
-  else if not auth.CheckDate(@now) then
+  else if not auth.CheckDate(@now, TimeUtc) then
     result := ecvDeprecatedAuthority
   else if Date > now then
     result := ecvInvalidDate
-  else if not Ecc256r1Verify(auth.Head.Signed.PublicKey, hash, Signature) then
+  else if not Ecc256r1DoVerify(auth.Head.Signed.PublicKey, authuncomp, hash, Signature) then
     result := ecvInvalidSignature
   else if auth.IsSelfSigned then
     result := ecvValidSelfSigned
@@ -1822,13 +1904,20 @@ begin
 end;
 
 function TEccSignatureCertifiedContent.Verify(const hash: THash256;
-  const authkey: TEccPublicKey; valid: TEccValidity): TEccValidity;
+  const authkey: TEccPublicKey; valid: TEccValidity;
+  TimeUtc: TDateTime): TEccValidity;
+var
+  now: TEccDate;
 begin
+  if TimeUtc = 0 then
+    now := NowEccDate
+  else
+    now := EccDate(TimeUtc);
   if IsZero(hash) then
     result := ecvBadParameter
   else if not Check then
     result := ecvCorrupted
-  else if Date > NowEccDate then
+  else if Date > now then
     result := ecvInvalidDate
   else if not Ecc256r1Verify(authkey, hash, Signature) then
     result := ecvInvalidSignature

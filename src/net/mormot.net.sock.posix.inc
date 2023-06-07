@@ -10,7 +10,7 @@ uses
   termio,
   sockets,
   {$ifdef OSLINUXANDROID}
-  linux, // for epoll
+  linux,   // for epoll
   {$endif OSLINUXANDROID}
   initc; // link clib='c' for our socket purpose
 
@@ -29,6 +29,8 @@ uses
 { ******** Sockets Type Definitions }
 
 const
+  host_file = '/etc/hosts';
+
   NI_MAXHOST = 1025;
   NI_MAXSERV = 32;
 
@@ -36,6 +38,7 @@ const
   WSAEADDRNOTAVAIL = ESysEADDRNOTAVAIL;
   WSAECONNABORTED = ESysECONNABORTED;
   WSAETIMEDOUT = ESysETIMEDOUT;
+  WSAEINVAL = ESysEINVAL;
   WSAEMFILE = ESysEMFILE;
   WSAECONNREFUSED = ESysECONNREFUSED;
 
@@ -214,6 +217,11 @@ begin
   result := fpbind(s, addr, namelen);
 end;
 
+function getsockname(s: integer; name: PSockAddr; var namelen: tsocklen): integer; inline;
+begin
+  result := fpgetsockname(s, name, @namelen);
+end;
+
 function listen(s: integer; backlog: integer): integer; inline;
 begin
   result := fplisten(s, backlog);
@@ -302,6 +310,9 @@ function getnameinfo(addr: PSockAddr; namelen: tsocklen; host: PAnsiChar;
 
 function bind(s: integer; addr: PSockAddr; namelen: tsocklen): integer; cdecl;
   external clib name 'bind';
+
+function getsockname(s: integer; name: PSockAddr; var namelen: tsocklen): integer; cdecl;
+  external clib name 'getsockname';
 
 function listen(s: integer; backlog: integer): integer; cdecl;
   external clib name 'listen';
@@ -421,28 +432,16 @@ begin
       end;
     exit;
   end;
-  // check supplied port
+  // check supplied IP port
   addr4.sin_port := htons(GetCardinal(pointer(addrport)));
   if (addr4.sin_port = 0) and
      (addrport <> '0') then // explicit '0' to get ephemeral port
     exit;
-  // handle simple cases
+  // check most simple IPv4 resolution (maybe using mormot.net.dns)
   result := nrOk;
-  if (address = cLocalhost) or
-     (address = c6Localhost) or
-     PropNameEquals(address, 'localhost') then
-  begin
-    addr4.sin_family := AF_INET;
-    PCardinal(@addr4.sin_addr)^ := cLocalhost32; // 127.0.0.1
+  if SetFromIP4(address, false) then
     exit;
-  end
-  else if (address = cAnyHost) or
-          (address = c6AnyHost) then
-  begin
-    addr4.sin_family := AF_INET; // 0.0.0.0
-    exit;
-  end;
-  // resolve name or IP (getaddrinfo is more recent, but addrinfo is not fixed)
+  // use OS API (getaddrinfo is more recent, but addrinfo is not cross-platform)
   _gethostbynamesafe.Lock;
   try
     h := gethostbyname(pointer(address));
@@ -512,6 +511,21 @@ begin
   SetOpt(SOL_SOCKET, SO_RCVTIMEO, @tv, SizeOf(tv));
 end;
 
+procedure TNetSocketWrap.SetReuseAddrPort;
+var
+  v: integer;
+begin
+  v := ord(true);
+  {$ifdef OSBSDDARWIN}
+  SetOpt(SOL_SOCKET, SO_REUSEPORT, @v, SizeOf(v));
+  {$ifndef OSOPENBSD}
+  SetOpt(SOL_SOCKET, SO_NOSIGPIPE, @v, SizeOf(v));
+  {$endif OSOPENBSD}
+  {$else}
+  SetOpt(SOL_SOCKET, SO_REUSEADDR, @v, SizeOf(v));
+  {$endif OSBSDDARWIN}
+end;
+
 procedure TNetSocketWrap.SetLinger(linger: integer);
 var
   v: TLinger;
@@ -520,17 +534,40 @@ begin
   v.l_onoff := ord(linger >= 0);
   SetOpt(SOL_SOCKET, SO_LINGER, @v, SizeOf(v));
   if linger > 0 then
-  begin
-    v.l_onoff := ord(true);
-    {$ifdef OSBSDDARWIN}
-    SetOpt(SOL_SOCKET, SO_REUSEPORT, @v.l_onoff, SizeOf(v.l_onoff));
-    {$ifndef OSOPENBSD}
-    SetOpt(SOL_SOCKET, SO_NOSIGPIPE, @v.l_onoff, SizeOf(v.l_onoff));
-    {$endif OSOPENBSD}
-    {$else}
-    SetOpt(SOL_SOCKET, SO_REUSEADDR, @v.l_onoff, SizeOf(v.l_onoff));
-    {$endif OSBSDDARWIN}
-  end;
+    SetReuseAddrPort;
+end;
+
+procedure TNetSocketWrap.SetCork(cork: boolean);
+var
+  v: integer;
+begin
+  v := ord(cork);
+  {$ifdef OSLINUXANDROID}
+  SetOpt(IPPROTO_TCP, TCP_CORK, @v, SizeOf(v));
+  {$else}
+  {$ifdef OSBSDDARWIN}
+  SetOpt(IPPROTO_TCP, TCP_NOPUSH, @v, SizeOf(v));
+  {$endif OSBSDDARWIN}
+  {$endif OSLINUXANDROID}
+end;
+
+{$ifdef OSLINUXANDROID}
+procedure TNetSocketWrap.SetLowPriority;
+var
+  v: integer;
+begin
+  v := 0; // lowest priority
+  SetOpt(SOL_SOCKET, SO_PRIORITY, @v, SizeOf(v));
+end;
+{$else}
+procedure TNetSocketWrap.SetLowPriority;
+begin
+end;
+{$endif OSLINUXANDROID}
+
+function TNetSocketWrap.HasLowPriority: boolean;
+begin
+  result := false;
 end;
 
 function TNetSocketWrap.WaitFor(ms: integer; scope: TNetEvents;
@@ -652,21 +689,8 @@ begin
         s := '';
         case info^.ifa_addr^.sa_family of
           AF_INET:
-            if kind <> tiaIPv6 then
-              with info^.ifa_addr^ do
-                if (integer(sin_addr) <> $0100007f) and
-                   (integer(sin_addr) <> 0) then
-                  case Kind of
-                    tiaIpv4,
-                    tiaAny:
-                      IP4Text(@sin_addr,s);
-                    tiaIPv4Public:
-                      if IsPublicIP(integer(sin_addr)) then
-                        IP4Text(@sin_addr, s);
-                    tiaIPv4Private:
-                      if not IsPublicIP(integer(sin_addr)) then
-                        IP4Text(@sin_addr, s);
-                  end;
+            if IP4Filter(integer(info^.ifa_addr^.sin_addr), Kind) then
+              IP4Text(@info^.ifa_addr^.sin_addr,s);
           AF_INET6:
             if kind in [tiaAny, tiaIPv6] then
               with PSockAddrIn6(info^.ifa_addr)^ do
@@ -802,10 +826,53 @@ end;
 
 {$endif USE_IFADDRS}
 
+function _GetDnsAddresses(usePosixEnv, getAD: boolean): TRawUtf8DynArray;
+var
+  resolv, one: RawUtf8;
+  p: PUtf8Char;
+  n: PtrInt;
+  ok: boolean;
+begin
+  result := nil;
+  if usePosixEnv then
+    resolv := StringFromFile(GetEnvironmentVariable('ETC'), true);
+  if resolv = '' then
+    // all systems are likely to have or generate this file
+    // - the libc seems to read it for its gethostname()
+    resolv := StringFromFile('/etc/resolv.conf');
+  n := 0;
+  p := pointer(resolv);
+  while p <> nil do
+  begin
+    while p^ in [#9, ' '] do
+      inc(p);
+    if p^ in [#0, '#'] then
+      ok := false
+    else if getAD then
+      ok := NetStartWith(p, 'SEARCH ') or
+            NetStartWith(p, 'DOMAIN ')  // "domain" is used e.g. on MacOS
+    else
+      ok := NetStartWith(p, 'NAMESERVER ');
+    if ok then
+    begin
+      repeat
+        inc(p);
+      until p^ <= ' '; // go after search/domain/nameserver keyword
+      repeat
+        one := NetGetNextSpaced(p);
+        if one = '' then
+          break;
+        SetLength(result, n + 1);
+        result[n] := one;
+        inc(n);
+      until false;
+    end;
+    p := GotoNextLine(p);
+  end;
+end;
+
 
 { ******************** Efficient Multiple Sockets Polling }
-
-{$ifdef USEPOLL}
 
 type
   /// socket polling via the POSIX poll API
@@ -854,27 +921,28 @@ begin
   s := PtrUInt(socket);
   new := -1;
   p := pointer(fFD);
-  if fFDCount = fCount then
-  begin
-    // no void entry
-    for i := 1 to fFDCount do
-      if p^.fd = s then
-        // already subscribed
-        exit
-      else
-        inc(p);
-  end
-  else
-    for i := 0 to fFDCount - 1 do
+  if p <> nil then
+    if fFDCount = fCount then
     begin
-      fd := p^.fd;
-      if fd = s then
-        // already subscribed
-        exit
-      else if fd < 0 then
-        // found a void entry
-        new := i;
-    end;
+      // no void entry
+      for i := 1 to fFDCount do
+        if p^.fd = s then
+          // already subscribed
+          exit
+        else
+          inc(p);
+    end
+    else
+      for i := 0 to fFDCount - 1 do
+      begin
+        fd := p^.fd;
+        if fd = s then
+          // already subscribed
+          exit
+        else if fd < 0 then
+          // found a void entry
+          new := i;
+      end;
   if new < 0 then
   begin
     if fFDCount = length(fFD) then
@@ -991,20 +1059,27 @@ begin
   if n <= 0 then
     exit;
   if results.Events = nil then
-    SetLength(results.Events, n + 4)
+    SetLength(results.Events, n + 4) // optimized for a few items
   else if n > length(results.Events) then
-  if length(results.Events) < n then
   begin
     results.Events := nil;
-    SetLength(results.Events, fMaxSockets);
+    SetLength(results.Events, NextGrow(n + 64)); // more generous allocation
   end;
   PollConvert(pointer(fFD), pointer(results.Events), fFDCount, pointer(fTags));
   result := true;
 end;
 
+function PollFewSockets: TPollSocketAbstract;
+begin
+  result := TPollSocketPoll.Create(nil);
+end;
+
+
+{$ifdef USEPOLL}
+
 function PollSocketClass: TPollSocketClass;
 begin
-  PollSocketClass := TPollSocketPoll;
+  result := TPollSocketPoll;
 end;
 
 {$else}
@@ -1030,6 +1105,8 @@ type
       timeoutMS: integer): boolean; override;
     // stop epolling
     procedure Terminate; override;
+    // return true for epoll
+    class function FollowEpoll: boolean; override;
     // read-only access to the low-level epoll_create file descriptor
     property EPFD: integer
       read fEPFD;
@@ -1056,6 +1133,11 @@ begin
     exit;
   fpClose(fEPFD);
   fEPFD := -1;
+end;
+
+class function TPollSocketEpoll.FollowEpoll: boolean;
+begin
+  result := true; // TPollSocketEpoll is thread-safe and has no size limit
 end;
 
 const
@@ -1194,7 +1276,7 @@ end;
 
 function PollSocketClass: TPollSocketClass;
 begin
-  PollSocketClass := TPollSocketEpoll;
+  result := TPollSocketEpoll;
 end;
 
 {$endif USEPOLL}

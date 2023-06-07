@@ -457,8 +457,6 @@ type
     end;
     function TryResolve(aInterface: PRttiInfo; out Obj): boolean; override;
     procedure SetLogClass(aClass: TSynLogClass); virtual;
-    /// compute the server time stamp offset from the given date/time
-    procedure SetServerTimestamp(const Value: TTimeLog);
     /// wrapper methods to access fAcquireExecution[]
     function GetAcquireExecutionMode(
       Cmd: TRestServerUriContextCommand): TRestServerAcquireMode;
@@ -555,6 +553,9 @@ type
     // - inherited classes may override this method, or set the appropriate
     // value in Offset field
     function GetServerTimestamp(tix64: Int64): TTimeLog; virtual;
+    /// set the server time stamp offset from the given date/time
+    // - if Value is 0, the current local UTC time will be used
+    procedure SetServerTimestamp(const Value: TTimeLog);
 
     /// main access to the IRestOrm methods of this instance
     property Orm: IRestOrm
@@ -699,9 +700,9 @@ type
       const WhereClauseFormat: RawUtf8; const BoundsSqlWhere: array of const): TOrmTable; overload;
     function MultiFieldValues(Table: TOrmClass; const FieldNames: RawUtf8;
       const WhereClauseFormat: RawUtf8; const Args, Bounds: array of const): TOrmTable; overload;
-    function FTSMatch(Table: TOrmFts3Class; const WhereClause: RawUtf8;
+    function FtsMatch(Table: TOrmFts3Class; const WhereClause: RawUtf8;
       var DocID: TIDDynArray): boolean; overload;
-    function FTSMatch(Table: TOrmFts3Class; const MatchClause: RawUtf8;
+    function FtsMatch(Table: TOrmFts3Class; const MatchClause: RawUtf8;
       var DocID: TIDDynArray; const PerFieldWeight: array of double;
       limit: integer = 0; offset: integer = 0): boolean; overload;
     function MainFieldValue(Table: TOrmClass; ID: TID;
@@ -710,10 +711,10 @@ type
     function MainFieldIDs(Table: TOrmClass; const Values: array of RawUtf8;
       out IDs: TIDDynArray): boolean;
     function Retrieve(const SqlWhere: RawUtf8; Value: TOrm;
-      const aCustomFieldsCsv: RawUtf8 = ''): boolean; overload;
+      const FieldsCsv: RawUtf8 = ''): boolean; overload;
     function Retrieve(const WhereClauseFmt: RawUtf8;
       const Args, Bounds: array of const; Value: TOrm;
-      const aCustomFieldsCsv: RawUtf8 = ''): boolean; overload;
+      const FieldsCsv: RawUtf8 = ''): boolean; overload;
     function Retrieve(aID: TID; Value: TOrm;
       ForUpdate: boolean = false): boolean; overload;
     function Retrieve(Reference: TRecordReference;
@@ -721,33 +722,33 @@ type
     function Retrieve(aPublishedRecord, aValue: TOrm): boolean; overload;
     function RetrieveList(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const aCustomFieldsCsv: RawUtf8 = ''): TObjectList; overload;
+      const FieldsCsv: RawUtf8 = ''): TObjectList; overload;
     function RetrieveListJson(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const aCustomFieldsCsv: RawUtf8 = ''; aForceAjax: boolean = false): RawJson; overload;
+      const FieldsCsv: RawUtf8 = ''; aForceAjax: boolean = false): RawJson; overload;
     function RetrieveListJson(Table: TOrmClass;
-      const SqlWhere: RawUtf8; const aCustomFieldsCsv: RawUtf8 = '';
+      const SqlWhere: RawUtf8; const FieldsCsv: RawUtf8 = '';
       aForceAjax: boolean = false): RawJson; overload;
     function RetrieveDocVariantArray(Table: TOrmClass;
-      const ObjectName, CustomFieldsCsv: RawUtf8;
+      const ObjectName, FieldsCsv: RawUtf8;
       FirstRecordID: PID = nil; LastRecordID: PID = nil): variant; overload;
     function RetrieveDocVariantArray(Table: TOrmClass;
       const ObjectName: RawUtf8; const FormatSqlWhere: RawUtf8;
-      const BoundsSqlWhere: array of const; const CustomFieldsCsv: RawUtf8;
+      const BoundsSqlWhere: array of const; const FieldsCsv: RawUtf8;
       FirstRecordID: PID = nil; LastRecordID: PID = nil): variant; overload;
     function RetrieveOneFieldDocVariantArray(Table: TOrmClass;
       const FieldName, FormatSqlWhere: RawUtf8;
       const BoundsSqlWhere: array of const): variant;
     function RetrieveDocVariant(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const CustomFieldsCsv: RawUtf8): variant;
+      const FieldsCsv: RawUtf8): variant;
     function RetrieveListObjArray(var ObjArray; Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-      const aCustomFieldsCsv: RawUtf8 = ''): boolean;
+      const FieldsCsv: RawUtf8 = ''): boolean;
     procedure AppendListAsJsonArray(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
       const OutputFieldName: RawUtf8; W: TOrmWriter;
-      const CustomFieldsCsv: RawUtf8 = '');
+      const FieldsCsv: RawUtf8 = '');
     function RTreeMatch(DataTable: TOrmClass;
       const DataTableBlobFieldName: RawUtf8; RTreeTable: TOrmRTreeClass;
       const DataTableBlobField: RawByteString; var DataID: TIDDynArray): boolean;
@@ -1100,19 +1101,21 @@ type
   PRestServerConnectionOpaque = ^TRestServerConnectionOpaque;
 
   /// flags which may be set by the caller to notify low-level context
-  // - llfHttps will indicates that the communication was made over HTTPS
-  // - llfSecured is set if the transmission is encrypted or in-process,
+  // - llfHttps is set if the communication was made over HTTPS
+  // - llfSecured if the transmission is encrypted or in-process
   // using e.g. HTTPS/TLS or our proprietary AES/ECDHE WebSockets algorithms
-  // - llfWebsockets communication was made using WebSockets
-  // - llfInProcess is done when run from the same process, i.e. on server side
-  // - llfConnectionUpgrade is set when "connection: upgrade" is within headers
+  // - llfWebsockets if communication was made using WebSockets
+  // - llfInProcess when run from the same process, i.e. on server side
+  // - llfConnectionUpgrade when "connection: upgrade" is within headers
+  // - llfAuthorized when a valid "authorization:" header is set
   // - should exactly match THttpServerRequestFlag from mormot.net.http.pas
   TRestUriParamsLowLevelFlag = (
     llfHttps,
     llfSecured,
     llfWebsockets,
     llfInProcess,
-    llfConnectionUpgrade);
+    llfConnectionUpgrade,
+    llfAuthorized);
 
   /// some flags set by the caller to notify low-level context
   TRestUriParamsLowLevelFlags = set of TRestUriParamsLowLevelFlag;
@@ -1318,7 +1321,7 @@ type
     // - may return '127.0.0.1'
     procedure SetRemoteIP(var IP: RawUtf8);
       {$ifdef HASINLINE} inline; {$endif}
-    /// "RemoteIP" value from Call^.LowLevelRemoteIP  but nil for '127.0.0.1'
+    /// "RemoteIP" value from Call^.LowLevelRemoteIP but nil for '127.0.0.1'
     // - won't scan the incoming HTTP headers, but it is usually not needed
     function RemoteIPNotLocal: PUtf8Char;
     /// retrieve the "User-Agent" value from the incoming HTTP headers
@@ -2101,7 +2104,10 @@ end;
 
 procedure TRest.SetServerTimestamp(const Value: TTimeLog);
 begin
-  fServerTimestamp.Offset := PTimeLogBits(@Value)^.ToDateTime - NowUtc;
+  if Value = 0 then
+    fServerTimestamp.Offset := 0
+  else
+    fServerTimestamp.Offset := PTimeLogBits(@Value)^.ToDateTime - NowUtc;
   if fServerTimestamp.Offset = 0 then
     fServerTimestamp.Offset := 0.000001; // retrieve server date/time only once
 end;
@@ -2444,17 +2450,17 @@ begin
   result := fOrm.MultiFieldValues(Table, FieldNames, WhereClauseFormat, Args, Bounds);
 end;
 
-function TRest.FTSMatch(Table: TOrmFts3Class;
+function TRest.FtsMatch(Table: TOrmFts3Class;
   const WhereClause: RawUtf8; var DocID: TIDDynArray): boolean;
 begin
-  result := fOrm.FTSMatch(Table, WhereClause, DocID);
+  result := fOrm.FtsMatch(Table, WhereClause, DocID);
 end;
 
-function TRest.FTSMatch(Table: TOrmFts3Class;
+function TRest.FtsMatch(Table: TOrmFts3Class;
   const MatchClause: RawUtf8; var DocID: TIDDynArray;
   const PerFieldWeight: array of double; limit, offset: integer): boolean;
 begin
-  result := fOrm.FTSMatch(Table, MatchClause, DocID, PerFieldWeight, limit, offset);
+  result := fOrm.FtsMatch(Table, MatchClause, DocID, PerFieldWeight, limit, offset);
 end;
 
 function TRest.MainFieldValue(Table: TOrmClass; ID: TID;
@@ -2475,16 +2481,16 @@ begin
 end;
 
 function TRest.Retrieve(const SqlWhere: RawUtf8; Value: TOrm;
-  const aCustomFieldsCsv: RawUtf8): boolean;
+  const FieldsCsv: RawUtf8): boolean;
 begin
-  result := fOrm.Retrieve(SqlWhere, Value, aCustomFieldsCsv);
+  result := fOrm.Retrieve(SqlWhere, Value, FieldsCsv);
 end;
 
 function TRest.Retrieve(const WhereClauseFmt: RawUtf8;
   const Args, Bounds: array of const; Value: TOrm;
-  const aCustomFieldsCsv: RawUtf8): boolean;
+  const FieldsCsv: RawUtf8): boolean;
 begin
-  result := fOrm.Retrieve(WhereClauseFmt, Args, Bounds, Value, aCustomFieldsCsv);
+  result := fOrm.Retrieve(WhereClauseFmt, Args, Bounds, Value, FieldsCsv);
 end;
 
 function TRest.Retrieve(aID: TID; Value: TOrm; ForUpdate: boolean): boolean;
@@ -2504,41 +2510,41 @@ end;
 
 function TRest.RetrieveList(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const aCustomFieldsCsv: RawUtf8): TObjectList;
+  const FieldsCsv: RawUtf8): TObjectList;
 begin
-  result := fOrm.RetrieveList(Table, FormatSqlWhere, BoundsSqlWhere, aCustomFieldsCsv);
+  result := fOrm.RetrieveList(Table, FormatSqlWhere, BoundsSqlWhere, FieldsCsv);
 end;
 
 function TRest.RetrieveListJson(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const aCustomFieldsCsv: RawUtf8; aForceAjax: boolean): RawJson;
+  const FieldsCsv: RawUtf8; aForceAjax: boolean): RawJson;
 begin
   result := fOrm.RetrieveListJson(Table, FormatSqlWhere, BoundsSqlWhere,
-    aCustomFieldsCsv, aForceAjax);
+    FieldsCsv, aForceAjax);
 end;
 
 function TRest.RetrieveListJson(Table: TOrmClass;
-  const SqlWhere: RawUtf8; const aCustomFieldsCsv: RawUtf8;
+  const SqlWhere: RawUtf8; const FieldsCsv: RawUtf8;
   aForceAjax: boolean): RawJson;
 begin
-  result := fOrm.RetrieveListJson(Table, SqlWhere, aCustomFieldsCsv, aForceAjax);
+  result := fOrm.RetrieveListJson(Table, SqlWhere, FieldsCsv, aForceAjax);
 end;
 
 function TRest.RetrieveDocVariantArray(Table: TOrmClass;
-  const ObjectName, CustomFieldsCsv: RawUtf8;
+  const ObjectName, FieldsCsv: RawUtf8;
   FirstRecordID: PID; LastRecordID: PID): variant;
 begin
-  result := fOrm.RetrieveDocVariantArray(Table, ObjectName, CustomFieldsCsv,
+  result := fOrm.RetrieveDocVariantArray(Table, ObjectName, FieldsCsv,
     FirstRecordID, LastRecordID);
 end;
 
 function TRest.RetrieveDocVariantArray(Table: TOrmClass;
   const ObjectName: RawUtf8; const FormatSqlWhere: RawUtf8; const BoundsSqlWhere:
-  array of const; const CustomFieldsCsv: RawUtf8; FirstRecordID: PID;
+  array of const; const FieldsCsv: RawUtf8; FirstRecordID: PID;
   LastRecordID: PID): variant;
 begin
   result := fOrm.RetrieveDocVariantArray(Table, ObjectName, FormatSqlWhere,
-    BoundsSqlWhere, CustomFieldsCsv, FirstRecordID, LastRecordID);
+    BoundsSqlWhere, FieldsCsv, FirstRecordID, LastRecordID);
 end;
 
 function TRest.RetrieveOneFieldDocVariantArray(Table: TOrmClass;
@@ -2550,26 +2556,26 @@ end;
 
 function TRest.RetrieveDocVariant(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const CustomFieldsCsv: RawUtf8): variant;
+  const FieldsCsv: RawUtf8): variant;
 begin
   result := fOrm.RetrieveDocVariant(Table, FormatSqlWhere, BoundsSqlWhere,
-    CustomFieldsCsv);
+    FieldsCsv);
 end;
 
 function TRest.RetrieveListObjArray(var ObjArray; Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const aCustomFieldsCsv: RawUtf8): boolean;
+  const FieldsCsv: RawUtf8): boolean;
 begin
   result := fOrm.RetrieveListObjArray(ObjArray, Table, FormatSqlWhere,
-    BoundsSqlWhere, aCustomFieldsCsv);
+    BoundsSqlWhere, FieldsCsv);
 end;
 
 procedure TRest.AppendListAsJsonArray(Table: TOrmClass;
   const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
-  const OutputFieldName: RawUtf8; W: TOrmWriter; const CustomFieldsCsv: RawUtf8);
+  const OutputFieldName: RawUtf8; W: TOrmWriter; const FieldsCsv: RawUtf8);
 begin
   fOrm.AppendListAsJsonArray(Table, FormatSqlWhere, BoundsSqlWhere,
-    OutputFieldName, W, CustomFieldsCsv);
+    OutputFieldName, W, FieldsCsv);
 end;
 
 function TRest.RTreeMatch(DataTable: TOrmClass;
@@ -3805,6 +3811,7 @@ end;
 function TRestUriContext.RemoteIPNotLocal: PUtf8Char;
 begin
   if (self <> nil) and
+     (fCall^.LowLevelRemoteIP <> '') and
      (fCall^.LowLevelRemoteIP <> '127.0.0.1') then
     result := pointer(fCall^.LowLevelRemoteIP)
   else

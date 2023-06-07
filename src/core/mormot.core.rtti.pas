@@ -123,8 +123,8 @@ const
   /// potentially managed types in TRttiKind enumerates
   rkManagedTypes = [rkLStringOld,
                     rkLString,
-                    rkWstring,
-                    rkUstring,
+                    rkWString,
+                    rkUString,
                     rkArray,
                     rkObject,
                     rkRecord,
@@ -161,7 +161,8 @@ type
     dkUString,
     dkClassRef,
     dkPointer,
-    dkProcedure);
+    dkProcedure,
+    dkMRecord);
 
 const
   /// convert our TRttiKind to Delphi's TTypeKind enumerate
@@ -200,28 +201,29 @@ const
 
   /// convert Delphi's TTypeKind to our TRttiKind enumerate
   DELPHITOFPC: array[TDelphiType] of TRttiKind = (
-    rkUnknown,
-    rkInteger,
-    rkChar,
-    rkEnumeration,
-    rkFloat,
-    rkSString,
-    rkSet,
-    rkClass,
-    rkMethod,
-    rkWChar,
-    rkLString,
-    rkWString,
-    rkVariant,
-    rkArray,
-    rkRecord,
-    rkInterface,
-    rkInt64,
-    rkDynArray,
-    rkUString,
-    rkClassRef,
-    rkPointer,
-    rkProcVar);
+    rkUnknown,     //  dkUnknown
+    rkInteger,     //  dkInteger
+    rkChar,        //  dkChar
+    rkEnumeration, //  dkEnumeration
+    rkFloat,       //  dkFloat
+    rkSString,     //  dkString
+    rkSet,         //  dkSet
+    rkClass,       //  dkClass
+    rkMethod,      //  dkMethod
+    rkWChar,       //  dkWChar
+    rkLString,     //  dkLString
+    rkWString,     //  dkWString
+    rkVariant,     //  dkVariant
+    rkArray,       //  dkArray
+    rkRecord,      //  dkRecord
+    rkInterface,   //  dkInterface
+    rkInt64,       //  dkInt64
+    rkDynArray,    //  dkDynArray
+    rkUString,     //  dkUString
+    rkClassRef,    //  dkClassRef
+    rkPointer,     //  dkPointer
+    rkProcVar,     //  dkProcedure
+    rkRecord);     //  dkMRecord
 
 {$else}
 
@@ -250,7 +252,8 @@ const
     rkUString,
     rkClassRef,
     rkPointer,
-    rkProcedure
+    rkProcedure,
+    rkMRecord // managed records from newest Delphi are partially supported
     {$endif UNICODE});
 
 const
@@ -259,6 +262,7 @@ const
                     rkWstring,
                     {$ifdef UNICODE}
                     rkUstring,
+                    rkMRecord,
                     {$endif UNICODE}
                     rkArray,
                     rkRecord,
@@ -267,7 +271,10 @@ const
                     rkVariant
                    ];
   /// maps record or object in TTypeKind RTTI enumerates
-  rkRecordTypes = [rkRecord];
+  rkRecordTypes = [rkRecord
+                   {$ifdef UNICODE},
+                   rkMRecord
+                   {$endif UNICODE}];
 
 {$endif FPC}
 
@@ -314,6 +321,9 @@ const
 
   /// maps integer and floating point types in TRttiKind RTTI enumerates
   rkNumberTypes = rkOrdinalTypes + [ rkFloat ];
+
+  /// maps enumeration types in TRttiKind RTTI
+  rkEnumerationTypes = [rkEnumeration {$ifdef FPC}, rkBool {$endif}];
 
   /// maps values which expect TRttiProp.GetOrdProp/SetOrdProp
   // - includes 32-bit ordinals and pointers
@@ -661,12 +671,12 @@ type
     rcfGetOrdProp,
     rcfGetInt64Prop,
     rcfIsRawBlob,
-    rcfIsCurrency,
     rcfIsNumber);
 
   /// as used by TRttiCache.Flags
   // - rcfQWord/rcfBoolean map Info^.IsQWord/IsBoolean
-  // - rcfIsRawBlob/rcfIsCurrency map Info^.IsRawBlob/IsCurrency
+  // - rcfIsRawBlob maps Info^.IsRawBlob
+  // - rcfIsNumber is set if Info^.Kind is in rkNumberTypes
   // - set rcfHasRttiOrd/rcfGetOrdProp/rcfGetInt64Prop to access the value
   TRttiCacheFlags = set of TRttiCacheFlag;
 
@@ -695,7 +705,8 @@ type
     /// type-specific information
     case TRttiKind of
       rkFloat: (
-        RttiFloat: TRttiFloat);
+        RttiFloat: TRttiFloat;
+        IsDateTime: boolean);
       rkLString: ( // from TypeInfo() on older Delphi with no CP RTTI
         CodePage: cardinal; // RawBlob=CP_RAWBYTESTRING not CP_RAWBLOB
         Engine: TSynAnsiConvert);
@@ -767,6 +778,9 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// return TRUE if the property is a currency field
     function IsCurrency: boolean;
+      {$ifdef HASINLINE}inline;{$endif}
+    /// return TRUE if the property is a TDateTime/TDateTimeMS/TDate
+    function IsDate: boolean;
       {$ifdef HASINLINE}inline;{$endif}
     /// return true if this property is a BLOB (RawBlob)
     function IsRawBlob: boolean;
@@ -934,6 +948,10 @@ type
     procedure SetOrdProp(Instance: TObject; Value: PtrInt);
     /// raw retrieval of rkClass
     function GetObjProp(Instance: TObject): TObject;
+    /// raw retrieval of rkDynArray getter as a pointer
+    // - caller should then release the instance using e.g. FastDynArrayClear()
+    // - do nothing if the property is a field with no getter
+    function GetDynArrayPropGetter(Instance: TObject): pointer;
     /// raw retrieval of rkInt64, rkQWord
     // - rather call GetInt64Value
     function GetInt64Prop(Instance: TObject): Int64;
@@ -1132,21 +1150,15 @@ const
 /// retrieve the text name of one TRttiKind enumerate
 function ToText(k: TRttiKind): PShortString; overload;
 
-/// convert an ordinal value from its (signed) pointer-sized integer representation
-function FromRttiOrd(o: TRttiOrd; P: pointer): Int64; overload;
-  {$ifdef HASINLINE}inline;{$endif}
+var
+  /// convert an ordinal value from its (signed) pointer-sized integer representation
+  RTTI_FROM_ORD: array[TRttiOrd] of function(P: pointer): Int64;
 
-/// convert an ordinal value from its (signed) pointer-sized integer representation
-procedure FromRttiOrd(o: TRttiOrd; P: pointer; res: PInt64); overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
-/// convert an ordinal value into its RTTI-defined binary buffer
-procedure ToRttiOrd(o: TRttiOrd; P: pointer; Value: PtrInt);
-  {$ifdef HASINLINE}inline;{$endif}
+  /// convert an ordinal value into its RTTI-defined binary buffer
+  RTTI_TO_ORD: array[TRttiOrd] of procedure(P: pointer; Value: PtrInt);
 
   /// convert a float value into its RTTI-defined binary buffer
-procedure ToRttiFloat(rf: TRttiFloat; P: pointer; Value: TSynExtended);
-  {$ifdef HASINLINE}inline;{$endif}
+  RTTI_TO_FLOAT: array[TRttiFloat] of procedure(P: pointer; Value: TSynExtended);
 
 
 {$ifdef HASINLINE}
@@ -1399,6 +1411,7 @@ procedure CopyCollection(Source, Dest: TCollection);
 procedure SetDefaultValuesObject(Instance: TObject);
 
 /// set any (potentially nested) object property by path
+// - see also GetValueObject() from mormot.core.json
 function SetValueObject(Instance: TObject; const Path: RawUtf8;
   const Value: variant): boolean;
 
@@ -1518,6 +1531,9 @@ function GetCaptionFromClass(C: TClass): string;
 
 /// defined here to avoid circular dependency in mormot.core.os.pas
 function ToText(cmd: TParseCommands): ShortString; overload;
+
+/// defined here to avoid circular dependency in mormot.core.os.pas
+function ToText(w: TWellKnownSid): PShortString; overload;
 
 
 { ***************** IInvokable Interface RTTI }
@@ -1695,6 +1711,10 @@ type
   TRttiCopiers = array[TRttiKind] of TRttiCopier;
   PRttiCopiers = ^TRttiCopiers;
 
+  /// internal function handler for copying a class instance
+  // - use TRttiCustom.Props.CopyProperties but may be overriden e.g. for TOrm
+  TRttiClassCopier = procedure(Dest, Source: TObject);
+
 
 var
   /// lookup table of finalization functions for managed types
@@ -1709,7 +1729,7 @@ var
 
 /// fill all sensitive fields of this class or record with zeros
 // - RawByteString/TBytes with refcount=1 will be zeroed before freed
-procedure FillZero(Info: PRttiInfo; var Value); overload;
+procedure FillZeroRtti(Info: PRttiInfo; var Value);
 
 
 
@@ -2113,7 +2133,7 @@ type
     /// case-insensitive compare the supplied name/len with the Name property
     function NameMatch(P: PUtf8Char; Len: PtrInt): boolean;
       {$ifdef HASINLINE}inline;{$endif}
-    /// very fast retrieval of any field value into a TVarData-like
+    /// very fast retrieval of any field value into a TVarData-like mapping
     // - works if Prop is defined or not, calling any getter method if needed
     // - complex TRttiVarData with varAny pointer will be properly handled by
     // TJsonWriter.AddVariant/AddRttiVarData (e.g. rkEnumeration or rkDynArray)
@@ -2127,6 +2147,12 @@ type
     // - not implemented for Prop = nil (i.e. rkRecord/rkObject nested field)
     procedure SetValue(Data: pointer; var RVD: TRttiVarData;
       andclear: boolean = true);
+    /// retrieve any field vlaue as a variant instance
+    // - will generate a stand-alone variant value, not an internal TRttiVarData
+    // - complex values can be returned as TDocVariant after JSON conversion,
+    // using e.g. @JSON_[mFastFloat] as optional Options parameter
+    procedure GetValueVariant(Data: pointer; out Dest: TVarData;
+      Options: pointer{PDocVariantOptions} = nil);
     /// set a field value from its UTF-8 text
     // - will convert the Text into proper ordinal or float if needed
     // - also implemented for Prop = nil (i.e. rkRecord/rkObject nested field)
@@ -2135,6 +2161,7 @@ type
     // - caller should have checked that PropDefault <> NO_DEFAULT
     function ValueIsDefault(Data: pointer): boolean;
     /// check if the Value is void (0 / '' / null)
+    // - less restrictive function than VarIsVoid() from mormot.core.variants
     function ValueIsVoid(Data: pointer): boolean;
       {$ifdef HASINLINE}inline;{$endif}
     /// compare two properties values with proper getter method call
@@ -2146,6 +2173,8 @@ type
     // - wrap GetValue() + AddVariant() over a temp TRttiVarData
     procedure AddValueJson(W: TTextWriter; Data: pointer;
       Options: TTextWriterWriteObjectOptions; K: TTextWriterKind = twNone);
+    /// a wrapper calling AddValueJson()
+    procedure GetValueJson(Data: pointer; out Result: RawUtf8);
   end;
 
   /// store information about the properties/fields of a given TypeInfo/PRttiInfo
@@ -2307,6 +2336,7 @@ type
     fObjArrayClass: TClass;
     fCollectionItem: TCollectionItemClass;
     fCollectionItemRtti: TRttiCustom;
+    fCopyObject: TRttiClassCopier;
     procedure SetValueClass(aClass: TClass; aInfo: PRttiInfo); virtual;
     // for TRttiCustomList.RegisterObjArray/RegisterBinaryType/RegisterFromText
     function SetObjArray(Item: TClass): TRttiCustom;
@@ -2348,6 +2378,7 @@ type
     procedure ValueCopy(Dest, Source: pointer);
       {$ifdef HASINLINE}inline;{$endif}
     /// return TRUE if the Value is 0 / nil / '' / null
+    // - less restrictive function than VarIsVoid() from mormot.core.variants
     function ValueIsVoid(Data: PAnsiChar): boolean;
      // {$ifdef HASINLINE}inline;{$endif}
     /// compare two stored values of this type
@@ -2358,7 +2389,8 @@ type
     /// fill a variant with a stored value of this type
     // - not implemented in this class (raise an ERttiException)
     // but in TRttiJson, so that it will use mormot.core.variants process
-    // - complex objects are converted into a TDocVariant, after JSON serialization
+    // - complex values can be returned as TDocVariant after JSON conversion,
+    // using e.g. @JSON_[mFast] as optional Options parameter
     // - returns the size of the Data in bytes, i.e. Cache.ItemSize
     function ValueToVariant(Data: pointer; out Dest: TVarData;
       Options: pointer{PDocVariantOptions} = nil): PtrInt; virtual;
@@ -2493,6 +2525,11 @@ type
     /// redirect to the low-level value copy - use rather ValueCopy()
     property Copy: TRttiCopier
       read fCopy;
+    /// redirect to the low-level class instance copy
+    // - nil by default, to use Props.CopyProperties()
+    // - is overwritten e.g. by TOrm.RttiCustomSetParser
+    property CopyObject: TRttiClassCopier
+      read fCopyObject write fCopyObject;
     /// opaque TRttiJsonLoad callback used by mormot.core.json.pas
     property JsonLoad: pointer
       read fJsonLoad write fJsonLoad;
@@ -2523,6 +2560,7 @@ type
     /// speedup search by PRttiInfo e.g. from a loop
     LastInfo: TRttiCustom;
     /// CPU L1 cache efficient PRttiInfo/TRttiCustom pairs hashed by Name[0][1]
+    // - hashing by name allows fast per-TypeInfo() and per-Name lookup
     PerHash: array[0..RTTICUSTOMTYPEINFOHASH] of TPointerDynArray;
   end;
   PRttiCustomListPairs = ^TRttiCustomListPairs;
@@ -2569,8 +2607,8 @@ type
     /// efficient search of TRttiCustom from a given TObject class
     // - returns nil if Info is not known
     // - will use the ObjectClass vmtAutoTable slot for very fast O(1) lookup
-    function Find(ObjectClass: TClass): TRttiCustom; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+    class function Find(ObjectClass: TClass): TRttiCustom; overload;
+      {$ifdef HASINLINE}static; inline;{$endif}
     /// efficient search of TRttiCustom from a given type name
     // - internally use our "hash table of the poor" (tm) for quick search
     function Find(Name: PUtf8Char; NameLen: PtrInt;
@@ -2766,6 +2804,11 @@ type
 function FindCustomProp(p: PRttiCustomProp; name: pointer; namelen: TStrLen;
   count: integer): PRttiCustomProp;
 
+/// retrieve a (possibly nested) class property RTTI and instance by path
+// - as used e.g. by GetValueObject/SetValueObject wrapper functions
+function GetInstanceByPath(var Instance: TObject; const Path: RawUtf8;
+  out Prop: PRttiCustomProp; PathDelim: AnsiChar = '.'): boolean;
+
 var
   /// low-level access to the list of registered PRttiInfo/TRttiCustom/TRttiJson
   Rtti: TRttiCustomList;
@@ -2896,90 +2939,6 @@ implementation
 
 
 { some inlined definitions which should be declared before $include code }
-
-function FromRttiOrd(o: TRttiOrd; P: pointer): Int64;
-begin
-  case o of
-    roSByte:
-      result := PShortInt(P)^;
-    roSWord:
-      result := PSmallInt(P)^;
-    roSLong:
-      result := PInteger(P)^;
-    roUByte:
-      result := PByte(P)^;
-    roUWord:
-      result := PWord(P)^;
-    roULong:
-      result := PCardinal(P)^;
-    {$ifdef FPC_NEWRTTI}
-    roSQWord,
-    roUQWord:
-      result := PInt64(P)^;
-    {$endif FPC_NEWRTTI}
-  else
-    result := 0; // should never happen
-  end;
-end;
-
-procedure FromRttiOrd(o: TRttiOrd; P: pointer; res: PInt64);
-begin
-  case o of
-    roSByte:
-      res^ := PShortInt(P)^;
-    roSWord:
-      res^ := PSmallInt(P)^;
-    roSLong:
-      res^ := PInteger(P)^;
-    roUByte:
-      res^ := PByte(P)^;
-    roUWord:
-      res^ := PWord(P)^;
-    roULong:
-      res^ := PCardinal(P)^;
-    {$ifdef FPC_NEWRTTI}
-    roSQWord,
-    roUQWord:
-      res^ := PInt64(P)^;
-    {$endif FPC_NEWRTTI}
-  else
-    res^ := 0; // should never happen
-  end;
-end;
-
-procedure ToRttiOrd(o: TRttiOrd; P: pointer; Value: PtrInt);
-begin
-  case o of
-    roUByte,
-    roSByte:
-      PByte(P)^ := Value;
-    roUWord,
-    roSWord:
-      PWord(P)^ := Value;
-    roULong,
-    roSLong:
-      PCardinal(P)^ := Value;
-    {$ifdef FPC_NEWRTTI}
-    roSQWord,
-    roUQWord:
-      PInt64(P)^ := Value;
-    {$endif FPC_NEWRTTI}
-  end;
-end;
-
-procedure ToRttiFloat(rf: TRttiFloat; P: pointer; Value: TSynExtended);
-begin
-  case rf of
-    rfSingle:
-      PSingle(P)^ := Value;
-    rfDouble:
-      unaligned(PDouble(P)^) := Value;
-    rfExtended:
-      PExtended(P)^ := Value;
-    rfCurr:
-      DoubleToCurrency(Value, PCurrency(P));
-  end;
-end;
 
 type
   // local wrapper to retrieve IInvokable Interface RTTI via GetRttiInterface()
@@ -3138,12 +3097,12 @@ end;
 
 function TRttiEnumType.GetEnumName(const Value): PShortString;
 begin
-  result := GetEnumNameOrd(FromRttiOrd(RttiOrd, @Value));
+  result := GetEnumNameOrd(RTTI_FROM_ORD[RttiOrd](@Value));
 end;
 
 function TRttiEnumType.GetCaption(const Value): string;
 begin
-  GetCaptionFromTrimmed(GetEnumNameOrd(FromRttiOrd(RttiOrd, @Value)), result);
+  GetCaptionFromTrimmed(GetEnumNameOrd(RTTI_FROM_ORD[RttiOrd](@Value)), result);
 end;
 
 procedure TRttiEnumType.AddCaptionStrings(Strings: TStrings;
@@ -3387,7 +3346,7 @@ end;
 
 procedure TRttiEnumType.SetEnumFromOrdinal(out Value; Ordinal: PtrUInt);
 begin
-  ToRttiOrd(RttiOrd, @Value, Ordinal);
+  RTTI_TO_ORD[RttiOrd](@Value, Ordinal);
 end;
 
 
@@ -3433,6 +3392,13 @@ end;
 function TRttiInfo.IsCurrency: boolean;
 begin
   result := TRttiFloat(GetTypeData(@self)^.FloatType) = rfCurr;
+end;
+
+function TRttiInfo.IsDate: boolean;
+begin
+  result := (@self = TypeInfo(TDate)) or
+            (@self = TypeInfo(TDateTime)) or
+            (@self = TypeInfo(TDateTimeMS));
 end;
 
 function TRttiInfo.IsRawBlob: boolean;
@@ -3499,9 +3465,7 @@ begin
       result := SizeOf(variant);
     rkArray:
       result := ArraySize;
-    {$ifdef FPC}
-    rkObject,
-    {$endif FPC}
+    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
     rkRecord:
       result := RecordSize;
     rkSString:
@@ -3573,10 +3537,10 @@ var
   enum: PRttiEnumType;
   siz, cnt: PtrInt;
 begin
+  // caller ensured Cache is filled with zeros (e.g. TRttiCustom.fCache prop)
   Cache.Info := @self;
   Cache.Size := RttiSize;
   Cache.Kind := Kind;
-  Cache.Flags := [];
   if Kind in rkOrdinalTypes then
   begin
     if Kind in rkHasRttiOrdTypes then
@@ -3604,10 +3568,21 @@ begin
     rkFloat:
       begin
         Cache.RttiFloat := RttiFloat;
-        if Cache.RttiFloat = rfCurr then
+        if IsCurrency then
         begin
           Cache.RttiVarDataVType := varCurrency;
-          include(Cache.Flags, rcfIsCurrency);
+          Cache.VarDataVType := varCurrency;
+        end
+        else if IsDate then
+        begin
+          Cache.RttiVarDataVType := varDate;
+          Cache.VarDataVType := varDate;
+          Cache.IsDateTime := true;
+        end
+        else if Cache.RttiFloat = rfSingle then
+        begin
+          Cache.RttiVarDataVType := varSingle;
+          Cache.VarDataVType := varSingle;
         end;
       end;
     rkEnumeration,
@@ -4015,7 +3990,7 @@ begin
        (Kind = rkInterface) then
       result := PtrInt(call.Code)
     else
-      result := FromRttiOrd(RttiOrd, @call.Code);
+      result := RTTI_FROM_ORD[RttiOrd](@call.Code);
 end;
 
 procedure TRttiProp.SetOrdProp(Instance: TObject; Value: PtrInt);
@@ -4034,7 +4009,7 @@ begin
            (Kind = rkInterface) then
           PPtrInt({%H-}call.Data)^ := Value
         else
-          ToRttiOrd(RttiOrd, call.Data, Value);
+          RTTI_TO_ORD[RttiOrd](call.Data, Value);
     rpcMethod:
       TSetProc(call)(Value);
     rpcIndexed:
@@ -4059,6 +4034,24 @@ begin
   else
     result := nil;
   end;
+end;
+
+function TRttiProp.GetDynArrayPropGetter(Instance: TObject): pointer;
+type
+  TGetProc = function: TBytes of object;
+  TGetIndexed = function(Index: integer): TBytes of object;
+var
+  call: TMethod;
+  tmp: TBytes; // we use TBytes but any dynamic array will do
+begin
+  case Getter(Instance, @call) of
+    rpcMethod:
+      tmp := TGetProc({%H-}call);
+    rpcIndexed:
+      tmp := TGetIndexed(call)(Index);
+  end;
+  result := pointer(tmp); // weak copy
+  pointer(tmp) := nil;    // no dec(refcnt)
 end;
 
 function TRttiProp.GetInt64Prop(Instance: TObject): Int64;
@@ -4398,7 +4391,7 @@ begin
   rf := TypeInfo^.RttiFloat;
   case Setter(Instance, @call) of
     rpcField:
-      ToRttiFloat(rf, {%H-}call.Data, Value);
+      RTTI_TO_FLOAT[rf]({%H-}call.Data, Value);
     rpcMethod:
       case rf of
         rfSingle:
@@ -4726,6 +4719,11 @@ end;
 function ToText(t: TRttiParserType): PShortString;
 begin
   result := GetEnumName(TypeInfo(TRttiParserType), ord(t));
+end;
+
+function ToText(w: TWellKnownSid): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TWellKnownSid), ord(w));
 end;
 
 
@@ -5319,7 +5317,7 @@ begin
   CurrentMethod := @Definition.Methods[MethodCount];
   ShortStringToAnsi7String(aMethodName, CurrentMethod^.Name);
   for i := 0 to MethodCount - 1 do
-    if IdemPropNameU(Definition.Methods[i].Name, CurrentMethod^.Name) then
+    if PropNameEquals(Definition.Methods[i].Name, CurrentMethod^.Name) then
       RaiseError('duplicated method name', []);
   CurrentMethod^.HierarchyLevel := Level;
   if aKind = mkFunction then
@@ -5445,6 +5443,18 @@ begin
   end;
 end;
 
+function TRttiCustomList.RegisterType(Info: PRttiInfo): TRttiCustom;
+begin
+  if Info <> nil then
+  begin
+    result := FindType(Info);
+    if result = nil then
+      result := DoRegister(Info);
+  end
+  else
+    result := nil;
+end;
+
 
 { ************* Efficient Dynamic Arrays and Records Process }
 
@@ -5527,9 +5537,7 @@ var
 begin
   // caller ensured ElemTypeInfo<>nil and Count>0
   case ElemTypeInfo^.Kind of
-    {$ifdef FPC}
-    rkObject,
-    {$endif FPC}
+    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
     rkRecord:
       // retrieve ElemTypeInfo.RecordManagedFields once
       RecordClearSeveral(pointer(Value), ElemTypeInfo, Count);
@@ -6204,7 +6212,7 @@ end;
 
 { RTTI-based FillZero() }
 
-procedure FillZero(Info: PRttiInfo; var Value);
+procedure FillZeroRtti(Info: PRttiInfo; var Value);
 var
   nfo: TRttiCustom;
   fin: TRttiFinalizer;
@@ -6213,11 +6221,11 @@ var
   v: PAnsiChar;
   p: PRttiCustomProp;
 begin
-  nfo := nil;
+  if Info = nil then
+    exit;
+  nfo := nil; // is set below for rkClass/rkRecord
   case Info^.Kind of
-    {$ifdef FPC}
-    rkObject,
-    {$endif FPC}
+    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
     rkRecord:
       nfo := Rtti.RegisterType(Info);
     {$ifdef FPC}
@@ -6249,7 +6257,7 @@ begin
             if Info <> nil then
               for i := 1 to da^.length do
               begin
-                FillZero(Info, v^); // process nested items
+                FillZeroRtti(Info, v^); // process nested items
                 inc(v, siz);
               end
             else
@@ -6274,7 +6282,7 @@ begin
          (p^.Value <> nil) and
          (p^.Value.Info <> nil) and
          not (rcfIsNumber in p^.Value.Cache.Flags) then
-        FillZero(p^.Value.Info, v[p^.OffsetSet]); // process nested fields
+        FillZeroRtti(p^.Value.Info, v[p^.OffsetSet]); // process nested fields
       inc(p);
     end;
   end;
@@ -6418,9 +6426,7 @@ begin
       result := ptArray;
     rkDynArray:
       result := ptDynArray;
-  {$ifdef FPC}
-    rkObject,
-  {$endif FPC}
+    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
     rkRecord:
       result := ptRecord;
     rkChar:
@@ -6698,6 +6704,33 @@ begin
     GetValueGetter(Data, RVD);
 end;
 
+procedure TRttiCustomProp.GetValueVariant(Data: pointer; out Dest: TVarData;
+  Options: pointer{PDocVariantOptions});
+var
+  a: pointer;
+begin
+  if (Prop = nil) or
+     (OffsetGet >= 0) then
+    Value.ValueToVariant(PAnsiChar(Data) + OffsetGet, Dest, Options)
+  else if Value.Cache.RttiVarDataVType <> varAny then
+    GetValueGetter(Data, TRttiVarData(Dest)) // not TRttiVarData specific
+  else if Value.Cache.VarDataVType = varInt64 then // rkEnumeration, rkSet
+  begin
+    Dest.VType := varInt64;
+    Dest.VInt64 := Prop^.GetInt64Value(Data);
+  end
+  else if Value.Kind = rkDynArray then
+  begin
+    a := nil;
+    try
+      a := Prop^.GetDynArrayPropGetter(Data);
+      Value.ValueToVariant(@a, Dest, Options); // will create a TDocVariant
+    finally
+      FastDynArrayClear(@a, Value.ArrayRtti.Info);
+    end;
+  end;
+end;
+
 procedure TRttiCustomProp.SetValue(Data: pointer; var RVD: TRttiVarData;
   andclear: boolean);
 begin
@@ -6737,12 +6770,26 @@ begin
     VarClearProc(rvd.Data);
 end;
 
+procedure TRttiCustomProp.GetValueJson(Data: pointer; out Result: RawUtf8);
+var
+  w: TTextWriter;
+  tmp: TTextWriterStackBuffer;
+begin
+  w := DefaultJsonWriter.CreateOwnedStream(tmp);
+  try
+    AddValueJson(w, Data, []);
+    w.SetText(Result);
+  finally
+    w.Free;
+  end;
+end;
+
 function TRttiCustomProp.ValueIsDefault(Data: pointer): boolean;
 begin
   if rcfHasRttiOrd in Value.Cache.Flags then
     if OffsetGet >= 0 then
-      result := FromRttiOrd(
-        Value.Cache.RttiOrd, PAnsiChar(Data) + OffsetGet) = OrdinalDefault
+      result := RTTI_FROM_ORD[Value.Cache.RttiOrd](
+                  PAnsiChar(Data) + OffsetGet) = OrdinalDefault
     else
       result := Prop.GetOrdProp(Data) = OrdinalDefault
   else if rcfGetInt64Prop in Value.Cache.Flags then
@@ -6787,8 +6834,13 @@ begin
       varOleStr
       {$ifdef HASVARUSTRING}, varUString {$endif}:
         result := rvd.Data.VAny = nil;
+      varSingle,
+      varInteger,
+      varLongWord:
+        result := rvd.Data.VInteger = 0;
       varInt64,
       varWord64,
+      varDate,
       varDouble,
       varCurrency,
       varBoolean:
@@ -6812,7 +6864,7 @@ begin
   varInt64,
   varBoolean:
     // rkInteger, rkBool using VInt64 for proper cardinal support
-    FromRttiOrd(Value.Cache.RttiOrd, Data, @RVD.Data.VInt64);
+    RVD.Data.VInt64 := RTTI_FROM_ORD[Value.Cache.RttiOrd](Data);
   varWord64:
     // rkInt64, rkQWord
     begin
@@ -6820,6 +6872,10 @@ begin
         RVD.VType := varInt64;
       RVD.Data.VInt64 := PInt64(Data)^;
     end;
+  varSingle:
+    // copy this 32-bit type at binary level
+    RVD.Data.VInteger := PInteger(Data)^;
+  varDate,
   varDouble,
   varCurrency:
     // copy those 64-bit types at binary level
@@ -6869,6 +6925,9 @@ begin
     end;
   varCurrency:
     Prop.GetCurrencyProp(Instance, RVD.Data.VCurrency);
+  varSingle:
+    RVD.Data.VSingle := Prop.GetFloatProp(Instance);
+  varDate,
   varDouble:
     RVD.Data.VDouble := Prop.GetFloatProp(Instance);
   varAny:
@@ -6924,9 +6983,10 @@ begin
     if (OffsetGet >= 0) and
        (OtherRtti.OffsetGet >= 0) then
     begin
-      FromRttiOrd(Value.Cache.RttiOrd, PAnsiChar(Data) + OffsetGet, @v1.Data.VInt64);
-      FromRttiOrd(OtherRtti.Value.Cache.RttiOrd, PAnsiChar(Other) + OtherRtti.OffsetGet,
-        @v2.Data.VInt64);
+      v1.Data.VInt64 := RTTI_FROM_ORD[Value.Cache.RttiOrd](
+                          PAnsiChar(Data) + OffsetGet);
+      v2.Data.VInt64 := RTTI_FROM_ORD[OtherRtti.Value.Cache.RttiOrd](
+                          PAnsiChar(Other) + OtherRtti.OffsetGet);
     end
     else
     begin
@@ -7063,17 +7123,16 @@ end;
 function FromNames(p: PRttiCustomProp; n: integer; out names: RawUtf8): integer;
 begin
   result := 0;
-  if n = 0 then
-    exit;
-  repeat
-    if p^.Name <> '' then
-    begin
-      inc(result);
-      names := {%H-}names + '"' + p^.Name + '",';  // include trailing ,
-    end;
-    inc(p);
-    dec(n);
-  until n = 0;
+  if n <> 0 then
+    repeat
+      if p^.Name <> '' then
+      begin
+        inc(result);
+        names := {%H-}names + '"' + p^.Name + '",';  // include trailing ,
+      end;
+      inc(p);
+      dec(n);
+    until n = 0;
 end;
 
 function TRttiCustomProps.NameChange(const Old, New: RawUtf8): PRttiCustomProp;
@@ -7427,7 +7486,11 @@ var
   p: PRttiCustomProp;
   n: integer;
   v: TRttiVarData;
+  d, s: pointer;
 begin
+  if (Dest = nil) or
+     (Source = nil) then
+    exit; // avoid GPF
   p := pointer(List); // all published properties, not only Managed[]
   if p <> nil then
   begin
@@ -7441,12 +7504,19 @@ begin
           GetValue(Source, v);
           SetValue(Dest, v, {andclear=}true);
         end
-        else if Value.Kind = rkClass then
-          // explicit copy of nested instances properties
-          Value.Props.CopyProperties(Dest + OffsetSet, Source + OffsetGet)
         else
-          // direct content copy from the fields memory buffers
-          Value.ValueCopy(Dest + OffsetSet, Source + OffsetGet);
+        begin
+          d := Dest + OffsetSet;
+          s := Source + OffsetGet;
+          if p^.Value.Kind = rkClass then
+            if Assigned(Value.CopyObject) then
+              Value.CopyObject(PPointer(d)^, PPointer(s)^)
+            else
+              Value.Props.CopyProperties(PPointer(d)^, PPointer(s)^)
+          else
+            // direct content copy from the fields memory buffers
+            Value.ValueCopy(d, s);
+        end;
       inc(p);
       dec(n);
     until n = 0;
@@ -7522,6 +7592,7 @@ begin
   case fCache.Kind of
     rkClass:
       SetValueClass(aInfo.RttiClass.RttiClass, aInfo);
+    {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
     rkRecord:
       fProps.SetFromRecordExtendedRtti(aInfo); // only for Delphi 2010+
     rkLString:
@@ -7826,7 +7897,7 @@ begin
     {$endif HASVARUSTRING}
     rkFloat:
       if ToDouble(Text, f) then
-        ToRttiFloat(Cache.RttiFloat, Data, f)
+        RTTI_TO_FLOAT[Cache.RttiFloat](Data, f)
       else
         result := false;
     rkVariant:
@@ -7834,7 +7905,7 @@ begin
   else
     if rcfHasRttiOrd in Cache.Flags then
       if ToInt64(Text, v) then
-        ToRttiOrd(Cache.RttiOrd, Data, v)
+        RTTI_TO_ORD[Cache.RttiOrd](Data, v)
       else
         result := false
     else if rcfGetInt64Prop in Cache.Flags then
@@ -7866,12 +7937,13 @@ begin
     result := nil;
     if (rc = nil) or
        (Data = nil) or
-       (Props.Count = 0) then
+       (rc.Props.Count = 0) then
       exit;
     GetNextItemShortString(FullName, @n, PathDelim);
     if n[0] in [#0, #254] then
       exit;
-    result := FindCustomProp(pointer(Props.List), @n[1], ord(n[0]), Props.Count);
+    result := FindCustomProp(
+      pointer(rc.Props.List), @n[1], ord(n[0]), rc.Props.Count);
     if (result = nil) or
        (FullName = nil) then
       exit;
@@ -8050,7 +8122,7 @@ begin
         ptNone:
           // unknown type name -> try from TArray<*>/T*DynArray/T*s patterns
           begin
-            if IdemPropNameU(typname, 'TArray') and
+            if PropNameEquals(typname, 'TArray') and
                (P^ = '<') then
             begin
               // try generic syntax TArray<##>
@@ -8302,7 +8374,7 @@ begin
     result := PPointer(PAnsiChar(Info.RttiNonVoidClass.RttiClass) + vmtAutoTable)^;
 end;
 
-function TRttiCustomList.Find(ObjectClass: TClass): TRttiCustom;
+class function TRttiCustomList.Find(ObjectClass: TClass): TRttiCustom;
 begin
   result := PPointer(PAnsiChar(ObjectClass) + vmtAutoTable)^;
 end;
@@ -8450,18 +8522,6 @@ begin
     dec(n);
   until n = 0;
   k^.Safe.ReadUnLock;
-end;
-
-function TRttiCustomList.RegisterType(Info: PRttiInfo): TRttiCustom;
-begin
-  if Info <> nil then
-  begin
-    result := FindType(Info);
-    if result = nil then
-      result := DoRegister(Info);
-  end
-  else
-    result := nil;
 end;
 
 function TRttiCustomList.DoRegister(Info: PRttiInfo): TRttiCustom;
@@ -8890,7 +8950,10 @@ begin
       TStrings(aTo).Assign(TStrings(aFrom))
     else if PClass(aTo)^.InheritsFrom(PClass(aFrom)^) then
       // fast copy from RTTI properties of the common (or same) hierarchy
-      cf.Props.CopyProperties(pointer(aTo), pointer(aFrom))
+      if Assigned(cf.CopyObject) then
+        cf.CopyObject(aTo, aFrom) // overriden e.g. for TOrm
+      else
+        cf.Props.CopyProperties(pointer(aTo), pointer(aFrom))
     else
     begin
       // no common inheritance -> slower lookup by property name
@@ -8945,38 +9008,26 @@ begin
   end;
 end;
 
+function GetInstanceByPath(var Instance: TObject; const Path: RawUtf8;
+  out Prop: PRttiCustomProp; PathDelim: AnsiChar): boolean;
+begin
+  result := false;
+  if (Instance = nil) or
+     (Path = '') then
+    exit;
+  Prop := Rtti.RegisterClass(Instance).
+    PropFindByPath(pointer(Instance), pointer(Path), PathDelim);
+  result := (Prop <> nil) and
+            (Instance <> nil);
+end;
+
 function SetValueObject(Instance: TObject; const Path: RawUtf8;
   const Value: variant): boolean;
 var
-  rc: TRttiCustom;
   p: PRttiCustomProp;
-  paf: PUtf8Char;
-  n: ShortString;
 begin
-  result := false;
-  paf := pointer(Path);
-  if (Instance = nil) or
-     (paf = nil) then
-    exit;
-  rc := Rtti.RegisterClass(Instance);
-  repeat
-    GetNextItemShortString(paf, @n, '.');
-    if n[0] in [#0, #254] then
-      exit;
-    p := FindCustomProp(pointer(rc.Props.List), @n[1], ord(n[0]), rc.Props.Count);
-    if p = nil then
-      exit; // incorrect path (property not found)
-    if paf = nil then
-      break; // we reached the full path
-    if (p^.Value.Kind <> rkClass) or
-       (p^.Prop = nil) then
-      exit;
-    Instance := p^.Prop^.GetObjProp(Instance); // go one nested class level
-    if Instance = nil then
-      exit;
-    rc := p^.Value;
-  until false;
-  result := p^.Prop^.SetValue(Instance, Value);
+  result := GetInstanceByPath(Instance, Path, p) and
+            p^.Prop^.SetValue(Instance, Value);
 end;
 
 procedure ClearObject(Value: TObject; FreeAndNilNestedObjects: boolean);
@@ -9149,12 +9200,113 @@ begin
 end;
 
 
+// ------ some integer conversion wrapper functions
+
+function FromRttiOrdSByte(P: PShortInt): Int64;
+begin
+  result := P^;
+end;
+
+function FromRttiOrdSWord(P: PSmallInt): Int64;
+begin
+  result := P^;
+end;
+
+function FromRttiOrdSLong(P: PInteger): Int64;
+begin
+  result := P^;
+end;
+
+function FromRttiOrdUByte(P: PByte): Int64;
+begin
+  result := P^;
+end;
+
+function FromRttiOrdUWord(P: PWord): Int64;
+begin
+  result := P^;
+end;
+
+function FromRttiOrdULong(P: PCardinal): Int64;
+begin
+  result := P^;
+end;
+
+procedure ToRttiOrd1(P: PByte; Value: PtrUInt);
+begin
+  P^ := Value;
+end;
+
+procedure ToRttiOrd2(P: PWord; Value: PtrUInt);
+begin
+  P^ := Value;
+end;
+
+procedure ToRttiOrd4(P: PCardinal; Value: PtrUInt);
+begin
+  P^ := Value;
+end;
+
+{$ifdef FPC_NEWRTTI}
+function FromRttiOrdInt64(P: PInt64): Int64;
+begin
+  result := P^;
+end;
+
+procedure ToRttiOrd8(P: PInt64; Value: PtrInt);
+begin
+  P^ := Value;
+end;
+{$endif FPC_NEWRTTI}
+
+procedure ToRttiFloat32(P: PSingle; Value: TSynExtended);
+begin
+  P^ := Value;
+end;
+
+procedure ToRttiFloat64(P: PDouble; Value: TSynExtended);
+begin
+  unaligned(P^) := Value;
+end;
+
+procedure ToRttiFloat80(P: PExtended; Value: TSynExtended);
+begin
+  P^ := Value;
+end;
+
+procedure ToRttiFloatCurr(P: PCurrency; Value: TSynExtended);
+begin
+  DoubleToCurrency(Value, P);
+end;
+
 
 procedure InitializeUnit;
 var
   k: TRttiKind;
   t: TRttiParserType;
 begin
+  RTTI_FROM_ORD[roSByte] := @FromRttiOrdSByte;
+  RTTI_FROM_ORD[roSWord] := @FromRttiOrdSWord;
+  RTTI_FROM_ORD[roSLong] := @FromRttiOrdSLong;
+  RTTI_FROM_ORD[roUByte] := @FromRttiOrdUByte;
+  RTTI_FROM_ORD[roUWord] := @FromRttiOrdUWord;
+  RTTI_FROM_ORD[roULong] := @FromRttiOrdULong;
+  RTTI_TO_ORD[roSByte] := @ToRttiOrd1;
+  RTTI_TO_ORD[roSWord] := @ToRttiOrd2;
+  RTTI_TO_ORD[roSLong] := @ToRttiOrd4;
+  RTTI_TO_ORD[roUByte] := @ToRttiOrd1;
+  RTTI_TO_ORD[roUWord] := @ToRttiOrd2;
+  RTTI_TO_ORD[roULong] := @ToRttiOrd4;
+  {$ifdef FPC_NEWRTTI}
+  RTTI_FROM_ORD[roSQWord] := @FromRttiOrdInt64;
+  RTTI_FROM_ORD[roUQWord] := @FromRttiOrdInt64;
+  RTTI_TO_ORD[roSQWord]   := @ToRttiOrd8;
+  RTTI_TO_ORD[roUQWord]   := @ToRttiOrd8;
+  {$endif FPC_NEWRTTI}
+  RTTI_TO_FLOAT[rfSingle]   := @ToRttiFloat32;
+  RTTI_TO_FLOAT[rfDouble]   := @ToRttiFloat64;
+  RTTI_TO_FLOAT[rfExtended] := @ToRttiFloat80;
+  RTTI_TO_FLOAT[rfCurr]     := @ToRttiFloatCurr;
   RTTI_FINALIZE[rkLString]   := @_StringClear;
   RTTI_FINALIZE[rkWString]   := @_WStringClear;
   RTTI_FINALIZE[rkVariant]   := @_VariantClear;
@@ -9192,6 +9344,12 @@ begin
   RTTI_TO_VARTYPE[rkObject]      := varAny;
   RTTI_MANAGEDCOPY[rkLStringOld] := @_LStringCopy;
   RTTI_MANAGEDCOPY[rkObject]     := @_RecordCopy;
+  {$else}
+  {$ifdef UNICODE}
+  RTTI_FINALIZE[rkMRecord]       := @FastRecordClear;
+  RTTI_TO_VARTYPE[rkMRecord]     := varAny;
+  RTTI_MANAGEDCOPY[rkMRecord]    := @_RecordCopy;
+  {$endif UNICODE}
   {$endif FPC}
   for k := low(k) to high(k) do
   begin
@@ -9207,12 +9365,13 @@ begin
       rkDynArray,
       rkClass,
       rkInterface,
+      {$ifdef FPC}rkObject,{$else}{$ifdef UNICODE}rkMRecord,{$endif}{$endif}
       rkRecord,
       rkArray:
         RTTI_TO_VARTYPE[k] := varAny; // TVarData.VAny pointing to the value
     end;
   end;
-  RTTI_FINALIZE[rkClass] := @_ObjClear;
+  RTTI_FINALIZE[rkClass]   := @_ObjClear;
   PT_INFO[ptBoolean]       := TypeInfo(boolean);
   PT_INFO[ptByte]          := TypeInfo(byte);
   PT_INFO[ptCardinal]      := TypeInfo(cardinal);

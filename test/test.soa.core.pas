@@ -291,11 +291,13 @@ type
     procedure ClientSideRESTSignWithXxhash;
     /// test the client-side implementation with MD5 URI signature
     procedure ClientSideRESTSignWithMd5;
-    /// test the client-side implementation with SHA256 URI signature
+    /// test the client-side implementation with SHA-1 URI signature
+    procedure ClientSideRESTSignWithSha1;
+    /// test the client-side implementation with SHA-256 URI signature
     procedure ClientSideRESTSignWithSha256;
-    /// test the client-side implementation with SHA512 URI signature
+    /// test the client-side implementation with SHA-512 URI signature
     procedure ClientSideRESTSignWithSha512;
-    /// test the client-side implementation with SHA3 URI signature
+    /// test the client-side implementation with SHA3-256 URI signature
     procedure ClientSideRESTSignWithSha3;
     /// test the client-side implementation using TRestServerAuthenticationNone
     procedure ClientSideRESTWeakAuthentication;
@@ -822,6 +824,7 @@ procedure TTestServiceOrientedArchitecture.Test(const Inst:
   begin
     Setlength(Ints, 2);
     CSVToRawUtf8DynArray('one,two,three', Strs1);
+    CheckEqual(length(strs1), 3);
     for t := 1 to Iterations do
     begin
       i1 := Random(MaxInt) - Random(MaxInt);
@@ -889,7 +892,7 @@ procedure TTestServiceOrientedArchitecture.Test(const Inst:
     Check(Str2[3] = 'one,two,three');
     Check(Str2[4] = '');
     s := RawUtf8OfChar(#1, 100);
-    check(I.DirectCall(s) = 100);
+    CheckEqual(I.DirectCall(s), 100);
     s := RawUtf8OfChar('-', 600);
     t := length(I.RepeatJsonArray(s, 100));
     checkutf8(t = 1 + 100 * 603, 'RawJson %', [KB(t)]);
@@ -1682,7 +1685,7 @@ var
   Inst: TTestServiceInstances;
   Json: RawUtf8;
   i: integer;
-  URI: TRestServerURIDynArray;
+  URI: TRestServerUriDynArray;
 const
   SERVICES: array[0..4] of RawUtf8 = (
     'Calculator', 'ComplexCalculator',
@@ -1729,7 +1732,6 @@ begin
         [HTTPClient.SessionUser.LogonName], HTTPClient.SessionUser);
       Inst.ExpectedUserID := HTTPClient.SessionUser.ID;
       Inst.ExpectedGroupID := HTTPClient.SessionUser.GroupRights.ID;
-      //SetOptions(false{$ifndef LVCL},true,[optExecInMainThread]{$endif});
       CheckEqual(
         HTTPClient.CallBackGet('stat', ['findservice', 'toto'], Json),
         HTTP_SUCCESS);
@@ -1749,7 +1751,6 @@ begin
       Check(HTTPClient.ServiceRetrieveAssociated(ITestSession, URI));
       Check(length(URI) = 1);
       Test(Inst, 100);
-      //SetOptions(false{$ifndef LVCL},true,[]{$endif});
     finally
       Finalize(Inst);
       HTTPClient.Free;
@@ -1782,6 +1783,11 @@ end;
 procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithMD5;
 begin
   ClientAlgo(suaMD5);
+end;
+
+procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithSHA1;
+begin
+  ClientAlgo(suaSHA1);
 end;
 
 procedure TTestServiceOrientedArchitecture.ClientSideRESTSignWithSHA256;
@@ -2251,6 +2257,8 @@ begin
   Check(I.Multiply(2, 35) = 70);
   Check(I.Subtract(2.3, 1.2) = 0, 'Default result');
   Check(I.ToTextFunc(2.3) = 'default');
+  CheckEqual(Stub.LogAsText, 'Add(10,30)=[30],Multiply(10,30)=[60],' +
+    'Multiply(2,35)=[70],Subtract(2.3,1.2)=[0],ToTextFunc(2.3)=["default"]');
   Check(Stub.LogHash = $34FA7AAF);
   I := nil; // release Stub -> will check all expectations
   TInterfaceMock.Create(TypeInfo(ICalculator), I, self).

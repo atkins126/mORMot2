@@ -16,6 +16,7 @@ uses
 
 const
   ws2 = 'ws2_32.dll';
+  host_file = 'c:\windows\system32\drivers\etc\hosts';
 
 const
   // default on Windows is 64, but we grow it to 512 for TPollSocketSelect
@@ -332,21 +333,21 @@ const
 type
   PWSAData = ^TWSAData;
   TWSAData = record
-     wVersion: word;
-     wHighVersion: word;
-     {$ifdef WIN64}
-     iMaxSockets: word;
-     iMaxUdpDg: word;
-     lpVendorInfo: PAnsiChar;
-     szDescription:  array[0..WSADESCRIPTION_LEN] of AnsiChar;
-     szSystemStatus: array[0..WSASYS_STATUS_LEN] of AnsiChar;
-     {$else}
-     szDescription:  array[0..WSADESCRIPTION_LEN] of AnsiChar;
-     szSystemStatus: array[0..WSASYS_STATUS_LEN] of AnsiChar;
-     iMaxSockets: word;
-     iMaxUdpDg: word;
-     lpVendorInfo: PAnsiChar;
-     {$endif WIN64}
+    wVersion: word;
+    wHighVersion: word;
+    {$ifdef WIN64}
+    iMaxSockets: word;
+    iMaxUdpDg: word;
+    lpVendorInfo: PAnsiChar;
+    szDescription:  array[0..WSADESCRIPTION_LEN] of AnsiChar;
+    szSystemStatus: array[0..WSASYS_STATUS_LEN] of AnsiChar;
+    {$else}
+    szDescription:  array[0..WSADESCRIPTION_LEN] of AnsiChar;
+    szSystemStatus: array[0..WSASYS_STATUS_LEN] of AnsiChar;
+    iMaxSockets: word;
+    iMaxUdpDg: word;
+    lpVendorInfo: PAnsiChar;
+    {$endif WIN64}
   end;
   WSAData = TWSAData;
 
@@ -371,56 +372,80 @@ end;
 
 function WSAStartup(wVersionRequired: word; var WSData: TWSAData): integer; stdcall;
   external ws2 name 'WSAStartup';
+
 function WSACleanup: integer; stdcall;
   external ws2 name 'WSACleanup';
+
 function sockerrno: integer; stdcall;
   external ws2 name 'WSAGetLastError';
 
 function getaddrinfo(NodeName, ServName: PAnsiChar; Hints: PAddrInfo;
    var Addrinfo: PAddrInfo): integer; stdcall;
   external ws2 name 'getaddrinfo';
+
 procedure freeaddrinfo(ai: PAddrInfo); stdcall;
   external ws2 name 'freeaddrinfo';
+
 function socket(af, struct, protocol: integer): TSocket; stdcall;
   external ws2 name 'socket';
+
 function setsockopt(s: TSocket; level, optname: integer;
    optval: pointer; optlen: integer): integer; stdcall;
   external ws2 name 'setsockopt';
+
 function getsockopt(s: TSocket; level, optname: integer;
    optval: pointer; optlen: PInteger): integer; stdcall;
   external ws2 name 'getsockopt';
+
 function ioctlsocket(s: TSocket; cmd: cardinal; arg: PCardinal): integer; stdcall;
   external ws2 name 'ioctlsocket';
+
 function shutdown(s: TSocket; how: integer): integer; stdcall;
   external ws2 name 'shutdown';
+
 function closesocket(s: TSocket): integer; stdcall;
   external ws2 name 'closesocket';
+
 function getnameinfo(addr: PSockAddr; namelen: integer; host: PAnsiChar;
    hostlen: cardinal; serv: PAnsiChar; servlen: cardinal; flags: integer): integer; stdcall;
   external ws2 name 'getnameinfo';
+
 function bind(s: TSocket; addr: PSockAddr; namelen: integer): integer; stdcall;
   external ws2 name 'bind';
+
 function listen(s: TSocket; backlog: integer): integer; stdcall;
   external ws2 name 'listen';
+
 function accept(s: TSocket; addr: PSockAddr; var addrlen: integer): TSocket; stdcall;
   external ws2 name 'accept';
+
 function connect(s: TSocket; name: PSockAddr; namelen: integer): integer; stdcall;
   external ws2 name 'connect';
+
 function select(nfds: integer; readfds, writefds, exceptfds: PFDSet;
    timeout: PTimeVal): integer; stdcall;
   external ws2 name 'select';
+
 function recv(s: TSocket; Buf: Pointer; len, flags: integer): integer; stdcall;
   external ws2 name 'recv';
+
 function recvfrom(s: TSocket; Buf: Pointer; len, flags: integer;
    from: PSockAddr; fromlen: Pinteger): integer; stdcall;
   external ws2 name 'recvfrom';
+
 function send(s: TSocket; Buf: Pointer; len, flags: integer): integer; stdcall;
   external ws2 name 'send';
+
 function sendto(s: TSocket; Buf: Pointer; len, flags: integer;
    addrto: PSockAddr; tolen: integer): integer; stdcall;
   external ws2 name 'sendto';
+
+function getsockname(s: TSocket; name: PSockAddr; var namelen: integer): integer; stdcall;
+  external ws2 name 'getsockname';
+
 function getpeername(s: TSocket; name: PSockAddr; var namelen: integer): integer; stdcall;
   external ws2 name 'getpeername';
+
 function inet_addr(cp: PAnsiChar): cardinal; stdcall;
   external ws2 name 'inet_addr';
 
@@ -438,36 +463,21 @@ end;
 
 { TNetAddr }
 
-function SetAddr(const ip, port: RawUtf8; var h: TAddrInfo; var a: TSockAddr): boolean;
+function SetWinAddr(const ip, port: RawUtf8; family: cardinal; layer: TNetLayer;
+  out addr): boolean;
 var
+  h: TAddrInfo;
   res: PAddrInfo;
 begin
+  // use regular OS resolution for known addresses or host names
+  FillCharFast(h, SizeOf(h), 0);
+  h.ai_family := family;
+  h.ai_socktype := _ST[layer];
+  h.ai_protocol := _IP[layer];
   res := nil;
-  FillCharFast(a, SizeOf(a), 0);
-  if h.ai_socktype = SOCK_RAW then
-  begin
-    h.ai_socktype := 0;
-    h.ai_protocol := 0;
-    result := getaddrinfo(pointer(ip), nil, @h, res) = NO_ERROR;
-  end
-  else if (ip = cAnyHost) or
-          (ip = c6AnyHost) then
-  begin
-    // 0.0.0.0
-    h.ai_flags := AI_PASSIVE;
-    result := getaddrinfo(nil, pointer(port), @h, res) = NO_ERROR;
-  end
-  else if (ip = '') or
-          (ip = cLocalhost) or
-          (ip = c6Localhost) or
-          (PropNameEquals(ip, 'localhost')) then
-    // 127.0.0.1
-    result := getaddrinfo(nil, pointer(port), @h, res) = NO_ERROR
-  else
-    // ip or hostname
-    result := getaddrinfo(pointer(ip), pointer(port), @h, res) = NO_ERROR;
+  result := getaddrinfo(pointer(ip), pointer(port), @h, res) = NO_ERROR;
   if result then
-    MoveFast(res^.ai_addr^, a, res^.ai_addrlen);
+    MoveFast(res^.ai_addr^, addr, res^.ai_addrlen); // return the first result
   if res <> nil then
     freeaddrinfo(res);
 end;
@@ -475,23 +485,29 @@ end;
 function TNetAddr.SetFrom(const address, addrport: RawUtf8;
   layer: TNetLayer): TNetResult;
 var
-  h4, h6: TAddrInfo;
+  p: cardinal;
 begin
   if layer = nlUnix then
     result := nrNotImplemented
   else
   begin
-    // first try IP4, then IP6
-    FillCharFast(h4, SizeOf(h4), 0);
-    h4.ai_family := AF_INET;
-    h4.ai_socktype := _ST[layer];
-    h4.ai_protocol := _IP[layer];
-    h6 := h4;
-    h6.ai_family := AF_INET6;
-    if SetAddr(address, addrport, h4, PSockAddr(@Addr)^) or
-       SetAddr(address, addrport, h6, PSockAddr(@Addr)^) then
-      result := nrOK
-    else
+    FillCharFast(Addr, SizeOf(Addr), 0);
+    result := nrNotFound;
+    if address = '' then
+      exit;
+    // check supplied IP port
+    p := GetCardinal(pointer(addrport));
+    if (p = 0) and
+       (addrport <> '0') then // explicit '0' to get ephemeral port
+      exit;
+    PSockAddr(@Addr)^.sin_port := htons(p);
+    // check most simple IPv4 resolution (maybe using mormot.net.dns)
+    result := nrOk;
+    if SetFromIP4(address, false) then
+      exit;
+    // use the OS resolution, first try as IP4, then IP6
+    if not SetWinAddr(address, addrport, AF_INET, layer, Addr) and
+       not SetWinAddr(address, addrport, AF_INET6, layer, Addr) then
       result := nrNotFound;
   end;
 end;
@@ -510,9 +526,17 @@ begin
   SetOpt(SOL_SOCKET, SO_RCVTIMEO, @ms, SizeOf(ms));
 end;
 
-procedure TNetSocketWrap.ReusePort;
+procedure TNetSocketWrap.SetReuseAddrPort;
 begin
-  // unsupported on Windows
+  // do nothing on Windows
+end;
+
+procedure TNetSocketWrap.ReusePort;
+var
+  v: integer;
+begin
+  v := ord(true);
+  SetOpt(SOL_SOCKET, SO_REUSEADDR, @v, SizeOf(v));
 end;
 
 procedure TNetSocketWrap.SetLinger(linger: integer);
@@ -523,6 +547,39 @@ begin
   v.l_onoff := 0; // don't wait - ord(linger >= 0) would wait
   // https://docs.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-closesocket
   SetOpt(SOL_SOCKET, SO_LINGER, @v, SizeOf(v));
+end;
+
+procedure TNetSocketWrap.SetCork(cork: boolean);
+begin
+  // do nothing on Windows
+end;
+
+const
+  // https://techcommunity.microsoft.com/t5/networking-blog/ledbat-background-data-transfer-for-windows/ba-p/3639278
+  SIO_PRIORITY_HINT = integer($98000018); // _WSAIOW(IOC_VENDOR,$18)
+  SocketPriorityHintVeryLow = 0;
+  SocketPriorityHintLow = 1;
+  SocketPriorityHintNormal = 2;
+  SocketMaximumPriorityHintType = 3;
+
+procedure TNetSocketWrap.SetLowPriority;
+var
+  v: integer;
+begin
+  v := SocketPriorityHintVeryLow;
+  setsockopt(TSocket(@self), SOL_SOCKET, SIO_PRIORITY_HINT, @v, SizeOf(v));
+  // don't call SetOpt() which raise ENetSock on oldest Windows
+end;
+
+function TNetSocketWrap.HasLowPriority: boolean;
+var
+  v, l: integer;
+begin
+  v := -1;
+  l := SizeOf(v);
+  result :=
+    (getsockopt(TSocket(@self), SOL_SOCKET, SIO_PRIORITY_HINT, @v, @l) = NO_ERROR) and
+    (v = SocketPriorityHintVeryLow);
 end;
 
 procedure SetTimeVal(ms: cardinal; out tv: TTimeVal);
@@ -549,6 +606,7 @@ var
   end;
   rdp, wrp: PFDSet;
   tv: TTimeVal;
+  ptv: pointer;
   res: integer;
   pending: cardinal;
 begin
@@ -573,8 +631,14 @@ begin
     rd.fd_count := 1;
     rdp := @rd;
   end;
-  SetTimeVal(ms, tv);
-  res := select(sock + 1, rdp, wrp, nil, @tv);
+  if ms >= 0 then
+  begin
+    SetTimeVal(ms, tv);
+    ptv := @tv;
+  end
+  else
+    ptv := nil; // infinite timeout
+  res := select(sock + 1, rdp, wrp, nil, ptv);
   if res < 0 then
   begin
     if loerr <> nil then
@@ -609,7 +673,7 @@ type
   PMIB_IPADDRTABLE = ^MIB_IPADDRTABLE;
   MIB_IPADDRTABLE = record
     dwNumEntries: DWORD;
-    ip: array[0..200] of record
+    ip: array[byte] of record
       dwAddr: DWORD;
       dwIndex: DWORD;
       dwMask: DWORD;
@@ -621,6 +685,7 @@ type
   end;
 
 var
+  iphlpapiDll: THandle;
   // some iphlpapi.dll late-binded API via DelayedProc()
   GetIpAddrTable: function (pIpAddrTable: PMIB_IPADDRTABLE;
     var pdwSize: DWORD; bOrder: BOOL): DWORD; stdcall;
@@ -636,34 +701,26 @@ begin
   if Kind = tiaIPv6 then
     exit; // GetIpAddrTable() is an IPv4 only API
   Size := SizeOf(Table);
-  if not DelayedProc(GetIpAddrTable, 'iphlpapi.dll', 'GetIpAddrTable') or
+  if not DelayedProc(GetIpAddrTable, iphlpapiDll, 'iphlpapi.dll',
+           'GetIpAddrTable') or
      (GetIpAddrTable(@Table, Size, false) <> NO_ERROR) then
     exit;
   SetLength(result, Table.dwNumEntries);
   n := 0;
   for i := 0 to Table.dwNumEntries-1 do
     with Table.ip[i] do
-    if (dwAddr <> $0100007f) and
-       (dwAddr <> 0) then
-    begin
-      case Kind of
-        tiaIPv4Public:
-          if not IsPublicIP(dwAddr) then
-            continue;
-        tiaIPv4Private:
-          if IsPublicIP(dwAddr) then
-            continue;
+      if IP4Filter(dwAddr, Kind) then
+      begin
+        IP4Text(@dwAddr, result[n]);
+        inc(n);
       end;
-      IP4Text(@dwAddr, result[n]);
-      inc(n);
-    end;
   if n <> Table.dwNumEntries then
     SetLength(result, n);
 end;
 
 
 
-{ ******************** Mac Addresses Support }
+{ ******************** MAC and DNS Addresses Support }
 
 const
   MAX_ADAPTER_ADDRESS_LENGTH = 8;
@@ -681,15 +738,21 @@ const
               // or GAA_FLAG_INCLUDE_ALL_INTERFACES;
   IfOperStatusUp = 1;
 
+  MAX_HOSTNAME_LEN = 128;
+  MAX_DOMAIN_NAME_LEN = 128;
+  MAX_SCOPE_ID_LEN = 256;
+
 type
   SOCKET_ADDRESS = record
     lpSockaddr: PSOCKADDR;
     iSockaddrLength: Integer;
   end;
+
   PIP_ADAPTER_UNICAST_ADDRESS = pointer;
   PIP_ADAPTER_ANYCAST_ADDRESS = pointer;
   PIP_ADAPTER_DNS_SERVER_ADDRESS = pointer;
   PIP_ADAPTER_MULTICAST_ADDRESS = pointer;
+
   PIP_ADAPTER_ADDRESSES = ^_IP_ADAPTER_ADDRESSES;
   _IP_ADAPTER_ADDRESSES = record
     Union: record
@@ -735,12 +798,86 @@ type
     // DHCP v6 Info following (not used by our code)
   end;
 
+  IP_ADDRESS_STRING = array [0..15] of AnsiChar;
+  IP_ADDR_IP4 = cardinal;
+
+  IP_ADDR_STRING = packed record
+    IpAddress: IP_ADDRESS_STRING;
+    IpMask: IP_ADDRESS_STRING;
+    Context: IP_ADDR_IP4;
+  end;
+  PIP_ADDR_STRING = ^IP_ADDR_STRING;
+
+  PIP_ADDR_STRING_LINKED_LIST = ^IP_ADDR_STRING_LINKED_LIST;
+  IP_ADDR_STRING_LINKED_LIST = packed record
+    Next: PIP_ADDR_STRING_LINKED_LIST;
+    Current: IP_ADDR_STRING;
+  end;
+
+  FIXED_INFO = packed record
+    HostName: array[0..MAX_HOSTNAME_LEN + 3] of AnsiChar;
+    DomainName: array[0..MAX_DOMAIN_NAME_LEN + 3] of AnsiChar;
+    CurrentDnsServer: PIP_ADDR_STRING;
+    DnsServerList: IP_ADDR_STRING_LINKED_LIST;
+    NodeType: DWORD;
+    ScopeId: array[0 .. MAX_SCOPE_ID_LEN + 3] of AnsiChar;
+    EnableRouting: DWORD;
+    EnableProxy: DWORD;
+    EnableDns: DWORD;
+  end;
+  PFIXED_INFO = ^FIXED_INFO;
+
+
 var
   // some iphlpapi.dll late-binded APIs via DelayedProc()
   GetAdaptersAddresses: function(Family: ULONG; Flags: DWORD; Reserved: pointer;
     pAdapterAddresses: PIP_ADAPTER_ADDRESSES; pOutBufLen: PULONG): DWORD; stdcall;
+
   SendARP: function(DestIp: DWORD; srcIP: DWORD; pMacAddr: pointer;
     PhyAddrLen: Pointer): DWORD; stdcall;
+
+  GetNetworkParams: function(pFixedInfo: PFIXED_INFO;
+    pOutBufLen: PULONG): DWORD; stdcall;
+
+function _GetDnsAddresses(usePosixEnv, getAD: boolean): TRawUtf8DynArray;
+var
+  n, l: PtrInt;
+  siz: ULONG;
+  p: PIP_ADDR_STRING_LINKED_LIST;
+  tmp: RawByteString;
+begin
+  result := nil;
+  siz := 0;
+  if not DelayedProc(GetNetworkParams, iphlpapiDll, 'iphlpapi.dll',
+           'GetNetworkParams') or
+     (GetNetworkParams(nil, @siz) <> ERROR_BUFFER_OVERFLOW) then
+    exit;
+  SetLength(tmp, siz);
+  if GetNetworkParams(pointer(tmp), @siz) <> ERROR_SUCCESS then
+    exit;
+  if getAD then
+  begin
+    l := StrLen(@PFIXED_INFO(tmp)^.DomainName);
+    if l <> 0 then
+    begin
+      SetLength(result, 1);
+      FastSetString(result[0], @PFIXED_INFO(tmp)^.DomainName, l);
+    end;
+    exit;
+  end;
+  n := 0;
+  p := @PFIXED_INFO(tmp)^.DnsServerList;
+  repeat
+    l := StrLen(@p^.Current.IpAddress);
+    if l <> 0 then
+    begin
+      SetLength(result, n + 1);
+      FastSetString(result[n], @p^.Current.IpAddress, l);
+      inc(n);
+    end;
+    p := p^.Next;
+  until p = nil;
+end;
 
 function RetrieveMacAddresses(UpAndDown: boolean): TMacAddressDynArray;
 var
@@ -751,30 +888,29 @@ var
 begin
   result := nil;
   siz := 0;
-  if not DelayedProc(GetAdaptersAddresses, 'iphlpapi.dll', 'GetAdaptersAddresses') or
+  if not DelayedProc(GetAdaptersAddresses, iphlpapiDll, 'iphlpapi.dll',
+           'GetAdaptersAddresses') or
      (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, nil, nil, @siz) <>
        ERROR_BUFFER_OVERFLOW) then
     exit;
   SetLength(tmp, siz); // around 600 bytes per interface
   p := pointer(tmp);
-  if GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, nil, p, @siz) = ERROR_SUCCESS then
-  begin
-    n := 0;
-    repeat
-      if (p^.Flags <> 0) and
-         (UpAndDown or
-          (p^.OperStatus = IfOperStatusUp)) and
-         (p^.PhysicalAddressLength = 6) then
-      begin
-        SetLength(result, n + 1);
-        Win32PWideCharToUtf8(
-          p^.Description, StrLenW(p^.Description), result[n].Name);
-        result[n].Address := MacToText(@p^.PhysicalAddress);
-        inc(n);
-      end;
-      p := p^.Next;
-    until p = nil;
-  end;
+  if GetAdaptersAddresses(AF_UNSPEC, GAA_FLAGS, nil, p, @siz) <> ERROR_SUCCESS then
+    exit;
+  n := 0;
+  repeat
+    if (p^.Flags <> 0) and
+       (UpAndDown or
+        (p^.OperStatus = IfOperStatusUp)) and
+       (p^.PhysicalAddressLength = 6) then
+    begin
+      SetLength(result, n + 1);
+      Win32PWideCharToUtf8(p^.Description, result[n].Name);
+      result[n].Address := MacToText(@p^.PhysicalAddress);
+      inc(n);
+    end;
+    p := p^.Next;
+  until p = nil;
 end;
 
 function GetRemoteMacAddress(const IP: RawUtf8): RawUtf8;
@@ -787,7 +923,7 @@ begin
   result := '';
   dwremoteIP := inet_addr(pointer(IP));
   if (dwremoteIP <> 0) and
-     DelayedProc(SendARP, 'iphlpapi.dll', 'SendARP') then
+     DelayedProc(SendARP, iphlpapiDll, 'iphlpapi.dll', 'SendARP') then
   begin
     PhyAddrLen := 8;
     if SendARP(dwremoteIP, 0, @pMacAddr, @PhyAddrLen) = NO_ERROR then
@@ -981,6 +1117,12 @@ begin
   result := TPollSocketSelect;
 end;
 
+function PollFewSockets: TPollSocketAbstract;
+begin
+  result := TPollSocketSelect.Create(nil);
+end;
+
+
 
 { ******************** TLS / HTTPS Encryption Abstract Layer }
 
@@ -995,16 +1137,18 @@ type
     fCred: TCredHandle;
     fCtxt: TCtxtHandle;
     fFlags: cardinal;
+    fLastCheckSecError: cardinal;
     fSizes: TSecPkgContext_StreamSizes;
     fData, fInput: AnsiString;
     fInputSize, fDataPos, fDataCount, fInputCount: integer;
     fSessionClosed: boolean;
     fAccept: boolean;
-    fAcceptCert: PCCERT_CONTEXT;
+    fAcceptCert: mormot.core.os.PCCERT_CONTEXT;
     fAcceptCertStore: HCERTSTORE;
-    procedure ESChannelRaiseLastError(res: cardinal);
-    function CheckSEC_E_OK(res: integer): cardinal;
+    procedure ESChannelRaiseLastError(const ctx: shortstring; res: cardinal);
+    function CheckSEC_E_OK(const ctx: shortstring; res: integer): cardinal;
     procedure HandshakeLoop;
+    procedure FinalizeCredCtxt;
   public
     destructor Destroy; override;
     // INetTls methods
@@ -1016,36 +1160,48 @@ type
     function GetCipherName: RawUtf8;
     function GetRawTls: pointer;
     function Receive(Buffer: pointer; var Length: integer): TNetResult;
+    function ReceivePending: integer;
     function Send(Buffer: pointer; var Length: integer): TNetResult;
   end;
 
 
 { TSChannelNetTls }
 
-procedure TSChannelNetTls.ESChannelRaiseLastError(res: cardinal);
+procedure TSChannelNetTls.ESChannelRaiseLastError(
+  const ctx: shortstring; res: cardinal);
 var
-  LastError: integer;
+  syserr: integer;
 begin
-  LastError := GetLastError;
-  raise ESChannel.CreateFmt('<%s>: Result %x [%s], System Error %d ''%s''',
-    [fServerAddressW, res, SspiResToText(res), LastError,
-     string(GetErrorText(LastError))]);
+  syserr := GetLastError;
+  raise ESChannel.CreateFmt('<%s>: %s returned %x [%s], System Error %d [%s]',
+    [fServerAddressW, ctx, res, SspiResToText(res), syserr,
+     string(GetErrorText(syserr))]);
 end;
 
-function TSChannelNetTls.CheckSEC_E_OK(res: integer): cardinal;
+function TSChannelNetTls.CheckSEC_E_OK(
+  const ctx: shortstring; res: integer): cardinal;
 begin
+  fLastCheckSecError := res;
   if res <> SEC_E_OK then
-    ESChannelRaiseLastError(res);
+    ESChannelRaiseLastError(ctx, res);
   result := res;
 end;
 
-function CheckSocket(res: integer): cardinal;
+function CheckSocket(const ctx: shortstring; res: integer): cardinal;
 begin
   if res = SOCKET_ERROR then
-    raise ESChannel.CreateFmt('Socket Error %d', [sockerrno]);
+    raise ESChannel.CreateFmt('%s: Socket Error %d', [ctx, sockerrno]);
   if res = 0 then
-    raise ESChannel.Create('Handshake aborted');
+    raise ESChannel.CreateFmt('%s: Handshake aborted', [ctx]);
   result := res;
+end;
+
+procedure TSChannelNetTls.FinalizeCredCtxt;
+begin
+  DeleteSecurityContext(@fCtxt);
+  FreeCredentialsHandle(@fCred);
+  FillCharFast(fCtxt, SizeOf(fCtxt), 0);
+  FillCharFast(fCred, SizeOf(fCred), 0);
 end;
 
 const
@@ -1078,13 +1234,13 @@ begin
   FillCharFast(cred, SizeOf(cred), 0);
   cred.dwVersion := SCHANNEL_CRED_VERSION;
   cred.grbitEnabledProtocols :=
-     SP_PROT_TLS1_2_CLIENT or SP_PROT_TLS1_3_CLIENT or
-     SP_PROT_TLS1_2_SERVER or SP_PROT_TLS1_3_SERVER;
+      SP_PROT_TLS1_2_CLIENT or SP_PROT_TLS1_3_CLIENT or
+      SP_PROT_TLS1_2_SERVER or SP_PROT_TLS1_3_SERVER;
   if (OSVersion < wSeven) or // XP and Vista only support TLS 1.0 anyway :(
      AllowDeprecatedTls then
     cred.grbitEnabledProtocols := cred.grbitEnabledProtocols or
-     SP_PROT_TLS1_CLIENT or SP_PROT_TLS1_1_CLIENT or
-     SP_PROT_TLS1_SERVER or SP_PROT_TLS1_1_SERVER;
+      SP_PROT_TLS1_CLIENT or SP_PROT_TLS1_1_CLIENT or
+      SP_PROT_TLS1_SERVER or SP_PROT_TLS1_1_SERVER;
 end;
 
 procedure TSChannelNetTls.AfterConnection(Socket: TNetSocket;
@@ -1092,38 +1248,73 @@ procedure TSChannelNetTls.AfterConnection(Socket: TNetSocket;
 var
   cred: TSChannelCred;
   buf: THandshakeBuf;
-  res, f: cardinal;
+  nfo: TWinCertInfo;
+  res, f, trial: cardinal;
 begin
   // prepare execution context
   fSocket := Socket;
   fServerAddressW := SynUnicode(ServerAddress);
-  fAccept := false;
-  CredInit(cred, Context.AllowDeprecatedTLS);
-  CheckSEC_E_OK(AcquireCredentialsHandleW(
-    nil, UNISP_NAME, SECPKG_CRED_OUTBOUND, nil, @cred, nil, nil, @fCred, nil));
-  fDataPos := 0;
-  fDataCount := 0;
-  fFlags := ISC_REQ_FLAGS;
-  if Context.IgnoreCertificateErrors then
-    // prevent SEC_E_UNTRUSTED_ROOT result in HandshakeLoop
-    fFlags := fFlags or ISC_REQ_MANUAL_CRED_VALIDATION;
-  // initiate a ClientHello TLS message and a new fCtxt
-  HandshakeBufInit(buf);
-  res := InitializeSecurityContextW(
-    @fCred, nil, pointer(fServerAddressW), fFlags, 0, 0,
-    nil, 0, @fCtxt, @buf.output, f, nil);
-  if res <> SEC_I_CONTINUE_NEEDED then
-    ESChannelRaiseLastError(res);
-  if (buf.buf[2].cbBuffer = 0) or
-     (buf.buf[2].pvBuffer = nil) then
-    raise ESChannel.CreateFmt('Void Hello answer to %s', [ServerAddress]);
-  CheckSocket(mormot.net.sock.Send(
-    fSocket.Socket, buf.buf[2].pvBuffer, buf.buf[2].cbBuffer, 0));
-  CheckSEC_E_OK(FreeContextBuffer(buf.buf[2].pvBuffer));
-  // make TLS handshake and prepare for process
   SetLength(fData, TLSRECMAXSIZE);
-  HandshakeLoop;
+  fAccept := false;
+  trial := 0;
+  while true do
+    try
+      CredInit(cred, Context.AllowDeprecatedTLS);
+      if Context.IgnoreCertificateErrors then
+        cred.dwFlags := SCH_CRED_MANUAL_CRED_VALIDATION
+      else
+        cred.dwFlags := SCH_CRED_REVOCATION_CHECK_CHAIN or
+                        SCH_CRED_IGNORE_REVOCATION_OFFLINE;
+      CheckSEC_E_OK('AcquireCredentialsHandleW', AcquireCredentialsHandleW(
+        nil, UNISP_NAME, SECPKG_CRED_OUTBOUND, nil, @cred, nil, nil, @fCred, nil));
+      fDataPos := 0;
+      fDataCount := 0;
+      fFlags := ISC_REQ_FLAGS;
+      if Context.IgnoreCertificateErrors then
+        // prevent SEC_E_UNTRUSTED_ROOT result in HandshakeLoop
+        fFlags := fFlags or ISC_REQ_MANUAL_CRED_VALIDATION;
+      // initiate a ClientHello TLS message and a new fCtxt
+      HandshakeBufInit(buf);
+      res := InitializeSecurityContextW(
+        @fCred, nil, pointer(fServerAddressW), fFlags, 0, 0,
+        nil, 0, @fCtxt, @buf.output, f, nil);
+      if res <> SEC_I_CONTINUE_NEEDED then
+        ESChannelRaiseLastError('InitializeSecurityContextW', res);
+      if (buf.buf[2].cbBuffer = 0) or // SECBUFFER_TOKEN
+         (buf.buf[2].pvBuffer = nil) then
+        raise ESChannel.CreateFmt('Void Hello answer to %s', [ServerAddress]);
+      CheckSocket('send', mormot.net.sock.Send(
+        fSocket.Socket, buf.buf[2].pvBuffer, buf.buf[2].cbBuffer, 0));
+      CheckSEC_E_OK('FreeContextBuffer',
+        FreeContextBuffer(buf.buf[2].pvBuffer));
+      // make TLS handshake and prepare for process
+      HandshakeLoop;
+      break; // we are connected
+    except
+      // circumvent Windows 7/8 random bug identified on TLS 1.2 and
+      // TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 TLS_DHE_RSA_WITH_AES_256_GCM_SHA384
+      // https://github.com/Waffle/waffle/pull/128#issuecomment-163342222
+      on E: ESChannel do
+        if (trial = 0) and
+           ((fLastCheckSecError = SEC_E_BUFFER_TOO_SMALL) or
+            (fLastCheckSecError = SEC_E_MESSAGE_ALTERED)) then
+        begin
+          // just retry once
+          FinalizeCredCtxt;
+          inc(trial);
+        end
+        else
+          raise;
+    end;
   Context.CipherName := GetCipherName;
+  if TlsCertInfo(fCtxt, nfo) then
+  begin
+    Context.PeerIssuer := nfo.IssuerName;
+    Context.PeerSubject := nfo.SubjectName;
+    if Context.WithPeerInfo and
+       Assigned(WinCertInfoToText) then
+      Context.PeerInfo := WinCertInfoToText(nfo);
+  end;
 end;
 
 procedure TSChannelNetTls.AfterBind(var Context: TNetTlsContext);
@@ -1156,11 +1347,12 @@ begin
     if pass <> '' then
       FillCharFast(pointer(pass)^, length(pass) * 2, 0); // anti forensic
     if fAcceptCertStore = nil then
-      ESChannelRaiseLastError(SEC_E_CERT_UNKNOWN);
+      ESChannelRaiseLastError('PFXImportCertStoreSEC_E_CERT_UNKNOWN',
+        SEC_E_CERT_UNKNOWN);
   end;
   // find first certificate in store
-  fAcceptCert := CertFindCertificateInStore(fAcceptCertStore, 0, 0,
-    CERT_FIND_ANY, nil, nil);
+  fAcceptCert := mormot.lib.sspi.CertFindCertificateInStore(
+    fAcceptCertStore, 0, 0, CERT_FIND_ANY, nil, nil);
   if fAcceptCert = nil then
     raise ESChannel.Create('AfterBind: no Certificate available');
   // this global certificate will be used by AfterAccept()
@@ -1181,8 +1373,9 @@ begin
   CredInit(cred, BoundContext.AllowDeprecatedTls);
   cred.cCreds := 1;
   cred.paCred := @BoundContext.AcceptCert;
-  CheckSEC_E_OK(AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
-    nil, @cred, nil, nil, @fCred, nil));
+  CheckSEC_E_OK('AcquireCredentialsHandleW',
+    AcquireCredentialsHandleW(nil, UNISP_NAME, SECPKG_CRED_INBOUND,
+      nil, @cred, nil, nil, @fCred, nil));
   fDataPos := 0;
   fDataCount := 0;
   fFlags := ASC_REQ_FLAGS;
@@ -1214,7 +1407,7 @@ procedure TSChannelNetTls.HandshakeLoop;
     LInCtxPtr: PSecHandle;
   begin
     HandshakeBufInit(buf);
-    buf.buf[0].cbBuffer := fDataCount;
+    buf.buf[0].cbBuffer := fDataCount; // SECBUFFER_TOKEN
     buf.buf[0].pvBuffer := pointer(fData);
     f := 0;
     if fAccept then
@@ -1223,8 +1416,8 @@ procedure TSChannelNetTls.HandshakeLoop;
         LInCtxPtr := nil
       else
         LInCtxPtr := @fCtxt;
-      result := AcceptSecurityContext(@fCred, LInCtxPtr, @buf.input,
-        fFlags, 0, @fCtxt, @buf.output, f, nil);
+      result := AcceptSecurityContext(
+        @fCred, LInCtxPtr, @buf.input, fFlags, 0, @fCtxt, @buf.output, f, nil);
     end
     else
       result := InitializeSecurityContextW(
@@ -1238,9 +1431,10 @@ procedure TSChannelNetTls.HandshakeLoop;
          (buf.buf[2].pvBuffer <> nil) then
       begin
         // need to send back something to the server
-        CheckSocket(mormot.net.sock.Send(
+        CheckSocket('send', mormot.net.sock.Send(
           fSocket.Socket, buf.buf[2].pvBuffer, buf.buf[2].cbBuffer, 0));
-        CheckSEC_E_OK(FreeContextBuffer(buf.buf[2].pvBuffer));
+        CheckSEC_E_OK('FreeContextBuffer',
+          FreeContextBuffer(buf.buf[2].pvBuffer));
       end;
     if (buf.buf[1].BufferType = SECBUFFER_EXTRA) and
        (buf.buf[1].cbBuffer <> 0) then
@@ -1259,7 +1453,7 @@ var
   res: cardinal;
 begin
   repeat
-    inc(fDataCount, CheckSocket(
+    inc(fDataCount, CheckSocket('recv',
       Recv(fSocket.Socket, @PByteArray(fData)[fDataCount],
         length(fData) - fDataCount, MSG_NOSIGNAL)));
     res := ComputeAndSendAnswer;
@@ -1268,14 +1462,14 @@ begin
       res := ComputeAndSendAnswer; // run twice to let the handshake pass
   until (res <> SEC_I_CONTINUE_NEEDED) and
         (res <> SEC_E_INCOMPLETE_MESSAGE);
-  CheckSEC_E_OK(res);
+  CheckSEC_E_OK('ComputeAndSendAnswer', res);
   // note: fDataCount trailing content may come from SECBUFFER_EXTRA bytes
   fCipherName := ''; // will be retrieved if needed 
   if fInputSize = 0 then
   begin
     // retrieve the TLS field sizes during first handshake
-    CheckSEC_E_OK(QueryContextAttributesW(
-      @fCtxt, SECPKG_ATTR_STREAM_SIZES, @fSizes));
+    CheckSEC_E_OK('QueryContextAttributesW',
+      QueryContextAttributesW(@fCtxt, SECPKG_ATTR_STREAM_SIZES, @fSizes));
     fInputSize := fSizes.cbHeader + fSizes.cbMaximumMessage + fSizes.cbTrailer;
     if (fInputSize = 0) or
        (fInputSize > TLSRECMAXSIZE) then
@@ -1289,7 +1483,7 @@ destructor TSChannelNetTls.Destroy;
 var
   desc: TSecBufferDesc;
   buf: TSecBuffer;
-  dt, f: cardinal;
+  dt, f, res: cardinal;
 begin
   try
     if {%H-}PtrInt(fSocket.Socket) > 0 then
@@ -1308,28 +1502,21 @@ begin
         buf.BufferType := SECBUFFER_TOKEN;
         buf.pvBuffer := nil;
         if fAccept then
-        begin
-          if AcceptSecurityContext(@fCred, @fCtxt, nil, fFlags, 0,
-             nil, @desc, f, nil) = SEC_E_OK then
-          begin
-            mormot.net.sock.Send(fSocket.Socket, buf.pvBuffer, buf.cbBuffer, 0);
-            FreeContextBuffer(buf.pvBuffer);
-          end;
-        end
+          res := AcceptSecurityContext(
+            @fCred, @fCtxt, nil, fFlags, 0, nil, @desc, f, nil)
         else
+          res := InitializeSecurityContextW(
+            @fCred, @fCtxt, pointer(fServerAddressW), fFlags, 0, 0,
+            nil, 0, @fCtxt, @desc, f, nil);
+        if res = SEC_E_OK then
         begin
-          if InitializeSecurityContextW(@fCred, @fCtxt, nil, fFlags, 0,
-             0, nil, 0, @fCtxt, @desc, f, nil) = SEC_E_OK then
-          begin
-            mormot.net.sock.Send(fSocket.Socket, buf.pvBuffer, buf.cbBuffer, 0);
-            FreeContextBuffer(buf.pvBuffer);
-          end;
+          mormot.net.sock.Send(fSocket.Socket, buf.pvBuffer, buf.cbBuffer, 0);
+          FreeContextBuffer(buf.pvBuffer);
         end;
       end;
     end;
     // finalize TLS context for this connection
-    DeleteSecurityContext(@fCtxt);
-    FreeCredentialsHandle(@fCred);
+    FinalizeCredCtxt;
   finally
     // release AfterBind() certificates information
     if fAcceptCert <> nil then
@@ -1338,6 +1525,14 @@ begin
       CertCloseStore(fAcceptCertStore, CERT_CLOSE_STORE_DEFAULT);
     inherited Destroy;
   end;
+end;
+
+function TSChannelNetTls.ReceivePending: integer;
+begin
+  if fSessionClosed then
+    result := -1
+  else
+    result := fDataCount;
 end;
 
 function TSChannelNetTls.Receive(Buffer: pointer; var Length: integer): TNetResult;
@@ -1408,7 +1603,7 @@ begin
         SEC_E_INCOMPLETE_MESSAGE:
           break;
         else
-          CheckSEC_E_OK(res);
+          CheckSEC_E_OK('DecryptInput', res);
       end;
       fInputCount := 0;
       for i := 1 to 3 do

@@ -231,7 +231,7 @@ type
     /// current time as a character-string of length 16
     // - represented in the format YYYYMMDDhhmmssxx (4 characters for the year;
     // 2 characters each for the month, the day, the hour, the minute, and the
-    // second; and 2 additional reserved ‘0’ characters).
+    // second; and 2 additional reserved '0' characters).
     // - The value of this field only makes sense for tokens equipped with a
     // clock, as indicated in the token information flags
     utcTime: array[0..15] of AnsiChar;
@@ -665,6 +665,10 @@ type
 
 
 { ---------- 3.5 Data types for mechanisms }
+
+// about CKM_RSA_PKCS see https://crypto.stackexchange.com/a/10103/40200
+// https://github.com/aws-samples/aws-cloudhsm-pkcs11-examples/blob/master/src/sign/ec_sign.c
+// https://github.com/tpm2-software/tpm2-pkcs11/blob/master/docs/INITIALIZING.md
 
 type
   /// identifies a mechanism type
@@ -1254,6 +1258,9 @@ type
 
     /// search for a given attribute value
     function Find(aType: CK_ATTRIBUTE_TYPE): CK_ATTRIBUTE_PTR; overload;
+    /// search for a given attribute len
+    // - returns -1 if not found
+    function FindLen(aType: CK_ATTRIBUTE_TYPE): integer;
     /// search for a given CK_ULONG attribute value
     function Find(aType: CK_ATTRIBUTE_TYPE;
       out aValue: CK_ULONG): boolean; overload;
@@ -1398,13 +1405,14 @@ type
     CKR_VENDOR_DEFINED);
 
 const
-  CKR_SUCCESS   = 0;                     // = ToULONG(CKR_OK)
-  CKR_ABORT     = 1;                     // = ToULONG(CKR_CANCEL)
-  CKR_NOEVENT   = 8;                     // = ToULONG(CKR_NO_EVENT)
-  CKR_SENSITIVE = $0011;                 // = ToULONG(CKR_ATTRIBUTE_SENSITIVE)
-  CKR_INVALID   = $0012;                 // = ToULONGCKR_ATTRIBUTE_TYPE_INVALID)
-  CKR_BUFFER_TOOSMALL = $0150;           // = ToULONG(CKR_BUFFER_TOO_SMALL)
-  CKR_VENDOR_DEFINED_ULONG = $80000000;  // = ToULONG(CKR_VENDOR_DEFINED)
+  CKR_SUCCESS         = 0;          // = ToULONG(CKR_OK)
+  CKR_ABORT           = 1;          // = ToULONG(CKR_CANCEL)
+  CKR_NOEVENT         = 8;          // = ToULONG(CKR_NO_EVENT)
+  CKR_SENSITIVE       = $0011;      // = ToULONG(CKR_ATTRIBUTE_SENSITIVE)
+  CKR_INVALID         = $0012;      // = ToULONG(CKR_ATTRIBUTE_TYPE_INVALID)
+  CKR_SIGNINVALID     = $00C0;      // = ToULONG(CKR_SIGNATURE_INVALID)
+  CKR_BUFFER_TOOSMALL = $0150;      // = ToULONG(CKR_BUFFER_TOO_SMALL)
+  CKR_VENDORDEFINED   = $80000000;  // = ToULONG(CKR_VENDOR_DEFINED)
 
 function ToULONG(rv: CK_RV): CK_RVULONG; overload;
   {$ifdef FPC} inline; {$endif}
@@ -1464,6 +1472,8 @@ type
     /// returns the function list
     GetFunctionList: TfC_GetFunctionList;
     /// obtains a list of slots in the system
+    // - warning: tokenPresent is sometimes ignored and void slots can be
+    // returned if GetSlotList() is called several times: never trust this flag!
     GetSlotList: function(tokenPresent: boolean;
       pSlotList: CK_SLOT_ID_PTR; var Count: CK_ULONG): CK_RVULONG; cdecl;
     /// obtains information about a particular slot in the system
@@ -1476,7 +1486,7 @@ type
     GetMechanismList: function(slotID: CK_SLOT_ID;
       pMechanismList: CK_MECHANISM_TYPE_ULONG_PTR; var Count: CK_ULONG): CK_RVULONG; cdecl;
     /// obtains information about a particular mechanism possibly supported by a token
-    GetMechanismInfo: function(slotID: CK_SLOT_ID; _type: CK_MECHANISM_TYPE;
+    GetMechanismInfo: function(slotID: CK_SLOT_ID; _type: CK_MECHANISM_TYPE_ULONG;
       out pInfo: CK_MECHANISM_INFO): CK_RVULONG; cdecl;
     /// initializes a token
     // - ulPinLen is the length in bytes of the PIN
@@ -1787,6 +1797,20 @@ type
   /// map several CK_SLOT_ID but with a fixed 32-bit size
   TPkcs11SlotIDDynArray = array of TPkcs11SlotID;
 
+  /// high-level information about a PKCS#11 mechanism
+  TPkcs11Mechanism = packed record
+    /// the type of Mechanism
+    Kind: CK_MECHANISM_TYPE;
+    /// minimum size of the Mechanism key (in bits or bytes, or even meaningless)
+    MinKey: cardinal;
+    /// maximum size of the Mechanism key (in bits or bytes, or even meaningless)
+    MaxKey: cardinal;
+    /// define the Mechanism behavior
+    Flags: CKM_FLAGS;
+  end;
+  /// high-level information about one or several PKCS#11 mechanism(s)
+  TPkcs11Mechanisms = array of TPkcs11Mechanism;
+
   /// high-level information about a PKCS#11 Slot
   // - can be (un) serialized as binary or JSON if needed
   TPkcs11Slot = packed record
@@ -1799,7 +1823,7 @@ type
     /// Slot Information Flags
     Flags: CKSL_FLAGS;
     /// the Mechanism supported by this Slot
-    Mechanism: CK_MECHANISM_TYPES;
+    Mechanism: TPkcs11Mechanisms;
     /// version number of the slot's hardware
     Hardware: CK_VERSION;
     /// version number of the slot's firmware
@@ -1846,7 +1870,7 @@ type
   TPkcs11Object = packed record
     /// the class of the object (from CKA_CLASS)
     ObjClass: CK_OBJECT_CLASS;
-    /// the identifier of this Storage Object (from CKA_UNIQUE_ID or CKA_ID)
+    /// the identifier of this Storage Object (from CKA_ID), as hexadecimal
     StorageID: RawUtf8;
     /// the description of this Storage Object (from CKA_LABEL value)
     StorageLabel: RawUtf8;
@@ -1856,6 +1880,11 @@ type
     KeyType: CK_KEY_TYPE;
     /// how this stored Key has been generated (from CKA_KEY_GEN_MECHANISM)
     KeyGen: CK_MECHANISM_TYPE;
+    /// the size of the object key in bits
+    // - e.g. from CKA_MODULUS_BITS (for CKK_RSA) or CKA_EC_POINT (for CKK_EC)
+    // - may be 0 for not-so-used/unsupported algorithms
+    // - note that CKA_VALUE_LEN is likely to be not present on most HW
+    KeyBits: cardinal;
     /// start date of this Storage Object (from CKA_START_DATE)
     Start: TDateTime;
     /// end date of this Storage Object (from CKA_END_DATE)
@@ -1868,8 +1897,11 @@ type
     Serial: RawByteString;
     /// the DER issuer of this Storage Object (from CKA_ISSUER)
     Issuer: RawByteString;
+    /// the DER unique ID of this Certificate (from CKA_UNIQUE_ID)
+    UniqueID: RawByteString;
     /// the low-level CK_OBJECT_HANDLE, which lifetime would match the session
-    SessionHandle: CK_OBJECT_HANDLE;
+    // - not defined as CK_OBJECT_HANDLE because this type is not cross-platform
+    SessionHandle: cardinal;
   end;
   /// high-level information about several PKCS#11 Objects
   // - can be (un) serialized as binary or JSON if needed
@@ -1929,6 +1961,9 @@ procedure AddToAttributes(var Attr: CK_ATTRIBUTES; Flags: TPkcs11ObjectStorages)
 // - returns [] if not known enough, or the appropriate flags
 function DefaultKeyStorageFlags(kt: CK_KEY_TYPE): TPkcs11ObjectStorages;
 
+/// compute the ECC bits (e.g. 256) from the CKA_EC_POINT attribute length
+function EccBitsFromPointLen(bytes: integer; out bits: cardinal): boolean;
+
 type
   TPkcs11 = class;
 
@@ -1957,6 +1992,7 @@ type
     procedure Check(res: CK_RVULONG; const ctxt: ShortString;
       unlock: boolean = false);
     procedure CheckAttr(res: CK_RVULONG);
+    function DoGetSlotList(Present: boolean): TPkcs11SlotIDDynArray;
     // some actions within the current opened session
     function SessionCreateObject(const a: CK_ATTRIBUTES): RawUtf8;
     function SessionGetAttribute(obj: CK_OBJECT_HANDLE;
@@ -1981,6 +2017,8 @@ type
 
     /// get information about this instance in Slots[] and Tokens[] properties
     procedure RetrieveConfig(IncludeVoidSlots: boolean = false);
+    /// retrieve the list of Void slots
+    function RetrieveVoidSlots: TPkcs11SlotIDDynArray;
     /// update information in Slots[] and Tokens[] about a single slot
     // - as called e.g. by RetrieveConfig() and also function WaitForSlotEvent()
     procedure UpdateConfig(SlotID: TPkcs11SlotID);
@@ -2007,6 +2045,9 @@ type
     // - not thread-safe: use Safe.Lock/UnLock when you are outside a session
     function TokenByName(const TokenName: RawUtf8;
       CaseInsensitive: boolean = false): PPkcs11Token;
+    /// search for a given TPkcs11Token.Slot within current Tokens[].Name
+    function SlotByTokenName(const TokenName: RawUtf8; out Slot: TPkcs11SlotID;
+      CaseInsensitive: boolean = false): boolean;
 
     /// enter public session by Slot ID, R/O by default
     // - only a single session can be opened at once in a TPkcs11 instance
@@ -2059,6 +2100,8 @@ type
     // - return the matching CK_OBJECT_HANDLE, which lifetime is the Session
     function GetObject(ObjectClass: CK_OBJECT_CLASS; const StorageLabel: RawUtf8 = '';
       const StorageID: RawUtf8 = ''): CK_OBJECT_HANDLE; overload;
+    /// retrieve some random bytes using the device opened in the current Session
+    function GetRandom(Len: PtrInt): RawByteString;
     /// digitally sign a memory buffer using a supplied Private Key
     // - you must supply a mechanism - method won't setup any default parameter
     // - return the signature as a binary blob
@@ -2069,12 +2112,13 @@ type
     // - raise an EPkcs11 exception on error
     // - some HW (e.g. OpenSC Nitrokey) does not allow to verify using the
     // device: you need to extract the key and verify the signature in software
-    procedure Verify(Data, Sig: pointer; DataLen, SigLen: PtrInt;
-      PubKey: CK_OBJECT_HANDLE; var Mechanism: CK_MECHANISM);
+    function Verify(Data, Sig: pointer; DataLen, SigLen: PtrInt;
+      PubKey: CK_OBJECT_HANDLE; var Mechanism: CK_MECHANISM): boolean;
     /// store a CKO_DATA object using the current R/W Session
     // - return the CKA_UNIQUE_ID generated by the token, or raise EPkcs11
     function AddSessionData(const Application, DataLabel: RawUtf8;
       const Data: RawByteString; const DerID: RawByteString = ''): RawUtf8;
+
     /// release a session previously created with Open() overloads
     // - will release the lock with Safe.UnLock
     // - do nothing if no session did actually began with a former Open()
@@ -2089,6 +2133,10 @@ type
     // destroyed, and access by the normal user is disabled until the SO sets
     // the normal user PIN
     procedure InitToken(SlotID: TPkcs11SlotID; const SOPin, TokenLabel: RawUtf8);
+    /// initialize an User PIN for the Token on slot #SlotID
+    procedure InitUserPin(SlotID: TPkcs11SlotID; const SOPin, UserPin: RawUtf8);
+    /// change the User PIN for the Token on slot #SlotID
+    procedure ChangeUserPin(SlotID: TPkcs11SlotID; const OldPin, NewPin: RawUtf8);
 
     /// low-level numerical version of the loaded library
     property VersionNum: CK_VERSION
@@ -3057,7 +3105,7 @@ const
 function ToULONG(rv: CK_RV): CK_RVULONG;
 begin
   if rv = CKR_VENDOR_DEFINED then
-    result := CKR_VENDOR_DEFINED_ULONG // = $80000000
+    result := CKR_VENDORDEFINED // = $80000000
   else
     result := CKR_WORD[rv];
 end;
@@ -3203,7 +3251,7 @@ procedure CK_ATTRIBUTES.New(aClass: CK_OBJECT_CLASS; const aLabel, aID: RawUtf8;
   aStore: boolean);
 begin
   New(aClass);
-  Add(CKA_TOKEN, aStore); // stored token object
+  Add(CKA_TOKEN, aStore); // object stored in token
   if aLabel <> '' then
     Add(CKA_LABEL, aLabel);
   if aID <> '' then
@@ -3253,6 +3301,17 @@ begin
       else
         inc(result);
   result := nil;
+end;
+
+function CK_ATTRIBUTES.FindLen(aType: CK_ATTRIBUTE_TYPE): integer;
+var
+  found: CK_ATTRIBUTE_PTR;
+begin
+  found := Find(aType);
+  if found = nil then
+    result := - 1
+  else
+    result := found^.ulValueLen;
 end;
 
 function CK_ATTRIBUTES.Find(aType: CK_ATTRIBUTE_TYPE;
@@ -3453,6 +3512,23 @@ begin
   end;
 end;
 
+function EccBitsFromPointLen(bytes: integer; out bits: cardinal): boolean;
+begin
+  // ECC uncompressed key is ASN1/DER encoded as 04 41 04 ..x.. ..y..
+  if bytes <= 3 then
+  begin
+    result := false;
+    exit;
+  end;
+  if bytes <= 127 + 2 then
+    bits := (bytes - 3) * 4
+  else if bytes <= 255 + 3 then
+    bits := (bytes - 4) * 4
+  else
+    bits := (bytes - 5) * 4;
+  result := true;
+end;
+
 
 { TPkcs11 }
 
@@ -3644,31 +3720,62 @@ begin
   fTokens := nil;
 end;
 
-procedure TPkcs11.RetrieveConfig(IncludeVoidSlots: boolean);
+function TPkcs11.DoGetSlotList(Present: boolean): TPkcs11SlotIDDynArray;
 var
   n: CK_ULONG;
   s: array of CK_SLOT_ID; // may be 64-bit on POSIX
   res: integer;
   i: PtrInt;
 begin
-  EnsureLoaded('RetrieveConfig');
-  fSlots := nil;
-  fSlotIDs := nil;
-  fTokens := nil;
+  result := nil;
   if not Assigned(fC^.GetSlotList) then
     exit;
+  Check(fC^.GetSlotList(Present, nil, n), 'GetSlotList');
+  if n = 0 then
+    exit;
+  repeat // need to loop because token number may have changed in-between!
+    SetLength(s, n);
+    res := fC^.GetSlotList(Present, pointer(s), n);
+  until res <> CKR_BUFFER_TOOSMALL;
+  Check(res, 'GetSlotList');
+  if n = 0 then
+    exit;
+  SetLength(result, n);
+  for i := 0 to CK_LONG(n) - 1 do
+    result[i] := s[i]; // from CK_SLOT_ID to TPkcs11SlotID
+end;
+
+procedure TPkcs11.RetrieveConfig(IncludeVoidSlots: boolean);
+var
+  i: PtrInt;
+begin
+  EnsureLoaded('RetrieveConfig');
   fSafe.Lock;
   try
-    Check(fC^.GetSlotList(not IncludeVoidSlots, nil, n), 'GetSlotList');
-    if n = 0 then
-      exit;
-    repeat // need to loop because token number may have changed in-between!
-      SetLength(s, n);
-      res := fC^.GetSlotList(not IncludeVoidSlots, pointer(s), n);
-    until res <> CKR_BUFFER_TOOSMALL;
-    Check(res, 'GetSlotList');
-    for i := 0 to CK_LONG(n) - 1 do
-      UpdateConfig(s[i]);
+    fSlots := nil;
+    fTokens := nil;
+    fSlotIDs := DoGetSlotList(not IncludeVoidSlots);
+    for i := 0 to high(fSlotIDs) do
+      UpdateConfig(fSlotIDs[i]);
+  finally
+    fSafe.UnLock;
+  end;
+end;
+
+function TPkcs11.RetrieveVoidSlots: TPkcs11SlotIDDynArray;
+var
+  all, present: TPkcs11SlotIDDynArray;
+  i: PtrInt;
+begin
+  EnsureLoaded('RetrieveVoidSlots');
+  result := nil;
+  fSafe.Lock;
+  try
+    present := DoGetSlotList(true); // when called twice: return ALL :(
+    all := DoGetSlotList(false);
+    for i := 0 to high(all) do
+      if not IntegerScanExists(pointer(present), length(present), all[i]) then
+        AddInteger(TIntegerDynArray(result), all[i]);
   finally
     fSafe.UnLock;
   end;
@@ -3679,17 +3786,27 @@ var
   i: PtrInt;
   sltnfo: CK_SLOT_INFO;
   toknfo: CK_TOKEN_INFO;
+  mecnfo: CK_MECHANISM_INFO;
   s: PPkcs11Slot;
-  mn, res: CK_ULONG;
+  mn: CK_ULONG;
+  res: CK_RVULONG;
   m: array of CK_ULONG;
 begin
   EnsureLoaded('UpdateConfig');
+  FillCharFast(sltnfo, SizeOf(sltnfo), 0);
+  FillCharFast(toknfo, SizeOf(toknfo), 0);
   fSafe.Lock;
   try
-    FillCharFast(sltnfo, SizeOf(sltnfo), 0);
-    Check(fC^.GetSlotInfo(SlotID, sltnfo), 'GetSlotInfo');
     AddInteger(TIntegerDynArray(fSlotIDs), SlotID, {nodup=}true);
     s := SlotByID(SlotID, {addnew=}true);
+    res := fC^.GetSlotInfo(SlotID, sltnfo);
+    if res = CKR_WORD[CKR_FUNCTION_NOT_SUPPORTED] then
+    begin
+      // some hardware won't support this call if no token is available
+      FormatUtf8('Undefined: GetSlotInfo(#%) failed', [SlotID], s^.Description);
+      exit;
+    end;
+    Check(res, 'GetSlotInfo');
     FillSlot(SlotID, sltnfo, s^);
     if not (CKF_TOKEN_PRESENT in s^.Flags) then
     begin
@@ -3710,8 +3827,16 @@ begin
     Check(res, 'GetMechanismList');
     SetLength(s^.Mechanism, mn);
     for i := 0 to CK_LONG(mn) - 1 do
-      s^.Mechanism[i] := MECHANISM_TYPE(m[i]);
-    FillCharFast(toknfo, SizeOf(toknfo), 0);
+    begin
+      Check(fC^.GetMechanismInfo(SlotID, m[i], mecnfo), 'GetMechanismInfo');
+      with s^.Mechanism[i] do
+      begin
+        Kind := MECHANISM_TYPE(m[i]);
+        MinKey := mecnfo.ulMinKeySize;
+        MaxKey := mecnfo.ulMaxKeySize;
+        Flags := CKM_FLAGS(cardinal(mecnfo.flags));
+      end;
+    end;
     Check(fC^.GetTokenInfo(SlotID, toknfo), 'GetTokenInfo');
     FillToken(SlotID, toknfo, TokenByID(SlotID, {addnew=}true)^);
   finally
@@ -3804,7 +3929,7 @@ begin
     result := pointer(fTokens);
     for i := 0 to length(fTokens) - 1 do
       if (CaseInsensitive and
-          IdemPropNameU(TokenName, result^.Name)) or
+          PropNameEquals(TokenName, result^.Name)) or
          ((not CaseInsensitive) and
           (TokenName = result^.Name)) then
           exit
@@ -3812,6 +3937,19 @@ begin
           inc(result);
   end;
   result := nil;
+end;
+
+function TPkcs11.SlotByTokenName(const TokenName: RawUtf8;
+  out Slot: TPkcs11SlotID; CaseInsensitive: boolean): boolean;
+var
+  tok: PPkcs11Token;
+begin
+  result := false;
+  tok := TokenByName(TokenName, CaseInsensitive);
+  if tok = nil then
+    exit;
+  Slot := tok^.Slot;
+  result := true;
 end;
 
 function TPkcs11.GetObjects(Filter: PCK_ATTRIBUTES;
@@ -3836,7 +3974,8 @@ begin
   arr.Add([CKA_CLASS, CKA_LABEL, CKA_APPLICATION, CKA_UNIQUE_ID,
            CKA_START_DATE, CKA_END_DATE, CKA_ID, CKA_SERIAL_NUMBER,
            CKA_ISSUER, CKA_SUBJECT, CKA_OWNER, CKA_URL, CKA_CERTIFICATE_TYPE,
-           CKA_KEY_TYPE, CKA_KEY_GEN_MECHANISM]);
+           CKA_KEY_TYPE, CKA_KEY_GEN_MECHANISM, CKA_MODULUS_BITS,
+           CKA_EC_POINT, CKA_VALUE_LEN]);
   for s := low(POS2CKA) to high(POS2CKA) do
     arr.Add(POS2CKA[s]);
   if Values <> nil then
@@ -3867,8 +4006,7 @@ begin
           arr.Find(CKA_LABEL, StorageLabel);
           arr.Find(CKA_APPLICATION, Application);
           arr.Find(CKA_ID, StorageID, {hex=}true);
-          if StorageID = '' then
-            arr.Find(CKA_UNIQUE_ID, StorageID);
+          arr.Find(CKA_UNIQUE_ID, UniqueID);
           arr.Find(CKA_SUBJECT, Subject);
           if arr.Find(CKA_CERTIFICATE_TYPE, u) then
           begin
@@ -3890,9 +4028,16 @@ begin
           arr.Find(CKA_START_DATE, Start);
           arr.Find(CKA_END_DATE, Stop);
           if arr.Find(CKA_KEY_TYPE, u) then
+          begin
             KeyType := KEY_TYPE(u);
-          if arr.Find(CKA_KEY_GEN_MECHANISM, u) then
-            KeyGen := MECHANISM_TYPE(u);
+            if arr.Find(CKA_KEY_GEN_MECHANISM, u) then
+              KeyGen := MECHANISM_TYPE(u);
+            if arr.Find(CKA_MODULUS_BITS, u) then // for RSA
+              KeyBits := u
+            else if not EccBitsFromPointLen(arr.FindLen(CKA_EC_POINT), KeyBits) then
+              if arr.Find(CKA_VALUE_LEN, u) then // CKK_EC
+                KeyBits := u shl 3; // CKK_AES
+          end;
           SessionHandle := obj[i];
           if Values <> nil then
             arr.Find(CKA_VALUE, Values^[count]);
@@ -3950,6 +4095,16 @@ begin
     result := CK_INVALID_HANDLE; // return 0 on error
 end;
 
+function TPkcs11.GetRandom(Len: PtrInt): RawByteString;
+begin
+  EnsureSession('GetRandom');
+  if Len > 0 then
+    FastSetRawByteString(result, nil, Len);
+  if (Len <= 0) or
+     (fC.GenerateRandom(fSession, pointer(result), Len) <> CKR_SUCCESS) then
+    result := '';
+end;
+
 function TPkcs11.Sign(Data: pointer; Len: PtrInt; PrivKey: CK_OBJECT_HANDLE;
   var Mechanism: CK_MECHANISM): RawByteString;
 var
@@ -3962,19 +4117,36 @@ begin
     exit;
   EnsureSession('Sign');
   Check(fC.SignInit(fSession, Mechanism, PrivKey), 'SignInit');
-  Check(fC.Sign(fSession, Data, Len, nil, reslen), 'Sign');
+  Check(fC.Sign(fSession, nil, 0, nil, reslen), 'Sign');
   SetLength(result, reslen);
   Check(fC.Sign(fSession, Data, Len, pointer(result), reslen), 'Sign');
   if len <> length(result) then
     SetLength(result, reslen);
 end;
 
-procedure TPkcs11.Verify(Data, Sig: pointer; DataLen, SigLen: PtrInt;
-  PubKey: CK_OBJECT_HANDLE; var Mechanism: CK_MECHANISM);
+function TPkcs11.Verify(Data, Sig: pointer; DataLen, SigLen: PtrInt;
+  PubKey: CK_OBJECT_HANDLE; var Mechanism: CK_MECHANISM): boolean;
+var
+  res: CK_RVULONG;
 begin
   EnsureSession('Verify');
+  result := false;
+  if (Data = nil) or
+     (Sig = nil) or
+     (DataLen <= 0) or
+     (SigLen <= 0) or
+     (PubKey = CK_INVALID_HANDLE) then
+    exit;
   Check(fC.VerifyInit(fSession, Mechanism, PubKey), 'VerifyInit');
-  Check(fC.Verify(fSession, Data, DataLen, Sig, SigLen), 'Verify');
+  res := fC.Verify(fSession, Data, DataLen, Sig, SigLen);
+  case res of
+    CKR_SUCCESS:
+      result := true;
+    CKR_SIGNINVALID:
+      exit;
+  else
+    Check(res, 'Verify'); // fatal error raise EPkcs11 exception
+  end;
 end;
 
 procedure TPkcs11.InitToken(SlotID: TPkcs11SlotID;
@@ -3989,6 +4161,30 @@ begin
     fSafe.UnLock;
   end;
 end;
+
+procedure TPkcs11.InitUserPin(SlotID: TPkcs11SlotID; const SOPin, UserPin: RawUtf8);
+begin
+  EnsureLoaded('InitUserPin');
+  Open(SlotID, SOPin, {rw=}true, {so=}true); // need a R/W SO session
+  try
+    Check(fC.InitPIN(fSession, pointer(UserPin), length(UserPin)), 'InitPIN');
+  finally
+    Close;
+  end;
+end;
+
+procedure TPkcs11.ChangeUserPin(SlotID: TPkcs11SlotID; const OldPin, NewPin: RawUtf8);
+begin
+  EnsureLoaded('ChangePin');
+  Open(SlotID, OldPin, {rw=}true, {so=}false); // need a R/W User session
+  try
+    Check(fC.SetPIN(fSession, pointer(OldPin), length(OldPin),
+      pointer(NewPin), length(NewPin)), 'SetPIN');
+  finally
+    Close;
+  end;
+end;
+
 
 function TPkcs11.SessionGetAttribute(
   obj: CK_OBJECT_HANDLE; attr: CK_ATTRIBUTE_TYPE): RawUtf8;
@@ -4034,8 +4230,6 @@ begin
 end;
 
 
-
-
 initialization
   // paranoid cross-platform validation
   assert(cardinal(1 shl ord(CKF_ERROR_STATE)) = $01000000);
@@ -4047,22 +4241,24 @@ initialization
     TypeInfo(CKT_FLAGS),
     TypeInfo(CKSL_FLAGS),
     TypeInfo(CK_MECHANISM_TYPE),
-    TypeInfo(CK_MECHANISM_TYPES),
+    TypeInfo(CKM_FLAGS),
     TypeInfo(CK_OBJECT_CLASS),
     TypeInfo(CK_KEY_TYPE),
     TypeInfo(TPkcs11ObjectStorages)
     ]);
   Rtti.RegisterFromText([
+    TypeInfo(TPkcs11Mechanisms),
+      'type:CK_MECHANISM_TYPE min,max:cardinal flags:CKM_FLAGS',
     TypeInfo(TPkcs11Slot),
-      'Slot:cardinal Description,Manufacturer:RawUtf8 Flags:CKSL_FLAGS' +
-      ' Mechanism:CK_MECHANISM_TYPES HwMaj,HwMin,FwMaj,FwMin:byte',
+      'slot:cardinal description,manufacturer:RawUtf8 flags:CKSL_FLAGS' +
+      ' mechanism:TPkcs11Mechanisms hwmaj,hwmin,fwmaj,fwmin:byte',
     TypeInfo(TPkcs11ObjectDynArray),
-      'Class:CK_OBJECT_CLASS ID,Label:RawUtf8 Flags:TPkcs11ObjectStorages' +
-      ' KeyType:CK_KEY_TYPE KeyGen:CK_MECHANISM_TYPE Start,End:TDateTime' +
-      ' App:RawUtf8 Sub,SN,Issuer:RawByteString Hdl:PtrUInt',
+      'class:CK_OBJECT_CLASS id,label:RawUtf8 flags:TPkcs11ObjectStorages' +
+      ' keytype:CK_KEY_TYPE keygen:CK_MECHANISM_TYPE keybits:cardinal ' +
+      ' start,end:TDateTime app:RawUtf8 sub,sn,iss,uid:RawByteString hdl:cardinal',
     TypeInfo(TPkcs11Token),
-      'Slot:cardinal Name,Manufacturer,Model,Serial,Time:RawUtf8 Flags:CKT_FLAGS' +
-      ' Sessions,MaxSessions,MinPin,MaxPin: integer'
+      'slot:cardinal name,manufacturer,model,serial,time:RawUtf8 flags:CKT_FLAGS' +
+      ' sessions,maxsessions,minpin,maxpin: integer'
     ]);
 
 

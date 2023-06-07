@@ -130,11 +130,22 @@ begin
   result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
 end;
 
+procedure DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
+var
+  tmp: TSynTempBuffer;
+begin
+  tmp.Init(Len * 3);
+  Len := UnicodeToUtf8(tmp.Buf, Len * 3, P, Len); // use RTL if complex
+  if Len > 0 then
+    dec(Len); // UnicodeToUtf8() result includes the null terminator
+  FastSetString(res, tmp.buf, Len);
+  tmp.Done;
+end;
+
 // local RTL wrapper functions to avoid linking mormot.core.unicode.pas
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
 var
   i: PtrInt;
-  tmp: TSynTempBuffer;
 begin
   if Len > 0 then
     if IsAnsiCompatibleW(P, Len) then
@@ -144,14 +155,13 @@ begin
         PByteArray(res)[i] := PWordArray(P)[i]; // fast direct conversion
     end
     else
-    begin
-      tmp.Init(Len * 3);
-      Len := UnicodeToUtf8(tmp.Buf, Len * 3, P, Len); // use RTL if complex
-      if Len > 0 then
-        dec(Len); // UnicodeToUtf8() result includes the null terminator
-      FastSetString(res, tmp.buf, Len);
-      tmp.Done;
-    end;
+      DoWin32PWideCharToUtf8(P, Len, res);
+end;
+
+procedure Win32PWideCharToUtf8(P: PWideChar; out res: RawUtf8);
+begin
+  if P <> nil then
+    Win32PWideCharToUtf8(P, StrLenW(P), res);
 end;
 
 function Utf8ToWin32PWideChar(const Text: RawUtf8;
@@ -244,9 +254,6 @@ begin
   PInt64Rec(@I64)^.Hi := FT.dwHighDateTime;
 end;
 
-const
-  UnixFileTimeDelta = 116444736000000000; // from year 1601 to 1970
-
 procedure UnixTimeToFileTime(I64: TUnixTime; out FT: TFileTime);
 begin
   I64 := I64 * 10000000;
@@ -270,6 +277,11 @@ var
   nano100: Int64; // TFileTime is in 100 ns unit
 {$endif CPU64}
 begin
+  if PInt64(@FT)^ = 0 then
+  begin
+    result := 0;
+    exit;
+  end;
   {$ifdef CPU64}
   FileTimeToInt64(ft, nano100);
   result := (nano100 - UnixFileTimeDelta) div 10000000;
@@ -284,12 +296,25 @@ var
   nano100: Int64; // TFileTime is in 100 ns unit
 {$endif CPU64}
 begin
+  if PInt64(@FT)^ = 0 then
+  begin
+    result := 0;
+    exit;
+  end;
   {$ifdef CPU64}
   FileTimeToInt64(ft, nano100);
   result := (nano100 - UnixFileTimeDelta) div 10000;
   {$else} 
   result := (PInt64(@ft)^ - UnixFileTimeDelta) div 10000;
   {$endif CPU64}
+end;
+
+function FileTimeToDateTime(const FT: TFileTime): TDateTime;
+begin
+  if PInt64(@FT)^ = 0 then
+    result := 0
+  else
+    result := FileTimeToUnixMSTime(FT) / MSecsPerDay + UnixDateDelta;
 end;
 
 function UnixTimeUtc: TUnixTime;
@@ -413,12 +438,13 @@ const
     'FILE_EXISTS', '81', 'CANNOT_MAKE', 'FAIL_I24', 'OUT_OF_STRUCTURES',
     'ALREADY_ASSIGNED', 'INVALID_PASSWORD', 'INVALID_PARAMETER',
     'NET_WRITE_FAULT', 'NO_PROC_SLOTS');
-  ERROR_STANDARD4: array[108..124] of PUtf8Char = (
+  ERROR_STANDARD4: array[108..129] of PUtf8Char = (
     'DRIVE_LOCKED', 'BROKEN_PIPE', 'OPEN_FAILED', 'BUFFER_OVERFLOW',
     'DISK_FULL', 'NO_MORE_SEARCH_HANDLES', 'INVALID_TARGET_HANDLE', '115',
     '116', 'INVALID_CATEGORY', 'INVALID_VERIFY_SWITCH', 'BAD_DRIVER_LEVEL',
     'CALL_NOT_IMPLEMENTED', 'SEM_TIMEOUT', 'INSUFFICIENT_BUFFER',
-    'INVALID_NAME', 'INVALID_LEVEL');
+    'INVALID_NAME', 'INVALID_LEVEL', 'NO_VOLUME_LABEL', 'MOD_NOT_FOUND',
+    'PROC_NOT_FOUND', 'WAIT_NO_CHILDREN', 'CHILD_NOT_COMPLETE');
   ERROR_STANDARD5: array[995..1013] of PUtf8Char = (
     'OPERATION_ABORTED', 'IO_INCOMPLETE', 'IO_PENDING', 'NOACCESS', 'SWAPERROR',
     '1000', 'STACK_OVERFLOW', 'INVALID_MESSAGE', 'CAN_NOT_COMPLETE',
@@ -493,13 +519,13 @@ end;
 
 function WinErrorText(Code: cardinal; ModuleName: PChar): RawUtf8;
 var
-  err: integer;
+  bak: integer;
   flags, len: PtrUInt;
   src: pointer;
   cod: PUtf8Char;
   tmp: array[0..511] of WideChar;
 begin
-  err := GetLastError;
+  bak := GetLastError;
   flags := FORMAT_MESSAGE_FROM_SYSTEM;
   if ModuleName = nil then
   begin
@@ -529,7 +555,7 @@ begin
      (src <> nil) then
   begin
     // fallback to the system error message if this module as no such code
-    SetLastError(err);
+    SetLastError(bak);
     result := WinErrorText(Code, nil);
     exit;
   end;
@@ -537,7 +563,7 @@ begin
         (ord(tmp[len - 1]) in [0..32, ord('.')]) do
     dec(len); // trim right
   Win32PWideCharToUtf8(@tmp, len, result);
-  SetLastError(err);
+  SetLastError(bak);
 end;
 
 function GetErrorText(error: integer): RawUtf8;
@@ -723,8 +749,7 @@ var
   FA: WIN32_FILE_ATTRIBUTE_DATA;
 begin
   if GetFileAttributesInternal(FileName, FA) and
-     (AllowDir or
-      ({%H-}FA.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY = 0)) then
+     (AllowDir or ({%H-}FA.dwFileAttributes and faDirectory = 0)) then
     result := FileTimeToUnixTime(FA.ftLastWriteTime) // no local time conversion
   else
     result := 0;
@@ -737,7 +762,7 @@ var
 begin
   result := 0;
   if GetFileAttributesInternal(FileName, FA) and
-     ({%H-}FA.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY = 0) and
+     ({%H-}FA.dwFileAttributes and faDirectory = 0) and
      FileTimeToLocalFileTime(FA.ftLastWriteTime, ft) then
     if not FileTimeToDosDateTime(ft, LongRec(result).Hi, LongRec(result).Lo) then
       result := 0;
@@ -798,7 +823,7 @@ var
   FA: WIN32_FILE_ATTRIBUTE_DATA;
 begin
   result := GetFileAttributesInternal(FileName, FA, FollowLink) and
-    ((FA.dwFileAttributes and FILE_ATTRIBUTE_DIRECTORY <> 0) = CheckAsDir);
+            ((FA.dwFileAttributes and faDirectory <> 0) = CheckAsDir);
 end;
 
 function DirectoryExists(const FileName: TFileName; FollowLink: boolean): boolean;
@@ -881,10 +906,12 @@ begin
     0, nil, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
 end;
 
+const
+  FILE_WRITE_ATTRIBUTES = $0100; // not defined on oldest Delphi
+
 // W32() will support length > MAX_PATH even if aFileName is UnicodeString
 function FileOpen(const aFileName: TFileName; aMode: integer): THandle;
 const
-  FILE_WRITE_ATTRIBUTES = $0100; // not defined on oldest Delphi
   ACCESS: array[0..2] of DWord = (
     GENERIC_READ,
     GENERIC_WRITE,
@@ -961,6 +988,45 @@ begin
     result := MoveFileW(W32(OldName, o), W32(NewName, n));
 end;
 
+function FileSetTime(const FileName: TFileName;
+  const Created, Accessed, Written: Int64): boolean;
+var
+  tmp: TW32Temp;
+  h: THandle;
+  pct, pat, pwt: pointer;
+begin
+  result := false;
+  h := CreateFileW(W32(FileName, tmp), FILE_WRITE_ATTRIBUTES,
+    FILE_SHARE_READ, nil, OPEN_ALWAYS, 0, 0);
+  if ValidHandle(h) then
+    try
+      // some input code may not set all properties: use what we got
+      if Created <> 0 then
+        pct := @Created
+      else if Written <> 0 then
+        pct := @Written
+      else if Accessed <> 0 then
+        pct := @Accessed
+      else
+        exit;
+      if Accessed <> 0 then
+        pat := @Accessed
+      else if Written <> 0 then
+        pat := @Written
+      else
+        pat := @Created;
+      if Written <> 0 then
+        pwt := @Written
+      else if Created <> 0 then
+        pwt := @Created
+      else
+        pwt := @Accessed;
+      result := SetFileTime(h, pct, pat, pwt);
+    finally
+      CloseHandle(h);
+    end;
+end;
+
 function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boolean;
 var
   s, t: TW32Temp;
@@ -979,6 +1045,19 @@ begin
   result := CreateFileW(W32(FileName, tmp), GENERIC_READ,
     FILE_SHARE_READ or FILE_SHARE_WRITE, nil, // same as fmShareDenyNone
     OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, 0);
+end;
+
+function IsFileReadable(const aFileName: TFileName): boolean;
+var
+  tmp: TW32Temp;
+  h: THandle;
+begin
+  h := CreateFileW(W32(aFileName, tmp), GENERIC_READ,
+    FILE_SHARE_READ or FILE_SHARE_WRITE, nil, // same as fmShareDenyNone
+    OPEN_EXISTING, 0, 0);
+  result := ValidHandle(h);
+  if result then
+    CloseHandle(h);
 end;
 
 threadvar // mandatory: GetTickCount seems per-thread on XP :(
@@ -1142,6 +1221,19 @@ function SetThreadMaskAffinity(Thread: TThread; const Mask: TCpuSet): boolean;
 begin
   result := (Thread <> nil) and
             (Windows.SetThreadAffinityMask(Thread.Handle, Mask) <> 0);
+end;
+
+function GetProcessAffinityMask(hProcess: THandle;
+  var lpProcessAffinityMask, lpSystemAffinityMask: TCpuSet): BOOL;
+    stdcall; external kernel32; // redefined for Delphi 7 compatibility
+
+function GetMaskAffinity(out CpuSet: TCpuSet): boolean;
+var
+  process, thread: TCpuSet;
+begin
+  result := GetProcessAffinityMask(GetCurrentProcess, process, thread);
+  if result then
+    CpuSet := process;
 end;
 
 type
@@ -1587,19 +1679,21 @@ var
   GetModuleFileNameExW: function(hProcess: THandle; hModule: HMODULE;
     lpBaseName: PWideChar; nSize: DWord): DWord; stdcall;
 
-function DelayedProc(var api; libname: PChar; procname: PAnsiChar): boolean;
+function DelayedProc(var api; var lib: THandle;
+  libname: PChar; procname: PAnsiChar): boolean;
 var
-  h: THandle;
   proc: pointer;
 begin
   if pointer(api) = nil then
   begin
-    // try to load the library once
     proc := nil;
     GlobalLock; // avoid race condition
-    h := Windows.LoadLibrary(libname);
-    if h >= 32 then
-      proc := Windows.GetProcAddress(h, procname);
+    if lib = 0 then
+      lib := Windows.LoadLibrary(libname);
+    if lib >= 32 then
+      proc := Windows.GetProcAddress(lib, procname)
+    else
+      lib := 1; // try to load the library once
     if proc = nil then
       proc := pointer(1); // mark non available
     pointer(api) := proc; // set it last
@@ -1607,6 +1701,7 @@ begin
   end;
   result := pointer(api) <> pointer(1);
 end;
+
 
 function GetNextItem(var P: PAnsiChar): RawUtf8;
 var
@@ -1659,11 +1754,14 @@ begin
   end;
 end;
 
+var
+  PsapiDll: THandle;
+
 function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
 var n: cardinal;
 begin
   result := nil;
-  if not DelayedProc(EnumProcesses, 'Psapi.dll', 'EnumProcesses') then
+  if not DelayedProc(EnumProcesses, PsapiDll, 'Psapi.dll', 'EnumProcesses') then
     exit;
   n := 2048;
   repeat
@@ -1702,10 +1800,10 @@ begin
         if QueryFullProcessImageNameW(h, 0, name, @len) then
           Win32PWideCharToUtf8(name, len, result);
       end
-      else if DelayedProc(GetModuleFileNameExW,
-                'Psapi.dll', 'GetModuleFileNameExW') and
+      else if DelayedProc(GetModuleFileNameExW, PsapiDll, 'Psapi.dll',
+                'GetModuleFileNameExW') and
               (GetModuleFileNameExW(h, 0, name, high(name)) <> 0) then
-        Win32PWideCharToUtf8(name, StrLenW(name), result);
+        Win32PWideCharToUtf8(name, result);
     finally
       CloseHandle(h);
     end;
@@ -1731,7 +1829,8 @@ end;
 
 function DelayedGetProcessMemoryInfo: boolean;
 begin
-  result:= DelayedProc(GetProcessMemoryInfo, 'Psapi.dll', 'GetProcessMemoryInfo');
+  result:= DelayedProc(GetProcessMemoryInfo, PsapiDll, 'Psapi.dll',
+    'GetProcessMemoryInfo');
 end;
 
 function RetrieveProcessInfo(PID: cardinal; out KernelTime, UserTime: Int64;
@@ -2259,7 +2358,7 @@ var
     u := Utf8Decode('\StringFileInfo\' + LanguageInfo + '\' + From);
     VerQueryValueW(Pt, pointer(u), StrValPt, sz);
     if sz > 0 then
-      Win32PWideCharToUtf8(StrValPt, StrLenW(StrValPt), result)
+      Win32PWideCharToUtf8(StrValPt, result)
     else
       result := '';
   end;
@@ -2323,15 +2422,16 @@ var
 begin
   tmpsize := SizeOf(tmp);
   GetComputerNameW(tmp{%H-}, tmpsize);
-  Win32PWideCharToUtf8(@tmp, StrLenW(tmp), Host);
+  Win32PWideCharToUtf8(@tmp, Host);
   tmpsize := SizeOf(tmp);
   GetUserNameW(tmp, tmpsize);
-  Win32PWideCharToUtf8(@tmp, StrLenW(tmp), User);
+  Win32PWideCharToUtf8(@tmp, User);
 end;
 
 var
   // ComputeSystemPath() cache
   _SystemPath: array[TSystemPath] of TFileName;
+  SHFolderDll: THandle;
   // avoid unneeded reference to ShlObj.pas
   // - late binding is mandatory to be used on WinPE which does NOT have this dll
   // - late binding also ensure that we load libraries only when needed
@@ -2365,7 +2465,8 @@ begin
      IsDirectoryWritable(Executable.ProgramFilePath) then
     result := EnsureDirectoryExists(Executable.ProgramFilePath + 'log')
   else if (CSIDL[kind] <> 0) and
-     DelayedProc(SHGetFolderPath, 'SHFolder.dll', 'SHGetFolderPath' + _AW) and
+     DelayedProc(SHGetFolderPath, SHFolderDll, 'SHFolder.dll',
+       'SHGetFolderPath' + _AW) and
      (SHGetFolderPath(0, CSIDL[kind], 0, 0, @tmp) = S_OK) then
     result := tmp
   else
@@ -2449,20 +2550,27 @@ end;
 
 function TWinRegistry.ReadString(const entry: SynUnicode; andtrim: boolean): RawUtf8;
 var
-  rtype, rsize: DWord;
+  rtype, rsize, res: DWord;
   tmp: TSynTempBuffer;
 begin
   result := '';
-  if RegQueryValueExW(key, pointer(entry), nil, @rtype, nil, @rsize) <> 0 then
-    exit;
-  tmp.Init(rsize);
-  if RegQueryValueExW(key, pointer(entry), nil, nil, tmp.buf, @rsize) = 0 then
+  rsize := {%H-}tmp.Init; // most of the time, a single call is enough
+  res := RegQueryValueExW(key, pointer(entry), nil, @rtype, tmp.buf, @rsize);
+  if res <> 0 then
+    if res = ERROR_MORE_DATA then
+    begin
+      tmp.Init(rsize); // more than 4KB of data (unlikely)
+      res := RegQueryValueExW(key, pointer(entry), nil, nil, tmp.buf, @rsize);
+    end
+    else
+      exit;
+  if res = 0 then
   begin
     case rtype of
       REG_SZ,
       REG_EXPAND_SZ,
-      REG_MULTI_SZ:
-        Win32PWideCharToUtf8(tmp.buf, StrLenW(tmp.buf), result);
+      REG_MULTI_SZ: // StrLen() will return the first value of REG_MULTI_SZ
+        Win32PWideCharToUtf8(tmp.buf, result);
     end;
     if andtrim then
       TrimSelf(result);
@@ -2472,10 +2580,10 @@ end;
 
 function TWinRegistry.ReadData(const entry: SynUnicode): RawByteString;
 var
-  rtype, rsize: DWord;
+  rsize: DWord;
 begin
   result := '';
-  if RegQueryValueExW(key, pointer(entry), nil, @rtype, nil, @rsize) <> 0 then
+  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @rsize) <> 0 then
     exit;
   SetLength(result, rsize);
   if RegQueryValueExW(key, pointer(entry), nil, nil, pointer(result), @rsize) <> 0 then
@@ -2498,6 +2606,12 @@ function TWinRegistry.ReadBuffer(const entry: SynUnicode;
   Data: pointer; DataLen: DWord): boolean;
 begin
   result := RegQueryValueExW(key, pointer(entry), nil, nil, Data, @DataLen) = 0;
+end;
+
+function TWinRegistry.ReadSize(const entry: SynUnicode): integer;
+begin
+  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @result) <> 0 then
+    result := -1;
 end;
 
 function TWinRegistry.ReadEnumEntries: TRawUtf8DynArray;
@@ -2654,11 +2768,11 @@ function CurrentSid(wtt: TWinTokenType; name, domain: PRawUtf8): RawUtf8;
 var
   sid: RawSid;
 begin
-  CurrentSid(sid, wtt, name, domain);
-  result := SidToText(sid);
+  CurrentRawSid(sid, wtt, name, domain);
+  result := RawSidToText(sid);
 end;
 
-procedure CurrentSid(out sid: RawSid; wtt: TWinTokenType;
+procedure CurrentRawSid(out sid: RawSid; wtt: TWinTokenType;
   name, domain: PRawUtf8);
 var
   h: THandle;
@@ -2696,7 +2810,7 @@ var
   i: PtrInt;
 begin
   result := nil;
-  if RawTokenGetInfo(tok, TokenGroups, buf) >= SizeOf(nfo^) then
+  if RawTokenGetInfo(tok, TokenGroups, buf) >= SizeOf({%H-}nfo^) then
   begin
     nfo := buf.buf;
     if nfo.GroupCount <> 0 then
@@ -2706,6 +2820,30 @@ begin
         result[i] := pointer(nfo.Groups[i].Sid); // within buf.buf/len
     end;
   end;
+end;
+
+function TokenGroupsText(tok: THandle): TRawUtf8DynArray;
+var
+  tmp: TSynTempBuffer;
+begin
+  result := SidsToText(RawTokenGroups(tok, tmp));
+  tmp.Done;
+end;
+
+function TokenHasGroup(tok: THandle; sid: PSid): boolean;
+var
+  tmp: TSynTempBuffer;
+begin
+  result := HasSid(RawTokenGroups(tok, tmp), sid);
+  tmp.Done;
+end;
+
+function TokenHasAnyGroup(tok: THandle; const sid: RawSidDynArray): boolean;
+var
+  tmp: TSynTempBuffer;
+begin
+  result := HasAnySid(RawTokenGroups(tok, tmp), sid);
+  tmp.Done;
 end;
 
 function CurrentGroups(wtt: TWinTokenType; var tmp: TSynTempBuffer): PSids;
@@ -2719,18 +2857,9 @@ end;
 
 function CurrentGroupsSid(wtt: TWinTokenType): TRawUtf8DynArray;
 var
-  i: PtrInt;
-  sids: PSids;
   tmp: TSynTempBuffer;
 begin
-  result := nil;
-  sids := CurrentGroups(wtt, tmp);
-  if sids <> nil then
-  begin
-    SetLength(result, length(sids));
-    for i := 0 to length(sids) - 1 do
-      result[i] := SidToText(sids[i]);
-  end;
+  result := SidsToText(CurrentGroups(wtt, tmp));
   tmp.Done;
 end;
 
@@ -2758,18 +2887,17 @@ end;
 
 function CurrentUserHasGroup(sid: PSid; wtt: TWinTokenType): boolean;
 var
-  i: PtrInt;
-  sids: PSids;
   tmp: TSynTempBuffer;
 begin
-  result := false;
-  sids := CurrentGroups(wtt, tmp);
-  for i := 0 to length(sids) - 1 do
-    if SidCompare(sid, sids[i]) = 0 then
-    begin
-      result := true;
-      break;
-    end;
+  result := HasSid(CurrentGroups(wtt, tmp), sid);
+  tmp.Done;
+end;
+
+function CurrentUserHasAnyGroup(const sid: RawSidDynArray; wtt: TWinTokenType): boolean;
+var
+  tmp: TSynTempBuffer;
+begin
+  result := HasAnySid(CurrentGroups(wtt, tmp), sid);
   tmp.Done;
 end;
 
@@ -2815,8 +2943,8 @@ begin
   dl := SizeOf(d);
   if LookupAccountSidW(Utf8ToWin32PWideChar(server, s), sid, @n, nl, @d, dl, use) then
   begin
-    Win32PWideCharToUtf8(@n, StrLenW(@n), name);
-    Win32PWideCharToUtf8(@d, StrLenW(@d), domain);
+    Win32PWideCharToUtf8(@n, name);
+    Win32PWideCharToUtf8(@d, domain);
     if use <= byte(high(TSidType)) then
       result := TSidType(use);
   end;
@@ -2832,6 +2960,25 @@ begin
     result := LookupSid(@s, name, domain, server)
   else
     result := stUndefined;
+end;
+
+function LookupToken(tok: THandle; out name, domain: RawUtf8;
+  const server: RawUtf8): boolean;
+var
+  tmp: TSynTempBuffer;
+begin
+  result := LookupSid(RawTokenSid(tok, tmp) ,name, domain, server) <> stUndefined;
+  tmp.Done;
+end;
+
+function LookupToken(tok: THandle; const server: RawUtf8): RawUtf8;
+var
+  name, domain: RawUtf8;
+begin
+  if LookupToken(tok, name, domain, server) then
+    result := domain + '\' + name
+  else
+    result := '';
 end;
 
 
@@ -4063,7 +4210,7 @@ begin
     for i := 0 to ArgCount - 1 do
     begin
       inc(Args); // first was service name
-      Win32PWideCharToUtf8(Args^, StrLenW(Args^), fArgsList[i]); // to string
+      Win32PWideCharToUtf8(Args^, fArgsList[i]); // to string
     end;
   end;
   fStatusHandle := RegisterServiceCtrlHandlerW(

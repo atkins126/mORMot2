@@ -334,7 +334,7 @@ type
     // - default is '.service'
     property Ext: TFileName
       read fExt write fExt;
-    /// timeout in seconds for "http://....." local HTTP requests
+    /// timeout in milliseconds for "http://....." local HTTP requests
     // - default is 200
     property HttpTimeoutMS: integer
       read fHttpTimeoutMS write fHttpTimeoutMS;
@@ -654,7 +654,7 @@ begin
   end;
   if fService <> nil then
     fService.fRunner := nil; // notify ended
-  log.NotifyThreadEnded;   // as needed by TSynLog
+  log.NotifyThreadEnded; // as needed by TSynLog
 end;
 
 procedure TSynAngelizeRunner.PerformRotation;
@@ -1049,7 +1049,7 @@ var
 begin
   if ServiceName <> '' then
     for i := 0 to high(fService) do
-      if IdemPropNameU(fService[i].Name, ServiceName) then
+      if PropNameEquals(fService[i].Name, ServiceName) then
       begin
         result := fService[i];
         exit;

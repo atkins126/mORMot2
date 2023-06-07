@@ -10,7 +10,7 @@ unit mormot.core.base;
     - Framework Version and Information
     - Common Types Used for Compatibility Between Compilers and CPU
     - Numbers (floats and integers) Low-level Definitions
-    - integer Arrays Manipulation
+    - Integer Arrays Manipulation
     - ObjArray PtrArray InterfaceArray Wrapper Functions
     - Low-level Types Mapping Binary or Bits Structures
     - Buffers (e.g. Hashing and SynLZ compression) Raw Functions
@@ -341,6 +341,8 @@ type
   {$ifndef ISDELPHI2007ANDUP}
   TBytes = array of byte;
   {$endif ISDELPHI2007ANDUP}
+  TBytesDynArray = array of TBytes;
+  PBytesDynArray = ^TBytesDynArray;
   TObjectDynArray = array of TObject;
   PObjectDynArray = ^TObjectDynArray;
   TPersistentDynArray = array of TPersistent;
@@ -518,77 +520,76 @@ type
   // - used to reduce the $ifdef when implementing interfaces in Delphi and FPC
   TIntQry = {$ifdef FPC} longint {$else} HRESULT {$endif};
 
-  type
-    {$ifdef FPC}
+  {$ifdef FPC}
 
-    TStrRec = record // see TAnsiRec/TUnicodeRec in astrings/ustrings.inc
-    case integer of
-      0: (
-          {$ifdef HASCODEPAGE}
-          codePage: TSystemCodePage; // =Word
-          elemSize: Word;
-          {$ifndef STRCNT32}
-          {$ifdef CPU64}
-          _PaddingToQWord: DWord;
-          {$endif CPU64}
-          {$endif STRCNT32}
-          {$endif HASCODEPAGE}
-          refCnt: TStrCnt; // =SizeInt on older FPC, =longint since FPC 3.4
-          length: TStrLen;
-        );
-      {$ifdef HASCODEPAGE}
-      1: (
-          codePageElemSize: cardinal;
-        );
-      {$endif HASCODEPAGE}
-    end;
-
-    TDynArrayRec = record
-      refCnt: TDACnt; // =SizeInt
-      high: TDALen;   // =SizeInt (differs from Delphi: equals length-1)
-      function GetLength: TDALen; inline;
-      procedure SetLength(len: TDALen); inline;
-      property length: TDALen // Delphi compatibility wrapper
-        read GetLength write SetLength;
-    end;
-
-    {$else not FPC}
-
-    /// map the Delphi/FPC string header (stored before each instance)
-    TStrRec = packed record
+  TStrRec = record // see TAnsiRec/TUnicodeRec in astrings/ustrings.inc
+  case integer of
+    0: (
+        {$ifdef HASCODEPAGE}
+        codePage: TSystemCodePage; // =Word
+        elemSize: Word;
+        {$ifndef STRCNT32}
+        {$ifdef CPU64}
+        _PaddingToQWord: DWord;
+        {$endif CPU64}
+        {$endif STRCNT32}
+        {$endif HASCODEPAGE}
+        refCnt: TStrCnt; // =SizeInt on older FPC, =longint since FPC 3.4
+        length: TStrLen;
+      );
     {$ifdef HASCODEPAGE}
-      {$ifdef CPU64}
-      /// padding bytes for 16 byte alignment of the header
-      _Padding: cardinal;
-      {$endif CPU64}
-      /// the string code page - e.g. CP_UTF8 for RawUtf8
-      codePage: Word;
-      /// 1 for AnsiString/RawByteString/RawUtf8, 2 for UnicodeString
-      elemSize: Word;
+    1: (
+        codePageElemSize: cardinal;
+      );
     {$endif HASCODEPAGE}
-      /// string reference count (basic garbage memory mechanism)
-      refCnt: TStrCnt; // 32-bit longint with Delphi
-      /// equals length(s) - i.e. size in AnsiChar/WideChar, not bytes
-      length: TStrLen; // 32-bit longint with Delphi
-    end;
+  end;
 
-    /// map the Delphi/FPC dynamic array header (stored before each instance)
-    TDynArrayRec = packed record
-      {$ifdef CPUX64}
-      /// padding bytes for 16 byte alignment of the header
-      _Padding: cardinal;
-      {$endif}
-      /// dynamic array reference count (basic garbage memory mechanism)
-      refCnt: TDACnt; // 32-bit longint with Delphi
-      /// length in element count
-      // - size in bytes = length*ElemSize
-      length: TDALen; // PtrInt/NativeInt
-    end;
+  TDynArrayRec = record
+    refCnt: TDACnt; // =SizeInt
+    high: TDALen;   // =SizeInt (differs from Delphi: equals length-1)
+    function GetLength: TDALen; inline;
+    procedure SetLength(len: TDALen); inline;
+    property length: TDALen // Delphi compatibility wrapper
+      read GetLength write SetLength;
+  end;
 
-    {$endif FPC}
+  {$else not FPC}
 
-    PStrRec = ^TStrRec;
-    PDynArrayRec = ^TDynArrayRec;
+  /// map the Delphi/FPC string header (stored before each instance)
+  TStrRec = packed record
+  {$ifdef HASCODEPAGE}
+    {$ifdef CPU64}
+    /// padding bytes for 16 byte alignment of the header
+    _Padding: cardinal;
+    {$endif CPU64}
+    /// the string code page - e.g. CP_UTF8 for RawUtf8
+    codePage: Word;
+    /// 1 for AnsiString/RawByteString/RawUtf8, 2 for UnicodeString
+    elemSize: Word;
+  {$endif HASCODEPAGE}
+    /// string reference count (basic garbage memory mechanism)
+    refCnt: TStrCnt; // 32-bit longint with Delphi
+    /// equals length(s) - i.e. size in AnsiChar/WideChar, not bytes
+    length: TStrLen; // 32-bit longint with Delphi
+  end;
+
+  /// map the Delphi/FPC dynamic array header (stored before each instance)
+  TDynArrayRec = packed record
+    {$ifdef CPUX64}
+    /// padding bytes for 16 byte alignment of the header
+    _Padding: cardinal;
+    {$endif}
+    /// dynamic array reference count (basic garbage memory mechanism)
+    refCnt: TDACnt; // 32-bit longint with Delphi
+    /// length in element count
+    // - size in bytes = length*ElemSize
+    length: TDALen; // PtrInt/NativeInt
+  end;
+
+  {$endif FPC}
+
+  PStrRec = ^TStrRec;
+  PDynArrayRec = ^TDynArrayRec;
 
 const
   /// codePage offset = string header size
@@ -727,6 +728,14 @@ procedure FastAssignNew(var d; s: pointer = nil);
 function FastNewString(len, codepage: PtrInt): PAnsiChar;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// ensure the supplied variable will have a CP_UTF8 - making it unique if needed
+procedure EnsureRawUtf8(var s: RawByteString); overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// ensure the supplied variable will have a CP_UTF8 - making it unique if needed
+procedure EnsureRawUtf8(var s: RawUtf8); overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// internal function which could be used instead of SetLength() if RefCnt = 1
 procedure FakeLength(var s: RawUtf8; len: PtrInt); overload;
   {$ifdef HASINLINE} inline; {$endif}
@@ -746,8 +755,8 @@ procedure FakeLength(var s: RawByteString; len: PtrInt); overload;
 procedure FakeCodePage(var s: RawByteString; cp: cardinal);
   {$ifdef HASINLINE} inline; {$endif}
 
-/// internal function which assign src to dest, calling FakeCodePage(CP_UTF8)
-// - warning: src is set to '' once assigned to dest
+/// internal function which assign src to dest, force CP_UTF8 and set src to ''
+// - warning: calls FakeCodePage(CP_UTF8) so requires src to have a RefCnt of 1
 procedure FastAssignUtf8(var dest: RawUtf8; var src: RawByteString);
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -827,6 +836,7 @@ procedure ClassToText(C: TClass; var result: RawUtf8);
 function ToText(C: TClass): RawUtf8; overload;
   {$ifdef HASSAFEINLINE}inline;{$endif}
 
+
 var
   /// retrieve the unit name where a given class is implemented
   // - is implemented in mormot.core.rtti.pas; so may be nil otherwise
@@ -856,10 +866,44 @@ function PropNameEquals(P1, P2: PShortString): boolean; overload;
 // comparison with other kind of input variables
 function PropNameEquals(const P1, P2: RawUtf8): boolean; overload;
 
+/// raw internal method as published by FindNonVoid[false]
+function FindNonVoidRawUtf8(n: PPointerArray; name: pointer; len: TStrLen;
+  count: PtrInt): PtrInt;
+
+/// raw internal method as published by FindNonVoid[true]
+function FindNonVoidRawUtf8I(n: PPointerArray; name: pointer; len: TStrLen;
+  count: PtrInt): PtrInt;
+
+type
+  TFindNonVoid =
+    function(p: PPointerArray; n: pointer; l: TStrLen; c: PtrInt): PtrInt;
+const
+  /// raw internal methods for case sensitive (or not) search for a RawUtf8
+  // - expects non-void RawUtf8 values, with ASCII-7 encoding, e.g. as with
+  // TDocVariantData.GetValueIndex() property names
+  FindNonVoid: array[{casesensitive:}boolean] of TFindNonVoid = (
+    FindNonVoidRawUtf8I,
+    FindNonVoidRawUtf8);
+
+/// return the case-insensitive ASCII 7-bit index of Value in non-void Values[]
+// - typical use with a TRawUtf8DynArray is like this:
+// ! index := FindPropName(pointer(aDynArray), aValue, length(aDynArray));
+// - by design, this function expects Values[] to not contain any void ''
+function FindPropName(Values: PRawUtf8Array; const Value: RawUtf8;
+  ValuesCount: PtrInt): PtrInt; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// use the RTL to return a date/time as ISO-8601 text
 // - slow function, here to avoid linking mormot.core.datetime
 function DateTimeToIsoString(dt: TDateTime): string;
 
+/// convert a binary into its human-friendly per-byte hexadecimal lowercase text
+// - returns e.g. '12:50:b6:1e:c6:aa', i.e. the DN/MAC format
+// - used e.g. in mormot.lib.openssl11 and mormot.net.sock
+procedure ToHumanHex(var result: RawUtf8; bin: PByteArray; len: PtrInt);
+
+/// convert a binary into its human-friendly hexadecimal in reverse order
+procedure ToHumanHexReverse(var result: RawUtf8; bin: PByteArray; len: PtrInt);
 
 // backward compatibility types redirections
 {$ifndef PUREMORMOT2}
@@ -1191,7 +1235,7 @@ function Utf8ToInt64(const text: RawUtf8; const default: Int64 = 0): Int64;
 /// get and check range of a signed 32-bit integer stored in a RawUtf8 string
 // - we use the PtrInt result type, even if expected to be 32-bit, to use
 // native CPU register size (don't want any 32-bit overflow here)
-function Utf8ToInteger(const value: RawUtf8; min,max: PtrInt;
+function Utf8ToInteger(const value: RawUtf8; min, max: PtrInt;
   default: PtrInt = 0): PtrInt; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1666,7 +1710,7 @@ type
   PSortedIntegerArray = ^TSortedIntegerArray;
 
 /// compute GCD of two integers using substraction-based Euclidean algorithm
-function gcd(a, b: cardinal): cardinal;
+function gcd(a, b: PtrUInt): PtrUInt;
 
 
 
@@ -1843,6 +1887,12 @@ procedure RawObjectsClear(o: PObject; n: integer);
 // - only difference is that aObj is set to nil AFTER being destroyed
 procedure FreeAndNilSafe(var aObj);
 
+/// same as aInterface := nil but ignoring any exception
+procedure InterfaceNilSafe(var aInterface);
+
+/// same as aInterface := nil but ignoring any exception
+procedure InterfacesNilSafe(const aInterfaces: array of pointer);
+
 /// wrapper to add an item to a T*InterfaceArray dynamic array storage
 function InterfaceArrayAdd(var aInterfaceArray; const aItem: IUnknown): PtrInt;
 
@@ -1918,6 +1968,12 @@ type
   THash192 = array[0..23] of byte;
   /// pointer to a 192-bit hash value
   PHash192 = ^THash192;
+
+  /// store a 224-bit hash value
+  // - consumes 28 bytes of memory
+  THash224 = array[0..27] of byte;
+  /// pointer to a 224-bit hash value
+  PHash224 = ^THash224;
 
   /// store a 256-bit hash value
   // - e.g. a SHA-256 digest, a TEccSignature result, or array[0..7] of cardinal
@@ -2750,9 +2806,6 @@ function IsAnsiCompatible(const Text: RawByteString): boolean; overload;
 /// return TRUE if the supplied UTF-16 buffer only contains 7-bits Ansi characters
 function IsAnsiCompatibleW(PW: PWideChar; Len: PtrInt): boolean; overload;
 
-/// check if a supplied "array of const" argument is an instance of a given class
-function VarRecAs(const aArg: TVarRec; aClass: TClass): pointer;
-
 type
   /// 32-bit Pierre L'Ecuyer software (random) generator
   // - cross-compiler and cross-platform efficient randomness generator, very
@@ -2908,7 +2961,7 @@ procedure bswap64array(a, b: PQWordArray; n: PtrInt);
 // ! end;
 // then callbacks are then executed as such:
 // ! if fEchos<>nil then
-// !   for i := 0 to length(fEchos)-1 do
+// !   for i := 0 to length(fEchos) - 1 do
 // !     fEchos[i](self,fEchoBuf);
 // - use MultiEventRemove() to un-register a callback from the list
 function MultiEventAdd(var EventList; const Event: TMethod): boolean;
@@ -3237,18 +3290,21 @@ function xxHash32Mixup(crc: cardinal): cardinal;
   {$ifdef HASINLINE}inline;{$endif}
 
 const
-  /// Knuth's magic number for hashing a cardinal, using the golden ratio
+  /// Knuth's magic number for hashing a 32-bit value, using the golden ratio
   // - then use the result high bits, i.e. via "shr" not via "and"
   // - for instance, mormot.core.log uses it to hash the TThreadID:
   // $ hash := cardinal(cardinal(id) * KNUTH_HASH32_MUL) shr (32 - MAXLOGTHREADBITS);
   KNUTH_HASH32_MUL = $9E3779B1;
 
+  /// Knuth's magic number for hashing a 64-bit value, using the golden ratio
+  KNUTH_HASH64_MUL = $9E3779B97F4A7C15;
+
   /// Knuth's magic number for hashing a PtrUInt, using the golden ratio
   {$ifdef CPU32}
-  KNUTH_HASHPTR_MUL = $9E3779B1;
+  KNUTH_HASHPTR_MUL = KNUTH_HASH32_MUL;
   KNUTH_HASHPTR_SHR = 32;
   {$else}
-  KNUTH_HASHPTR_MUL = $9E3779B97F4A7C15;
+  KNUTH_HASHPTR_MUL = KNUTH_HASH64_MUL;
   KNUTH_HASHPTR_SHR = 64;
   {$endif CPU32}
 
@@ -3383,20 +3439,40 @@ procedure DynArrayHashTableAdjust16(P: PWordArray; deleted: cardinal; count: Ptr
 
 { ************ Efficient Variant Values Conversion }
 
+type
+  PVarType = ^TVarType;
+
 const
   /// unsigned 64bit integer variant type
   // - currently called varUInt64 in Delphi (not defined in older versions),
   // and varQWord in FPC
   varWord64 = 21;
+  /// map the Windows VT_INT extended VARENUM, i.e. a 32-bit signed integer
+  // - also detected and handled by VariantToInteger/VariantToInt64
+  varOleInt = 22;
+  /// map the Windows VT_UINT extended VARENUM, i.e. a 32-bit unsigned integer
+  // - also detected and handled by VariantToInteger/VariantToInt64
+  varOleUInt = 23;
+  /// map the Windows VT_LPSTR extended VARENUM, i.e. a PAnsiChar
+  // - also detected and handled by VariantToUtf8
+  varOlePAnsiChar = 30;
+  /// map the Windows VT_LPWSTR extended VARENUM, i.e. a PWideChar
+  // - also detected and handled by VariantToUtf8
+  varOlePWideChar = 31;
+  /// map the Windows VT_FILETIME extended VARENUM, i.e. a 64-bit TFileTime
+  // - also detected and handled by VariantToDateTime
+  varOleFileTime = 64;
+  /// map the Windows VT_CLSID extended VARENUM, i.e. a by-reference PGuid
+  varOleClsid = 72;
 
   varVariantByRef = varVariant or varByRef;
-  varStringByRef = varString or varByRef;
-  varOleStrByRef = varOleStr or varByRef;
+  varStringByRef  = varString or varByRef;
+  varOleStrByRef  = varOleStr or varByRef;
 
   /// this variant type will map the current SynUnicode type
   // - depending on the compiler version
   {$ifdef HASVARUSTRING}
-  varSynUnicode = varUString;
+  varSynUnicode   = varUString;
   varUStringByRef = varUString or varByRef;
   {$else}
   varSynUnicode = varOleStr;
@@ -3415,7 +3491,11 @@ const
   {$endif ISDELPHI}
 
   /// those TVarData.VType values are meant to be direct values
-  VTYPE_SIMPLE = [varEmpty..varDate, varBoolean, varShortInt..varWord64, varUnknown];
+  VTYPE_SIMPLE = [varEmpty..varDate, varBoolean, varShortInt..varWord64,
+    {$ifdef OSWINDOWS} varOleInt, varOleUInt, varOlePAnsiChar, varOlePWideChar,
+      varOleFileTime, {$endif OSWINDOWS} varUnknown];
+  /// bitmask used by our inlined VarClear() to avoid unneeded VarClearProc()
+  VTYPE_STATIC = $BFE8;
 
   /// a slightly faster alternative to Variants.Null function with TVarData
   NullVarData:  TVarData = (VType: varNull{%H-});
@@ -3728,6 +3808,7 @@ type
     procedure SetSize(NewSize: Longint); override;
   public
     /// initialize the storage, optionally with some RawByteString content
+    // - to be used for Read() from this memory buffer
     constructor Create(const aString: RawByteString); overload;
     /// read some bytes from the internal storage
     // - returns the number of bytes filled into Buffer (<=Count)
@@ -3919,9 +4000,6 @@ uses
 
 
 { ************ Common Types Used for Compatibility Between Compilers and CPU }
-
-const
-  VTYPE_STATIC = $BFE8; // bitmask to avoid unneeded VarClearProc call
 
 procedure VarClearAndSetType(var v: variant; vtype: integer);
 var
@@ -4242,6 +4320,23 @@ begin
 end;
 
 {$ifdef HASCODEPAGE}
+
+procedure EnsureRawUtf8(var s: RawByteString);
+begin
+  if s <> '' then
+    with PStrRec(PAnsiChar(pointer(s)) - _STRRECSIZE)^ do
+      if CodePage <> CP_UTF8 then
+        if refCnt <> 1 then
+          FastSetString(RawUtf8(s), pointer(s), length) // make copy
+        else
+          CodePage := CP_UTF8; // just replace in-place
+end;
+
+procedure EnsureRawUtf8(var s: RawUtf8);
+begin
+  EnsureRawUtf8(RawByteString(s));
+end;
+
 procedure FakeCodePage(var s: RawByteString; cp: cardinal);
 var
   p: PAnsiChar;
@@ -4255,11 +4350,6 @@ function GetCodePage(const s: RawByteString): cardinal;
 begin
   result := PStrRec(PAnsiChar(pointer(s)) - _STRRECSIZE)^.CodePage;
 end;
-{$else}
-procedure FakeCodePage(var s: RawByteString; cp: cardinal);
-begin // do nothing on Delphi 7-2007
-end;
-{$endif HASCODEPAGE}
 
 procedure FastAssignUtf8(var dest: RawUtf8; var src: RawByteString);
 begin
@@ -4267,6 +4357,23 @@ begin
   FastAssignNew(dest, pointer(src));
   pointer(src) := nil; // was assigned with no ref-counting involved
 end;
+
+{$else} // do nothing on Delphi 7-2007
+procedure FakeCodePage(var s: RawByteString; cp: cardinal);
+begin
+end;
+procedure EnsureRawUtf8(var s: RawByteString);
+begin
+end;
+procedure EnsureRawUtf8(var s: RawUtf8);
+begin
+end;
+procedure FastAssignUtf8(var dest: RawUtf8; var src: RawByteString);
+begin
+  FastAssignNew(dest, pointer(src));
+  pointer(src) := nil; // was assigned with no ref-counting involved
+end;
+{$endif HASCODEPAGE}
 
 procedure FakeLength(var s: RawUtf8; len: PtrInt);
 var
@@ -4429,6 +4536,7 @@ end;
 
 const
   HexChars: array[0..15] of AnsiChar = '0123456789ABCDEF';
+  HexCharsLower: array[0..15] of AnsiChar = '0123456789abcdef';
 
 procedure AppendShortByteHex(value: byte; var dest: ShortString);
 var
@@ -4597,10 +4705,135 @@ zero:
   result := false;
 end;
 
+function FindNonVoidRawUtf8(n: PPointerArray; name: pointer; len: TStrLen;
+  count: PtrInt): PtrInt;
+var
+  p: PUtf8Char;
+begin
+  // FPC does proper inlining in this loop
+  result := 0;
+  repeat
+    p := n[result]; // all VName[]<>'' so p=n^<>nil
+    if (PStrLen(p - _STRLEN)^ = len) and
+       CompareMemFixed(p, name, len) then
+      exit;
+    inc(result);
+    dec(count);
+  until count = 0;
+  result := -1;
+end;
+
+function FindNonVoidRawUtf8I(n: PPointerArray; name: pointer; len: TStrLen;
+  count: PtrInt): PtrInt;
+var
+  p1, p2, l: PUtf8Char;
+label
+  no;
+begin
+  result := 0;
+  p2 := name;
+  repeat
+    // inlined IdemPropNameUSameLenNotNull(p, name, len)
+    p1 := n[result]; // all VName[]<>'' so p1<>nil
+    if PStrLen(p1 - _STRLEN)^ = len then
+    begin
+      l := @p1[len - SizeOf(cardinal)];
+      dec(p2, PtrUInt(p1));
+      while PtrUInt(l) >= PtrUInt(p1) do
+        // compare 4 Bytes per loop
+        if (PCardinal(p1)^ xor PCardinal(@p2[PtrUInt(p1)])^) and $dfdfdfdf <> 0 then
+          goto no
+        else
+          inc(PCardinal(p1));
+      inc(PCardinal(l));
+      while PtrUInt(p1) < PtrUInt(l) do
+        // remaining bytes
+        if (ord(p1^) xor ord(p2[PtrUInt(p1)])) and $df <> 0 then
+          goto no
+        else
+          inc(PByte(p1));
+      exit; // match found
+no:   p2 := name;
+    end;
+    inc(result);
+    dec(count);
+  until count = 0;
+  result := -1;
+end;
+
+function FindPropName(Values: PRawUtf8Array; const Value: RawUtf8;
+  ValuesCount: PtrInt): PtrInt;
+begin
+  if (Values <> nil) and
+     (ValuesCount > 0) and
+     (Value <> '') then
+    result := FindNonVoidRawUtf8I(pointer(Values), pointer(Value),
+      PStrLen(PAnsiChar(pointer(Value)) - _STRLEN)^, ValuesCount)
+  else
+    result := -1;
+end;
+
 function DateTimeToIsoString(dt: TDateTime): string;
 begin
   // avoid to link mormot.core.datetime
   DateTimeToString(result, 'yyyy-mm-dd hh:nn:ss', dt);
+end;
+
+procedure ToHumanHex(var result: RawUtf8; bin: PByteArray; len: PtrInt);
+var
+  P: PAnsiChar;
+  i, c: PtrInt;
+  tab: PAnsichar;
+begin
+  if len <= 0 then
+  begin
+    result := '';
+    exit;
+  end;
+  FastSetString(result, nil, (len * 3) - 1);
+  dec(len);
+  tab := @HexCharsLower;
+  P := pointer(result);
+  i := 0;
+  repeat
+    c := bin[i];
+    P[0] := tab[c shr 4];
+    c := c and 15;
+    P[1] := tab[c];
+    if i = len then
+      break;
+    P[2] := ':'; // to please human limited hexadecimal capabilities
+    inc(P, 3);
+    inc(i);
+  until false;
+end;
+
+procedure ToHumanHexReverse(var result: RawUtf8; bin: PByteArray; len: PtrInt);
+var
+  P: PAnsiChar;
+  i, c: PtrInt;
+  tab: PAnsichar;
+begin
+  if len <= 0 then
+  begin
+    result := '';
+    exit;
+  end;
+  FastSetString(result, nil, (len * 3) - 1);
+  tab := @HexCharsLower;
+  P := pointer(result);
+  i := len;
+  repeat
+    dec(i);
+    c := bin[i];
+    P[0] := tab[c shr 4];
+    c := c and 15;
+    P[1] := tab[c];
+    if i = 0 then
+      break;
+    P[2] := ':';
+    inc(P, 3);
+  until false;
 end;
 
 
@@ -6768,7 +7001,7 @@ begin
     result[i] := Values[i];
 end;
 
-function gcd(a, b: cardinal): cardinal;
+function gcd(a, b: PtrUInt): PtrUInt;
 begin
   while a <> b do
     if a > b then
@@ -7105,6 +7338,24 @@ begin
   except
   end;
   TObject(aObj) := nil; // we could do it AFTER destroy
+end;
+
+procedure InterfaceNilSafe(var aInterface);
+begin
+  if IInterface(aInterface) <> nil then
+    try // slower but paranoidically safe
+      IInterface(aInterface) := nil;
+    except
+      pointer(aInterface) := nil; // force variable to nil
+    end;
+end;
+
+procedure InterfacesNilSafe(const aInterfaces: array of pointer);
+var
+  i: PtrInt;
+begin
+  for i := 0 to high(aInterfaces) do
+    InterfaceNilSafe(aInterfaces[i]^);
 end;
 
 procedure ObjArrayClear(var aObjArray);
@@ -8034,7 +8285,7 @@ begin
     dec(L,start);
     if count < L then
       L := count;
-    while L>0 do
+    while L > 0 do
       if S[start + L] <= ' ' then
         dec(L)
       else
@@ -8243,16 +8494,6 @@ begin
       dec(Len);
     until Len = 0;
   result := true;
-end;
-
-function VarRecAs(const aArg: TVarRec; aClass: TClass): pointer;
-begin
-  if (aArg.VType = vtObject) and
-     (aArg.VObject <> nil) and
-     aArg.VObject.InheritsFrom(aClass) then
-    result := aArg.VObject
-  else
-    result := nil;
 end;
 
 procedure StrCntAdd(var refcnt: TStrCnt; increment: TStrCnt);
@@ -10827,14 +11068,16 @@ begin
         Value := vd^.VShortInt;
       varWord:
         Value := vd^.VWord;
-      varLongWord:
+      varLongWord,
+      varOleUInt:
         if vd^.VLongWord <= cardinal(High(integer)) then
           Value := vd^.VLongWord
         else
           exit;
       varByte:
         Value := vd^.VByte;
-      varInteger:
+      varInteger,
+      varOleInt:
         Value := vd^.VInteger;
       varWord64:
         if (vd^.VInt64 >= 0) and
@@ -10957,7 +11200,7 @@ begin
           Value := true // normalize
         else
           Value := false;
-      varInteger: // coming e.g. from GetJsonField()
+      varInteger: // coming e.g. from TGetJsonField
         Value := vd^.VInteger = 1;
       varString:
         Value := GetBoolean(vd^.VAny);
@@ -11003,11 +11246,13 @@ begin
         Value := vd^.VShortInt;
       varWord:
         Value := vd^.VWord;
-      varLongWord:
+      varLongWord,
+      varOleUInt:
         Value := vd^.VLongWord;
       varByte:
         Value := vd^.VByte;
-      varInteger:
+      varInteger,
+      varOleInt:
         Value := vd^.VInteger;
       varWord64:
         if vd^.VInt64 >= 0 then
@@ -11057,9 +11302,7 @@ begin
   if Txt = '' then
     exit;
   RawUtf8(TVarData(Value).VAny) := Txt;
-  {$ifdef HASCODEPAGE} // Txt may be read-only: no FastAssignUtf8/FakeCodePage
-  SetCodePage(RawByteString(TVarData(Value).VAny), CP_UTF8, false);
-  {$endif HASCODEPAGE}
+  EnsureRawUtf8(RawByteString(TVarData(Value).VAny));
 end;
 
 function RawUtf8ToVariant(const Txt: RawUtf8): variant;
@@ -11452,14 +11695,21 @@ procedure TRawByteStringStream.GetAsText(StartPos, Len: PtrInt; var Text: RawUtf
 var
   L: PtrInt;
 begin
+  if StartPos < 0 then
+    StartPos := 0;
   L := length(fDataString);
-  if (StartPos = 0) and
-     (Len = L) then
-    FastAssignUtf8(Text, fDataString) // FPC expects this
+  if (L = 0) or
+     (StartPos >= L) then
+    FastAssignNew(Text) // nothing to return
+  else if (StartPos = 0) and
+          (Len = L) and
+          (PStrCnt(PAnsiChar(pointer(fDataString)) - _STRCNT)^ = 1) then
+    FastAssignUtf8(Text, fDataString) // fast return fDataString instance
   else
   begin
-    if Len - StartPos > L then
-      Len := L - StartPos; // avoid any buffer overflow
+    dec(L, StartPos);
+    if Len > L then
+      Len := L; // avoid any buffer overflow
     FastSetString(Text, @PByteArray(fDataString)[StartPos], Len);
   end;
 end;

@@ -29,10 +29,13 @@ type
   /// regression tests for mormot.crypt.core and mormot.crypt.jwt features
   TTestCoreCrypto = class(TSynTestCase)
   public
+    fDigestAlgo: TDigestAlgo;
     procedure CryptData(dpapi: boolean);
     procedure Prng(meta: TAesPrngClass; const name: RawUTF8);
+    function DigestUser(const User, Realm: RawUtf8;
+      out HA0: THash512Rec): TAuthServerResult;
   published
-    /// MD5 hashing functions
+    /// MD5 (and MD4) hashing functions
     procedure _MD5;
     /// SHA-1 hashing functions
     procedure _SHA1;
@@ -72,7 +75,9 @@ type
     procedure _TBinaryCookieGenerator;
     /// mormot.lib.pkcs11 unit validation
     procedure Pkcs11;
-    /// Cryptography Catalog
+    /// validate client-server DIGEST access authentication
+    procedure Digest;
+    /// High-Level Cryptography Catalog
     procedure Catalog;
     /// compute some performance numbers, mostly against regression
     procedure Benchmark;
@@ -322,6 +327,8 @@ procedure TTestCoreCrypto._SHA512;
 
 const
   FOX: RawByteString = 'The quick brown fox jumps over the lazy dog';
+  ABCU: RawByteString = 'abcdefghbcdefghicdefghijdefghijkefghijklfghijk' +
+    'lmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu';
 var
   dig: THash512Rec;
   i: PtrInt;
@@ -329,24 +336,28 @@ var
   c: AnsiChar;
   temp: RawByteString;
 begin
-  // includes SHA-384, which is a truncated SHA-512
-  Check(SHA384('') =
+  // includes SHA-384 and SHA-512/256, which are truncated SHA-512
+  CheckEqual(SHA384(''),
     '38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63' +
     'f6e1da274edebfe76f65fbd51ad2f14898b95b');
-  Check(SHA384('abc') =
+  CheckEqual(SHA384('abc'),
     'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605' +
     'a43ff5bed8086072ba1e7cc2358baeca134c825a7');
-  Check(SHA384(
-    'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn' +
-    'hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu') = '09330c33f711' +
+  CheckEqual(SHA384(ABCU), '09330c33f711' +
     '47e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039');
-  Check(Sha512('') =
+  CheckEqual(Sha512_256(''),
+    'c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0967a');
+  CheckEqual(Sha512_256('abc'),
+    '53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23');
+  CheckEqual(Sha512_256(ABCU),
+    '3928e184fb8690f840da3988121d31be65cb9d3ef83ee6146feac861e19b563a');
+  CheckEqual(Sha512(''),
     'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d' +
     '36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e');
-  Check(Sha512(FOX) =
+  CheckEqual(Sha512(FOX),
     '07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785' +
     '436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
-  Check(Sha512(FOX + '.') =
+  CheckEqual(Sha512(FOX + '.'),
     '91ea1245f20d46ae9a037a989f54f1f790f0a47607eeb8a14d128' +
     '90cea77a1bbc6c7ed9cf205e67b7f2b8fd4c7dfd3a7a8617e45f3c463d481c7e586c39ac1ed');
   sha.Init;
@@ -933,9 +944,9 @@ type
     // non cryptographic hashes
     bCRC32c, bXXHash32, bCRC32, bAdler32, bHash32, bAesniHash,
     // cryptographic hashes
-    bMD5,
+    bMD4, bMD5,
     bSHA1, bHMACSHA1, bSHA256, bHMACSHA256,
-    bSHA384, bHMACSHA384, bSHA512, bHMACSHA512,
+    bSHA384, bHMACSHA384, bSHA512, bSHA512_256, bHMACSHA512,
     bSHA3_256, bSHA3_512,
     // encryption
     bRC4,
@@ -978,11 +989,12 @@ var
   s, i, size, n: integer;
   data, encrypted: RawByteString;
   dig: THash512Rec;
-  MD5: TMd5;
+  MD: TMd5;
   SHA1: TSha1;
   SHA256: TSha256;
   SHA384: TSha384;
   SHA512: TSha512;
+  SHA512_256: TSha512_256;
   SHA3, SHAKE128, SHAKE256: TSha3;
   RC4: TRC4;
   timer: TPrecisionTimer;
@@ -1043,8 +1055,10 @@ begin
             dig.d0 := adler32(0, pointer(data), SIZ[s]);
           bCRC32:
             dig.d0 := crc32(0, pointer(data), SIZ[s]);
+          bMD4:
+            MD.Full(pointer(data), SIZ[s], dig.h0, {forcemd4=}true);
           bMD5:
-            MD5.Full(pointer(data), SIZ[s], dig.h0);
+            MD.Full(pointer(data), SIZ[s], dig.h0);
           bSHA1:
             SHA1.Full(pointer(data), SIZ[s], dig.b160);
           bHMACSHA1:
@@ -1059,6 +1073,8 @@ begin
             HmacSha384('secret', data, dig.b384);
           bSHA512:
             SHA512.Full(pointer(data), SIZ[s], dig.b);
+          bSHA512_256:
+            SHA512_256.Full(pointer(data), SIZ[s], dig.Lo);
           bHMACSHA512:
             HmacSha512('secret', data, dig.b);
           bSHA3_256:
@@ -1570,7 +1586,7 @@ begin
     Check(StrLen(pointer(b64)) = length(b64), 'unz');
     Check(Zeroed(b64) = tmp, 'UnZeroed');
     c := Random32;
-    AppendBufferToRawByteString(tmp, c, 1);
+    Append(tmp, @c, 1);
   end;
   Check(Zeroed(UnZeroed(#0)) = #0, 'unz0');
   Check(Zeroed(UnZeroed(#0#0)) = #0#0, 'unz1');
@@ -1709,6 +1725,7 @@ var
   mac: TAesMac256;
   mac1, mac2: THash256;
   one, two, encdec: TAesAbstract;
+  cts: TAesCbc;
   noaesni, gcm, aead: boolean;
   Timer: array[boolean] of TPrecisionTimer;
   ValuesCrypted, ValuesOrig: array[0..6] of RawByteString;
@@ -1962,6 +1979,40 @@ begin
   {$ifdef CPUINTEL}
   CpuFeatures := backup;
   {$endif CPUINTEL}
+  // see https://datatracker.ietf.org/doc/html/rfc3962#appendix-B
+  st := HexToBin('636869636b656e207465726979616b69');
+  CheckEqual(length(st), 16);
+  FillZero(iv.b);
+  cts := TAesCbc.Create(PHash128(st)^);
+  try
+    orig := HexToBin('4920776f756c64206c696b652074686520');
+    crypted := cts.EncryptCts(orig);
+    CheckEqual(BinToHex(crypted), 'C6353568F2BF8CB4D8A580362DA7FF7F97');
+    cts.iv := iv.b; // reset IV
+    s2 := cts.DecryptCts(crypted);
+    CheckEqual(s2, orig);
+    cts.iv := iv.b;
+    orig := HexToBin(
+      '4920776f756c64206c696b65207468652047656e6572616c20476175277320');
+    crypted := cts.EncryptCts(orig);
+    CheckEqual(BinToHex(crypted),
+      'FC00783E0EFDB2C1D445D4C8EFF7ED2297687268D6ECCCC0C07B25E25ECFE5');
+    cts.iv := iv.b;
+    s2 := cts.DecryptCts(crypted);
+    CheckEqual(s2, orig);
+    for i := 16 to 100 do
+    begin
+      orig := RandomAnsi7(i);
+      cts.iv := iv.b;
+      crypted := cts.EncryptCts(orig);
+      cts.iv := iv.b;
+      s2 := cts.DecryptCts(crypted);
+      CheckEqual(s2, orig);
+      CheckEqual(cts.DecryptCts(cts.EncryptCts(orig, true), true), orig);
+    end;
+  finally
+    cts.Free;
+  end;
 end;
 
 procedure TTestCoreCrypto._AES_GCM;
@@ -2207,23 +2258,242 @@ var
   md: TMd5;
   dig, dig2: TMd5Digest;
   tmp: TByteDynArray;
+  ismd4: boolean;
 begin
-  check(htdigest('agent007', 'download area', 'secret') =
-    'agent007:download area:8364d0044ef57b3defcfa141e8f77b65');
-  check(Md5('') = 'd41d8cd98f00b204e9800998ecf8427e');
-  check(Md5('a') = '0cc175b9c0f1b6a831c399e269772661');
-  check(Md5('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789') =
-    'd174ab98d277d9f5a5611c2c9f419d9f');
+  // MD5 validation
+  CheckEqual(htdigest('agent007', 'download area', 'secret'),
+    'agent007:download area:8364d0044ef57b3defcfa141e8f77b65', 'htdigest');
+  CheckEqual(Md5(''), 'd41d8cd98f00b204e9800998ecf8427e', 'MD5ref1');
+  CheckEqual(Md5('a'), '0cc175b9c0f1b6a831c399e269772661', 'MD5ref2');
+  CheckEqual(Md5('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'),
+    'd174ab98d277d9f5a5611c2c9f419d9f', 'MD5ref3');
+  // MD4 validation
+  CheckEqual(Md4(''), '31d6cfe0d16ae931b73c59d7e0c089c0', 'MD4ref1');
+  CheckEqual(Md4('Wikipedia, l''encyclopedie libre et gratuite'),
+    'b94e66e0817dd34dc7858a0c131d4079', 'MD4ref2');
+  CheckEqual(Md4('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'),
+    '043f8582f241db351ce627e153e7f0e4', 'MD4ref3');
+  CheckEqual(Md4(HexToBin('839c7a4d7a92cb5678a5d5b9eea5a7573c8a74deb366c3dc20a08' +
+    '3b69f5d2a3bb3719dc69891e9f95e809fd7e8b23ba6318edd45e51fe39708bf9427e9c3e8b9')),
+    '4d7e6a1defa93d2dde05b45d864c429b', 'colllisionA');
+  CheckEqual(Md4(HexToBin('839c7a4d7a92cbd678a5d529eea5a7573c8a74deb366c3dc20a08' +
+    '3b69f5d2a3bb3719dc69891e9f95e809fd7e8b23ba6318edc45e51fe39708bf9427e9c3e8b9')),
+    '4d7e6a1defa93d2dde05b45d864c429b', 'colllisionB');
+  // MD Context Hashing validation
   SetLength(tmp, 256);
-  for n := 256 - 80 to 256 do
+  for ismd4 := false to true do
+    for n := 256 - 80 to 256 do
+    begin
+      if ismd4 then
+        md.InitMD4
+      else
+        md.Init;
+      for i := 1 to n do
+        md.Update(tmp[0], 1);
+      md.Final(dig);
+      md.Full(pointer(tmp), n, dig2, ismd4);
+      check(IsEqual(dig, dig2), 'MDrefA');
+      check(CompareMem(@dig, @dig2, SizeOf(dig)), 'MDrefB');
+    end;
+end;
+
+function TTestCoreCrypto.DigestUser(const User, Realm: RawUtf8;
+  out HA0: THash512Rec): TAuthServerResult;
+begin
+  if DigestHA0(fDigestAlgo, User, Realm, User + '"pass', HA0) <> 0 then
+    result := asrMatch
+  else
+    result := asrUnknownUser;
+end;
+
+procedure TTestCoreCrypto.Digest;
+var
+  n, u: integer;
+  a: TDigestAlgo;
+  h32: cardinal;
+  realm, user, url, pwd, s, c, authuser, authurl, fpwd: RawUtf8;
+  opaque: Int64;
+  fn: TFileName;
+  dig: TDigestAuthServerFile;
+  users, pwds, users2: TRawUtf8DynArray;
+  bak: RawByteString;
+begin
+  // validate raw client-server Digest access authentication
+  Check(DigestServerInit(daUndefined, '', '', '', 0) = '');
+  Check(DigestClient(daUndefined, '', '', '', '', '') = '');
+  for n := 1 to 10 do
   begin
-    md.Init;
-    for i := 1 to n do
-      md.Update(tmp[0], 1);
-    md.Final(dig);
-    md.Full(pointer(tmp), n, dig2);
-    check(IsEqual(dig, dig2));
-    check(CompareMem(@dig, @dig2, SizeOf(dig)));
+    realm := RandomAnsi7(10) + '"';
+    user := RandomUri(10);
+    pwd := user + '"pass';
+    url := '/' + RandomUri(15);
+    opaque := Random64;
+    // pwd and realm have a quote within
+    for a := daMD5 to high(a) do
+    begin
+      Check(DigestServerInit(a, '', '', '', opaque) = '');
+      s := DigestServerInit(a, QuotedStr(realm, '"'), '', '', opaque);
+      Check(s <> '');
+      CheckEqual(DigestRealm(s), realm, 'realm server');
+      Check(DigestClient(daUndefined, s, 'GET', url, user, pwd) = '');
+      c := DigestClient(a, s, 'GET', url, user, pwd);
+      Check(c <> '');
+      CheckEqual(DigestRealm(c), realm, 'realm client');
+      fDigestAlgo := a;
+      Check(DigestServerAuth(a, realm, 'GET', pointer(c), opaque, DigestUser,
+        authuser, authurl, 100) = asrMatch, 'auth ok');
+      dec(opaque);
+      Check(DigestServerAuth(a, realm, 'GET', pointer(c), opaque, DigestUser,
+        authuser, authurl, 100) = asrRejected, 'connection change detection');
+      inc(opaque);
+      fDigestAlgo := daUndefined;
+      Check(DigestServerAuth(a, realm, 'GET', pointer(c), opaque, DigestUser,
+        authuser, authurl, 100) = asrUnknownUser, 'wrong algo');
+    end;
+  end;
+  Check(DigestServerInit(daUndefined, realm, '', '', opaque) = '');
+  // validate TDigestAuthServerFile
+  SetLength(users, 100);
+  SetLength(pwds, length(users));
+  for u := 0 to length(users) - 1 do
+  begin
+    FormatUtf8('user%', [u + 1], users[u]);
+    FormatUtf8('%pwd%', [u + 1, Random32], pwds[u]);
+  end;
+  realm := RandomUri(10);
+  fn := WorkDir + '.htdigest';
+  for a := daMD5 to high(a) do
+  begin
+    // initialize a new .htdigest file for each algorithm
+    fn := WorkDir + '.htdigest';
+    DeleteFile(fn);
+    fpwd := '';
+    if a = daMD5_Sess then
+      fpwd := 'encryptsecret';
+    dig := TDigestAuthServerFile.Create(realm, fn, fpwd, a);
+    try
+      Check(dig.Encrypted = (fpwd <> ''));
+      CheckEqual(dig.Count, 0);
+      Check(not dig.Modified);
+      for u := 0 to high(users) do
+        dig.SetCredential(users[u], pwds[u]);
+      Check(dig.Modified);
+      CheckEqual(dig.Count, length(users));
+      for u := 0 to high(users) do
+        Check(dig.CheckCredential(users[u], pwds[u]) = asrMatch, 'check1');
+    finally
+      dig.Free;
+    end;
+    // reload the file from scratch
+    dig := TDigestAuthServerFile.Create(realm, fn, fpwd, a);
+    try
+      // ensure everything was properly persisted
+      Check(dig.Encrypted = (fpwd <> ''));
+      CheckEqual(dig.Count, length(users), 'reload1');
+      Check(not dig.Modified);
+      for u := 0 to high(users) do
+        Check(dig.CheckCredential(users[u], pwds[u]) = asrMatch, 'check2');
+      Check(not dig.Modified);
+      // remove some entries
+      for u := 0 to length(users) shr 3 do
+        dig.SetCredential(users[u * 8], '');
+      Check(dig.Modified);
+      for u := 0 to high(users) do
+        Check((dig.CheckCredential(users[u], pwds[u]) = asrMatch) =
+              ((u and 7) <> 0), 'check3');
+      Check(dig.Modified);
+      dig.SaveToFile;
+      bak := StringFromFile(fn);
+      // add missing entries
+      Check(not dig.Modified);
+      for u := length(users) shr 3 downto 0 do
+        dig.SetCredential(users[u * 8], pwds[u * 8]);
+      Check(dig.Modified);
+      for u := 0 to high(users) do
+        Check(dig.CheckCredential(users[u], pwds[u]) = asrMatch, 'check4');
+      Check(dig.Modified);
+      // update some entries
+      for u := length(users) shr 3 downto 0 do
+      begin
+        pwds[u * 8] := pwds[u * 8] + 'new';
+        dig.SetCredential(users[u * 8], pwds[u * 8]);
+      end;
+      Check(dig.Modified);
+      for u := 0 to high(users) do
+        Check(dig.CheckCredential(users[u], pwds[u]) = asrMatch, 'check6');
+    finally
+      dig.Free;
+    end;
+    // reload after modifications, and validate authentication and file refresh
+    dig := TDigestAuthServerFile.Create(realm, fn, fpwd, a);
+    try
+      Check(dig.Encrypted = (fpwd <> ''));
+      Check(not dig.Modified);
+      CheckEqual(dig.Count, length(users), 'reload2');
+      for u := 0 to high(users) do
+        Check(dig.CheckCredential(users[u], pwds[u]) = asrMatch, 'check7');
+      // test actual client/server authentication of all users
+      for u := 0 to high(users) do
+      begin
+        opaque := Random64;
+        s := dig.DigestInit(opaque, 0, '', '');
+        Check(s <> '');
+        c := DigestClient(a, s, 'GET', url, users[u], pwds[u]);
+        Check(c <> '');
+        Check(dig.DigestAlgoMatch(c), 'algo');
+        Check(dig.DigestAuth(
+          pointer(c), 'GET', opaque, 0, authuser, authurl) = asrMatch, 'auth1');
+        CheckEqual(authuser, users[u]);
+        CheckEqual(authurl, url);
+        inc(opaque);
+        Check(dig.DigestAuth(
+          pointer(c), 'GET', opaque, 0, authuser, authurl) = asrRejected, 'auth2');
+        dec(opaque);
+        Check(dig.DigestAuth(
+          pointer(c), 'GET', opaque, 0, authuser, authurl) = asrMatch, '3');
+        CheckEqual(authuser, users[u]);
+        CheckEqual(authurl, url);
+        c := DigestClient(a, s, 'GET', url, users[u], pwds[u] + 'wrong');
+        Check(c <> '');
+        Check(dig.DigestAlgoMatch(c));
+        Check(dig.DigestAuth(pointer(c), 'GET', opaque, 0,
+          authuser, authurl) = asrIncorrectPassword, 'auth3');
+        CheckEqual(authuser, '');
+        CheckEqual(authurl, '');
+        s := dig.BasicInit;
+        Check(IdemPChar(pointer(s), 'WWW-AUTHENTICATE: BASIC '));
+        CheckEqual(BasicRealm(copy(s, 25, 100)), dig.Realm);
+        c := BasicClient(users[u], pwds[u]);
+        Check(c <> '');
+        Check(dig.BasicAuth(pointer(c), authuser));
+        CheckEqual(authuser, users[u]);
+        c := BasicClient(users[u], pwds[u] + 'wrong');
+        Check(c <> '');
+        Check(not dig.BasicAuth(pointer(c), authuser));
+        CheckEqual(authuser, '');
+      end;
+      // force file refresh (from previously bak state)
+      Check(not dig.RefreshFile);
+      FileFromString(bak, fn, false, Now - 1); // as previous day to refresh
+      Check(dig.RefreshFile);
+      Check(not dig.Modified);
+      for u := 0 to high(users) do
+        Check((dig.CheckCredential(users[u], pwds[u])  = asrMatch) =
+              ((u and 7) <> 0), 'check8');
+      Check(length(users) <> dig.Count);
+      // validate GetUsers method
+      users2 := dig.GetUsers;
+      CheckEqual(length(users2), dig.Count);
+      h32 := 0;
+      for u := 0 to high(users2) do
+      begin
+        Check(IdemPChar(pointer(users2[u]), 'USER'));
+        h32 := crc32c(h32, pointer(users2[u]), length(users2[u]));
+      end;
+      CheckEqual(h32, 2570601015);
+    finally
+      dig.Free;
+    end;
   end;
 end;
 
