@@ -369,19 +369,44 @@ function RawLdapSearchParse(const Response: TAsnObject; MessageId: integer;
 // are likely to use simple \ escape: it is easier to reject than escaping
 function LdapSafe(const Text: RawUtf8): boolean;
 
-/// returns true when no * \ character is part of a non-void Text
-// - works like LdapEscaped() so that ( ) could be later escaped
-function LdapValid(const Text: RawUtf8): boolean;
+const
+  /// the chars to escape for LdapEscape()
+  LDAP_ESC: array[{keepwildchar=}boolean] of TSynAnsicharSet = (
+    [#0 .. #31, '(', ')', '&', '|', '=', '!', '>', '<', '~', '/', '\', '*'],
+    [#0 .. #31, '(', ')', '&', '|', '=', '!', '>', '<', '~', '/', '\']);
 
-/// escape the ( ) characters as expected by LDAP
+  /// the chars to escape for LdapEscapeCN()
+  LDAP_CN: TSynAnsicharSet = (
+    ['.', '/', '\']);
+
+/// escape the ( ) & | = ! > < ~ * / \ characters as expected by LDAP filters
+// - you can let * untouched if KeepWildChar is set
+function LdapEscape(const Text: RawUtf8; KeepWildChar: boolean = false): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// returns true when no * \ character is part of a non-void name
+// - as called by LdapEscapeName() for sAMAccountName/distinguishedName
+function LdapValidName(const Text: RawUtf8): boolean;
+
+/// calls LdapValidName() then LdapEscape() or return false
 // - in the context of user or group distinguished name, i.e. will return
 // false if Text is void or contains any unexpected * or \ character
-function LdapEscaped(const Text: RawUtf8; var Safe: RawUtf8): boolean;
+function LdapEscapeName(const Text: RawUtf8; var Safe: RawUtf8): boolean; overload;
 
-/// escape the ( ) characters as expected by LDAP
+/// calls LdapValidName() then LdapEscape() or raise an exception
 // - in the context of user or group distinguished name, i.e. will raise an
 // ELdap exception if Text is void or contains any unexpected * or \ character
-function LdapEscape(const Text: RawUtf8): RawUtf8;
+function LdapEscapeName(const Text: RawUtf8): RawUtf8; overload;
+
+/// decode \xx or \c from a LDAP string value
+// - following e.g. https://www.rfc-editor.org/rfc/rfc4514#section-2.4
+// specifications about distinguished names encoding
+// - is also the reverse function of LdapEscape()
+function LdapUnescape(const Text: RawUtf8): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// escape the . / \ characters as expected by LDAP filters
+function LdapEscapeCN(const Text: RawUtf8): RawUtf8;
 
 
 { **************** CLDAP Client Functions }
@@ -767,6 +792,7 @@ type
 
   /// high-level information of a User or Group object in the LDAP database
   TLdapObject = object
+  public
     sAMAccountName, distinguishedName, canonicalName: RawUtf8;
     name, CN, description: RawUtf8;
     objectSid, objectGUID: RawUtf8;
@@ -782,6 +808,7 @@ type
   // - note that "member" array won't include nested groups - use rather the
   // TLdapClient.GetIsMemberOf() method or TLdapCheckMember class instead
   TLdapGroup = object(TLdapObject)
+  public
     primaryGroupID: cardinal;
     groupType: TGroupTypes;
     member: TRawUtf8DynArray;
@@ -793,6 +820,7 @@ type
   // - note that "memberof" array won't include nested groups - use rather the
   // TLdapClient.GetIsMemberOf() method or TLdapCheckMember class instead
   TLdapUser = object(TLdapObject)
+  public
     userPrincipalName, displayName, mail: RawUtf8;
     pwdLastSet, lastLogon: TDateTime;
     memberof: TRawUtf8DynArray;
@@ -1067,7 +1095,9 @@ type
     function ModifyDN(const obj, newRdn, newSuperior: RawUtf8;
       DeleteOldRdn: boolean): boolean;
     ///  remove an entry from the directory server
-    function Delete(const Obj: RawUtf8): boolean;
+    // - if the object has children and DeleteChildren is false, the deletion
+    // will not work and the result will be LDAP_RES_NOT_ALLOWED_ON_NON_LEAF
+    function Delete(const Obj: RawUtf8; DeleteChildren: boolean = false): boolean;
     /// determine whether a given entry has a specified attribute value
     function Compare(const Obj, AttributeValue: RawUtf8): boolean;
     /// call any LDAP v3 extended operations
@@ -1179,6 +1209,10 @@ type
       read fSearchPageSize write fSearchPageSize;
     /// cookie returned by paged search results
     // - use an empty string for the first search request
+    // - if not empty, you should call Search() again for the next page until it
+    // is eventually empty
+    // - you can force to an empty string to reset the pagination or for a new
+    // Search()
     property SearchCookie: RawUtf8
       read fSearchCookie write fSearchCookie;
     /// result of the search command
@@ -1250,6 +1284,7 @@ type
     function Authorize(const User: RawUtf8;
       GroupsAN: PRawUtf8DynArray = nil): boolean;
     /// main TOnAuthServer callback to check if a user is allowed to login
+    // - just redirect to the Authorize() method
     function BeforeAuth(Sender: TObject; const User: RawUtf8): boolean;
     /// remove any previously allowed groups
     procedure AllowGroupClear;
@@ -1942,6 +1977,8 @@ begin
     if (kind = '') or
        (value = '') then
       raise ELdap.CreateUtf8('DNToCN(%): invalid Distinguished Name', [DN]);
+    if not PropNameValid(pointer(value)) then // simple alphanum is just fine
+      value := LdapEscapeCN(LdapUnescape(value)); // may need some (un)escape
     LowerCaseSelf(kind);
     if kind = 'dc' then
     begin
@@ -1967,9 +2004,11 @@ begin
       0:
         if n <> length(value) then
           exit
-        else // consider null-terminated strings as non-binary, but truncate
+        else
+          // consider null-terminated strings as non-binary, but truncate
           SetLength(Value, n - 1);
-      1..8, 10..31:
+      1..8,
+      10..31:
         exit;
     end;
   result := false;
@@ -2100,7 +2139,7 @@ begin
   end;
 end;
 
-{$ifdef ASNUNSTABLE}
+{$ifdef ASNUNTESTED} // untested code from Lukas Gebauer: use with caution
 
 // not used nor fully tested
 function IntMibToStr(const Value: RawByteString): RawUtf8;
@@ -2167,7 +2206,8 @@ begin
     result[1] := AnsiChar(ord(result[1]) or $80);
 end;
 
-{$endif ASNUNSTABLE}
+{$endif ASNUNTESTED}
+
 
 { **************** LDAP Protocol Definitions }
 
@@ -2475,7 +2515,7 @@ begin
              (PosCharAny(pointer(Text), '*()\') = nil));
 end;
 
-function LdapValid(const Text: RawUtf8): boolean;
+function LdapValidName(const Text: RawUtf8): boolean;
 begin
   result := (Text <> '') and
             (PosExChar('*', Text) = 0) and
@@ -2483,31 +2523,47 @@ begin
             IsValidUtf8(Text);
 end;
 
-function LdapEscaped(const Text: RawUtf8; var Safe: RawUtf8): boolean;
+function LdapEscape(const Text: RawUtf8; KeepWildChar: boolean): RawUtf8;
 begin
-  result := LdapValid(Text);
+  if (Text = '') or
+     PropNameValid(pointer(Text)) then
+    result := Text // alphanum requires no escape nor memory allocation
+  else
+    result := EscapeHex(Text, LDAP_ESC[KeepWildChar], '\');
+end;
+
+function LdapEscapeName(const Text: RawUtf8; var Safe: RawUtf8): boolean;
+begin
+  result := LdapValidName(Text);
   if result then
-    Safe := StringReplaceAll(StringReplaceAll(Text, '(', '\28'), ')', '\29');
+    Safe := LdapEscape(Text);
 end;
 
-function LdapEscape(const Text: RawUtf8): RawUtf8;
+function LdapEscapeName(const Text: RawUtf8): RawUtf8;
 begin
-  if not LdapEscaped(Text, result) then
-    raise ELdap.CreateUtf8('Invalid input in LdapEscape(%)', [Text]);
+  if not LdapEscapeName(Text, result) then
+    raise ELdap.CreateUtf8('Invalid input name: %', [Text]);
 end;
 
-function LdapEscapeParenth(const Text: RawUtf8): RawUtf8;
+function LdapUnescape(const Text: RawUtf8): RawUtf8;
 begin
-  if PosExChar('\', Text) <> 0 then
-    raise ELdap.CreateUtf8('Invalid input in LdapEscapeParenth(%)', [Text]);
-  result := StringReplaceAll(StringReplaceAll(Text, '(', '\28'), ')', '\29');
+  result := UnescapeHex(Text, '\');
+end;
+
+function LdapEscapeCN(const Text: RawUtf8): RawUtf8;
+begin
+  if (Text = '') or
+     PropNameValid(pointer(Text)) then
+    result := Text // alphanum requires no escape nor memory allocation
+  else
+    result := EscapeChar(Text, LDAP_CN, '\');
 end;
 
 
 { **************** CLDAP Client Functions }
 
 const
-  NTVER: RawByteString = #6#0#0#0;
+  NTVER: RawByteString = #6#0#0#0; // '\00\00\00\06' does NOT work on CLDAP
 
 function Random31: cardinal;
 begin
@@ -2535,7 +2591,7 @@ begin
   if sock <> nil then
   try
     id := Random31;
-    FormatUtf8('(&(DnsDomain=%)(NtVer=%))', [LdapEscape(DomainName), NTVER], filter);
+    FormatUtf8('(&(DnsDomain=%)(NtVer=%))', [LdapEscapeName(DomainName), NTVER], filter);
     req := Asn(ASN1_SEQ, [
              Asn(id),
              RawLdapSearch('', false, filter, ['NetLogon'])]);
@@ -3289,7 +3345,7 @@ begin
   fTls := false;
   if not u.From(uri, '0') then
     exit;
-  if u.Scheme <> '' then // no scheme:// means LDAP
+  if u.Scheme <> '' then
     if IdemPChar(pointer(u.Scheme), 'LDAP') then
       case u.Scheme[5] of
         #0:
@@ -3300,7 +3356,9 @@ begin
         exit;
       end
     else
-      exit; // not the ldap[s]:// scheme
+      exit // not the ldap[s]:// scheme
+  else if u.Port = LDAP_TLS_PORT then
+    fTls := true; // no scheme:// means LDAP - force LDAPS on address:636
   fTargetHost := u.Server;
   if u.Port = '0' then
     u.Port := LDAP_DEFAULT_PORT[fTls];
@@ -3836,18 +3894,22 @@ begin
             needencrypt := false; // fSecContextEncrypt = false by default
           end
         else if seclayers * KLS_EXPECTED = [] then
-          // we only support signing sealing
+          // we only support signing+sealing
           exit
-        else if needencrypt then // MS AD requires signing/sealing
+        else
+        // if we reached here, the server asked for signing+sealing
+        if needencrypt or             // from MS AD
+           not fSock.TLS.Enabled then // ldap_require_strong_auth on OpenLDAP
         begin
           // return the supported algorithm, with a 64KB maximum message size
           if secmaxsize > 64 shl 10 then
-            secmaxsize := 64 shl 10; // evolution: call gss_wrap_size_limit?
+            secmaxsize := 64 shl 10;
+            // note: calling gss_wrap_size_limit is pointless due to 16bit limit
           PCardinal(datain)^ := bswap32(secmaxsize) + byte(KLS_EXPECTED);
           needencrypt := true; // fSecContextEncrypt = true = sign and seal
         end
         else
-          // non MS-AD return LDAP_RES_UNWILLING_TO_PERFORM for KLS_EXPECTED :(
+          // needed for OpenLDAP over TLS to avoid LDAP_RES_UNWILLING_TO_PERFORM
           PCardinal(datain)^ := 0;
         if AuthIdentify <> '' then
           Append(datain, AuthIdentify);
@@ -3962,8 +4024,8 @@ var
 begin
   result := false;
   if not Connected or
-     not LdapEscaped(ComputerParentDN, ParentSafe) or
-     not LdapEscaped(ComputerName, ComputerSafe) then
+     not LdapEscapeName(ComputerParentDN, ParentSafe) or
+     not LdapEscapeName(ComputerName, ComputerSafe) then
     exit;
   ComputerDN := NetConcat(['CN=', ComputerSafe, ',', ParentSafe]);
   ComputerSam := NetConcat([UpperCase(ComputerSafe), '$']);
@@ -4021,12 +4083,33 @@ end;
 
 // https://ldap.com/ldapv3-wire-protocol-reference-delete
 
-function TLdapClient.Delete(const Obj: RawUtf8): boolean;
+function TLdapClient.Delete(const Obj: RawUtf8; DeleteChildren: boolean): boolean;
+var
+  PreviousSearchScope: TLdapSearchScope;
+  Children: TRawUtf8DynArray;
+  i: PtrInt;
 begin
   result := false;
   if not Connected then
     exit;
-  SendAndReceive(Asn(obj, LDAP_ASN1_DEL_REQUEST));
+  PreviousSearchScope := SearchScope;
+  SendAndReceive(Asn(Obj, LDAP_ASN1_DEL_REQUEST));
+  if (fResultCode = LDAP_RES_NOT_ALLOWED_ON_NON_LEAF) and
+     DeleteChildren then
+    // Obj had children and DeleteChildren is True
+    try
+      SearchScope := lssSingleLevel;
+      Search(Obj, false, '', []);
+      Children := fSearchResult.ObjectNames;
+      for i := 0 to high(Children) do
+        if not Delete(Children[i], {DeleteChildren=}true) then
+          break; // stop on error
+      if fResultCode = LDAP_RES_SUCCESS then
+        // retry Obj deletion after children have been successfully removed
+        SendAndReceive(Asn(Obj, LDAP_ASN1_DEL_REQUEST));
+    finally
+      SearchScope := PreviousSearchScope;
+    end;
   result := fResultCode = LDAP_RES_SUCCESS;
 end;
 
@@ -4240,11 +4323,11 @@ function InfoFilter(AT: cardinal; const AN, DN, UPN, CustomFilter: RawUtf8): Raw
 begin
   result := '';
   if AN <> '' then
-    FormatUtf8('(sAMAccountName=%)', [LdapEscape(AN)], result);
+    FormatUtf8('(sAMAccountName=%)', [LdapEscapeName(AN)], result);
   if DN <> '' then
-    result := FormatUtf8('%(distinguishedName=%)', [result, LdapEscape(DN)]);
+    result := FormatUtf8('%(distinguishedName=%)', [result, LdapEscapeName(DN)]);
   if UPN <> '' then
-    result := FormatUtf8('%(userPrincipalName=%)', [result, LdapEscape(UPN)]);
+    result := FormatUtf8('%(userPrincipalName=%)', [result, LdapEscapeName(UPN)]);
   if result = '' then
   begin
     result := '(cn=)'; // return no answer whatsoever
@@ -4339,8 +4422,8 @@ begin
     f := FormatUtf8('(%%=%)%', [uacname, AND_FLAG, Uac, f]);
   if unUac <> 0 then
     f := FormatUtf8('(!(%%=%))%', [uacname, AND_FLAG, unUac, f]);
-  if Match <> '' then // allow * wildchar in Match - but escape parenthesis
-    f := FormatUtf8('%(%=%)', [f, AttributeName, LdapEscapeParenth(Match)]);
+  if Match <> '' then // allow * wildchar in Match - but escape others
+    f := FormatUtf8('%(%=%)', [f, AttributeName, LdapEscape(Match, {keep*=}true)]);
   FormatUtf8('(sAMAccountType=%)', [AT], filter);
   if f <> '' then
     filter := FormatUtf8('(&%%)', [filter, f]);
@@ -4489,12 +4572,12 @@ var
   i, n: PtrInt;
 begin
   result := false;
-  if not LdapEscaped(UserDN, user) then
+  if not LdapEscapeName(UserDN, user) then
     exit;
   n := 0;
   for i := 0 to high(GroupAN) do
     if GroupAN[i] <> '' then
-      if LdapEscaped(GroupAN[i], grp) then
+      if LdapEscapeName(GroupAN[i], grp) then
       begin
         filter := FormatUtf8('%(sAMAccountName=%)', [filter, grp]);
         inc(n);
@@ -4503,7 +4586,7 @@ begin
         exit;
   for i := 0 to high(GroupDN) do
     if GroupDN[i] <> '' then
-      if LdapEscaped(GroupDN[i], grp) then
+      if LdapEscapeName(GroupDN[i], grp) then
       begin
         filter := FormatUtf8('%(distinguishedName=%)', [filter, grp]);
         inc(n);
@@ -4670,7 +4753,7 @@ begin
   if ((fGroupAN = nil) and
       (fGroupDN = nil) and
       (fGroupID = nil)) or
-     not LdapValid(User) then
+     not LdapValidName(User) then
     exit;
   tix := GetTickCount64;
   if not fBound and

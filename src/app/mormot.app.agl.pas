@@ -1342,7 +1342,7 @@ function Exec(Sender: TSynAngelize; Log: TSynLog; Service: TSynAngelizeService;
   Action: TAglAction; Ctxt: TAglContext; const Param: RawUtf8): boolean;
 var
   ms: integer;
-  p, st: RawUtf8;
+  p: RawUtf8;
   fn, lf, env, wd: TFileName;
   ls: TFileStreamEx;
   status, expectedstatus, sec: integer;
@@ -1366,9 +1366,12 @@ var
   end;
 
 begin
-  expectedstatus := 0; // e.g. executable file exitcode = 0 as success
-  if Split(Param, '=', p, st) then
-    ToInteger(st, expectedstatus);
+  if not ToInteger(SplitRight(Param, '=', @p), expectedstatus) or
+     (p = '') then
+  begin
+    p := Param; // was not a valid "http:...=200" input
+    expectedstatus := 0; // e.g. executable file exitcode = 0 as success
+  end;
   if p = '' then
     p := Service.Run; // "exec" = "exec:%run%" (exename or servicename)
   case Action of

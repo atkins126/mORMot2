@@ -1264,6 +1264,7 @@ type
   {$else}
   TBinaryCookieGenerator = object
   {$endif USERECORDWITHMETHODS}
+  public
     /// the cookie name, used for storage in the client side HTTP headers
     // - is not part of the Generate/Validate content, but could be used
     // when the cookie is actually stored in HTTP headers
@@ -2121,7 +2122,7 @@ type
   // - could be seen as a certificates store of the poor (tm)
   // - per usage lookup is in O(1) so faster than iterative ICryptCert.GetUsage
   // - also features simple PEM / binary serialization methods
-  // - should be initialized by Clear at startup, or set as a TObject field
+  // - should be initialized by Clear at startup, or set as a class field
   {$ifdef USERECORDWITHMETHODS}
   TCryptCertPerUsage = record
   {$else}
@@ -2133,7 +2134,7 @@ type
     /// all usages currently stored in this list
     Usages: TCryptCertUsages;
     /// lookup table used by GetUsage()/PerUsage()
-    // - 0 means no certificate, or store the index in Cert[] + 1
+    // - 0 means no certificate, or store the index in List[] + 1
     Index: array[TCryptCertUsage] of byte;
     /// reset all storage and indexes
     procedure Clear;

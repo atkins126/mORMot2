@@ -2119,7 +2119,8 @@ end;
 
 function NullableFloatToValue(const V: TNullableFloat): Double;
 begin
-  VariantToDouble(PVariant(@V)^, result);
+  if not VariantToDouble(PVariant(@V)^, result) then
+    result := 0;
 end;
 
 // TNullableCurrency
@@ -2163,12 +2164,13 @@ function NullableDateTimeToValue(const V: TNullableDateTime; out Value: TDateTim
 begin
   Value := 0;
   result := not VarDataIsEmptyOrNull(@V) and
-            VariantToDouble(PVariant(@V)^, Double(Value));
+            VariantToDateTime(PVariant(@V)^, Value);
 end;
 
 function NullableDateTimeToValue(const V: TNullableDateTime): TDateTime;
 begin
-  VariantToDouble(PVariant(@V)^, Double(result));
+  if not VariantToDateTime(PVariant(@V)^, result) then
+    result := 0;
 end;
 
 // TNullableTimeLog
@@ -4180,6 +4182,8 @@ begin
     end
   else
     W.AddShort('insert into ');
+  // PostgreSQL has no UPSERT but could be emulated with ON CONFLICT syntax
+  // https://www.postgresqltutorial.com/postgresql-tutorial/postgresql-upsert
 end;
 
 procedure InitializeUnit;

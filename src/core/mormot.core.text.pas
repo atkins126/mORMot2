@@ -954,6 +954,32 @@ function HtmlEscape(const text: RawUtf8;
 function HtmlEscapeString(const text: string;
   fmt: TTextWriterHtmlFormat = hfAnyWhere): RawUtf8;
 
+/// escape as \xx hexadecimal some chars from a set into a pre-allocated buffer
+// - dest^ should have at least srclen * 3 bytes, for \## trios
+function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
+  const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): PUtf8Char;
+
+/// escape as \xx hexadecimal some chars from a set into a new RawUtf8 string
+function EscapeHex(const src: RawUtf8;
+  const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): RawUtf8;
+
+/// un-escape \xx or \c encoded chars from a pre-allocated buffer
+// - dest^ should have at least the same length than src^
+function UnescapeHexBuffer(src, dest: PUtf8Char; escape: AnsiChar = '\'): PUtf8Char;
+
+/// un-escape \xx or \c encoded chars into a new RawUtf8 string
+function UnescapeHex(const src: RawUtf8; escape: AnsiChar = '\'): RawUtf8;
+
+/// escape as \char pair some chars from a set into a pre-allocated buffer
+// - dest^ should have at least srclen * 2 bytes, for \char pairs
+// - by definition, escape should be part of the toescape set
+function EscapeCharBuffer(src, dest: PUtf8Char; srclen: integer;
+  const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): PUtf8Char;
+
+/// escape as \char pair some chars from a set into a new RawUtf8 string
+// - by definition, escape should be part of the toescape set
+function EscapeChar(const src: RawUtf8;
+  const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): RawUtf8;
 
 const
   /// TTextWriter JSON serialization options focusing of sets support
@@ -5060,6 +5086,114 @@ begin
     end;
 end;
 
+function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
+  const toescape: TSynAnsicharSet; escape: AnsiChar): PUtf8Char;
+begin
+  result := dest;
+  if srclen > 0 then
+    repeat
+      if src^ in toescape then
+      begin
+        result^ := escape;
+        result := pointer(ByteToHex(pointer(result + 1), ord(src^)));
+      end
+      else
+      begin
+        result^ := src^;
+        inc(result);
+      end;
+      inc(src);
+      dec(srclen);
+    until srclen = 0;
+end;
+
+function EscapeHex(const src: RawUtf8;
+  const toescape: TSynAnsicharSet; escape: AnsiChar): RawUtf8;
+var
+  l: PtrInt;
+begin
+  l := length(src);
+  if l <> 0 then
+  begin
+    FastSetString(result, nil, l * 3); // allocate maximum size
+    l := EscapeHexBuffer(pointer(src), pointer(result), l,
+      toescape, escape) - pointer(result);
+  end;
+  FakeSetLength(result, l); // return in-place with no realloc
+end;
+
+function UnescapeHexBuffer(src, dest: PUtf8Char; escape: AnsiChar): PUtf8Char;
+var
+  c: AnsiChar;
+begin
+  result := dest;
+  if src <> nil then
+    while src^ <> #0 do
+    begin
+      if src^ = escape then
+      begin
+        inc(src);
+        if mormot.core.text.HexToBin(PAnsiChar(src), PByte(@c), 1) then // \xx
+        begin
+          result^ := c;
+          inc(src, 2);
+          inc(result);
+          continue;
+        end;
+        if src^ = #0 then // expect valid \c
+          break;
+      end;
+      result^ := src^;
+      inc(src);
+      inc(result);
+    end;
+end;
+
+function UnescapeHex(const src: RawUtf8; escape: AnsiChar): RawUtf8;
+begin
+  if PosExChar(escape, src) = 0 then
+    result := src // no unescape needed
+  else
+  begin
+    FastSetString(result, nil, length(src)); // allocate maximum size
+    FakeSetLength(result, UnescapeHexBuffer(
+      pointer(src), pointer(result), escape) - pointer(result));
+  end;
+end;
+
+function EscapeCharBuffer(src, dest: PUtf8Char; srclen: integer;
+  const toescape: TSynAnsicharSet; escape: AnsiChar): PUtf8Char;
+begin
+  result := dest;
+  if srclen > 0 then
+    repeat
+      if src^ in toescape then
+      begin
+        result^ := escape;
+        inc(result);
+      end;
+      result^ := src^;
+      inc(result);
+      inc(src);
+      dec(srclen);
+    until srclen = 0;
+end;
+
+function EscapeChar(const src: RawUtf8;
+  const toescape: TSynAnsicharSet; escape: AnsiChar): RawUtf8;
+var
+  l: PtrInt;
+begin
+  l := length(src);
+  if l <> 0 then
+  begin
+    FastSetString(result, nil, l * 2); // allocate maximum size
+    l := EscapeCharBuffer(pointer(src), pointer(result), l,
+      toescape, escape) - pointer(result);
+  end;
+  FakeSetLength(result, l); // return in-place with no realloc
+end;
+
 
 { ************ Numbers (integers or floats) to Text Conversion }
 
@@ -7701,6 +7835,7 @@ end;
 type
   // 3KB info on stack - only supported token is %, with any const arguments
   TFormatUtf8 = object
+  public
     last: PTempUtf8;
     L, argN: PtrInt;
     blocks: array[0..63] of TTempUtf8; // to avoid most heap allocations

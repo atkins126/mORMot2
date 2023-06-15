@@ -64,6 +64,15 @@ type
   // - stored in compressed form, i.e. each private key consumes 32 bytes of memory
   TEccPrivateKey = array[0..ECC_BYTES - 1] of byte;
 
+  /// store a public key and a private key for ECC secp256r1 cryptography
+  // - used e.g. for ECDHE shared secret computation, or to store a full key
+  TEccKeyPair = packed record
+    /// a public key for ECC secp256r1 cryptography
+    pub: TEccPublicKey;
+    /// a private key for ECC secp256r1 cryptography
+    priv: TEccPrivateKey;
+  end;
+
   /// store a 256-bit hash, as expected by ECC secp256r1 cryptography
   // - see e.g. Ecc256r1Sign() and Ecc256r1Verify() functions
   TEccHash = THash256;
@@ -87,6 +96,7 @@ type
   PEccHash = ^TEccHash;
   PEccSignature = ^TEccSignature;
   PEccSecretKey = ^TEccSecretKey;
+  PEccKeyPair = ^TEccKeyPair;
 
 var
   /// create a public/private key pair
@@ -423,6 +433,7 @@ type
   {$else}
   TEccSignatureCertifiedContent = object
   {$endif USERECORDWITHMETHODS}
+  public
     /// the TEccSignatureCertificated format version
     Version: word;
     /// when this signature was generated
@@ -472,6 +483,7 @@ type
   {$else}
   TEccCertificateRevocation = object
   {$endif USERECORDWITHMETHODS}
+  public
     /// contains the 65535 fixed number (ECC_REVOC_MAGIC)
     // - make a clear distinction with TEccCertificateContentV1.Version
     // - will be Base64-encoded as '/w...' so could be recognized from

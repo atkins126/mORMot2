@@ -36,6 +36,7 @@ uses
 type
   // see http://floodyberry.wordpress.com/2007/04/14/utf-8-conversion-tricks
   TUtf8Table = object
+  public
     Lookup: array[byte] of byte;
     Extra: array[0..6] of record
       offset, minimum: cardinal;
@@ -1167,7 +1168,6 @@ var
 // - following classic pascal naming convention, first char must be alphabetical
 // or '_' (i.e. not a digit), following chars can be alphanumerical or '_'
 function PropNameValid(P: PUtf8Char): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
 
 /// returns TRUE if the given text buffers contains A..Z,0..9,_ characters
 // - use it with property names values (i.e. only including A..Z,0..9,_ chars)
@@ -5014,11 +5014,7 @@ begin
      (L <> 0) then
   begin
     FastSetRawByteString(result, nil, L * 3);
-    L := Utf8ToWideChar(pointer(result), P, L);
-    if L = 0 then
-      result := ''
-    else
-      FakeLength(result, L);
+    FakeSetLength(result, Utf8ToWideChar(pointer(result), P, L));
   end
   else
     result := '';
@@ -7529,13 +7525,7 @@ begin
           P[n] := text[j];
           inc(n);
         end;
-      if n = 0 then
-        result := ''
-      else
-      begin
-        PStrLen(P - _STRLEN)^ := n; // in-place truncation
-        P[n] := #0;
-      end;
+      FakeSetLength(result, n);
       exit;
     end;
   result := text; // no control char found
@@ -7561,13 +7551,7 @@ begin
           P[n] := text[j];
           inc(n);
         end;
-      if n = 0 then
-        result := ''
-      else
-      begin
-        PStrLen(P - _STRLEN)^ := n; // in-place truncation
-        P[n] := #0;
-      end;
+      FakeSetLength(result, n);
       exit;
     end;
   result := text; // no exclude char found
@@ -8996,6 +8980,7 @@ end;
 type
   /// used internally for faster quick sort
   TQuickSortRawUtf8 = object
+  public
     Compare: TUtf8Compare;
     CoValues: PIntegerArray;
     pivot: pointer;
@@ -9144,6 +9129,7 @@ end;
 type
   // 20,016 bytes for full Unicode 10.0 case folding branchless conversion
   TUnicodeUpperTable = object
+  public
     Block: array[0..37, 0..127] of integer;
     IndexHi: array[0..271] of byte;
     IndexLo: array[0..8, 0..31] of byte;

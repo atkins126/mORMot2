@@ -623,6 +623,31 @@ begin
   CheckEqual(DNToCN(
     'cn=JDoe,ou=Widgets,ou=Manufacturing,dc=USRegion,dc=OrgName,dc=com'),
     'USRegion.OrgName.com/Manufacturing/Widgets/JDoe');
+  // validate LDAP escape/unescape
+  for c := 0 to 200 do
+  begin
+    u := RandomIdentifier(c); // alphanums are never escaped
+    CheckEqual(LdapEscape(u), u);
+    CheckEqual(LdapUnescape(u), u);
+    if u <> '' then
+      CheckEqual(LdapEscapeName(u), u);
+    CheckEqual(LdapEscapeCN(u), u);
+    u := RandomAnsi7(c);
+    CheckEqual(LdapUnescape(LdapEscape(u)), u);
+  end;
+  CheckEqual(LdapUnescape('abc\>'), 'abc>');
+  CheckEqual(LdapUnescape('abc\>e'), 'abc>e');
+  CheckEqual(LdapUnescape('abc\'), 'abc');
+  Check(LdapSafe(''));
+  Check(LdapSafe('abc'));
+  Check(LdapSafe('ab cd'));
+  Check(LdapSafe('@abc'));
+  Check(not LdapSafe('\abc'));
+  Check(not LdapSafe('abc*'));
+  Check(not LdapSafe('a(bc'));
+  Check(not LdapSafe('abc)'));
+  Check(not LdapSafe('*'));
+  Check(not LdapSafe('()'));
   // validate LDAP settings
   l := TLdapClientSettings.Create;
   try
@@ -649,16 +674,6 @@ begin
   finally
     l.Free;
   end;
-  Check(LdapSafe(''));
-  Check(LdapSafe('abc'));
-  Check(LdapSafe('ab cd'));
-  Check(LdapSafe('@abc'));
-  Check(not LdapSafe('\abc'));
-  Check(not LdapSafe('abc*'));
-  Check(not LdapSafe('a(bc'));
-  Check(not LdapSafe('abc)'));
-  Check(not LdapSafe('*'));
-  Check(not LdapSafe('()'));
   l := TLdapClientSettings.Create;
   try
     CheckEqual(l.TargetUri, '');
@@ -684,7 +699,7 @@ end;
 procedure TNetworkProtocols.TunnelExecute(Sender: TObject);
 begin
   // one of the two handshakes should be done in another thread
-  Check((Sender as TTunnelLocal).Open(session, options, 1000, appsec) <> 0);
+  Check((Sender as TTunnelLocal).Open(session, options, 1000, appsec, cLocalhost) <> 0);
 end;
 
 procedure TNetworkProtocols.TunnelExecuted(Sender: TObject);
@@ -701,7 +716,6 @@ var
   sent, received, sent2, received2: RawByteString;
   clientsock, serversock: TNetSocket;
 begin
-  exit; // FIXME
   // setup the two instances with the specified options and certificates
   clientinstance := TTunnelLocalClient.Create;
   clientinstance.SignCert := clientcert;
@@ -720,15 +734,15 @@ begin
   appsec := RandomAnsi7(10);
   TLoggedWorkThread.Create(
     TSynLog, 'servertunnel', serverinstance, TunnelExecute, TunnelExecuted);
-  Check(clienttunnel.Open(session, options, 1000, appsec) <> 0);
+  Check(clienttunnel.Open(session, options, 1000, appsec, clocalhost) <> 0);
   SleepHiRes(1000, tunnelexecutedone);
   Check(tunnelexecutedone, 'TunnelExecuted');
   tunnelexecutedone := false; // for the next run
   Check(clienttunnel.LocalPort <> '');
   Check(servertunnel.LocalPort <> '');
   Check(servertunnel.LocalPort <> clienttunnel.LocalPort, 'ports');
-  Check(clienttunnel.Encrypted = (toEcdhe in options), 'cEncrypted');
-  Check(servertunnel.Encrypted = (toEcdhe in options), 'sEncrypted');
+  Check(clienttunnel.Encrypted = (toEncrypted * options <> []), 'cEncrypted');
+  Check(servertunnel.Encrypted = (toEncrypted * options <> []), 'cEncrypted');
   Check(NewSocket('127.0.0.1', clienttunnel.LocalPort, nlTcp, {bind=}false,
     1000, 1000, 1000, 0, clientsock) = nrOk);
   Check(NewSocket('127.0.0.1', servertunnel.LocalPort, nlTcp, {bind=}false,
@@ -769,20 +783,28 @@ begin
 end;
 
 procedure TNetworkProtocols._TTunnelLocal;
+var
+  c, s: ICryptCert;
 begin
+  c := Cert('syn-es256').Generate([cuDigitalSignature]);
+  s := Cert('syn-es256').Generate([cuDigitalSignature]);
   // plain tunnelling
+  TunnelTest(nil, nil);
+  // symmetric secret encrypted tunnelling
+  options := [toEncrypt];
   TunnelTest(nil, nil);
   // ECDHE encrypted tunnelling
   options := [toEcdhe];
   TunnelTest(nil, nil);
   // tunnelling with mutual authentication
   options := [];
-  TunnelTest(Cert('syn-es256').Generate([cuDigitalSignature]),
-             Cert('syn-es256').Generate([cuDigitalSignature]));
+  TunnelTest(c, s);
+  // symmetric secret encrypted tunnelling with mutual authentication
+  options := [toEncrypt];
+  TunnelTest(c, s);
   // ECDHE encrypted tunnelling with mutual authentication
   options := [toEcdhe];
-  TunnelTest(Cert('syn-es256').Generate([cuDigitalSignature]),
-             Cert('syn-es256').Generate([cuDigitalSignature]));
+  TunnelTest(c, s);
 end;
 
 end.

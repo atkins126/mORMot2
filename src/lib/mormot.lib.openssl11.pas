@@ -1775,6 +1775,7 @@ type
 
   /// wrapper to the PKCS12 abstract pointer
   PKCS12 = object
+  public
     /// parse and extract the private key, certificate and CAs in this PKCS12 store
     // - use pointers to result structures, nil if one is not needed
     // - caller should call needed privatekey^.Free, cert^.Free and ca^.FreeX509
@@ -7424,7 +7425,7 @@ begin
     EOpenSsl.Check( // second call to make the actual encryption
       EVP_PKEY_encrypt(ctx, pointer(result), len, pointer(Content), Length(Content)),
       'EVP_PKEY_encrypt2');
-    FakeLength(result, len); // previous len was the max, now is final size
+    FakeSetLength(result, len); // previous len was the max, now is final size
   finally
     EVP_PKEY_CTX_free(ctx);
   end;
@@ -7452,7 +7453,7 @@ begin
     EOpenSsl.Check(
       EVP_PKEY_decrypt(ctx, pointer(result), len, pointer(Content), Length(Content)),
       'EVP_PKEY_decrypt2');
-    FakeLength(result, len);
+    FakeSetLength(result, len);
   finally
     EVP_PKEY_CTX_free(ctx);
   end;

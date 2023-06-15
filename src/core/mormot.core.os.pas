@@ -1143,8 +1143,8 @@ type
     fFileName: TFileName;
     fBuildDateTime: TDateTime;
     fVersionInfo, fUserAgent: RawUtf8;
-    /// change the version (not to be used in most cases)
-    procedure SetVersion(aMajor, aMinor, aRelease, aBuild: integer);
+    // change the version - returns true if supplied values are actually new
+    function SetVersion(aMajor, aMinor, aRelease, aBuild: integer): boolean;
   public
     /// executable major version number
     Major: integer;
@@ -2243,7 +2243,7 @@ function GetModuleHandle(lpModuleName: PChar): HMODULE;
 
 /// post a message to the Windows message queue
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
-function PostMessage(hWnd: HWND; Msg:UINT; wParam: WPARAM; lParam: LPARAM): BOOL;
+function PostMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): BOOL;
 
 /// retrieves the current stack trace
 // - only available since Windows XP
@@ -2903,6 +2903,7 @@ type
   /// calling context when intercepting exceptions
   // - used e.g. for TSynLogExceptionToStr or RawExceptionIntercept() handlers
   TSynLogExceptionContext = object
+  public
     /// the raised exception class
     EClass: ExceptClass;
     /// the Delphi Exception instance
@@ -4339,6 +4340,7 @@ type
   // - just wrap TLecuyer with a TLighLock
   // - should not be used, unless may be slightly faster than a threadvar
   TLecuyerThreadSafe = object
+  public
     Safe: TLightLock;
     Generator: TLecuyer;
     /// compute the next 32-bit generated value
@@ -7431,8 +7433,14 @@ begin
     result := Major shl 16 + Minor shl 8 + Release;
 end;
 
-procedure TFileVersion.SetVersion(aMajor, aMinor, aRelease, aBuild: integer);
+function TFileVersion.SetVersion(aMajor, aMinor, aRelease, aBuild: integer): boolean;
 begin
+  result := (Major <> aMajor) or
+            (Minor <> aMinor) or
+            (Release <> aRelease) or
+            (Build <> aBuild);
+  if not result then
+    exit;
   Major := aMajor;
   Minor := aMinor;
   Release := aRelease;
@@ -7607,8 +7615,8 @@ end;
 
 procedure SetExecutableVersion(aMajor, aMinor, aRelease, aBuild: integer);
 begin
-  Executable.Version.SetVersion(aMajor, aMinor, aRelease, aBuild);
-  ComputeExecutableHash;
+  if Executable.Version.SetVersion(aMajor, aMinor, aRelease, aBuild) then
+    ComputeExecutableHash; // re-compute if changed
 end;
 
 
@@ -8135,15 +8143,15 @@ notfound:
       end;
 end;
 
+{$ifdef CPUINTEL} // don't mess with raw SMBIOS encoding outside of Intel/AMD
+
 // from DSP0134 3.6.0 System Management BIOS (SMBIOS) Reference Specification
 const
-  SMB_START  = $000f0000;
-  SMB_STOP   = $00100000;
-  SMB_ANCHOR = $5f4d535f;  // _SM_
-  SMB_INT4   = $494d445f;  // _DMI
-  SMB_INT5   = $5f;        // _
-  SMB_ANCHOR4 = $334d535f; // _SM3
-  SMB_ANCHOR5 = $5f;       // _
+  SMB_ANCHOR  = $5f4d535f;  // _SM_
+  SMB_INT4    = $494d445f;  // _DMI
+  SMB_INT5    = $5f;        // _
+  SMB_ANCHOR4 = $334d535f;  // _SM3
+  SMB_ANCHOR5 = $5f;        // _
 
 type
   TSmbEntryPoint32 = packed record
@@ -8190,7 +8198,7 @@ begin
     inc(cs, PByteArray(p)[i]);
   if cs <> 0 then
   begin
-    result := 0;
+    result := 0; // invalid checksum
     exit;
   end;
   result := p^.StructAddr;
@@ -8221,7 +8229,7 @@ begin
 end;
 
 // caller should then try to decode SMB from pointer(result) + info.Len
-function SearchSmbios(const mem: RawByteString; var info: TRawSmbiosInfo): QWord;
+function SearchSmbios(const mem: RawByteString; var info: TRawSmbiosInfo): PtrUInt;
 var
   p, pend: PSmbEntryPoint32;
 begin
@@ -8250,43 +8258,7 @@ begin
   until PtrUInt(p) >= PtrUInt(pend);
 end;
 
-function GetRawSmbiosFromMem(var info: TRawSmbiosInfo): boolean;
-var
-  mem: RawByteString;
-  addr: QWord;
-  {$ifdef OSLINUX}
-  fromsysfs: boolean;
-  {$endif OSLINUX}
-begin
-  result := false;
-  Finalize(info.Data);
-  FillCharFast(info, SizeOf(info), 0);
-  {$ifdef OSLINUX}
-  // on Linux, first try from sysfs tables
-  fromsysfs := false;
-  mem := StringFromFile('/sys/firmware/dmi/tables/smbios_entry_point', true);
-  if mem <> '' then
-    fromsysfs := true
-  else
-  {$endif OSLINUX}
-    // then try to read system EFI entries
-    mem := GetSmbEfiMem;
-  if mem = '' then
-    // last fallback to raw memory reading (won't work on modern/EFI systems)
-    mem := ReadSystemMemory(SMB_START, SMB_STOP - SMB_START);
-  if mem = '' then
-    exit;
-  addr := SearchSmbios(mem, info);
-  if addr = 0 then
-    exit;
-  {$ifdef OSLINUX}
-  if fromsysfs then
-    info.data := StringFromFile('/sys/firmware/dmi/tables/DMI', {nosize=}true)
-  else
-  {$endif OSLINUX}
-    info.data := ReadSystemMemory(addr, info.Length);
-  result := info.data <> '';
-end;
+{$endif CPUINTEL}
 
 procedure ComputeGetSmbios;
 begin
@@ -8294,7 +8266,9 @@ begin
   try
     if not _SmbiosRetrieved then
     begin
-       _SmbiosRetrieved := true;
+      _SmbiosRetrieved := true;
+      Finalize(RawSmbios.Data);
+      FillCharFast(RawSmbios, SizeOf(RawSmbios), 0);
       if _GetRawSmbios(RawSmbios) then // OS specific call
          if DecodeSmbios(RawSmbios, _Smbios) <> 0 then
          begin
@@ -8540,7 +8514,7 @@ begin
   result := PtrUInt(s) - PtrUInt(raw.Data);
   raw.Length := result;
   if length(raw.Data) <> result then
-    FakeLength(raw.Data, result);
+    FakeSetLength(raw.Data, result);
 end;
 
 

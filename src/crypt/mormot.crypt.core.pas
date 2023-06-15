@@ -5311,10 +5311,7 @@ begin
   begin
     // fast in-place set result length without any memory resize
     dec(InputLen, padding);
-    if InputLen = 0 then
-      result := ''
-    else
-      FakeLength(result, InputLen);
+    FakeSetLength(result, InputLen);
   end;
 end;
 
@@ -6812,7 +6809,7 @@ begin
   begin
     result.Free;
     AesModeIvUpdated[aesMode] := TAesInternal[aesMode]; // our code sets the IV
-    result := TAesInternal[aesMode].Create(key, keySizeBits); // fallback
+    result := TAesInternal[aesMode].Create(key, keySizeBits); // fallback (once)
   end;
 end;
 
@@ -10225,10 +10222,12 @@ function HTDigest(const user, realm, pass: RawByteString): RawUtf8;
 //    hash=`echo -n "$user:$realm:$pass" | md5sum | cut -b -32`
 //    echo "$user:$realm:$hash"
 var
-  tmp: RawByteString;
+  tmp: RawUtf8;
 begin
-  tmp := user + ':' + realm + ':';
-  result := tmp + Md5(tmp + pass);
+  FormatUtf8('%:%:', [user, realm], tmp);
+  result := tmp;
+  Append(tmp, pass);
+  Append(result, Md5(tmp));
 end;
 
 function Md4Buf(const Buffer; Len: cardinal): THash128;
