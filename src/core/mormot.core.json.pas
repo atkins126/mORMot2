@@ -5336,6 +5336,7 @@ begin
   begin
     // direct value write (record field or plain class property)
     c.Info := p^.Value;
+    c.Prop := p;
     TRttiJsonSave(c.Info.JsonSave)(Data + p^.OffsetGet, c);
   end
   else
@@ -5482,42 +5483,44 @@ procedure _JS_RttiCustom(Data: PAnsiChar; const Ctxt: TJsonSaveContext);
 var
   nfo: TRttiJson;
   p: PRttiCustomProp;
+  t: TClass;
   n: integer;
   flags: set of (isNotFirst, noStored, noDefault, noHook, noVoid, isHumanReadable);
-  c: TJsonSaveContext;
+  c: TJsonSaveContext; // dedicated context used for fields/properties
 begin
   c.W := Ctxt.W;
   c.Options := Ctxt.Options;
   nfo := TRttiJson(Ctxt.Info);
-  if nfo.fJsonWriter.Code <> nil then // TRttiJson.RegisterCustomSerializer()
-  begin
-    if nfo.Kind = rkClass then
-      Data := PPointer(Data)^;
-    TOnRttiJsonWrite(nfo.fJsonWriter)(c.W, Data, c.Options); // e.g. TOrm.RttiJsonWrite
-    exit;
-  end;
   if nfo.Kind = rkClass then
   begin
     if Data <> nil then
       Data := PPointer(Data)^; // class instances are accessed by reference
     if Data = nil then
     begin
-      Ctxt.W.AddNull; // append 'null' for nil class instance
+      c.W.AddNull; // append 'null' for nil class instance
       exit;
     end;
+    t := PClass(Data)^; // actual class of this instance
+    if t <> nfo.ValueClass then
+      nfo := TRttiJson(Rtti.RegisterClass(t)); // work on proper inherited class
     flags := [];
     if (woStoreStoredFalse in c.Options) or
-       (rcfDisableStored in Ctxt.Info.Flags) then
+       (rcfDisableStored in nfo.Flags) then
       include(flags, noStored);
     if not (woDontStoreDefault in c.Options) then
       include(flags, noDefault);
-    if not (rcfHookWriteProperty in Ctxt.Info.Flags) then
+    if not (rcfHookWriteProperty in nfo.Flags) then
       include(flags, noHook);
   end
   else
   begin
     exclude(c.Options, woFullExpand); // not available for null or records
     flags := [noStored, noDefault, noHook];
+  end;
+  if nfo.fJsonWriter.Code <> nil then // TRttiJson.RegisterCustomSerializer()
+  begin // e.g. TOrm.RttiJsonWrite
+    TOnRttiJsonWrite(nfo.fJsonWriter)(c.W, Data, c.Options);
+    exit;
   end;
   if not (rcfHookWrite in nfo.Flags) or
      not TCCHook(Data).RttiBeforeWriteObject(c.W, c.Options) then
@@ -5557,7 +5560,7 @@ begin
       if woStorePointer in c.Options then
       begin
         c.W.WriteObjectPropNameShort('Address', c.Options);
-        if Ctxt.Info.ValueRtlClass = vcESynException then
+        if nfo.ValueRtlClass = vcESynException then
           AppendExceptionLocation(c.W, ESynException(Data))
         else
           c.W.AddPointer(PtrUInt(Data), '"');
@@ -5565,26 +5568,28 @@ begin
           c.W.BlockAfterItem(c.Options);
       end;
       if woDontStoreInherited in c.Options then
-        with Ctxt.Info.Props do
-        begin
-          // List[NotInheritedIndex]..List[Count-1] store the last hierarchy level
-          n := Count - NotInheritedIndex;
-          inc(c.Prop, NotInheritedIndex);
-        end;
+        with nfo.Props do
+          if NotInheritedIndex <> 0 then
+          begin
+            // List[NotInheritedIndex]..List[Count-1] is the last class level
+            inc(c.Prop, NotInheritedIndex);
+            dec(n, NotInheritedIndex);
+          end;
     end;
     if n > 0 then
+    begin
       // this is the main loop serializing Info.Props[]
+      p := c.Prop;
       repeat
-        p := c.Prop;
         if // handle Props.NameChange() set to Name='' to ignore this field
            (p^.Name <> '') and
            // handle woStoreStoredFalse flag and "stored" attribute in code
-           ((noStored in flags) or
-            (p^.Prop = nil) or
-            (p^.Prop.IsStored(pointer(Data)))) and
+           ((p^.Stored = rpsTrue) or // most common case
+            (noStored in flags) or
+            ((p^.Stored = rpsGetter) and
+             (p^.Prop.IsStoredGetter(pointer(Data))))) and
            // handle woDontStoreDefault flag over "default" attribute in code
            ((noDefault in flags) or
-            (p^.Prop = nil) or
             (p^.OrdinalDefault = NO_DEFAULT) or
             not p^.ValueIsDefault(Data)) and
            // detect 0 numeric values and empty strings
@@ -5595,7 +5600,6 @@ begin
           if isNotFirst in flags then
             // append ',' and proper indentation if a field was just appended
             c.W.BlockAfterItem(c.Options);
-          include(flags, isNotFirst);
           if isHumanReadable in flags then
             c.W.WriteObjectPropNameHumanReadable(pointer(p^.Name), length(p^.Name))
           else
@@ -5603,13 +5607,15 @@ begin
           if (noHook in flags) or
              not TCCHook(Data).RttiWritePropertyValue(c.W, p, c.Options) then
             _JS_OneProp(c, p, Data);
+          include(flags, isNotFirst);
         end;
         dec(n);
         if n = 0 then
           break;
-        inc(c.Prop);
+        inc(p);
       until false;
-    if rcfHookWrite in Ctxt.Info.Flags then
+    end;
+    if rcfHookWrite in nfo.Flags then
        TCCHook(Data).RttiAfterWriteObject(c.W, c.Options);
     if isHumanReadable in flags then
       c.W.BlockEnd('}', c.Options)

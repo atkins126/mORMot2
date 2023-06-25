@@ -502,7 +502,6 @@ type
     // - return the first one if Value is invalid (>MaxValue)
     // - Value will be converted to the matching ordinal value (byte or word)
     function GetEnumName(const Value): PShortString;
-      {$ifdef HASINLINE}inline;{$endif}
     /// get the caption text corresponding to a enumeration name
     // - return the first one if Value is invalid (>MaxValue)
     // - Value will be converted to the matching ordinal value (byte or word)
@@ -928,6 +927,12 @@ type
     rpcMethod,
     rpcIndexed);
 
+  /// TRttiProp.IsStoredKind response - default is "stored true"
+  TRttiPropStored = (
+    rpsTrue,
+    rpsFalse,
+    rpsGetter);
+
   /// a wrapper containing a RTTI class property definition
   // - used for direct Delphi / UTF-8 SQL type mapping/conversion
   // - doesn't depend on RTL's TypInfo unit, to enhance cross-compiler support
@@ -997,9 +1002,6 @@ type
     procedure GetVariantProp(Instance: TObject; var Result: Variant; SetByRef: boolean);
     /// raw assignment of rkVariant
     procedure SetVariantProp(Instance: TObject; const Value: Variant);
-    /// raw retrieval of the 'stored' flag using getter
-    /// - called by IsStored when inlined
-    function GetIsStored(Instance: TObject): boolean;
   public
     /// contains the index value of an indexed class data property
     // - outside SQLite3, this can be used to define a VARCHAR() length value
@@ -1037,12 +1039,15 @@ type
     // - get the first PRttiProp with RttiProps()^.PropList
     function Next: PRttiProp;
       {$ifdef HASINLINE}inline;{$endif}
-    /// return FALSE (AS_UNIQUE) if was marked as "stored AS_UNIQUE"
-    //  (i.e. "stored false"), or TRUE by default
-    // - if Instance=nil, will work only at RTTI level, not with field or method
-    // (and will return TRUE if nothing is defined in the RTTI)
+    /// returns rpsTrue/rpsFalse if was marked as "stored true/false" or
+    // rpsGetter if IsStoredGetter(Instance) is to be called at runtime
+    function IsStoredKind: TRttiPropStored;
+    /// raw retrieval of the 'stored' flag using getter
+    /// - called by IsStored or for TRttiPropStored = rpsGetter
+    function IsStoredGetter(Instance: TObject): boolean;
+    /// return the "stored true/false/method/field" value for a class property
+    // - not used internally: for backward compatibility only
     function IsStored(Instance: TObject): boolean;
-      {$ifdef FPC} inline; {$endif}
     /// return true if this property is a BLOB (RawBlob)
     function IsRawBlob: boolean;
       {$ifdef FPC} inline; {$endif}
@@ -2122,15 +2127,16 @@ type
     // - equals -1 if Prop has a setter
     OffsetSet: PtrInt;
     /// contains Prop^.Name or a customized field/property name
-    // - e.g. 'SubProp'
     // - equals '' if Props.NameChange() was set to New='', meaning this field
     // should not be part of the serialized JSON object
     Name: RawUtf8;
     /// store standard RTTI of this published property
     // - equals nil for rkRecord/rkObject nested field
     Prop: PRttiProp;
-    /// equals NO_DEFAULT or the default value
+    /// equals NO_DEFAULT or the default integer value of this property
     OrdinalDefault: integer;
+    /// reflect the "stored" property attribute as defined in the source
+    Stored: TRttiPropStored;
     /// case-insensitive compare the supplied name/len with the Name property
     function NameMatch(P: PUtf8Char; Len: PtrInt): boolean;
       {$ifdef HASINLINE}inline;{$endif}
@@ -2848,8 +2854,7 @@ type
       var Options: TTextWriterWriteObjectOptions): boolean; virtual;
     // called by TJsonWriter.WriteObject() to serialize one published property value
     // - triggered if RttiCustomSetParser defined the rcfHookWriteProperty flag
-    // - is overriden in TOrm/TOrmMany to detect "fake" instances
-    // or by TSynPersistentWithPassword to hide the password field value
+    // - is e.g. overriden in TOrm/TOrmMany to detect "fake" instances
     // - should return true if a property has been written, false (which is the
     // default) if the property is to be serialized as usual
     function RttiWritePropertyValue(W: TTextWriter; Prop: PRttiCustomProp;
@@ -6665,6 +6670,7 @@ begin
     OrdinalDefault := RttiProp.Default
   else
     OrdinalDefault := NO_DEFAULT;
+  Stored := RttiProp^.IsStoredKind;
   result := Value.Size;
 end;
 
@@ -6981,32 +6987,30 @@ begin
   // direct comparison of ordinal values (rkClass is handled below)
   if (rcfHasRttiOrd in Value.Cache.Flags) and
      (rcfHasRttiOrd in OtherRtti.Value.Cache.Flags) then
-    if (OffsetGet >= 0) and
-       (OtherRtti.OffsetGet >= 0) then
-    begin
+  begin
+    if OffsetGet >= 0 then
       v1.Data.VInt64 := RTTI_FROM_ORD[Value.Cache.RttiOrd](
-                          PAnsiChar(Data) + OffsetGet);
-      v2.Data.VInt64 := RTTI_FROM_ORD[OtherRtti.Value.Cache.RttiOrd](
-                          PAnsiChar(Other) + OtherRtti.OffsetGet);
-    end
+                          PAnsiChar(Data) + OffsetGet)
     else
-    begin
       v1.Data.VInt64 := Prop.GetOrdProp(Data);
+    if OtherRtti.OffsetGet >= 0 then
+      v2.Data.VInt64 := RTTI_FROM_ORD[OtherRtti.Value.Cache.RttiOrd](
+                          PAnsiChar(Other) + OtherRtti.OffsetGet)
+    else
       v2.Data.VInt64 := OtherRtti.Prop.GetOrdProp(Other);
-    end
+  end
   else if (rcfGetInt64Prop in Value.Cache.Flags) and
           (rcfGetInt64Prop in OtherRtti.Value.Cache.Flags) then
-    if (OffsetGet >= 0) and
-       (OtherRtti.OffsetGet >= 0) then
-    begin
-      v1.Data.VInt64 := PInt64(PAnsiChar(Data) + OffsetGet)^;
-      v2.Data.VInt64 := PInt64(PAnsiChar(Other) + OtherRtti.OffsetGet)^;
-    end
+  begin
+    if OffsetGet >= 0 then
+      v1.Data.VInt64 := PInt64(PAnsiChar(Data) + OffsetGet)^
     else
-    begin
       v1.Data.VInt64 := Prop.GetInt64Prop(Data);
+    if OtherRtti.OffsetGet >= 0 then
+      v2.Data.VInt64 := PInt64(PAnsiChar(Other) + OtherRtti.OffsetGet)^
+    else
       v2.Data.VInt64 := OtherRtti.Prop.GetInt64Prop(Other);
-    end
+  end
   else
   // comparison using temporary TRttiVarData (using varByRef if possible)
   begin
@@ -7209,6 +7213,7 @@ begin
     Name := PropName;
     Prop := nil;
     OrdinalDefault := NO_DEFAULT;
+    Stored := rpsTrue;
     inc(Size, Value.Size);
   end;
 end;
@@ -7370,6 +7375,7 @@ begin
       OffsetSet := f^.Offset;
       Name := ToUtf8(f^.Name^);
       OrdinalDefault := NO_DEFAULT;
+      Stored := rpsTrue;
       inc(f);
     end;
 end;
@@ -8204,6 +8210,7 @@ begin
       cp^.OffsetGet := fCache.Size;
       cp^.OffsetSet := fCache.Size;
       cp^.OrdinalDefault := NO_DEFAULT;
+      cp^.Stored := rpsTrue;
       inc(fCache.Size, c.fCache.Size);
     end;
     // continue until we reach end of buffer or ExpectedEnd

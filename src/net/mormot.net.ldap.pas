@@ -611,6 +611,7 @@ type
     property Count: integer
       read fCount;
     /// access to the individual rwas
+    // - note that length(List) = capacity - use Count property instead
     property List: TRawByteStringDynArray
       read fList;
     /// name of this LDAP attribute
@@ -657,6 +658,7 @@ type
     // - returns empty string if not found
     function Get(const AttributeName: RawUtf8): RawUtf8;
     /// access to the internal list of TLdapAttribute objects
+    // - note that length(Items) = Count for this class
     property Items: TLdapAttributeDynArray
       read fItems;
   end;
@@ -2894,25 +2896,37 @@ begin
   case lat of
     latObjectSid:
       if IsValidRawSid(s) then
+      begin
         s := SidToText(pointer(s));
+        exit;
+      end;
     latObjectGuid:
       if length(s) = SizeOf(TGuid) then
+      begin
         s := ToUtf8(PGuid(s)^);
+        exit;
+      end;
     latFileTime:
       begin
         qw := GetQWord(pointer(s), err);
         if (err = 0) and
            (qw <> 0) then
+        begin
           if qw >= $7FFFFFFFFFFFFFFF then
             s := 'Never expires'
           else
             s := UnixMSTimeToString(WindowsFileTime64ToUnixMSTime(qw));
+          exit;
+        end;
       end;
     latIsoTime:
       begin
         ts.From(pointer(s), length(s) - 3);
         if ts.Value <> 0 then
-          s := ts.Text(true); // normalize
+        begin
+          s := ts.Text({expanded=}true); // normalize
+          exit;
+        end;
       end;
   end;
   if IsValidUtf8(s) then
