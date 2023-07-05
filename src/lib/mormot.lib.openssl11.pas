@@ -1,4 +1,4 @@
-/// low-level access to the OpenSSL 1.1.1 / 3.x Library
+/// low-level access to the OpenSSL 1.1 / 3.x Library
 // - this unit is a part of the Open Source Synopse mORMot framework 2,
 // licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 unit mormot.lib.openssl11;
@@ -6,7 +6,7 @@ unit mormot.lib.openssl11;
 {
   *****************************************************************************
 
-   Cross-Platform and Cross-Compiler OpenSSL 1.1.1 / 3.x API
+   Cross-Platform and Cross-Compiler OpenSSL 1.1 / 3.x API
    - Dynamic or Static OpenSSL Library Loading
    - OpenSSL Library Constants
    - OpenSSL Library Types and Structures
@@ -14,11 +14,11 @@ unit mormot.lib.openssl11;
    - OpenSSL Helpers
    - TLS / HTTPS Encryption Layer using OpenSSL for mormot.net.sock / TCrtSocket
 
-    In respect to OpenSSL 1.0.x, the new 1.1.1 API hides most structures
+    In respect to OpenSSL 1.0.x, the new 1.1 API hides most structures
    behind getter/setter functions, and doesn't require complex initialization.
-    OpenSSL 1.1.1 features TLS 1.3, and is a LTS revision (until 2023-09-11).
+    OpenSSL 1.1 features TLS 1.3, and is a LTS revision (until 2023-09-11).
     OpenSSL 3.x is also supported on some platforms, as the next major version.
-    OpenSSL 1.1.1 / 3.x API adaptation is done at runtime by dynamic loading.
+    OpenSSL 1.1 / 3.x API adaptation is done at runtime by dynamic loading.
 
   *****************************************************************************
 
@@ -44,11 +44,11 @@ unit mormot.lib.openssl11;
 // you may try to define it if you don't check memory leaks (at you own risk)
 
 {.$define NOOPENSSL1}
-// define this to disable OpenSSL 1.1.1 API
+// define this to disable OpenSSL 1.1 API
 
 {.$define NOOPENSSL3}
 // define this to disable OpenSSL 3.x API - only Linux and Windows by now
-// on dynamic linking, will fallback to 1.1.1 if 3.x is not available
+// on dynamic linking, will fallback to 1.1 if 3.x is not available
 
 
 {$ifdef FPCMM_REPORTMEMORYLEAKS}
@@ -112,7 +112,7 @@ type
 const
   // some binaries may be retrieved from https://github.com/grijjy/DelphiOpenSsl
   // or http://wiki.overbyte.eu/wiki/index.php/ICS_Download (more up-to-date)
-  // - on Windows, we found out that ICS OpenSSL 3 is slower than OpenSSL 1.1.1
+  // - on Windows, we found out that ICS OpenSSL 3 is slower than OpenSSL 1.1
   {$ifdef OSWINDOWS}
     {$ifdef CPU32}
     LIB_CRYPTO1 = 'libcrypto-1_1.dll';
@@ -175,7 +175,7 @@ const
         LIB_SSL3 = 'libssl.so.3';
         {$else}
         {$define NOOPENSSL3} // unsupported yet
-        LIB_CRYPTO1 = 'libcrypto.so'; // should redirect to 1.1.1
+        LIB_CRYPTO1 = 'libcrypto.so'; // should redirect to 1.1
         LIB_SSL1 = 'libssl.so';
         {$endif OSLINUX}
         _PU = '';
@@ -202,7 +202,7 @@ var
 
 {$ifdef OPENSSLSTATIC}
 
-  // only OpenSSL 1.1.1 is supported yet as static linking (need more testing)
+  // only OpenSSL 1.1 is supported yet as static linking (need more testing)
   {$undef NOOPENSSL1}
   {$define NOOPENSSL3}
 
@@ -228,27 +228,29 @@ var
 
 
 const
+  /// the minimal 32-bit OpenSslVersion value for Open SSL 1.1.0
+  OPENSSL1_VERNUM = $10100000;
   /// the minimal 32-bit OpenSslVersion value for Open SSL 1.1.1
-  OPENSSL1_VERNUM = $10101000;
+  OPENSSL11_VERNUM = $10101000;
   /// the minimal 32-bit OpenSslVersion value for Open SSL 3.0.0
   OPENSSL3_VERNUM = $30000000;
   /// the minimal 32-bit OpenSslVersion value for Open SSL 3.1.0
   OPENSSL31_VERNUM = $30100000;
 
   {$ifdef NOOPENSSL3}
-  LIB_TXT = '1.1.1';
+  LIB_TXT = '1.1';
   LIB_MIN = OPENSSL1_VERNUM;
   {$else}
   {$ifdef NOOPENSSL1}
   LIB_TXT = '3.x';
   LIB_MIN = OPENSSL3_VERNUM;
   {$else}
-  LIB_TXT = '1.1.1/3.x';
-  LIB_MIN = $10101000;
+  LIB_TXT = '1.1/3.x';
+  LIB_MIN = OPENSSL1_VERNUM;
   {$endif NOOPENSSL1}
   {$endif NOOPENSSL3}
 
-/// return TRUE if OpenSSL 1.1.1 / 3.x library can be used
+/// return TRUE if OpenSSL 1.1 / 3.x library can be used
 // - will load and initialize it, calling OpenSslInitialize if necessary,
 // catching any exception during the process
 // - return always true if OPENSSLFULLAPI or OPENSSLSTATIC conditionals have
@@ -257,16 +259,16 @@ const
 function OpenSslIsAvailable: boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// return TRUE if OpenSSL 1.1.1 / 3.x library has been initialized
+/// return TRUE if OpenSSL 1.1 / 3.x library has been initialized
 // - don't try to load it if was not already done
 // - could be run before OpenSslInitialize() is called
 function OpenSslIsLoaded: boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// initialize the OpenSSL 1.1.1 / 3.x API, accessible via the global functions
+/// initialize the OpenSSL 1.1 / 3.x API, accessible via the global functions
 // - will raise EOpenSsl exception on any loading issue
 // - you can force the library names to load, but by default OpenSSL 3.x then
-// OpenSSL 1.1.1 libraries will be searched within the executable folder (on
+// OpenSSL 1.1 libraries will be searched within the executable folder (on
 // Windows) and then in the system path
 // - do nothing if the library has already been loaded or if
 // OPENSSLFULLAPI or OPENSSLSTATIC conditionals have been defined
@@ -2603,7 +2605,7 @@ const
     'SSL_set_bio',
     'SSL_set_ex_data',
     'SSL_get_ex_data',
-    'SSL_get1_peer_certificate SSL_get_peer_certificate', // OpenSSL 3.0 / 1.1.1
+    'SSL_get1_peer_certificate SSL_get_peer_certificate', // OpenSSL 3.0 / 1.1
     'SSL_get_peer_cert_chain',
     'SSL_free',
     'SSL_connect',
@@ -3259,7 +3261,7 @@ const
     'ERR_load_BIO_strings',
     'EVP_MD_CTX_new',
     'EVP_MD_CTX_free',
-    'EVP_PKEY_get_size EVP_PKEY_size', // OpenSSL 3.0 / 1.1.1 alternate names
+    'EVP_PKEY_get_size EVP_PKEY_size', // OpenSSL 3.0 / 1.1 alternate names
     'EVP_PKEY_type',
     'EVP_PKEY_get_id EVP_PKEY_id',
     'EVP_PKEY_get_base_id EVP_PKEY_base_id',
@@ -3274,8 +3276,8 @@ const
     'EVP_DigestSignFinal',
     'EVP_DigestVerifyInit',
     'EVP_DigestVerifyFinal',
-    'EVP_DigestSign',
-    'EVP_DigestVerify',
+    '?EVP_DigestSign',   // not defined in oldest versions
+    '?EVP_DigestVerify',
     'EVP_SealInit',
     'EVP_SealFinal',
     'EVP_OpenInit',
@@ -3296,7 +3298,7 @@ const
     'X509_get_subject_name',
     'X509_get_pubkey',
     'X509_get_signature_nid',
-    'X509_get_signature_info',
+    '?X509_get_signature_info',
     'X509_up_ref',
     'X509_STORE_free',
     'X509_STORE_CTX_free',
@@ -3454,9 +3456,9 @@ const
     'ASN1_TIME_new',
     'ASN1_TIME_free',
     'ASN1_TIME_set',
-    'ASN1_TIME_set_string_X509',
-    'ASN1_TIME_to_tm',
-    'ASN1_TIME_normalize',
+    '?ASN1_TIME_set_string_X509',
+    '?ASN1_TIME_to_tm',
+    '?ASN1_TIME_normalize',
     'OPENSSL_sk_new',
     'OPENSSL_sk_free',
     'OPENSSL_sk_pop_free',
@@ -3485,7 +3487,7 @@ const
     'RSA_private_encrypt',
     'RSA_public_decrypt',
     'RSA_private_decrypt',
-    'RSA_pkey_ctx_ctrl',
+    '?RSA_pkey_ctx_ctrl',
     'i2d_PrivateKey_bio',
     'd2i_PrivateKey_bio',
     'i2d_PUBKEY_bio',
@@ -3507,11 +3509,11 @@ const
     'EVP_MD_CTX_new',
     'EVP_MD_CTX_free',
     'EVP_MD_CTX_md',
-    'EVP_MD_get_flags EVP_MD_flags', // OpenSSL 3.0 / 1.1.1 alternate names
+    'EVP_MD_get_flags EVP_MD_flags', // OpenSSL 3.0 / 1.1 alternate names
     'EVP_MD_get_size EVP_MD_size',
     'EVP_DigestInit_ex',
     'EVP_DigestFinal_ex',
-    'EVP_DigestFinalXOF',
+    '?EVP_DigestFinalXOF', // not defined in oldest versions
     'HMAC_CTX_new',
     'HMAC_CTX_free',
     'HMAC_Init_ex',
@@ -3699,13 +3701,37 @@ end;
 function EVP_DigestSign(ctx: PEVP_MD_CTX; sigret: PByte; var siglen: PtrUInt;
    tbs: PByte; tbslen: PtrUInt): integer;
 begin
-  result := libcrypto.EVP_DigestSign(ctx, sigret, siglen, tbs, tbslen);
+  if Assigned(libcrypto.EVP_DigestSign) then
+    // new 1.1/3.x API - as required e.g. by ED25519
+    result := libcrypto.EVP_DigestSign(ctx, sigret, siglen, tbs, tbslen)
+  else
+  begin
+    // fallback for oldest OpenSSL versions
+    if sigret = nil then
+      result := OPENSSLSUCCESS
+    else // = EVP_DigestSignUpdate macro
+      result := libcrypto.EVP_DigestUpdate(ctx, tbs, tbslen);
+    if result = OPENSSLSUCCESS then
+      result := libcrypto.EVP_DigestSignFinal(ctx, sigret, siglen);
+  end;
 end;
 
 function EVP_DigestVerify(ctx: PEVP_MD_CTX; sigret: PByte; siglen: PtrUInt;
    tbs: PByte; tbslen: PtrUInt): integer;
 begin
-  result := libcrypto.EVP_DigestVerify(ctx, sigret, siglen, tbs, tbslen);
+  if Assigned(libcrypto.EVP_DigestVerify) then
+    // new 1.1/3.x API - as required e.g. by ED25519
+    result := libcrypto.EVP_DigestVerify(ctx, sigret, siglen, tbs, tbslen)
+  else
+  begin
+    // fallback for oldest OpenSSL versions
+    if sigret = nil then
+      result := OPENSSLSUCCESS
+    else // = EVP_DigestVerifyUpdate macro
+      result := libcrypto.EVP_DigestUpdate(ctx, tbs, tbslen);
+    if result = OPENSSLSUCCESS then
+      result := libcrypto.EVP_DigestVerifyFinal(ctx, sigret, siglen);
+  end;
 end;
 
 function EVP_SealInit(ctx: PEVP_CIPHER_CTX; typ: PEVP_CIPHER;
@@ -3815,7 +3841,10 @@ end;
 
 function X509_get_signature_info(x: PX509; mdnid, pknid, secbits, flags: PInteger): integer;
 begin
-  result := libcrypto.X509_get_signature_info(x, mdnid, pknid, secbits, flags);
+  if Assigned(libcrypto.X509_get_signature_info) then
+    result := libcrypto.X509_get_signature_info(x, mdnid, pknid, secbits, flags)
+  else
+    result := 0; // unsupported
 end;
 
 function X509_up_ref(x: PX509): integer;
@@ -4047,7 +4076,10 @@ end;
 
 function X509_NAME_hash(x: PX509_NAME): cardinal;
 begin
-  result := libcrypto.X509_NAME_hash(x);
+  if Assigned(libcrypto.X509_NAME_hash) then
+    result := libcrypto.X509_NAME_hash(x)
+  else
+    result := 0; // unsupported
 end;
 
 function X509_NAME_cmp(a: PX509_NAME; b: PX509_NAME): integer;
@@ -4634,17 +4666,26 @@ end;
 
 function ASN1_TIME_set_string_X509(s: PASN1_TIME; str: PUtf8Char): integer;
 begin
-  result := libcrypto.ASN1_TIME_set_string_X509(s, str);
+  if Assigned(libcrypto.ASN1_TIME_set_string_X509) then
+    result := libcrypto.ASN1_TIME_set_string_X509(s, str)
+  else
+    result := 0; // unsupported
 end;
 
 function ASN1_TIME_to_tm(s: PASN1_TIME; tm: Ptm): integer;
 begin
-  result := libcrypto.ASN1_TIME_to_tm(s, tm);
+  if Assigned(libcrypto.ASN1_TIME_to_tm) then
+    result := libcrypto.ASN1_TIME_to_tm(s, tm)
+  else
+    result := 0;
 end;
 
 function ASN1_TIME_normalize(s: PASN1_TIME): integer;
 begin
-  result := libcrypto.ASN1_TIME_normalize(s);
+  if Assigned(libcrypto.ASN1_TIME_normalize) then
+    result := libcrypto.ASN1_TIME_normalize(s)
+  else
+    result := 0;
 end;
 
 function OPENSSL_sk_new(cmp: OPENSSL_sk_compfunc): POPENSSL_STACK;
@@ -4799,7 +4840,10 @@ end;
 function RSA_pkey_ctx_ctrl(ctx: PEVP_PKEY_CTX; optype: integer;
   cmd: integer; p1: integer; p2: pointer): integer; cdecl;
 begin
-  result := libcrypto.RSA_pkey_ctx_ctrl(ctx, optype, cmd, p1, p2);
+  if Assigned(libcrypto.RSA_pkey_ctx_ctrl) then
+    result := libcrypto.RSA_pkey_ctx_ctrl(ctx, optype, cmd, p1, p2)
+  else
+    result := 0;
 end;
 
 function i2d_PrivateKey_bio(bp: PBIO; pkey: PEVP_PKEY): integer;
@@ -4872,11 +4916,11 @@ end;
 function EVP_CipherInit_ex2(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER;
   key: PByte; iv: PByte; enc: integer; params: pointer): integer;
 begin
-  // note: the latest API (i.e. EVP_CipherInit_ex on 1.1.1, EVP_CipherInit_ex2
+  // note: the latest API (i.e. EVP_CipherInit_ex on 1.1, EVP_CipherInit_ex2
   // on 3.0) should be called to be able to reuse the context
   if Assigned(libcrypto.EVP_CipherInit_ex2) then // OpenSSL 3.0 API
     result := libcrypto.EVP_CipherInit_ex2(ctx, cipher, key, iv, enc, params)
-  else                                // fallback to OpenSSL 1.1.1 call
+  else                                // fallback to OpenSSL 1.1 call
     result := libcrypto.EVP_CipherInit_ex(ctx, cipher, nil, key, iv, enc);
 end;
 
@@ -4938,7 +4982,10 @@ end;
 
 function EVP_DigestFinalXOF(ctx: PEVP_MD_CTX; md: PEVP_MD_DIG; len: PtrUInt): integer;
 begin
-  result := libcrypto.EVP_DigestFinalXOF(ctx, md, len);
+  if Assigned(libcrypto.EVP_DigestFinalXOF) then
+    result := libcrypto.EVP_DigestFinalXOF(ctx, md, len)
+  else
+    result := 0; // unsupported
 end;
 
 function HMAC_CTX_new: PHMAC_CTX;
@@ -6427,7 +6474,7 @@ function EVP_CipherInit_ex(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER; impl: PENG
 
 function EVP_CipherInit_ex2(ctx: PEVP_CIPHER_CTX; cipher: PEVP_CIPHER;
   key: PByte; iv: PByte; enc: integer; params: pointer): integer;
-begin // redirect from OpenSSL 3 API into 1.1.1 call
+begin // redirect from OpenSSL 3 API into 1.1 call
   result := EVP_CipherInit_ex(ctx, cipher, nil, key, iv, enc);
 end;
 
@@ -7863,8 +7910,7 @@ end;
 
 function X509_NAME.Hash: cardinal;
 begin
-  if (@self = nil) or
-     not Assigned(@X509_NAME_hash) then
+  if @self = nil then
     result := 0
   else
     result := X509_NAME_hash(@self);

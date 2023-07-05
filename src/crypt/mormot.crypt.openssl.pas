@@ -6,7 +6,7 @@ unit mormot.crypt.openssl;
 {
   *****************************************************************************
 
-   High-Performance Cryptographic Features using OpenSSL 1.1.1
+   High-Performance Cryptographic Features using OpenSSL 1.1 / 3.x
     - OpenSSL Cryptographic Pseudorandom Number Generator (CSPRNG)
     - AES Cypher/Uncypher in various Modes
     - Hashers and Signers OpenSSL Wrappers
@@ -55,7 +55,7 @@ type
   /// exception class raised by the AES classes of this unit
   EOpenSslCrypto = class(EOpenSsl);
 
-  /// TAesPrng-compatible class using OpenSSL 1.1.1
+  /// TAesPrng-compatible class using OpenSSL 1.1
   // - we abbreviate OpenSsl as Osl in class names for brevity
   // - may be used instead of TAesPrng if a "proven" generator is required -
   // you could override MainAesPrng global variable
@@ -67,7 +67,7 @@ type
   // $  mORMot FillRandom in 46us, 2 GB/s
   TAesPrngOsl = class(TAesPrngAbstract)
   public
-    /// initialize the CSPRNG using OpenSSL 1.1.1
+    /// initialize the CSPRNG using OpenSSL 1.1
     // - if the library is not available, will raise an Exception
     constructor Create; override;
     /// wrapper around function OpenSslIsAvailable
@@ -355,6 +355,10 @@ function OpenSslVerify(const Algorithm: RawUtf8; const PublicKeyPassword: SpiUtf
   MessageLen, PublicKeyLen, SignatureLen: integer;
   const Engine: RawUtf8 = ''): boolean;
 
+/// check if an OpenSSL given type of public/private pair of keys is supported
+// - some older OpenSSL versions do not support e.g. EVP_PKEY_ED25519
+function OpenSslSupports(EvpType: integer): boolean;
+
 /// generate a public/private pair of keys in raw OpenSSL format
 // - if EvpType is EVP_PKEY_DSA, EVP_PKEY_DH or EVP_PKEY_RSA or EVP_PKEY_RSA_PSS,
 // BitsOrCurve is the number of bits of the key
@@ -506,7 +510,7 @@ type
     /// finalize the instance
     destructor Destroy; override;
     /// wrapper around function OpenSslIsAvailable
-    class function IsAvailable: boolean;
+    class function IsAvailable: boolean; virtual;
     /// the OpenSSL hash algorithm, as supplied to the constructor
     property HashAlgorithm: RawUtf8
       read fHashAlgorithm;
@@ -530,8 +534,8 @@ type
   TJwtAbstractOsl = class(TJwtOpenSsl)
   protected
     fAsym: TCryptAsymAlgo;
-    procedure SetAlgorithms; virtual; // set fHashAlgo+fHashAlgorithm
-    procedure SetAlgorithm; virtual; abstract; // set fAsym
+    procedure SetAlgorithms; virtual; // set fAsym+fHashAlgo+fHashAlgorithm
+    class function GetAlgorithm: TCryptAsymAlgo; virtual; abstract; // for fAsym
   public
     /// initialize the JWT processing instance calling SetAlgorithms abstract method
     // - the supplied key(s) could be in PEM or raw DER binary format
@@ -551,6 +555,8 @@ type
     class procedure GenerateKeys(out PrivateKey, PublicKey: RawUtf8);
     /// generate a private/public keys pair for this algorithm in raw DER format
     class procedure GenerateBinaryKeys(out PrivateKey, PublicKey: RawByteString);
+    /// wrapper around function OpenSslSupports
+    class function IsAvailable: boolean; override;
   end;
 
   /// meta-class of all OpenSSL JWT algorithms
@@ -563,67 +569,67 @@ type
   // $ TJwtES256Osl:       100 ES256 in 8.64ms i.e. 11.3K/s, aver. 86us
   TJwtES256Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'ES384' secp384r1 ECC algorithm over SHA-384 using OpenSSL
   TJwtES384Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'ES512' ecp521r1 ECC algorithm over SHA-512 using OpenSSL
   TJwtES512Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'ES256K' secp256k1 ECC algorithm using OpenSSL
   TJwtES256KOsl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'RS256' RSA 2048-bit algorithm over SHA-256 using OpenSSL
   TJwtRS256Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'RS384' RSA 2048-bit algorithm over SHA-384 using OpenSSL
   TJwtRS384Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'RS512' RSA 2048-bit algorithm over SHA-512 using OpenSSL
   TJwtRS512Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'PS256' RSA-PSS 2048-bit algorithm over SHA-256 using OpenSSL
   TJwtPS256Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'PS384' RSA-PSS 2048-bit algorithm over SHA-384 using OpenSSL
   TJwtPS384Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'PS512' RSA-PSS 2048-bit algorithm over SHA-512 using OpenSSL
   TJwtPS512Osl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
   /// implements 'EdDSA' Ed25519 algorithm using OpenSSL
   TJwtEdDSAOsl = class(TJwtAbstractOsl)
   protected
-    procedure SetAlgorithm; override;
+    class function GetAlgorithm: TCryptAsymAlgo; override;
   end;
 
 
@@ -698,7 +704,7 @@ begin
   begin
     // OpenSSL allows to reuse the previous Ctxt[], just setting the (new) IV
     // -> this makes a huge performance benefit
-    // note: the latest API (i.e. EVP_CipherInit_ex on 1.1.1, EVP_CipherInit_ex2
+    // note: the latest API (i.e. EVP_CipherInit_ex on 1.1, EVP_CipherInit_ex2
     // on 3.0) should be called to be able to reuse the context
     EOpenSslCrypto.Check(Owner, method, EVP_CipherInit_ex2(
       c, nil, nil, @Owner.IV, ord(DoEncrypt), nil));
@@ -1007,7 +1013,7 @@ end;
 procedure TOpenSslHash.Update(Data: pointer; DataLength: integer);
 begin
   EOpenSslHash.Check(self, 'Update',
-    EVP_DigestUpdate(fCtx, Data, DataLength));
+    EVP_DigestUpdate(fCtx, Data, DataLength)); // = EVP_DigestSignUpdate
 end;
 
 function TOpenSslHash.Digest(Dest: pointer): cardinal;
@@ -1204,6 +1210,34 @@ begin
     finally
       pkey.Free;
     end;
+end;
+
+var
+  EvpOk, EvpKo: TIntegerDynArray; // creating a context has a cost
+
+function OpenSslSupports(EvpType: integer): boolean;
+var
+  ctx: PEVP_PKEY_CTX;
+begin
+  result := IntegerScanExists(pointer(EvpOk), length(EvpOk), EvpType);
+  if result or // most common case
+     not OpenSslIsAvailable or
+     IntegerScanExists(pointer(EvpKo), length(EvpKo), EvpType) then
+    exit;
+  if ((EvpType = EVP_PKEY_RSA_PSS) or
+      (EvpType = EVP_PKEY_ED25519)) and
+     (OpenSslVersion < OPENSSL11_VERNUM) then
+    ctx := nil // those curves require at least OpenSSL 1.1.1
+  else
+    ctx := EVP_PKEY_CTX_new_id(EvpType, nil);
+  if ctx = nil then
+  begin
+    AddInteger(EvpKo, EvpType); // do not search twice
+    exit;
+  end;
+  EVP_PKEY_CTX_free(ctx);
+  AddInteger(EvpOk, EvpType);
+  result := true;
 end;
 
 function OpenSslGenerateKeys(EvpType, BitsOrCurve: integer): PEVP_PKEY;
@@ -1601,9 +1635,14 @@ end;
 
 { TJwtAbstractOsl }
 
+class function TJwtAbstractOsl.IsAvailable: boolean;
+begin
+  result := OpenSslSupports(CAA_EVPTYPE[GetAlgorithm]);
+end;
+
 procedure TJwtAbstractOsl.SetAlgorithms;
 begin
-  SetAlgorithm;
+  fAsym := GetAlgorithm;
   fAlgorithm := CAA_JWT[fAsym];
   fHashAlgorithm := CAA_HASH[fAsym];
   fGenEvpType := CAA_EVPTYPE[fAsym];
@@ -1651,79 +1690,79 @@ end;
 
 { TJwtES256Osl }
 
-procedure TJwtES256Osl.SetAlgorithm;
+class function TJwtES256Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaES256;
+  result := caaES256;
 end;
 
 { TJwtES384Osl }
 
-procedure TJwtES384Osl.SetAlgorithm;
+class function TJwtES384Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaES384;
+  result := caaES384;
 end;
 
 { TJwtES512Osl }
 
-procedure TJwtES512Osl.SetAlgorithm;
+class function TJwtES512Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaES512;
+  result := caaES512;
 end;
 
 { TJwtES256KOsl }
 
-procedure TJwtES256KOsl.SetAlgorithm;
+class function TJwtES256KOsl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaES256K;
+  result := caaES256K;
 end;
 
 { TJwtRS256Osl }
 
-procedure TJwtRS256Osl.SetAlgorithm;
+class function TJwtRS256Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaRS256;
+  result := caaRS256;
 end;
 
 { TJwtRS384Osl }
 
-procedure TJwtRS384Osl.SetAlgorithm;
+class function TJwtRS384Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaRS384;
+  result := caaRS384;
 end;
 
 { TJwtRS512Osl }
 
-procedure TJwtRS512Osl.SetAlgorithm;
+class function TJwtRS512Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaRS512;
+  result := caaRS512;
 end;
 
 { TJwtPS256Osl }
 
-procedure TJwtPS256Osl.SetAlgorithm;
+class function TJwtPS256Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaPS256;
+  result := caaPS256;
 end;
 
 { TJwtPS384Osl }
 
-procedure TJwtPS384Osl.SetAlgorithm;
+class function TJwtPS384Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaPS384;
+  result := caaPS384;
 end;
 
 { TJwtPS512Osl }
 
-procedure TJwtPS512Osl.SetAlgorithm;
+class function TJwtPS512Osl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaPS512;
+  result := caaPS512;
 end;
 
 { TJwtEdDSAOsl }
 
-procedure TJwtEdDSAOsl.SetAlgorithm;
+class function TJwtEdDSAOsl.GetAlgorithm: TCryptAsymAlgo;
 begin
-  fAsym := caaEdDSA;
+  result := caaEdDSA;
 end;
 
 
@@ -1816,6 +1855,7 @@ type
   end;
 
   /// class implementing ICryptCert using OpenSSL X509
+  // - will store a certificate as PX509 and/or a PEVP_PKEY private key
   TCryptCertOpenSsl = class(TCryptCert)
   protected
     fX509: PX509;
@@ -1859,8 +1899,8 @@ type
     function Decrypt(const Message: RawByteString;
       const Cipher: RawUtf8): RawByteString; override;
     function SharedSecret(const pub: ICryptCert): RawByteString; override;
-    function Handle: pointer; override;
-    function PrivateKeyHandle: pointer; override;
+    function Handle: pointer; override;           // a PX509 instance
+    function PrivateKeyHandle: pointer; override; // a PEVP_PKEY instance
   end;
 
   /// 'x509-store' ICryptStore algorithm
@@ -2782,8 +2822,7 @@ begin
     NID_ecdsa_with_SHA512:
       result := caaES512;
     NID_rsassaPss:
-      begin
-        X509_get_signature_info(x, @md, nil, nil, nil);
+      if X509_get_signature_info(x, @md, nil, nil, nil) = OPENSSLSUCCESS then
         case md of
           NID_sha256:
             result := caaPS256;
@@ -2791,8 +2830,9 @@ begin
             result := caaPS384;
           NID_sha512:
             result := caaPS512;
-        end;
-      end;
+        end
+      else
+        result := caaPS256; // is likely to be unsupported anyway
     NID_ED25519:
       result := caaEdDSA;
   end;
