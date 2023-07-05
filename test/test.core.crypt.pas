@@ -22,6 +22,7 @@ uses
   mormot.core.test,
   mormot.core.variants,
   mormot.lib.pkcs11,
+  mormot.lib.openssl11,
   mormot.crypt.jwt,
   mormot.crypt.ecc;
 
@@ -554,6 +555,7 @@ begin
   Prng(TAesPrng, 'mORMot');
   {$ifdef USE_OPENSSL}
   Prng(TAesPrngOsl, 'OpenSSL');
+  AddConsole('       using OpenSSL %', [OpenSslVersionHexa]);
   {$endif USE_OPENSSL}
   // same benchmarks as in Prng()
   timer.Start;
@@ -566,7 +568,7 @@ begin
   SetLength(big, 100000);
   timer.Start;
   RandomBytes(pointer(big), length(big));
-  NotifyTestSpeed('Lecuyer RandomBytes', [], 1, length(big), @timer);
+  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big), @timer);
 end;
 
 procedure TTestCoreCrypto.Prng(meta: TAesPrngClass; const name: RawUTF8);
@@ -685,7 +687,7 @@ begin
   SetLength(big, 100000);
   timer.Start;
   p.FillRandom(pointer(big), length(big));
-  NotifyTestSpeed('% FillRandom', [name], 1, length(big), @timer);
+  NotifyTestSpeed('       % FillRandom', [name], 1, length(big), @timer);
 end;
 
 procedure TTestCoreCrypto.CryptData(dpapi: boolean);
@@ -2705,8 +2707,11 @@ begin
     Check(c1.IsSelfSigned);
     if c1.GetAuthorityKey <> c1.GetSubjectKey then // equal on syn-ecc
       CheckEqual(c1.GetAuthorityKey, '', 'X509 self-sign has no auth');
-    Check(c1.Verify(nil) = cvValidSelfSigned, 'cvValidSelfSigned1');
-    Check(c1.Verify(c1) = cvValidSelfSigned, 'cvValidSelfSigned2');
+    cv := c1.Verify(nil);
+    CheckUtf8(cv = cvValidSelfSigned,
+      '%:cvValidSelfSigned1=%', [crt.AlgoName, ToText(cv)^]);
+    cv := c1.Verify(c1);
+    CheckUtf8(cv = cvValidSelfSigned, 'cvValidSelfSigned2=%', [ToText(cv)^]);
     Check(c1.GetSignatureInfo <> '');
     Check(c1.HasPrivateSecret);
     jwt := c1.JwtCompute([], {iss=}'myself', {sub=}'me', '', 0, 10);
