@@ -65,11 +65,11 @@ type
     /// validate TUriTree high-level structure
     procedure _TUriTree;
     /// validate DNS and LDAP clients
-    procedure IpDnsLdap;
+    procedure DNSAndLDAP;
     /// RTSP over HTTP, as implemented in SynProtoRTSPHTTP unit
-    procedure RtspOverHttp;
+    procedure RTSPOverHTTP;
     /// RTSP over HTTP, with always temporary buffering
-    procedure RtspOverHttpBufferedWrite;
+    procedure RTSPOverHTTPBufferedWrite;
     /// validate mormot.net.tunnel
     procedure _TTunnelLocal;
   end;
@@ -278,12 +278,12 @@ const
   //ASYNC_OPTION = ASYNC_OPTION_DEBUG;
   ASYNC_OPTION = ASYNC_OPTION_VERBOSE;
 
-procedure TNetworkProtocols.RtspOverHttp;
+procedure TNetworkProtocols.RTSPOverHTTP;
 begin
   DoRtspOverHttp(ASYNC_OPTION);
 end;
 
-procedure TNetworkProtocols.RtspOverHttpBufferedWrite;
+procedure TNetworkProtocols.RTSPOverHTTPBufferedWrite;
 begin
   DoRtspOverHttp(ASYNC_OPTION + [acoWritePollOnly]);
 end;
@@ -579,11 +579,15 @@ begin
   end;
 end;
 
-procedure TNetworkProtocols.IpDnsLdap;
+procedure TNetworkProtocols.DNSAndLDAP;
 var
-  ip, u, v: RawUtf8;
+  ip, u, v, dn, sid: RawUtf8;
   c: cardinal;
+  guid: TGuid;
+  i, j, k: PtrInt;
+  dns, clients: TRawUtf8DynArray;
   l: TLdapClientSettings;
+  one: TLdapClient;
 begin
   // validate some IP releated process
   Check(not NetIsIP4(nil));
@@ -694,6 +698,52 @@ begin
     CheckEqual(l.KerberosDN, 'ad.synopse.com');
   finally
     l.Free;
+  end;
+  // optional LDAP client tests
+  if Executable.Command.Get(['dns'], dns) then
+    for i := 0 to high(dns) do
+    begin
+      // syntax is -dns server1 [-dns server2]
+      clients := DnsLdapControlersSorted(100, 10, dns[i], false, @dn);
+      for j := 0 to high(clients) do
+      begin
+        one := TLdapClient.Create;
+        try
+          one.Settings.TargetUri := clients[j];
+          one.Settings.KerberosDN := dn;
+          try
+            if one.BindSaslKerberos then
+            begin
+              AddConsole('% = %', [one.Settings.TargetHost, one.NetbiosDN]);
+              Check(one.NetbiosDN <> '', 'NetbiosDN');
+              Check(one.ConfigDN <> '', 'ConfigDN');
+              Check(one.Search(one.WellKnownObjects.Users, {typesonly=}false,
+                    '(cn=Domain Controllers)', ['*']), 'Search');
+              Check(one.SearchResult.Count <> 0, 'SeachResult');
+              for k := 0 to one.SearchResult.Count - 1 do
+                with one.SearchResult.Items[k] do
+                begin
+                  sid := '';
+                  Check(CopyObjectSid(sid), 'objectSid');
+                  Check(sid <> '');
+                  FillZero(guid);
+                  Check(CopyObjectGUID(guid), 'objectGUID');
+                  Check(not IsNullGuid(guid));
+                  CheckEqual(Attributes.Get('cn'), 'Domain Controllers', 'cn');
+                  Check(Attributes.Get('name') <> '', 'name');
+                end;
+              //writeln(one.SearchResult.Dump);
+            end
+            else
+              CheckUtf8(false, clients[i]);
+          except
+            on E: Exception do
+              Check(false, E.Message);
+          end;
+        finally
+          one.Free;
+        end;
+      end;
   end;
 end;
 

@@ -358,6 +358,8 @@ type
     // by default, but may be overridden to update a real UI or reporting system
     // - method implementation can use fCurrentMethodInfo^ to get run context
     procedure AfterOneRun; virtual;
+    /// could be overriden to add some custom command-line parameters
+    class procedure DescribeCommandLine; virtual;
   public
     /// you can put here some text to be displayed at the end of the messages
     // - some internal versions, e.g.
@@ -1213,8 +1215,7 @@ begin
               Text(['! ', fCurrentMethodInfo^.IdentTestName]);
               if E.InheritsFrom(EControlC) then
                 raise; // Control-C should just abort whole test
-              TextLn([#13#10'! Exception ', E.ClassName,
-                ' raised with messsage:'#13#10'!  ', E.Message]);
+              TextLn([#13#10'! ', GetLastExceptionText]); // with extended info
               Color(ccLightGray);
             end;
           end;
@@ -1330,6 +1331,11 @@ begin
   Color(ccLightGray);
 end;
 
+class procedure TSynTests.DescribeCommandLine;
+begin
+  // do nothing by default - override with proper Executable.Command calls
+end;
+
 procedure TSynTests.SaveToFile(const DestPath: TFileName;
   const FileName: TFileName);
 var
@@ -1362,9 +1368,32 @@ class procedure TSynTests.RunAsConsole(const CustomIdent: string;
   withLogs: TSynLogInfos; options: TSynTestOptions; const workdir: TFileName);
 var
   tests: TSynTests;
+  redirect: TFileName;
+  err: RawUtf8;
 begin
   if self = TSynTests then
     raise ESynException.Create('You should inherit from TSynTests');
+  // properly parse command line switches
+  with Executable.Command do
+  begin
+    ExeDescription := Executable.ProgramName;
+    {$ifndef OSPOSIX}
+    Option('noenter', 'do not wait for ENTER key on exit');
+    {$endif OSPOSIX}
+    if Arg(0, '#filename to redirect the console output') then
+      Utf8ToFileName(Args[0], redirect);
+    DescribeCommandLine; // may be overriden to define additional parameters
+    err := DetectUnknown;
+    if (err <> '') or
+       Option(['?', 'help'], 'display this message') or
+       SameText(redirect, 'help') then
+    begin
+      ConsoleWrite(err);
+      ConsoleWrite(FullDescription);
+      exit;
+    end;
+  end;
+  // setup logs and console
   AllocConsole;
   RunFromSynTests := true; // set mormot.core.os.pas global flag
   with TSynLogTestLog.Family do
@@ -1387,9 +1416,9 @@ begin
     if workdir <> '' then
       tests.WorkDir := workdir;
     tests.Options := options;
-    if ParamCount > 0 then
+    if redirect <> '' then
     begin
-      tests.SaveToFile(paramstr(1)); // export to file if named on command line
+      tests.SaveToFile(redirect); // export to file if named on command line
       {$I-} // minimal console output during blind regression tests
       Writeln(tests.Ident, #13#10#13#10' Running tests... please wait');
       {$I+}

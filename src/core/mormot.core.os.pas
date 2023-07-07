@@ -1271,13 +1271,13 @@ type
       k: TExecutableCommandLineKind = clkUndefined; const d: RawUtf8 = '';
       const def: RawUtf8 = ''; f: PtrInt = 0): PtrInt;
   public
-    /// return the "arg" value by 0-based index in Args[]
+    /// mark and describe an "arg" value by 0-based index in Args[]
     function Arg(index: integer;
       const description: RawUtf8 = ''): boolean; overload;
-    /// search for "arg" value in Args[]
+    /// mark and describe an "arg" value in Args[]
     function Arg(const name: RawUtf8;
       const description: RawUtf8 = ''): boolean; overload;
-    /// search for "arg" value in Args[]
+    /// mark and describe or or several "arg" value(s) in Args[]
     function Arg(const name: array of RawUtf8;
       const description: RawUtf8 = ''): boolean; overload;
     /// search for "-optionname" switches in Options[]
@@ -2922,7 +2922,7 @@ type
     /// the address where the exception occurred
     EAddr: PtrUInt;
     /// the optional stack trace
-    EStack: PPtrUInt;
+    EStack: PPtrUIntArray;
     /// timestamp of this exception, as number of seconds since UNIX Epoch
     // - UnixTimeUtc is faster than NowUtc or GetSystemTime
     // - use UnixTimeToDateTime() to convert it into a regular TDateTime

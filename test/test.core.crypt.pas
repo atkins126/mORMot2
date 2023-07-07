@@ -2836,8 +2836,10 @@ begin
       CheckEqual(c2.GetAuthorityKey, '', 'X509 self-sign has no auth');
     if crt.AlgoName <> 'syn-es256-v1' then
       Check(c2.GetUsage = [cuDigitalSignature, cuKeyAgreement]);
-    Check(c2.Verify(c1) = cvValidSelfSigned, 'self1');
-    Check(c2.Verify(nil) = cvValidSelfSigned, 'self2');
+    cv := c2.Verify(c1);
+    CheckUtf8(cv = cvValidSelfSigned, '%:self1=%', [crt.AlgoName, ToText(cv)^]);
+    cv := c2.Verify(nil);
+    CheckUtf8(cv = cvValidSelfSigned, 'self2=%', [ToText(cv)^]);
     c2.Sign(c1); // change signature
     CheckEqual(c2.GetAuthorityKey, c1.GetSubjectKey);
     Check(c2.Verify(c1) = cvValidSigned, 'self3');
@@ -2856,11 +2858,11 @@ begin
     // c2 has [cuDigitalSignature, cuKeyAgreement]
     // c3 has [cuDataEncipherment, cuKeyAgreement]
     cpe.Clear;
-    check(cpe.Usages = []);
-    check(not cpe.GetUsage(cuCA, c4));
-    check(c4 = nil);
-    check(cpe.Add(nil) = []);
-    check(cpe.Usages = []);
+    check(cpe.Usages = [], 'cpeu1');
+    check(not cpe.GetUsage(cuCA, c4), 'cpeu2');
+    check(c4 = nil, 'c4');
+    check(cpe.Add(nil) = [], 'cpeadd');
+    check(cpe.Usages = [], 'cpeu3');
     for u := low(u) to high(u) do
     begin
       check(not cpe.GetUsage(u, c4));
