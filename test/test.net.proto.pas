@@ -64,7 +64,7 @@ type
   published
     /// validate TUriTree high-level structure
     procedure _TUriTree;
-    /// validate DNS and LDAP clients
+    /// validate DNS and LDAP clients (and NTP/SNTP)
     procedure DNSAndLDAP;
     /// RTSP over HTTP, as implemented in SynProtoRTSPHTTP unit
     procedure RTSPOverHTTP;
@@ -588,7 +588,21 @@ var
   dns, clients: TRawUtf8DynArray;
   l: TLdapClientSettings;
   one: TLdapClient;
+  utc1, utc2: TDateTime;
+  ntp: RawUtf8;
 begin
+  // validate NTP/SNTP client using NTP_DEFAULT_SERVER = time.google.com
+  if not Executable.Command.Get('ntp', ntp) then
+    ntp := NTP_DEFAULT_SERVER;
+  utc1 := GetSntpTime(ntp);
+  //writeln(DateTimeMSToString(utc), ' = ', DateTimeMSToString(NowUtc));
+  if utc1 <> 0 then
+  begin
+    utc2 := NowUtc;
+    AddConsole('% : % = %', [ntp, DateTimeMSToString(utc1), DateTimeMSToString(utc2)]);
+    // only make a single GetSntpTime call - most servers refuse to scale
+    CheckSame(utc1, utc2, 1, 'NTP system'); // allow 1 day diff
+  end;
   // validate some IP releated process
   Check(not NetIsIP4(nil));
   Check(not NetIsIP4('1'));

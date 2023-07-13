@@ -143,8 +143,8 @@ const
       {$endif CPU32}
     {$else}
       {$ifdef OSDARWIN}
-        {$define NOOPENSSL3} // unsupported yet
         {$ifdef CPUINTEL}
+          // from https://github.com/grijjy/DelphiOpenSsl
           {$ifdef CPUX86}
           LIB_CRYPTO1 = 'libssl-merged-osx32.dylib';
           LIB_SSL1 = 'libssl-merged-osx32.dylib';
@@ -166,6 +166,9 @@ const
           LIB_SSL1 = 'libssl.1.1.dylib';
           _PU = '';
         {$endif CPUINTEL}
+        // most common OpenSSL library names on MacOS
+        LIB_CRYPTO3 = 'libcrypto.dylib';
+        LIB_SSL3 = 'libssl.dylib';
       {$else}
         {$ifdef OSLINUX}
         // specific versions on Linux
@@ -185,8 +188,10 @@ const
 
 var
   /// optional libcrypto location for OpenSslIsAvailable/OpenSslInitialize
+  // - you could also set OPENSSL_LIBPATH environment variable
   OpenSslDefaultCrypto: TFileName;
   /// optional libssl location for OpenSslIsAvailable/OpenSslInitialize
+  // - you could also set OPENSSL_LIBPATH environment variable
   OpenSslDefaultSsl: TFileName;
 
 
@@ -267,9 +272,10 @@ function OpenSslIsLoaded: boolean;
 
 /// initialize the OpenSSL 1.1 / 3.x API, accessible via the global functions
 // - will raise EOpenSsl exception on any loading issue
-// - you can force the library names to load, but by default OpenSSL 3.x then
-// OpenSSL 1.1 libraries will be searched within the executable folder (on
-// Windows) and then in the system path
+// - you can force the library path names to load as parameters, but by default
+// OpenSSL 3.x / 1.1 libraries will be searched from OpenSslDefaultCrypto and
+// OpenSslDefaultSsl global variables or OPENSSL_LIBPATH environment variable,
+// then within the executable folder, and then in the system path
 // - do nothing if the library has already been loaded or if
 // OPENSSLFULLAPI or OPENSSLSTATIC conditionals have been defined
 function OpenSslInitialize(
@@ -1916,6 +1922,7 @@ function SSL_CTX_set_alpn_protos(ctx: PSSL_CTX;
 function SSL_CTX_ctrl(ctx: PSSL_CTX; cmd: integer; larg: clong; parg: pointer): clong; cdecl;
 // op/result are cardinal for OpenSSL 1.1, but QWord since OpenSSL 3.0 :(
 function SSL_CTX_set_options(ctx: PSSL_CTX; op: cardinal): cardinal; cdecl;
+function SSL_CTX_clear_options(ctx: PSSL_CTX; op: cardinal): cardinal; cdecl;
 function SSL_CTX_callback_ctrl(p1: PSSL_CTX; p2: integer; p3: SSL_CTX_callback_ctrl_): integer; cdecl;
 function SSL_new(ctx: PSSL_CTX): PSSL; cdecl;
 function SSL_set_SSL_CTX(ssl: PSSL; ctx: PSSL_CTX): PSSL_CTX; cdecl;
@@ -2580,6 +2587,7 @@ type
     SSL_CTX_set_alpn_protos: function(ctx: PSSL_CTX; protos: PByte; protos_len: cardinal): integer; cdecl;
     SSL_CTX_ctrl: function(ctx: PSSL_CTX; cmd: integer; larg: clong; parg: pointer): clong; cdecl;
     SSL_CTX_set_options: pointer; // variable signature between 1.1 vs 3.0 :(
+    SSL_CTX_clear_options: pointer;
     SSL_CTX_callback_ctrl: function(p1: PSSL_CTX; p2: integer; p3: SSL_CTX_callback_ctrl_): integer; cdecl;
     SSL_new: function(ctx: PSSL_CTX): PSSL; cdecl;
     SSL_set_SSL_CTX: function(ssl: PSSL; ctx: PSSL_CTX): PSSL_CTX; cdecl;
@@ -2622,7 +2630,7 @@ type
   end;
 
 const
-  LIBSSL_ENTRIES: array[0..54] of RawUtf8 = (
+  LIBSSL_ENTRIES: array[0..55] of RawUtf8 = (
     'SSL_CTX_new',
     'SSL_CTX_free',
     'SSL_CTX_set_timeout',
@@ -2640,6 +2648,7 @@ const
     'SSL_CTX_set_alpn_protos',
     'SSL_CTX_ctrl',
     'SSL_CTX_set_options',
+    'SSL_CTX_clear_options',
     'SSL_CTX_callback_ctrl',
     'SSL_new',
     'SSL_set_SSL_CTX',
@@ -2766,6 +2775,8 @@ type
   // OpenSSL 3.0 changed the SSL_CTX_set_options() parameter types to 64-bit
   TSSL_CTX_set_options32 = function(ctx: PSSL_CTX; op: cardinal): cardinal; cdecl;
   TSSL_CTX_set_options64 = function(ctx: PSSL_CTX; op: qword): qword; cdecl;
+  TSSL_CTX_clear_options32 = function(ctx: PSSL_CTX; op: cardinal): cardinal; cdecl;
+  TSSL_CTX_clear_options64 = function(ctx: PSSL_CTX; op: qword): qword; cdecl;
 
 function SSL_CTX_set_options(ctx: PSSL_CTX; op: cardinal): cardinal;
 begin
@@ -2774,6 +2785,15 @@ begin
     result := TSSL_CTX_set_options32(libssl.SSL_CTX_set_options)(ctx, op)
   else
     result := TSSL_CTX_set_options64(libssl.SSL_CTX_set_options)(ctx, op);
+end;
+
+function SSL_CTX_clear_options(ctx: PSSL_CTX; op: cardinal): cardinal;
+begin
+  // we publish a 32-bit 1.1 version anyway
+  if OpenSslVersion < OPENSSL3_VERNUM then
+    result := TSSL_CTX_clear_options32(libssl.SSL_CTX_clear_options)(ctx, op)
+  else
+    result := TSSL_CTX_clear_options64(libssl.SSL_CTX_clear_options)(ctx, op);
 end;
 
 function SSL_CTX_callback_ctrl(p1: PSSL_CTX; p2: integer; p3: SSL_CTX_callback_ctrl_): integer;
@@ -5466,7 +5486,7 @@ function OpenSslInitialize(const libcryptoname, libsslname: TFileName;
 var
   P: PPointerArray;
   api: PtrInt;
-  lib1, lib3: TFileName;
+  libenv, libsys1, libsys3, libexe1, libexe3: TFileName;
 begin
   result := true;
   if openssl_initialized = osslAvailable then
@@ -5477,36 +5497,50 @@ begin
     // paranoid thread-safe double check
     if openssl_initialized = osslAvailable then
       exit;
+    // read and validate OPENSSL_LIBPATH environment variable
+    libenv := GetEnvironmentVariable('OPENSSL_LIBPATH');
+    if libenv <> '' then
+      if DirectoryExists(libenv) then
+        libenv := IncludeTrailingPathDelimiter(libenv)
+      else
+        libenv := ''; // search anywhere within system path
     // initialize library loaders
     libcrypto := TLibCrypto.Create;
     libssl := TLibSsl.Create;
     try
-      // MacOS X and Windows have no system OpenSSL: also try in exe folder
-      libcrypto.TryFromExecutableFolder := OS_KIND in [osOSX, osWindows];
-      libssl.TryFromExecutableFolder := libcrypto.TryFromExecutableFolder;
       // attempt to load libcrypto
       if libcryptoname = '' then
       begin
         {$ifndef NOOPENSSL1}
-        lib1 := LIB_CRYPTO1;
+        libexe1 := Executable.ProgramFilePath + LIB_CRYPTO1;
+        if not FileExists(libexe1) then
+          libexe1 := '';
+        libsys1 := libenv + LIB_CRYPTO1;
         {$endif NOOPENSSL1}
         {$ifndef NOOPENSSL3}
-        lib3 := LIB_CRYPTO3;
+        libexe3 := Executable.ProgramFilePath + LIB_CRYPTO3;
+        if not FileExists(libexe3) then
+          libexe3 := '';
+        libsys3 := libenv + LIB_CRYPTO3;
         {$endif NOOPENSSL3}
-      end
-      else
-        lib1 := libcryptoname;
-      if lib3 = '' then
-        lib3 := lib1; // duplicated names are just ignored by TryLoadLibrary()
+      end;
       libcrypto.TryLoadLibrary([
-        // first try with the global variable
+        // first try the exact supplied crypto library name
+        libcryptoname,
+        // try with the global variable
         OpenSslDefaultCrypto,
-        // try the library somewhere in the system or on specified path
-        lib3,
-        lib1
-      {$ifdef OSPOSIX}
-        , 'libcrypto.so' // generic library name on most systems
-      {$endif OSPOSIX}
+        // try from executable folder
+        libexe3,
+        libexe1,
+        // try the library from OPENSSL_LIBPATH or somewhere in the system
+        libsys3,
+        libsys1
+        {$ifdef OSPOSIX}
+        {$ifndef OSDARWIN}
+        // generic library name on most UNIX
+        , 'libcrypto.so'
+        {$endif OSDARWIN}
+        {$endif OSPOSIX}
         ], EOpenSsl);
       P := @@libcrypto.CRYPTO_malloc;
       for api := low(LIBCRYPTO_ENTRIES) to high(LIBCRYPTO_ENTRIES) do
@@ -5514,29 +5548,38 @@ begin
       if not Assigned(libcrypto.X509_print) then // last known entry
         raise EOpenSsl.Create('OpenSslInitialize: incorrect libcrypto API');
       // attempt to load libssl
-      lib3 := '';
       if libsslname = '' then
       begin
         {$ifndef NOOPENSSL1}
-        lib1 := LIB_SSL1;
+        libexe1 := Executable.ProgramFilePath + LIB_SSL1;
+        if not FileExists(libexe1) then
+          libexe1 := '';
+        libsys1 := libenv + LIB_SSL1;
         {$endif NOOPENSSL1}
         {$ifndef NOOPENSSL3}
-        lib3 := LIB_SSL3;
+        libexe3 := Executable.ProgramFilePath + LIB_SSL3;
+        if not FileExists(libexe3) then
+          libexe3 := '';
+        libsys3 := libenv + LIB_SSL3;
         {$endif NOOPENSSL3}
-      end
-      else
-        lib1 := libsslname;
-      if lib3 = '' then
-        lib3 := lib1;
+      end;
       libssl.TryLoadLibrary([
-        // first try with the global variable
+        // first try the exact supplied ssl library name
+        libsslname,
+        // try with the global variable
         OpenSslDefaultSsl,
-        // try the library somewhere in the system or on specified path
-        lib3,
-        lib1
-      {$ifdef OSPOSIX}
-        , 'libssl.so'  // generic library name on most UNIX
-      {$endif OSPOSIX}
+        // try from executable folder
+        libexe3,
+        libexe1,
+        // try the library from OPENSSL_LIBPATH or somewhere in the system
+        libsys3,
+        libsys1
+        {$ifndef OSDARWIN}
+        {$ifdef OSPOSIX}
+          // generic library name on most UNIX
+          , 'libssl.so'
+        {$endif OSPOSIX}
+        {$endif OSDARWIN}
         ], EOpenSsl);
       P := @@libssl.SSL_CTX_new;
       for api := low(LIBSSL_ENTRIES) to high(LIBSSL_ENTRIES) do
@@ -5644,6 +5687,9 @@ function SSL_CTX_ctrl(ctx: PSSL_CTX; cmd: integer; larg: clong; parg: pointer): 
 
 function SSL_CTX_set_options(ctx: PSSL_CTX; op: cardinal): cardinal; cdecl;
   external LIB_SSL name _PU + 'SSL_CTX_set_options';
+
+function SSL_CTX_clear_options(ctx: PSSL_CTX; op: cardinal): cardinal; cdecl;
+  external LIB_SSL name _PU + 'SSL_CTX_clear_options';
 
 function SSL_CTX_callback_ctrl(p1: PSSL_CTX; p2: integer; p3: SSL_CTX_callback_ctrl_): integer; cdecl;
   external LIB_SSL name _PU + 'SSL_CTX_callback_ctrl';
