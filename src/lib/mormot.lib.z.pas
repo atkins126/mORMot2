@@ -131,7 +131,11 @@ type
   /// main access to the zlib API for compression/uncompression
   // - we encapsulated all low-level C calls into this object-oriented structure
   // - see CompressStream/UncompressStream for actual use of its methods
+  {$ifdef USERECORDWITHMETHODS}
+  TZLib = record
+  {$else}
   TZLib = object
+  {$endif USERECORDWITHMETHODS}
   private
     FlushStream: TStream;
     FlushBuffer: pointer;
@@ -541,7 +545,7 @@ function UncompressZipString(const src: RawByteString;
 /// just hash aString with CRC32 algorithm
 // - crc32 is better than adler32 for short strings
 // - use the much faster libdeflate instead of plain zlib if available
-function CRC32string(const aString: RawByteString): cardinal;
+function Crc32String(const aString: RawByteString): cardinal;
 
 
 implementation
@@ -1166,7 +1170,7 @@ begin
     pointer(src), length(src), nil, ZlibFormat, TempBufSize);
 end;
 
-function CRC32string(const aString: RawByteString): cardinal;
+function Crc32String(const aString: RawByteString): cardinal;
 begin
   result := length(aString);
   if result <> 0 then

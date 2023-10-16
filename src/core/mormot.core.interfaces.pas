@@ -3472,7 +3472,8 @@ begin
       repeat
         if resultAsJsonObject then
         begin
-          Val := GetJsonPropName(c.Json, @ValLen);
+          Val := GetJsonPropName(
+            c.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json, @ValLen);
           if Val = nil then
             // end of JSON object
             break;
@@ -3499,7 +3500,7 @@ begin
         end;
         if c.Json = nil then
           break;
-        c.Json := GotoNextNotSpace(c.Json);
+        c.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json := GotoNextNotSpace(c.Json);
         if resultAsJsonObject then
         begin
           if (c.Json^ = #0) or
@@ -4048,15 +4049,16 @@ begin
         imvSet:
           if not (ArgRtti.Size in [1, 2, 4, 8]) then
             raise EInterfaceFactory.CreateUtf8(
-              '%.Create: unexpected RTTI size = % in %.% method % parameter' +
-              ' for % set - we support only byte/word/integer/Int64 sizes',
+              '%.Create: unexpected RTTI size = % in %.% method % parameter ' +
+              'for % set - should match byte/word/integer/Int64 (1,2,4,8) sizes',
               [self, ArgRtti.Size, fInterfaceName, URI, ParamName^, ArgTypeName^]);
         imvRecord:
           if ArgRtti.Size <= POINTERBYTES then
+            // handle records only when passed by ref
             raise EInterfaceFactory.CreateUtf8(
               '%.Create: % record too small in %.% method % parameter: it ' +
-              'should be at least % bytes (i.e. a pointer) to be on stack',
-              [self, ArgTypeName^, fInterfaceName, URI, ParamName^, POINTERBYTES]);
+              'should be at least % bytes (i.e. bigger than a pointer) to be on stack',
+              [self, ArgTypeName^, fInterfaceName, URI, ParamName^, POINTERBYTES + 1]);
       end;
       OffsetAsValue := ArgsSizeAsValue;
       inc(ArgsSizeAsValue, ArgRtti.Size);
@@ -4086,8 +4088,8 @@ begin
         {$endif CPUARM}
         {$ifdef HAS_FPREG}
         {$ifdef OSPOSIX}  // Linux x64, armhf, aarch64
-        ((ValueIsInFPR) and (fpreg > FPREG_LAST)) or
-        ((not ValueIsInFPR) and (reg > PARAMREG_LAST))
+        ((ValueIsInFPR) and (fpreg > FPREG_LAST)) or   // too many FP registers
+        ((not ValueIsInFPR) and (reg > PARAMREG_LAST)) // too many int registers
         {$else}
         (reg > PARAMREG_LAST) // Win64: XMMs overlap regular registers
         {$endif OSPOSIX}
@@ -4101,11 +4103,20 @@ begin
         {$endif FPC} then
       begin
         // this parameter will go on the stack
+        {$ifdef OSDARWINARM}
+        // the Mac M1 does NOT follow the ARM ABI standard on stack :(
+        // https://developer.apple.com/documentation/xcode/
+        //    writing-arm64-code-for-apple-platforms#Pass-arguments-to-functions-correctly
+        // "arguments may consume slots on the stack that are not multiples of 8 bytes"
+        if ValueDirection = imdConst then
+          SizeInStack := ArgRtti.Size;
+        {$else}
         {$ifdef CPUARM}
         // parameter must be aligned on a SizeInStack boundary
         if SizeInStack > POINTERBYTES then
           Inc(ArgsSizeInStack, ArgsSizeInStack mod cardinal(SizeInStack));
         {$endif CPUARM}
+        {$endif OSDARWINARM}
         InStackOffset := ArgsSizeInStack;
         inc(ArgsSizeInStack, SizeInStack);
       end
@@ -4162,6 +4173,11 @@ begin
         end;
       end;
     end;
+    {$ifdef OSDARWINARM}
+    // the Mac M1 does NOT follow the ARM ABI standard on stack :(
+    while ArgsSizeInStack and 7 <> 0 do
+      inc(ArgsSizeInStack); // ensure pointer-aligned
+    {$endif OSDARWINARM}
     if ArgsSizeInStack > MAX_EXECSTACK then
       raise EInterfaceFactory.CreateUtf8(
         '%.Create: Stack size % > % for %.% method parameters',
@@ -5412,7 +5428,7 @@ type // to access fAutoCreateInterfaces protected field
 
 procedure TInjectableObject.AutoResolve(aRaiseEServiceExceptionIfNotFound: boolean);
 var
-  rtti: TRttiJson;
+  r: TRttiJson;
   n: integer;
   p: PPRttiCustomProp;
   addr: pointer;
@@ -5422,12 +5438,16 @@ begin
     raise EInterfaceResolver.CreateUtf8(
       '%.AutoResolve with no prior registration', [self]);
   // inlined Rtti.RegisterClass()
-  rtti := PPointer(PPAnsiChar(self)^ + vmtAutoTable)^;
-  if (rtti = nil) or
-     not (rcfAutoCreateFields in rtti.Flags) then
-    rtti := DoRegisterAutoCreateFields(self);
+  {$ifdef NOPATCHVMT}
+  r := pointer(Rtti.FindType(PPointer(PPAnsiChar(self)^ + vmtTypeInfo)^));
+  {$else}
+  r := PPointer(PPAnsiChar(self)^ + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
+  if (r = nil) or
+     not (rcfAutoCreateFields in r.Flags) then
+    r := DoRegisterAutoCreateFields(self);
   // resolve all published interface fields
-  p := pointer(TRttiCustomWrapper(rtti).fAutoCreateInterfaces);
+  p := pointer(TRttiCustomWrapper(r).fAutoCreateInterfaces);
   if p = nil then
     exit;
   n := PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF; // length(AutoCreateClasses)
@@ -7532,7 +7552,7 @@ begin
                 continue
             else
               // value to be retrieved from JSON object
-              ctxt.Json := ParObjValues[a]
+              ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json := ParObjValues[a]
           else if ctxt.Json = nil then
             break; // premature end of ..] (ParObjValuesUsed=false)
           if arg^.ValueType = imvInterface then
@@ -7700,7 +7720,7 @@ var
   i: PtrInt;
   fields: PPointerArray; // holds a TPointerDynArray but avoid try..finally
 begin
-  inst := Rtti.Find(PClass(self)^).GetPrivateSlot(TSetWeakZero);
+  inst := Rtti.FindClass(PClass(self)^).GetPrivateSlot(TSetWeakZero);
   fields := nil;
   if inst.FindAndExtract(self, fields) and
      (fields <> nil) then
@@ -7731,6 +7751,9 @@ function GetWeakZero(aClass: TClass; CreateIfNonExisting: boolean): TSetWeakZero
 var
   rc: TRttiCustom;
 begin
+  {$ifdef NOPATCHVMT}
+  raise EInterfaceFactory.Create('Unsupported SetWeakZero() on this context');
+  {$endif NOPATCHVMT}
   rc := Rtti.RegisterClass(aClass);
   result := rc.GetPrivateSlot(TSetWeakZero);
   if (result = nil) and

@@ -6,7 +6,7 @@ unit mormot.db.raw.sqlite3.static;
 {
   *****************************************************************************
 
-    Statically linked SQLite3 3.41.0 engine with optional AES encryption
+    Statically linked SQLite3 3.42.0 engine with optional AES encryption
     - TSqlite3LibraryStatic Implementation
     - Encryption-Related Functions
 
@@ -94,15 +94,15 @@ const
   /// the exact version expected by the current state of this unit
   // - an error message is generated via DisplayFatalError() if the statically
   // linked sqlite3.o(bj) does not match this expected value
-  EXPECTED_SQLITE3_VERSION = '3.41.0';
+  EXPECTED_SQLITE3_VERSION = '3.42.0';
 
   /// the github release tag associated with this EXPECTED_SQLITE3_VERSION
   // - to be used if you don't want the latest version of sqlite3, but the very
   // same binaries expected by this unit, in one of its previous version
   // - you could download the static for this exact mORMot source revision e.g. as
-  // https://github.com/synopse/mORMot2/releases/download/2.0.stable/mormot2static.7z
-  // https://github.com/synopse/mORMot2/releases/download/2.0.stable/mormot2static.tgz
-  EXPECTED_RELEASE_TAG = '2.0.stable';
+  // https://github.com/synopse/mORMot2/releases/download/2.1.stable/mormot2static.7z
+  // https://github.com/synopse/mORMot2/releases/download/2.1.stable/mormot2static.tgz
+  EXPECTED_RELEASE_TAG = '2.1.stable';
 
   /// where to download the latest available static binaries, including SQLite3
   {$ifdef OSWINDOWS}
@@ -124,10 +124,10 @@ const
 // with rounds=1000 or a JSON (extended) serialized TSynSignerParams object like
 // ${algo:"saSha512",secret:"StrongPassword",salt:"FixedSalt",rounds:10000}
 // - please note that this encryption is compatible only with SQlite3 files made
-// with SynSQLiteStatic.pas unit (not external/official/wxsqlite3 dll)
+// with this mormot.db.raw.sqlite3.static unit (not external/official/wxsqlite3 dll)
 // - implementation is NOT compatible with the official SQLite Encryption Extension
 // (SEE) file format, not the wxsqlite3 extension, but is (much) faster thanks
-// to our SynCrypto AES-NI enabled unit
+// to our mormot.crypt.core AES-NI enabled unit
 // - if the key is not correct, a ESqlite3Exception will be raised with
 // 'database disk image is malformed' (SQLITE_CORRUPT) at database opening
 // - see also IsSQLite3File/IsSQLite3FileEncrypted functions
@@ -192,11 +192,15 @@ uses
   {$endif OSWINDOWS}
 
   {$ifdef OSDARWIN}
-    {$ifdef CPU64}
-      {$linklib ..\..\static\x86_64-darwin\libsqlite3.a}
-    {$else}
+    {$ifdef CPUAARCH64}
+      {$L ..\..\static\aarch64-darwin\sqlite3.o}
+    {$endif CPUAARCH64}
+    {$ifdef CPUX86}
       {$linklib ..\..\static\i386-darwin\libsqlite3.a}
-    {$endif CPU64}
+    {$endif CPUX86}
+    {$ifdef CPUX64}
+      {$linklib ..\..\static\x86_64-darwin\libsqlite3.a}
+    {$endif CPUX64}
   {$endif OSDARWIN}
 
   {$ifdef OSANDROID}
@@ -582,7 +586,7 @@ begin
     aes^.Encrypt(iv.b); // avoid potential brute force attack
   len := len shr AesBlockShift;
   if page = 1 then
-    // ensure header bytes 16..23 are stored unencrypted
+    // ensure header bytes 16..23 are stored unencrypted in the first page
     if (PInt64(data)^ = SQLITE_FILE_HEADER128.lo) and
        (data[21] = #64) and
        (data[22] = #32) and
@@ -617,7 +621,7 @@ begin
   else
     // whole page encryption if not the first one
     if ForceSQLite3AesCtr then
-      aes^.DoBlocksCtr(@iv.b, data, data, len) // faster on x86_64 SSE4.1
+      aes^.DoBlocksCtr(@iv.b, data, data, len) // fastest on x86_64 SSE4.1
     else
       aes^.DoBlocksOfb(@iv.b, data, data, len);
 end;
@@ -673,7 +677,7 @@ begin
     size := FileSize(F);
     if FileRead(F, head, SizeOf(head)) <> SizeOf(head) then
       exit;
-    if size > 4 shl 20 then // use up to 4MB of R/W buffer
+    if size > 4 shl 20 then // use up to 4MB of R/decrypt/encrypt/W buffer
       bufsize := 4 shl 20
     else
       bufsize := size;

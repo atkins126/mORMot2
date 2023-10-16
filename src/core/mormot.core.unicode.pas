@@ -35,7 +35,11 @@ uses
 // some constants used for UTF-8 conversion, including surrogates
 type
   // see http://floodyberry.wordpress.com/2007/04/14/utf-8-conversion-tricks
+  {$ifdef USERECORDWITHMETHODS}
+  TUtf8Table = record
+  {$else}
   TUtf8Table = object
+  {$endif USERECORDWITHMETHODS}
   public
     Lookup: array[byte] of byte;
     Extra: array[0..6] of record
@@ -201,7 +205,8 @@ var
 
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding
 // - will also refuse #0 characters within the buffer
-// - on Haswell AVX2 Intel/AMD CPUs, will use very efficient ASM
+// - on Haswell AVX2 Intel/AMD CPUs, will use very efficient ASM, reaching e.g.
+// 21 GB/s parsing speed on a Core i5-13500
 function IsValidUtf8(const source: RawUtf8): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -209,13 +214,15 @@ function IsValidUtf8(const source: RawUtf8): boolean; overload;
 // - will stop when the buffer contains #0
 // - just a wrapper around IsValidUtf8Buffer(source, StrLen(source)) so if you
 // know the source length, you would better call IsValidUtf8Buffer() directly
+// - on Haswell AVX2 Intel/AMD CPUs, will use very efficient ASM, reaching e.g.
+// 15 GB/s parsing speed on a Core i5-13500 - StrLen() itself runs at 37 GB/s
 function IsValidUtf8(source: PUtf8Char): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// detect UTF-8 content and mark the variable with the CP_UTF8 codepage
 // - to circumvent FPC concatenation bug with CP_UTF8 and CP_RAWBYTESTRING
 procedure DetectRawUtf8(var source: RawByteString);
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifndef HASCODEPAGE}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding with no #1..#31
 // control characters
@@ -1224,11 +1231,6 @@ function IdemPropNameUSameLenNotNull(P1, P2: PUtf8Char; P1P2Len: PtrInt): boolea
 function IdemPropNameU(const P1, P2: RawUtf8): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// return the index of Value in Values[], -1 if not found
-// - here name search would use fast IdemPropNameU() function
-// - just a wrapper to the homonymous function in mormot.core.base
-function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer; overload;
-
 /// returns true if the beginning of p^ is the same as up^
 // - ignore case - up^ must be already Upper
 // - chars are compared as 7-bit Ansi only (no accentuated characters): but when
@@ -1729,7 +1731,7 @@ function TrimChar(const text: RawUtf8; const exclude: TSynAnsicharSet): RawUtf8;
 
 /// returns the supplied text content, without any other char than specified
 // - specify a custom char set to be included, e.g. as ['A'..'Z']
-function OnlyChar(const text: RawUtf8; only: TSynAnsicharSet): RawUtf8;
+function OnlyChar(const text: RawUtf8; const only: TSynAnsicharSet): RawUtf8;
 
 /// returns the supplied text content, without any control char
 // - here control chars have an ASCII code in [#0 .. ' '], i.e. text[] <= ' '
@@ -3339,7 +3341,7 @@ function IsFixedWidthCodePage(aCodePage: cardinal): boolean;
 begin
   result := ((aCodePage >= 1250) and
              (aCodePage <= 1258)) or
-            (aCodePage = CODEPAGE_LATIN1) or
+            (aCodePage = CP_LATIN1) or
             (aCodePage >= CP_RAWBLOB);
 end;
 
@@ -3736,8 +3738,8 @@ const
   // - this table contains all the Unicode codepoints corresponding to
   // the Ansi Code Page 1252 (i.e. WinAnsi), which Unicode value are > 255
   // - values taken from MultiByteToWideChar(1252,0,@Tmp,256,@WinAnsiTable,256)
-  // so these values are available outside the Windows platforms (e.g. Linux/BSD)
-  // and even if registry has been tweaked as such:
+  // so are available outside the Windows platforms (e.g. Linux/BSD) and even
+  // if the system has been tweaked as such:
   // http://www.fas.harvard.edu/~chgis/data/chgis/downloads/v4/howto/cyrillic.html
   WinAnsiUnicodeChars: packed array[128..159] of word = (
     8364, 129, 8218, 402, 8222, 8230, 8224, 8225, 710, 8240, 352, 8249, 338,
@@ -3752,19 +3754,19 @@ var
 begin
   inherited;
   if not IsFixedWidthCodePage(aCodePage) then
-    // warning: CreateUtf8() uses Utf8ToString() -> call CreateFmt() now
+    // warning: CreateUtf8() uses Utf8ToString() -> call CreateFmt() here
     raise ESynUnicode.CreateFmt('%s.Create - Invalid code page %d',
       [ClassNameShort(self)^, fCodePage]);
   // create internal look-up tables
   SetLength(fAnsiToWide, 256);
-  if (aCodePage = CODEPAGE_US) or
-     (aCodePage = CODEPAGE_LATIN1) or
+  if (aCodePage = CP_WINANSI) or
+     (aCodePage = CP_LATIN1) or
      (aCodePage >= CP_RAWBLOB) then
   begin
     // Win1252 has its own table, LATIN1 and RawByteString map 8-bit Unicode
     for i := 0 to 255 do
       fAnsiToWide[i] := i;
-    if aCodePage = CODEPAGE_US then
+    if aCodePage = CP_WINANSI then
       // do not trust the Windows API for the 1252 code page :(
       for i := low(WinAnsiUnicodeChars) to high(WinAnsiUnicodeChars) do
         fAnsiToWide[i] := WinAnsiUnicodeChars[i];
@@ -5351,13 +5353,6 @@ begin
       result := false
   else
     result := true;
-end;
-
-function FindPropName(const Names: array of RawUtf8; const Name: RawUtf8): integer;
-begin
-  result := high(Names);
-  if result >= 0 then
-    result := FindPropName(@Names[0], Name, result + 1);
 end;
 
 function IdemPChar(p: PUtf8Char; up: PAnsiChar): boolean;
@@ -7478,7 +7473,7 @@ begin
       if i = 0 then
       begin
         if DestPtr[result] <> nil then
-          FastSetString(DestPtr[result]^, P, length(Str) - j);
+          FastSetString(DestPtr[result]^, P, length(Str) - j + 1);
         inc(result);
         break;
       end;
@@ -7557,13 +7552,14 @@ begin
   result := text; // no exclude char found
 end;
 
-function OnlyChar(const text: RawUtf8; only: TSynAnsicharSet): RawUtf8;
+function OnlyChar(const text: RawUtf8; const only: TSynAnsicharSet): RawUtf8;
 var
   i: PtrInt;
-begin
-  for i := 0 to SizeOf(only) do
-    PByteArray(@only)[i] := not PByteArray(@only)[i]; // reverse bits
-  result := TrimChar(text, only);
+  exclude: array[0..(SizeOf(only) shr POINTERSHR) - 1] of PtrInt;
+begin // reverse bits in local stack copy before calling TrimChar()
+  for i := 0 to (SizeOf(only) shr POINTERSHR) - 1 do
+    exclude[i] := not PPtrIntArray(@only)[i];
+  result := TrimChar(text, TSynAnsicharSet(exclude));
 end;
 
 procedure FillZero(var secret: RawByteString);
@@ -7572,6 +7568,7 @@ begin
     with PStrRec(Pointer(PtrInt(secret) - _STRRECSIZE))^ do
       if refCnt = 1 then // avoid GPF if const
         FillCharFast(pointer(secret)^, length, 0);
+  FastAssignNew(secret); // dec refCnt
 end;
 
 procedure FillZero(var secret: RawUtf8);
@@ -7591,6 +7588,7 @@ begin
     with PStrRec(Pointer(PtrInt(secret) - _STRRECSIZE))^ do
       if refCnt = 1 then // avoid GPF if const
         FillCharFast(pointer(secret)^, length * SizeOf(WideChar), 0);
+  Finalize(secret); // dec refCnt
 end;
 {$endif HASVARUSTRING}
 
@@ -7600,6 +7598,7 @@ begin
     with PDynArrayRec(Pointer(PtrInt(secret) - _DARECSIZE))^ do
       if refCnt = 1 then // avoid GPF if const
         FillCharFast(pointer(secret)^, length, 0);
+  secret := nil; // dec refCnt
 end;
 
 function StringReplaceAllProcess(const S, OldPattern, NewPattern: RawUtf8;
@@ -8979,7 +8978,11 @@ end;
 
 type
   /// used internally for faster quick sort
+  {$ifdef USERECORDWITHMETHODS}
+  TQuickSortRawUtf8 = record
+  {$else}
   TQuickSortRawUtf8 = object
+  {$endif USERECORDWITHMETHODS}
   public
     Compare: TUtf8Compare;
     CoValues: PIntegerArray;
@@ -9128,12 +9131,17 @@ end;
 
 type
   // 20,016 bytes for full Unicode 10.0 case folding branchless conversion
+  {$ifdef USERECORDWITHMETHODS}
+  TUnicodeUpperTable = record
+  {$else}
   TUnicodeUpperTable = object
+  {$endif USERECORDWITHMETHODS}
   public
     Block: array[0..37, 0..127] of integer;
     IndexHi: array[0..271] of byte;
     IndexLo: array[0..8, 0..31] of byte;
     // branchless Unicode 10.0 uppercase folding using our internal tables
+    // caller should have checked that c <= UU_MAX
     function Ucs4Upper(c: PtrUInt): PtrUInt;
       {$ifdef HASINLINE} inline; {$endif}
   end;
@@ -9682,7 +9690,7 @@ c2low:          if c2 = 0 then
             end
             else
               result := UTF8_TABLE.GetHighUtf8Ucs4(u1);
-            if result <= UU_MAX then
+            if PtrUInt(result) <= UU_MAX then
               result := tab.Ucs4Upper(result);
           end;
           if c2 <= 127 then
@@ -9694,7 +9702,7 @@ c2low:          if c2 = 0 then
           end
           else
             c2 := UTF8_TABLE.GetHighUtf8Ucs4(u2);
-          if c2 <= UU_MAX then
+          if PtrUInt(c2) <= UU_MAX then
             c2 := tab.Ucs4Upper(c2);
           dec(result, c2);
           if result <> 0 then
@@ -9782,7 +9790,7 @@ begin
             until i = extra;
             inc(u1, extra);
             dec(result, utf8.Extra[extra].offset);
-            if result <= UU_MAX then
+            if PtrUInt(result) <= UU_MAX then
               result := tab.Ucs4Upper(result);
           end;
           // here result=NormToUpper[u1^]
@@ -9812,7 +9820,7 @@ begin
             until i = extra;
             inc(u2, extra);
             dec(c2, utf8.Extra[extra].offset);
-            if c2 <= UU_MAX then
+            if PtrUInt(c2) <= UU_MAX then
               c2 := tab.Ucs4Upper(c2);
             dec(result, c2);
             if result <> 0 then
@@ -9893,7 +9901,7 @@ nxt:u0 := U;
       until i = extra;
       inc(U, extra);
       dec(c, utf8.Extra[extra].offset);
-      if c <= UU_MAX then
+      if PtrUInt(c) <= UU_MAX then
         c := tab.Ucs4Upper(c);
       if c <> Up[0] then
         continue;
@@ -9931,7 +9939,7 @@ nxt:u0 := U;
         until i = extra;
         inc(u2, extra);
         dec(c, utf8.Extra[extra].offset);
-        if c <= UU_MAX then
+        if PtrUInt(c) <= UU_MAX then
           c := tab.Ucs4Upper(c);
         if c <> up2^ then
           goto nxt;
@@ -10094,7 +10102,7 @@ begin
   // setup basic Unicode conversion engines
   SetLength(SynAnsiConvertListCodePage, 16); // no resize -> more thread safe
   CurrentAnsiConvert   := NewEngine(Unicode_CodePage);
-  WinAnsiConvert       := NewEngine(CODEPAGE_US) as TSynAnsiFixedWidth;
+  WinAnsiConvert       := NewEngine(CP_WINANSI) as TSynAnsiFixedWidth;
   Utf8AnsiConvert      := NewEngine(CP_UTF8) as TSynAnsiUtf8;
   RawByteStringConvert := NewEngine(CP_RAWBYTESTRING) as TSynAnsiFixedWidth;
   // setup optimized ASM functions

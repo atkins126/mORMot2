@@ -655,9 +655,9 @@ procedure TestMasterSlaveRecordVersion(Test: TSynTestCase; const DBExt: TFileNam
       Test.CheckEqual(Rec1.FillTable.RowCount, Rec2.FillTable.RowCount);
       while Rec1.FillOne do
       begin
-        Test.check(Rec2.FillOne);
-        Test.check(Rec1.SameRecord(Rec2), 'simple fields');
-        Test.CheckEqual(Rec1.Version, Rec2.Version);
+        Test.check(Rec2.FillOne, 'fill');
+        Test.check(Rec1.SameRecord(Rec2), 'fields');
+        Test.CheckEqual(Rec1.Version, Rec2.Version, 'version');
       end;
     finally
       Rec1.Free;
@@ -793,13 +793,22 @@ begin
         if i and 3 = 1 then
           Test.check(Master.Server.Delete(TOrmPeopleVersioned, Rec.IDValue))
         else
-          Test.check(Master.Server.Update(Rec));
+          Test.check(Master.Server.Update(Rec, 'YearOfBirth'));
         if i and 3 = 2 then
         begin
           Rec.YearOfBirth := Rec.YearOfBirth + 4;
           Test.check(Master.Server.Update(Rec), 'update twice to increase Version');
         end;
       end;
+      //Test.check(Rec.FillRewind); would fail TestMasterSlave expectations
+      MasterAccess.Client.BatchStart(TOrmPeopleVersioned);
+      for i := 0 to 9 do
+      begin
+        Test.check(Rec.FillOne);
+        Rec.YearOfBirth := Rec.YearOfBirth + 10;
+        Test.check(MasterAccess.Client.BatchUpdate(Rec, 'YearOfBirth') >= 0);
+      end;
+      Test.check(MasterAccess.Client.BatchSend(IDs) = HTTP_SUCCESS);
       TestMasterSlave(Master, Slave1, MasterAccess);
       TestMasterSlave(Master, Slave1, MasterAccess);
       if Test is TTestBidirectionalRemoteConnection then
@@ -1033,13 +1042,13 @@ begin
       check(MS.DestList.DestGetJoined(aClient, 'ADest.SignatureTime=:(0):', sID[i], res));
       check(length(res) = 0);
       check(MS.DestList.DestGetJoined(aClient,
-        FormatUtf8('ADest.SignatureTime=?', [], [MD.SignatureTime]), sID[i], res));
+        FormatSql('ADest.SignatureTime=?', [], [MD.SignatureTime]), sID[i], res));
 // 'ADest.SignatureTime=:('+Int64ToUtf8(MD.SignatureTime)+'):',sID[i],res));
       if CheckFailed(length(res) = 1) then
         continue; // avoid GPF
       check(res[0] = dID[i]);
       MD2 := MS.DestList.DestGetJoined(aClient,
-        FormatUtf8('ADest.SignatureTime=?', [], [MD.SignatureTime]), sID[i]) as TOrmADest;
+        FormatSql('ADest.SignatureTime=?', [], [MD.SignatureTime]), sID[i]) as TOrmADest;
 // 'ADest.SignatureTime=:('+Int64ToUtf8(MD.SignatureTime)+'):',sID[i]) as TOrmADest;
       if CheckFailed(MD2 <> nil) then
         continue;
@@ -1190,13 +1199,13 @@ var
     begin
       k := i shl 5;
       aClient.Orm.OneFieldValues(TOrmPeopleArray, 'ID',
-        FormatUtf8('IntegerDynArrayContains(Ints,?)', [], [k]), IDs);
+        FormatSql('IntegerDynArrayContains(Ints,?)', [], [k]), IDs);
       l := n + 1 - 32 * i;
       check(length(IDs) = l);
       for j := 0 to high(IDs) do
         check(IDs[j] = k + j);
       aClient.Orm.OneFieldValues(TOrmPeopleArray, 'ID',
-       FormatUtf8('CardinalDynArrayContains(Ints,?)', [], [k]), IDs);
+       FormatSql('CardinalDynArrayContains(Ints,?)', [], [k]), IDs);
       check(length(IDs) = l);
       for j := 0 to high(IDs) do
         check(IDs[j] = k + j);
@@ -1629,7 +1638,7 @@ begin
         begin
           check(Client.Orm.RetrieveBlob(TOrmPeople, IntArray[i], 'Data', Data));
           check(Length(Data) = sizeof(BlobDali));
-          check(CompareMem(pointer(Data), @BlobDali, sizeof(BlobDali)));
+          check(CompareBuf(Data, @BlobDali, sizeof(BlobDali)));
           check(Client.Orm.RetrieveBlob(TOrmPeople, IntArray[i], 'Data', DataS));
           check((DataS.Size = 4) and
                 (PCardinal(DataS.Memory)^ = $E7E0E961));

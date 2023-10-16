@@ -2055,7 +2055,7 @@ type
   TOrmTableData = PUtf8Char;
   TOrmTableDataArray = PPUtf8CharArray;
   TOrmTableJsonDataArray = TPUtf8CharDynArray;
-  {$else} // reduce memory consumption by half on 64-bit CPUs
+  {$else} // reduce memory consumption and L1 cache miss by half on 64-bit CPUs
   TOrmTableData = integer;
   TOrmTableDataArray = PIntegerArray; // 0 = nil, or offset in fDataStart[]
   TOrmTableJsonDataArray = TIntegerDynArray;
@@ -2903,7 +2903,6 @@ type
   // - is fully implemented in mormot.orm.core by the final TOrmProperties class
   TOrmPropertiesAbstract = class
   protected
-    fSafe: TOSLock;
     fTableRtti: TRttiJson;
     fHasNotSimpleFields: boolean;
     fDynArrayFieldsHasObjArray: boolean;
@@ -2916,9 +2915,13 @@ type
     fBlobCustomFields: TOrmPropInfoCustomDynArray;
     fBlobFields: TOrmPropInfoRttiRawBlobDynArray;
     fManyFields: TOrmPropInfoRttiManyObjArray;
+    fSafe: TOSLightLock;
     fRecordManySourceProp: TOrmPropInfoRttiInstance;
     fRecordManyDestProp: TOrmPropInfoRttiInstance;
     fSqlTableNameUpperWithDot: RawUtf8;
+    fLastFieldsSafe: TLightLock;
+    fLastFieldsCsv: RawUtf8;
+    fLastFieldsCsvBits: TFieldBits;
     fSqlFillPrepareMany: RawUtf8;
     fSqlTableSimpleFieldsNoRowID: RawUtf8;
     fSqlTableUpdateBlobFields: RawUtf8;
@@ -5618,7 +5621,7 @@ var
 begin
   fPropInfo.GetLongStrProp(Instance, Value);
   if CaseInsensitive then // 255 max chars is enough to avoid hashing collisions
-    if fEngine.CodePage = CODEPAGE_US then
+    if fEngine.CodePage = CP_WINANSI then
       result := DefaultHasher(0, Up{%H-}, UpperCopyWin255(Up{%H-}, Value) - {%H-}Up)
     else
       result := DefaultHasher(0, Up, UpperCopy255Buf(Up, pointer(Value), length(Value)) - Up)
@@ -5668,7 +5671,7 @@ begin
     fPropInfo.GetLongStrProp(Item1, tmp1);
     fPropInfo.GetLongStrProp(Item2, tmp2);
     if CaseInsensitive then
-      if fEngine.CodePage = CODEPAGE_US then
+      if fEngine.CodePage = CP_WINANSI then
         result := AnsiIComp(pointer(tmp1), pointer(tmp2))
       else
         result := StrIComp(pointer(tmp1), pointer(tmp2))
@@ -9316,7 +9319,11 @@ type
   // - code generated is very optimized: stack and memory usage, CPU registers
   // prefered, multiplication avoided to calculate memory position from index,
   // hand tuned assembler...
+  {$ifdef USERECORDWITHMETHODS}
+  TUtf8QuickSort = record
+  {$else}
   TUtf8QuickSort = object
+  {$endif USERECORDWITHMETHODS}
   public
     Data: TOrmTableDataArray;
     {$ifndef NOTORMTABLELEN}
@@ -9615,7 +9622,11 @@ begin
 end;
 
 type
+  {$ifdef USERECORDWITHMETHODS}
+  TUtf8QuickSortMulti = record
+  {$else}
   TUtf8QuickSortMulti = object
+  {$endif USERECORDWITHMETHODS}
   public
     Data: TOrmTableDataArray;
     {$ifndef NOTORMTABLELEN}
@@ -10816,17 +10827,16 @@ end;
 
 function TOrmCacheTable.Get(aID: TID): pointer;
 var
-  e: POrmCacheTableValue;
+  i: PtrInt;
 begin
   result := nil;
   if (@self = nil) or
      not CacheEnable or
      (TimeOutMS <> 0) then // by safety: TimeOutMS may delete the instance
     exit;
-  e := RetrieveEntry(aID);
-  if (e <> nil) and
-     (e <> ORMCACHE_DEPRECATED) then
-    result := e^.Value; // no copy
+  i := SortFind(Value, aID, Count);
+  if i >= 0 then
+    result := Value[i].Value;
 end;
 
 function TOrmCacheTable.CachedEntries: cardinal;
@@ -11256,6 +11266,17 @@ begin
   result := false;
   if self = nil then
     exit;
+  if fLastFieldsSafe.TryLock then
+  begin
+    if IdemPropNameU(fLastFieldsCsv, aFieldsCsv) then
+    begin
+      result := true;
+      Bits := fLastFieldsCsvBits;
+    end;
+    fLastFieldsSafe.UnLock;
+    if result then
+      exit;
+  end;
   P := pointer(aFieldsCsv);
   while P <> nil do
   begin
@@ -11264,6 +11285,12 @@ begin
     if ndx < 0 then
       exit; // invalid field name
     FieldBitSet(Bits, ndx);
+  end;
+  if fLastFieldsSafe.TryLock then
+  begin
+    fLastFieldsCsv := aFieldsCsv;
+    fLastFieldsCsvBits := Bits;
+    fLastFieldsSafe.UnLock;
   end;
   result := true;
 end;

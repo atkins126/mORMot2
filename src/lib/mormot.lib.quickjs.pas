@@ -116,7 +116,11 @@ type
   // - you can use e.g. JSValue(somejsvaluevariable).IsObject or JSValue.Raw
   // - JSValueRaw is the low-level type mandatory for QuickJS API calls: using
   // JSValue to call the QuickJS library fails to use registers, so trigger GPF
+  {$ifdef USERECORDWITHMETHODS}
+  JSValue = record
+  {$else}
   JSValue = object
+  {$endif USERECORDWITHMETHODS}
   private
     u: record
       case byte of
@@ -268,7 +272,11 @@ type
   /// wrapper object to the QuickJS JSRuntime abstract pointer type
   // - JSRuntime is a pointer to this opaque object
   // - only a single
+  {$ifdef USERECORDWITHMETHODS}
+  TJSRuntime = record
+  {$else}
   TJSRuntime = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// create a new execution context for this Runtime
     function New: JSContext;
@@ -282,11 +290,15 @@ type
 
   /// wrapper object to the QuickJS JSContext abstract pointer type
   // - JSContext is a pointer to this opaque object
+  {$ifdef USERECORDWITHMETHODS}
+  TJSContext = record
+  {$else}
   TJSContext = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// just a wrapper around JS_FreeContext(@self)
     procedure Done;
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// release the memory used by a JSValueRaw - JS_FreeValue() alternative
     procedure FreeInlined(var v: JSValueRaw); overload;
       {$ifdef HASINLINE} inline; {$endif}
@@ -373,7 +385,7 @@ type
     procedure ToUtf8(v: JSValue; var s: RawUtf8; noJson: boolean = false); overload;
     /// convert a JSValue into its RawUtf8 text
     function ToUtf8(const v: JSValue; noJson: boolean = false): RawUtf8; overload;
-      {$ifdef HASINLINE} inline; {$endif}
+      {$ifdef HASSAFEINLINE} inline; {$endif}
     /// convert a JSValue into its RawUtf8 text and free the value
     function ToUtf8Free(var v: JSValue; noJson: boolean = false): RawUtf8;
     /// convert a JSValue into an UTF-8 text buffer
@@ -394,10 +406,10 @@ type
     function FromW(P: PWideChar; Len: PtrInt): JSValue; overload;
     /// create a JS_TAG_STRING from UTF-8 string
     function From(const val: RawUtf8): JSValue; overload;
-       {$ifdef HASINLINE} inline; {$endif}
+       {$ifdef HASSAFEINLINE} inline; {$endif}
     /// create a JS_TAG_STRING from UTF-16 string
     function FromW(const val: SynUnicode): JSValue; overload;
-       {$ifdef HASINLINE} inline; {$endif}
+       {$ifdef HASSAFEINLINE} inline; {$endif}
     /// create a JS value from an "array of const" value
     procedure FromVarRec(const val: TVarRec; out result: JSValue);
     /// create a JS value from a variant value

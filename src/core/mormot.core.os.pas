@@ -1650,12 +1650,22 @@ var
   _Smbios: TSmbiosBasicInfos;
   _SmbiosRetrieved: boolean;
 
+  /// customize how DecodeSmbiosUuid() handle endianess of its first bytes
+  // - sduDirect will directly use GUIDToString() layout (seems expected on
+  // Windows to match "wmic csproduct get uuid" value)
+  // - sduInvert will force first values inversion (mandatory on MacOS)
+  // - sduVersion will invert for SMBios version < 2.6 (set outside Windows)
+  _SmbiosDecodeUuid: (sduDirect, sduInvert, sduVersion)
+    {$ifdef OSDARWIN}  = sduInvert  {$else}
+      {$ifdef OSPOSIX} = sduVersion {$endif} {$endif};
+
 /// retrieve SMBIOS information as text
 // - only the main values are decoded - see GetSmbiosInfo in mormot.core.perf
 // for a more complete DMI/SMBIOS decoder
 // - on POSIX, requires root to access full SMBIOS information - will fallback
 // reading /sys/class/dmi/id/* on Linux or kenv() on FreeBSD for most entries
 // if we found no previous root-retrieved cache in local /var/tmp/.synopse.smb
+// - see _SmbiosDecodeUuid global flag for UUID decoding
 function GetSmbios(info: TSmbiosBasicInfo): RawUtf8;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -1693,7 +1703,11 @@ type
   // - could be used as alternative to TRegistry, which doesn't behave the same on
   // all Delphi versions, and is enhanced on FPC (e.g. which supports REG_MULTI_SZ)
   // - is also Unicode ready for text, using UTF-8 conversion on all compilers
+  {$ifdef USERECORDWITHMETHODS}
+  TWinRegistry = record
+  {$else}
   TWinRegistry = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// the opened HKEY handle
     key: HKEY;
@@ -1781,7 +1795,11 @@ type
   // - not all available privileges are active for all process
   // - for usage of more advanced WinAPI, explicit enabling of privilege is
   // sometimes needed
+  {$ifdef USERECORDWITHMETHODS}
+  TSynWindowsPrivileges = record
+  {$else}
   TSynWindowsPrivileges = object
+  {$endif USERECORDWITHMETHODS}
   private
     fAvailable: TWinSystemPrivileges;
     fEnabled: TWinSystemPrivileges;
@@ -2120,7 +2138,11 @@ type
   end;
 
   /// direct access to the Windows CryptoApi
+  {$ifdef USERECORDWITHMETHODS}
+  TWinCryptoApi = record
+  {$else}
   TWinCryptoApi = object
+  {$endif USERECORDWITHMETHODS}
   private
     /// if the presence of this API has been tested
     Tested: boolean;
@@ -2539,7 +2561,7 @@ procedure LinuxEventFDWrite(fd: integer; count: QWord);
 
 /// wrapper to wait for a eventfd() file read
 // - return true if was notified for reading, or false on timeout
-function LinuxEventFDWait(fd: integer; ms: integer): boolean;
+function LinuxEventFDWait(fd: integer; ms: integer): boolean; inline;
 
 {$endif OSLINUX}
 
@@ -2618,6 +2640,21 @@ var
 
 {$else}
 
+const
+  /// a cross-platform incorrect THandle value, as defined in Windows unit
+  INVALID_HANDLE_VALUE = THandle(-1);
+
+  /// allow to assign proper signed symbol table name for a libc.so.6 method
+  {$ifdef OSLINUXX64}
+  LIBC_SUFFIX = '@GLIBC_2.2.5';
+  {$else}
+  {$ifdef OSLINUXX86}
+  LIBC_SUFFIX = '@GLIBC_2.0';
+  {$else}
+  LIBC_SUFFIX = ''; // no suffix seems needed outside of Intel/AMD systems
+  {$endif OSLINUXX86}
+  {$endif OSLINUXX64}
+
 type
   /// system-specific type returned by FileAge(): UTC 64-bit Epoch on POSIX
   TFileAge = TUnixTime;
@@ -2638,6 +2675,7 @@ type
 // some pthread_mutex_*() API defined here for proper inlining
 {$ifdef OSPTHREADSLIB}
 var
+  {%H-}pthread: pointer; // access to pthread.so e.g. for mormot.lib.static
   pthread_mutex_lock:    function(mutex: pointer): integer; cdecl;
   pthread_mutex_trylock: function(mutex: pointer): integer; cdecl;
   pthread_mutex_unlock:  function(mutex: pointer): integer; cdecl;
@@ -2911,7 +2949,11 @@ var
 type
   /// calling context when intercepting exceptions
   // - used e.g. for TSynLogExceptionToStr or RawExceptionIntercept() handlers
+  {$ifdef USERECORDWITHMETHODS}
+  TSynLogExceptionContext = record
+  {$else}
   TSynLogExceptionContext = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// the raised exception class
     EClass: ExceptClass;
@@ -3112,6 +3154,18 @@ procedure DisplayError(const fmt: string; const args: array of const);
 function SearchRecToDateTime(const F: TSearchRec): TDateTime;
   {$ifdef HASINLINE}inline;{$endif}
 
+/// get a file UTC date and time, from a FindFirst/FindNext search
+// - SearchRecToDateTime(), SearchRecToWindowsTime() and F.TimeStamp, which have
+// local time and require a conversion, may appear less useful on server side
+// - is implemented as a wrapper around SearchRecToUnixTimeUtc()
+function SearchRecToDateTimeUtc(const F: TSearchRec): TDateTime;
+
+/// get a file UTC date and time, from a FindFirst/FindNext search, as Unix time
+// - SearchRecToDateTime(), SearchRecToWindowsTime() and F.TimeStamp, which have
+// local time and require a conversion, may appear less useful on server side
+function SearchRecToUnixTimeUtc(const F: TSearchRec): TUnixTime;
+  {$ifdef OSPOSIX}inline;{$endif}
+
 /// get a file date and time, from a FindFirst/FindNext search, as Windows time
 // - this cross-system function is used e.g. by mormot.core.zip which expects
 // Windows TimeStamps in its headers
@@ -3221,6 +3275,7 @@ function StringFromFolders(const Folders: array of TFileName;
 
 /// create a File from a string content
 // - uses RawByteString for byte storage, whatever the codepage is
+// - can optionaly force writing to disk, and/or set the file local timestamp
 function FileFromString(const Content: RawByteString; const FileName: TFileName;
   FlushOnDisk: boolean = false; FileDate: TDateTime = 0): boolean;
 
@@ -3297,8 +3352,12 @@ function IsDirectoryWritable(const Directory: TFileName): boolean;
 
 type
   /// cross-platform memory mapping of a file content
+  {$ifdef USERECORDWITHMETHODS}
+  TMemoryMap = record
+  {$else}
   TMemoryMap = object
-  protected
+  {$endif USERECORDWITHMETHODS}
+  private
     fBuf: PAnsiChar;
     fBufSize: PtrUInt;
     fFile: THandle;
@@ -3363,7 +3422,11 @@ type
 
   /// low-level access to a resource bound to the executable
   // - so that Windows is not required in your unit uses clause
+  {$ifdef USERECORDWITHMETHODS}
+  TExecutableResource = record
+  {$else}
   TExecutableResource = object
+  {$endif USERECORDWITHMETHODS}
   private
     // note: we can't use THandle which is 32-bit on 64-bit POSIX
     HResInfo: TLibHandle;
@@ -3404,7 +3467,11 @@ type
   TSystemUseDataDynArray = array of TSystemUseData;
 
   /// low-level structure used to compute process memory and CPU usage
+  {$ifdef USERECORDWITHMETHODS}
+  TProcessInfo = record
+  {$else}
   TProcessInfo = object
+  {$endif USERECORDWITHMETHODS}
   private
     {$ifdef OSWINDOWS}
     fSysPrevIdle, fSysPrevKernel, fSysPrevUser,
@@ -3485,7 +3552,7 @@ function ReadSystemMemory(address, size: PtrUInt): RawByteString;
 /// return the PIDs of all running processes
 // - under Windows, is a wrapper around EnumProcesses() PsAPI call
 // - on Linux, will enumerate /proc/* pseudo-files
-function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
+function EnumAllProcesses: TCardinalDynArray;
 
 /// return the process name of a given PID
 // - under Windows, is a wrapper around
@@ -3535,8 +3602,7 @@ function GetDiskPartitions: TDiskPartitions;
 /// call several Operating System APIs to gather 512-bit of entropy information
 procedure XorOSEntropy(var e: THash512Rec);
 
-/// low-level function returning some random binary from then available
-// Operating System pseudorandom source
+/// low-level function returning some random binary from the Operating System
 // - will call /dev/urandom or /dev/random under POSIX, and CryptGenRandom API
 // on Windows then return TRUE, or fallback to mormot.core.base gsl_rng_taus2
 // generator and return FALSE if the system API failed
@@ -3636,6 +3702,18 @@ function Utf8ToWin32PWideChar(const Text: RawUtf8;
 /// internal function to avoid linking mormot.core.buffers.pas
 function PosixParseHex32(p: PAnsiChar): integer;
 
+/// internal function just wrapping fppoll(POLLIN or POLLPRI)
+function WaitReadPending(fd, timeout: integer): boolean;
+
+/// POSIX-only function calling directly getdents/getdents64 syscall
+// - could be used when FindFirst/FindNext are an overkill, e.g. to quickly
+// cache all file names of a folder in memory, optionally with its sub-folders
+// - warning: the file system has to support d_type (e.g. btrfs, ext2-ext4) so
+// that Recursive is handled and only DT_REG files are retrieved; non-compliant
+// file systems (or Linux Kernel older than 2.6.4) won't support the Recursive
+// search, and may return some false positives, like symlinks or nested folders
+function PosixFileNames(const Folder: TFileName; Recursive: boolean): TRawUtf8DynArray;
+
 {$endif OSWINDOWS}
 
 /// internal function to avoid linking mormot.core.buffers.pas
@@ -3704,6 +3782,8 @@ type
 /// self-modifying code - change some memory buffer in the code segment
 // - if Backup is not nil, it should point to a Size array of bytes, ready
 // to contain the overridden code buffer, for further hook disabling
+// - some systems do forbid such live patching: consider setting NOPATCHVMT
+// and NOPATCHRTL conditionals for such projects
 procedure PatchCode(Old, New: pointer; Size: PtrInt; Backup: pointer = nil;
   LeaveUnprotected: boolean = false);
 
@@ -3953,7 +4033,7 @@ type
   /// the standard rentrant lock supplied by the Operating System
   // - maps TRTLCriticalSection, i.e. calls Win32 API or pthreads library
   // - don't forget to call Init and Done to properly initialize the structure
-  // - if you do require a rentrant/recursive lock, consider TOSLightLock
+  // - if you do require a non-rentrant/recursive lock, consider TOSLightLock
   // - same signature as TLightLock/TOSLightLock, usable as compile time alternatives
   {$ifdef USERECORDWITHMETHODS}
   TOSLock = record
@@ -4050,8 +4130,12 @@ type
   // - RWUse property could replace the TRTLCriticalSection by a lighter TRWLock
   // - see also TRWLock and TSynPersistentRWLock if the multiple read / exclusive
   // write lock is better (only if the locked process does not take too much time)
+  {$ifdef USERECORDWITHMETHODS}
+  TSynLocker = record
+  {$else}
   TSynLocker = object
-  protected
+  {$endif USERECORDWITHMETHODS}
+  private
     fSection: TRTLCriticalSection;
     fRW: TRWLock;
     fPaddingUsedCount: byte;
@@ -4278,6 +4362,7 @@ type
   end;
 
   /// our lightweight cross-platform TEvent-like component
+  // - on Windows, calls directly the CreateEvent/ResetEvent/SetEvent API
   // - on Linux, will use eventfd() in blocking and non-semaphore mode
   // - on other POSIX, will use PRTLEvent which is lighter than TEvent BasicEvent
   // - only limitation is that we don't know if WaitFor is signaled or timeout,
@@ -4348,7 +4433,11 @@ type
   /// a thread-safe Pierre L'Ecuyer software random generator
   // - just wrap TLecuyer with a TLighLock
   // - should not be used, unless may be slightly faster than a threadvar
+  {$ifdef USERECORDWITHMETHODS}
+  TLecuyerThreadSafe = record
+  {$else}
   TLecuyerThreadSafe = object
+  {$endif USERECORDWITHMETHODS}
   public
     Safe: TLightLock;
     Generator: TLecuyer;
@@ -4397,7 +4486,8 @@ function SleepHiRes(ms: cardinal; var terminated: boolean;
 
 /// call SleepHiRes() taking count of the activity, in 0/1/5/50/120-250 ms steps
 // - range is agressively designed burning some CPU in favor of responsiveness
-// - should reset start := 0 when some activity occurred
+// - should reset start := 0 when some activity occurred, or start := -1 on
+// Windows to avoid any SleepHiRes(0) = SwitchToThread call
 // - would optionally return if terminated^ is set, or event is signaled
 // - returns the current GetTickCount64 value
 function SleepStep(var start: Int64; terminated: PBoolean = nil): Int64;
@@ -4408,6 +4498,8 @@ function SleepDelay(elapsed: PtrInt): PtrInt;
 
 /// compute optimal sleep time as SleepStep, in 0/1/5/50/120-250 ms steps
 // - is agressively designed burning some CPU in favor of responsiveness
+// - start=0 would fill its value with tix; start<0 would fill its value with
+// tix-50 so that SleepDelay() would never call SleepHiRes(0)
 function SleepStepTime(var start, tix: Int64; endtix: PInt64 = nil): PtrInt;
 
 /// similar to Windows SwitchToThread API call, to be truly cross-platform
@@ -4442,7 +4534,7 @@ function SetCpuSet(var CpuSet: TCpuSet; CpuIndex: cardinal): boolean;
 /// retrieve the current CPU cores masks available of the system
 // - the current process may have been tuned to use only a sub-set of the cores
 // e.g. via "taskset -c" on Linux
-// - return the number of accessible CPU cores - i.e. GetBitCount(CpuSet) or
+// - return the number of accessible CPU cores - i.e. GetBitsCount(CpuSet) or
 // 0 if the function failed
 function CurrentCpuSet(out CpuSet: TCpuSet): integer;
 
@@ -4641,8 +4733,7 @@ const
 
 type
   PServiceStatus = ^TServiceStatus;
-  TServiceStatus = object
-  public
+  TServiceStatus = record
     dwServiceType: cardinal;
     dwCurrentState: cardinal;
     dwControlsAccepted: cardinal;
@@ -4653,8 +4744,8 @@ type
   end;
 
   PServiceStatusProcess = ^TServiceStatusProcess;
-  TServiceStatusProcess = object(TServiceStatus)
-  public
+  TServiceStatusProcess = record
+    Service: TServiceStatus;
     dwProcessId: cardinal;
     dwServiceFlags: cardinal;
   end;
@@ -5185,9 +5276,11 @@ type
   // existing system environment variable
   // - roWinJobCloseChildren will setup a Windows Job to close any child
   // process(es) when the created process quits
+  // - roWinNoProcessDetach will avoid creating a Windows sub-process and group
   TRunOptions = set of (
     roEnvAddExisting,
-    roWinJobCloseChildren);
+    roWinJobCloseChildren,
+    roWinNoProcessDetach);
 
 /// like SysUtils.ExecuteProcess, but allowing not to wait for the process to finish
 // - optional env value follows 'n1=v1'#0'n2=v2'#0'n3=v3'#0#0 Windows layout
@@ -6121,7 +6214,7 @@ begin
     BALTIC_CHARSET:
       result := 1257;
   else
-    result := CODEPAGE_US; // default ANSI_CHARSET = iso-8859-1 = windows-1252
+    result := CP_WINANSI; // default ANSI_CHARSET = iso-8859-1 = windows-1252
   end;
 end;
 
@@ -6258,7 +6351,7 @@ begin
   result := (Int64(WinTime) - UnixFileTimeDelta) div FileTimePerMs;
 end;
 
-function DirectorySize(const FileName: TFileName; Recursive: boolean = false): Int64;
+function DirectorySize(const FileName: TFileName; Recursive: boolean): Int64;
 var
   SR: TSearchRec;
   dir: TFileName;
@@ -6374,6 +6467,11 @@ begin
   {$else}
   result := FileDateToDateTime(F.Time);
   {$endif ISDELPHIXE}
+end;
+
+function SearchRecToDateTimeUtc(const F: TSearchRec): TDateTime;
+begin
+  result := SearchRecToUnixTimeUtc(F) / Int64(SecsPerDay) + Int64(UnixDelta);
 end;
 
 function SearchRecValidFile(const F: TSearchRec): boolean;
@@ -6611,7 +6709,7 @@ begin
     FlushFileBuffers(F);
   {$ifdef OSWINDOWS}
   if FileDate <> 0 then
-    FileSetDate(F, DateTimeToFileDate(FileDate));
+    FileSetDate(F, DateTimeToFileDate(FileDate)); // use the existing handle
   FileClose(F);
   {$else}
   FileClose(F); // POSIX expects the file to be closed to set the date
@@ -6817,7 +6915,7 @@ begin
   Dir := IncludeTrailingPathDelimiter(Directory);
   if FindFirst(Dir + Mask, faAnyFile, F) = 0 then
   begin
-    old := Now - TimePeriod;
+    old := NowUtc - TimePeriod;
     repeat
       if SearchRecValidFolder(F) then
       begin
@@ -6826,7 +6924,7 @@ begin
             Dir + F.Name, TimePeriod, Mask, true, TotalSize);
       end
       else if SearchRecValidFile(F) and
-              (SearchRecToDateTime(F) < old) then
+              (SearchRecToDateTimeUtc(F) < old) then
         if not DeleteFile(Dir + F.Name) then
           result := false
         else if TotalSize <> nil then
@@ -8342,7 +8440,7 @@ var
     if s = '' then
       exit;
     u.c[n] := crc32c(u.c[n], pointer(s), length(s));
-    n := (n + 1) and 3;
+    n := (n + 1) and 3; // update only 32-bit of UUID per crctext() call
   end;
 
 begin
@@ -8357,15 +8455,17 @@ begin
   s := StringFromFile(fn);
   if length(s) = SizeOf(uuid) then
   begin
-    uuid := PGuid(s)^;
+    uuid := PGuid(s)^; // seems to be a valid UUID binary blob
     exit;
   end;
-  // no known UUID: compute and store a 128-bit hash from hardware information
+  // no known UUID: compute and store a 128-bit hash from HW specs
+  // which should remain identical even between full OS reinstalls
   // note: /etc/machine-id is no viable alternative since it is from SW random
   {$ifdef CPUINTELARM}
   crc128c(@CpuFeatures, SizeOf(CpuFeatures), u.b);
   {$else}
-  FillZero(u.b);
+  s := CPU_ARCH_TEXT;
+  crc128c(pointer(s), length(s), u.b); // rough starting point
   {$endif CPUINTELARM}
   if RawSmbios.Data <> '' then // some bios have no uuid but some HW info
     crc32c128(@u.b, pointer(RawSmbios.Data), length(RawSmbios.Data));
@@ -8376,16 +8476,20 @@ begin
   crctext(BiosInfoText);
   crctext(CpuInfoText);
   if Assigned(GetSystemMacAddress) then
-  begin
     // from mormot.net.sock or mormot.core.os.posix.inc for Linux only
     mac := GetSystemMacAddress;
+  if mac <> nil then
+  begin
+    // MAC should make it unique at least over the local network
     for i := 0 to high(mac) do
       crctext(mac[i]);
-    if FileFromBuffer(@u, SizeOf(u), fn) then // only MAC make it HW unique
+    // we have enough unique HW information to store it locally for next startup
+    // note: RawSmbios.Data may not be genuine e.g. between VMs
+    if FileFromBuffer(@u, SizeOf(u), fn) then
       FileSetSticky(fn); // use S_ISVTX so that file is not removed from /var/tmp
   end
   else
-    // fallback if mormot.net.sock is not included (very unlikely)
+    // unpersisted fallback if mormot.net.sock is not included (very unlikely)
     crctext(Executable.Host);
 end;
 
@@ -8394,26 +8498,27 @@ var
   uid: TGuid;
 begin
   uid := src^;
-  if IsZero(@uid, SizeOf(uid)) or // 0 means not supported
-     ((PCardinalArray(@uid)[0] = $ffffffff) and // ff means not set
+  // reject full $00 = unsupported or full $ff = not set
+  if IsZero(@uid, SizeOf(uid)) or
+     ((PCardinalArray(@uid)[0] = $ffffffff) and
       (PCardinalArray(@uid)[1] = $ffffffff) and
       (PCardinalArray(@uid)[2] = $ffffffff) and
       (PCardinalArray(@uid)[3] = $ffffffff)) then
     exit;
   // GUIDToString() already displays the first 4 bytes as little-endian
-  // so we don't need to swap those bytes as dmi_system_uuid() in dmidecode.c
-  // - without those 2 lines, result matches "wmic csproduct get uuid"
-  // on Windows XP or 10, and "dmidecode" output on both Delphi and FPC
-  {$ifdef SMB_UUID_SWAP4}
-  if raw.SmbMajorVersion shl 8 + raw.SmbMinorVersion < $0206 then
-    uid.D1 := bswap32(uid.D1); // swap endian as of version 2.6
-  {$endif SMB_UUID_SWAP4}
-  {$ifdef OSDARWIN}
-  // mandatory to match IOPlatformUUID value from ioreg :(
-  uid.D1 := bswap32(uid.D1);
-  uid.D2 := swap(uid.D2);
-  uid.D3 := swap(uid.D3);
-  {$endif OSDARWIN}
+  // - we don't need to swap those bytes as dmi_system_uuid() in dmidecode.c
+  // on Windows, to match "wmic csproduct get uuid" official value
+  // - on MacOs, sduInvert is set to match IOPlatformUUID value from ioreg :(
+  if (_SmbiosDecodeUuid = sduInvert) or
+  // - dmi_save_uuid() from the Linux kernel do check for SMBIOS 2.6 version
+  // https://elixir.bootlin.com/linux/latest/source/drivers/firmware/dmi_scan.c
+     ((_SmbiosDecodeUuid = sduVersion) and
+      (raw.SmbMajorVersion shl 8 + raw.SmbMinorVersion < $0206)) then
+  begin
+    uid.D1 := bswap32(uid.D1);
+    uid.D2 := swap(uid.D2);
+    uid.D3 := swap(uid.D3);
+  end;
   dest := RawUtf8(UpperCase(copy(GUIDToString(uid), 2, 36)));
 end;
 
@@ -9409,8 +9514,11 @@ end;
 function SleepStepTime(var start, tix: Int64; endtix: PInt64): PtrInt;
 begin
   tix := GetTickCount64;
-  if start = 0 then
-    start := tix;
+  if (start = 0) or
+     (tix < 50) then
+    start := tix
+  else if start < 0 then
+    start := tix - 50; // ensure tix - start = elapsed is not < 50
   result := SleepDelay(tix - start);
   if endtix <> nil then
     endtix^ := tix + result;

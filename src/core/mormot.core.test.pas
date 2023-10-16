@@ -85,6 +85,7 @@ type
     fInternalTestsCount: integer;
     fOptions: TSynTestOptions;
     fWorkDir: TFileName;
+    fRestrict: TRawUtf8DynArray;
     function GetCount: integer;
     function GetIdent: string;
     procedure SetWorkDir(const Folder: TFileName);
@@ -124,10 +125,18 @@ type
     // - when set, will ensure it contains a trailing path delimiter (\ or /)
     property WorkDir: TFileName
       read fWorkDir write SetWorkDir;
+    /// list of 'class.method' names to restrict the tests for Run
+    // - as retrieved from "--test class.method" command line switch
+    property Restrict: TRawUtf8DynArray
+      read fRestrict write fRestrict;
   published
     { all published methods of the children will be run as individual tests
       - these methods must be declared as procedure with no parameter }
   end;
+
+  /// callback signature as used by TSynTestCase.CheckRaised
+  // - passed parameters can be converted e.g. using VarRecToUtf8/VarRecToInt64
+  TOnTestCheck = procedure(const Params: array of const) of object;
 
   TSynTests = class;
 
@@ -214,6 +223,9 @@ type
     // - includes some optional precision argument
     function CheckSame(const Value1, Value2: double;
       const Precision: double = DOUBLE_SAME; const msg: string = ''): boolean;
+    /// used by the published methods to run a test assertion about two TDateTime values
+    // - allows an error of up to 1 second between the values
+    function CheckSameTime(const Value1, Value2: TDateTime; const msg: string = ''): boolean;
     /// used by the published methods to perform a string comparison with several values
     // - test passes if (Value=Values[0]) or (Value=Value[1]) or (Value=Values[2])...
     // and ExpectedResult=true
@@ -227,6 +239,10 @@ type
     // - condition must equals TRUE to pass the test
     procedure CheckUtf8(condition: boolean; const msg: RawUtf8;
       const args: array of const); overload;
+    /// used by the published methods to execute a Method with the given
+    // parameters, and ensure a (optionally specific) exception is raised
+    function CheckRaised(const Method: TOnTestCheck; const Params: array of const;
+      Raised: ExceptionClass = nil): boolean;
     /// used by published methods to start some timing on associated log
     // - call this once, before one or several consecutive CheckLogTime()
     // - warning: this method is not thread-safe
@@ -289,7 +305,7 @@ type
     /// the test suit which owns this test case
     property Owner: TSynTests
       read fOwner;
-    /// the test name
+    /// the human-readable test name
     // - either the Ident parameter supplied to the Create() method, either
     // an uncameled text from the class name
     property Ident: string
@@ -297,7 +313,7 @@ type
     /// the number of assertions (i.e. Check() method call) for this test case
     property Assertions: integer
       read fAssertions;
-    /// the number of assertions (i.e. Check() method call) for this test case
+    /// the number of failures (i.e. Check(false) method call) for this test case
     property AssertionsFailed: integer
       read fAssertionsFailed;
   published
@@ -419,7 +435,8 @@ type
     // cleared at the beginning of the run
     // - Assertions and AssertionsFailed counter properties are reset and
     // computed during the run
-    // - you may override this method to provide additional information, e.g.
+    // - you may override the DescribeCommandLine method to provide additional
+    // information, e.g.
     // ! function TMySynTests.Run: boolean;
     // ! begin // need mormot.db.raw.sqlite3 unit in the uses clause
     // !   CustomVersions := format(#13#10#13#10'%s'#13#10'    %s'#13#10 +
@@ -692,8 +709,7 @@ end;
 
 function TSynTestCase.CheckEqual(const a, b: RawUtf8; const msg: RawUtf8): boolean;
 begin
-  result := (length(a) = length(b)) and
-            CompareMem(pointer(a), pointer(b), length(a));
+  result := CompareBuf(a, b);
   CheckUtf8(result, EQUAL_MSG, [a, b, msg]);
 end;
 
@@ -711,8 +727,7 @@ end;
 
 function TSynTestCase.CheckNotEqual(const a, b: RawUtf8; const msg: RawUtf8): boolean;
 begin
-  result := (length(a) <> length(b)) or
-            not CompareMem(pointer(a), pointer(b), length(a));
+  result := not CompareBuf(a, b);
   CheckUtf8(result, NOTEQUAL_MSG, [a, b, msg]);
 end;
 
@@ -727,6 +742,12 @@ function TSynTestCase.CheckSame(const Value1, Value2: double; const Precision: d
 begin
   result := SameValue(Value1, Value2, Precision);
   CheckUtf8(result, EQUAL_MSG, [Value1, Value2, msg]);
+end;
+
+function TSynTestCase.CheckSameTime(const Value1, Value2: TDateTime;
+  const msg: string): boolean;
+begin
+  result := CheckSame(Value1, Value2, 1 / SecsPerDay);
 end;
 
 function TSynTestCase.CheckMatchAny(const Value: RawUtf8; const Values: array of RawUtf8;
@@ -764,6 +785,31 @@ begin
   end;
 end;
 
+function TSynTestCase.CheckRaised(const Method: TOnTestCheck;
+  const Params: array of const; Raised: ExceptionClass): boolean;
+var
+  msg: string;
+begin
+  try
+    Method(Params);
+    result := false;
+    if Raised = nil then
+      Raised := Exception;
+    FormatString('% missing', [Raised], msg);
+  except
+    on E: Exception do
+    begin
+      result := (Raised = nil) or
+                (PClass(E)^ = Raised);
+      if result then
+        FormatString('% [%]', [E, E.Message], msg)
+      else
+        FormatString('% instead of %', [E, Raised], msg);
+    end;
+  end;
+  Check(result, msg);
+end;
+
 procedure TSynTestCase.CheckLogTimeStart;
 begin
   fCheckLogTime.Start;
@@ -798,7 +844,7 @@ var
   tmp: TSynTempBuffer;
 begin
   R := tmp.InitRandom(CharCount);
-  FastSetStringCP(result, nil, CharCount, CODEPAGE_US);
+  FastSetStringCP(result, nil, CharCount, CP_WINANSI);
   for i := 0 to CharCount - 1 do
     PByteArray(result)[i] := 32 + R[i] and 127;
   tmp.Done;
@@ -892,7 +938,7 @@ begin
   last := paragraph;
   while WordCount > 0 do
   begin
-    rnd := lec.Next; // get 32 bits of randomness for up to 4 words per loop
+    rnd := lec^.Next; // get 32 bits of randomness for up to 4 words per loop
     for n := 0 to rnd and 3 do
     begin
       // consume up to 4*5 = 20 bits from rnd
@@ -1159,6 +1205,7 @@ var
   dir: TFileName;
   err: string;
   C: TSynTestCase;
+  started: boolean;
   {%H-}log: IUnknown;
 begin
   if TTextRec(fSaveToFile).Handle = 0 then
@@ -1180,23 +1227,37 @@ begin
     try
       for i := 0 to high(fTestCaseClass) do
       begin
-        C := fTestCaseClass[i].Create(self);
+        started := false;
+        C := fTestCaseClass[i].Create(self); // add all published methods
         try
-          Color(ccWhite);
-          TextLn([#13#10' ', m + 1, '.', i + 1, '. ', C.Ident, ': ']);
-          Color(ccLightGray);
-          C.fAssertions := 0; // reset assertions count
-          C.fAssertionsFailed := 0;
-          C.fWorkDir := fWorkDir;
-          SetCurrentDir(fWorkDir);
-          TotalTimer.Start;
-          C.Setup;
           for t := 0 to C.Count - 1 do
           try
+            fCurrentMethodInfo := @C.fTests[t];
+            if (fRestrict <> nil) and
+              ((FindPropName(pointer(fRestrict),
+                  FormatUtf8('%.%', [C, fCurrentMethodInfo^.MethodName]),
+                  // e.g. --test TNetworkProtocols.DNSAndLDAP
+                  length(fRestrict)) < 0) and
+               (FindPropName(pointer(fRestrict),
+                  // e.g. --test TNetworkProtocols
+                  ToText(C.ClassType), length(fRestrict)) < 0)) then
+              continue;
+            if not started then
+            begin
+              C.fAssertions := 0; // reset assertions count
+              C.fAssertionsFailed := 0;
+              C.fWorkDir := fWorkDir;
+              SetCurrentDir(fWorkDir);
+              TotalTimer.Start;
+              C.Setup;
+              Color(ccWhite);
+              TextLn([#13#10' ', m + 1, '.', i + 1, '. ', C.Ident, ': ']);
+              Color(ccLightGray);
+              started := true;
+            end;
             C.fAssertionsBeforeRun := C.fAssertions;
             C.fAssertionsFailedBeforeRun := C.fAssertionsFailed;
             C.fRunConsoleOccurenceNumber := fRunConsoleOccurenceNumber;
-            fCurrentMethodInfo := @C.fTests[t];
             log := BeforeRun;
             TestTimer.Start;
             C.MethodSetup;
@@ -1219,6 +1280,8 @@ begin
               Color(ccLightGray);
             end;
           end;
+          if not started then
+            continue;
           C.CleanUp; // should be done before Destroy call
           if C.AssertionsFailed = 0 then
             Color(ccLightGreen)
@@ -1370,6 +1433,7 @@ var
   tests: TSynTests;
   redirect: TFileName;
   err: RawUtf8;
+  restrict: TRawUtf8DynArray;
 begin
   if self = TSynTests then
     raise ESynException.Create('You should inherit from TSynTests');
@@ -1382,6 +1446,8 @@ begin
     {$endif OSPOSIX}
     if Arg(0, '#filename to redirect the console output') then
       Utf8ToFileName(Args[0], redirect);
+    Executable.Command.Get(['test'], restrict,
+      'the #class.method name(s) to restrict the tests');
     DescribeCommandLine; // may be overriden to define additional parameters
     err := DetectUnknown;
     if (err <> '') or
@@ -1416,6 +1482,7 @@ begin
     if workdir <> '' then
       tests.WorkDir := workdir;
     tests.Options := options;
+    tests.Restrict := restrict;
     if redirect <> '' then
     begin
       tests.SaveToFile(redirect); // export to file if named on command line

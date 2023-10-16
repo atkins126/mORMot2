@@ -241,7 +241,7 @@ asm
         movups  xmm1, dqword ptr [eax]       // last 16
         push    ecx
         neg     ecx
-        and     edx,  -16                    // 16-byte align writes
+        and     edx, -16                     // 16-byte align writes
         lea     ecx, [ecx + edx + 16]
         pop     edx
         cmp     ecx, -NONTEMPORALSIZE        // assume > 512KB bypass the cache
@@ -2068,7 +2068,7 @@ asm
         fild    qword ptr [eax]
         push    edx
         neg     edx
-        and     esi,  -8
+        and     esi, -8
         lea     edx, [edx + esi + 8]
         pop     esi
 @lrgnxt:fild    qword ptr [eax + edx]
@@ -2102,7 +2102,7 @@ asm
         movups  xmm1, dqword ptr [eax]
         push    edx
         neg     edx
-        and     esi,  -16
+        and     esi, -16
         lea     edx, [edx + esi + 16]
         pop     esi
 @lrgnxt:movups  xmm0, dqword ptr [eax + edx]
@@ -2397,13 +2397,15 @@ asm // see https://software.intel.com/en-us/blogs/2011/04/14/is-avx-enabled
         sete    al
 end;
 
-procedure GetCpuid(Param: cardinal; var Registers: TIntelRegisters);
+procedure GetCpuid(cpueax, cpuecx: cardinal; var Registers: TIntelRegisters);
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
         push    esi
         push    edi
-        mov     esi, edx
-        mov     edi, eax
+        push    ebx
+        mov     edi, cpueax
+        mov     ebx, cpuecx
+        mov     esi, Registers
         pushfd
         pop     eax
         mov     edx, eax
@@ -2412,18 +2414,17 @@ asm
         popfd
         pushfd
         pop     eax
-        xor     eax, edx
+        xor     eax, edx // does this CPU support the cpuid opcode?
         jz      @nocpu
-        push    ebx
         mov     eax, edi
-        xor     ecx, ecx
+        mov     ecx, ebx
         cpuid
         mov     TIntelRegisters(esi).&eax, eax
         mov     TIntelRegisters(esi).&ebx, ebx
         mov     TIntelRegisters(esi).&ecx, ecx
         mov     TIntelRegisters(esi).&edx, edx
-        pop     ebx
-@nocpu: pop     edi
+@nocpu: pop     ebx
+        pop     edi
         pop     esi
 end;
 
@@ -2529,7 +2530,11 @@ asm
 @finish:add     eax, edi            // exponent value - number of decimal places
         mov     [edx], ebx          // result code = 0
         jz      @pow                // no call to _pow10 needed
-        mov     edi, ecx            // save decimal sign flag
+        cmp     eax, 308
+        jge     @oor                // limit to < 1.7 x 10^308 double range
+        cmp     eax, -324
+        jle     @oor                // limit to > 5.0 x 10^-324 range
+@oors:  mov     edi, ecx            // save decimal sign flag
         call    System.@Pow10       // raise to power of 10
         mov     ecx, edi            // restore decimal sign flag
 @pow:   test    ch, ch              // decimal sign flag set?
@@ -2542,6 +2547,10 @@ asm
         ret                         // finished
 @negate:fchs                        // negate result in fpu
         jmp     @ok
+@oor:   inc     esi                 // force result code = 1
+        mov     [edx], esi          // set result code
+        xor     eax, eax            // set exponent = 0 (as pure pascal version)
+        jmp     @oors
 @nil:   inc     esi                 // force result code = 1
         fldz                        // result value = 0
 @error: pop     ebx                 // dump local storage

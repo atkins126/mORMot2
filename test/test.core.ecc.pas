@@ -20,6 +20,7 @@ uses
   mormot.core.data,
   mormot.core.variants,
   mormot.core.json,
+  mormot.core.search,
   mormot.core.test,
   mormot.crypt.secure,
   mormot.crypt.jwt,
@@ -130,6 +131,8 @@ begin
   FillZero(s3);
   Check(ecdh_shared_secret_pas(pu2, pr1, s3));
   Check(IsEqual(s1, s3));
+  Check(Ecc256r1MatchKeys(pr1, pu1), 'prpu1');
+  Check(Ecc256r1MatchKeys(pr2, pu2), 'prpu1');
 end;
 
 procedure TTestCoreEcc.ECC;
@@ -141,6 +144,7 @@ var
   c1, c2: TEccPublicKey;
 begin
   Check(ecc_make_key_pas(pub[0], priv[0])); // also validate our pascal code
+  Check(Ecc256r1MatchKeys(priv[0], pub[0]), 'match0');
   timer.Start;
   for i := 1 to ECC_COUNT - 1 do
     Check(Ecc256r1MakeKey(pub[i], priv[i])); // may be OpenSSL
@@ -152,6 +156,7 @@ begin
   NotifyTestSpeed('Ecc256r1Uncompress', ECC_COUNT - 1, 0, @timer);
   for i := 1 to ECC_COUNT - 1 do
   begin
+    Check(Ecc256r1MatchKeys(priv[i], pub[i]), 'match');
     Ecc256r1Compress(pubunc[i], c1); // fast enough, but ensure accurate
     Check(CompareMem(@c1, @pub[i], SizeOf(c1)), 'Ecc256r1Compress');
     Ecc256r1CompressAsn1(Ecc256r1UncompressAsn1(c1), c2);
@@ -299,7 +304,7 @@ begin
     check(chain.AddSelfSigned(secret) >= 0);
     check(chain.IsValidRaw(secret.Content, true) = ecvValidSelfSigned);
     check(secret.Serial <> cert.Serial);
-    check(secret.Serial = '29E3D71DC26C134A093BA1C22CFA2582');
+    checkEqual(secret.Serial, '29E3D71DC26C134A093BA1C22CFA2582');
     json1 := ObjectToJson(secret);
     check(json1 <> json2);
     json2 := PUBPRIVJSON + copy(PUBPRIV64, 1,
@@ -332,9 +337,11 @@ begin
     secret.Free;
     secret := TEccCertificateSecret.CreateFromSecureBinary(@MYPRIVKEY,
       MYPRIVKEY_LEN, MYPRIVKEY_PASS, MYPRIVKEY_ROUNDS);
-    check(secret.Serial = '29E3D71DC26C134A093BA1C22CFA2582');
-    check(chain.IsValidRaw(secret.Content, true, false) = ecvDeprecatedAuthority);
-    check(chain.IsValidRaw(secret.Content, true, true) = ecvValidSelfSigned);
+    checkHash(secret.ToJson, $ECCE6E1C);
+    checkEqual(secret.Serial, '29E3D71DC26C134A093BA1C22CFA2582');
+    // "ValidityStart":"2016-08-11","ValidityEnd":"2016-08-21"
+    check(chain.IsValidRaw(secret.Content, {igndate=}false) = ecvInvalidDate);
+    check(chain.IsValidRaw(secret.Content, {igndate=}true) = ecvValidSelfSigned);
     json2 := ObjectToJson(secret);
     check(json1 = json2);
     secret.Free;
@@ -419,6 +426,7 @@ var
     rounds: integer;
   end;
   exectemp: variant;
+  dirsize: Int64;
 
   function Exec(const nv: array of const; cmd: TEccCommand): PDocVariantData;
   var
@@ -551,6 +559,19 @@ begin
   finally
     SetCurrentDir('..');
   end;
+  // use the "synecc" sub-folder to verify folder copy
+  dirsize := DirectorySize('synecc');
+  check(dirsize <> 0, 'dirsize');
+  check(CopyFolder('synecc', 'synecc2', []) > 0, 'copy1a');
+  checkEqual(CopyFolder('synecc', 'synecc2', [sfoWriteFileNameToConsole]), 0, 'copy1b');
+  CheckEqual(DirectorySize('synecc'), dirsize, 'dir1');
+  check(DirectoryDelete('synecc2', FILES_ALL, {filesnotdir=}true), 'del1');
+  CheckEqual(DirectorySize('synecc2'), 0, 'rem1');
+  check(CopyFolder('synecc', 'synecc2', [sfoByContent]) > 0, 'copy2a');
+  checkEqual(CopyFolder('synecc', 'synecc2', [sfoByContent, sfoWriteFileNameToConsole]), 0, 'copy2b');
+  CheckEqual(DirectorySize('synecc'), dirsize, 'dir2');
+  check(DirectoryDelete('synecc2', FILES_ALL, {filesnotdir=}true), 'del2');
+  CheckEqual(DirectorySize('synecc2'), 0, 'rem2');
 end;
 
 procedure TTestCoreEcc.ECDHEStreamProtocol;

@@ -119,7 +119,13 @@ function HttpMethodWithNoBody(const method: RawUtf8): boolean;
 function MimeHeaderEncode(const header: RawUtf8): RawUtf8;
 
 /// quick check for case-sensitive 'GET' HTTP method name
+// - see also HttpMethodWithNoBody()
 function IsGet(const method: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// quick check for case-sensitive 'HEAD' HTTP method name
+// - see also HttpMethodWithNoBody()
+function IsHead(const method: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// quick check for case-sensitive 'POST' HTTP method name
@@ -731,11 +737,11 @@ type
 
   /// store a list of IPv4 which should be rejected at connection
   // - more tuned than TIPBan for checking just after accept()
-  // - used e.g. for hsoBan40xIP
+  // - used e.g. to implement hsoBan40xIP
   THttpAcceptBan = class(TSynPersistent)
   protected
     fSafe: TOSLightLock; // almost never on contention, no R/W needed
-    fCount, fCurrent: integer;
+    fCount, fLastSec: integer;
     fIP: array of TCardinalDynArray; // one [0..fMax] IP array per second
     fSeconds, fMax, fWhiteIP: cardinal;
     fRejected, fTotal: Int64;
@@ -980,6 +986,13 @@ begin
   result := PCardinal(method)^ =
     ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24;
 end;
+
+function IsHead(const method: RawUtf8): boolean;
+begin
+  result := PCardinal(method)^ =
+    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24;
+end;
+
 
 function IsUrlFavIcon(P: PUtf8Char): boolean;
 begin
@@ -2346,7 +2359,7 @@ function THttpServerRequestAbstract.RouteInt64(const Name: RawUtf8;
 var
   v: PIntegerArray;
 begin
-  v := GetRouteValuePosLen(Name);
+  v := GetRouteValuePosLen(Name); // v = [pos,len] pair in fUrl
   if v <> nil then
   begin
     SetInt64(PUtf8Char(pointer(Url)) + v[0], Value{%H-}); // will end at #0 or &
@@ -2361,7 +2374,7 @@ function THttpServerRequestAbstract.RouteUtf8(const Name: RawUtf8;
 var
   v: PIntegerArray;
 begin
-  v := GetRouteValuePosLen(Name);
+  v := GetRouteValuePosLen(Name); // v = [pos,len] pair in fUrl
   if v <> nil then
   begin
     if v[1] <> 0 then
@@ -2377,10 +2390,9 @@ function THttpServerRequestAbstract.RouteEquals(
 var
   v: PIntegerArray;
 begin
-  v := GetRouteValuePosLen(Name);
+  v := GetRouteValuePosLen(Name); // v = [pos,len] pair in fUrl
   if v <> nil then
-    result := (v[1] = length(ExpectedValue)) and
-      CompareMemFixed(pointer(ExpectedValue), @PByteArray(Url)[v[0]], v[1])
+    result := CompareBuf(ExpectedValue, @PByteArray(Url)[v[0]], v[1])
   else
     result := false;
 end;
@@ -2455,7 +2467,7 @@ procedure THttpAcceptBan.SetSeconds(const Value: cardinal);
 begin
   if not (Value in [1, 2, 4, 8, 16, 32, 64, 128]) then
     raise EHttpSocket.CreateFmt(
-      'Invalid %.SetSeconds(%): should be a small power of two',
+      'Invalid %s.SetSeconds(%d): should be a small power of two',
       [ClassNameShort(self)^, Value]);
   fSafe.Lock;
   try
@@ -2471,13 +2483,13 @@ var
   i: PtrInt;
 begin
   fCount := 0;
-  fCurrent := 0;
+  fLastSec := 0;
   fIP := nil;
   if fMax = 0 then
     exit;
-  SetLength(fIP, fSeconds);
+  SetLength(fIP, fSeconds); // fIP[secs,0]=count fIP[secs,1..fMax]=ips
   for i := 0 to fSeconds - 1 do
-    SetLength(fIP[i], fMax + 1); // 1st item is the count
+    SetLength(fIP[i], fMax + 1);
 end;
 
 function THttpAcceptBan.BanIP(ip4: cardinal): boolean;
@@ -2497,7 +2509,7 @@ begin
       {$else}
       begin
       {$endif HASFASTTRYFINALLY}
-        P := pointer(fIP[fCurrent]); // 1st item is the count
+        P := pointer(fIP[fLastSec]); // fIP[secs,0]=count fIP[secs,1..fMax]=ips
         if P[0] < fMax then
         begin
           inc(P[0]);
@@ -2543,13 +2555,13 @@ begin
   {$else}
   begin
   {$endif HASFASTTRYFINALLY}
-    s := pointer(fIP);
-    n := fMax;
+    s := pointer(fIP); // fIP[secs,0]=count fIP[secs,1..fMax]=ips
+    n := fSeconds;
     if n <> 0 then
       repeat
         P := s^;
         inc(s);
-        if (P[0] <> 0) and // 1st item is the count
+        if (P[0] <> 0) and // count
            IntegerScanExists(@P[1], P[0], ip4) then // O(n) SSE2 asm on Intel
         begin
           inc(fRejected);
@@ -2585,10 +2597,10 @@ begin
   try
     if fCount <> 0 then
     begin
-      n := fSeconds - 1;         // power of two bitmask
-      n := (fCurrent + 1) and n; // per-second round robin
-      fCurrent := n;
-      p := @fIP[n][0]; // 1st item is the count
+      n := fSeconds - 1; // power of two bitmask
+      n := (fLastSec + 1) and n; // per-second round robin
+      fLastSec := n;
+      p := @fIP[n][0]; // fIP[secs,0]=count fIP[secs,1..fMax]=ips
       dec(fCount, p^);
       p^ := 0;         // the oldest slot becomes the current (no memory move)
     end;

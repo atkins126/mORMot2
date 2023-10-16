@@ -1318,31 +1318,31 @@ function Base58ToBin(const base58: RawUtf8): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the length resulting of Base32 encoding of a binary buffer
-// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O I1 8B
+// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O 1I 8B
 function BinToBase32Length(BinLen: cardinal): cardinal;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// conversion from a binary buffer into Base32 encoded text  buffer
-// - default b32enc is RFC4648 upper alphanumeric without misleading 0O I1 8B
+// - default b32enc is RFC4648 upper alphanumeric without misleading 0O 1I 8B
 procedure BinToBase32(Bin: PByteArray; Dest: PAnsiChar; BinLen: PtrInt;
   b32enc: PAnsiChar); overload;
 
 /// conversion from a binary buffer into Base32 encoded text as RawUtf8
-// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O I1 8B
+// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O 1I 8B
 function BinToBase32(Bin: PAnsiChar; BinLen: PtrInt): RawUtf8; overload;
 
 /// conversion from a binary buffer into Base32 encoded text as RawUtf8
-// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O I1 8B
+// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O 1I 8B
 function BinToBase32(const Bin: RawByteString): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// conversion from Base32 encoded text into a binary string
-// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O I1 8B
+// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O 1I 8B
 // - returns '' if input was not valid Base32 encoded
 function Base32ToBin(B32: PAnsiChar; B32Len: integer): RawByteString; overload;
 
 /// conversion from Base32 encoded text into a binary string
-// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O I1 8B
+// - RFC4648 Base32 is defined as upper alphanumeric without misleading 0O 1I 8B
 // - returns '' if input was not valid Base32 encoded
 function Base32ToBin(const base32: RawUtf8): RawByteString; overload;
   {$ifdef HASINLINE}inline;{$endif}
@@ -1485,12 +1485,19 @@ function BaudotToAscii(const Baudot: RawByteString): RawUtf8; overload;
 
 { ***************** URI-Encoded Text Buffer Process }
 
-/// encode a string to be compatible with URI encoding
+/// encode a string as URI parameter encoding, i.e. ' ' as '+'
 function UrlEncode(const svar: RawUtf8): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// encode a string to be compatible with URI encoding
+/// encode a string as URI parameter encoding, i.e. ' ' as '+'
 function UrlEncode(Text: PUtf8Char): RawUtf8; overload;
+
+/// encode a string as URI network name encoding, i.e. ' ' as %20
+function UrlEncodeName(const svar: RawUtf8): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// encode a string as URI network name encoding, i.e. ' ' as %20
+function UrlEncodeName(Text: PUtf8Char): RawUtf8; overload;
 
 /// encode supplied parameters to be compatible with URI encoding
 // - parameters must be supplied two by two, as Name,Value pairs, e.g.
@@ -1498,21 +1505,24 @@ function UrlEncode(Text: PUtf8Char): RawUtf8; overload;
 // - parameters names should be plain ASCII-7 RFC compatible identifiers
 // (0..9a..zA..Z_.~), otherwise their values are skipped
 // - parameters values can be either textual, integer or extended, or any TObject
-// - TObject serialization into UTF-8 will be processed by the ObjectToJson()
-// function
+// - TObject serialization into UTF-8 will be processed with ObjectToJson()
 function UrlEncode(const NameValuePairs: array of const;
   TrimLeadingQuestionMark: boolean = false): RawUtf8; overload;
 
-/// decode a string compatible with URI encoding into its original value
-// - you can specify the decoding range (as in copy(s,i,len) function)
-function UrlDecode(const s: RawUtf8; i: PtrInt = 1; len: PtrInt = -1): RawUtf8; overload;
-
-/// decode a string compatible with URI encoding into its original value
+/// decode a UrlEncode() URI encoded parameter into its original value
 function UrlDecode(U: PUtf8Char): RawUtf8; overload;
-  {$ifdef HASINLINE}inline;{$endif}
 
-/// decode a string compatible with URI encoding into its original value
-procedure UrlDecode(U: PUtf8Char; var result: RawUtf8); overload;
+/// decode a UrlEncode() URI encoded parameter into its original value
+function UrlDecode(const s: RawUtf8): RawUtf8; overload;
+
+/// decode a UrlEncodeName() URI encoded network name into its original value
+function UrlDecodeName(U: PUtf8Char): RawUtf8; overload;
+
+/// decode a UrlEncodeName() URI encoded network name into its original value
+function UrlDecodeName(const s: RawUtf8): RawUtf8; overload;
+
+/// decode a UrlEncode/UrlEncodeName() URI encoded string into its original value
+procedure UrlDecodeVar(U: PUtf8Char; L: PtrInt; var result: RawUtf8; name: boolean);
 
 /// decode a specified parameter compatible with URI encoding into its original
 // textual value
@@ -1967,12 +1977,24 @@ function BinToSource(const ConstName, Comment: RawUtf8; Data: pointer;
 function BinToSource(const ConstName, Comment: RawUtf8; const Data: RawByteString;
   PerLine: integer = 16; const Suffix: RawUtf8 = ''): RawUtf8; overload;
 
+/// generate some 'xx:xx:xx:xx' output buffer with left and right margins
+// - used e.g. by ParsedToText() to output X509 public key content in PeerInfo
+function BinToHumanHex(Data: PByte; Len: integer; PerLine: integer = 16;
+  LeftTab: integer = 0; SepChar: AnsiChar = ':'): RawUtf8; overload;
+
+/// generate some 'xx:xx:xx:xx' output buffer with left and right margins
+procedure BinToHumanHex(W: TTextWriter; Data: PByte; Len: integer;
+  PerLine: integer = 16; LeftTab: integer = 0; SepChar: AnsiChar = ':'); overload;
+
 
 { *************************** TStreamRedirect and other Hash process }
 
 /// compute the 32-bit default hash of a file content
 // - you can specify your own hashing function if DefaultHasher is not what you expect
 function HashFile(const FileName: TFileName; Hasher: THasher = nil): cardinal; overload;
+
+/// compare two files by content, reading them by blocks
+function SameFileContent(const One, Another: TFileName): boolean;
 
 type
   /// prototype of a file hashing function, returning its hexadecimal hash
@@ -5873,10 +5895,10 @@ begin
   case process of
     doCompress:
       begin
-        tmp.Init(srcLen - srcLen shr 3); // RLE should reduce at least by 1/8
+        tmp.Init(srcLen - srcLen shr 3); // try to reduce at least by 1/8
         rle := RleCompress(src, tmp.buf, srcLen, tmp.Len);
         if rle < 0 then
-          // RLE was not worth it -> apply only SynLZ
+          // RLE was not worth it (no 1/8 reduction) -> apply only SynLZ
           PByte(dst)^ := 0
         else
         begin
@@ -5948,7 +5970,7 @@ begin
   case process of
     doCompress:
       begin
-        // RLE should reduce at least by 1/8
+        // try to reduce at least by 1/8
         result := RleCompress(src, dst, srcLen, srcLen - srcLen shr 3);
         if result < 0 then
           // RLE was not worth it -> caller would fallback to plain store
@@ -7840,9 +7862,14 @@ begin
   result := UrlEncode(pointer(svar));
 end;
 
+function UrlEncodeName(const svar: RawUtf8): RawUtf8;
+begin
+  result := UrlEncodeName(pointer(svar));
+end;
+
 // two sub-functions for better code generation of UrlEncode()
 
-procedure _UrlEncode_Write(s, p: PByte; tab: PTextByteSet);
+procedure _UrlEncode_Write(s, p: PByte; tab: PTextByteSet; space2plus: cardinal);
 var
   c: cardinal;
   hex: ^TByteToWord;
@@ -7859,7 +7886,7 @@ begin
     end
     else if c = 0 then
       exit
-    else if c = 32 then
+    else if c = space2plus then // space2plus=32 for parameter, =48 for URI
     begin
       p^ := ord('+');
       inc(p);
@@ -7874,7 +7901,7 @@ begin
   until false;
 end;
 
-function _UrlEncode_ComputeLen(s: PByte; tab: PTextByteSet): PtrInt;
+function _UrlEncode_ComputeLen(s: PByte; tab: PTextByteSet; space2plus: cardinal): PtrInt;
 var
   c: cardinal;
 begin
@@ -7883,7 +7910,7 @@ begin
     c := s^;
     inc(s);
     if (tcUriUnreserved in tab[c]) or
-       (c = 32) then
+       (c = space2plus) then // =32 for parameter, =48 for URI
     begin
       inc(result);
       continue;
@@ -7899,8 +7926,17 @@ begin
   result := '';
   if Text = nil then
     exit;
-  FastSetString(result, nil, _UrlEncode_ComputeLen(pointer(Text), @TEXT_CHARS));
-  _UrlEncode_Write(pointer(Text), pointer(result), @TEXT_BYTES);
+  FastSetString(result, nil, _UrlEncode_ComputeLen(pointer(Text), @TEXT_CHARS, 32));
+  _UrlEncode_Write(pointer(Text), pointer(result), @TEXT_BYTES, 32);
+end;
+
+function UrlEncodeName(Text: PUtf8Char): RawUtf8;
+begin
+  result := '';
+  if Text = nil then
+    exit;
+  FastSetString(result, nil, _UrlEncode_ComputeLen(pointer(Text), @TEXT_CHARS, 48));
+  _UrlEncode_Write(pointer(Text), pointer(result), @TEXT_BYTES, 48);
 end;
 
 function UrlEncode(const NameValuePairs: array of const;
@@ -7972,58 +8008,11 @@ begin
     result := URI;
 end;
 
-function UrlDecode(const s: RawUtf8; i, len: PtrInt): RawUtf8;
+procedure UrlDecodeVar(U: PUtf8Char; L: PtrInt; var result: RawUtf8; name: boolean);
 var
-  L: PtrInt;
   P: PUtf8Char;
   tmp: TSynTempBuffer;
 begin
-  result := '';
-  L := PtrInt(s);
-  if L = 0 then
-    exit;
-  L := PStrLen(L - _STRLEN)^;
-  if len < 0 then
-    len := L;
-  if i > L then
-    exit;
-  dec(i);
-  if len = i then
-    exit;
-  P := tmp.Init(len - i);  // reserve enough space for result
-  while i < len do
-  begin
-    case s[i + 1] of
-      #0:
-        break; // reached end of s
-      '%':
-        if not HexToChar(PAnsiChar(pointer(s)) + i + 1, P) then
-          P^ := s[i + 1]
-        else
-          inc(i, 2); // browsers may not follow the RFC (e.g. encode % as % !)
-      '+':
-        P^ := ' ';
-    else
-      P^ := s[i + 1];
-    end; // case s[i] of
-    inc(i);
-    inc(P);
-  end;
-  tmp.Done(P, result);
-end;
-
-function UrlDecode(U: PUtf8Char): RawUtf8;
-begin
-  UrlDecode(U, result);
-end;
-
-procedure UrlDecode(U: PUtf8Char; var result: RawUtf8); overload;
-var
-  P: PUtf8Char;
-  L: integer;
-  tmp: TSynTempBuffer;
-begin
-  L := StrLen(U);
   if L = 0 then
   begin
     result := '';
@@ -8040,7 +8029,10 @@ begin
         else
           inc(U, 2); // browsers may not follow the RFC (e.g. encode % as % !)
       '+':
-        P^ := ' ';
+        if name then
+          P^ := '+'
+        else
+          P^ := ' ';
     else
       P^ := U^;
     end; // case s[i] of
@@ -8048,6 +8040,26 @@ begin
     inc(P);
   until false;
   tmp.Done(P, result);
+end;
+
+function UrlDecode(U: PUtf8Char): RawUtf8;
+begin
+  UrlDecodeVar(U, StrLen(U), result, {name=}false);
+end;
+
+function UrlDecode(const s: RawUtf8): RawUtf8;
+begin
+  UrlDecodeVar(pointer(s), length(s), result, {name=}false);
+end;
+
+function UrlDecodeName(U: PUtf8Char): RawUtf8;
+begin
+  UrlDecodeVar(U, StrLen(U), result, {name=}true);
+end;
+
+function UrlDecodeName(const s: RawUtf8): RawUtf8;
+begin
+  UrlDecodeVar(pointer(s), length(s), result, {name=}true);
 end;
 
 function UrlDecodeNextValue(U: PUtf8Char; out Value: RawUtf8): PUtf8Char;
@@ -9164,7 +9176,7 @@ begin
     for i := 1 to line do
     begin
       Dest.Add(' ', '$');
-      Dest.AddByteToHex(P^);
+      Dest.AddByteToHexLower(P^);
       inc(P);
       Dest.AddComma;
     end;
@@ -9173,6 +9185,46 @@ begin
   Dest.CancelLastComma;
   Dest.Add(');'#13#10'  %_LEN = SizeOf(%);'#13#10, [ConstName, ConstName]);
 end;
+
+function BinToHumanHex(Data: PByte; Len, PerLine, LeftTab: integer;
+  SepChar: AnsiChar): RawUtf8;
+var
+  w: TTextWriter;
+  temp: TTextWriterStackBuffer;
+begin
+  w := TTextWriter.CreateOwnedStream(temp);
+  try
+    BinToHumanHex(w, Data, Len, PerLine, LeftTab, SepChar);
+    w.SetText(result);
+  finally
+    w.Free;
+  end;
+end;
+
+procedure BinToHumanHex(W: TTextWriter; Data: PByte;
+  Len, PerLine, LeftTab: integer; SepChar: AnsiChar);
+var
+  n: integer;
+begin
+  if Data <> nil then
+    while Len > 0 do
+    begin
+      W.AddChars(' ', LeftTab);
+      n := PerLine;
+      repeat
+        W.AddByteToHexLower(Data^);
+        inc(Data);
+        W.Add(SepChar);
+        dec(Len);
+        if Len = 0 then
+          break;
+        dec(n);
+      until n = 0;
+      W.CancelLastChar;
+      W.AddCR;
+    end;
+end;
+
 
 { *************************** TStreamRedirect and other Hash process }
 
@@ -9848,6 +9900,35 @@ begin
   end;
 end;
 
+function SameFileContent(const One, Another: TFileName): boolean;
+var
+  b1, b2: array[word] of word; // 2 * 128KB of buffers
+  r1, r2: integer;
+  f1, f2: THandle;
+begin
+  f1 := FileOpenSequentialRead(One);
+  f2 := FileOpenSequentialRead(Another);
+  result := false;
+  if ValidHandle(f1) and
+     ValidHandle(f2) and
+     (FileSize(f1) = FileSize(f2)) then
+    repeat
+      r1 := FileRead(f1, b1, SizeOf(b1));
+      r2 := FileRead(f2, b2, SizeOf(b2));
+      if (r1 <= 0) or (r2 <= 0) then
+      begin
+        result := (r1 <= 0) = (r2 <= 0);
+        break;
+      end;
+    until (r1 <> r2) or
+          not CompareMem(@b1, @b2, r1);
+  if ValidHandle(f2) then
+    FileClose(f2);
+  if ValidHandle(f1) then
+    FileClose(f1);
+end;
+
+
 function HashFileCrc32c(const FileName: TFileName): RawUtf8;
 begin
   result := CardinalToHexLower(HashFile(FileName, crc32c));
@@ -9889,7 +9970,11 @@ type
     twlCode4,
     twlCode3);
 
+  {$ifdef USERECORDWITHMETHODS}
+  TTextWriterEscape = record
+  {$else}
   TTextWriterEscape = object
+  {$endif USERECORDWITHMETHODS}
   public
     P, B, P2, B2: PUtf8Char;
     W: TTextWriter;

@@ -22,6 +22,7 @@ uses
   sysutils,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.text,
   mormot.core.log,
   mormot.core.test,
   mormot.db.raw.sqlite3, // for the SQLite3 version below
@@ -42,6 +43,7 @@ uses
   //mormot.db.rad.nexusdb,
   {$endif FPC}
   mormot.lib.openssl11,
+  mormot.crypt.openssl,
   mormot.tools.ecc         in '..\src\tools\ecc\mormot.tools.ecc.pas',
   test.core.base           in '.\test.core.base.pas',
   test.core.data           in '.\test.core.data.pas',
@@ -86,8 +88,11 @@ begin
       {$else}
       'after kinit');
       {$endif OSWINDOWS}
-    Param('ntp', 'the NTP/SNTP #server name/IP to use instead of time.google.com');
+    Param('ldapusr', 'the LDAP #user for --dns, e.g. name@ad.company.com');
+    Param('ldappwd', 'the LDAP #password for --dns');
+    Param('ntp', 'a NTP/SNTP #server name/IP to use instead of time.google.com');
     {$ifdef USE_OPENSSL}
+    // refine the OpenSSL library path - RegisterOpenSsl is done in Run method
     OpenSslDefaultCrypto := Utf8ToString(
       Param('libcrypto', 'the OpenSSL libcrypto #filename'));
     OpenSslDefaultSsl := Utf8ToString(
@@ -98,15 +103,29 @@ end;
 
 function TIntegrationTests.Run: boolean;
 var
-  cp: shortstring;
+  cp, ssl: shortstring;
+  mem: TMemoryInfo;
 begin
-  str(Unicode_CodePage, cp);
-  if cp = '65001' then
-    cp := 'utf8';
-  CustomVersions := Format(#13#10#13#10'%s (cp %s)'#13#10 +
-    '    %s'#13#10'    on %s'#13#10'Using mORMot %s'#13#10'    %s',
-    [OSVersionText, cp, CpuInfoText, BiosInfoText,
-     SYNOPSE_FRAMEWORK_FULLVERSION, sqlite3.Version]);
+  ssl[0] := #0;
+  {$ifdef USE_OPENSSL}
+  // warning: OpenSSL on Windows requires to download the right libraries
+  RegisterOpenSsl;
+  if OpenSslIsAvailable then
+    FormatShort(' and OpenSSL %', [OpenSslVersionHexa], ssl);
+  {$endif USE_OPENSSL}
+  case Unicode_CodePage of
+    CP_UTF8:
+      cp := 'utf8';
+    CODEPAGE_US:
+      cp := 'WinAnsi';
+  else
+    FormatShort('cp%', [Unicode_CodePage], cp);
+  end;
+  GetMemoryInfo(mem, false);
+  CustomVersions := Format(#13#10#13#10'%s [%s %s %x]'#13#10 +
+    '    %s'#13#10'    on %s'#13#10'Using mORMot %s%s'#13#10'    %s',
+    [OSVersionText, cp, KBNoSpace(mem.memtotal), OSVersionInt32, CpuInfoText,
+     BiosInfoText, SYNOPSE_FRAMEWORK_FULLVERSION, ssl, sqlite3.Version]);
   result := inherited Run;
 end;
 

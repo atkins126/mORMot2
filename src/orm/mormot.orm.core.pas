@@ -1785,7 +1785,7 @@ type
     // for the class within it is defined, and we need a var for each class:
     // so even Delphi XE syntax is not powerful enough for our purpose, and the
     // vmtAutoTable trick if very fast, and works with all versions of Delphi -
-    // including 64-bit target)
+    // including 64-bit target) - unless NOPATCHVMT conditional is defined
     class function OrmProps: TOrmProperties;
       {$ifdef HASINLINE}inline;{$endif}
     /// direct access to the TOrmProperties info of an existing TOrm instance
@@ -2842,7 +2842,11 @@ type
   // depends on it to store the Table type
   // - since 6 bits are used for the table index, the corresponding table
   // MUST appear in the first 64 items of the associated TOrmModel.Tables[]
+  {$ifdef USERECORDWITHMETHODS}
+  RecordRef = record
+  {$else}
   RecordRef = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// the value itself
     // - (value and 63) is the TableIndex in the current database Model
@@ -3019,13 +3023,14 @@ type
 
   /// store a read-only ORM result table from a JSON message
   // - the JSON data is parsed and unescaped in-place, to enhanced performance
-  // and reduce resource consumption (mainly memory/heap fragmentation)
+  // and reduce resource consumption (mainly memory/heap fragmentation) - both
+  // expanded and non-expanded layouts are supported, the latest the fastest
   // - is used by the ORM for TOrm.FillPrepare/FillOne methods for
   // fast access to individual object values
-  // - some numbers taken from TTestCoreProcess.JSONBenchmark on my laptop:
-  // $   TOrmTableJson expanded in 38.82ms, 505 MB/s
-  // $   TOrmTableJson not expanded in 21.54ms, 400.3 MB/s
-  // $   TOrmTableJson GetJsonValues in 22.94ms, 375.9 MB/s
+  // - some numbers taken from TTestCoreProcess.JSONBenchmark on Core i5-13500:
+  // $ TOrmTableJson save (GetJsonValues) in 11.05ms i.e. 14.1M rows/s, 779.9 MB/s
+  // $ TOrmTableJson parse expanded in 16.28ms i.e. 9.6M rows/s, 1.1 GB/s
+  // $ TOrmTableJson parse not expanded in 9.05ms i.e. 17.3M rows/s, 0.9 GB/s
   TOrmTableJson = class(TOrmTable)
   protected
     /// used if a private copy of the JSON buffer is needed
@@ -3052,7 +3057,7 @@ type
       aUpdateHash: boolean): boolean;
   public
     /// create the result table from a JSON-formated Data message
-    // - the JSON data is parsed and formatted in-place
+    // - the expanded or non-expanded JSON data is parsed and formatted in-place
     // - please note that the supplied JSON buffer content will be changed:
     // if you want to reuse this JSON content, you shall make a private copy
     // before calling this constructor and you shall NOT release the corresponding
@@ -3104,9 +3109,9 @@ type
       PCurrentRow: PInteger): boolean;
 
     /// the private copy of the processed data buffer
-    // - available e.g. for Create constructor using aJson parameter,
+    // - available e.g. for Create constructor using aJson RawUtf8 parameter,
     // or after the UpdateFrom() process
-    // - this buffer is not to be access directly: this won't be a valid JSON
+    // - this buffer is not to be access directly: this won't be any valid JSON
     // content, but a processed buffer, on which Results[] elements point to -
     // it will contain unescaped text and numerical values, ending with #0
     property PrivateInternalCopy: RawUtf8
@@ -4673,6 +4678,11 @@ type
   TRestBatchLockedDynArray = array of TRestBatchLocked;
 
 
+{$ifdef NOPATCHVMT}
+var
+  LastOrmProps: TOrmProperties; // naive but efficient thread-safe cache
+{$endif NOPATCHVMT}
+
 /// compute the SQL field names, used to create a SQLite3 virtual table
 function GetVirtualTableSqlCreate(Props: TOrmProperties): RawUtf8;
 
@@ -4810,7 +4820,11 @@ type
   /// set the User Access Rights, for each Table
   // - one property for every and each URI method (GET/POST/PUT/DELETE)
   // - one bit for every and each Table in Model.Tables[]
+  {$ifdef USERECORDWITHMETHODS}
+  TOrmAccessRights = record
+  {$else}
   TOrmAccessRights = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// set of allowed actions on the server side
     AllowRemoteExecute: TOrmAllowRemoteExecute;
@@ -5029,24 +5043,24 @@ constructor TOrmPropInfoRttiTID.Create(aPropInfo: PRttiProp; aPropIndex: integer
   aOrmFieldType: TOrmFieldType; aOptions: TOrmPropInfoListOptions);
 var
   TypeName: PShortString;
+  L: PtrInt;
   Found: TRttiCustom;
 begin
   inherited Create(aPropInfo, aPropIndex, aOrmFieldType, aOptions);
   TypeName := fPropType^.Name;
+  L := ord(TypeName^[0]);
   if IdemPropName(TypeName^, 'TID') or
      (ord(TypeName^[1]) and $df <> ord('T')) or // expect T...ID pattern
-     (PWord(@TypeName^[ord(TypeName^[0]) - 1])^ and $dfdf <> ord('I') + ord('D') shl 8) or
+     (PWord(@TypeName^[L - 1])^ and $dfdf <> ord('I') + ord('D') shl 8) or
      (Rtti.Counts[rkClass] = 0) then
     exit;
-  if (ord(TypeName^[0]) > 13) and
-     IdemPropName('ToBeDeletedID', @TypeName^[ord(TypeName^[0]) - 12], 13) then
-  begin
-    // 'TOrmClientToBeDeletedID' -> TOrmClient + CascadeDelete=true
+  if (L > 13) and IdemPropName('ToBeDeletedID', @TypeName^[L - 12], 13) then
+  begin   // 'TOrmClientToBeDeletedID' -> TOrmClient + CascadeDelete=true
     fCascadeDelete := true;
-    Found := Rtti.Find(@TypeName^[1], ord(TypeName^[0]) - 13, rkClass);
+    Found := Rtti.FindName(@TypeName^[1], L - 13, rkClass);
   end
   else    // 'TOrmClientID' -> TOrmClient
-    Found := Rtti.Find(@TypeName^[1], ord(TypeName^[0]) - 2, rkClass);
+    Found := Rtti.FindName(@TypeName^[1], L - 2, rkClass);
   if (Found <> nil) and Found.ValueClass.InheritsFrom(TOrm) then
     fRecordClass := pointer(Found.ValueClass);
 end;
@@ -6165,29 +6179,42 @@ end;
 
 // some methods defined ahead of time for proper inlining
 
-// since "var class" are not available in Delphi 6-7, and is inherited by
-// the children classes under latest Delphi versions (i.e. the "var class" is
-// shared by all inherited classes, whereas we want one var per class), we
-// reused one of the magic VMT slots (i.e. the one for automated methods,
-// AutoTable, a relic from Delphi 2 that is generally not used anymore) - see
-// http://hallvards.blogspot.com/2007/05/hack17-virtual-class-variables-part-ii.html
-// [a slower alternative may have been to use a global TSynDictionary]
-
 class function TOrm.OrmProps: TOrmProperties;
 begin
+  {$ifdef NOPATCHVMT}
+  result := LastOrmProps;
+  if (result <> nil) and
+     (result.Table = self) then
+    exit;
+  result := pointer(Rtti.FindType(PPointer(PAnsiChar(self) + vmtTypeInfo)^));
+  {$else}
   result := PPointer(PAnsiChar(self) + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
   if result <> nil then
     // we expect TRttiCustom is in the slot, and PrivateSlot as TOrmProperties
     result := TRttiCustom(pointer(result)).PrivateSlot;
   if result = nil then
     // first time we use this TOrm class: generate information from RTTI
-    result := PropsCreate;
+    result := PropsCreate
+  {$ifdef NOPATCHVMT}
+  else
+    LastOrmProps := result;
+  {$endif NOPATCHVMT}
 end;
 
 function TOrm.Orm: TOrmProperties;
 begin
   // we know TRttiCustom is in the slot, and PrivateSlot is TOrmProperties
+  {$ifdef NOPATCHVMT} // no need of a TOrmProperties field (LastOrmProps is ok)
+  result := LastOrmProps;
+  if (result <> nil) and
+     (result.Table = PClass(self)^) then
+    exit;
+  result := Rtti.FindType(PPointer(PPAnsiChar(self)^ + vmtTypeInfo)^).PrivateSlot;
+  LastOrmProps := result;
+  {$else}
   result := PRttiCustom(PPAnsiChar(self)^ + vmtAutoTable)^.PrivateSlot;
+  {$endif NOPATCHVMT}
 end;
 
 class function TOrm.SqlTableName: RawUtf8;
@@ -6419,13 +6446,13 @@ end;
 
 class function TOrm.PropsCreate: TOrmProperties;
 var
-  rtticustom: TRttiCustom;
+  rc: TRttiCustom;
 begin
   // private sub function for proper TOrm.OrmProps method inlining
-  rtticustom := Rtti.RegisterClass(self);
+  rc := Rtti.RegisterClass(self);
   Rtti.RegisterSafe.Lock;
   try
-    result := rtticustom.PrivateSlot; // Private is TOrmProperties
+    result := rc.PrivateSlot; // Private is TOrmProperties
     if Assigned(result) then
       if result.InheritsFrom(TOrmProperties) then
         // registered by a background thread
@@ -6436,8 +6463,8 @@ begin
           [self, result]);
     // create the properties information from RTTI
     result := TOrmProperties.Create(self);
-    rtticustom.PrivateSlot := result; // will be owned by this TRttiCustom
-    rtticustom.Flags := rtticustom.Flags +
+    rc.PrivateSlot := result; // will be owned by this TRttiCustom
+    rc.Flags := rc.Flags +
       [rcfDisableStored,  // for AS_UNIQUE
        rcfHookWriteProperty, rcfHookReadProperty, // custom RttiWrite/RttiRead
        rcfClassMayBeID];  // avoid most IsPropClassInstance calls
@@ -6584,7 +6611,7 @@ constructor TOrm.Create(const aClient: IRestOrm;
 begin
   InternalCreate;
   if aClient <> nil then
-    aClient.Retrieve(FormatUtf8(FormatSqlWhere, [], BoundsSqlWhere), self);
+    aClient.Retrieve(FormatSql(FormatSqlWhere, [], BoundsSqlWhere), self);
 end;
 
 constructor TOrm.Create(const aClient: IRestOrm;
@@ -6592,7 +6619,7 @@ constructor TOrm.Create(const aClient: IRestOrm;
 begin
   InternalCreate;
   if aClient <> nil then
-    aClient.Retrieve(FormatUtf8(FormatSqlWhere, ParamsSqlWhere, BoundsSqlWhere), self);
+    aClient.Retrieve(FormatSql(FormatSqlWhere, ParamsSqlWhere, BoundsSqlWhere), self);
 end;
 
 constructor TOrm.CreateFrom(const JsonRecord: RawUtf8);
@@ -6878,7 +6905,7 @@ function TOrm.FillPrepare(const aClient: IRestOrm; const FormatSqlWhere: RawUtf8
 var
   sqlwhere: RawUtf8;
 begin
-  sqlwhere := FormatUtf8(FormatSqlWhere, [], BoundsSqlWhere);
+  sqlwhere := FormatSql(FormatSqlWhere, [], BoundsSqlWhere);
   result := FillPrepare(aClient, sqlwhere, FieldsCsv);
 end;
 
@@ -6888,7 +6915,7 @@ function TOrm.FillPrepare(const aClient: IRestOrm; const FormatSqlWhere: RawUtf8
 var
   sqlwhere: RawUtf8;
 begin
-  sqlwhere := FormatUtf8(FormatSqlWhere, ParamsSqlWhere, BoundsSqlWhere);
+  sqlwhere := FormatSql(FormatSqlWhere, ParamsSqlWhere, BoundsSqlWhere);
   result := FillPrepare(aClient, sqlwhere, FieldsCsv);
 end;
 
@@ -7581,9 +7608,13 @@ begin
 end;
 
 function TOrm.ClassProp: TRttiJson;
-begin
+begin // this method is seldom called
   if self <> nil then
+    {$ifdef NOPATCHVMT}
+    result := pointer(Rtti.FindType(PPointer(PPAnsiChar(self)^ + vmtTypeInfo)^))
+    {$else}
     result := PPointer(PPAnsiChar(self)^ + vmtAutoTable)^
+    {$endif NOPATCHVMT}
   else
     result := nil; // avoid GPF
 end;
@@ -7665,7 +7696,7 @@ constructor TOrm.CreateAndFillPrepare(const aClient: IRestOrm;
 var
   where: RawUtf8;
 begin
-  where := FormatUtf8(FormatSqlWhere, [], BoundsSqlWhere);
+  where := FormatSql(FormatSqlWhere, [], BoundsSqlWhere);
   CreateAndFillPrepare(aClient, where, FieldsCsv);
 end;
 
@@ -7675,7 +7706,7 @@ constructor TOrm.CreateAndFillPrepare(const aClient: IRestOrm;
 var
   where: RawUtf8;
 begin
-  where := FormatUtf8(FormatSqlWhere, ParamsSqlWhere, BoundsSqlWhere);
+  where := FormatSql(FormatSqlWhere, ParamsSqlWhere, BoundsSqlWhere);
   CreateAndFillPrepare(aClient, where, FieldsCsv);
 end;
 
@@ -7722,7 +7753,7 @@ begin
     raise EModelException.CreateUtf8('No nested TOrm to JOIN in %', [self]);
   sql := props.Sql.SelectAllJoined;
   if aFormatSQLJoin <> '' then
-    sql := sql + FormatUtf8(SqlFromWhere(aFormatSQLJoin), aParamsSQLJoin, aBoundsSQLJoin);
+    sql := sql + FormatSql(SqlFromWhere(aFormatSQLJoin), aParamsSQLJoin, aBoundsSQLJoin);
   T := aClient.ExecuteList(props.props.JoinedFieldsTable, sql);
   if T = nil then
     exit;
@@ -8004,7 +8035,7 @@ begin
         break;
       aSqlWhere := aSqlWhere + ProcessField(JBeg);
     until JBeg^ = #0;
-    SQL := SQL + ' and (' + FormatUtf8(aSqlWhere, [], aBoundsSQLJoin) + ')';
+    SQL := SQL + ' and (' + FormatSql(aSqlWhere, [], aBoundsSQLJoin) + ')';
   end;
   // execute SQL statement and retrieve the matching data
   result := aClient.ExecuteJson([], SQL);
@@ -8122,8 +8153,9 @@ begin
     exit; // invalid or {} or null
   i := 0; // for optimistic property name lookup
   repeat
-     name := GetJsonPropName(Context.Json, @namelen);
-     Context.GetJsonFieldOrObjectOrArray;
+     name := GetJsonPropName(
+       Context.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json, @namelen);
+     Context.{$ifdef USERECORDWITHMETHODS}Get.{$endif}GetJsonFieldOrObjectOrArray;
      if (name = nil) or
         (Context.Json = nil) then
      begin
@@ -9850,14 +9882,17 @@ end;
 
 function TOrmModel.GetTableIndex(aTable: TOrmClass): PtrInt;
 var
+  {$ifndef NOPATCHVMT}
   i: PtrInt;
   Props: TOrmProperties;
   m: ^TOrmPropertiesModelEntry;
+  {$endif NOPATCHVMT}
   c: POrmClass;
 begin
   if (self <> nil) and
      (aTable <> nil) then
   begin
+    {$ifndef NOPATCHVMT}
     Props := aTable.OrmProps;
     if (Props <> nil) and
        (Props.fModelMax < fTablesMax) then
@@ -9873,7 +9908,8 @@ begin
         else
           inc(m);
     end;
-    // manual search e.g. if fModel[] is not yet set
+    {$endif NOPATCHVMT}
+    // manual search e.g. if fModel[] is not yet set or OrmProps has no VMT
     c := pointer(Tables);
     for result := 0 to fTablesMax do
       if c^ = aTable then
@@ -10684,11 +10720,11 @@ end;
 function TOrmMapping.InternalCsvToExternalCsv(
   const CsvFieldNames, Sep, SepEnd: RawUtf8): RawUtf8;
 var
-  IntFields, ExtFields: TRawUtf8DynArray;
+  int, ext: TRawUtf8DynArray;
 begin
-  CsvToRawUtf8DynArray(CsvFieldNames, Sep, SepEnd, IntFields);
-  InternalToExternalDynArray(IntFields, ExtFields);
-  result := RawUtf8ArrayToCsv(ExtFields, Sep) + SepEnd;
+  CsvToRawUtf8DynArray(CsvFieldNames, Sep, SepEnd, int);
+  InternalToExternalDynArray(int, ext);
+  result := RawUtf8ArrayToCsv(ext, Sep) + SepEnd;
 end;
 
 procedure TOrmMapping.InternalToExternalDynArray(
@@ -11703,6 +11739,7 @@ begin
   tmp.Init(Value);
   try
     JsonDecode(tmp.buf, ['FieldNames'], @V, True);
+    Finalize(fFieldNames);
     CsvToRawUtf8DynArray(V[0].Text, fFieldNames);
   finally
     tmp.Done;

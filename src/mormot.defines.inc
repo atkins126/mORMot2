@@ -43,8 +43,15 @@
 {.$define NOEXCEPTIONINTERCEPT}
 // if defined, exceptions shall not be intercepted nor logged
 
+{.$define NOPATCHVMT}
+// disable the vmtAutoTable slot runtime patch, replacing it with Rtti.FindType
+// - is likely to be defined with the NOPATCHRTL conditional
+// - could be used e.g. when in-memory executables can't be patched (e.g. on
+// security constrained systems, or on OS without any mmap support)
+
 {.$define NOPATCHRTL}
 // if defined, FPC RTL won't be patched on x86_64 with optimized asm
+// - is likely to be defined with the NOPATCHVMT conditional
 // - you can enable it if you find out some compatibility problem
 
 {$ifdef CPUX86}
@@ -143,7 +150,7 @@
 
   {$define HASINLINE}
   {$define HASINLINEWINAPI} // Delphi has troubles inlining Windows API calls
-  {$define HASSAFEINLINE}   // Delphi 2007 has sometimes troubles inlining :(
+  {$define HASSAFEINLINE}   // Delphi 2007-2009 have troubles inlining
   {$define NODELPHIASM}     // avoid e.g. low-level System.@LStrFromPCharLen
   {$define HASDYNARRAYTYPE} // eltype2 field, used e.g. for T*ObjArray
   {$define HASITERATORS}
@@ -261,8 +268,13 @@
         {$define FPCLINUX}
         {$define OSLINUXANDROID}
         {$ifdef CPUX64}
+          {$define OSLINUXINTEL}
           {$define OSLINUXX64}
         {$endif CPUX64}
+        {$ifdef CPUX86}
+          {$define OSLINUXINTEL}
+          {$define OSLINUXX86}
+        {$endif CPUX86}
       {$else}
         {$ifdef ANDROID}
           // conditionals for Android
@@ -679,7 +691,6 @@
       {$define OSDARWINARM}
       {$define LIZARD_EXTERNALONLY}
       {$define NOLIBCSTATIC}
-      {$define NOSQLITE3STATIC}
     {$endif OSDWARWIN}
   {$endif CPUARM3264}
 {$else}

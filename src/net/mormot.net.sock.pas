@@ -141,7 +141,11 @@ type
   TNetSocket = ^TNetSocketWrap;
 
   /// internal mapping of an address, in any supported socket layer
+  {$ifdef USERECORDWITHMETHODS}
+  TNetAddr = record
+  {$else}
   TNetAddr = object
+  {$endif USERECORDWITHMETHODS}
   private
     // opaque wrapper with len: sockaddr_un=110 (POSIX) or sockaddr_in6=28 (Win)
     Addr: array[0..SOCKADDR_SIZE - 1] of byte;
@@ -166,7 +170,7 @@ type
     procedure IP(var res: RawUtf8; localasvoid: boolean = false); overload;
     /// convert this address into its IPv4/IPv6 textual representation
     function IP(localasvoid: boolean = false): RawUtf8; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// convert this address into its 32-bit IPv4 value, 0 on IPv6/nlUnix
     function IP4: cardinal;
       {$ifdef FPC}inline;{$endif}
@@ -212,7 +216,11 @@ type
   /// convenient object-oriented wrapper around a socket connection
   // - encapsulate a cross-platform low-level access to the socket API
   // - TNetSocket is a pointer to this, so TSocket(@self) is used for OS calls
+  {$ifdef USERECORDWITHMETHODS}
+  TNetSocketWrap = record
+  {$else}
   TNetSocketWrap = object
+  {$endif USERECORDWITHMETHODS}
   private
     procedure SetOpt(prot, name: integer; value: pointer; valuelen: integer);
     function GetOptInt(prot, name: integer): integer;
@@ -297,7 +305,7 @@ type
     function Close: TNetResult;
     /// access to the raw socket handle, i.e. @self
     function Socket: PtrInt;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// change the OS sending buffer size of this socket, in bytes
     property SendBufferSize: integer
       read GetSendBufferSize write SetSendBufferSize;
@@ -361,14 +369,14 @@ var
   // on Windows, and gethostbyname() on POSIX
   // - if you include mormot.net.dns, its own IPv4 DNS resolution function will
   // be registered here
-  // - this level or DNS resolution has a simple in-memory cache of 32 seconds
+  // - this level of DNS resolution has a simple in-memory cache of 32 seconds
   // - NewSocketAddressCache from mormot.net.client will implement a more
   // tunable cache, for both IPv4 and IPv6 resolutions
   NewSocketIP4Lookup: function(const HostName: RawUtf8; out IP4: cardinal): boolean;
 
-  /// the DNS resolver address to be used by NewSocketIP4Lookup() callback
-  // - to override default mormot.net.dns behavior which is to query all DNS
-  // servers known by the OS
+  /// the DNS resolver address(es) to be used by NewSocketIP4Lookup() callback
+  // - default '' would call GetDnsAddresses to ask the server known by the OS
+  // - you can specify an alternate CSV list of DNS servers to be called in order
   NewSocketIP4LookupServer: RawUtf8;
 
   /// interface used by NewSocket() to cache the host names
@@ -492,7 +500,6 @@ function GetIPAddressesText(const Sep: RawUtf8 = ' ';
 /// flush the GetIPAddressesText/GetMacAddresses internal cache
 // - may be set to force detection after HW configuration change
 procedure MacIPAddressFlush;
-
 
 type
   /// interface name/address pairs as returned by GetMacAddresses
@@ -660,7 +667,7 @@ type
     CertificateFile: RawUtf8;
     /// input: opaque pointer containing a certificate to be used
     // - on OpenSSL client or server, calls SSL_CTX_use_certificate() API
-    // expecting the pointer to be of PEVP_PKEY type
+    // expecting the pointer to be of PX509 type
     // - not used on SChannel client
     CertificateRaw: pointer;
     /// input: PEM file name containing a private key to be loaded
@@ -670,12 +677,13 @@ type
     PrivateKeyFile: RawUtf8;
     /// input: optional password to load the PrivateKey file
     // - see also OnPrivatePassword callback
-    // - on OpenSSL client or server, calls SSL_CTX_set_default_passwd_cb_userdata() API
+    // - on OpenSSL client or server, calls
+    // SSL_CTX_set_default_passwd_cb_userdata() API
     // - not used on SChannel
     PrivatePassword: RawUtf8;
     /// input: opaque pointer containing a private key to be used
     // - on OpenSSL client or server, calls SSL_CTX_use_PrivateKey() API
-    // expecting the pointer to be of PX509 type
+    // expecting the pointer to be of PEVP_PKEY type
     // - not used on SChannel
     PrivateKeyRaw: pointer;
     /// input: file containing a specific set of CA certificates chain
@@ -1703,7 +1711,11 @@ type
   // implement a thread-safe cache of IPv4 for hostnames
   // - used e.g. by TNetAddr.SetFromIP4 and GetKnownHost
   // - avoid the overhead of TSynDictionary for a few short-living items
+  {$ifdef USERECORDWITHMETHODS}
+  TNetHostCache = record
+  {$else}
   TNetHostCache = object
+  {$endif USERECORDWITHMETHODS}
   public
     Host: TRawUtf8DynArray;
     Safe: TLightLock;
@@ -2898,7 +2910,11 @@ var
   i, c: PtrInt;
   tab: PAnsichar;
 begin
+  if maclen < 0 then
+    maclen := 0;
   FastSetString(result, nil, maclen * 2);
+  if maclen = 0 then
+    exit;
   dec(maclen);
   tab := @HexCharsLower;
   P := pointer(result);
@@ -4681,7 +4697,7 @@ begin
     BufSize := InputBufferSize;
     BufPtr := pointer(PAnsiChar(SockIn) + SizeOf(TTextRec));
     OpenFunc := @OpenSock;
-    Handle := {$ifdef FPC}THandle{$endif}(-1);
+    Handle := {$ifdef FPC}THandle{$endif}(0); // some invalid handle
   end;
   SetLineBreakStyle(SockIn^, LineBreak); // http does break lines with #13#10
   Reset(SockIn^);
@@ -4703,7 +4719,7 @@ begin
     BufSize := OutputBufferSize;
     BufPtr := pointer(PAnsiChar(SockIn) + SizeOf(TTextRec)); // ignore Buffer[] (Delphi 2009+)
     OpenFunc := @OpenSock;
-    Handle := {$ifdef FPC}THandle{$endif}(-1);
+    Handle := {$ifdef FPC}THandle{$endif}(0); // some invalid handle
   end;
   SetLineBreakStyle(SockOut^, tlbsCRLF); // force e.g. for Linux platforms
   Rewrite(SockOut^);
@@ -4935,7 +4951,7 @@ begin
         vtUnicodeString:
           begin
             Unicode_WideToShort(VUnicodeString, // assume WinAnsi encoding
-              length(UnicodeString(VUnicodeString)), CODEPAGE_US, tmp);
+              length(UnicodeString(VUnicodeString)), CP_WINANSI, tmp);
             SockSend(@tmp[1], Length(tmp));
           end;
         {$endif HASVARUSTRING}
@@ -5327,7 +5343,11 @@ end;
 type
   {$A-}
   /// a 64-bit SNTP timestamp, as described in RFC 2030
+  {$ifdef USERECORDWITHMETHODS}
+  TNtpTimestamp = record
+  {$else}
   TNtpTimestamp = object
+  {$endif USERECORDWITHMETHODS}
     Seconds: integer;
     Fraction: integer;
     procedure SwapEndian;
@@ -5336,7 +5356,11 @@ type
   end;
 
   /// map a SNTP header, as described in RFC 2030
+  {$ifdef USERECORDWITHMETHODS}
+  TNtpPacket = record
+  {$else}
   TNtpPacket = object
+  {$endif USERECORDWITHMETHODS}
     LiVnMode, Stratum, Poll, Precision: byte;
     RootDelay, RootDispersion, ReferenceIdentifier: cardinal;
     Reference, Originate, Receive, Transmit: TNtpTimestamp;

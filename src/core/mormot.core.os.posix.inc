@@ -10,7 +10,7 @@ uses
   unix,
   unixcp,
   unixtype,
-  unixutil,
+  unixutil, // for TZSeconds - used by sysutils anyway
   {$ifdef OSBSDDARWIN}
   sysctl,
   {$else}
@@ -91,12 +91,12 @@ begin
       inc(p, length(up));
       while (p^ <= ' ') and
             (p^ <> #0) do
-        inc(p);
+        inc(p); // trim left
       L := 0;
       while p[L] > #13 do
         inc(L);
       while p[L - 1] = ' ' do
-        dec(L);
+        dec(L); // trim right
       FastSetString(res, p, L);
       exit;
     end;
@@ -141,6 +141,17 @@ begin
   FastSetString(result, S, P - S);
 end;
 
+procedure RawUtf8Append(var s: RawUtf8; p: PUtf8Char; l: PtrInt);
+var
+  n: PtrInt;
+begin
+  if l = 0 then
+    exit;
+  n := length(s);
+  SetLength(s, n + l);
+  MoveFast(p^, PByteArray(s)[n], l);
+end;
+
 function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
 begin
   result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
@@ -162,12 +173,12 @@ end;
 
 procedure LibraryClose(Lib: TLibHandle);
 begin
-  dlclose(Lib);
+  dlclose(pointer(Lib));
 end;
 
 function LibraryResolve(Lib: TLibHandle; ProcName: PAnsiChar): pointer;
 begin
-  result := dlsym(Lib, ProcName);
+  result := dlsym(pointer(Lib), ProcName);
 end;
 
 function LibraryError: string;
@@ -737,10 +748,10 @@ const
 //   GetTickCount64 fpc    2 494 563 op/sec
 //   GetTickCount64 libc 119 919 893 op/sec
 function clock_gettime(clk_id: clockid_t; tp: ptimespec): cint;
-  cdecl external clib name 'clock_gettime';
+  cdecl external clib name 'clock_gettime'; // LIBC_SUFFIX fails on CentOS 7
 
 function gettimeofday(tp: ptimeval; tzp: ptimezone): cint;
-  cdecl external clib name 'gettimeofday';
+  cdecl external clib name 'gettimeofday' + LIBC_SUFFIX;
 
 {$endif OSBSD}
 
@@ -818,17 +829,16 @@ end;
 {$ifdef OSPTHREADSLIB}
   {$define OSPTHREADS}
 var
-  {%H-}pthread: pointer;
   {$ifdef OSLINUX}
   // pthread_setname_np for Linux https://stackoverflow.com/a/7989973/458259
   {$define HAS_PTHREADSETNAMENP}
   pthread_setname_np: function(thread: pointer; name: PAnsiChar): integer; cdecl;
   // pthread_setaffinity_np has been tested on Linux only
   {$define HAS_PTHREADSETAFFINITY}
-  pthread_setaffinity_np: function (thread: pointer;
+  pthread_setaffinity_np: function(thread: pointer;
     cpusetsize: SizeUInt; cpuset: pointer): integer; cdecl;
   {$endif OSLINUX}
-  pthread_cancel: function (thread: pointer): integer; cdecl;
+  pthread_cancel: function(thread: pointer): integer; cdecl;
   pthread_mutex_init: function(mutex, attr: pointer): integer; cdecl;
   pthread_mutex_destroy: function(mutex: pointer): integer; cdecl;
 {$endif OSPTHREADSLIB}
@@ -1063,7 +1073,7 @@ begin
     result := 0
   else
     // + unixutil.TZSeconds = UTC to local time conversion
-    result := (FileDate + TZSeconds) / SecsPerDay + UnixDelta;
+    result := Int64(FileDate + TZSeconds) / Int64(SecsPerDay) + Int64(UnixDelta);
 end;
 
 function FileAgeToDateTime(const FileName: TFileName): TDateTime;
@@ -1102,6 +1112,11 @@ end;
 function SearchRecToWindowsTime(const F: TSearchRec): integer;
 begin
   result := DateTimeToWindowsFileTime(FileDateToDateTime(F.Time));
+end;
+
+function SearchRecToUnixTimeUtc(const F: TSearchRec): TUnixTime;
+begin
+  result := F.Time; // raw POSIX FileDate is already in UTC seconds
 end;
 
 function FileAgeToWindowsTime(const FileName: TFileName): integer;
@@ -1445,7 +1460,7 @@ begin
   {$ifdef HASEVENTFD}
   if fFD <> 0 then
   begin
-    if LinuxEventFDWait(fFD, TimeoutMS) then
+    if WaitReadPending(fFD, TimeoutMS) then // = LinuxEventFDWait()
       LinuxEventFDRead(fFD);
   end
   else
@@ -1662,23 +1677,36 @@ end;
 var
   TextAttr: integer = 255; // always change the color at startup
 
-procedure TextColor(Color: TConsoleColor);
+procedure TextColorCmd(Color: TConsoleColor; var s: TShort8);
 const
   TERM_CTRL: string[8] = '04261537';
-var
-  s: shortstring;
 begin
+  s[0] := #0;
   if (ord(Color) = TextAttr) or
      not StdOutIsTTY then
     exit;
   TextAttr := ord(Color);
+  s := #27'[0;3#m';
   if ord(Color) >= 8 then
-    s := #27'[1;3'
-  else
-    s := #27'[0;3';
-  AppendShortChar(TERM_CTRL[(ord(Color) and 7) + 1], s);
-  AppendShortChar('m', s);
-  fpwrite(StdOutputHandle, @s[1], ord(s[0])); // single syscall
+    s[3] := '1';
+  s[6] := TERM_CTRL[(ord(Color) and 7) + 1];
+end;
+
+procedure TextColorAppend(Color: TConsoleColor; var s: RawUtf8);
+var
+  c: TShort8;
+begin
+  TextColorCmd(Color, c);
+  RawUtf8Append(s, @c[1], ord(c[0]));
+end;
+
+procedure TextColor(Color: TConsoleColor);
+var
+  c: TShort8;
+begin
+  TextColorCmd(Color, c);
+  if c[0] <> #0 then
+    fpwrite(StdOutputHandle, @c[1], ord(c[0])); // single syscall
 end;
 
 procedure TextBackground(Color: TConsoleColor);
@@ -1693,16 +1721,21 @@ const
 
 procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor;
   NoLineFeed, NoColor: boolean);
+var
+  s: RawUtf8;
 begin
+  // pre-compute the whole chars to be sent to the console
+  if not NoColor then
+    TextColorAppend(Color, s);
+  RawUtf8Append(s, pointer(Text), length(Text));
+  if not NoLineFeed then
+    RawUtf8Append(s, @PosixLineFeed, 1);
+  if not NoColor then
+    TextColorAppend(ccLightGray, s);
+  // display whole line in a single syscall
   ConsoleCriticalSection.Lock;
   try
-    if not NoColor then
-      TextColor(Color);
-    fpwrite(StdOutputHandle, pointer(Text), length(Text)); // UTF-8 console
-    if not NoLineFeed then
-      fpwrite(StdOutputHandle, @PosixLineFeed, 1);
-    if not NoColor then
-      TextColor(ccLightGray);
+    fpwrite(StdOutputHandle, pointer(s), length(s)); // UTF-8 console
   finally
     ConsoleCriticalSection.UnLock;
   end;
@@ -2060,6 +2093,78 @@ begin
             (fpgeterrno <> ESysEFAULT);
 end;
 
+const
+  DT_UNKNOWN  = 0; // need to call fpstat() if this is returned (depends on FS)
+  DT_FIFO     = 1;
+  DT_CHR      = 2;
+  DT_DIR      = 4;
+  DT_BLK      = 6;
+  DT_REG      = 8;
+  DT_LNK      = 10;
+  DT_SOCK     = 12;
+  DT_WHT      = 14;
+
+function PosixFileNames(const Folder: TFileName; Recursive: boolean): TRawUtf8DynArray;
+var
+  n: PtrInt;
+  root: TFileName;
+
+  procedure DoFolder(const subpath: TFileName);
+  var
+    d: pDir;
+    e: pDirent;
+    pl, el: PtrInt;
+    fn: RawUtf8;
+  begin
+    d := FpOpendir(root + subpath); // (much) faster alternative to FindFirst()
+    if d = nil then
+      exit;
+    pl := length(subpath);
+    if pl <> 0 then
+      inc(pl);
+    repeat
+      e := FpReaddir(d^); // FPC RTL use getdents64 syscall on Linux and BSD :)
+      if e = nil then
+        break;
+      // fn := [subpath + '/'] + e^.d_name
+      el := StrLen(@e^.d_name);
+      FastSetString(fn, nil, pl + el);
+      if pl <> 0 then
+      begin
+        MoveFast(pointer(subpath)^, pointer(fn)^, pl - 1);
+        PByteArray(fn)[pl - 1] := ord('/');
+      end;
+      MoveFast(e^.d_name, PByteArray(fn)[pl], el);
+      // handle this entry
+      case e.d_type of
+        DT_UNKNOWN, // assume modern FS over BSD or Linux Kernel >= 2.6.4
+        DT_REG:
+          begin
+            if n = 0 then
+              SetLength(result, 128)
+            else if n = length(result) then
+              SetLength(result, NextGrow(n));
+            result[n] := fn;
+            inc(n);
+          end;
+        DT_DIR:
+          if Recursive and
+             (e^.d_name[0] <> '.')  then
+            DoFolder(fn);
+      end;
+    until false;
+    FpClosedir(d^);
+  end;
+
+begin
+  result := nil;
+  n := 0;
+  root := IncludeTrailingPathDelimiter(Folder);
+  DoFolder('');
+  if n <> 0 then
+    DynArrayFakeLength(result, n);
+end;
+
 {$ifdef OSBSDDARWIN}
 
 function IsValidPid(pid: cardinal): boolean;
@@ -2067,7 +2172,7 @@ begin
   result := pid <> 0;
 end;
 
-function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
+function EnumAllProcesses: TCardinalDynArray;
 begin
   result := nil; // not implemented yet on BSD/Darwin
   // https://kaashif.co.uk/2015/06/18/how-to-get-a-list-of-processes-on-openbsd-in-c/
@@ -2240,19 +2345,6 @@ end;
 
 {$else} // Linux-specific code
 
-const
-  // function DirectoryFileNames(const Folder: TFileName): TFileNameDynArray; ?
-  // function DirectoryFolderNames(const Folder: TFileName): TFileNameDynArray; ?
-  DT_UNKNOWN  = 0; // need to call fpstat() if returned this
-  DT_FIFO     = 1;
-  DT_CHR      = 2;
-  DT_DIR      = 4;
-  DT_BLK      = 6;
-  DT_REG      = 8;
-  DT_LNK      = 10;
-  DT_SOCK     = 12;
-  DT_WHT      = 14;
-
 function IsValidPid(pid: cardinal): boolean;
 var
   status, tgid: RawUtf8;
@@ -2267,7 +2359,7 @@ begin
   result := GetCardinal(pointer(tgid)) = pid;
 end;
 
-function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
+function EnumAllProcesses: TCardinalDynArray;
 var
   d: pDir;
   e: pDirent;
@@ -2281,11 +2373,10 @@ begin
   n := 0;
   SetLength(result, 128);
   repeat
-    e := FpReaddir(d^); // FPC RTL use getdents64 syscall on Linux and BSD :)
+    e := FpReaddir(d^); // FPC RTL uses direct getdents syscall on Linux/BSD :)
     if e = nil then
       break;
-    if ((e.d_type = DT_UNKNOWN) or
-        (e.d_type = DT_DIR)) and
+    if (e.d_type in [DT_UNKNOWN, DT_DIR]) and
        (e.d_name[0] in ['1'..'9']) then
     begin
       pid := GetCardinal(@e.d_name[0]);
@@ -2547,6 +2638,8 @@ var
   rd, dev: integer;
 begin
   result := false;
+  if Len <= 0 then
+    exit;
   dev := FileOpenSequentialRead('/dev/urandom');  // non blocking on Linux + BSD
   if (dev <= 0) and
      AllowBlocking then
@@ -3005,18 +3098,18 @@ begin
          not DeleteFile(pidfilename) then
         raise EOSException.CreateFmt(
           '%s.CommandLine Fork failed: %s is already forked as pid=%d',
-          [daemon.ClassName, Executable.ProgramName, PtrInt(pid)]);
+          [ClassNameShort(daemon)^, Executable.ProgramName, PtrInt(pid)]);
     pid := fpFork;
     if pid < 0 then
       raise EOSException.CreateFmt(
-        '%s.CommandLine Fork failed', [daemon.ClassName]);
+        '%s.CommandLine Fork failed', [ClassNameShort(daemon)^]);
     if pid > 0 then  // main program - just terminate
       exit;
     // clean forked instance
     sid := fpSetSID;
     if sid < 0 then // new session (process group) created?
       raise EOSException.CreateFmt(
-        '%s.CommandLine SetSID failed', [daemon.ClassName]);
+        '%s.CommandLine SetSID failed', [ClassNameShort(daemon)^]);
     CleanAfterFork;
     // create local .[Executable.ProgramName].pid file
     pid := fpgetpid;
@@ -3613,6 +3706,10 @@ begin
   SystemInfo.dwNumberOfProcessors := fpsysctlhwint(HW_NCPU);
   beg := fpsysctlhwstr(HW_MACHINE, temp);
   FastSetString(BiosInfoText, beg, StrLen(beg));
+  {$ifdef OSDARWIN}
+  if PosExChar(' ', BiosInfoText) = 0 then
+    BiosInfoText := 'Mac ' + BiosInfoText; // from a Parallels VM
+  {$endif OSDARWIN}
   modname := fpsysctlhwstr(HW_MODEL, temp);
   with uts do
     OSVersionText := sysname + '-' + release + ' ' + version;
@@ -3822,8 +3919,6 @@ begin
   else
     CpuInfoText := _fmt('%d x %s %s (' + CPU_ARCH_TEXT + ')',
       [SystemInfo.dwNumberOfProcessors, modname, CpuInfoText]);
-  if CpuInfoText = '' then
-    CpuInfoText := CPU_ARCH_TEXT;
   // intialize supported APIs
   TimeZoneLocalBias := -GetLocalTimeOffset;
   {$ifdef OSDARWIN}

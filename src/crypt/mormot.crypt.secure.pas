@@ -16,11 +16,15 @@ unit mormot.crypt.secure;
     - TBinaryCookieGenerator Simple Cookie Generator
     - Rnd/Hash/Sign/Cipher/Asym/Cert/Store High-Level Algorithms Factories
     - Minimal PEM/DER Encoding/Decoding
+    - Basic ASN.1 Support
     - Windows Executable Digital Signature Stuffing
 
    Uses optimized mormot.crypt.core.pas for its actual cryptographic process.
 
   *****************************************************************************
+
+   Legal Notice: as stated by our LICENSE.md terms, make sure that you comply
+   to any restriction about the use of cryptographic software in your country.
 }
 
 interface
@@ -315,7 +319,11 @@ type
   // - bits 0..14 map a 15-bit increasing counter (collision-free)
   // - bits 15..30 map a 16-bit process identifier
   // - bits 31..63 map a 33-bit UTC time, encoded as seconds since Unix epoch
+  {$ifdef USERECORDWITHMETHODS}
+  TSynUniqueIdentifierBits = record
+  {$else}
   TSynUniqueIdentifierBits = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// the actual 64-bit storage value
     // - in practice, only first 63 bits are used
@@ -529,7 +537,11 @@ type
 
   /// a generic wrapper object to handle digital HMAC-SHA-2/SHA-3 signatures
   // - used e.g. to implement TJwtSynSignerAbstract
+  {$ifdef USERECORDWITHMETHODS}
+  TSynSigner = record
+  {$else}
   TSynSigner = object
+  {$endif USERECORDWITHMETHODS}
   private
     ctxt: packed array[1..SHA3_CONTEXT_SIZE] of byte; // enough space for all
   public
@@ -614,7 +626,11 @@ type
   // - as used e.g. by HashFile/HashFull functions
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance
+  {$ifdef USERECORDWITHMETHODS}
+  TSynHasher = record
+  {$else}
   TSynHasher = object
+  {$endif USERECORDWITHMETHODS}
   private
     fAlgo: THashAlgo;
     ctxt: array[1..SHA3_CONTEXT_SIZE] of byte; // enough space for all algorithms
@@ -641,8 +657,12 @@ type
     procedure Full(aAlgo: THashAlgo; const aBuffer: array of RawByteString;
       var aResult: RawUtf8); overload;
     /// one-step hash computation of a buffer as a binary buffer
+    // - returns the written aDigest size in bytes
     function Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer;
       out aDigest: THash512Rec): integer; overload;
+    /// fill a buffer with the MGF1 seed deriviation, following RFC 2437
+    // - a Mask Generation Function expands aSeed/aSeedLen into aDestLen buffer
+    function Mgf1(aAlgo: THashAlgo; aSeed: pointer; aSeedLen, aDestLen: PtrUInt): RawByteString;
     /// returns the number of bytes of the hash of the current Algo
     function HashSize: integer;
     /// the hash algorithm used by this instance
@@ -714,14 +734,19 @@ type
 
   /// the known 32-bit crc algorithms as returned by CryptCrc32()
   // - ccaCrc32 and ccaAdler32 require mormot.lib.z.pas to be included
-  // - AesNiHash() is not part of it, because it is not cross-platform, and
-  // randomly seeded at process startup
+  // - caDefault may be AesNiHash32(), therefore not persistable between
+  // executions, since is randomly seeded at process startup
+  // - some cryptographic-level hashes are truncated to 32-bit - caSha1 could
+  // leverage Intel SHA HW opcodes to achieve pretty good performance
   TCrc32Algo = (
     caCrc32c,
     caCrc32,
     caAdler32,
     caxxHash32,
-    caFnv32);
+    caFnv32,
+    caDefault,
+    caMd5,
+    caSha1);
 
 /// returns the 32-bit crc function for a given algorithm
 // - may return nil, e.g. for caCrc32/caAdler32 when mormot.lib.z is not loaded
@@ -730,6 +755,9 @@ function CryptCrc32(algo: TCrc32Algo): THasher;
 function ToText(algo: TSignAlgo): PShortString; overload;
 function ToText(algo: THashAlgo): PShortString; overload;
 function ToText(algo: TCrc32Algo): PShortString; overload;
+
+/// recognize a THashAlgo from a text, e.g. 'SHA1' or 'SHA3_256'
+function TextToHashAlgo(const Text: RawUtf8; out Algo: THashAlgo): boolean;
 
 /// compute the hexadecimal hash of any (big) file
 // - using a temporary buffer of 1MB for the sequential reading
@@ -780,6 +808,29 @@ function HashFileSha3_256(const FileName: TFileName): RawUtf8;
 /// compute the SHA-3-512 checksum of a given file
 // - this function maps the THashFile signature as defined in mormot.core.buffers
 function HashFileSha3_512(const FileName: TFileName): RawUtf8;
+
+const
+  /// map the size in bytes of any THashAlgo digest
+  HASH_SIZE: array[THashAlgo] of integer = (
+    SizeOf(TMd5Digest),    // hfMD5
+    SizeOf(TSHA1Digest),   // hfSHA1
+    SizeOf(TSHA256Digest), // hfSHA256
+    SizeOf(TSHA384Digest), // hfSHA384
+    SizeOf(TSHA512Digest), // hfSHA512
+    SizeOf(THash256),      // hfSHA512_256
+    SizeOf(THash256),      // hfSHA3_256
+    SizeOf(THash512));     // hfSHA3_512
+
+  /// map the file extension text of any THashAlgo digest
+  HASH_EXT: array[THashAlgo] of RawUtf8 = (
+    '.md5',        // hfMD5
+    '.sha1',       // hfSHA1
+    '.sha256',     // hfSHA256
+    '.sha384',     // hfSHA384
+    '.sha512',     // hfSHA512
+    '.sha512-256', // hfSHA512_256
+    '.sha3-256',   // hfSHA3_256
+    '.sha3-512');  // hfSHA3_512
 
 
 { **************** Client and Server HTTP Access Authentication }
@@ -1254,11 +1305,11 @@ type
   {$A-}
   /// efficient thread-safe cookie generation
   // - you can see it as a JWT-Of-The-Poor: faster to parse and validate
-  // its content, and with very efficiently binary-based serialization
+  // its content, and with very efficience binary-based serialization
   // - stores a session ID, cookie name, and encryption and signature keys
   // - can optionally store any associated record as efficient binary
   // - it is NOT cryptographic secure, because cookies are not, but it is strong
-  // enough to avoid most attacks, and uses much less space than a JWT
+  // enough to avoid most attacks, and uses much less space and CPU than a JWT
   {$ifdef USERECORDWITHMETHODS}
   TBinaryCookieGenerator = record
   {$else}
@@ -1269,13 +1320,13 @@ type
     // - is not part of the Generate/Validate content, but could be used
     // when the cookie is actually stored in HTTP headers
     CookieName: RawUtf8;
-    /// an increasing 31-bit counter, to implement unique session ID
+    /// 31-bit increasing counter, to implement unique session ID
     SessionSequence: TBinaryCookieGeneratorSessionID;
     /// the random initial value of the SessionSequence counter
     SessionSequenceStart: TBinaryCookieGeneratorSessionID;
-    /// secret information, used for digital signature of the cookie content
+    /// 32-bit secret information, used for digital signature of the cookie
     Secret: cardinal;
-    /// random IV used as CTR on Crypt[] secret key
+    /// 32-bit random IV used as CTR on Crypt[] secret key
     CryptNonce: cardinal;
     /// used when Generate() has TimeOutMinutes=0
     // - if equals 0, one month delay is used as "never expire"
@@ -1287,6 +1338,8 @@ type
     /// private random secret, used for encryption of the cookie content
     Crypt: array[byte] of byte;
     /// initialize ephemeral temporary cookie generation
+    // - default crc32c is fast and secure enough on most platforms, but you
+    // may consider caDefault or caSha1 on recent Intel/AMD servers
     procedure Init(const Name: RawUtf8 = 'mORMot';
       DefaultSessionTimeOutMinutes: cardinal = 0;
       SignAlgo: TCrc32Algo = caCrc32c);
@@ -1301,11 +1354,11 @@ type
       PRecordTypeInfo: PRttiInfo = nil): TBinaryCookieGeneratorSessionID;
     ///  decode a base64uri cookie and optionally fill an associated record
     // - return the associated session/sequence number, 0 on error
-    function Validate(const Cookie: RawUtf8;
-      PRecordData: pointer = nil; PRecordTypeInfo: PRttiInfo = nil;
-      PExpires: PUnixTime = nil;
+    function Validate(const Cookie: RawUtf8; PRecordData: pointer = nil;
+      PRecordTypeInfo: PRttiInfo = nil; PExpires: PUnixTime = nil;
       PIssued: PUnixTime = nil): TBinaryCookieGeneratorSessionID;
     /// allow the very same cookie to be recognized after server restart
+    // - note that caDefault won't be persistable, because may map AesNiHash32
     function Save: RawUtf8;
     /// unserialize the cookie generation context as serialized by Save
     function Load(const Saved: RawUtf8): boolean;
@@ -1434,6 +1487,9 @@ type
     function FullFile(const filename: TFileName): RawUtf8;
     /// main factory to create a new hasher instance with this algorithm
     function New: ICryptHash; virtual; abstract;
+    /// return the THashAlgo equivalency of this hasher
+    // - this default implementation returns false meaning that it is unknown
+    function HashAlgo(out hasher: THashAlgo): boolean; virtual;
   end;
 
   /// signing parent class, as resolved by Signer()
@@ -1529,6 +1585,8 @@ type
 
   /// asymmetric public-key cryptography parent class, as returned by Asym()
   TCryptAsym = class(TCryptAlgo)
+  protected
+    fPemPublic, fPemPrivate: byte; // TPemKind as defined below
   public
     /// generate a public/private pair of keys in the PEM text format
     procedure GeneratePem(out pub, priv: RawUtf8; const privpwd: RawUtf8); virtual;
@@ -1569,21 +1627,26 @@ type
   /// exception class raised by our High-Level Certificates Process
   ECryptCert = class(ESynException);
 
-  /// the known asymmetric algorithms, e.g. as published by OpenSSL
+  /// the supported asymmetric algorithms, e.g. as published by OpenSSL
   // - as implemented e.g. by TJwtAbstractOsl inherited classes, or
   // TCryptAsymOsl/TCryptCertAlgoOpenSsl implementing TCryptAsym/ICryptCert,
   // accessible via CryptAsymOpenSsl[] and CryptCertAlgoOpenSsl[] factories
-  // - caaES256 is our mormot.crypt.ecc256r1 prime256v1/NISTP-256 ECC Curve
+  // - mormot.crypt.ecc unit implements only caaES256
+  // - mormot.crypt.x509 unit implements caaES256/caaRS256/caaRS384/caaRS512
+  // - mormot.crypt.openssl unit implements them all
   // - caaES256, caaES384 and caaES512 match OpenSSL EVP_PKEY_EC with
   // prime256v1, NID_secp384r1 and NID_secp512r1 curves
   // - caaRS256, caaRS384 and caaRS512 match OpenSSL EVP_PKEY_RSA with
-  // 2048 bits from SHA-256, SHA-384 and SHA-512 digest method
+  // 2048-bit from SHA-256, SHA-384 and SHA-512 digest method
   // - caaPS256, caaPS384 and caaPS512 match OpenSSL EVP_PKEY_RSA_PSS with
-  // 2048 bits from SHA-256, SHA-384 and SHA-512 digest method
+  // 2048-bit from SHA-256, SHA-384 and SHA-512 digest method
   // - caaEdDSA match OpenSSL EVP_PKEY_ED25519 curve
   // - note that caaES256K is NID_secp256k1 which was defined for completeness,
   // but should appear for special needs only: caaES256 is to be preferred,
   // and is also significantly faster
+  // - our RSA algorithms generates RSA_DEFAULT_GENERATION_BITS = 2048-bit,
+  // but our units can read and manage any other size of existing certificates
+  // generated e.g. by OpenSSL or our mormot.crypt.rsa unit
   TCryptAsymAlgo = (
     caaES256,
     caaES384,
@@ -1596,6 +1659,9 @@ type
     caaPS384,
     caaPS512,
     caaEdDSA);
+
+  /// set of supported asymmetric algorithms
+  TCryptAsymAlgos = set of TCryptAsymAlgo;
 
   /// the known Key Usages for a given Certificate
   // - is an exact match of TX509Usage enumerate in mormot.lib.openssl11.pas
@@ -1641,7 +1707,7 @@ type
 
   /// the Digital Signature results for a given Certificate
   // - is an exact match of TEccValidity enumerate in mormot.crypt.ecc256r1.pas
-  // - see CV_VALIDSIGN constant
+  // - see CV_VALIDSIGN constant for verification success
   TCryptCertValidity = (
     cvUnknown,
     cvValidSigned,
@@ -1655,21 +1721,34 @@ type
     cvInvalidSignature,
     cvRevoked,
     cvWrongUsage);
+
   /// a set of Digital Signature results
   TCryptCertValidities = set of TCryptCertValidity;
 
-  /// convenient wrapper of X509 Certificate subject name fields
+  /// convenient wrapper of X.509 Certificate subject name X.501 fields
   // - not always implemented - mainly our 'syn-es256' certificate won't
+  // - as defined in RFC 5280 Appendix A.1
   TCryptCertFields = record
-    Country,
-    State,
-    Locality,
-    Organization,
-    OrgUnit,
-    CommonName,
-    EmailAddress,
-    SurName,
+    /// countryName field (OID 2.5.4.6)
+    Country: RawUtf8;
+    /// stateOrProvinceName field (OID 2.5.4.8)
+    State: RawUtf8;
+    /// localityName field (OID 2.5.4.7)
+    Locality: RawUtf8;
+    /// organizationName field (OID 2.5.4.10)
+    Organization: RawUtf8;
+    /// organizationalUnitName field (OID 2.5.4.11)
+    OrgUnit: RawUtf8;
+    /// commonName field (OID 2.5.4.3)
+    CommonName: RawUtf8;
+    /// email field (OID 1.2.840.113549.1.9.1)
+    EmailAddress: RawUtf8;
+    /// surname field (OID 2.5.4.4)
+    SurName: RawUtf8;
+    /// givenName field (OID 2.5.4.42)
     GivenName: RawUtf8;
+    /// netscapeComment extension (not a field - OID 2.16.840.1.113730.1.13)
+    Comment: RawUtf8;
   end;
   PCryptCertFields = ^TCryptCertFields;
 
@@ -1703,7 +1782,7 @@ type
   TCryptCertAlgo = class;
 
   /// abstract interface to a Certificate, as returned by Cert() factory
-  // - may be X509 or not, OpenSSL implemented or not, e.g. for syn-es256
+  // - may be X.509 or not, OpenSSL implemented or not, e.g. for syn-es256
   // - note: features and serialization are not fully compatible between engines,
   // but those high-level methods work as expected within each TCryptCertAlgo
   ICryptCert = interface
@@ -1714,28 +1793,60 @@ type
     // - ValidDays and ExpireDays are relative to the current time - ValidDays
     // is -1 by default to avoid most clock synch issues
     // - additional information can be passed into Fields (e.g. common name)
-    // - return self to be used as a fluent interface
+    // - return self to be used as a fluent interface, e.g. calling
+    // Save(cccPrivateKeyOnly) to persist the newly created private key
     function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8 = '';
       const Authority: ICryptCert = nil; ExpireDays: integer = 365;
       ValidDays: integer = -1; Fields: PCryptCertFields = nil): ICryptCert;
+    /// create a new Certificate instance from a supplied CSR
+    // - will first unserialize and verify a self-signed CSR (PEM) content, e.g.
+    // as generated by a former TCryptCertAlgo.CreateSelfSignedCsr() call
+    // - retrieve the Subjects and Usages as previously set to the CSR
+    // - expect either a self-signed certificate as CSR, or a PKCS#10 CSR
+    // by the X.509 engines (OpenSSL or mormot.crypt.x509)
+    // - if Authority is set, it will sign the certificate, and keep the public
+    // key stored in the CSR so that the requester could keep its private key
+    // - if Authority is not set, a new key pair is generated to self-sign
+    // the certificate, and the public key is stored in the certificate, and
+    // the generated keys (public and private) can be retrieved using Save
+    // - return self to be used as a fluent interface, or nil if unsupported
+    function GenerateFromCsr(const Csr: RawByteString;
+      const Authority: ICryptCert = nil; ExpireDays: integer = 365;
+      ValidDays: integer = -1): ICryptCert;
     /// the Certificate Genuine Serial Number
     // - e.g. '04:f9:25:39:39:f8:ce:79:1a:a4:0e:b3:fa:72:e3:bc:9e:d6'
     function GetSerial: RawUtf8;
+    /// the High-Level Certificate Subject
+    // - actual text output depend on the provider used; for instance
+    // '/C=US/O=Let''s Encrypt/CN=R3' with OpenSSL, 'CN=R3, C=US, O=Let''s Encrypt'
+    // with mormot.crypt.x509 or some Baudot-encoded text with mormot.crypt.ecc
+    function GetSubjectName: RawUtf8;
     /// the Low-Level Certificate Main Subject
-    // - e.g. 'synopse.info' from OpenSSL X509 CN= subject field
-    function GetSubject: RawUtf8;
+    // - returns by default the CommonName, e.g. 'synopse.info' from a X.509
+    // CN= subject field
+    // - can search another Relative Distinguished Name (RDN) e.g. 'O' or 'OU'
+    // - if Rdn is a hash, e.g. 'SHA1'/'SHA256', will return the subject digest
+    function GetSubject(const Rdn: RawUtf8 = 'CN'): RawUtf8;
     /// an array of all Subject names covered by this Certificate
     // - e.g. ['synopse.info', 'www.synopse.info']
+    // - e.g. read from X.509 v3 Subject Alternative Names extension
     function GetSubjects: TRawUtf8DynArray;
     /// the High-Level Certificate Issuer
-    // - e.g. '/C=US/O=Let''s Encrypt/CN=R3' or some Baudot-encoded text
+    // - actual text output depend on the provider used; for instance
+    // '/C=US/O=Let''s Encrypt/CN=R3' with OpenSSL, 'CN=R3, C=US, O=Let''s Encrypt'
+    // with mormot.crypt.x509 or some Baudot-encoded text with mormot.crypt.ecc
     function GetIssuerName: RawUtf8;
-    /// the Issuer Key Identifier of this Certificate
+    /// the Low-Level Certificate Main Issuer
+    // - returns by default the CommonName, e.g. 'R3' from a X.509 CN= subject field
+    // - can search another Relative Distinguished Name (RDN) e.g. 'O' or 'OU'
+    // - if Rdn is a hash, e.g. 'SHA1'/'SHA256', will return the issuer digest
+    function GetIssuer(const Rdn: RawUtf8 = 'CN'): RawUtf8;
+    /// the Subject Issuer Key Identifier (SKID) of this Certificate
     // - e.g. '14:2E:B3:17:B7:58:56:CB:AE:50:09:40:E6:1F:AF:9D:8B:14:C2:C6'
-    // - match the SKID on X509, or the serial number for syn-es256
+    // - match the SKID on X.509, or the serial number for syn-es256
     function GetSubjectKey: RawUtf8;
-    /// the signing Authority Key Identifier of this Certificate
-    // - match the AKID on X509 (so may be '' for a self-signed certificate),
+    /// the signing Authority Key Identifier (AKID) of this Certificate
+    // - match the AKID on X.509 (so may be '' for a self-signed certificate),
     // or the authority serial number for syn-es256 (so equals GetSubjectKey
     // for a self-signed certificate)
     function GetAuthorityKey: RawUtf8;
@@ -1763,39 +1874,45 @@ type
     // - is usually the hash of its binary (e.g. DER) serialization
     function GetDigest(Algo: THashAlgo = hfSHA256): RawUtf8;
     /// load a Certificate from a Save() content
+    // - use Content to specify the extent of the loaded value
     // - PrivatePassword is used for cccCertWithPrivateKey and cccPrivateKeyOnly
-    // - will only recognize and support the ccfBinary and ccfPem formats
+    // - warning: don't forget FillZero() once done with any sensitive input
     function Load(const Saved: RawByteString;
       Content: TCryptCertContent = cccCertOnly;
       const PrivatePassword: SpiUtf8 = ''): boolean;
     /// load a Certificate from a SaveToFile() content
-    // - just a wrapper around the Load() method
+    // - just a wrapper around the Load() method, reading a file from disk
+    // and setting the GetFileName method result value
     function LoadFromFile(const Source: TFileName;
       Content: TCryptCertContent = cccCertOnly;
       const PrivatePassword: SpiUtf8 = ''): boolean;
+    /// the last Source file name of LoadFromFile()
+    function GetFileName: TFileName;
     /// serialize the Certificate as reusable content
-    // - after Generate, will contain the public and private key, so
-    // cccCertWithPrivateKey and cccPrivateKeyOnly content could be used, with
-    // an optional PrivatePassword
-    // - will use binary by default, but you can export to another formats,
-    // depending on the underlying TCryptCertAlgo
+    // - use Content to specify the extent of the returned value; e.g. after
+    // Generate, this ICryptCert instance will contain both the public and
+    // private key, so cccCertWithPrivateKey and cccPrivateKeyOnly content could
+    // be used, with an optional PrivatePassword, to save the private key
+    // - will use binary by default, but you can set e.g. ccfPem if needed
+    // - warning: don't forget FillZero() once done with any sensitive result
     function Save(Content: TCryptCertContent = cccCertOnly;
       const PrivatePassword: SpiUtf8 = '';
       Format: TCryptCertFormat = ccfBinary): RawByteString;
     /// serialize the Certificate as reusable file content
-    // - just a wrapper around the Save() method
-    procedure SaveToFile(const Dest: TFileName;
+    // - just a wrapper to store the Save() method result as a file
+    // - if Dest is '' then GetFileName value from last LoadFromFile() is used
+    procedure SaveToFile(const Dest: TFileName = '';
       Content: TCryptCertContent = cccCertOnly;
       const PrivatePassword: SpiUtf8 = '';
       Format: TCryptCertFormat = ccfBinary);
     /// compute a digital signature of some digital content
     // - memory buffer will be hashed then signed using the private secret key
     // of this certificate instance
-    // - you could later on verify this text signature according to the public
-    // key of this certificate, using ICryptCert.Verify() or ICryptStore.Verify()
+    // - you could later verify this text signature according to the public key
+    // of this certificate, using ICryptCert.Verify() or ICryptStore.Verify()
     // - this certificate should have the cuDigitalSignature usage
     // - returns '' on failure, e.g. if this Certificate has no private key
-    // - returns the binary signature of the Data buffer
+    // - returns the binary signature of the Data buffer on success
     function Sign(Data: pointer; Len: integer): RawByteString; overload;
     /// compute a digital signature of some digital content
     // - will use the private key of this certificate
@@ -1809,7 +1926,7 @@ type
     // - this certificate should have the cuDigitalSignature usage
     // - see ICryptStore.Verify() for a complete CA chain validation
     // - depending on the engine, some errors can be ignored, e.g.
-    // cvWrongUsage and cvDeprecatedAuthority with OpenSSL
+    // cvWrongUsage and cvDeprecatedAuthority with X.509 certificates
     // - certificate expiration date can be specified instead of current time
     function Verify(Sign, Data: pointer; SignLen, DataLen: integer;
       IgnoreError: TCryptCertValidities = [];
@@ -1842,19 +1959,19 @@ type
       IgnoreError: TCryptCertValidities = [];
       TimeUtc: TDateTime = 0): TCryptCertValidity;
     /// encrypt a message using the public key of this certificate
-    // - only RSA and ES256 support this method by now
-    // - 'x509-rs*' and 'x509-ps*' RSA algorithms use OpenSSL Envelope key
-    // transport then our EVP_PKEY.RsaSeal encoding, then both 'x509-es256' and
-    // 'syn-es256' use our EciesSeal() ES256 encoding
+    // - only RSA and ES256 algorithms do support this method by now
+    // - 'x509-rs*' and 'x509-ps*' RSA algorithms use an OpenSSL Envelope key
+    // transport then our EVP_PKEY.RsaSeal encoding (or TRsa.Seal)
+    // - both 'x509-es256' and 'syn-es256' use our EciesSeal() ES256 encoding
     // - returns '' if this feature is not supported
     // - certificate should have cuDataEncipherment or cuEncipherOnly usage
     function Encrypt(const Message: RawByteString;
       const Cipher: RawUtf8 = 'aes-128-ctr'): RawByteString;
     /// decrypt a message using the private key of this certificate
     // - not all algorithms support key transport, only RSA and ES256 by now
-    // - 'x509-rs*' and 'x509-ps*' RSA algorithms use OpenSSL Envelope key
-    // transport then our EVP_PKEY.RsaOpen decoding, then both 'x509-es256' and
-    // 'syn-es256' use our EciesOpen() ES256 decoding
+    // - 'x509-rs*' and 'x509-ps*' RSA algorithms use an OpenSSL Envelope key
+    // transport then our EVP_PKEY.RsaOpen decoding (or TRsa.Open)
+    // - both 'x509-es256' and 'syn-es256' use our EciesOpen() ES256 decoding
     // - returns '' if this feature is not supported, or Message is incorrect
     // - certificate should have cuDataEncipherment or cuDecipherOnly usage
     function Decrypt(const Message: RawByteString;
@@ -1866,15 +1983,22 @@ type
     // - both current and pub certificates should have cuKeyAgreement usage
     // - the caller should always apply a cryptographic hash over the result
     function SharedSecret(const pub: ICryptCert): RawByteString;
-    /// returns true if the Certificate contains a private key secret
+    /// returns true if this ICryptCert instance holds a private key secret
     function HasPrivateSecret: boolean;
     /// retrieve the public key as raw binary
+    // - actual format depend on the TCryptCert class and algorithm involved,
+    // but is usually using a DER format
     function GetPublicKey: RawByteString;
     /// retrieve the private key as raw binary, or '' if none
+    // - actual format depend on the TCryptCert class and algorithm involved,
+    // but is usually using a DER format
+    // - warning: don't forget FillZero() once done with this sensitive result
     function GetPrivateKey: RawByteString;
     /// include the raw private key as saved by GetPrivateKey
     // - the private key should match with the public key of the Certificate
-    // - any previously stored private key will first be erased
+    // - any previously stored private key will first be erased, therefore
+    // SetPrivateKey('') will wipe any private key currently stored in memory
+    // - warning: don't forget FillZero() once done with this sensitive input
     function SetPrivateKey(const saved: RawByteString): boolean;
     /// compare two Certificates, which should share the same algorithm
     // - will compare the internal properties and the public key, not the
@@ -1884,22 +2008,35 @@ type
     /// the high-level asymmetric algorithm used for this certificate
     function AsymAlgo: TCryptAsymAlgo;
     /// the high-level asymmetric algorithm class used for this certificate
+    // - i.e. the factory associated with this ICryptCert instance
     function CertAlgo: TCryptCertAlgo;
-    /// access to the low-level implementation class
+    /// access to the low-level implementation class instance
+    // - used internally to quickly retrieve the TCryptCert from an ICryptCert
     function Instance: TCryptCert;
     /// access to the low-level implementation handle of the certificate
-    // - e.g. PX509 for OpenSsl, or TEccCertificate for mormot.crypt.ecc
-    // - equals nil if there is no associated certificate, e.g. after New
+    // - e.g. a PX509 for OpenSsl, aTEccCertificate class for mormot.crypt.ecc,
+    // or a TX509 class for mormot.crypt.x509
+    // - equals nil if there is no associated certificate yet, e.g. after New
     function Handle: pointer;
     /// access to the low-level implementation handle of the stored private key
-    // - e.g. PEVP_PKEY for OpenSsl, or PEccPrivateKey for mormot.crypt.ecc
+    // - e.g. a PEVP_PKEY for OpenSsl, a PEccPrivateKey for mormot.crypt.ecc,
+    // or a TXPrivateKey class for mormot.crypt.x509
     // - equals nil if there is no associated private key
     function PrivateKeyHandle: pointer;
+    /// return the public BigInt values associated to the stored private key
+    // - as BigInt binaries, ready e.g. for JWS / JSON Web Key responses
+    // - for ECC, returns the x,y coordinates
+    // - for RSA, x is set to the Exponent (e), and y to the Modulus (n)
+    // - return false if there is no compliant key information in the provider
+    function GetPrivateKeyParams(out x, y: RawByteString): boolean;
   end;
 
   /// abstract parent class to implement ICryptCert, as returned by Cert() factory
+  // - you should never use this class, but the ICryptCert instances
+  // - type is only defined here to be inherited with the actual provider units
   TCryptCert = class(TCryptInstance, ICryptCert)
   protected
+    fLastLoadFromFileName: TFileName;
     procedure RaiseError(const Msg: shortstring); overload;
     procedure RaiseError(const Fmt: RawUtf8; const Args: array of const); overload;
     procedure RaiseErrorGenerate(const api: ShortString);
@@ -1908,10 +2045,14 @@ type
     function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8;
       const Authority: ICryptCert; ExpireDays, ValidDays: integer;
       Fields: PCryptCertFields): ICryptCert; virtual; abstract;
+    function GenerateFromCsr(const Csr: RawByteString;
+      const Authority: ICryptCert; ExpireDays, ValidDays: integer): ICryptCert; virtual;
     function GetSerial: RawUtf8; virtual; abstract;
-    function GetSubject: RawUtf8; virtual; abstract;
+    function GetSubjectName: RawUtf8; virtual; abstract;
+    function GetSubject(const Rdn: RawUtf8): RawUtf8; virtual; abstract;
     function GetSubjects: TRawUtf8DynArray; virtual; abstract;
     function GetIssuerName: RawUtf8; virtual; abstract;
+    function GetIssuer(const Rdn: RawUtf8): RawUtf8; virtual; abstract;
     function GetSubjectKey: RawUtf8; virtual; abstract;
     function GetAuthorityKey: RawUtf8; virtual; abstract;
     function IsSelfSigned: boolean; virtual; abstract;
@@ -1927,7 +2068,8 @@ type
       const PrivatePassword: SpiUtf8): boolean; virtual; abstract;
     function LoadFromFile(const Source: TFileName; Content: TCryptCertContent;
       const PrivatePassword: SpiUtf8): boolean;
-    function Save(Content: TCryptCertContent;
+    function GetFileName: TFileName; virtual;
+     function Save(Content: TCryptCertContent;
       const PrivatePassword: SpiUtf8;
       Format: TCryptCertFormat): RawByteString; virtual;
     procedure SaveToFile(const Dest: TFileName; Content: TCryptCertContent;
@@ -1965,7 +2107,8 @@ type
     function CertAlgo: TCryptCertAlgo;
     function Instance: TCryptCert;
     function Handle: pointer; virtual; abstract;
-    function PrivateKeyHandle: pointer; virtual; abstract;
+    function PrivateKeyHandle: pointer; virtual;
+    function GetPrivateKeyParams(out x, y: RawByteString): boolean; virtual;
   end;
 
   /// meta-class of the abstract parent to implement ICryptCert interface
@@ -1977,6 +2120,7 @@ type
     fOsa: TCryptAsymAlgo; // should be set by the overwritten constructor
   public
     /// main factory to create a new Certificate instance with this algorithm
+    // - return a new void instance, ready to call e.g. ICryptCert.Load
     function New: ICryptCert; virtual; abstract;
     /// low-level factory directly from the raw implementation handle
     // - e.g. a PX509 for OpenSsl, or TEccCertificate for mormot.crypt.ecc
@@ -1994,18 +2138,32 @@ type
       const PrivatePassword: SpiUtf8 = ''): ICryptCert;
     /// factory to generate a new Certificate instance
     // - just a wrapper around New and ICryptCert.Generate()
-    // - Subjects is a mandatory field as with X509
+    // - Subjects is a mandatory field as with X.509
     function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8;
       const Authority: ICryptCert = nil; ExpireDays: integer = 365;
       ValidDays: integer = -1; Fields: PCryptCertFields = nil): ICryptCert;
     /// factory for a new Certificate Signing Request over a set of (DNS) names
-    // - will generate a new public/private key pair, then forge a request with
-    // the public key, self-signing the request using the new PrivateKeyPem
-    // - implemented only as PKCS#10 by the X509/OpenSSL engine by now, in
-    // a Let's Encrypt compatible way
-    function CreateSelfSignedCsr(const Subjects: TRawUtf8DynArray;
-      const PrivateKeyPassword: SpiUtf8;
-      out PrivateKeyPem: RawUtf8): RawByteString; virtual;
+    // - if PrivateKeyPem is void, will generate a new public/private key pair,
+    // then forge a request with this new public key
+    // - if PrivateKeyPem is supplied, will use it as public key
+    // - you can optionally specify the expected usages and information fields
+    // - returns both the private key and the self-signed CSR as PEM
+    // - by default, this class returns a self-signed certificate as CSR, but
+    // will be overriden by our X.509 engines (OpenSSL and mormot.crypt.x509) to
+    // return a proper PKCS#10 standard CSR, in a Let's Encrypt compatible way
+    function CreateSelfSignedCsr(const Subjects: RawUtf8;
+      const PrivateKeyPassword: SpiUtf8; var PrivateKeyPem: RawUtf8;
+      Usages: TCryptCertUsages = [];
+      Fields: PCryptCertFields = nil): RawUtf8; virtual;
+    /// factory to generate a new Certificate instance from a supplied CSR
+    // - will first unserialize and verify a self-self CSR PEM content, as
+    // generated by a former CreateSelfSignedCsr() call
+    // - retrieve the Subjects and Usages as previously set to the CSR, enabling
+    // only UsagesFilter items if set
+    // - this default implementation expects the CSR to be a self-signed certificate
+    function GenerateFromCsr(const Csr: RawByteString;
+      const Authority: ICryptCert = nil; ExpireDays: integer = 365;
+      ValidDays: integer = -1): ICryptCert; virtual;
     /// return the corresponding JWT algorithm name, computed from AsymAlgo
     // - e.g. 'ES256' for 'x509-es256' or 'syn-es256-v1'
     function JwtName: RawUtf8;
@@ -2016,13 +2174,13 @@ type
   end;
 
   /// abstract interface to a Certificates Store, as returned by Store() factory
-  // - may be X509 or not, OpenSSL implemented or not
+  // - may be X.509 or not, OpenSSL implemented or not
   ICryptStore = interface
     /// load a Certificates Store from a ICryptStore.Save memory buffer content
     function Load(const Saved: RawByteString): boolean;
     /// serialize the Certificates Store into a memory buffer
     // - may be our TEccCertificateChain proprietary binary, or a chain of
-    // X509 Certificates and CRLs in PEM text format
+    // X.509 Certificates and CRLs in PEM text format
     function Save: RawByteString;
     /// search for a certificate from its (hexadecimal) identifier
     function GetBySerial(const Serial: RawUtf8): ICryptCert;
@@ -2037,7 +2195,8 @@ type
     /// register a certificate in the internal certificate chain
     // - returns false e.g. if the certificate was not valid, or its serial was
     // already part of the internal list, or not of a compatible class
-    // - self-signed certificate could be included - but add them with caution
+    // - self-signed certificates could be included - but add them with caution
+    // because they will become root CA, or "trust anchors" in X.509 terminology
     // - the Certificate should have one of cuCA, cuDigitalSignature usages
     function Add(const cert: ICryptCert): boolean;
     /// load a register a certificate or certificate chain from a memory buffer
@@ -2068,7 +2227,7 @@ type
     // and validate the stored signature according to the public key of
     // the associated signing authority (which should be in this Store)
     // - warning: only supported by our 'syn-store' algorithm: OpenSSL Store
-    // has no way to lookup the X509 certificate which actually signed the buffer
+    // has no way to lookup the X.509 certificate which actually signed the buffer
     function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
       IgnoreError: TCryptCertValidities = []; TimeUtc: TDateTime = 0): TCryptCertValidity;
     /// how many certificates are currently stored
@@ -2173,20 +2332,43 @@ type
   end;
 
 const
+  /// our units generate RSA keypairs with 2048-bit by default
+  // - anything lower than 2048-bit is unsafe and should not be used
+  // - 2048-bit is today's norm, creating 112-bit of security
+  // - 3072-bit is supposed to be supported up to 2030, with 128-bit of security
+  // - 4096-bit has no security advantage, just slower process
+  // - 7680-bit is highly impractical (e.g. generation can be more than 30 secs)
+  // and offers only 192-bit of security, so other algorithms may be preferred
+  RSA_DEFAULT_GENERATION_BITS = 2048;
+
   /// the JWT algorithm names according to our known asymmetric algorithms
   // - as implemented e.g. by TJwtAbstractOsl
   CAA_JWT: array[TCryptAsymAlgo] of RawUtf8 = (
-    'ES256',  // caaES256
-    'ES384',  // caaES384
-    'ES512',  // caaES512
-    'ES256K', // caaES256K
-    'RS256',  // caaRS256
-    'RS384',  // caaRS384
-    'RS512',  // caaRS512
-    'PS256',  // caaPS256
-    'PS384',  // caaPS384
-    'PS512',  // caaPS512
-    'EdDSA'); // caaEdDSA
+    'ES256',      // caaES256
+    'ES384',      // caaES384
+    'ES512',      // caaES512
+    'ES256K',     // caaES256K
+    'RS256',      // caaRS256
+    'RS384',      // caaRS384
+    'RS512',      // caaRS512
+    'PS256',      // caaPS256
+    'PS384',      // caaPS384
+    'PS512',      // caaPS512
+    'EdDSA');     // caaEdDSA
+
+  /// the THashAlgo according to our known asymmetric algorithms
+  CAA_HF: array[TCryptAsymAlgo] of THashAlgo = (
+    hfSHA256,     // caaES256
+    hfSHA384,     // caaES384
+    hfSHA512,     // caaES512
+    hfSHA256,     // caaES256K
+    hfSHA256,     // caaRS256
+    hfSHA384,     // caaRS384
+    hfSHA512,     // caaRS512
+    hfSHA256,     // caaPS256
+    hfSHA384,     // caaPS384
+    hfSHA512,     // caaPS512
+    hfSHA512);    // caaEdDSA - SHA-512 is included in the algorithm
 
   /// the known asymmetric algorithms which implement ECC cryptography
   CAA_ECC = [caaES256, caaES384, caaES512, caaES256K, caaEdDSA];
@@ -2228,7 +2410,7 @@ const
     'tm'); //  cuTimestamp
 
   /// standard long identifier of Certificate usage
-  // - i.e. match X509.ExtendedKeyUsage/KeyUsage text
+  // - i.e. match OpenSSL PX509.ExtendedKeyUsage/KeyUsage text
   CU_FULLTEXT: array[TCryptCertUsage] of RawUtf8 = (
     'CA',                            // cuCA
     'Encipher Only',                 // cuEncipherOnly
@@ -2247,6 +2429,13 @@ const
     'OCSP Signing',                  // cuOcspSign
     'Time Stamping');                // cuTimestamp
 
+/// compute the number of security bits of a digital signature
+// - ECC security size is half of its X,Y coordinates storage size
+// - RSA security depends on the signature size, not the hash size
+// - e.g. 112 for RSA-2048, 128 for ECC-256
+function GetSignatureSecurityBits(a: TCryptAsymAlgo; len: integer): integer;
+
+function ToText(a: TCryptAsymAlgo): PShortString; overload;
 function ToText(r: TCryptCertRevocationReason): PShortString; overload;
 function ToText(u: TCryptCertUsage): PShortString; overload;
 function ToText(u: TCryptCertUsages; from_cu_text: boolean = false): ShortString; overload;
@@ -2267,8 +2456,9 @@ function Rnd(const name: RawUtf8 = 'rnd-default'): TCryptRandom;
 // to compute a digital signature from a given secret
 // - the shared TCryptHasher of this algorithm is returned: caller should NOT free it
 // - if not nil, you could call New or Full/FullFile methods
-// - this unit supports 'md5','sha1','sha256','sha384','sha512','sha3_256','sha3_512'
-// and 32-bit non-cryptographic 'crc32','crc32c','xxhash32','adler32','fnv32'
+// - this unit supports 'md5', 'sha1', 'sha256', 'sha384', 'sha512', 'sha3_256',
+// 'sha3_512' and 32-bit non-cryptographic 'crc32', 'crc32c', 'xxhash32',
+// 'adler32', 'fnv32', 'aesni32', 'md5-32' and 'sha1-32'
 function Hasher(const name: RawUtf8): TCryptHasher;
 
 /// main factory of the hashers instances as returned by Hasher()
@@ -2381,19 +2571,22 @@ var
   /// direct access to the mormot.crypt.openssl.pas 'x509-store' algorithm
   // - may be nil if this unit was not included or if OpenSSL is not available
   // - is currently nil because TCryptStoreOpenSsl is not stable yet
+  // - call RegisterOpenSsl once to initialize this lookup table
   CryptStoreAlgoOpenSsl: TCryptStoreAlgo;
 
   /// direct access to the mormot.crypt.openssl.pas TCryptAsym factories
   // - may be nil if this unit was not included or if OpenSSL is not available
+  // - call RegisterOpenSsl once to initialize this lookup table
   CryptAsymOpenSsl: array[TCryptAsymAlgo] of TCryptAsym;
 
   /// direct access to the mormot.crypt.openssl.pas ICryptCert factories
   // - may be nil if this unit was not included or if OpenSSL is not available
   // - to return a ICryptCert instance using OpenSSL RSA 2048 key, use e.g.
   // $ CryptCertAlgoOpenSsl[caaRS256].New
+  // - call RegisterOpenSsl once to initialize this lookup table
   CryptCertAlgoOpenSsl: array[TCryptAsymAlgo] of TCryptCertAlgo;
 
-  /// the prefered/default algorithm to be used wth OpenSsl X509 certificates
+  /// the prefered/default algorithm to be used wth OpenSsl X.509 certificates
   // - NISTP-256 seems the new default, even if RSA-2048 (i.e. caaRS256) may
   // still be used for compatiblity with legacy systems
   // - as returned e.g. by 'x509-store' for its DefaultCertAlgo method
@@ -2404,10 +2597,10 @@ var
 { ************************** Minimal PEM/DER Encoding/Decoding }
 
 type
-  /// a certificate (typically X509) encoded as PEM / text
+  /// a certificate (typically X.509) encoded as PEM / text
   TCertPem = type RawUtf8;
 
-  /// a certificate (typically X509) encoded as binary
+  /// a certificate (typically X.509) encoded as binary
   TCertDer = type RawByteString;
 
   /// the DerToPem() supported contents of a PEM text instance
@@ -2422,6 +2615,7 @@ type
     pemPublicKey,
     pemRsaPrivateKey,
     pemRsaPublicKey,
+    pemEcPublicKey,
     pemEcPrivateKey,
     pemEncryptedPrivateKey,
     pemCertificateRequest,
@@ -2432,7 +2626,8 @@ type
     pemSynopseSignature,
     pemSynopseCertificate,
     pemSynopseUnencryptedPrivateKey,
-    pemSynopseEncryptedPrivateKey,
+    pemSynopseEccEncryptedPrivateKey,
+    pemSynopseRsaEncryptedPrivateKey,
     pemSynopsePrivateKeyAndCertificate);
   PPemKind = ^TPemKind;
 
@@ -2447,6 +2642,7 @@ const
     '-----BEGIN PUBLIC KEY-----'#13#10,
     '-----BEGIN RSA PRIVATE KEY-----'#13#10,
     '-----BEGIN RSA PUBLIC KEY-----'#13#10,
+    '-----BEGIN EC PUBLIC KEY-----'#13#10,
     '-----BEGIN EC PRIVATE KEY-----'#13#10,
     '-----BEGIN ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----BEGIN CERTIFICATE REQUEST-----'#13#10,
@@ -2458,6 +2654,7 @@ const
     '-----BEGIN SYNECC CERTIFICATE-----'#13#10,
     '-----BEGIN SYNECC PRIVATE KEY-----'#13#10,
     '-----BEGIN SYNECC ENCRYPTED PRIVATE KEY-----'#13#10,
+    '-----BEGIN SYNRSA ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----BEGIN SYNECC BOUNDED CERTIFICATE-----'#13#10);
 
   /// the supported ending markers of a PEM text instance
@@ -2469,6 +2666,7 @@ const
     '-----END PUBLIC KEY-----'#13#10,
     '-----END RSA PRIVATE KEY-----'#13#10,
     '-----END RSA PUBLIC KEY-----'#13#10,
+    '-----END EC PUBLIC KEY-----'#13#10,
     '-----END EC PRIVATE KEY-----'#13#10,
     '-----END ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----END CERTIFICATE REQUEST-----'#13#10,
@@ -2480,6 +2678,7 @@ const
     '-----END SYNECC CERTIFICATE-----'#13#10,
     '-----END SYNECC PRIVATE KEY-----'#13#10,
     '-----END SYNECC ENCRYPTED PRIVATE KEY-----'#13#10,
+    '-----END SYNRSA ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----END SYNECC BOUNDED CERTIFICATE-----'#13#10);
 
   /// our proprietary SYNECC TPemKind formats
@@ -2487,7 +2686,7 @@ const
                  pemSynopseCertificate,
                  pemSynopseUnencryptedPrivateKey,
                  pemSynopsePrivateKeyAndCertificate,
-                 pemSynopseEncryptedPrivateKey];
+                 pemSynopseEccEncryptedPrivateKey];
 
 /// convert a binary DER content into a single-instance PEM text
 function DerToPem(der: pointer; len: PtrInt; kind: TPemKind): TCertPem; overload;
@@ -2497,7 +2696,7 @@ function DerToPem(const der: TCertDer; kind: TPemKind): TCertPem; overload;
 
 /// convert a single-instance PEM text file into a binary DER
 // - if the supplied buffer doesn't start with '-----BEGIN .... -----'
-// trailer, will expect the input to be plain DER binary and return it
+// trailer, will expect the input to be plain DER binary and directly return it
 function PemToDer(const pem: TCertPem; kind: PPemKind = nil): TCertDer;
 
 /// parse a multi-PEM text input and return the next PEM content
@@ -2521,31 +2720,275 @@ function IsPem(const pem: RawUtf8): boolean;
 // - won't decode the Base64 encoded binary, so may return some false negative
 function IsPemEncrypted(const pem: TCertPem): boolean;
 
-/// low-level binary-to-DER encoder
+/// extract pemCertificate and a private key concatenated in a PEM text file
+function PemToCertAndPrivKey(const MultiPartPem: RawUtf8;
+  out Cert, PrivKey: RawByteString): boolean;
+
+/// low-level binary-to-DER encoder of small buf with buflen < 127
 function DerAppend(P: PAnsiChar; buf: PByteArray; buflen: PtrUInt): PAnsiChar;
 
 /// low-level DER sequence to binary decoding
 // - only support a single DER_INTEGER sequence format as generated by DerAppend()
 function DerParse(P: PAnsiChar; buf: PByteArray; buflen: PtrInt): PAnsiChar;
 
+/// cipher any private key buffer into safe binary
+// - encryption uses safe PBKDF2 HMAC-SHA256 AES-CTR-128 and AF-32 algorithms
+// - as used by pemSynopseEncryptedPrivateKey format and EccPrivateKeyEncrypt()
+function PrivateKeyEncrypt(const Input, Salt: RawByteString;
+  const PrivatePassword: SpiUtf8; AfSplitRounds: integer = 31;
+  Pbkdf2Rounds: integer = 1000): RawByteString;
+
+/// uncipher some binary into a raw private key buffer
+// - encryption uses safe PBKDF2 HMAC-SHA256 AES-CTR-128 and AF-32 algorithms
+// - as used by pemSynopseEncryptedPrivateKey format and EccPrivateKeyDecrypt()
+function PrivateKeyDecrypt(const Input, Salt: RawByteString;
+  const PrivatePassword: SpiUtf8; AfSplitRounds: integer = 31;
+  Pbkdf2Rounds: integer = 1000): RawByteString;
+
+
 type
   /// output of the X509Parse() function
+  // - contains X.509 certificate main properties and binary public key
   TX509Parsed = record
-    Serial, SubjectDN, IssuerDN, SubjectID, IssuerID, SigAlg, PubAlg, PeerInfo: RawUtf8;
+    Serial, SubjectDN, IssuerDN, SubjectID, IssuerID,
+    SigAlg, PubAlg, SubjectAltNames, PeerInfo: RawUtf8;
     Usage: TCryptCertUsages;
     NotBefore, NotAfter: TDateTime;
     PubKey: RawByteString;
   end;
 
+/// return the number of bits of a X.509 certificate SubjectPublicKey ASN1_BITSTR
+// - will recognize RSA ASN1_SEQ and ECC uncompressed keys as stored in X.509
+// - returns typically 2048 for RSA, or 256 for ecc256r1
+// - can format the key as its hexa members for ParsedToText(TX509Parsed)
+function X509PubKeyBits(const PubKey: RawByteString;
+  PubText: PRawUtf8 = nil): integer;
+
 /// return some multi-line text of the main TX509Parsed fields
 // - in a layout similar to X509_print() OpenSSL formatting
-function ToText(const c: TX509Parsed): RawUtf8; overload;
+// - is used by its own TX509Parsed.PeerInfo field
+function ParsedToText(const c: TX509Parsed): RawUtf8;
 
-/// high-level function to decode X509 certificate main properties
-// - properly implemented by mormot.crypt.openssl.pas, but this unit will
-// register our mormot.lib.sspi parser as failover on Windows
+/// high-level function to decode X.509 Certificate main properties
+// - properly implemented by mormot.crypt.openssl or mormot.crypt.x509, but
+// this unit will register our mormot.lib.sspi parser as failover on Windows
 var
   X509Parse: function(const Cert: RawByteString; out Info: TX509Parsed): boolean;
+
+{$ifdef OSWINDOWS}
+/// the raw mormot.lib.sspi parser - published for testing
+function WinX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
+{$endif OSWINDOWS}
+
+
+{ **************** Basic ASN.1 Support }
+
+type
+  /// we defined our own type to hold an ASN object binary
+  TAsnObject = RawByteString;
+
+{ $define ASNDEBUG}
+// enable low-level debugging of the LDAP transmitted frames on the console
+
+const
+  /// constructed class type bitmask
+  ASN1_CL_CTR   = $20;
+  /// application-specific class type bitmask
+  ASN1_CL_APP   = $40;
+  /// context-specific class type bitmask
+  ASN1_CL_CTX   = $80;
+  /// private class type bitmask
+  ASN1_CL_PRI   = $c0;
+
+  // base ASN.1 types
+  ASN1_BOOL        = $01;
+  ASN1_INT         = $02;
+  ASN1_BITSTR      = $03;
+  ASN1_OCTSTR      = $04;
+  ASN1_NULL        = $05;
+  ASN1_OBJID       = $06;
+  ASN1_ENUM        = $0a;
+  ASN1_UTF8STRING  = $0c;
+  ASN1_PRINTSTRING = $13;
+  ASN1_IA5STRING   = $16;
+  ASN1_UTCTIME     = $17;
+  ASN1_GENTIME     = $18;
+  // base ASN1_CL_CTR types
+  ASN1_SEQ         = $30;
+  ASN1_SETOF       = $31;
+  // common ASN1_CL_APP types
+  ASN1_IPADDR      = $40;
+  ASN1_COUNTER     = $41;
+  ASN1_GAUGE       = $42;
+  ASN1_TIMETICKS   = $43;
+  ASN1_OPAQUE      = $44;
+  ASN1_COUNTER64   = $46;
+
+  ASN1_TEXT = [
+    ASN1_UTF8STRING,
+    ASN1_PRINTSTRING,
+    ASN1_IA5STRING];
+
+  ASN1_NUMBERS = [
+    ASN1_INT,
+    ASN1_ENUM,
+    ASN1_BOOL,
+    ASN1_COUNTER,
+    ASN1_GAUGE,
+    ASN1_TIMETICKS,
+    ASN1_COUNTER64];
+
+  //  context-specific class, tag #n
+  ASN1_CTX0  = $80;
+  ASN1_CTX1  = $81;
+  ASN1_CTX2  = $82;
+  ASN1_CTX3  = $83;
+  ASN1_CTX4  = $84;
+  ASN1_CTX5  = $85;
+  ASN1_CTX6  = $86;
+  ASN1_CTX7  = $87;
+  ASN1_CTX8  = $88;
+  ASN1_CTX9  = $89;
+
+  //  context-specific class, constructed, tag #n
+  ASN1_CTC0  = $a0;
+  ASN1_CTC1  = $a1;
+  ASN1_CTC2  = $a2;
+  ASN1_CTC3  = $a3;
+  ASN1_CTC4  = $a4;
+  ASN1_CTC5  = $a5;
+  ASN1_CTC6  = $a6;
+  ASN1_CTC7  = $a7;
+  ASN1_CTC8  = $a8;
+  ASN1_CTC9  = $a9;
+
+  /// encode a boolean value into ASN.1 binary
+  ASN1_BOOLEAN_VALUE: array[boolean] of TAsnObject = (
+    RawByteString(#$01#$01#$00),
+    RawByteString(#$01#$01#$ff));
+
+  /// encode a boolean value into nothing or true as ASN.1 binary
+  // - as used e.g. in X.509 v3 extensions optional fields
+  ASN1_BOOLEAN_NONE: array[boolean] of TAsnObject = (
+    '',
+    RawByteString(#$01#$01#$ff));
+
+  /// encode a 0 value into ASN.1 binary
+  ASN1_ZERO_VALUE: TAsnObject = RawByteString(#$00);
+
+  /// encode a null value into ASN.1 binary
+  ASN1_NULL_VALUE: TAsnObject = RawByteString(#$05#$00);
+
+/// encode a 64-bit signed integer value into ASN.1 binary
+function AsnEncInt(Value: Int64): TAsnObject;
+
+/// encode a 64-bit unsigned OID integer value into ASN.1 binary
+// - append the encoded value into the Result shortstring existing content
+procedure AsnEncOidItem(Value: PtrUInt; var Result: shortstring);
+
+/// create an ASN.1 ObjectID from '1.x.x.x.x' text
+function AsnEncOid(OidText: PUtf8Char): TAsnObject;
+
+/// encode the len of a ASN.1 binary item
+function AsnEncLen(Len: cardinal; dest: PByte): PtrInt;
+
+/// create an ASN.1 binary from the aggregation of several binaries
+function Asn(AsnType: integer;
+  const Content: array of TAsnObject): TAsnObject; overload;
+
+/// create an ASN.1 binary from some raw data - as OCTSTR by default
+function Asn(const Data: RawByteString; AsnType: integer = ASN1_OCTSTR): TAsnObject;
+  overload; {$ifdef HASINLINE} inline; {$endif}
+
+/// create an ASN.1 binary from several raw data - as OCTSTR by default
+function AsnArr(const Data: array of RawUtf8;
+  AsnType: integer = ASN1_OCTSTR): TAsnObject;
+
+/// create an ASN.1 binary from 64-bit signed integer, calling AsnEncInt()
+function Asn(Value: Int64; AsnType: integer = ASN1_INT): TAsnObject; overload;
+
+/// create an ASN.1 binary from an unsigned Big Integer raw buffer
+// - the raw buffer is likely to come from mormot.crypt.rsa TBigInt.Save result
+// - will trim unneeded leading zeros, and ensure will be stored as unsigned
+// even if starts with a $80 byte
+function AsnBigInt(const BigInt: RawByteString;
+  AsnType: integer = ASN1_INT): TAsnObject;
+
+/// create an ASN.1 SEQuence from some raw data
+function AsnSeq(const Data: TAsnObject): TAsnObject; overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// create an ASN.1 SEQuence from the aggregation of several binaries
+function AsnSeq(const Content: array of TAsnObject): TAsnObject; overload;
+  {$ifdef FPC} inline; {$endif}
+
+/// create an ASN.1 ObjectID from 'x.x.x.x.x' text
+function AsnOid(OidText: PUtf8Char): TAsnObject;
+
+/// create an ASN.1 PrintableString or UTF8String from some UTF-8 text
+// - will prefer ASN1_PRINTSTRING if the charset of the supplied text do suffice
+function AsnText(const Text: RawUtf8): TAsnObject;
+
+/// create an ASN.1 block from some date/time value
+// - according to X.509 profile, use UTCTime up to 2049 then GeneralizedTime
+// - dt = 0 will be converted as '99991231235959Z' GeneralizedTime - could be
+// used e.g. with X.509 NotAfter field when no good expiration date can be
+// assigned (see RFC 5280 #4.1.2.5)
+function AsnTime(dt: TDateTime): TAsnObject;
+
+/// raw append some binary to an ASN.1 object buffer
+procedure AsnAdd(var Data: TAsnObject; const Buffer: TAsnObject);
+  overload; {$ifdef HASINLINE} inline; {$endif}
+
+/// encode and append some raw data as ASN.1
+procedure AsnAdd(var Data: TAsnObject; const Buffer: TAsnObject;
+  AsnType: integer); overload;
+
+/// decode the len of a ASN.1 binary item
+function AsnDecLen(var Start: integer; const Buffer: TAsnObject): cardinal;
+
+/// decode the header of a ASN.1 binary item
+function AsnDecHeader(var Pos: integer; const Buffer: TAsnObject;
+  out AsnType, AsnSize: integer): boolean;
+
+/// decode an ASN1_INT ASN1_ENUM ASN1_BOOL value
+function AsnDecInt(var Start: integer; const Buffer: TAsnObject;
+  AsnSize: integer): Int64;
+
+/// decode an OID ASN.1 value into human-readable text
+function AsnDecOid(Pos, EndPos: integer; const Buffer: TAsnObject): RawUtf8;
+
+/// decode an OID ASN.1 IP Address buffer into human-readable text
+function AsnDecIp(p: PAnsiChar; len: integer): RawUtf8;
+
+/// parse the next ASN.1 value as text
+// - returns the ASN.1 value type, and optionally the ASN.1 value blob itself
+function AsnNext(var Pos: integer; const Buffer: TAsnObject;
+  Value: PRawByteString = nil; CtrEndPos: PInteger = nil): integer;
+
+/// parse the next ASN1_INT ASN1_ENUM ASN1_BOOL value as integer
+function AsnNextInteger(var Pos: integer; const Buffer: TAsnObject;
+  out ValueType: integer): Int64;
+
+/// parse the next ASN.1 value as raw buffer
+// - returns the ASN.1 value type, and the ASN.1 raw value blob itself
+function AsnNextRaw(var Pos: integer; const Buffer: TAsnObject;
+  out Value: RawByteString; IncludeHeader: boolean = false): integer;
+
+/// parse the next ASN1_INT value as raw Big Integer binary
+function AsnNextBigInt(var Pos: integer; const Buffer: TAsnObject;
+  out Value: RawByteString): boolean;
+
+/// parse the next ASN1_UTCTIME ASN1_GENTIME value as TDateTime
+function AsnNextTime(var Pos: integer; const Buffer: TAsnObject;
+  out Value: TDateTime): boolean;
+
+/// initialize a set of AsnNext() Pos[] with its 1 default position
+procedure AsnNextInit(var Pos: TIntegerDynArray; Count: PtrInt);
+
+/// human-readable display of a ASN.1 value binary
+// - used e.g. by the ASNDEBUG conditional
+function AsnDump(const Value: TAsnObject): RawUtf8;
 
 
 { ************** Windows Executable Digital Signature Stuffing }
@@ -2558,7 +3001,8 @@ var
   /// low-level function used by StuffExeCertificate()
   // - properly implemented by mormot.crypt.openssl.pas, but this unit
   // has a stand-alone version using a pre-generated fixed certificate
-  CreateDummyCertificate: function(const Stuff: RawUtf8; const CertName: RawUtf8;
+  // - warning: the Marker should have no 0 byte within
+  CreateDummyCertificate: function(const Stuff, CertName: RawUtf8;
     Marker: cardinal): RawByteString;
 
 /// create a NewFile executable from adding some text to MainFile digital signature
@@ -2663,17 +3107,6 @@ begin
   FillZero(dig.b);
 end;
 
-const
-  HASH_SIZE: array[THashAlgo] of integer = (
-    SizeOf(TMd5Digest),    // hfMD5
-    SizeOf(TSHA1Digest),   // hfSHA1
-    SizeOf(TSHA256Digest), // hfSHA256
-    SizeOf(TSHA384Digest), // hfSHA384
-    SizeOf(TSHA512Digest), // hfSHA512
-    SizeOf(THash256),      // hfSHA512_256
-    SizeOf(THash256),      // hfSHA3_256
-    SizeOf(THash512));     // hfSHA3_512
-
 function TSynHasher.HashSize: integer;
 begin
   result := HASH_SIZE[fAlgo];
@@ -2704,9 +3137,12 @@ end;
 
 function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUtf8;
 begin
-  Init(aAlgo);
-  Update(aBuffer, aLen);
-  Final(result);
+  result := '';
+  if Init(aAlgo) then
+  begin
+    Update(aBuffer, aLen);
+    Final(result);
+  end;
 end;
 
 function TSynHasher.Full(aAlgo: THashAlgo; const aBuffer: RawByteString): RawUtf8;
@@ -2732,6 +3168,34 @@ begin
   result := Final(aDigest);
 end;
 
+function TSynHasher.Mgf1(aAlgo: THashAlgo;
+  aSeed: pointer; aSeedLen, aDestLen: PtrUInt): RawByteString;
+var
+  dig: PHash512Rec;
+  diglen, counter: cardinal;
+begin
+  result := '';
+  if (aSeed = nil) or
+     (aSeedLen <= 0) or
+     (aDestLen <= 0) then
+    exit;
+  diglen := HASH_SIZE[aAlgo];
+  SetLength(result, ((aDestLen div diglen) + 1) * diglen);
+  dig := pointer(result);
+  counter := 0;
+  repeat
+    Init(aAlgo);
+    Update(aSeed, aSeedLen);
+    counter := bswap32(counter);
+    Update(@counter, SizeOf(counter));
+    counter := bswap32(counter);
+    inc(PByte(dig), Final(dig^));
+    inc(counter);
+  until PtrUInt(dig) - PtrUInt(result) >= aDestLen;
+  FakeLength(result, aDestLen);
+end;
+
+
 
 { TStreamRedirectSynHasher }
 
@@ -2750,17 +3214,6 @@ function TStreamRedirectSynHasher.GetHash: RawUtf8;
 begin
   fHash.Final(result);
 end;
-
-const
-  HASH_EXT: array[THashAlgo] of RawUtf8 = (
-    '.md5',        // hfMD5
-    '.sha1',       // hfSHA1
-    '.sha256',     // hfSHA256
-    '.sha384',     // hfSHA384
-    '.sha512',     // hfSHA512
-    '.sha512-256', // hfSHA512_256
-    '.sha3-256',   // hfSHA3_256
-    '.sha3-512');  // hfSHA3_512
 
 class function TStreamRedirectSynHasher.GetHashFileExt: RawUtf8;
 begin
@@ -2824,6 +3277,23 @@ begin
   result := hfMD5;
 end;
 
+function md5hash32(crc: cardinal; buffer: pointer; len: cardinal): cardinal;
+var
+  md5: TMd5;
+  dig: THash128Rec;
+begin
+  md5.Full(buffer, len, dig.b);
+  result := dig.c0 xor dig.c1 xor dig.c2 xor dig.c3;
+end;
+
+function sha1hash32(crc: cardinal; buffer: pointer; len: cardinal): cardinal;
+var
+  sha: TSha1;
+  dig: THash256Rec;
+begin
+  sha.Full(buffer, len, dig.sha1);
+  result := dig.c[0] xor dig.c[1] xor dig.c[2] xor dig.c[3] xor dig.c[4];
+end;
 
 function CryptCrc32(algo: TCrc32Algo): THasher;
 begin
@@ -2831,13 +3301,19 @@ begin
     caCrc32c:
       result := crc32c;
     caCrc32:
-      result := crc32;   // maybe from mormot.lib.z
+      result := crc32;   // from mormot.lib.z - nil if unit was not included
     caAdler32:
-      result := adler32; // maybe from mormot.lib.z
+      result := adler32; // also from mormot.lib.z
     caxxHash32:
       result := @xxHash32;
     caFnv32:
       result := @fnv32;
+    caDefault:
+      result := DefaultHasher; // may use AES-NI with process-specific seed
+    caMd5:
+      result := @md5hash32;
+    caSha1:
+      result := @sha1hash32; // may use Intel SHA HW opcodes
   else
     result := nil;
   end;
@@ -2921,17 +3397,6 @@ begin
     result := h[0];
 end;
 
-const
-  ALGO_EXT: array[THashAlgo] of string[10] = (
-    'md5',          // hfMD5
-    'sha1',         // hfSHA1
-    'sha256',       // hfSHA256
-    'sha384',       // hfSHA384
-    'sha512',       // hfSHA512
-    'sha512_256',   // hfSHA512_256
-    'sha3_256',     // hfSHA3_256
-    'sha3_512');    // hfSHA3_512
-
 procedure HashFile(const aFileName: TFileName; aAlgos: THashAlgos);
 var
   h: TRawUtf8DynArray;
@@ -2947,7 +3412,7 @@ begin
   for a := low(a) to high(a) do
     if a in aAlgos then
     begin
-      fn := FormatString('%.%', [efn, ALGO_EXT[a]]);
+      fn := FormatString('%%', [efn, HASH_EXT[a]]);
       FileFromString(FormatUtf8('% *%', [h[n], efn]), fn);
       inc(n);
     end;
@@ -3253,6 +3718,18 @@ begin
   result := GetEnumName(TypeInfo(TCrc32Algo), ord(algo));
 end;
 
+function TextToHashAlgo(const Text: RawUtf8; out Algo: THashAlgo): boolean;
+var
+  i: integer;
+begin
+  i := GetEnumNameValueTrimmed(TypeInfo(THashAlgo), pointer(Text), length(Text));
+  result := false;
+  if i < 0 then
+    exit;
+  Algo := THashAlgo(i);
+  result := true;
+end;
+
 
 { **************** Client and Server HTTP Access Authentication }
 
@@ -3453,7 +3930,7 @@ begin
   if Algo = daUndefined then
     exit;
   // parse server token
-  dp.Init(Algo);
+  {%H-}dp.Init(Algo);
   p := pointer(FromServer);
   while p <> nil do
     if not dp.Parse(p) then // invalid algorithm
@@ -3535,7 +4012,7 @@ begin
      not Assigned(OnSearchUser) then
     exit;
   // parse the input parameters
-  dp.Init(Algo);
+  {%H-}dp.Init(Algo);
   while FromClient <> nil do
     if not dp.Parse(FromClient) then
       exit; // invalid input (e.g. unexpected algorithm)
@@ -3654,7 +4131,7 @@ var
   user, pass: RawUtf8;
 begin
   result := BasicServerAuth(FromClient, user, pass) and
-            OnBasicAuth(self, user, pass);
+            OnBasicAuth(self, user{%H-}, pass{%H-});
   if not result then
     exit;
   ClientUser := user;
@@ -3886,7 +4363,7 @@ end;
 
 procedure TDigestAuthServerFile.LoadFromFile;
 var
-  tmp: RawByteString;
+  tmp1, tmp2: RawByteString;
   p, l: PUtf8Char;
   u, r: RawUtf8;
   h: TDigestAuthHash;
@@ -3898,12 +4375,14 @@ begin
     fFileLastTime := FileAgeToUnixTimeUtc(fFileName);
     if fFileLastTime <> 0 then
     begin
-      tmp := StringFromFile(fFileName);
+      tmp1 := StringFromFile(fFileName);
       aes := GetAes;
       try
-        if aes <> nil then
-          tmp := aes.DecryptPkcs7(tmp, {iv=}true, {raise=}true);
-        p := pointer(tmp);
+        if aes = nil then
+          tmp2 := tmp1
+        else
+          tmp2 := aes.DecryptPkcs7(tmp1, {iv=}true, {raise=}true);
+        p := pointer(tmp2);
         while p <> nil do
         begin
           l := pointer(GetNextLine(p, p, {trim=}true));
@@ -3925,6 +4404,10 @@ begin
     end;
   finally
     fUsers.Safe.UnLock;
+    // anti-forensic
+    FillZero(tmp1);
+    FillZero(tmp2);
+    FillZero(h);
   end;
 end;
 
@@ -3933,7 +4416,7 @@ var
   i: PtrInt;
   w: TTextWriter;
   tmp: TTextWriterStackBuffer;
-  txt: RawUtf8;
+  middle, txt1, txt2: RawUtf8;
   u: PRawUtf8;
   d: ^TDigestAuthHash;
   aes: TAesAbstract;
@@ -3946,9 +4429,9 @@ begin
         exit;
       fModified := false;
       if aes = nil then
-        txt := ':' + fRealm + ':'
+        middle := ':' + fRealm + ':'
       else
-        txt := ':'; // no need to store the realm in the encrypted file
+        middle := ':'; // no need to store the realm in the encrypted file
       w := TTextWriter.CreateOwnedStream(tmp);
       try
         u := fUsers.Keys.Value^;
@@ -3956,26 +4439,31 @@ begin
         for i := 0 to fUsers.Count - 1 do
         begin
           w.AddNoJsonEscapeUtf8(u^);
-          w.AddNoJsonEscapeUtf8(txt);
-          w.AddBinToHex(d, fAlgoSize, true);
+          w.AddNoJsonEscapeUtf8(middle);
+          w.AddBinToHex(d, fAlgoSize, {lowerhex=}true);
           w.Add(#10);
           inc(u);
           inc(d);
         end;
-        w.SetText(txt);
+        w.SetText(txt1);
       finally
         w.Free;
       end;
     finally
       fUsers.Safe.ReadUnLock;
     end;
-    if aes <> nil then
-      txt := aes.EncryptPkcs7(txt, {iv=}true);
+    if aes = nil then
+      txt2 := txt1
+    else
+      txt2 := aes.EncryptPkcs7(txt1, {iv=}true);
+    FileFromString(txt2, fFileName);
+    fFileLastTime := FileAgeToUnixTimeUtc(fFileName);
   finally
     aes.Free;
+    // anti-forensic
+    FillZero(txt1);
+    FillZero(txt2);
   end;
-  FileFromString(txt, fFileName);
-  fFileLastTime := FileAgeToUnixTimeUtc(fFileName);
 end;
 
 function TDigestAuthServerFile.RefreshFile: boolean;
@@ -4840,7 +5328,7 @@ begin
     dec(size, SizeOf(cardinal));
     data^ := data^ xor key256bytes[ctr and $3f] xor ctr;
     inc(data);
-    ctr := ((ctr xor (ctr shr 15)) * 2246822519); // prime-number ctr diffusion
+    ctr := ((ctr xor (ctr shr 15)) * 2246822519); // xxHash32Mixup ctr diffusion
     ctr := ((ctr xor (ctr shr 13)) * 3266489917);
     ctr := ctr xor (ctr shr 16);
   end;
@@ -4874,7 +5362,7 @@ begin
       'Unsupported TBinaryCookieGenerator.Init(%)', [ToText(SignAlgo)^]);
   CrcAlgo := SignAlgo;
   Padding := 0;
-  // 256 bytes of cryptographic randomness
+  // 256 bytes of strong cryptographic randomness (public values use Lecuyer)
   MainAesPrng.FillRandom(@Crypt, SizeOf(Crypt));
 end;
 
@@ -5010,8 +5498,8 @@ constructor TCryptAlgo.Create(const name: RawUtf8);
 begin
   if name = '' then
     raise ECrypt.CreateUtf8('Unexpected %.Create('''')', [self]);
-  fName := name;
-  GlobalCryptAlgo.AddOrReplaceObject(name, self);
+  fName := LowerCase(name);
+  GlobalCryptAlgo.AddOrReplaceObject(fName, self);
 end;
 
 class function TCryptAlgo.InternalFind(
@@ -5368,7 +5856,10 @@ begin
   result := h.Final;
 end;
 
-
+function TCryptHasher.HashAlgo(out hasher: THashAlgo): boolean;
+begin
+  result := false; // unspecified
+end;
 
 type
   TCryptCrc32Internal = class(TCryptHasher)
@@ -5394,7 +5885,8 @@ type
 
 const
   /// CSV text of TCrc32Algo items
-  CrcAlgosText: PUtf8Char = 'crc32,crc32c,xxhash32,adler32,fnv32';
+  CrcAlgosText: PUtf8Char =
+    'crc32,crc32c,xxhash32,adler32,fnv32,default32,md5-32,sha1-32';
 
 constructor TCryptCrc32Internal.Create(const name: RawUtf8);
 begin
@@ -5441,6 +5933,7 @@ type
   public
     constructor Create(const name: RawUtf8); override;
     function New: ICryptHash; override;
+    function HashAlgo(out hasher: THashAlgo): boolean; override;
   end;
 
   TCryptHashInternal = class(TCryptHash)
@@ -5453,7 +5946,7 @@ type
   end;
 
 const
-  /// CSV text of THashAlgo items, as recognized by Hasher/Hash factories
+  // CSV text of THashAlgo items, as recognized by Hasher/Hash factories
   HashAlgosText: PUtf8Char = 'md5,sha1,sha256,sha384,sha512,sha3_256,sha3_512';
 
 constructor TCryptHasherInternal.Create(const name: RawUtf8);
@@ -5469,6 +5962,12 @@ begin
   h := TCryptHashInternal.Create(self);
   h.fAlgo.Init(fAlgo);
   result := h;
+end;
+
+function TCryptHasherInternal.HashAlgo(out hasher: THashAlgo): boolean;
+begin
+  hasher := fAlgo;
+  result := true;
 end;
 
 
@@ -5812,10 +6311,18 @@ procedure TCryptAsym.GeneratePem(out pub, priv: RawUtf8;
   const privpwd: RawUtf8);
 var
   derpub, derpriv: RawByteString;
+  pempub, pempriv: TPemKind;
 begin // inherited classes should override at least one of those Generate*()
   GenerateDer(derpub, derpriv, privpwd);
-  pub := DerToPem(pointer(derpub), length(derpub), pemPublicKey);
-  priv := DerToPem(pointer(derpriv), length(derpriv), pemPrivateKey);
+  pempub := TPemKind(fPemPublic);
+  if pempub = pemUnspecified then
+    pempub := pemPublicKey;
+  pempriv := TPemKind(fPemPrivate);
+  if pempriv = pemUnspecified then
+    pempriv := pemPrivateKey;
+  pub := DerToPem(pointer(derpub), length(derpub), pempub);
+  priv := DerToPem(pointer(derpriv), length(derpriv), pempriv);
+  FillZero(derpriv); // anti-forensic
 end;
 
 procedure TCryptAsym.GenerateDer(out pub, priv: RawByteString; const privpwd: RawUtf8);
@@ -5825,6 +6332,7 @@ begin // inherited classes should override at least one of those Generate*()
   GeneratePem(pempub, pempriv, privpwd);
   pub := PemToDer(pempub);
   priv := PemToDer(pempriv);
+  FillZero(pempriv); // anti-forensic
 end;
 
 function TCryptAsym.Sign(const msg, priv: RawByteString; out sig: RawByteString;
@@ -5875,14 +6383,32 @@ function TCryptCertAlgo.Generate(Usages: TCryptCertUsages;
   const Subjects: RawUtf8; const Authority: ICryptCert; ExpireDays: integer;
   ValidDays: integer; Fields: PCryptCertFields): ICryptCert;
 begin
-  result := New;
-  result.Generate(Usages, Subjects, Authority, ExpireDays, ValidDays, Fields);
+  result := New.
+    Generate(Usages, Subjects, Authority, ExpireDays, ValidDays, Fields);
 end;
 
-function TCryptCertAlgo.CreateSelfSignedCsr(const Subjects: TRawUtf8DynArray;
-  const PrivateKeyPassword: SpiUtf8; out PrivateKeyPem: RawUtf8): RawByteString;
+function TCryptCertAlgo.CreateSelfSignedCsr(const Subjects: RawUtf8;
+  const PrivateKeyPassword: SpiUtf8; var PrivateKeyPem: RawUtf8;
+  Usages: TCryptCertUsages; Fields: PCryptCertFields): RawUtf8;
+var
+  csr: ICryptCert;
 begin
-  result := ''; // unsupported by default
+  if PrivateKeyPem <> '' then
+    raise ECryptCert.CreateUtf8(
+      '%.CreateSelfSignedCsr % does not support a custom private key',
+      [self, AlgoName]);
+  // by default, just generate a self-signed certificate as CSR
+  csr := New;
+  csr.Generate(Usages, Subjects, nil, 365, -1, Fields);
+  PrivateKeyPem := csr.Save(cccPrivateKeyOnly, PrivateKeyPassword);
+  result := csr.Save(cccCertOnly, '', ccfPem);
+  // fields are ignored with our syn-ecc encoding anyway
+end;
+
+function TCryptCertAlgo.GenerateFromCsr(const Csr: RawByteString;
+  const Authority: ICryptCert; ExpireDays, ValidDays: integer): ICryptCert;
+begin
+  result := New.GenerateFromCsr(Csr, Authority, ExpireDays, ValidDays);
 end;
 
 function TCryptCertAlgo.JwtName: RawUtf8;
@@ -5912,6 +6438,24 @@ begin
   RaiseError('Generate: % error', [api]); // raise ECryptCert
 end;
 
+function TCryptCert.GenerateFromCsr(const Csr: RawByteString;
+  const Authority: ICryptCert; ExpireDays, ValidDays: integer): ICryptCert;
+var
+  x: ICryptCert;
+begin
+  // by default, CreateSelfSignedCsr generates a self-signed certificate as CSR
+  // - mormot.crypt.openssl and mormot.crypt.x509 will generate a proper CSR
+  result := nil;
+  if Csr = '' then
+    exit;
+  x := (fCryptAlgo as TCryptCertAlgo).Load(Csr);
+  if (x <> nil) and
+     (x.Verify(x) = cvValidSelfSigned) then
+    result := Generate(x.GetUsage, RawUtf8ArrayToCsv(x.GetSubjects),
+      Authority, ExpireDays, ValidDays, {Fields=}nil);
+    // note: Fields=nil since TCryptCertInternal does not support them
+end;
+
 function TCryptCert.IsValidDate(date: TDateTime): boolean;
 var
   na, nb: TDateTime;
@@ -5938,7 +6482,13 @@ end;
 function TCryptCert.LoadFromFile(const Source: TFileName;
   Content: TCryptCertContent; const PrivatePassword: SpiUtf8): boolean;
 begin
+  fLastLoadFromFileName := Source;
   result := Load(StringFromFile(Source), Content, PrivatePassword);
+end;
+
+function TCryptCert.GetFileName: TFileName;
+begin
+  result := fLastLoadFromFileName;
 end;
 
 function TCryptCert.Save(Content: TCryptCertContent;
@@ -5962,9 +6512,13 @@ procedure TCryptCert.SaveToFile(const Dest: TFileName; Content: TCryptCertConten
   const PrivatePassword: SpiUtf8; Format: TCryptCertFormat);
 var
   s: RawByteString;
+  fn: TFileName;
 begin
+  fn := Dest;
+  if fn = '' then
+    fn := fLastLoadFromFileName;
   s := Save(Content, PrivatePassword, Format);
-  FileFromString(s, Dest);
+  FileFromString(s, fn);
   FillZero(s); // may be a private key with no password :(
 end;
 
@@ -6098,6 +6652,16 @@ begin
   result := self;
 end;
 
+function TCryptCert.PrivateKeyHandle: pointer;
+begin
+  result := nil; // unsupported
+end;
+
+function TCryptCert.GetPrivateKeyParams(out x, y: RawByteString): boolean;
+begin
+  result := false; // unsupported
+end;
+
 
 { TCryptStore }
 
@@ -6196,7 +6760,7 @@ begin
     raise ECryptCert.Create('TCryptCertPerUsage.Add overflow'); // paranoid
   SetLength(List, n + 1);
   List[n] := cert;
-  inc(n); // CertPerUsage[u] stores index + 1
+  inc(n); // CertPerUsage[u] stores index + 1, i.e. in 1..255 range
   for u := low(u) to high(u) do
     if u in result then
     begin
@@ -6302,6 +6866,42 @@ begin
 end;
 
 
+function GetSignatureSecurityBits(a: TCryptAsymAlgo; len: integer): integer;
+begin
+  result := 0;
+  len := len shl 3; // into bits
+  if len > 128 then
+    case a of
+      // ECC security size is half of its X,Y coordinates storage size
+      caaES256,
+      caaES256K,
+      caaEdDSA:
+        result := 128;
+      caaES384:
+        result := 192;
+      caaES512:
+        result := 256;
+      // RSA security depends on the signature size, not the hash size
+      caaRS256 .. caaPS512:
+        if len < 1024 then
+          result := 30           // 512-bit
+        else if len < 2048 then
+          result := 80           // 1024-bit
+        else if len < 3072 then
+          result := 112          // 2048-bit
+        else if len < 7680 then
+          result := 128          // 3072-bit
+        else if len < 15360 then
+          result := 192          // 7680-bit: very unlikely since very slow
+        else
+          result := 256; // the lower RS256 hash has 256-bit of security anyway
+    end;
+end;
+
+function ToText(a: TCryptAsymAlgo): PShortString; overload;
+begin
+  result := GetEnumName(TypeInfo(TCryptAsymAlgo), ord(a));
+end;
 
 function ToText(r: TCryptCertRevocationReason): PShortString;
 begin
@@ -6580,6 +7180,8 @@ function ParsePem(var P: PUtf8Char; Kind: PPemKind; var Len: PtrInt;
 var
   start: PUtf8Char;
 begin
+  if kind <> nil then
+    kind^ := pemUnspecified;
   result := nil;
   start := GotoMarker(P);
   if start = nil then
@@ -6623,7 +7225,7 @@ begin
   P := pointer(pem);
   result := NextPemToDer(P, kind);
   if result = '' then
-    result := pem;
+    result := pem; // if content is not PEM, assume its a DER binary
 end;
 
 function NextPemToDer(var P: PUtf8Char; Kind: PPemKind): TCertDer;
@@ -6656,6 +7258,32 @@ begin
     FastSetString(RawUtf8(result), pem, len);
 end;
 
+function PemToCertAndPrivKey(const MultiPartPem: RawUtf8;
+  out Cert, PrivKey: RawByteString): boolean;
+var
+  P: PUtf8Char;
+  pem: RawUtf8;
+  k: TPemKind;
+begin
+  result := false;
+  P := pointer(MultiPartPem);
+  repeat
+    pem := NextPem(P, @k);
+    if pem = '' then
+      break;
+    if k = pemCertificate then
+      if Cert <> '' then
+        exit // should contain a single Certificate
+      else
+        Cert := PemToDer(pem)
+    else
+      PrivKey := pem; // private key may be with several TPemKind markers
+    FillZero(pem);
+  until false;
+  result := ({%H-}Cert <> '') and
+            ({%H-}PrivKey <> '');
+end;
+
 const
   DER_INTEGER  = #$02;
 
@@ -6665,13 +7293,13 @@ var
 begin
   pos := 0;
   while buf[pos] = 0 do
-    // ignore trailing zeros
+    // ignore leading zeros
     inc(pos);
   dec(buflen, pos);
-  prefix := buf[pos] shr 7; // two's complement?
+  prefix := buf[pos] shr 7; // detect if need to avoid two's complement storage
   P[0] := DER_INTEGER;
   P[1] := AnsiChar(buflen + prefix);
-  P[2] := #$00; // prepend 0 for negative number (if prefix=1)
+  P[2] := #$00; // prepend 0 to prevent stored as negative number (if prefix=1)
   inc(P, 2 + prefix);
   MoveFast(buf[pos], P^, buflen);
   result := P + buflen;
@@ -6700,6 +7328,35 @@ begin
   result := P + buflen;
 end;
 
+function PrivateKeyEncrypt(const Input, Salt: RawByteString;
+  const PrivatePassword: SpiUtf8; AfSplitRounds, Pbkdf2Rounds: integer): RawByteString;
+var
+  pks: RawByteString;
+begin
+  if PrivatePassword = '' then
+    result := Input
+  else
+  begin
+    pks := MainAesPrng.AFSplit(Input, AfSplitRounds);
+    result := AesPkcs7(pks, {encrypt=}true, PrivatePassword, Salt, Pbkdf2Rounds);
+    FillZero(pks);
+  end;
+end;
+
+function PrivateKeyDecrypt(const Input, Salt: RawByteString;
+  const PrivatePassword: SpiUtf8; AfSplitRounds, Pbkdf2Rounds: integer): RawByteString;
+var
+  pks: RawByteString;
+begin
+  if PrivatePassword = '' then
+    result := Input
+  else
+  begin
+    pks := AesPkcs7(Input, {encrypt=}false, PrivatePassword, Salt, Pbkdf2Rounds);
+    result := TAesPrng.AFUnSplit(pks, AfSplitRounds);
+    FillZero(pks);
+  end;
+end;
 
 
 { ************** Windows Executable Digital Signature Stuffing }
@@ -6901,13 +7558,6 @@ const
   _CERTNAME_ = 'Dummy Cert';
   _MARKER_ = $0102aba5;
 
-const
-  ASN1_INT = $02;
-  ASN1_OID = $06;
-  ASN1_SEQ = $30;
-  ASN1_SET = $31;
-  ASN1_ARR = $a0;
-
 procedure StuffExeCertificate(const MainFile, NewFile: TFileName;
   const Stuff: RawUtf8; UseInternalCertificate: boolean);
 var
@@ -6941,19 +7591,19 @@ begin
       fixme[0] := p;
       if Asn1Next(p, ASN1_SEQ, {moveafter=}false, 'SEQ') + 4 > length(sig) then
         raise EStuffExe.CreateUtf8('Truncated signature in %', [MainFile]);
-      Asn1Next(p, ASN1_OID, true,  'OID');
+      Asn1Next(p, ASN1_OBJID, true,  'OID');
       fixme[1] := p;
-      Asn1Next(p, ASN1_ARR, false, 'ARR');
+      Asn1Next(p, ASN1_CTC0, false, 'ARR');
       fixme[2] := p;
       Asn1Next(p, ASN1_SEQ, false, 'PKCS#7');
       Asn1Next(p, ASN1_INT, true,  'Version');
-      Asn1Next(p, ASN1_SET, true,  'Digest');
+      Asn1Next(p, ASN1_SETOF, true,  'Digest');
       Asn1Next(p, ASN1_SEQ, true,  'Context');
       fixme[3] := p;
-      certslen := Asn1Next(p, ASN1_ARR, false, 'Certs');
+      certslen := Asn1Next(p, ASN1_CTC0, false, 'Certs');
       inc(p, certslen);
       certsend := p - pointer(sig);
-      Asn1Next(p, ASN1_SET, true, 'SignerInfo');
+      Asn1Next(p, ASN1_SETOF, true, 'SignerInfo');
       if p - pointer(sig) > length(sig) then
         raise EStuffExe.CreateUtf8('Wrong cert ending in %', [MainFile]);
       // append the stuffed data within a dummy certificate
@@ -7012,10 +7662,56 @@ begin
     end;
 end;
 
-
-function ToText(const c: TX509Parsed): RawUtf8;
+function X509PubKeyBits(const PubKey: RawByteString;
+  PubText: PRawUtf8): integer;
 var
-  pub: RawUtf8;
+  pub: PByte;
+  pos, publen: integer;
+  modulo, exp: RawByteString;
+  name, bits: RawUtf8;
+begin
+  pub := pointer(PubKey);
+  publen := length(PubKey);
+  result := publen;
+  if result <> 0 then
+    case PubKey[1] of
+      #$04:
+        begin
+          // ECC uncompressed key
+          inc(pub);
+          dec(publen);
+          result := publen shr 1;
+          if PubText <> nil then
+            name := 'ECC ';
+        end;
+      #$30:
+        begin
+          // RSA sequence
+          pos := 1;
+          if (AsnNext(pos, PubKey) = ASN1_SEQ) and
+             AsnNextBigInt(pos, PubKey, modulo) and
+             AsnNextBigInt(pos, PubKey, exp) then
+          begin
+            result := length(modulo);
+            if PubText <> nil then
+            begin
+              name := 'RSA ';
+              bits := '      Modulus' + bits + ':'#13#10 +
+                BinToHumanHex(pointer(modulo), length(modulo), 16, 8) +
+                '      Exponent: 0x' + BinToHex(exp) + #13#10 ;
+            end;
+          end;
+        end;
+    end;
+  result := result shl 3; // from bytes to bits
+  if PubText = nil then
+    exit;
+  if bits = '' then
+    bits := BinToHumanHex(pub, publen, 16, 6);
+  FormatUtf8('    %Public Key: (% bit)'#13#10'%', [name, result, bits], PubText^);
+end;
+
+function ParsedToText(const c: TX509Parsed): RawUtf8;
 
   procedure KeyUsage(l, h: TCryptCertUsage; const ext: RawUtf8);
   var
@@ -7025,7 +7721,7 @@ var
     for cu := l to h do
       if cu in c.Usage then
         begin
-        if usage <> '' then
+        if {%H-}usage <> '' then
           usage := usage + ', ';
         usage := usage + CU_FULLTEXT[cu];
       end;
@@ -7034,10 +7730,21 @@ var
                            '      ' + usage + #13#10;
   end;
 
+var
+  bits: RawUtf8;
+  version: integer;
 begin
-  // roughly follow X509_print() OpenSSL formatting
-  ToHumanHex(pub, pointer(c.PubKey), length(c.PubKey));
+  // somewhat follows X509_print() OpenSSL formatting
+  if (c.Usage <> []) or
+     (c.SubjectID <> '') or
+     (c.IssuerID <> '') then
+    version := 2
+  else
+    version := 1;
+  X509PubKeyBits(c.PubKey, @bits);
   result := 'Certificate:'#13#10 +
+            '  Version: ' + SmallUInt32Utf8[version + 1] +
+                   ' (0x' + SmallUInt32Utf8[version] + ')'#13#10 +
             '  Serial Number:'#13#10 +
             '    ' + c.Serial + #13#10 +
             '  Signature Algorithm: ' + c.SigAlg + #13#10 +
@@ -7048,25 +7755,28 @@ begin
             '  Subject: ' + c.SubjectDN + #13#10 +
             '  Subject Public Key Info:'#13#10 +
             '    Public Key Algorithm: ' + c.PubAlg + #13#10 +
-            '    Public Key:'#13#10 +
-            '      ' + pub + #13#10;
-  if (c.Usage <> []) or
-     (c.SubjectID <> '') or
-     (c.IssuerID <> '') then
+            bits;
+  if version = 2 then // X.509 v3
   begin
-    // append the known extensions
+    // append the X.509 v3 known extensions
     result := result + '  X509v3 extensions:'#13#10;
+    KeyUsage(cuCrlSign, cuDigitalSignature, 'Key Usage: critical');
+    KeyUsage(cuTlsServer, cuTimestamp, 'Extended Key Usage:');
     if cuCA in c.Usage then
-      result := result + '    X509v3 Basic Constraints: critical'#13#10 +
-                         '      CA:TRUE'#13#10;
+      bits := 'TRUE'
+    else
+      bits := 'FALSE';
+    result := result + '    X509v3 Basic Constraints: critical'#13#10 +
+                       '      CA:' + bits + #13#10;
     if c.SubjectID <> '' then
       result := result + '    X509v3 Subject Key Identifier:'#13#10 +
                          '      ' + c.SubjectID + #13#10;
     if c.IssuerID <> '' then
       result := result + '    X509v3 Authority Key Identifier:'#13#10 +
                          '      ' + c.IssuerID + #13#10;
-    KeyUsage(cuCrlSign, cuDigitalSignature, 'Key Usage: critical');
-    KeyUsage(cuTlsServer, cuTimestamp, 'Extended Key Usage:');
+    if c.SubjectAltNames <> '' then
+      result := result + '    X509v3 Subject Alternative Name:'#13#10 +
+                         '      ' + c.SubjectAltNames + #13#10;
   end;
 end;
 
@@ -7077,6 +7787,7 @@ begin
   Info.Serial := c.Serial;
   Info.SubjectDN := c.SubjectName;
   Info.IssuerDN := c.IssuerName;
+  Info.SubjectAltNames := ''; // not yet part of TwinCertInfo
   Info.SubjectID := c.SubjectID;
   Info.IssuerID := c.IssuerID;
   Info.SigAlg := c.AlgorithmName;
@@ -7085,14 +7796,14 @@ begin
   Info.NotBefore := c.NotBefore;
   Info.NotAfter := c.NotAfter;
   Info.PubKey := c.PublicKeyContent;
-  Info.PeerInfo := ToText(Info); // should be the last
+  Info.PeerInfo := ParsedToText(Info); // should be the last
 end;
 
 function WinX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
 var
   c: TWinCertInfo;
 begin
-  result := WinCertDecode(Cert, c);
+  result := WinCertDecode(PemToDer(Cert), c);
   if result then
     WinInfoToParse(c, Info);
 end;
@@ -7106,6 +7817,681 @@ begin
 end;
 
 {$endif OSWINDOWS}
+
+
+
+{ **************** Basic ASN.1 Support }
+
+procedure AsnEncOidItem(Value: PtrUInt; var Result: shortstring);
+var
+  tmp: array[0..15] of byte; // written in reverse order (big endian)
+  vl, rl: PtrInt;
+  r: PByte;
+begin
+  r := @tmp[14];
+  r^ := byte(Value) and $7f;
+  Value := Value shr 7;
+  while Value <> 0 do
+  begin
+    dec(r);
+    r^ := byte(Value) or $80;
+    Value := Value shr 7;
+  end;
+  rl := ord(Result[0]);
+  vl := PAnsiChar(@tmp[15]) - pointer(r);
+  inc(Result[0], vl);
+  MoveFast(r^, Result[rl + 1], vl);
+end;
+
+function AsnEncOid(OidText: PUtf8Char): TAsnObject;
+var
+  x, y: PtrUInt;
+  tmp: ShortString; // no temporary memory allocation
+begin
+  tmp[0] := #0;
+  // first byte = two first numbers modulo 40
+  x := GetNextItemCardinal(OidText, '.') * 40;
+  y := 0;
+  while OidText <> nil do
+  begin
+    y := GetNextItemCardinal(OidText, '.');
+    if y = 0 then
+      break;
+    inc(x, y);
+    AsnEncOidItem(x, tmp);
+    x := 0;
+  end;
+  if (y = 0) or
+     (tmp[0] < #3) then
+    tmp[0] := #0; // clearly invalid input
+  FastSetRawByteString(result, @tmp[1], ord(tmp[0]));
+end;
+
+function AsnDecOidItem(var Pos: integer; const Buffer: TAsnObject): cardinal;
+var
+  x: byte;
+begin
+  result := 0;
+  repeat
+    result := result shl 7;
+    x := ord(Buffer[Pos]);
+    inc(Pos);
+    inc(result, x and $7F);
+  until (x and $80) = 0;
+end;
+
+function AsnEncLen(Len: cardinal; dest: PByte): PtrInt;
+var
+  n: PtrInt;
+  tmp: array[0..7] of byte;
+begin
+  if Len <= $7f then
+  begin
+    dest^ := Len;
+    result := 1;
+    exit;
+  end;
+  n := 0;
+  repeat
+    tmp[n] := byte(Len);
+    inc(n);
+    Len := Len shr 8;
+  until Len = 0;
+  result := n + 1;
+  dest^ := byte(n) or $80; // first byte is number of following bytes + $80
+  repeat
+    inc(dest);
+    dec(n);
+    dest^ := tmp[n]; // stored as big endian
+  until n = 0;
+end;
+
+function AsnDecLen(var Start: integer; const Buffer: TAsnObject): cardinal;
+var
+  n: byte;
+begin
+  result := ord(Buffer[Start]);
+  inc(Start);
+  if result <= $7f then
+    exit;
+  n := result and $7f; // first byte is number of following bytes + $80
+  result := 0;
+  repeat
+    result := (result shl 8) + cardinal(Buffer[Start]);
+    inc(Start);
+    dec(n);
+  until n = 0;
+end;
+
+function AsnEncInt(Value: Int64): TAsnObject;
+var
+  y: byte;
+  neg: boolean;
+  n: PtrInt;
+  p: PByte;
+  tmp: array[0..15] of byte;
+begin
+  result := '';
+  neg := Value < 0;
+  Value := Abs(Value);
+  if neg then
+    dec(Value);
+  n := 0;
+  repeat
+    y := byte(Value);
+    if neg then
+      y := not y;
+    tmp[n] := y;
+    inc(n);
+    Value := Value shr 8;
+  until Value = 0;
+  if neg then
+  begin
+    if y <= $7f then
+    begin
+      tmp[n] := $ff; // negative numbers start with ff or 8x
+      inc(n);
+    end;
+  end
+  else if y > $7F then
+  begin
+    tmp[n] := 0; // positive numbers start with a 0 or 0x..7x
+    inc(n);
+  end;
+  FastSetRawByteString(result, nil, n);
+  p := pointer(result);
+  repeat
+    dec(n);
+    p^ := tmp[n]; // stored as big endian
+    inc(p);
+  until n = 0;
+end;
+
+function AsnDecInt(var Start: integer; const Buffer: TAsnObject;
+  AsnSize: integer): Int64;
+var
+  x: byte;
+  neg: boolean;
+begin
+  result := 0;
+  if (AsnSize <= 0) or
+     (Start + AsnSize > length(Buffer)) then
+    exit;
+  neg := ord(Buffer[Start]) > $7f;
+  while AsnSize > 0 do
+  begin
+    x := ord(Buffer[Start]);
+    if neg then
+      x := not x;
+    result := (result shl 8) + x;
+    inc(Start);
+    dec(AsnSize);
+  end;
+  if neg then
+    result := -(result + 1);
+end;
+
+function Asn(AsnType: integer; const Content: array of TAsnObject): TAsnObject;
+var
+  tmp: array[0..7] of byte;
+  i, len, al: PtrInt;
+  p: PByte;
+begin
+  len := ord(AsnType = ASN1_BITSTR);
+  for i := 0 to high(Content) do
+    inc(len, length(Content[i]));
+  al := AsnEncLen(len, @tmp);
+  SetString(result, nil, 1 + al + len);
+  p := pointer(result);
+  p^ := AsnType;         // type
+  inc(p);
+  MoveFast(tmp, p^, al); // encoded length
+  inc(p, al);
+  if AsnType = ASN1_BITSTR then
+  begin
+    p^ := 0; // leading unused bit length
+    inc(p);
+  end;
+  for i := 0 to high(Content) do
+  begin
+    len := length(Content[i]);
+    MoveFast(pointer(Content[i])^, p^, len); // content
+    inc(p, len);
+  end;
+end;
+
+function Asn(const Data: RawByteString; AsnType: integer): TAsnObject;
+begin
+  result := Asn(AsnType, [Data]);
+end;
+
+function AsnArr(const Data: array of RawUtf8; AsnType: integer): TAsnObject;
+var
+  i: PtrInt;
+begin
+  result := '';
+  for i := 0 to high(Data) do
+    Append(result, Asn(AsnType, [Data[i]]));
+end;
+
+function Asn(Value: Int64; AsnType: integer): TAsnObject;
+begin
+  result := Asn(AsnType, [AsnEncInt(Value)]);
+end;
+
+function AsnBigInt(const BigInt: RawByteString; AsnType: integer): TAsnObject;
+var
+  i, l: PtrInt;
+  v: TAsnObject;
+begin
+  l := length(BigInt);
+  i := 1;
+  while (i < l) and
+        (BigInt[i] = #0) do
+    inc(i); // trim leading zeros
+  if i = l then
+    v := ASN1_ZERO_VALUE
+  else
+  begin
+    if i = 1 then
+      v := BigInt
+    else
+      v := copy(BigInt, i, l);
+    if (v <> '') and
+       (ord(v[1]) and $80 <> 0) then
+      Prepend(v, #0); // prepend 0 to ensure not parsed as negative number
+  end;
+  result := Asn(AsnType, [v]);
+end;
+
+function AsnSeq(const Data: TAsnObject): TAsnObject;
+begin
+  result := Asn(ASN1_SEQ, [Data]);
+end;
+
+function AsnSeq(const Content: array of TAsnObject): TAsnObject;
+begin
+  result := Asn(ASN1_SEQ, Content);
+end;
+
+function AsnOid(OidText: PUtf8Char): TAsnObject;
+begin
+  result := Asn(ASN1_OBJID, [AsnEncOid(OidText)]);
+end;
+
+function AsnTypeText(p: PUtf8Char): integer;
+begin
+  // allow A..Z, a..z, 0..9, ' = ( ) + , - . / : ? but excluding @ & _
+  result := ASN1_PRINTSTRING;
+  if p = nil then
+    exit;
+  while true do
+    case p^ of
+      #0:
+        exit; // whole string was printable
+      'A'..'Z',
+      'a'..'z',
+      '0'..'9',
+      '''', '=', '(', ')', '+', ',', '-', '.', '/', ':', '?':
+        inc(p);
+    else
+      break;
+    end;
+  result := ASN1_UTF8STRING;
+end;
+
+function AsnText(const Text: RawUtf8): TAsnObject;
+begin
+  result := Asn(AsnTypeText(pointer(Text)), [Text]);
+end;
+
+function AsnTime(dt: TDateTime): TAsnObject;
+var
+  t: TSynSystemTime;
+begin
+  if dt = 0 then
+  begin
+    result := Asn(ASN1_GENTIME, ['99991231235959Z']);
+    exit;
+  end;
+  t.FromDateTime(dt);
+  if t.Year > 1900 then
+    if (t.Year <= 2000) or
+       (t.Year >= 2050) then
+      result := Asn(ASN1_GENTIME, [FormatUtf8('%%%%%%Z', [
+        UInt4DigitsToShort(t.Year),
+        UInt2DigitsToShortFast(t.Month),
+        UInt2DigitsToShortFast(t.Day),
+        UInt2DigitsToShortFast(t.Hour),
+        UInt2DigitsToShortFast(t.Minute),
+        UInt2DigitsToShortFast(t.Second)])])
+    else
+      result := Asn(ASN1_UTCTIME, [FormatUtf8('%%%%%%Z', [
+        UInt2DigitsToShortFast(t.Year - 2000),
+        UInt2DigitsToShortFast(t.Month),
+        UInt2DigitsToShortFast(t.Day),
+        UInt2DigitsToShortFast(t.Hour),
+        UInt2DigitsToShortFast(t.Minute),
+        UInt2DigitsToShortFast(t.Second)])])
+  else
+    raise ECrypt.CreateUtf8('Invalid AsnTime(%)', [dt]);
+end;
+
+procedure AsnAdd(var Data: TAsnObject; const Buffer: TAsnObject);
+begin
+  Append(Data, Buffer);
+end;
+
+procedure AsnAdd(var Data: TAsnObject; const Buffer: TAsnObject; AsnType: integer);
+begin
+  Append(Data, Asn(AsnType, [Buffer]));
+end;
+
+function AsnDecOid(Pos, EndPos: integer; const Buffer: TAsnObject): RawUtf8;
+var
+  x, y: cardinal;
+begin
+  result := '';
+  y := 0;
+  while Pos < EndPos do
+  begin
+    x := AsnDecOidItem(Pos, Buffer);
+    if y = 0 then
+    begin
+      y := x div 40; // first byte = two first numbers modulo 40
+      x := x mod 40;
+      UInt32ToUtf8(y, result);
+    end;
+    Append(result, ['.', x]);
+  end;
+end;
+
+function AsnDecIp(p: PAnsiChar; len: integer): RawUtf8;
+begin
+  case len of
+    4:
+      with PDWordRec(p)^ do
+        FormatUtf8('%.%.%.%', [B[0], B[1], B[2], B[3]], result);
+   {16: // not true IPv6 content (no mormot.net.sock dependency) }
+  else
+    BinToHexLower(p, len, result);
+  end;
+end;
+
+function AsnDecHeader(var Pos: integer; const Buffer: TAsnObject;
+  out AsnType, AsnSize: integer): boolean;
+var
+  t, l: integer;
+begin
+  result := false;
+  l := length(Buffer);
+  if Pos > l then
+    exit;
+  t := ord(Buffer[Pos]);
+  inc(Pos);
+  AsnSize := AsnDecLen(Pos, Buffer);
+  if (Pos + AsnSize - 1) > l then
+    exit; // avoid overflow
+  AsnType := t;
+  result := true;
+end;
+
+function AsnNextTime(var Pos: integer; const Buffer: TAsnObject;
+  out Value: TDateTime): boolean;
+var
+  vt: integer;
+  raw: RawByteString;
+begin
+  vt := AsnNextRaw(pos, Buffer, raw);
+  result := false;
+  if length(raw) < 12 then
+    exit;
+  case vt of
+    ASN1_UTCTIME:
+      Prepend(raw, '20'); // YY -> YYYY
+    ASN1_GENTIME:
+      if raw = '99991231235959Z' then
+      begin
+        Value := 0; // special value for unspecified NotAfter
+        result := true;
+        exit;
+      end;
+  else
+    exit;
+  end;
+  insert('T', raw, 9); // make ISO-8601 compatible 'YYYYMMDDThhmmss'
+  Iso8601ToDateTimePUtf8CharVar(pointer(raw), length(raw), Value);
+  result := Value <> 0;
+end;
+
+function AsnNextInteger(var Pos: integer; const Buffer: TAsnObject;
+  out ValueType: integer): Int64;
+var
+  asnsize: integer;
+begin
+  if AsnDecHeader(Pos, Buffer, ValueType, asnsize) and
+     (ValueType in [ASN1_INT, ASN1_ENUM, ASN1_BOOL]) then
+    result := AsnDecInt(Pos, Buffer, asnsize)
+  else
+  begin
+    ValueType := ASN1_NULL;
+    result := -1;
+  end;
+end;
+
+function AsnNextRaw(var Pos: integer; const Buffer: TAsnObject;
+  out Value: RawByteString; IncludeHeader: boolean): integer;
+var
+  headpos, asnsize: integer;
+begin
+  result := ASN1_NULL;
+  headpos := Pos;
+  if AsnDecHeader(Pos, Buffer, result, asnsize) then
+  begin
+    if result = ASN1_BITSTR then
+    begin
+      inc(Pos); // ignore bit length
+      dec(asnsize);
+    end;
+    if IncludeHeader then
+      Value := copy(Buffer, headpos, asnsize + Pos - headpos)
+    else
+      Value := copy(Buffer, Pos, asnsize);
+    inc(Pos, asnsize);
+  end;
+end;
+
+function AsnNextBigInt(var Pos: integer; const Buffer: TAsnObject;
+  out Value: RawByteString): boolean;
+begin
+  result := AsnNextRaw(Pos, Buffer, Value) = ASN1_INT;
+  if result then
+    while (Value <> '') and
+          (Value[1] = #0) do
+      delete(Value, 1, 1);
+end;
+
+function AsnNext(var Pos: integer; const Buffer: TAsnObject;
+  Value: PRawByteString; CtrEndPos: PInteger): integer;
+var
+  asnsize: integer;
+  y: Int64;
+begin
+  if Value <> nil then
+    Value^ := '';
+  result := ASN1_NULL;
+  if not AsnDecHeader(Pos, Buffer, result, asnsize) then
+    exit;
+  if CtrEndPos <> nil then
+    CtrEndPos^ := Pos + asnsize;
+  if Value = nil then
+  begin
+    // no need to allocate and return the whole Value^: just compute position
+    if (result and ASN1_CL_CTR) = 0 then
+      // constructed (e.g. SEQ/SETOF): keep Pos after header
+      inc(Pos, asnsize);
+    exit;
+  end;
+  // we need to decode and return the Value^
+  if (result and ASN1_CL_CTR) <> 0 then
+    // constructed (e.g. SEQ/SETOF): return whole data, but keep Pos after header
+    Value^ := copy(Buffer, Pos, asnsize)
+  else
+    // decode Value^ as text - use AsnNextRaw() to avoid the decoding
+    case result of
+      ASN1_INT,
+      ASN1_ENUM,
+      ASN1_BOOL:
+        Int64ToUtf8(AsnDecInt(Pos, Buffer, asnsize), RawUtf8(Value^));
+      ASN1_COUNTER,
+      ASN1_GAUGE,
+      ASN1_TIMETICKS,
+      ASN1_COUNTER64:
+        begin
+          y := 0;
+          while asnsize <> 0 do
+          begin
+            y := (y shl 8) + ord(Buffer[Pos]);
+            inc(Pos);
+            dec(asnsize);
+          end;
+          Int64ToUtf8(y, RawUtf8(Value^));
+        end;
+      ASN1_OBJID:
+        begin
+          Value^ := AsnDecOid(Pos, Pos + asnsize, Buffer);
+          inc(Pos, asnsize);
+        end;
+      ASN1_IPADDR:
+        begin
+          Value^ := AsnDecIp(@Buffer[Pos], asnsize);
+          inc(Pos, asnsize);
+        end;
+      ASN1_NULL:
+        inc(Pos, asnsize);
+    else
+      // ASN1_UTF8STRING, ASN1_OCTSTR, ASN1_OPAQUE or unknown
+      begin
+        Value^ := copy(Buffer, Pos, asnsize); // return as raw binary
+        DetectRawUtf8(Value^); // detect and mark CP_UTF8 to please the FPC RTL
+        inc(Pos, asnsize);
+      end;
+    end;
+end;
+
+procedure AsnNextInit(var Pos: TIntegerDynArray; Count: PtrInt);
+var
+  i: PtrInt;
+begin
+  SetLength(Pos, Count);
+  for i := 0 to Count - 1 do
+    Pos[i] := 1;
+end;
+
+function IsBinaryString(var Value: RawByteString): boolean;
+var
+  n: PtrInt;
+begin
+  result := true;
+  for n := 1 to length(Value) do
+    case ord(Value[n]) of
+      0:
+        if n <> length(value) then
+          exit
+        else
+          // consider null-terminated strings as non-binary, but truncate
+          SetLength(Value, n - 1);
+      1..8, // consider TAB char as text
+      10..31:
+        exit;
+    end;
+  result := false;
+end;
+
+procedure DumpClass(at: integer; w: TTextWriter);
+begin
+  if at and ASN1_CL_APP <> 0 then
+    w.AddShorter('APP ');
+  if at and ASN1_CL_CTX <> 0 then
+    w.AddShorter('CTX ');
+  if at and ASN1_CL_PRI = ASN1_CL_PRI then
+    w.AddShorter('PRI ');
+  if at < ASN1_CL_APP then
+    w.AddShorter('unknown')
+  else
+    w.AddByteToHex(at and $0f);
+end;
+
+function AsnDump(const Value: TAsnObject): RawUtf8;
+var
+  i, at, x, n, indent: integer;
+  s: RawByteString;
+  il: TIntegerDynArray;
+  w: TTextWriter;
+  tmp: TTextWriterStackBuffer;
+begin
+  w := TTextWriter.CreateOwnedStream(tmp);
+  try
+    i := 1;
+    indent := 0;
+    while i < length(Value) do
+    begin
+      for n := length(il) - 1 downto 0 do
+      begin
+        x := il[n];
+        if x <= i then
+        begin
+          DeleteInteger(il, n);
+          dec(indent, 2);
+        end;
+      end;
+      at := AsnNext(i, Value, @s);
+      w.AddChars(' ', indent);
+      w.Add('$');
+      w.AddByteToHexLower(at);
+      if (at and ASN1_CL_CTR) <> 0 then
+      begin
+        w.Add(' ');
+        case at of
+          ASN1_SEQ:
+            w.AddShorter('SEQ');
+          ASN1_SETOF:
+            w.AddShorter('SETOF');
+        else
+          DumpClass(at, w);
+        end;
+        x := length(s);
+        w.Add(' CTR: length %', [x]);
+        inc(indent, 2);
+        AddInteger(il, x + i - 1);
+      end
+      else
+      begin
+        w.Add(' ');
+        case at of
+          // base ASN.1 types
+          ASN1_BOOL:
+            w.AddShorter('BOOL');
+          ASN1_INT:
+            w.AddShorter('INT');
+          ASN1_BITSTR:
+            w.AddShorter('BITSTR');
+          ASN1_OCTSTR:
+            w.AddShorter('OCTSTR');
+          ASN1_NULL:
+            w.AddShorter('NULL');
+          ASN1_OBJID:
+            w.AddShorter('OBJID');
+          ASN1_ENUM:
+            w.AddShorter('ENUM');
+          ASN1_UTF8STRING:
+            w.AddShorter('UTF8');
+          // ASN1_CL_APP are application-specific
+          {
+          ASN1_IPADDR:
+            w.AddShorter('IPADDR');
+          ASN1_COUNTER:
+            w.AddShorter('COUNTER');
+          ASN1_GAUGE:
+            w.AddShorter('GAUGE');
+          ASN1_TIMETICKS:
+            w.AddShorter('TIMETICK');
+          ASN1_OPAQUE:
+            w.AddShorter('OPAQUE');
+          ASN1_COUNTER64:
+            w.AddShorter('CNTR64');
+          }
+        else
+          DumpClass(at, w);
+        end;
+        w.Add(':', ' ');
+        if IsBinaryString(s) then
+        begin
+          w.Add('binary len=% ', [length(s)]);
+          w.AddShort(EscapeToShort(s));
+        end
+        else if at in ASN1_NUMBERS then
+          w.AddString(s) // not quoted value
+        else if PosExChar('"', s) = 0 then
+        begin
+          w.Add('"');
+          w.AddString(s);
+          w.Add('"');
+        end
+        else
+        begin
+          w.Add('''');
+          w.AddString(s); // alternate output layout for quoted text
+          w.Add('''');
+        end;
+      end;
+      w.AddCR;
+    end;
+    w.SetText(result);
+  finally
+    w.Free;
+  end;
+end;
 
 
 procedure InitializeUnit;

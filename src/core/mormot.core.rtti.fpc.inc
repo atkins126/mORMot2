@@ -621,6 +621,41 @@ begin
   CurrentMethod := nil;
 end;
 
+const
+  // gather rk* to reduce number of TRttiCustomListPairs hash slots in memory
+  RK_TOSLOT_MAX = 14;
+  RK_TOSLOT: array[TRttiKind] of byte = (
+    0,   // rkUnknown
+    1,   // rkInteger
+    2,   // rkChar
+    3,   // rkEnumeration
+    4,   // rkFloat
+    5,   // rkSet
+    0,   // rkMethod
+    0,   // rkSString
+    6,   // rkLStringOld
+    6,   // rkLString
+    7,   // rkWString
+    8,   // rkVariant
+    0,   // rkArray
+    9,   // rkRecord
+    8,   // rkInterface
+    10,  // rkClass
+    11,  // rkObject
+    7,   // rkWChar
+    3,   // rkBool
+    12,  // rkInt64
+    13,  // rkQWord
+    14,  // rkDynArray
+    0,   // rkInterfaceRaw
+    0,   // rkProcVar
+    7,   // rkUString
+    7,   // rkUChar
+    0,   // rkHelper
+    0,   // rkFile
+    0,   // rkClassRef
+    0);  // rkPointer
+
 
 { ********* Redirect Most Used FPC RTL Functions to Optimized x86_64 Assembly }
 
@@ -813,7 +848,7 @@ asm
         jz      @maybe0
 @ok:    mov     rax, qword ptr [s1 - _STRLEN] // len must match
         cmp     rax, qword ptr [s2 - _STRLEN]
-        jne     @q
+        jne     @q                            // returns len diff <> 0
         lea     s1, qword ptr [s1 + rax - 8]
         lea     s2, qword ptr [s2 + rax - 8]
         neg     rax
@@ -828,7 +863,7 @@ asm
         je      @s
         mov     eax, 1
         ret
-@0:     xor     eax, eax
+@0:     xor     eax, eax // returns 0 if s1 equals s2
 @q:     ret
 @maybe0:test    s2, s2
         jz      @1

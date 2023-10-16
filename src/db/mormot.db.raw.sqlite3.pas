@@ -8433,13 +8433,8 @@ begin
 end;
 
 function TSqlRequest.FieldDeclaredTypeS(Col: integer): string;
-var
-  P: PUtf8Char;
 begin
-  if cardinal(Col) >= cardinal(FieldCount) then
-    sqlite3_failed(RequestDB, SQLITE_RANGE, 'FieldDeclaredTypeS');
-  P := pointer(sqlite3.column_decltype(Request, Col));
-  result := Utf8DecodeToString(P, StrLen(P));
+  Utf8ToStringVar(FieldDeclaredType(Col), result);
 end;
 
 function TSqlRequest.FieldUtf8(Col: integer): RawUtf8;
@@ -8863,7 +8858,7 @@ begin
      (Cache[LastPrepared].StatementSql <> GenericSql) then
     LastPrepared := Caches.FindHashedForAdding(GenericSql, added)
   else
-    added := false; // occurs e.g. on multiple insert
+    added := false; // occurs e.g. on multiple inserts or updates
   c := @Cache[LastPrepared];
   if added then
   begin

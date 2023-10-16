@@ -2386,17 +2386,17 @@ procedure bswap160(s, d: PIntegerArray);
         mov     r8d, dword ptr [s + 4]
         mov     r9d, dword ptr [s + 8]
         mov     r10d, dword ptr [s + 12]
+        mov     r11d, dword ptr [s + 16]
         bswap   eax
         bswap   r8d
         bswap   r9d
         bswap   r10d
+        bswap   r11d
         mov     dword ptr [d], eax
         mov     dword ptr [d + 4], r8d
         mov     dword ptr [d + 8], r9d
         mov     dword ptr [d + 12], r10d
-        mov     eax, dword ptr [s + 16]
-        bswap   eax
-        mov     dword ptr [d + 16], eax
+        mov     dword ptr [d + 16], r11d
 end;
 
 function _add256(out Output: THash256Rec; const Left, Right: THash256Rec): PtrUInt;
@@ -2668,6 +2668,347 @@ procedure _inc128(var Value: THash256Rec; var Added: THash128Rec);
         adc    qword ptr [Value + 8], rdx
         adc    qword ptr [Value + 16], r8
         adc    qword ptr [Value + 24], r8
+end;
+
+// use CF flag to propagate 64-bit additions carry
+function _xasmadd(Value, Adds: pointer; Carry: PtrUInt): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Value rdx/rsi=Adds r8/rdx=Carry
+        xor    eax, eax
+        mov    r9, qword ptr [Adds]
+        add    r9, Carry
+        mov    r8 , qword ptr [Adds + 8]
+        mov    r10, qword ptr [Adds + 8 * 2]
+        mov    r11, qword ptr [Adds + 8 * 3]
+        add    qword ptr [Value], r9
+        adc    qword ptr [Value + 8], r8
+        adc    qword ptr [Value + 8 * 2], r10
+        adc    qword ptr [Value + 8 * 3], r11
+        mov    r9,  qword ptr [Adds + 8 * 4]
+        mov    r8 , qword ptr [Adds + 8 * 5]
+        mov    r10, qword ptr [Adds + 8 * 6]
+        mov    r11, qword ptr [Adds + 8 * 7]
+        adc    qword ptr [Value + 8 * 4], r9
+        adc    qword ptr [Value + 8 * 5], r8
+        adc    qword ptr [Value + 8 * 6], r10
+        adc    qword ptr [Value + 8 * 7], r11
+        mov    r9,  qword ptr [Adds + 8 * 8]
+        mov    r8 , qword ptr [Adds + 8 * 9]
+        mov    r10, qword ptr [Adds + 8 * 10]
+        mov    r11, qword ptr [Adds + 8 * 11]
+        adc    qword ptr [Value + 8 * 8], r9
+        adc    qword ptr [Value + 8 * 9], r8
+        adc    qword ptr [Value + 8 * 10], r10
+        adc    qword ptr [Value + 8 * 11], r11
+        mov    r9,  qword ptr [Adds + 8 * 12]
+        mov    r8 , qword ptr [Adds + 8 * 13]
+        mov    r10, qword ptr [Adds + 8 * 14]
+        mov    r11, qword ptr [Adds + 8 * 15]
+        adc    qword ptr [Value + 8 * 12], r9
+        adc    qword ptr [Value + 8 * 13], r8
+        adc    qword ptr [Value + 8 * 14], r10
+        adc    qword ptr [Value + 8 * 15], r11
+        adc    eax, eax // return current carry as 0/1
+end;
+
+// use CF flag to propagate 64-bit substractions carry
+function _xasmsub(Value, Subs: pointer; Carry: PtrUInt): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Value rdx/rsi=Subs r8/rdx=Carry
+        xor    eax, eax
+        mov    r9,  qword ptr [Subs]
+        add    r9, Carry
+        mov    r8 , qword ptr [Subs + 8]
+        mov    r10, qword ptr [Subs + 8 * 2]
+        mov    r11, qword ptr [Subs + 8 * 3]
+        sub    qword ptr [Value], r9
+        sbb    qword ptr [Value + 8], r8
+        sbb    qword ptr [Value + 8 * 2], r10
+        sbb    qword ptr [Value + 8 * 3], r11
+        mov    r9,  qword ptr [Subs + 8 * 4]
+        mov    r8 , qword ptr [Subs + 8 * 5]
+        mov    r10, qword ptr [Subs + 8 * 6]
+        mov    r11, qword ptr [Subs + 8 * 7]
+        sbb    qword ptr [Value + 8 * 4], r9
+        sbb    qword ptr [Value + 8 * 5], r8
+        sbb    qword ptr [Value + 8 * 6], r10
+        sbb    qword ptr [Value + 8 * 7], r11
+        mov    r9,  qword ptr [Subs + 8 * 8]
+        mov    r8 , qword ptr [Subs + 8 * 9]
+        mov    r10, qword ptr [Subs + 8 * 10]
+        mov    r11, qword ptr [Subs + 8 * 11]
+        sbb    qword ptr [Value + 8 * 8], r9
+        sbb    qword ptr [Value + 8 * 9], r8
+        sbb    qword ptr [Value + 8 * 10], r10
+        sbb    qword ptr [Value + 8 * 11], r11
+        mov    r9,  qword ptr [Subs + 8 * 12]
+        mov    r8 , qword ptr [Subs + 8 * 13]
+        mov    r10, qword ptr [Subs + 8 * 14]
+        mov    r11, qword ptr [Subs + 8 * 15]
+        sbb    qword ptr [Value + 8 * 12], r9
+        sbb    qword ptr [Value + 8 * 13], r8
+        sbb    qword ptr [Value + 8 * 14], r10
+        sbb    qword ptr [Value + 8 * 15], r11
+        adc    eax, eax // return current carry as 0/1
+end;
+
+// use "mul" opcode to compute 64-bit * 64-bit into 128-bit
+function _xasmmul(Src, Dst: pointer; Factor, Carry: PtrUInt): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Src rdx/rsi=Dst r8/rdx=Factor r9/rcx=Carry
+        {$ifdef WIN64ABI}
+        push   rsi
+        push   rdi
+        mov    rsi, Dst
+        mov    rdi, Src
+        mov    rcx, Carry
+        {$endif WIN64ABI}
+        xor    r10, r10
+        mov    r11, Factor
+        mov    rax, qword ptr [rdi]
+        mul    r11         // rax:rdx = [Src] * Factor
+        add    rax, rcx
+        adc    rdx, r10    // rax:rdx = ([Src] * Factor) + Carry
+        mov    qword ptr [rsi], rax
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 1]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        mov    qword ptr [rsi + 8 * 1], rax
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 2]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        mov    qword ptr [rsi + 8 * 2], rax
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 3]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        mov    qword ptr [rsi + 8 * 3], rax
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 4]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        mov    qword ptr [rsi + 8 * 4], rax
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 5]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        mov    qword ptr [rsi + 8 * 5], rax
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 6]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        mov    qword ptr [rsi + 8 * 6], rax
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 7]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        mov    qword ptr [rsi + 8 * 7], rax
+        mov    rax, rdx
+        {$ifdef WIN64ABI}
+        pop    rdi
+        pop    rsi
+        {$endif WIN64ABI}
+end;
+
+// use "div" opcode to divide 128-bit into 64-bit * 64-bit result
+function _xasmdiv(Value: pointer; Factor, Carry: PtrUInt): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Value rdx/rsi=Factor r8/rdx=Carry
+        {$ifdef WIN64ABI}
+        push   rsi
+        push   rdi
+        mov    rdi, Value
+        mov    rsi, Factor
+        mov    rdx, Carry
+        {$endif WIN64ABI}
+        mov    rax, qword ptr [rdi + 8 * 15]
+        div    rsi // rax = rdx:rax div rsi (rdx = modulo for next div)
+        mov    qword ptr [rdi + 8 * 15], rax
+        mov    rax, qword ptr [rdi + 8 * 14]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 14], rax
+        mov    rax, qword ptr [rdi + 8 * 13]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 13], rax
+        mov    rax, qword ptr [rdi + 8 * 12]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 12], rax
+        mov    rax, qword ptr [rdi + 8 * 11]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 11], rax
+        mov    rax, qword ptr [rdi + 8 * 10]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 10], rax
+        mov    rax, qword ptr [rdi + 8 * 9]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 9], rax
+        mov    rax, qword ptr [rdi + 8 * 8]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 8], rax
+        mov    rax, qword ptr [rdi + 8 * 7]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 7], rax
+        mov    rax, qword ptr [rdi + 8 * 6]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 6], rax
+        mov    rax, qword ptr [rdi + 8 * 5]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 5], rax
+        mov    rax, qword ptr [rdi + 8 * 4]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 4], rax
+        mov    rax, qword ptr [rdi + 8 * 3]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 3], rax
+        mov    rax, qword ptr [rdi + 8 * 2]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 2], rax
+        mov    rax, qword ptr [rdi + 8 * 1]
+        div    rsi
+        mov    qword ptr [rdi + 8 * 1], rax
+        mov    rax, qword ptr [rdi]
+        div    rsi
+        mov    qword ptr [rdi], rax
+        mov    rax, rdx // return carry/modulo
+        {$ifdef WIN64ABI}
+        pop    rdi
+        pop    rsi
+        {$endif WIN64ABI}
+end;
+
+// use "div" opcode to divide 128-bit into 64-bit * 64-bit result
+function _xasmmod(Value: pointer; Factor, Carry: PtrUInt): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Value rdx/rsi=Factor r8/rdx=Carry
+        {$ifdef WIN64ABI}
+        push   rsi
+        push   rdi
+        mov    rdi, Value
+        mov    rsi, Factor
+        mov    rdx, Carry
+        {$endif WIN64ABI}
+        mov    rax, qword ptr [rdi + 8 * 15]
+        div    rsi // rax = rdx:rax div rsi (rdx = modulo for next div)
+        mov    rax, qword ptr [rdi + 8 * 14]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 13]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 12]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 11]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 10]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 9]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 8]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 7]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 6]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 5]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 4]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 3]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 2]
+        div    rsi
+        mov    rax, qword ptr [rdi + 8 * 1]
+        div    rsi
+        mov    rax, qword ptr [rdi]
+        div    rsi
+        mov    rax, rdx // return carry/modulo
+        {$ifdef WIN64ABI}
+        pop    rdi
+        pop    rsi
+        {$endif WIN64ABI}
+end;
+
+// use "mul" opcode to compute 64-bit * 64-bit into 128-bit
+function _xasmmuladd(Src, Dst: pointer; Factor, Carry: PtrUInt): PtrUInt;
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        // rcx/rdi=Src rdx/rsi=Dst r8/rdx=Factor r9/rcx=Carry
+        {$ifdef WIN64ABI}
+        push   rsi
+        push   rdi
+        mov    rsi, Dst
+        mov    rdi, Src
+        mov    rcx, Carry
+        {$endif WIN64ABI}
+        xor    r10, r10
+        mov    r11, Factor
+        mov    rax, qword ptr [rdi]
+        mul    r11         // rax:rdx = [Src] * Factor
+        add    rax, rcx
+        adc    rdx, r10   // rax:rdx = [Src] * Factor + Carry
+        add    qword ptr [rsi], rax
+        adc    rdx, r10   // [Dst]:rdx = [Src] * Factor + [Dst] + Carry
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 1]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        add    qword ptr [rsi + 8 * 1], rax
+        adc    rdx, r10
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 2]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        add    qword ptr [rsi + 8 * 2], rax
+        adc    rdx, r10
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 3]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        add    qword ptr [rsi + 8 * 3], rax
+        adc    rdx, r10
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 4]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        add    qword ptr [rsi + 8 * 4], rax
+        adc    rdx, r10
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 5]
+        mul    r11
+        add    rax, qword ptr [rsi + 8 * 5]
+        adc    rdx, r10
+        add    rax, rcx
+        adc    rdx, r10
+        mov    qword ptr [rsi + 8 * 5], rax
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 6]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        add    qword ptr [rsi + 8 * 6], rax
+        adc    rdx, r10
+        mov    rcx, rdx
+        mov    rax, qword ptr [rdi + 8 * 7]
+        mul    r11
+        add    rax, rcx
+        adc    rdx, r10
+        add    qword ptr [rsi + 8 * 7], rax
+        adc    rdx, r10
+        mov    rax, rdx
+        {$ifdef WIN64ABI}
+        pop    rdi
+        pop    rsi
+        {$endif WIN64ABI}
 end;
 
 
@@ -3977,7 +4318,7 @@ asm     // Windows x64 calling convention expects to preserve XMM6-XMM15
         movups  xmm12, dqword ptr [aes + 16 * 11]
         movups  xmm13, dqword ptr [aes + 16 * 12]
         movups  xmm14, dqword ptr [aes + 16 * 13]
-        add     aes,  16 * 14  // aes = last key
+        add     aes, 16 * 14  // aes = last key
 {$ifdef FPC} align 16 {$else} .align 16 {$endif}
 @s:     movups  xmm15, dqword ptr [aes]
         pxor    xmm7, xmm0
@@ -6965,4 +7306,5 @@ asm
 end;
 
 {$endif CRC32C_X64}
+
 

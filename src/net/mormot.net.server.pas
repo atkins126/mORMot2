@@ -397,11 +397,12 @@ type
     fOnAfterRequest: TOnHttpServerRequest;
     fOnAfterResponse: TOnHttpServerAfterResponse;
     fMaximumAllowedContentLength: cardinal;
+    fCurrentConnectionID: integer;  // 31-bit NextConnectionID sequence
     /// set by RegisterCompress method
     fCompress: THttpSocketCompressRecDynArray;
     fCompressAcceptEncoding: RawUtf8;
     fServerName: RawUtf8;
-    fCurrentConnectionID: integer; // 31-bit NextConnectionID sequence
+    fRequestHeaders: RawUtf8; // pre-computed headers with ServerName
     fCallbackSendDelay: PCardinal;
     fRemoteIPHeader, fRemoteIPHeaderUpper: RawUtf8;
     fRemoteConnIDHeader, fRemoteConnIDHeaderUpper: RawUtf8;
@@ -409,6 +410,7 @@ type
     fFavIcon: RawByteString;
     function GetApiVersion: RawUtf8; virtual; abstract;
     procedure SetServerName(const aName: RawUtf8); virtual;
+    procedure SetOptions(opt: THttpServerOptions);
     procedure SetOnRequest(const aRequest: TOnHttpServerRequest); virtual;
     procedure SetOnBeforeBody(const aEvent: TOnHttpServerBeforeBody); virtual;
     procedure SetOnBeforeRequest(const aEvent: TOnHttpServerRequest); virtual;
@@ -622,7 +624,7 @@ type
     /// allow to customize this HTTP server instance
     // - some inherited classes may have only partial support of those options
     property Options: THttpServerOptions
-      read fOptions write fOptions;
+      read fOptions write SetOptions;
     /// read access to the URI router, as published property (e.g. for logs)
     // - use the Route function to actually setup the routing
     // - may be nil if Route has never been accessed, i.e. no routing was set
@@ -1063,6 +1065,9 @@ type
   // configured as https reverse proxy, leaving default "proxy_http_version 1.0"
   // and "proxy_request_buffering on" options for best performance, and
   // setting KeepAliveTimeOut=0 in the THttpServer.Create constructor
+  // - consider using THttpAsyncServer from mormot.net.async if a very high
+  // number of concurrent connections is expected, e.g. if using HTTP/1.0 behind
+  // a https reverse proxy is not an option
   // - under Windows, will trigger the firewall UAC popup at first run
   // - don't forget to use Free method when you are finished
   // - a typical HTTPS server usecase could be:
@@ -1697,19 +1702,19 @@ begin
   result := false;
   if Text = '' then
     exit;
-  case PCardinal(Text)^ of
+  case PCardinal(Text)^ of // case-sensitive test in occurence order
     ord('G') + ord('E') shl 8 + ord('T') shl 16:
       Method := urmGet;
     ord('P') + ord('O') shl 8 + ord('S') shl 16 + ord('T') shl 24:
       Method := urmPost;
     ord('P') + ord('U') shl 8 + ord('T') shl 16:
       Method := urmPut;
+    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24:
+      Method := urmHead;
     ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24:
       Method := urmDelete;
     ord('O') + ord('P') shl 8 + ord('T') shl 16 + ord('I') shl 24:
       Method := urmOptions;
-    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24:
-      Method := urmHead;
   else
     exit;
   end;
@@ -1731,7 +1736,7 @@ begin
         else
           inc(p);
     end
-    else if not (p^ in ['/', '_', '-', '.', '0'..'9', 'a'..'z', 'A'..'Z']) then
+    else if not (p^ in ['/', '_', '-', '.', '$', '0'..'9', 'a'..'z', 'A'..'Z']) then
       exit; // not a valid plain URI character
     inc(p);
   until p^ = #0;
@@ -1761,7 +1766,7 @@ begin
     req.fUrlParamPos := Pos; // for faster req.UrlParam()
     exit;
   end;
-  req.fRouteName := pointer(Names); // fast assign as pointer reference
+  req.fRouteName := pointer(Names); // fast assignment as pointer reference
   n := length(Names) * 2; // length(Names[]) = current parameter index
   if length(req.fRouteValuePosLen) < n then
     SetLength(req.fRouteValuePosLen, n + 24); // alloc once by 12 params
@@ -1785,13 +1790,13 @@ begin
   // compute length of the new URI with injected values
   t := pointer(Data.ToUriPosLen); // [pos1,len1,valndx1,...] trio rules
   n := PDALen(PAnsiChar(t) - _DALEN)^ + _DAOFF;
-  v := pointer(THttpServerRequest(Ctxt).fRouteValuePosLen);
+  v := pointer(THttpServerRequest(Ctxt).fRouteValuePosLen); // [pos,len] pairs
   if v = nil then
      exit; // paranoid
   len := Data.ToUriStaticLen;
   repeat
-    if t[2] >= 0 then
-      inc(len, v[t[2] * 2 + 1]); // value length
+    if t[2] >= 0 then            // t[2]=valndx in v=fRouteValuePosLen[]
+      inc(len, v[t[2] * 2 + 1]); // add value length
     t := @t[3];
     dec(n, 3)
   until n = 0;
@@ -1801,12 +1806,12 @@ begin
   n := PDALen(PAnsiChar(t) - _DALEN)^ + _DAOFF;
   p := new; // write new URI
   repeat
-    if t[1] <> 0 then
+    if t[1] <> 0 then    // t[1]=len
     begin
       MoveFast(PByteArray(Data.ToUri)[t[0]], p^, t[1]); // static
       inc(p, t[1]);
     end;
-    if t[2] >= 0 then
+    if t[2] >= 0 then    // t[2]=valndx in fRouteValuePosLen[]
     begin
       v := @THttpServerRequest(Ctxt).fRouteValuePosLen[t[2] * 2];
       MoveFast(PByteArray(Ctxt.Url)[v[0]], p^, v[1]); // value [pos,len] pair
@@ -2274,16 +2279,12 @@ begin
     until P^ = #0;
   end;
   // generic headers
-  h^.AppendShort('Server: ');
-  h^.Append(fServer.ServerName);
-  h^.AppendCRLF;
+  h^.Append(fServer.fRequestHeaders); // Server: and X-Powered-By:
   if hsoIncludeDateHeader in fServer.Options then
     fServer.AppendHttpDate(h^);
-  if not (hsoNoXPoweredHeader in fServer.Options) then
-    h^.AppendShort(XPOWEREDNAME + ': ' + XPOWEREDVALUE + #13#10);
   Context.Content := OutContent;
   Context.ContentType := OutContentType;
-  OutContent := ''; // release body memory ASAP
+  OutContent := ''; // dec RefCnt to release body memory ASAP
   result := Context.CompressContentAndFinalizeHead(MaxSizeAtOnce); // also set State
   // now TAsyncConnectionsSockets.Write(result) should be called
 end;
@@ -2296,7 +2297,7 @@ end;
 
 procedure THttpServerRequest.SetOutJson(Value: pointer; TypeInfo: PRttiInfo);
 begin
-  SaveJson(Value^, TypeInfo, [], RawUtf8(fOutContent), []);
+  SaveJson(Value^, TypeInfo, [twoNoSharedStream], RawUtf8(fOutContent), []);
   fOutContentType := JSON_CONTENT_TYPE_VAR;
 end;
 
@@ -2333,8 +2334,8 @@ end;
 constructor THttpServerGeneric.Create(const OnStart, OnStop: TOnNotifyThread;
   const ProcessName: RawUtf8; ProcessOptions: THttpServerOptions);
 begin
+  fOptions := ProcessOptions; // should be set before SetServerName
   SetServerName('mORMot2 (' + OS_TEXT + ')');
-  fOptions := ProcessOptions;
   inherited Create(hsoCreateSuspended in fOptions, OnStart, OnStop, ProcessName);
 end;
 
@@ -2457,6 +2458,7 @@ end;
 
 procedure THttpServerGeneric.AppendHttpDate(var Dest: TRawByteStringBuffer);
 begin
+  // overriden in THttpAsyncServer.AppendHttpDate with its own per-second cache
   Dest.AppendShort(HttpDateNowUtc);
 end;
 
@@ -2469,6 +2471,17 @@ end;
 procedure THttpServerGeneric.SetServerName(const aName: RawUtf8);
 begin
   fServerName := aName;
+  FormatUtf8('Server: %'#13#10, [fServerName], fRequestHeaders);
+  if not (hsoNoXPoweredHeader in fOptions) then
+    Append(fRequestHeaders, XPOWEREDNAME + ': ' + XPOWEREDVALUE + #13#10);
+end;
+
+procedure THttpServerGeneric.SetOptions(opt: THttpServerOptions);
+begin
+  if fOptions = opt then
+    exit;
+  fOptions := opt;
+  SetServerName(fServerName); // recompute fRequestHeaders
 end;
 
 procedure THttpServerGeneric.SetOnRequest(
@@ -3531,7 +3544,7 @@ begin
     begin
       // allow THttpServer.OnHeaderParsed low-level callback
       if Assigned(fServer.fOnHeaderParsed) and
-        fServer.fOnHeaderParsed(self) then
+         fServer.fOnHeaderParsed(self) then
       begin
         result := grRejected; // the callback made its own SockSend() response
         exit;
@@ -4073,6 +4086,7 @@ begin
   fReceiveBufferSize := From.fReceiveBufferSize;
   if From.fLogData <> nil then
     fLogData := pointer(fLogDataStorage);
+  fOptions := From.fOptions; // needed by SetServerName() below
   SetServerName(From.fServerName); // setters are sometimes needed
   SetRemoteIPHeader(From.fRemoteIPHeader);
   SetRemoteConnIDHeader(From.fRemoteConnIDHeader);

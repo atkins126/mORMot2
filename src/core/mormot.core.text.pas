@@ -319,6 +319,7 @@ type
   // - twoNonExpandedArrays will force the 'non expanded' optimized JSON layout
   // for array of records or classes, ignoring other formatting options:
   // $ {"fieldCount":2,"values":["f1","f2","1v1",1v2,"2v1",2v2...],"rowCount":20}
+  // - twoNoSharedStream will force to create a new stream for each instance
   TTextWriterOption = (
     twoStreamIsOwned,
     twoFlushToStreamNoAutoResize,
@@ -332,7 +333,8 @@ type
     twoBufferIsExternal,
     twoIgnoreDefaultInRecord,
     twoDateTimeWithZ,
-    twoNonExpandedArrays);
+    twoNonExpandedArrays,
+    twoNoSharedStream);
     
   /// options set for a TTextWriter / TTextWriter instance
   // - allows to override e.g. AddRecordJson() and AddDynArrayJson() behavior;
@@ -710,12 +712,12 @@ type
     // - this won't escape the text as expected by JSON
     procedure AddTrimSpaces(const Text: RawUtf8); overload;
       {$ifdef HASINLINE}inline;{$endif}
-    /// append a UTF-8 String excluding any space or control char
+    /// append a #0-terminated UTF-8 buffer excluding any space or control char
     // - this won't escape the text as expected by JSON
     procedure AddTrimSpaces(P: PUtf8Char); overload;
-    /// append some chars, replacing a given character with another
+    /// append some UTF-8 chars, replacing a given character with another
     procedure AddReplace(Text: PUtf8Char; Orig, Replaced: AnsiChar);
-    /// append some chars, quoting all " chars
+    /// append some UTF-8 chars, quoting all " chars
     // - same algorithm than AddString(QuotedStr()) - without memory allocation,
     // and with an optional maximum text length (truncated with ending '...')
     // - this function implements what is specified in the official SQLite3
@@ -724,18 +726,18 @@ type
     // putting two single quotes in a row - as in Pascal."
     procedure AddQuotedStr(Text: PUtf8Char; TextLen: PtrUInt; Quote: AnsiChar;
       TextMaxLen: PtrInt = 0);
-    /// append some chars, escaping all HTML special chars as expected
+    /// append some UTF-8 chars, escaping all HTML special chars as expected
     procedure AddHtmlEscape(Text: PUtf8Char; Fmt: TTextWriterHtmlFormat = hfAnyWhere); overload;
-    /// append some chars, escaping all HTML special chars as expected
+    /// append some UTF-8 chars, escaping all HTML special chars as expected
     procedure AddHtmlEscape(Text: PUtf8Char; TextLen: PtrInt;
       Fmt: TTextWriterHtmlFormat = hfAnyWhere); overload;
-    /// append some UTF-16chars, escaping all HTML special chars as expected
+    /// append some UTF-16 chars, escaping all HTML special chars as expected
     procedure AddHtmlEscapeW(Text: PWideChar;
       Fmt: TTextWriterHtmlFormat = hfAnyWhere); overload;
     /// append some VCL/LCL chars, escaping all HTML special chars as expected
     procedure AddHtmlEscapeString(const Text: string;
       Fmt: TTextWriterHtmlFormat = hfAnyWhere);
-    /// append some chars, escaping all HTML special chars as expected
+    /// append some UTF-8 chars, escaping all HTML special chars as expected
     procedure AddHtmlEscapeUtf8(const Text: RawUtf8;
       Fmt: TTextWriterHtmlFormat = hfAnyWhere);
     /// append some chars, escaping all XML special chars as expected
@@ -805,6 +807,10 @@ type
     procedure AddPointer(P: PtrUInt; QuotedChar: AnsiChar = #0);
     /// write a byte as two hexa chars
     procedure AddByteToHex(Value: PtrUInt);
+      {$ifdef HASINLINE}inline;{$endif}
+    /// write a byte as two hexa chars
+    procedure AddByteToHexLower(Value: PtrUInt);
+      {$ifdef HASINLINE}inline;{$endif}
     /// write a Int18 value (0..262143) as 3 chars
     // - this encoding is faster than Base64, and has spaces on the left side
     // - use function Chars3ToInt18() to decode the textual content
@@ -938,6 +944,20 @@ function ObjectToJson(Value: TObject;
 /// will serialize any TObject into its UTF-8 JSON representation
 procedure ObjectToJson(Value: TObject; var result: RawUtf8;
   Options: TTextWriterWriteObjectOptions = [woDontStoreDefault]); overload;
+
+/// will serialize any TObject into its expanded UTF-8 JSON representation
+// - includes debugger-friendly information, similar to TSynLog, i.e.
+// class name and sets/enumerates as text
+// - redirect to ObjectToJson() with the proper TTextWriterWriteObjectOptions,
+// since our JSON serialization detects and serialize Exception.Message
+function ObjectToJsonDebug(Value: TObject;
+  Options: TTextWriterWriteObjectOptions = [woDontStoreDefault,
+    woHumanReadable, woStoreClassName, woStorePointer,
+    woHideSensitivePersonalInformation]): RawUtf8;
+
+/// a wrapper around ConsoleWrite(ObjectToJson(Value))
+procedure ConsoleObject(Value: TObject;
+  Options: TTextWriterWriteObjectOptions = [woHumanReadable]);
 
 /// check if some UTF-8 text would need HTML escaping
 function NeedsHtmlEscape(text: PUtf8Char; fmt: TTextWriterHtmlFormat): boolean;
@@ -1582,6 +1602,7 @@ function VarRecAs(const aArg: TVarRec; aClass: TClass): pointer;
 // - note that, due to a Delphi compiler limitation, cardinal values should be
 // type-casted to Int64() (otherwise the integer mapped value will be converted)
 // - any supplied TObject instance will be written as their class name
+// - see FormatSql() and FormatJson() from mormot.core.json for ? placeholders
 function FormatUtf8(const Format: RawUtf8; const Args: array of const): RawUtf8; overload;
 
 /// fast Format() function replacement, optimized for RawUtf8
@@ -1652,6 +1673,9 @@ procedure Append(var Text: RawByteString; const Added: RawByteString); overload;
 /// append one text buffer to a RawByteString variable with no code page conversion
 procedure Append(var Text: RawByteString; Added: pointer; AddedLen: PtrInt); overload;
 
+/// prepend some text to a RawByteString variable with no code page conversion
+procedure Prepend(var Text: RawByteString; const Added: RawByteString); overload;
+
 /// prepend some text items at the beginning of a RawUtf8 variable
 procedure Prepend(var Text: RawUtf8; const Args: array of const); overload;
 
@@ -1684,6 +1708,10 @@ function StringToConsole(const S: string): RawByteString;
 
 /// write some text to the console using a given color
 procedure ConsoleWrite(const Fmt: RawUtf8; const Args: array of const;
+  Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false); overload;
+
+/// write some text to the console using a given color
+procedure ConsoleWrite(const Args: array of const;
   Color: TConsoleColor = ccLightGray; NoLineFeed: boolean = false); overload;
 
 /// could be used in the main program block of a console application to
@@ -2360,7 +2388,8 @@ begin
           (S^ <> Sep) do
       inc(S);
     E := S;
-    while (E > P) and (E[-1] in [#1..' ']) do
+    while (E > P) and
+          (E[-1] in [#1..' ']) do
       dec(E); // trim right
     FastSetString(result, P, E - P);
     if S^ <> #0 then
@@ -2481,7 +2510,8 @@ begin
     PCardinal(D)^ := 0 // Dest='' with trailing #0
   else
   begin
-    while (S^ <= ' ') and (S^ <> #0) do
+    while (S^ <= ' ') and
+          (S^ <> #0) do
       inc(S);
     len := 0;
     repeat
@@ -2520,17 +2550,20 @@ begin
   FillCharFast(Bin^, BinBytes, 0);
   if P = nil then
     exit;
-  while (P^ <= ' ') and (P^ <> #0) do
+  while (P^ <= ' ') and
+        (P^ <> #0) do
     inc(P);
   S := P;
   if Sep = #0 then
     while S^ > ' ' do
       inc(S)
   else
-    while (S^ <> #0) and (S^ <> Sep) do
+    while (S^ <> #0) and
+          (S^ <> Sep) do
       inc(S);
   len := S - P;
-  while (P[len - 1] in [#1..' ']) and (len > 0) do
+  while (P[len - 1] in [#1..' ']) and
+        (len > 0) do
     dec(len); // trim right spaces
   if len <> BinBytes * 2 then
     exit;
@@ -2578,7 +2611,8 @@ begin
     until false;
   end;
   if Sep <> #0 then
-    while (P^ <> #0) and (P^ <> Sep) do
+    while (P^ <> #0) and
+          (P^ <> Sep) do
       inc(P); // go to end of CSV item (ignore any decimal)
   if P^ = #0 then
     P := nil
@@ -2702,7 +2736,8 @@ begin
     if GetBitPtr(@Bits, i) then
     begin
       j := i;
-      while (j + 1 < BitsCount) and GetBitPtr(@Bits, j + 1) do
+      while (j + 1 < BitsCount) and
+            GetBitPtr(@Bits, j + 1) do
         inc(j);
       result := result + UInt32ToUtf8(i + 1);
       if j = i then
@@ -2743,7 +2778,8 @@ begin
       inc(P);
     until false;
   end;
-  while (P^ <> #0) and (P^ <> Sep) do // go to end of CSV item (ignore any decimal)
+  while (P^ <> #0) and
+        (P^ <> Sep) do // go to end of CSV item (ignore any decimal)
     inc(P);
   if P^ = #0 then
     P := nil
@@ -2963,7 +2999,8 @@ var
   n: integer;
 begin
   n := length(List);
-  while (Csv <> nil) and (Csv^ <> #0) do
+  while (Csv <> nil) and
+        (Csv^ <> #0) do
   begin
     if TrimItems then
       GetNextItemTrimed(Csv, Sep, s)
@@ -3086,7 +3123,7 @@ begin
   len := seplen * HighValues;
   for i := 0 to HighValues do
     inc(len, length(Values[i]));
-  FastSetString(result, nil, len);
+  FastSetString(result, nil, len); // allocate the result buffer as once
   P := pointer(result);
   i := 0;
   repeat
@@ -3097,7 +3134,7 @@ begin
       inc(P, L);
     end;
     if i = HighValues then
-      Break;
+      break;
     if seplen > 0 then
     begin
       MoveFast(pointer(Sep)^, P^, seplen);
@@ -3125,7 +3162,8 @@ var
   n: integer;
 begin
   n := length(List);
-  while (Csv <> nil) and (Csv^ <> #0) do
+  while (Csv <> nil) and
+        (Csv^ <> #0) do
     AddInteger(List, n, GetNextItemInteger(Csv, Sep));
   if List <> nil then
     DynArrayFakeLength(List, n);
@@ -3137,7 +3175,8 @@ var
   n: integer;
 begin
   n := length(List);
-  while (Csv <> nil) and (Csv^ <> #0) do
+  while (Csv <> nil) and
+        (Csv^ <> #0) do
     AddInt64(List, n, GetNextItemInt64(Csv, Sep));
   if List <> nil then
     DynArrayFakeLength(List, n);
@@ -3148,7 +3187,8 @@ var
   n: integer;
 begin
   n := 0;
-  while (Csv <> nil) and (Csv^ <> #0) do
+  while (Csv <> nil) and
+        (Csv^ <> #0) do
     AddInt64(result, n, GetNextItemInt64(Csv, Sep));
   if result <> nil then
     DynArrayFakeLength(result, n);
@@ -4465,7 +4505,8 @@ var
 begin
   L := length(Text^);
   P := @Text^[1];
-  while (L > 0) and (P^ in ['a'..'z']) do
+  while (L > 0) and
+        (P^ in ['a'..'z']) do
   begin
     inc(P);
     dec(L);
@@ -4512,6 +4553,14 @@ begin
   if B >= BEnd then
     FlushToStream;
   PWord(B + 1)^ := TwoDigitsHexWB[Value];
+  inc(B, 2);
+end;
+
+procedure TTextWriter.AddByteToHexLower(Value: PtrUInt);
+begin
+  if B >= BEnd then
+    FlushToStream;
+  PWord(B + 1)^ := TwoDigitsHexWBLower[Value];
   inc(B, 2);
 end;
 
@@ -5087,6 +5136,18 @@ begin
     end;
 end;
 
+function ObjectToJsonDebug(Value: TObject;
+  Options: TTextWriterWriteObjectOptions): RawUtf8;
+begin
+  // our JSON serialization detects and serialize Exception.Message
+  result := ObjectToJson(Value, Options);
+end;
+
+procedure ConsoleObject(Value: TObject; Options: TTextWriterWriteObjectOptions);
+begin
+  ConsoleWrite(ObjectToJson(Value, Options));
+end;
+
 function EscapeHexBuffer(src, dest: PUtf8Char; srclen: integer;
   const toescape: TSynAnsicharSet; escape: AnsiChar): PUtf8Char;
 begin
@@ -5400,7 +5461,8 @@ begin
   result := 0;
   if P = nil then
     exit;
-  while (P^ <= ' ') and (P^ <> #0) do
+  while (P^ <= ' ') and
+        (P^ <> #0) do
     inc(P);
   if P^ = '-' then
   begin
@@ -5651,7 +5713,8 @@ begin
           if c = '9' then
           begin
             S[prec] := '0';
-            if ((prec = 2) and (S[1] = '-')) or
+            if ((prec = 2) and
+                (S[1] = '-')) or
                (prec = 1) then
             begin
               i := result;
@@ -5666,7 +5729,8 @@ begin
               break;
             end;
           end
-          else if (c >= '0') and (c <= '8') then
+          else if (c >= '0') and
+                  (c <= '8') then
           begin
             inc(S[prec]);
             break;
@@ -7258,13 +7322,15 @@ begin
   aValue := 0;
   result := false;
   if (aIP = nil) or
-     (IdemPChar(aIP, '127.0.0.1') and (aIP[9] = #0)) then
+     (IdemPChar(aIP, '127.0.0.1') and
+      (aIP[9] = #0)) then
     exit;
   for i := 0 to 3 do
   begin
     c := GetNextItemCardinal(aIP, '.');
     if (c > 255) or
-       ((aIP = nil) and (i < 3)) then
+       ((aIP = nil) and
+        (i < 3)) then
       exit;
     b[i] := c;
   end;
@@ -7835,7 +7901,11 @@ end;
 
 type
   // 3KB info on stack - only supported token is %, with any const arguments
+  {$ifdef USERECORDWITHMETHODS}
+  TFormatUtf8 = record
+  {$else}
   TFormatUtf8 = object
+  {$endif USERECORDWITHMETHODS}
   public
     last: PTempUtf8;
     L, argN: PtrInt;
@@ -8273,6 +8343,25 @@ begin
   {%H-}f.DoPrepend(Text, @Args[0], length(Args));
 end;
 
+procedure Prepend(var Text: RawByteString; const Added: RawByteString);
+var
+  t, a: PtrInt;
+  new: PAnsiChar;
+begin
+  t := length(Text);
+  a := length(Added);
+  if a <> 0 then
+    if t = 0 then
+      Text := Added
+    else
+    begin
+      new := FastNewString(t + a, CP_RAWBYTESTRING);
+      MoveFast(PByteArray(Text)[0], new[a], t);
+      MoveFast(PByteArray(Added)[0], new[0], a);
+      FastAssignNew(Text, new);
+    end;
+end;
+
 procedure Prepend(var Text: RawByteString; const Args: array of const);
 var
   f: TFormatUtf8;
@@ -8339,27 +8428,31 @@ begin
   ConsoleWrite(tmp, Color, NoLineFeed);
 end;
 
-{$I-}
+procedure ConsoleWrite(const Args: array of const;
+  Color: TConsoleColor; NoLineFeed: boolean);
+var
+  tmp: RawUtf8;
+begin
+  Append(tmp, Args);
+  ConsoleWrite(tmp, Color, NoLineFeed);
+end;
 
 procedure ConsoleShowFatalException(E: Exception; WaitForEnterKey: boolean);
 begin
-  ConsoleWrite(#13#10'Fatal exception ', cclightRed, true);
+  ConsoleWrite(#13#10'Fatal exception ', ccLightRed, true);
   ConsoleWrite('%', [E.ClassType], ccWhite, true);
   ConsoleWrite(' raised with message ', ccLightRed);
   ConsoleWrite('  %', [E.Message], ccLightMagenta);
   TextColor(ccLightGray);
   if WaitForEnterKey then
   begin
-    writeln(#13#10'Program will now abort');
+    ConsoleWrite(#13#10'Program will now abort');
     {$ifndef OSPOSIX}
-    writeln('Press [Enter] to quit');
+    ConsoleWrite('Press [Enter] to quit');
     ConsoleWaitForEnterKey;
     {$endif OSPOSIX}
   end;
-  ioresult;
 end;
-
-{$I+}
 
 
 { ************ Resource and Time Functions }

@@ -622,6 +622,7 @@ type
     fIncludeUserNameInFileName: boolean;
     fHighResolutionTimestamp: boolean;
     fLocalTimestamp: boolean;
+    fZonedTimestamp: boolean;
     fWithUnitName: boolean;
     fWithInstancePointer: boolean;
     fNoFile: boolean;
@@ -860,6 +861,10 @@ type
     // - you may set this property to TRUE to store local time instead
     property LocalTimestamp: boolean
       read fLocalTimestamp write fLocalTimestamp;
+    /// by default, UTC values have no time zone
+    // - you may set this property to TRUE to append a Z after the timestamp
+    property ZonedTimestamp: boolean
+      read fZonedTimestamp write fZonedTimestamp;
     /// if TRUE, will log the unit name with an object instance if available
     // - unit name is available from RTTI if the class has published properties
     // - set to TRUE by default, for better debugging experience
@@ -1314,6 +1319,11 @@ type
 
   TSynLogDynArray = array of TSynLog;
 
+{$ifdef NOPATCHVMT}
+var
+  LastFamily: TSynLogFamily; // very likely to be a single class involved
+{$endif NOPATCHVMT}
+
 {$ifndef PUREMORMOT2}
 const
   ptIdentifiedInOnFile = ptIdentifiedInOneFile;
@@ -1516,24 +1526,24 @@ type
   protected
     /// map the events occurring in the .log file content
     fLevels: TSynLogInfoDynArray;
+    fLineLevelOffset: byte;
+    fLineTextOffset: byte;
+    fLineHeaderCountToIgnore: byte;
+    fThreadInfoMax: cardinal;
+    fThreadsCount: integer;
+    fThreadMax: cardinal;
     fThreads: TWordDynArray;
     fThreadInfo: array of record
       Rows: cardinal;
       SetThreadName: TPUtf8CharDynArray;
     end;
-    fThreadInfoMax: cardinal;
-    fThreadsCount: integer;
-    fThreadMax: cardinal;
-    fLineLevelOffset: cardinal;
-    fLineTextOffset: cardinal;
-    fLineHeaderCountToIgnore: integer;
     /// as extracted from the .log header
     fExeName, fExeVersion, fInstanceName: RawUtf8;
     fHost, fUser, fCPU, fOSDetailed, fFramework: RawUtf8;
     fExeDate: TDateTime;
     fOS: TWindowsVersion;
-    fOSServicePack: integer;
     fWow64: boolean;
+    fOSServicePack: integer;
     fStartDateTime: TDateTime;
     fDayCurrent: Int64; // as PInt64('20160607')^
     fDayChangeIndex: TIntegerDynArray;
@@ -2952,14 +2962,18 @@ var
   end;
 
 var
-  i, j: PtrInt;
+  i, j, l: PtrInt;
   mapcontent: RawUtf8;
 begin
-  fSymbols.Capacity := 8000;
   mapcontent := StringFromFile(fDebugFile);
-  // parse .map/.dbg sections into fSymbol[] and fUnit[]
   P := pointer(mapcontent);
-  PEnd := P + length(mapcontent);
+  l := length(mapcontent);
+  if (P = nil) or
+     (StrLen(P) <> l) then
+    exit; // this is no .map file for sure
+  PEnd := P + l;
+  // parse .map/.dbg sections into fSymbol[] and fUnit[]
+  fSymbols.Capacity := 8000;
   while P < PEnd do
     if MatchPattern(P, PEnd, 'DETAILED MAP OF SEGMENTS', P) then
       ReadSegments
@@ -3107,7 +3121,7 @@ begin
   else
     // supplied e.g. 'exec.map', 'exec.dbg' or even plain 'exec'/'exec.exe'
     fDebugFile := aExeName;
-  MabFile := ChangeFileExt(fDebugFile, '.mab');
+  MabFile := ChangeFileExt(ExpandFileName(fDebugFile), '.mab');
   if not FileExists(MabFile) then
     if not IsDirectoryWritable(ExtractFilePath(MabFile)) then
       // read/only exe folder -> store .mab in local non roaming user folder
@@ -3900,10 +3914,11 @@ end;
 
 function TSynLogFamily.GetSynLogClassName: string;
 begin
-  if self = nil then
+  if (self = nil) or
+     (fSynLogClass = nil) then
     result := ''
   else
-    result := ClassName;
+    result := fSynLogClass.ClassName;
 end;
 
 constructor TSynLogFamily.Create(aSynLog: TSynLogClass);
@@ -3998,12 +4013,12 @@ begin
       try
         if ArchiveAfterDays < 0 then
           ArchiveAfterDays := 0;
-        oldTime := Now - ArchiveAfterDays;
+        oldTime := NowUtc - ArchiveAfterDays;
         repeat
           if (SR.Name[1] = '.') or
              (faDirectory and SR.Attr <> 0) then
             continue;
-          aTime := SearchRecToDateTime(SR);
+          aTime := SearchRecToDateTimeUtc(SR);
           if (aTime = 0) or
              (aTime > oldTime) then
             continue;
@@ -4208,58 +4223,85 @@ end;
 class function TSynLog.Family: TSynLogFamily;
 begin
   result := pointer(Self);
+  if result = nil then
+    exit;
+  // inlined Rtti.Find(ClassType)
+  {$ifdef NOPATCHVMT}
+  result := LastFamily;
+  if (result <> nil) and
+     (result.SynLogClass = self) then
+    exit;
+  result := pointer(Rtti.FindType(PPointer(PAnsiChar(self) + vmtTypeInfo)^));
+  {$else}
+  result := PPointer(PAnsiChar(result) + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
   if result <> nil then
-  begin
-    // inlined Rtti.Find(ClassType)
-    result := PPointer(PAnsiChar(result) + vmtAutoTable)^;
-    if result <> nil then
-      // we know TRttiCustom is in the slot, and PrivateSlot as TSynLogFamily
-      result := TRttiCustom(pointer(result)).PrivateSlot;
-    if result = nil then
-      // register the TSynLogFamily to the TRttiCustom.PrivateSlot field
-      result := FamilyCreate;
-  end;
+    // we know TRttiCustom is in the slot, and PrivateSlot as TSynLogFamily
+    result := TRttiCustom(pointer(result)).PrivateSlot;
+  if result = nil then
+    // register the TSynLogFamily to the TRttiCustom.PrivateSlot field
+    result := FamilyCreate
+  {$ifdef NOPATCHVMT}
+  else
+    LastFamily := result;
+  {$endif NOPATCHVMT}
 end;
 
 class function TSynLog.Add: TSynLog;
 var
-  P: pointer;
+  lf: TSynLogFamily;
 begin
-  // inlined TSynLog.Family with direct fGlobalLog check
-  result := pointer(Self);
-  if result <> nil then
+  // inlined TSynLog.Family with direct fGlobalLog check and no FamilyCreate
+  result := nil;
+  if self = nil then
+    exit;
+  {$ifdef NOPATCHVMT}
+  lf := LastFamily;
+  if (lf = nil) or
+     (lf.SynLogClass <> self) then
   begin
-    P := PPointer(PAnsiChar(result) + vmtAutoTable)^;
-    if P <> nil then
-    begin
-      // we know TRttiCustom is in the slot, and Private is TSynLogFamily
-      P := TRttiCustom(P).PrivateSlot;
-      result := TSynLogFamily(P).fGlobalLog;
-      // <>nil for ptMergedInOneFile and ptIdentifiedInOneFile (most common case)
-      if result = nil then
-        result := TSynLogFamily(P).SynLog; // ptOneFilePerThread or at startup
-    end
-    else
-      result := nil; // TSynLog.Family/FamilyCreate should have been called
+    lf := pointer(Rtti.FindType(PPointer(PAnsiChar(self) + vmtTypeInfo)^));
+  {$else}
+  begin
+    lf := PPointer(PAnsiChar(self) + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
+    if lf = nil then
+      exit;
+    // we know TRttiCustom is in the slot, and Private is TSynLogFamily
+    lf := TRttiCustom(pointer(lf)).PrivateSlot;
+    if lf = nil then
+      exit; // FamilyCreate should have been called
+    {$ifdef NOPATCHVMT}
+    LastFamily := lf;
+    {$endif NOPATCHVMT}
   end;
+  // if we reached here, lf points to the expected TSynLogFamily
+  result := lf.fGlobalLog;
+  // <>nil for ptMergedInOneFile and ptIdentifiedInOneFile (most common case)
+  if result = nil then
+    result := lf.SynLog; // ptOneFilePerThread or at startup
 end;
 
 class function TSynLog.FamilyCreate: TSynLogFamily;
 var
   rtticustom: TRttiCustom;
+  {$ifndef NOPATCHVMT}
   vmt: TObject;
+  {$endif NOPATCHVMT}
 begin
   // private sub function called from inlined TSynLog.Family / TSynLog.Add
   if (self <> nil) and
      InheritsFrom(TSynLog) then // paranoid
   begin
     rtticustom := Rtti.RegisterClass(self);
+    {$ifndef NOPATCHVMT}
     vmt := PPointer(PAnsiChar(self) + vmtAutoTable)^;
     if (rtticustom = nil) or
        (vmt <> rtticustom) then
       // TSynLog.Family / TSynLog.Add expect TRttiCustom in the first slot
       raise ESynLogException.CreateUtf8(
         '%.FamilyCreate: vmtAutoTable=% not %', [self, vmt, rtticustom]);
+    {$endif NOPATCHVMT}
     Rtti.RegisterSafe.Lock;
     try
       result := rtticustom.PrivateSlot;
@@ -4269,7 +4311,7 @@ begin
           exit
         else
           raise ESynLogException.CreateUtf8( // paranoid
-            '%.FamilyCreate: vmtAutoTable=%', [self, result]);
+            '%.FamilyCreate: PrivateSlot=%', [self, result]);
       // create the TSynLogFamily instance associated with this TSynLog class
       result := TSynLogFamily.Create(self); // stored in SynLogFamily[]
       rtticustom.PrivateSlot := result; // will be owned by this TRttiCustom
@@ -5323,7 +5365,11 @@ begin
     fWriter.AddBinToHexDisplay(@fCurrentTimestamp, SizeOf(fCurrentTimestamp));
   end
   else
+  begin
     fWriter.AddCurrentLogTime(fFamily.LocalTimestamp);
+    if fFamily.ZonedTimestamp then
+      fWriter.Add('Z');
+  end;
 end;
 
 procedure TSynLog.LogHeader(Level: TSynLogInfo);
@@ -5456,7 +5502,7 @@ end;
 procedure TSynLog.LogInternalText(Level: TSynLogInfo; const Text: RawUtf8;
   Instance: TObject; TextTruncateAtLength: integer);
 var
-  lasterror: cardinal;
+  lasterror, textlen: integer;
 begin
   if Level = sllLastError then
     lasterror := GetLastError
@@ -5481,11 +5527,13 @@ begin
       if Instance <> nil then
         fWriter.AddInstancePointer(Instance, ' ', fFamily.WithUnitName,
           fFamily.WithInstancePointer);
-      if length(Text) > TextTruncateAtLength then
+      textlen := length(Text);
+      if textlen > TextTruncateAtLength then
       begin
-        fWriter.AddOnSameLine(pointer(Text), TextTruncateAtLength);
+        fWriter.AddOnSameLine(pointer(Text),
+          Utf8TruncatedLength(pointer(Text), textlen, TextTruncateAtLength));
         fWriter.AddShort('... (truncated) length=');
-        fWriter.AddU(length(Text));
+        fWriter.AddU(textlen);
       end
       else
         fWriter.AddOnSameLine(pointer(Text));
@@ -6645,7 +6693,7 @@ begin
           mormot.core.text.HexToBin(pointer(feat), @fArm32CPU, SizeOf(fArm32CPU));
         '+': // AARCH64 marker
           mormot.core.text.HexToBin(pointer(feat), @fArm64CPU, SizeOf(fArm64CPU));
-      else
+      else // old/smaller TIntelCpuFeatures members will be left filled with 0
         mormot.core.text.HexToBin(pointer(feat), @fIntelCPU, SizeOf(fIntelCPU));
       end;
     fWow64 := aWow64 = '1';
@@ -6676,7 +6724,9 @@ begin
       fFreqPerDay := fFreq * SecsPerDay;
     P := pointer(fOSDetailed);
     fOS := TWindowsVersion(GetNextItemCardinal(P, '.'));
-    if fOS <> wUnknown then
+    if fOS > high(fOs) then
+     fOS := wUnknown
+    else if fOS <> wUnknown then
       fOSServicePack := GetNextItemCardinal(P);
     P := fLines[fHeaderLinesCount - 2]; // TSqlLog 1.18.2765 ERTL FTS3 2016-07-17T22:38:03
     i := LineSize(fHeaderLinesCount - 2) - 19; // length('2016-07-17T22:38:03')=19
@@ -6967,8 +7017,10 @@ begin
       exit; // definitively does not sound like a .log content
     if LineBeg[8] = ' ' then
     begin
-      // YYYYMMDD HHMMSS is one char bigger than Timestamp
+      // YYYYMMDD HHMMSSXX[Z] is one/two chars bigger than Timestamp
       fLineLevelOffset := 19;
+      if LineBeg[fLineLevelOffset] = 'Z' then
+        inc(fLineLevelOffset); // did have TSynLogFamily.ZonedTimestamp
       fDayCurrent := PInt64(LineBeg)^;
       AddInteger(fDayChangeIndex, fCount - 1);
     end

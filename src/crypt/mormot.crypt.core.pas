@@ -277,6 +277,36 @@ function _lshift(var Output: THash256Rec; const Input: THash256Rec; Shift: integ
 function _numbits256(const V: THash256Rec): integer;
   {$ifdef FPC}inline;{$endif}
 
+{$ifdef CPUINTEL} { x86_64/i386 asm sub-routines for mormot.crypt.rsa }
+
+/// add of two TBigInt 512/1024-bit buffers - as used by mormot.crypt.rsa
+function _xasmadd(Value, Adds: pointer; Carry: PtrUInt): PtrUInt;
+
+/// sub of two TBigInt 512/1024-bit buffers - as used by mormot.crypt.rsa
+function _xasmsub(Value, Subs: pointer; Carry: PtrUInt): PtrUInt;
+
+/// mul-by-integer of a TBigInt 256/512-bit buffer - as used by mormot.crypt.rsa
+function _xasmmul(Src, Dst: pointer; Factor, Carry: PtrUInt): PtrUInt;
+
+/// mul-and-add of a TBigInt 256/512-bit buffer - as used by mormot.crypt.rsa
+function _xasmmuladd(Src, Dst: pointer; Factor, Carry: PtrUInt): PtrUInt;
+
+/// div-by-integer of a TBigInt 512/1024-bit buffer - as used by mormot.crypt.rsa
+function _xasmdiv(Value: pointer; Factor, Carry: PtrUInt): PtrUInt;
+
+/// mod-by-integer of a TBigInt 512/1024-bit buffer - as used by mormot.crypt.rsa
+function _xasmmod(Value: pointer; Factor, Carry: PtrUInt): PtrUInt;
+
+const
+  _xasmaddn    = SizeOf(pointer) * 16; // 512/1024 bits per call
+  _xasmsubn    = SizeOf(pointer) * 16; // 512/1024 bits per call
+  _xasmmuln    = SizeOf(pointer) * 8;  // 256/512  bits per call
+  _xasmmuladdn = SizeOf(pointer) * 8;  // 256/512  bits per call
+  _xasmdivn    = SizeOf(pointer) * 16; // 512/1024 bits per call
+  _xasmmodn    = SizeOf(pointer) * 16; // 512/1024 bits per call
+
+{$endif CPUINTEL}
+
 
 { *************** AES Encoding/Decoding with optimized asm and AES-NI support }
 
@@ -310,7 +340,11 @@ type
   // - this class will use AES-NI hardware instructions, if available
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance
+  {$ifdef USERECORDWITHMETHODS}
+  TAes = record
+  {$else}
   TAes = object
+  {$endif USERECORDWITHMETHODS}
   private
     Context: packed array[1..AES_CONTEXT_SIZE] of byte;
   public
@@ -386,7 +420,11 @@ type
   // - implements standard AEAD (authenticated-encryption with associated-data)
   // algorithm, as defined by NIST Special Publication 800-38D
   // - will use AES-NI and CLMUL Intel/AMD opcodes if available on x86_64/i386
+  {$ifdef USERECORDWITHMETHODS}
+  TAesGcmEngine = record
+  {$else}
   TAesGcmEngine = object
+  {$endif USERECORDWITHMETHODS}
   private
     /// standard AES encryption context
     aes: TAes;
@@ -1556,6 +1594,9 @@ type
     /// returns an hexa-encoded binary buffer filled with some pseudorandom data
     // - this method is thread-safe, and its AES process is non blocking
     function FillRandomHex(Len: integer): RawUtf8;
+    /// xor a binary buffer with some pseudorandom data
+    // - call FillRandom then xor the supplied buffer content
+    procedure XorRandom(Buffer: pointer; Len: integer);
     /// returns a 32-bit unsigned random number
     // - is twice slower than Lecuyer's Random32 of mormot.core.base unit, but
     // is cryptographic secure
@@ -1843,7 +1884,7 @@ const
   SHA_CONTEXT_SIZE = 108;
 
   /// hide TSha3Context complex code by storing the Keccak/SHA-3 Sponge as buffer
-  SHA3_CONTEXT_SIZE = 412;
+  SHA3_CONTEXT_SIZE = 410;
 
 type
   /// 256-bit (32 bytes) memory block for SHA-256 hash digest storage
@@ -1863,7 +1904,11 @@ type
   // thread-safe reuse of one initialized instance, e.g. for THmacSha256
   // - see TSynHasher if you expect to support more than one algorithm at runtime
   // - can use several asm versions with HW opcodes support on x86_64 and aarch64
+  {$ifdef USERECORDWITHMETHODS}
+  TSha256 = record
+  {$else}
   TSha256 = object
+  {$endif USERECORDWITHMETHODS}
   private
     Context: packed array[1..SHA_CONTEXT_SIZE] of byte;
   public
@@ -1910,7 +1955,11 @@ type
   end;
 
   /// abstract parent for implementing SHA-384, SHA-512/256 and SHA-512 hashing
+  {$ifdef USERECORDWITHMETHODS}
+  TSha384512 = record
+  {$else}
   TSha384512 = object
+  {$endif USERECORDWITHMETHODS}
   private
     Index: PtrUInt;
     MLen: QWord;
@@ -1920,10 +1969,7 @@ type
     procedure FinalStep;
   public
     /// update the SHA-384 / SHA-512/256 /  SHA-512 context with some data
-    procedure Update(Buffer: pointer; Len: integer); overload;
-    /// update the SHA-384 / SHA-512/256 / SHA-512 context with some data
-    procedure Update(const Buffer: RawByteString); overload;
-      {$ifdef HASINLINE} inline; {$endif}
+    procedure Update(Buffer: pointer; Len: integer);
   end;
 
   /// implements SHA-384 hashing
@@ -1931,10 +1977,22 @@ type
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. for THmacSha384
   // - see TSynHasher if you expect to support more than one algorithm at runtime
-  TSha384 = object(TSha384512)
+  {$ifdef USERECORDWITHMETHODS}
+  TSha384 = record
+  {$else}
+  TSha384 = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    Engine: TSha384512;
   public
     /// initialize SHA-384 context for hashing
     procedure Init;
+    /// update the SHA-384 context with some data
+    procedure Update(Buffer: pointer; Len: integer); overload;
+      {$ifdef HASSAFEINLINE} inline; {$endif}
+    /// update the SHA-384 context with some data
+    procedure Update(const Buffer: RawByteString); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// finalize and compute the resulting SHA-384 hash Digest of all data
     // affected to Update() method
     // - will also call Init to reset all internal temporary context, for safety
@@ -1954,10 +2012,22 @@ type
   /// implements SHA-512/256 hashing
   // - it is in fact a TSha512 truncated hash, with other initial hash values
   // - see TSynHasher if you expect to support more than one algorithm at runtime
-  TSha512_256 = object(TSha384512)
+  {$ifdef USERECORDWITHMETHODS}
+  TSha512_256 = record
+  {$else}
+  TSha512_256 = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    Engine: TSha384512;
   public
     /// initialize SHA-512/256 context for hashing
     procedure Init;
+    /// update the SHA-512/256 context with some data
+    procedure Update(Buffer: pointer; Len: integer); overload;
+      {$ifdef HASSAFEINLINE} inline; {$endif}
+    /// update the SHA-512/256 context with some data
+    procedure Update(const Buffer: RawByteString); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// finalize and compute the resulting SHA-512/256 hash Digest of all data
     // affected to Update() method
     // - will also call Init to reset all internal temporary context, for safety
@@ -1986,10 +2056,22 @@ type
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. for THmacSha512
   // - see TSynHasher if you expect to support more than one algorithm at runtime
-  TSha512 = object(TSha384512)
+  {$ifdef USERECORDWITHMETHODS}
+  TSha512 = record
+  {$else}
+  TSha512 = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    Engine: TSha384512;
   public
     /// initialize SHA-512 context for hashing
     procedure Init;
+    /// update the SHA-512 context with some data
+    procedure Update(Buffer: pointer; Len: integer); overload;
+      {$ifdef HASSAFEINLINE} inline; {$endif}
+    /// update the SHA-512 context with some data
+    procedure Update(const Buffer: RawByteString); overload;
+      {$ifdef HASINLINE} inline; {$endif}
     /// finalize and compute the resulting SHA-512 hash Digest of all data
     // affected to Update() method
     // - will also call Init to reset all internal temporary context, for safety
@@ -2029,7 +2111,11 @@ type
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. after InitCypher
   // - see TSynHasher if you expect to support more than one algorithm at runtime
+  {$ifdef USERECORDWITHMETHODS}
+  TSha3 = record
+  {$else}
   TSha3 = object
+  {$endif USERECORDWITHMETHODS}
   private
     Context: packed array[1..SHA3_CONTEXT_SIZE] of byte;
   public
@@ -2165,7 +2251,11 @@ type
   // - see TSynHasher if you expect to support more than one algorithm at runtime
   // - this implementation has optimized x86 and x64 assembly, and a pure-pascal
   // fallback code on other CPUs (and for the MD4 algorithm)
+  {$ifdef USERECORDWITHMETHODS}
+  TMd5 = record
+  {$else}
   TMd5 = object
+  {$endif USERECORDWITHMETHODS}
   private
     in_: TMd5In;
     bytes: array[0..1] of cardinal;
@@ -2206,7 +2296,11 @@ type
   // thread-safe reuse of one initialized instance
   // - you can also restore and backup any previous state of the RC4 encryption
   // by copying the whole TRC4 variable into another (stack-allocated) variable
+  {$ifdef USERECORDWITHMETHODS}
+  TRC4 = record
+  {$else}
   TRC4 = object
+  {$endif USERECORDWITHMETHODS}
   private
     {$ifdef CPUINTEL}
     state: array[byte] of PtrInt; // PtrInt=270MB/s  byte=240MB/s on x86
@@ -2250,7 +2344,11 @@ type
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance, e.g. for THmacSha1
   // - see TSynHasher if you expect to support more than one algorithm at runtime
+  {$ifdef USERECORDWITHMETHODS}
+  TSha1 = record
+  {$else}
   TSha1 = object
+  {$endif USERECORDWITHMETHODS}
   private
     Context: packed array[1..SHA_CONTEXT_SIZE] of byte;
   public
@@ -2303,7 +2401,11 @@ type
   // - you may use HmacSha1() overloaded functions for one-step process
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance via Compute(), e.g. for fast PBKDF2
+  {$ifdef USERECORDWITHMETHODS}
+  THmacSha1 = record
+  {$else}
   THmacSha1 = object
+  {$endif USERECORDWITHMETHODS}
   private
     sha: TSha1;
     step7data: THash512Rec;
@@ -2350,7 +2452,11 @@ type
   // - you may use HmacSha256() overloaded functions for one-step process
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance via Compute(), e.g. for fast PBKDF2
+  {$ifdef USERECORDWITHMETHODS}
+  THmacSha256 = record
+  {$else}
   THmacSha256 = object
+  {$endif USERECORDWITHMETHODS}
   private
     sha: TSha256;
     step7data: THash512Rec;
@@ -2406,7 +2512,11 @@ type
   // - you may use HmacSha384() overloaded functions for one-step process
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance via Compute(), e.g. for fast PBKDF2
+  {$ifdef USERECORDWITHMETHODS}
+  THmacSha384 = record
+  {$else}
   THmacSha384 = object
+  {$endif USERECORDWITHMETHODS}
   private
     sha: TSha384;
     step7data: array[0..31] of cardinal;
@@ -2453,7 +2563,11 @@ type
   // - you may use HmacSha512() overloaded functions for one-step process
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance via Compute(), e.g. for fast PBKDF2
+  {$ifdef USERECORDWITHMETHODS}
+  THmacSha512 = record
+  {$else}
   THmacSha512 = object
+  {$endif USERECORDWITHMETHODS}
   private
     sha: TSha512;
     step7data: array[0..31] of cardinal;
@@ -2526,7 +2640,11 @@ type
   // - you may use HmacCrc32c() overloaded functions for one-step process
   // - we defined a record instead of a class, to allow stack allocation and
   // thread-safe reuse of one initialized instance via Compute()
+  {$ifdef USERECORDWITHMETHODS}
+  THmacCrc32c = record
+  {$else}
   THmacCrc32c = object
+  {$endif USERECORDWITHMETHODS}
   private
     seed: cardinal;
     step7data: THash512Rec;
@@ -2745,7 +2863,11 @@ type
   /// internal header for storing our AES data with salt and CRC
   // - memory size matches an TAesBlock on purpose, for direct encryption
   // - TAesFull uses unsafe direct AES-ECB chain mode, so is considered deprecated
+  {$ifdef USERECORDWITHMETHODS}
+   TAesFullHeader = record
+  {$else}
   TAesFullHeader = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// Len before compression (if any)
     OriginalLen,
@@ -2766,7 +2888,11 @@ type
   // - a TAesFullHeader is encrypted at the begining, allowing fast Key validation,
   // but the resulting stream is not compatible with raw TAes object
   // - will use unsafe direct AES-ECB chain mode, so is considered deprecated
+  {$ifdef USERECORDWITHMETHODS}
+  TAesFull = record
+  {$else}
   TAesFull = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// header, stored at the beginning of struct -> 16-byte aligned
     Head: TAesFullHeader;
@@ -3119,6 +3245,7 @@ const
 begin
   // no need to XOR with P.Hi since P input is from an AES permutation algorithm
   result := (P.Lo and $7fffffffffffffff) * COEFF64;
+  P.Lo := 0;
 end;
 
 function Hash128ToDouble(P: PHash128Rec): double;
@@ -3127,6 +3254,7 @@ const
 begin
   // no need to XOR with P.Lo since P input is from an AES permutation algorithm
   result := (P.Hi and $7fffffffffffffff) * COEFF64;
+  P.Hi := 0;
 end;
 
 function Hash128ToSingle(P: PHash128Rec): single;
@@ -3135,6 +3263,7 @@ const
 begin
   // no need to XOR with P.Hi since P input is from an AES permutation algorithm
   result := (P.Lo and $7fffffffffffffff) * COEFF64;
+  P.Lo := 0;
 end;
 
 function Adler32Pas(Adler: cardinal; p: pointer; Count: integer): cardinal;
@@ -3226,17 +3355,14 @@ begin
   {$endif FPC}
 end;
 
-type
-  THalf = array[byte] of {$ifdef CPU32} word {$else} cardinal {$endif};
-
 // computes Output = Left + Right, returning carry. Can modify in place
 function _add256(out Output: THash256Rec; const Left, Right: THash256Rec): PtrUInt;
 const
   HALFSHIFTADD = SizeOf(pointer) * 4; // 32 or 16
 var
-  l: THalf absolute Left; // branchless operation over half registers
-  r: THalf absolute Right;
-  o: THalf absolute Output;
+  l: THalfUIntArray absolute Left; // branchless operation over half registers
+  r: THalfUIntArray absolute Right;
+  o: THalfUIntArray absolute Output;
 begin
   result := PtrUInt(l[0]) + r[0];
   o[0] := result;
@@ -3312,9 +3438,9 @@ function _sub256(out Output: THash256Rec; const Left, Right: THash256Rec): PtrUI
 const
   HALFSHIFTSUB = SizeOf(pointer) * 8 - 1;  // 63 or 31
 var
-  l: THalf absolute Left; // branchless operation over half registers
-  r: THalf absolute Right;
-  o: THalf absolute Output;
+  l: THalfUIntArray absolute Left; // branchless operation over half registers
+  r: THalfUIntArray absolute Right;
+  o: THalfUIntArray absolute Output;
 begin
   result := PtrUInt(l[0]) - r[0];
   o[0] := result;
@@ -3362,8 +3488,8 @@ procedure _inc64(var Value: THash128Rec; var Added: QWord);
 const
   HALFSHIFTADD = SizeOf(pointer) * 4; // 32 or 16
 var
-  r: THalf absolute Added; // branchless operation over half registers
-  o: THalf absolute Value;
+  r: THalfUIntArray absolute Added; // branchless operation over half registers
+  o: THalfUIntArray absolute Value;
   c: PtrUInt;
 begin
   c := PtrUInt(o[0]) + r[0];
@@ -3390,8 +3516,8 @@ procedure _inc128(var Value: THash256Rec; var Added: THash128Rec);
 const
   HALFSHIFTADD = SizeOf(pointer) * 4; // 32 or 16
 var
-  r: THalf absolute Added; // branchless operation over half registers
-  o: THalf absolute Value;
+  r: THalfUIntArray absolute Added; // branchless operation over half registers
+  o: THalfUIntArray absolute Value;
   c: PtrUInt;
 begin
   c := PtrUInt(o[0]) + r[0];
@@ -5221,7 +5347,7 @@ begin
   end;
   if IVAtBeginning then
   begin
-    TAesPrng.Main.FillRandom(fIV); // cryptographic PRNG as seed for uniqueness
+    RandomBytes(@fIV, SizeOf(fIV)); // Lecuyer is enough for public random
     PAesBlock(Output)^ := fIV;
     inc(PAesBlock(Output));
   end;
@@ -5454,7 +5580,7 @@ begin
   // our non-standard mCfc/mOfc/mCtc modes with 256-bit crc32c
   if Encrypt then
   begin
-    TAesPrng.Main.FillRandom(nonce);
+    RandomBytes(@nonce, SizeOf(nonce)); // Lecuyer is enough for public random
     if not MacSetNonce({encrypt=}true, nonce, Associated) then
       // leave ASAP if this class doesn't support AEAD process
       exit;
@@ -5834,7 +5960,7 @@ begin
   p := pointer(result);
   if IVAtBeginning then
   begin
-    TAesPrng.Main.FillRandom(fIV); // cryptographic PRNG as seed for uniqueness
+    RandomBytes(@fIV, SizeOf(fIV)); // Lecuyer is enough for public random
     p^ := fIV;
     inc(p);
   end;
@@ -5990,8 +6116,8 @@ begin
   FillCharFast(fMac, SizeOf(fMac), 0);
 end;
 
-function TAesAbstractAead.MacSetNonce(DoEncrypt: boolean; const RandomNonce: THash256;
-  const Associated: RawByteString): boolean;
+function TAesAbstractAead.MacSetNonce(DoEncrypt: boolean;
+  const RandomNonce: THash256; const Associated: RawByteString): boolean;
 begin
   // safe seed for plain text crc, before AES encryption
   // from TEcdheProtocol.SetKey, RandomNonce uniqueness will avoid replay attacks
@@ -7366,20 +7492,38 @@ begin
   BinToHexLower(bin, pointer(result), Len);
 end;
 
+procedure TAesPrngAbstract.XorRandom(Buffer: pointer; Len: integer);
+var
+  tmp: array[0 .. 8191] of byte;
+  n, wipe: integer;
+begin
+  wipe := SizeOf(tmp);
+  if wipe > Len then
+    wipe := Len;
+  while Len > 0 do
+  begin
+    n := SizeOf(tmp);
+    if n > Len then
+      n := Len;
+    FillRandom(@tmp, n);
+    XorMemory(Buffer, @tmp, n);
+    dec(Len, n);
+  end;
+  FillCharFast(tmp, wipe, 0); // avoid leaking the secret on the stack
+end;
+
 function TAesPrngAbstract.Random32: cardinal;
 var
   block: THash128Rec;
 begin
   FillRandom(block.b);
   result := block.c0; // no need to XOR with c1, c2, c3 for a permutation algo
+  block.L := 0;
 end;
 
 function TAesPrngAbstract.Random32(max: cardinal): cardinal;
-var
-  block: THash128Rec;
 begin
-  FillRandom(block.b);
-  result := (QWord(block.c0) * max) shr 32; // no need to XOR with block.H
+  result := (QWord(Random32) * max) shr 32;
 end;
 
 function TAesPrngAbstract.Random64: QWord;
@@ -7388,6 +7532,7 @@ var
 begin
   FillRandom(block.b);
   result := block.L; // no need to XOR with block.H
+  block.L := 0;
 end;
 
 function TAesPrngAbstract.RandomExt: TSynExtended;
@@ -7587,9 +7732,12 @@ var
   data: THash512Rec;
   sha3: TSha3;
 begin
+  if Len <= 0 then
+    result := ''
+  else
   try
     // retrieve some initial entropy from OS (but for gesUserOnly)
-    SetLength(fromos, Len);
+    FastSetRawByteString(fromos, nil, Len);
     if Source <> gesUserOnly then
       FillSystemRandom(pointer(fromos), Len, Source = gesSystemOnlyMayBlock);
     if Source in [gesSystemOnly, gesSystemOnlyMayBlock] then
@@ -7750,7 +7898,7 @@ begin
       inc(PAesBlock(Buffer));
       dec(main);
     end;
-    if remain <> 0 then
+    if remain <> 0 then // trailing bytes from one TAesBlock
     begin
       TAesContext(fAes.Context).DoBlock(
         TAesContext(fAes.Context).rk, TAesContext(fAes.Context).iv, {%H-}aes.iv);
@@ -7762,7 +7910,7 @@ begin
     fSafe.UnLock;
     exit;
   end;
-  // big buffers will release the lock before processing
+  // big buffers will update the CTR IV and release the lock before processing
   MoveFast(fAes, aes, SizeOf(aes));
   H := bswap64(aes.iv.H);
   inc(H, main);
@@ -7772,7 +7920,7 @@ begin
     TAesContext(fAes.Context).iv.L := bswap64(bswap64(aes.iv.L) + 1);
   TAesContext(fAes.Context).iv.H := bswap64(H);
   fSafe.UnLock;
-  // unlocked AES computation
+  // unlocked AES-CTR computation
   if main <> 0 then
     {$ifdef USEAESNI64}
     if aesNiSse41 in aes.Flags then
@@ -7792,7 +7940,7 @@ begin
       inc(PAesBlock(Buffer));
       dec(main)
     until main = 0;
-  if remain <> 0 then
+  if remain <> 0 then // trailing bytes from one last TAesBlock
   begin
     aes.DoBlock(aes, aes.iv, aes.iv);
     MoveFast(aes.iv, Buffer^, remain);
@@ -7942,7 +8090,7 @@ begin
       if FileExists(fn) then
         // allow rewrite of an invalid local file
         FileSetHidden(fn, {ReadOnly=}false);
-      TAesPrng.Main.FillRandom(_h.k);
+      TAesPrng.Main.FillRandom(_h.k); // from strong CSPRNG random
       key := TAesPrng.Main.AFSplit(_h.k, SizeOf(_h.k), 126);
       {$ifdef OSWINDOWS}
       // 4KB local file, DPAPI-cyphered but with no DPAPI BLOB layout
@@ -8378,11 +8526,6 @@ begin
   until Len <= 0;
 end;
 
-procedure TSha384512.Update(const Buffer: RawByteString);
-begin
-  Update(pointer(Buffer), length(Buffer));
-end;
-
 procedure TSha384512.FinalStep;
 begin
   Data[Index] := $80;
@@ -8402,23 +8545,33 @@ end;
 
 procedure TSha512_256.Init;
 begin
-  Hash.a := QWord($22312194fc2bf72c);
-  Hash.b := QWord($9f555fa3c84c64c2);
-  Hash.c := QWord($2393b86b6f53b151);
-  Hash.d := QWord($963877195940eabd);
-  Hash.e := QWord($96283ee2a88effe3);
-  Hash.f := QWord($be5e1e2553863992);
-  Hash.g := QWord($2b0199fc2c85b8aa);
-  Hash.h := QWord($0eb72ddc81c52ca2);
-  MLen := 0;
-  Index := 0;
-  FillcharFast(Data, SizeOf(Data), 0);
+  Engine.Hash.a := QWord($22312194fc2bf72c);
+  Engine.Hash.b := QWord($9f555fa3c84c64c2);
+  Engine.Hash.c := QWord($2393b86b6f53b151);
+  Engine.Hash.d := QWord($963877195940eabd);
+  Engine.Hash.e := QWord($96283ee2a88effe3);
+  Engine.Hash.f := QWord($be5e1e2553863992);
+  Engine.Hash.g := QWord($2b0199fc2c85b8aa);
+  Engine.Hash.h := QWord($0eb72ddc81c52ca2);
+  Engine.MLen := 0;
+  Engine.Index := 0;
+  FillcharFast(Engine.Data, SizeOf(Engine.Data), 0);
+end;
+
+procedure TSha512_256.Update(Buffer: pointer; Len: integer);
+begin
+  Engine.Update(Buffer, Len);
+end;
+
+procedure TSha512_256.Update(const Buffer: RawByteString);
+begin
+  Engine.Update(pointer(Buffer), length(Buffer));
 end;
 
 procedure TSha512_256.Final(out Digest: TSha256Digest; NoInit: boolean);
 begin
-  FinalStep;
-  bswap64array(@Hash, @Digest, 4);
+  Engine.FinalStep;
+  bswap64array(@Engine.Hash, @Digest, 4);
   if not NoInit then
     Init;
 end;
@@ -8440,23 +8593,33 @@ end;
 
 procedure TSha384.Init;
 begin
-  Hash.a := QWord($cbbb9d5dc1059ed8);
-  Hash.b := QWord($629a292a367cd507);
-  Hash.c := QWord($9159015a3070dd17);
-  Hash.d := QWord($152fecd8f70e5939);
-  Hash.e := QWord($67332667ffc00b31);
-  Hash.f := QWord($8eb44a8768581511);
-  Hash.g := QWord($db0c2e0d64f98fa7);
-  Hash.h := QWord($47b5481dbefa4fa4);
-  MLen := 0;
-  Index := 0;
-  FillcharFast(Data, SizeOf(Data), 0);
+  Engine.Hash.a := QWord($cbbb9d5dc1059ed8);
+  Engine.Hash.b := QWord($629a292a367cd507);
+  Engine.Hash.c := QWord($9159015a3070dd17);
+  Engine.Hash.d := QWord($152fecd8f70e5939);
+  Engine.Hash.e := QWord($67332667ffc00b31);
+  Engine.Hash.f := QWord($8eb44a8768581511);
+  Engine.Hash.g := QWord($db0c2e0d64f98fa7);
+  Engine.Hash.h := QWord($47b5481dbefa4fa4);
+  Engine.MLen := 0;
+  Engine.Index := 0;
+  FillcharFast(Engine.Data, SizeOf(Engine.Data), 0);
+end;
+
+procedure TSha384.Update(Buffer: pointer; Len: integer);
+begin
+  Engine.Update(Buffer, Len);
+end;
+
+procedure TSha384.Update(const Buffer: RawByteString);
+begin
+  Engine.Update(pointer(Buffer), length(Buffer));
 end;
 
 procedure TSha384.Final(out Digest: TSha384Digest; NoInit: boolean);
 begin
-  FinalStep;
-  bswap64array(@Hash, @Digest, 6);
+  Engine.FinalStep;
+  bswap64array(@Engine.Hash, @Digest, 6);
   if not NoInit then
     Init;
 end;
@@ -8478,23 +8641,33 @@ end;
 
 procedure TSha512.Init;
 begin
-  Hash.a := QWord($6a09e667f3bcc908);
-  Hash.b := QWord($bb67ae8584caa73b);
-  Hash.c := QWord($3c6ef372fe94f82b);
-  Hash.d := QWord($a54ff53a5f1d36f1);
-  Hash.e := QWord($510e527fade682d1);
-  Hash.f := QWord($9b05688c2b3e6c1f);
-  Hash.g := QWord($1f83d9abfb41bd6b);
-  Hash.h := QWord($5be0cd19137e2179);
-  MLen := 0;
-  Index := 0;
-  FillcharFast(Data, SizeOf(Data), 0);
+  Engine.Hash.a := QWord($6a09e667f3bcc908);
+  Engine.Hash.b := QWord($bb67ae8584caa73b);
+  Engine.Hash.c := QWord($3c6ef372fe94f82b);
+  Engine.Hash.d := QWord($a54ff53a5f1d36f1);
+  Engine.Hash.e := QWord($510e527fade682d1);
+  Engine.Hash.f := QWord($9b05688c2b3e6c1f);
+  Engine.Hash.g := QWord($1f83d9abfb41bd6b);
+  Engine.Hash.h := QWord($5be0cd19137e2179);
+  Engine.MLen := 0;
+  Engine.Index := 0;
+  FillcharFast(Engine.Data, SizeOf(Engine.Data), 0);
+end;
+
+procedure TSha512.Update(Buffer: pointer; Len: integer);
+begin
+  Engine.Update(Buffer, Len);
+end;
+
+procedure TSha512.Update(const Buffer: RawByteString);
+begin
+  Engine.Update(pointer(Buffer), length(Buffer));
 end;
 
 procedure TSha512.Final(out Digest: TSha512Digest; NoInit: boolean);
 begin
-  FinalStep;
-  bswap64array(@Hash, @Digest, 8);
+  Engine.FinalStep;
+  bswap64array(@Engine.Hash, @Digest, 8);
   if not NoInit then
     Init;
 end;
@@ -8730,16 +8903,21 @@ end;
 { TSha3Context }
 
 type
+  {$A-}
+  {$ifdef USERECORDWITHMETHODS}
+  TSha3Context = record
+  {$else}
   TSha3Context = object
+  {$endif USERECORDWITHMETHODS}
   public
     State: packed array[0..cKeccakPermutationSizeInQWord - 1] of QWord;
     DataQueue: packed array[0..cKeccakMaximumRateInBytes - 1] of byte;
-    Algo: TSha3Algo;
-    Squeezing: boolean;
     Rate: integer;
     Capacity: integer;
     BitsInQueue: integer;
     BitsAvailableForSqueezing: integer;
+    Algo: TSha3Algo;
+    Squeezing: boolean;
     procedure Init(aAlgo: TSha3Algo);
     procedure AbsorbQueue;
     procedure Absorb(Data: PByteArray; databitlen: integer);
@@ -8750,6 +8928,7 @@ type
       numbits: integer);
   end;
   PSha3Context = ^TSha3Context;
+  {$A+}
 
 const
   SHA3_DEF_LEN: array[TSha3Algo] of integer = (

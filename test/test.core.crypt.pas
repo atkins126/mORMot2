@@ -24,7 +24,9 @@ uses
   mormot.lib.pkcs11,
   mormot.lib.openssl11,
   mormot.crypt.jwt,
-  mormot.crypt.ecc;
+  mormot.crypt.ecc,
+  mormot.crypt.rsa,
+  mormot.crypt.x509;
 
 type
   /// regression tests for mormot.crypt.core and mormot.crypt.jwt features
@@ -54,6 +56,10 @@ type
     procedure _RC4;
     /// 32-bit, 64-bit and 128-bit hashing functions including AesNiHash variants
     procedure Hashes;
+    /// pure pascal RSA tests
+    procedure _RSA;
+    /// X509 Certificates
+    procedure _X509;
     /// stream-oriented cryptography
     procedure Streams;
     /// Base64/Base58/Base32 encoding/decoding functions
@@ -555,7 +561,6 @@ begin
   Prng(TAesPrng, 'mORMot');
   {$ifdef USE_OPENSSL}
   Prng(TAesPrngOsl, 'OpenSSL');
-  AddConsole('       using OpenSSL %', [OpenSslVersionHexa]);
   {$endif USE_OPENSSL}
   // same benchmarks as in Prng()
   timer.Start;
@@ -744,9 +749,40 @@ begin
 end;
 {$endif OSWINDOWS}
 
+const
+  _rsapriv = // from "openssl genrsa -out priv.pem 2048"
+    '-----BEGIN PRIVATE KEY-----'#13#10 +
+    'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC1Dj92HMReUOmP'#13#10 +
+    'vV3AXdO3VLH8I693pjxHiTGBwtuWZ23cEKYYBiA1LbJ/Q5FwYqx77Bgsb4FXyshP'#13#10 +
+    'bNE9ushd8QmaeOWexDrfmf1syl+EUjKv2kTjDnLllQDMlK3Bia53KQUB8Dv/UFao'#13#10 +
+    'P64TfPk+p+eZkcRtg0d4Ea3S8hFJ9BBdfGP7CelpD78ZNhCvk4fKfIlLx6wP12kp'#13#10 +
+    '+wTFzusHHhUfW0LHVIf3JUAwe2zTrvgeOefIXK96hc5qM3WDGfj+I3WV9ZnPOhar'#13#10 +
+    'JW8pZnleK0IP8UR2FuMVtYqJuuS71z8/sc3PuiozHZCSEZr5qx59A2fAW/42ppz2'#13#10 +
+    'tMI/uV17AgMBAAECggEACSI/ClbY2Ic4GSkXndjokYLuIwcBLEXlxu1sDXHxQPer'#13#10 +
+    'yk0etpnh2GebQyH7UtJE2vrl8faYGFU3C2a1HD+cKb0QsSBwjl9eNvczmorlDFhX'#13#10 +
+    'N+7eHcmV+0YBOdDgU8yofANvk2b1Uo57fgEPEkBHlKUaIRxXmUy6TMYw4NzsXrDM'#13#10 +
+    'XyBDL3sGnjiKZ7IX6Wsx32SLyrFsHMYI5QWIb24nGi7/jeq4q8GZf/0gaL7WoSK6'#13#10 +
+    'DDqGI9l2QiK6LThuOsNNaEC9fBndjsh3RW4yWLRsQZ6QDVXhlMxRxG8uuU4bsuYc'#13#10 +
+    'XFoNCAYMIF+iWrAV/0g2GayAe5rzgB+z2DRyWLWlHQKBgQDoklA/vrBx8LxOkDVo'#13#10 +
+    'IOl4Yskx6pRWNa8SIz6JMI387Hy7Uz3abiEBx0KjQPWv9I5fIySPTsHWsuNAdYKs'#13#10 +
+    'v4b3DGS0QUlJRyGuVLx055E7uwcpk1I742t0lFgNZi7AOYT/cUO0jcDwkkRJZ+3k'#13#10 +
+    'xqRhZv+GVJOUbm61byZRuyiApwKBgQDHS2noTFXlr9uHIHHn67ccTbCkjArDfgdu'#13#10 +
+    'fxh2Fphst2ue+cPTc0L9lDND8EPAGZK3ffmcEbkjykF/Dey+3RXXCxELx7VjNPIJ'#13#10 +
+    'STk0+7ysHX7/1ThuTa+vb/xdeHNglQXRTV9K5e1+3ucHuT/oeacyop8/Kzku8Qwr'#13#10 +
+    '1LTx0MwjDQKBgDYjmTq9kSV0/ODtAQG0Z6T2mg9cpBtNc+us+KnG+8ac5oxU3Fk0'#13#10 +
+    'ucpIMGMAhDDppRrQe3pAwy7PhcdDk5/TFf/8ipTLfdvpCxYh85zjKxPUfd5XxRTb'#13#10 +
+    '4+/HeJfl6Ywl16f/HduyA+/8nJjZ8K8I7ssdxu3mUlSDQJJLxYfRIaSRAoGBAJmV'#13#10 +
+    'Q2uykCuup2XuGfnZjEZylKNqDM107TM5HNe8OADoJTbhUgk89S5ILG251exPiOKB'#13#10 +
+    'YX/lpKCxOGI6j+zSogcTzzId2Go4niGL3Vs4eMDHBl0PqypOEgsIKRq7PWb70Pzo'#13#10 +
+    'PHySzsCL9Mzd9SMpxTDfZAuhOrMzLecFR+BmwTptAoGAN3g6MjW6nThBvrWtaQ6j'#13#10 +
+    '2xE7gNaCgu0UVfTnMVmXD1Cbji3zW4+1lhQCGTnwrBhv54t1S1v6ilFCOtsZfLEC'#13#10 +
+    'ZHhnT2RzGDGHrq115yC+T8SwTo7/h5p/2AuO4fXWP6MWXMJcXUGs6MshY5vgH4QY'#13#10 +
+    'BPyNxBYuEhvuYUZ3nJXJZZ0='#13#10 +
+    '-----END PRIVATE KEY-----'#13#10;
+
 procedure TTestCoreCrypto._JWT;
 
-  procedure test(one: TJwtAbstract);
+  procedure test(one: TJwtAbstract; nofree: boolean = false);
   var
     t, sub, iss, hp: RawUtf8;
     jwt: TJwtContent;
@@ -816,7 +852,8 @@ procedure TTestCoreCrypto._JWT;
       one.Verify(t, jwt);
       check(jwt.result <> jwtValid);
     end;
-    one.Free;
+    if not nofree then
+      one.Free;
   end;
 
   procedure Benchmark(J: TJwtAbstract; N: integer = 1000);
@@ -826,6 +863,7 @@ procedure TTestCoreCrypto._JWT;
     jwt: TJwtContent;
     tim: TPrecisionTimer;
   begin
+    J.CacheTimeoutSeconds := 0;
     try
       tok := J.Compute([], 'myself');
       tim.Start;
@@ -846,20 +884,27 @@ procedure TTestCoreCrypto._JWT;
     end;
   end;
 
-{$ifdef USE_OPENSSL}
 const
+  JWT_RSA: array[0..5] of TJwtRsaClass = (
+    TJwtRs256,
+    TJwtRs384,
+    TJwtRs512,
+    TJwtPs256,
+    TJwtPs384,
+    TJwtPs512);
+{$ifdef USE_OPENSSL}
   OSSL_JWT: array[0..10] of TJwtAbstractOslClass = (
-    TJwtRS256Osl,
-    TJwtRS384Osl,
-    TJwtRS512Osl,
-    TJwtPS256Osl,
-    TJwtPS384Osl,
-    TJwtPS512Osl,
-    TJwtES256Osl,
-    TJwtES384Osl,
-    TJwtES512Osl,
-    TJwtES256KOsl,
-    TJwtEdDSAOsl);
+    TJwtRs256Osl,
+    TJwtRs384Osl,
+    TJwtRs512Osl,
+    TJwtPs256Osl,
+    TJwtPs384Osl,
+    TJwtPs512Osl,
+    TJwtEs256Osl,
+    TJwtEs384Osl,
+    TJwtEs512Osl,
+    TJwtEs256KOsl,
+    TJwtEddsaOsl);
 var
   priv, pub: RawUtf8;
 {$endif USE_OPENSSL}
@@ -911,11 +956,11 @@ begin
   for i := 1 to 10 do
   begin
     secret := TEccCertificateSecret.CreateNew(nil); // self-signed certificate
-    test(TJwtES256.Create(secret,
+    test(TJwtEs256.Create(secret,
       [jrcIssuer, jrcExpirationTime], [], 60));
-    test(TJwtES256.Create(secret,
+    test(TJwtEs256.Create(secret,
       [jrcIssuer, jrcExpirationTime, jrcIssuedAt], [], 60));
-    test(TJwtES256.Create(secret,
+    test(TJwtEs256.Create(secret,
       [jrcIssuer, jrcExpirationTime, jrcIssuedAt, jrcJWTID], [], 60));
     secret.Free;
   end;
@@ -924,10 +969,20 @@ begin
       'secret', 0, [jrcIssuer, jrcExpirationTime], []));
   secret := TEccCertificateSecret.CreateNew(nil);
   try
-    Benchmark(TJwtES256.Create(
+    Benchmark(TJwtEs256.Create(
       secret, [jrcIssuer, jrcExpirationTime], [], 60), 100);
   finally
     secret.Free;
+  end;
+  for i := 0 to high(JWT_RSA) do
+  begin
+    j := JWT_RSA[i].Create(_rsapriv, [jrcIssuer, jrcExpirationTime], [], 60);
+    {$ifdef USE_OPENSSL}
+    test(j, {nofree=}false);
+    {$else}
+    test(j, {nofree=}true);
+    Benchmark(j, 100);
+    {$endif USE_OPENSSL}
   end;
   {$ifdef USE_OPENSSL}
   for i := 0 to high(OSSL_JWT) do
@@ -1351,6 +1406,7 @@ var
   unalign: PtrInt;
   exp321, exp322, exp323, exp324: cardinal;
   exp641, exp642: QWord;
+  hasher: TSynHasher;
 begin
   Check(Adler32SelfTest);
   SetLength(buf, HASHESMAX + HASHALIGN);
@@ -1377,6 +1433,30 @@ begin
     if Assigned(AesNiHash128) then
       Check(Hash128Test(P, @AesNiHash128, msg), msg);
   end;
+  // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
+  buf := 'foo';
+  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 3)),
+    '1ac907');
+  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 5)),
+    '1ac9075cd4');
+  buf := 'bar';
+  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 5)),
+    'bc0c655e01');
+  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA1, pointer(buf), length(buf), 50)),
+    'bc0c655e016bc2931d85a2e675181adcef7f581f76df2739da74' +
+    'faac41627be2f7f415c89e983fd0ce80ced9878641cb4876');
+  CheckEqual(BinToHexLower(hasher.Mgf1(hfSHA256, pointer(buf), length(buf), 50)),
+    '382576a7841021cc28fc4c0948753fb8312090cea942ea4c4e73' +
+    '5d10dc724b155f9f6069f289d61daca0cb814502ef04eae1');
+  {$ifdef USE_OPENSSL}
+  CheckEqual(BigNumHexFromDecimal('0'), '');
+  CheckEqual(BigNumHexFromDecimal('1'), '01');
+  CheckEqual(BigNumHexFromDecimal('15'), '0f');
+  CheckEqual(BigNumHexFromDecimal('255'), 'ff');
+  CheckEqual(BigNumHexFromDecimal('65534'), 'fffe');
+  CheckEqual(BigNumHexFromDecimal('65535'), 'ffff');
+  CheckEqual(BigNumHexFromDecimal('12345678901234567890'), 'ab54a98ceb1f0ad2');
+  {$endif USE_OPENSSL}
 end;
 
 procedure TTestCoreCrypto.Streams;
@@ -1600,8 +1680,8 @@ begin
   tmp := RandomString(1 shl 20);
   b32 := BinToBase32(tmp);
   tmp2 := Base32ToBin(b32);
-  CheckEqual(length(tmp2), length(tmp)); // tmp = tmp2 fails on FPC :(
-  Check(CompareMem(pointer(tmp), pointer(tmp2), length(tmp)));
+  CheckEqual(length(tmp2), length(tmp));
+  Check(CompareBuf(tmp, tmp2), 'tmp=tmp2'); // tmp = tmp2 fails on FPC :(
   tmp2 := Zeroed(UnZeroed(tmp));
   {$ifdef FPC}
   SetCodePage(tmp2, StringCodePage(tmp)); // circumvent FPC inconsistency/bug
@@ -2507,7 +2587,7 @@ var
   c32, cprev: cardinal;
   d, dprev: double;
   n, h, nprev, aead, pub, priv, pub2, priv2, jwt, iss, sub, s2, s3: RawUtf8;
-  r, s: RawByteString;
+  r, s, csr: RawByteString;
   aes: TAesAbstract;
   key: THash256;
   rnd: TCryptRandom;
@@ -2528,6 +2608,7 @@ var
   u: TCryptCertUsage;
   namelen: integer;
   names: RawUtf8;
+  timer: TPrecisionTimer;
 
   procedure AddAlgName;
   begin
@@ -2653,6 +2734,7 @@ begin
   for a := 0 to high(alg) do
   begin
     asy := alg[a] as TCryptAsym;
+    AddAlgName;
     Check(mormot.crypt.secure.Asym(asy.AlgoName) = asy);
     asy.GeneratePem(pub, priv, '');
     Check(pub <> '');
@@ -2673,6 +2755,7 @@ begin
   alg := TCryptCertAlgo.Instances;
   for a := 0 to high(alg) do
   begin
+    timer.Start;
     crt := alg[a] as TCryptCertAlgo;
     AddAlgName;
     check(PosEx(UpperCase(CAA_JWT[crt.AsymAlgo]), UpperCase(crt.AlgoName)) > 0);
@@ -2749,8 +2832,8 @@ begin
       CheckEqual(c2.GetIssuerName, c1.GetIssuerName);
       CheckEqual(c2.GetSubjectKey, c1.GetSubjectKey);
       CheckEqual(c2.GetDigest, c1.GetDigest);
-      CheckSame(c2.GetNotAfter, c1.GetNotAfter);
-      CheckSame(c2.GetNotBefore, c1.GetNotBefore);
+      CheckSameTime(c2.GetNotAfter, c1.GetNotAfter);
+      CheckSameTime(c2.GetNotBefore, c1.GetNotBefore);
       Check(c2.IsValidDate);
       CheckEqual(word(c2.GetUsage), word(c1.GetUsage));
       CheckEqual(c2.GetPeerInfo, c1.GetPeerInfo);
@@ -2773,8 +2856,8 @@ begin
       CheckEqual(c3.GetSubject, c1.GetSubject);
       CheckEqual(c3.GetIssuerName, c1.GetIssuerName);
       CheckEqual(c3.GetSubjectKey, c1.GetSubjectKey);
-      CheckSame(c3.GetNotAfter, c1.GetNotAfter);
-      CheckSame(c3.GetNotBefore, c1.GetNotBefore);
+      CheckSameTime(c3.GetNotAfter, c1.GetNotAfter);
+      CheckSameTime(c3.GetNotBefore, c1.GetNotBefore);
       CheckEqual(c3.GetDigest, c1.GetDigest);
       CheckEqual(word(c3.GetUsage), word(c1.GetUsage));
       if fmt = ccfPem then // PKCS12 seems to add some information to X509 :(
@@ -2956,6 +3039,30 @@ begin
       check(cpe.GetUsage(u, c4) = (u in cpe.Usages));
       check((c4 <> nil) = (u in cpe.Usages));
     end;
+    priv := ''; // force generate a new private key
+    csr := crt.CreateSelfSignedCsr('sub1,sub2', '', priv, [cuCA, cuDigitalSignature]);
+    check(csr <> '', 'csr');
+    check(priv <> '', 'priv');
+    c2 := crt.GenerateFromCsr(csr);
+    if not CheckFailed(c2 <> nil, 'gen csr1') then
+    begin
+      if crt.AlgoName <> 'syn-es256-v1' then
+        check(c2.GetUsage = [cuCA, cuDigitalSignature], 'csr usage1');
+      CheckEqual(c2.GetSubject, 'sub1', 'csr sub1');
+      CheckEqual(RawUtf8ArrayToCsv(c2.GetSubjects), 'sub1,sub2', 'csr sub21');
+      check(c2.IsSelfSigned, 'csr self1');
+    end;
+    c2 := crt.GenerateFromCsr(csr, c1);
+    if not CheckFailed(c2 <> nil, 'gen csr2') then
+    begin
+      if crt.AlgoName <> 'syn-es256-v1' then
+        check(c2.GetUsage = [cuCA, cuDigitalSignature], 'csr usage2');
+      CheckEqual(c2.GetSubject, 'sub1', 'csr sub1');
+      CheckEqual(RawUtf8ArrayToCsv(c2.GetSubjects), 'sub1,sub2', 'csr sub22');
+      check(not c2.IsSelfSigned, 'csr self2');
+      CheckEqual(c2.GetAuthorityKey, c1.GetSubjectKey, 'csr auth2');
+    end;
+    //NotifyTestSpeed(Utf8ToString(crt.AlgoName), 1, 0, @timer);
   end;
   // validate Store High-Level Algorithms Factory
   r := RandomAnsi7(100);
@@ -3036,12 +3143,17 @@ begin
       Check(st2.Verify(s, pointer(r), length(r)) = cvInvalidSignature, 's2b');
       inc(r[1]);
       Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2c');
-      // validate CRL
+      // validate CRL on buffers (not OpenSSL)
       Check(st2.Revoke(c3, 0, crrWithdrawn));
       Check(st2.Verify(s, pointer(r), length(r)) = cvRevoked, 's2d');
       Check(st2.Revoke(c3, 0, crrNotRevoked));
       Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2e');
     end;
+    // validate CRL on certificates
+    Check(st2.Revoke(c3, 0, crrWithdrawn));
+    Check(st2.IsRevoked(c3.GetSerial) = crrWithdrawn);
+    Check(st2.IsRevoked(c3) = crrWithdrawn);
+    // note: st2.Save fails with OpenSSL because the CRL is not signed
     // ensure new certs are not recognized by previous stores
     if st3 <> nil then
     begin
@@ -3126,13 +3238,772 @@ begin
     Check(RV(ToULONG(r)) = r);
 end;
 
+const
+  _rsapub = // "openssl rsa -in priv.pem -outform PEM -pubout -out pub.pem"
+    // see _rsapriv defined above (used for TJwtRs* validation)
+    '-----BEGIN PUBLIC KEY-----'#13#10 +
+    'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtQ4/dhzEXlDpj71dwF3T'#13#10 +
+    't1Sx/COvd6Y8R4kxgcLblmdt3BCmGAYgNS2yf0ORcGKse+wYLG+BV8rIT2zRPbrI'#13#10 +
+    'XfEJmnjlnsQ635n9bMpfhFIyr9pE4w5y5ZUAzJStwYmudykFAfA7/1BWqD+uE3z5'#13#10 +
+    'PqfnmZHEbYNHeBGt0vIRSfQQXXxj+wnpaQ+/GTYQr5OHynyJS8esD9dpKfsExc7r'#13#10 +
+    'Bx4VH1tCx1SH9yVAMHts0674HjnnyFyveoXOajN1gxn4/iN1lfWZzzoWqyVvKWZ5'#13#10 +
+    'XitCD/FEdhbjFbWKibrku9c/P7HNz7oqMx2QkhGa+asefQNnwFv+Nqac9rTCP7ld'#13#10 +
+    'ewIDAQAB'#13#10 +
+    '-----END PUBLIC KEY-----'#13#10;
+  // from FPC RTL
+  _modulus =
+    'bb32b4d0d89e9a9e8c79294c2ba8ef5c43d4933b9478ff3054c71bc8e52f1b99cd108d' +
+    '67c8540c075ae4f4067fc7d684b42ccd2d4e4426011aea37beeff4c71507c3164c6b26' +
+    '1909d2ff5910445b8a8981941dfee25f9a5f8a36d8b0e91f6f802254acac29435552d8' +
+    '15be92687b94565118d0a7d5c35a47a8d83cc61d72dc04369daccf152c2e87d7f0fd49' +
+    '7755aeec4aa9db8b291e3567fe9d9520dd798d600a7873dc2875a586df31fb130936a6' +
+    'c3e02d46dc252b76f6adf4c77df868c23bb3335e542adf9baebfdc1019408d04ef6bca' +
+    'eeb5853d2bd38d825fa91b6bbb06fe75e83c26372f31cfdc0e8d378ea5e87433d37f7b' +
+    '0abc7206d1f3b2c56b18b5';
+  _exponent = '010001';
+  _hash = 'a135e3608e956e91743421e0677c03fbe2c7ce0890ff06423b66335e3428ef9a';
+  _signature =
+    '75bdcf54b21fd4f2891eec91d1e9f6d82adeb63bbb1db4e03a389b525e8f5b97669feb' +
+    '2e9c87ef4e785124f5499918771e03e4ff83e31ce0cf4a8276809c35aafbf9b45b7918' +
+    'f5d891d863ca441d5803dfd1c4190640a73ada10dc05c2ef480c449fdd157ab4cd1ade' +
+    '0b067930e07607134ed425be5a0a1f78afd6045ba638e718bfb311b8377c0facded4cd' +
+    '2b1e2692e480be260be355f050ebabf89e24f2833f56f0a74c185225db3b47b63612fb' +
+    '9bdee1e1b8707807093e1551f24527a7631947d033ed7052c439e50b8a46e4d0c06dbc' +
+    '38af1d64b49766a5cf9a82644650ffd733b61942db0bd8d47c8ef24a02dc9fd2ef557b' +
+    '12ded804519f2b2b6c284d';
 
+procedure TTestCoreCrypto._RSA;
+var
+  c: TRsa;
+  i, j, k: integer;
+  rnd: HalfUInt; // truncated to 16-bit or 32-bit value
+  a, b, s, d, e, m, v: PBigInt;
+  cu, pem, txt: RawUtf8;
+  bin, hash, signed, encrypted: RawByteString;
+  pub1, pub2: TRsaPublicKey;
+  pri1, pri2: TRsaPrivateKey;
+  timer: TPrecisionTimer;
+begin
+  c := TRsa.Create;
+  try
+    // validate TBigInt/TRsaContext raw calculation
+    for i := 1 to 100 do
+    begin
+      CheckEqual(c.ActiveCount, 0, 'nomem');
+      rnd := Random32;
+      if rnd = 0 then
+        continue; // avoid division per zero
+      b := c.AllocateFrom(rnd);
+      CheckEqual(b^.Size, 1);
+      CheckEqual(b^.Value[0], rnd);
+      v := c.AllocateFrom(rnd).IntMultiply(57777);
+      d := b^.GreatestCommonDivisor(v);
+      d.Trim;
+      CheckEqual(d^.Size, 1);
+      CheckEqual(d^.Value[0], gcd(rnd, PtrUInt(rnd) * 57777), 'gcd');
+      v.Release;
+      d.Release;
+      cu := b^.ToHexa;
+      txt := b^.ToText;
+      CheckEqual(txt, UInt32ToUtf8(rnd));
+      bin := b^.Save;
+      s := c.LoadPermanent(bin);
+      CheckEqual(txt, s.ToText);
+      s.ResetPermanentAndRelease;
+      CheckEqual(b^.IntMod(rnd), 0);
+      for j := 1 to 10000 do
+        CheckEqual(b^.IntMod(j), rnd mod HalfUInt(j));
+      v := b^.Clone.Substract(c.AllocateFrom(1));
+      Check(v.Compare(b) < 0);
+      CheckEqual(v^.Size, 1);
+      CheckEqual(v^.Value[0], rnd - 1);
+      v := v^.Add(c.AllocateFrom(1));
+      CheckEqual(v.Compare(b), 0);
+      v.Release;
+      CheckEqual(c.ActiveCount, 1);
+      v := c.AllocateFrom(rnd).IntDivide(rnd);
+      CheckEqual(v^.Size, 1);
+      CheckEqual(v^.Value[0], 1);
+      CheckEqual(v^.ToText, '1');
+      CheckEqual(v.Compare(1), 0, 'b/rnd');
+      CheckEqual(c.ActiveCount, 2);
+      v.Release;
+      CheckEqual(c.ActiveCount, 1);
+      v := b^.Clone;
+      CheckEqual(v^.ToText, txt);
+      for j := 1 to 100 do
+      begin
+        v^.IntAdd(j * 3333);
+        Check(v^.Compare(b) > 0);
+      end;
+      for j := 100 downto 1 do
+      begin
+        Check(v^.Compare(b) > 0);
+        v^.IntSub(j * 3333);
+      end;
+      CheckEqual(v^.ToText, txt);
+      Check(v^.Compare(b) = 0);
+      CheckEqual(c.ActiveCount, 2);
+      v.Release;
+      CheckEqual(c.ActiveCount, 1);
+      s := b.Clone;
+      for k := 0 to 10 do
+      begin
+        if k < 9 then // limit up to s^.Size = 512 i.e. 4096 bits on CPU64
+        begin
+          // verify (s * s) / s = s
+          v := s.Clone;
+          CheckEqual(c.ActiveCount, 3);
+          s := s.Multiply(v.Clone);
+          d := s.Divide(v.Clone);
+          CheckEqual(c.ActiveCount, 4);
+          CheckEqual(d.ToHexa, v.ToHexa);
+          CheckEqual(d.Compare(v), 0);
+          d.Release;
+          d := v.Clone;
+          d.Add(c.AllocateFrom(0));
+          CheckEqual(d.Compare(v), 0);
+          d.Release;
+          v.Release;
+        end;
+        for j := 0 to k do
+        begin
+          // b := b shl j to validate high number of bits
+          b^.LeftShift(j);
+          v := b.Clone;
+          Check(v.Compare(b) = 0);
+          CheckEqual(v.BitCount, b.BitCount);
+          Check(v.IsZero = b.IsZero);
+          CheckEqual(c.ActiveCount, 3);
+          // verify (b * rnd) div rnd = s
+          v := v.IntMultiply(rnd);
+          CheckEqual(c.ActiveCount, 3);
+          if rnd > 1 then
+          begin
+            Check(v.Compare(b) > 0);
+            Check(v.BitCount > 0);
+            Check(not v.IsZero);
+          end;
+          v := v.IntDivide(rnd);
+          CheckEqual(v.Compare(b), 0);
+          CheckEqual(v.ToHexa, b.ToHexa);
+          CheckEqual(c.ActiveCount, 3);
+          // verify b * 1 = b
+          v := v.IntMultiply(1);
+          CheckEqual(c.ActiveCount, 3);
+          CheckEqual(v.Compare(b), 0);
+          CheckEqual(v.Compare(0), CompareBI(rnd, 0), 'bi0');
+          if rnd > 1 then
+            CheckEqual(v.Trim.Compare(1), 1, 'bi1');
+          // verify b * 0 = 0
+          v := v.IntMultiply(0);
+          CheckEqual(c.ActiveCount, 3);
+          Check(v.Compare(b) <= 0);
+          CheckEqual(v.Size, 1);
+          CheckEqual(v.Value[0], 0);
+          CheckEqual(v.BitCount, 0);
+          Check(v.IsZero);
+          CheckEqual(v.Compare(0), 0, '0');
+          CheckEqual(v.ToText, '0');
+          CheckEqual(v.ToHexa, '00');
+          v.Trim;
+          CheckEqual(v.Size, 1);
+          v.Release;
+          // verify b / b = 1
+          v := b.Divide(b.Clone);
+          CheckEqual(c.ActiveCount, 3);
+          CheckEqual(v.Compare(1), 0, 'v/v');
+          CheckEqual(v.ToText, '1');
+          CheckEqual(v.ToHexa, '01');
+          v.Release;
+          CheckEqual(c.ActiveCount, 2);
+          // verify b % b = 0
+          v := b.Divide(b.Clone, bidMod);
+          Check(v.IsZero);
+          CheckEqual(v.Compare(0), 0, '0');
+          CheckEqual(v.ToText, '0');
+          CheckEqual(v.ToHexa, '00');
+          v.Release;
+          // verify persistence
+          bin := b.Save;
+          CheckEqual(length(bin), b.Size * HALF_BYTES);
+          v := c.Load(pointer(bin), length(bin));
+          Check(v <> nil);
+          Check(not v.IsZero);
+          CheckEqual(v.Compare(b), 0);
+          v.Release;
+        end;
+        Check(b^.Size > 0); // from 1 to 56 = 448 bits
+        // reverse b := b shr j to return to the initial value of b = rnd
+        for j := 0 to k do
+          b^.RightShift(j);
+        CheckEqual(b^.Compare(rnd), 0);
+        CheckEqual(b^.Size, 1);
+        CheckEqual(b^.Value[0], rnd);
+        CheckEqual(cu, b^.ToHexa);
+        CheckEqual(c.ActiveCount, 2);
+        // validate ShlBits/ShrBits
+        for j := 0 to k do
+        begin
+          b^.ShlBits;
+          CheckEqual(b^.Compare(rnd), 1);
+        end;
+        b^.ShrBits(k + 1);
+        CheckEqual(b^.Compare(rnd), 0);
+        CheckEqual(b^.Size, 1);
+        CheckEqual(b^.Value[0], rnd);
+      end;
+      CheckEqual(b^.Size, 1);
+      Check(not b^.IsZero);
+      b.Release;
+      {$ifdef CPU64} // up to 4096 bits = typical <= 512 bytes
+      CheckUtf8(s^.Size > 200, '%>200', [s^.Size]);
+      {$endif CPU64}
+      Check(not s^.IsZero);
+      s.Release;
+      CheckEqual(c.ActiveCount, 0);
+    end;
+    // validate TBigInt.MatchKnownPrime
+    rnd := 0;
+    for i := 0 to high(BIGINT_PRIMES_DELTA) do
+    begin
+      inc(rnd, BIGINT_PRIMES_DELTA[i]);
+      b := c.AllocateFrom(rnd);
+      Check(b^.MatchKnownPrime(bspFast) = (rnd < 256));
+      Check(b^.MatchKnownPrime(bspMost) = (rnd < 2000));
+      Check(b^.MatchKnownPrime(bspAll));
+      b := b.IntMultiply(high(HalfUInt));
+      Check(b^.MatchKnownPrime(bspFast)); // high(HalfUInt) has stuffed primes
+      Check(b^.MatchKnownPrime(bspAll));
+      b.Release;
+    end;
+    CheckEqual(rnd, 17989, 'last prime');
+    // those values were reproducing an endless loop
+    v := c.AllocateFromHex(
+      '937577A81E8978AC5807A88554DDC172F14F20CEBF7B4BB519A2DCFF132AF1' +
+      'DAA239F7443FDAEEEF49D3D78493E9ECCEE04B7FC095381C0DD9ABCB4D3A12505D');
+    Check(v <> nil);
+    b := c.AllocateFromHex('8B364C36D24EA139');
+    d := v.GreatestCommonDivisor(b);
+    Check(not d.IsZero);
+    CheckEqual(d.Compare(1), 0, 'gcd1');
+    d.Release;
+    d := b.GreatestCommonDivisor(v);
+    Check(not d.IsZero);
+    CheckEqual(d.Compare(1), 0, 'gcd2');
+    d.Release;
+    b.Release;
+    v.Release;
+    // some reference vectors taken from Mbed TLS tests
+    a := c.AllocateFromHex('EFE021C2645FD1DC586E69184AF4A31E' +
+      'D5F53E93B5F123FA41680867BA110131944FE7952E2517337780CB0DB80E61AA' +
+      'E7C8DDC6C5C6AADEB34EB38A2F40D5E6');
+    Check(a <> nil);
+    v := c.AllocateFromHex('0066A198186C18C10B2F5ED9B522752A' +
+      '9830B69916E535C8F047518A889A43A594B6BED27A168D31D4A52F88925AA8F5');
+    v^.SetPermanent;
+    Check(v <> nil);
+    e := c.AllocateFromHex('B2E7EFD37075B9F03FF989C7C5051C20' +
+      '34D2A323810251127E7BF8625A4F49A5F3E27F4DA8BD59C47D6DAABA4C8127BD' +
+      '5B5C25763222FEFCCFC38B832366C29E');
+    Check(e <> nil);
+    d := a.Copy.Multiply(v.Copy);
+    Check(d <> nil);
+    CheckEqual(d.ToHexa, '602AB7ECA597A3D6B56FF9829A5E8B85' +
+      '9E857EA95A03512E2BAE7391688D264AA5663B0341DB9CCFD2C4C5F421FEC814' +
+      '8001B72E848A38CAE1C65F78E56ABDEFE12D3C039B8A02D6BE593F0BBBDA56F1' +
+      'ECF677152EF804370C1A305CAF3B5BF130879B56C61DE584A0F53A2447A51E', 'Multiply');
+    d.Release;
+    d := a.Divide(v.Copy);
+    Check(d <> nil);
+    CheckEqual(d.ToHexa, '0256567336059E52CAE22925474705F39A94', 'Divide');
+    d.Release;
+    d := a.Modulo(v);
+    Check(d <> nil);
+    CheckEqual(d.ToHexa, '6613F26162223DF488E9CD48CC132C7A' +
+      '0AC93C701B001B092E4E5B9F73BCD27B9EE50D0657C77F374E903CDFA4C642', 'Modulo');
+    d.Release;
+    d := a.Divide(v.Copy, bidDivide, @m);
+    Check(d <> nil);
+    CheckEqual(d.ToHexa, '0256567336059E52CAE22925474705F39A94', 'Divide2');
+    Check(m <> nil);
+    CheckEqual(m.ToHexa, '6613F26162223DF488E9CD48CC132C7A' +
+      '0AC93C701B001B092E4E5B9F73BCD27B9EE50D0657C77F374E903CDFA4C642', 'Modulo2');
+    d.Release;
+    m.Release;
+    d := c.ModPower(a.Copy, e.Copy, v);
+    Check(d <> nil);
+    CheckEqual(d.ToHexa, '36E139AEA55215609D2816998ED020BB' +
+      'BD96C37890F65171D948E9BC7CBAA4D9325D24D6A3C12710F10A09FA08AB87', 'ModPower');
+    d.Release;
+    d := a.ModInverse(v);
+    Check(d <> nil);
+    CheckEqual(d.ToHexa, '3A0AAEDD7E784FC07D8F9EC6E3BFD5' +
+      'C3DBA76456363A10869622EAC2DD84ECC5B8A74DAC4D09E03B5E0BE779F2DF61', 'ModInverse');
+    d.Release;
+    v.ResetPermanentAndRelease;
+    a.Release;
+    e.Release;
+  finally
+    c.Free;
+  end;
+  // TRsaPublicKey / TRsaPrivateKey support
+  Check(pub1.ToDer = '');
+  pub1.Modulus := HexToBin(_modulus);
+  pub1.Exponent := HexToBin(_exponent);
+  Check(pub1.Modulus <> '');
+  Check(pub1.Exponent <> '');
+  bin := pub1.ToDer;
+  Check(bin <> '');
+  CheckHash(bin, $8B24F964);
+  pem := DerToPem(bin, pemRsaPublicKey);
+  CheckHash(pem, $70E26930);
+  Check(not pub2.FromDer(''));
+  Check(pub2.FromDer(bin));
+  Check(pub1.Modulus = pub2.Modulus);
+  Check(pub1.Exponent = pub2.Exponent);
+  Check(pub2.ToDer = bin);
+  Check(pri1.ToDer = '');
+  pri1.Version := 0;
+  Check(not pri1.Match(pub1));
+  Check(not pri1.Match(pub2));
+  pri1.Modulus := HexToBin(_modulus);
+  pri1.PublicExponent := HexToBin(_exponent);
+  pri1.Prime1 := _modulus + CardinalToHex(Random32);
+  pri1.Prime2 := _modulus + CardinalToHex(Random32);
+  pri1.Exponent1 := _modulus + CardinalToHex(Random32);
+  pri1.Exponent2 := _modulus + CardinalToHex(Random32);
+  pri1.Coefficient := _modulus + CardinalToHex(Random32);
+  Check(pri1.Modulus <> '');
+  Check(pri1.PublicExponent <> '');
+  bin := pri1.ToDer;
+  Check(bin <> '');
+  Check(not pri2.FromDer(''));
+  pri2.Version := 10;
+  Check(not pri2.Match(pub1));
+  Check(not pri2.Match(pub2));
+  Check(pri2.FromDer(bin));
+  CheckEqual(pri2.Version, 0);
+  Check(pri1.Modulus = pri2.Modulus);
+  Check(pri1.PublicExponent = pri2.PublicExponent);
+  Check(pri1.Match(pub1));
+  Check(pri1.Match(pub2));
+  Check(pri1.Prime1 = pri2.Prime1);
+  Check(pri1.Prime2 = pri2.Prime2);
+  Check(pri1.Exponent1 = pri2.Exponent1);
+  Check(pri1.Exponent2 = pri2.Exponent2);
+  Check(pri1.Coefficient = pri2.Coefficient);
+  Check(pri2.Match(pub1));
+  Check(pri2.Match(pub2));
+  Check(pri2.ToDer = bin);
+  Finalize(pub1);
+  Check(pub1.Modulus = '');
+  bin := PemToDer(_rsapub);
+  Check(bin <> '');
+  Check(pub1.FromDer(bin));
+  pem := DerToPem(pub1.ToDer, pemPublicKey);
+  CheckEqual(pem, _rsapub);
+  Check(pub1.ToDer = bin);
+  Finalize(pri1);
+  bin := PemToDer(_rsapriv);
+  Check(bin <> '');
+  Check(pri1.FromDer(bin));
+  pem := DerToPem(pri1.ToDer, pemPrivateKey);
+  CheckEqual(pem, _rsapriv);
+  Check(pri1.ToDer = bin);
+  // validate TRsa engine with pre-computed RSA-2048 signature from FPC RTL
+  c := TRsa.Create;
+  try
+    CheckEqual(c.ModulusBits, 0);
+    Check(not c.HasPublicKey);
+    Check(not c.HasPrivateKey);
+    c.LoadFromPublicKeyHexa(_exponent + _modulus);
+    Check(not c.E^.MatchKnownPrime(bspAll), 'primeE');
+    Check(not c.M^.MatchKnownPrime(bspAll), 'primeM');
+    CheckEqual(c.ModulusBits, 2048);
+    CheckEqual(c.ModulusLen, 256);
+    Check(c.HasPublicKey);
+    Check(not c.HasPrivateKey);
+    bin := HexToBin(_signature);
+    hash := HexToBin(_hash);
+    Check(c.Verify(pointer(hash), hfSHA256, bin), 'verif1');
+  finally
+    c.Free;
+  end;
+  // validate TRsa engine with an OpenSSL pre-computed keys pair
+  c := TRsa.Create;
+  try
+    CheckEqual(c.ModulusBits, 0);
+    Check(c.LoadFromPrivateKeyPem(_rsapriv));
+    Check(c.HasPublicKey);
+    Check(c.HasPrivateKey);
+    for i := 1 to 10 do
+      Check(c.CheckPrivateKey);
+    CheckEqual(c.ModulusBits, 2048);
+    CheckEqual(c.ModulusLen, 256);
+    CheckEqual(c.E.ToText, '65537');
+    txt := c.M.ToText;
+    Check(IdemPChar(pointer(txt),
+      '228561590982339343339762178744837209677820304476338116149357156792630'));
+    CheckEqual(length(txt), 617);
+    CheckHash(txt, $9137B7B8);
+    Check(not c.E^.MatchKnownPrime(bspAll), 'primeE');
+    Check(not c.M^.MatchKnownPrime(bspAll), 'primeM');
+    Check(not c.P^.MatchKnownPrime(bspAll), 'primeP');
+    Check(not c.Q^.MatchKnownPrime(bspAll), 'primeQ');
+    Check(c.E^.IsPrime, 'IsPrimeE');
+    Check(c.P^.IsPrime, 'IsPrimeP');
+    Check(c.Q^.IsPrime, 'IsPrimeQ');
+    Check(not c.M^.IsPrime, 'IsPrimeM');
+    Check(c.SavePublicKeyDer = PemToDer(_rsapub));
+    Check(c.SavePrivateKeyDer = PemToDer(_rsapriv));
+    if CheckFailed(length(hash) = SizeOf(TSha256Digest)) then
+      exit;
+    timer.Start;
+    for i := 1 to 10 do
+    begin
+      bin := c.Sign(pointer(hash), hfSHA256);
+      Check(bin <> '');
+      CheckHash(bin, $FBA40C03);
+    end;
+    NotifyTestSpeed('RS256 sign', 10, 0, @timer);
+  finally
+    c.Free;
+  end;
+  c := TRsa.Create;
+  try
+    Check(c.LoadFromPublicKeyPem(_rsapub));
+    Check(c.HasPublicKey);
+    Check(not c.HasPrivateKey);
+    CheckEqual(c.E.ToText, '65537');
+    CheckEqual(BigIntToText(c.E.Save), '65537');
+    CheckEqual(c.M.ToText, txt);
+    Check(c.SavePublicKeyDer = PemToDer(_rsapub));
+    Check(c.SavePrivateKeyDer = '');
+    timer.Start;
+    for i := 1 to 100 do
+      Check(c.Verify(pointer(hash), hfSHA256, bin), 'verifloop');
+    NotifyTestSpeed('RS256 verify', 100, 0, @timer);
+    CheckEqual(BinToHexLower(hash), _hash);
+  finally
+    c.Free;
+  end;
+  // validate RSA key generation
+  for i := 1 to 1 do
+  begin
+    c := TRsa.Create;
+    try
+      timer.Start;
+      check(c.Generate, 'TimeOut'); // with RSA_DEFAULT_GENERATION_* values
+      NotifyTestSpeed('RS256 generate', -1, 0, @timer);
+      CheckEqual(c.ModulusBits, RSA_DEFAULT_GENERATION_BITS);
+      CheckEqual(c.ModulusLen, 256);
+      CheckEqual(c.E^.ToText, '65537');
+      Check(c.HasPublicKey);
+      Check(c.HasPrivateKey);
+      Check(c.CheckPrivateKey);
+      Check(c.MatchKey(c));
+      Check(c.E^.IsPrime, 'genIsPrimeE');
+      Check(c.P^.IsPrime, 'genIsPrimeP');
+      Check(c.Q^.IsPrime, 'genIsPrimeQ');
+      Check(not c.M^.IsPrime, 'genIsPrimeM');
+      //c.P^.Debug('p', true); c.Q^.Debug('q', true);
+      // have been pasted and verified with Wolfram Alpha "isprime" command and
+      // http://www.javascripter.net/math/calculators/100digitbigintcalculator.htm
+      signed := c.Sign(pointer(hash), hfSHA256);
+      Check(c.Verify(pointer(hash), hfSHA256, signed), 'verif2');
+      bin := c.SavePrivateKeyDer;
+    finally
+      c.Free;
+    end;
+    // ensure our generated RSA keys can be properly persisted and used
+    c := TRsa.Create;
+    try
+      Check(c.LoadFromPrivateKeyDer(bin));
+      CheckEqual(c.ModulusBits, RSA_DEFAULT_GENERATION_BITS);
+      CheckEqual(c.ModulusLen, 256);
+      Check(c.HasPublicKey);
+      Check(c.HasPrivateKey);
+      Check(c.CheckPrivateKey);
+      Check(c.SavePrivateKeyDer = bin, 'gensaveload');
+      CheckEqual(length(hash), SizeOf(TSha256Digest));
+      CheckHash(hash, $401CD1EB);
+      Check(c.Sign(pointer(hash), hfSHA256) = signed);
+      Check(c.Verify(pointer(hash), hfSHA256, signed), 'verif3');
+      encrypted := c.Seal(bin); // bin is typically > 1KB long
+      Check(encrypted <> '', 'Seal');
+      Check(c.Open(encrypted) = bin, 'Open');
+    finally
+      c.Free;
+    end;
+  end;
+  // validate RSA-PSS padding
+  c := TRsaPss.Create;
+  try
+    Check(c.LoadFromPrivateKeyDer(bin)); // just reuse previous RSA keys
+    CheckEqual(c.ModulusBits, RSA_DEFAULT_GENERATION_BITS);
+    CheckEqual(c.ModulusLen, 256);
+    Check(c.HasPublicKey);
+    Check(c.HasPrivateKey);
+    Check(c.CheckPrivateKey);
+    CheckEqual(length(hash), SizeOf(TSha256Digest));
+    CheckHash(hash, $401CD1EB);
+    timer.Start;
+    for i := 1 to 10 do
+      signed := c.Sign(pointer(hash), hfSHA256);
+    NotifyTestSpeed('PS256 sign', 10, 0, @timer);
+    CheckEqual(length(signed), c.ModulusLen, 'signpss');
+    timer.Start;
+    for i := 1 to 100 do
+      Check(c.Verify(pointer(hash), hfSHA256, signed), 'verifpps');
+    NotifyTestSpeed('PS256 verify', 100, 0, @timer);
+    encrypted := c.Seal(bin); // bin is typically > 1KB long
+    Check(encrypted <> '', 'Seal');
+    Check(c.Open(encrypted) = bin, 'Open');
+  finally
+    c.Free;
+  end;
+end;
 
-initialization
-  {$ifdef USE_OPENSSL}
-  // warning: OpenSSL on Windows requires to download the right libraries
-  RegisterOpenSsl;
-  {$endif USE_OPENSSL}
+const
+  // synopse.info official website current certificate
+  _synopseinfo_pem =
+    '-----BEGIN CERTIFICATE-----'#13#10 +
+    'MIIE+DCCA+CgAwIBAgISA8yDqq/5weIc+vqAr+ZnbidMMA0GCSqGSIb3DQEBCwUA'#13#10 +
+    'MDIxCzAJBgNVBAYTAlVTMRYwFAYDVQQKEw1MZXQncyBFbmNyeXB0MQswCQYDVQQD'#13#10 +
+    'EwJSMzAeFw0yMzA4MTMwNTQ4MDJaFw0yMzExMTEwNTQ4MDFaMBcxFTATBgNVBAMT'#13#10 +
+    'DHN5bm9wc2UuaW5mbzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMb8'#13#10 +
+    'Tt6EqYOBvQQzNXtBaLQ6lYiVflpEKE1UEZvt15NuRGexkvwjipUOom789+W+wBCS'#13#10 +
+    'WarxpI66VNw8EaZPwWITP56aNLQbsKSydmqwRA8gL4TpRubW4hVnhDWJ1CJ/tOO+'#13#10 +
+    'L0EQNBtuRwqbUukap1XWozhi6UxOK96+GST1wbEHFAyjqeL9az4l5n4DbCvuU01O'#13#10 +
+    'UVwN7VMwoSCo4OrQMvZGshljfhuXI1Te8qKtppo55ERCTI0d8/Yf3uardNQj7k5e'#13#10 +
+    'eGcnM5ytrbItw7T1W5S5JwrC4QwvG5aLu2sgS5TZ1Phg0jj8pID3cYBHcQxl5gjs'#13#10 +
+    'j/GKo1T0HBQiGplgnqECAwEAAaOCAiEwggIdMA4GA1UdDwEB/wQEAwIFoDAdBgNV'#13#10 +
+    'HSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIwDAYDVR0TAQH/BAIwADAdBgNVHQ4E'#13#10 +
+    'FgQUDZCbaWfVSYee6ppAquMz60i6QBIwHwYDVR0jBBgwFoAUFC6zF7dYVsuuUAlA'#13#10 +
+    '5h+vnYsUwsYwVQYIKwYBBQUHAQEESTBHMCEGCCsGAQUFBzABhhVodHRwOi8vcjMu'#13#10 +
+    'by5sZW5jci5vcmcwIgYIKwYBBQUHMAKGFmh0dHA6Ly9yMy5pLmxlbmNyLm9yZy8w'#13#10 +
+    'KQYDVR0RBCIwIIIMc3lub3BzZS5pbmZvghB3d3cuc3lub3BzZS5pbmZvMBMGA1Ud'#13#10 +
+    'IAQMMAowCAYGZ4EMAQIBMIIBBQYKKwYBBAHWeQIEAgSB9gSB8wDxAHcAtz77JN+c'#13#10 +
+    'Tbp18jnFulj0bF38Qs96nzXEnh0JgSXttJkAAAGJ7abcUgAABAMASDBGAiEAu/Sb'#13#10 +
+    'MZPG953HDXiG3wLK5e7vTwECkAxC3tkvVaYQTWgCIQDt6IAX6DuU/St+sv/J2U6G'#13#10 +
+    'aYLcsKoq4V1aCy3heEAW9gB2AK33vvp8/xDIi509nB4+GGq0Zyldz7EMJMqFhjTr'#13#10 +
+    '3IKKAAABie2m3HoAAAQDAEcwRQIhAPpnLANKEAnxr8buMf7hxj6VmxKZ6e6mV77w'#13#10 +
+    'LVT/CeU7AiA550VskF0sgiln+guqIG1WuKnPRR2+e6BM19Ejn3d8mTANBgkqhkiG'#13#10 +
+    '9w0BAQsFAAOCAQEAptkYhAh/dNuNamhW3M/iSbciTqdv4RlpT2TcNktF9IsZPw5C'#13#10 +
+    'CIObmhvYEpIeABxUkAUb3cRYn0qAvNZo/JHY2BvWEtuEfHHG4B/lmRHPp9lzseVa'#13#10 +
+    'epTwiCOc5LB2XD212/CPGJ5ktHdo7lajmD8EMCx3m1617gszYDc3l4pj0JBA5viJ'#13#10 +
+    'ozuUeje7XRD0Es29EvXkXjiYkx+P3GT115mkH2SxdqfaDiaXc5uymibEClUEEPoR'#13#10 +
+    'V0wo7BzlVzPR+M/5FYCoVRDtJS0jVLtiKDL1HKnk0vifiCa9VDtmetdI23obh10K'#13#10 +
+    '7rF4458RkO9sisEdNgHz0LNeGSYcrPjsD9ySSw=='#13#10 +
+    '-----END CERTIFICATE-----'#13#10;
+  // the Let's Encrypt certificate used as authority to sign _synopseinfo_pem
+  _synopseauth_pem =
+    '-----BEGIN CERTIFICATE-----'#13#10 +
+    'MIIFFjCCAv6gAwIBAgIRAJErCErPDBinU/bWLiWnX1owDQYJKoZIhvcNAQELBQAw'#13#10 +
+    'TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh'#13#10 +
+    'cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMjAwOTA0MDAwMDAw'#13#10 +
+    'WhcNMjUwOTE1MTYwMDAwWjAyMQswCQYDVQQGEwJVUzEWMBQGA1UEChMNTGV0J3Mg'#13#10 +
+    'RW5jcnlwdDELMAkGA1UEAxMCUjMwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK'#13#10 +
+    'AoIBAQC7AhUozPaglNMPEuyNVZLD+ILxmaZ6QoinXSaqtSu5xUyxr45r+XXIo9cP'#13#10 +
+    'R5QUVTVXjJ6oojkZ9YI8QqlObvU7wy7bjcCwXPNZOOftz2nwWgsbvsCUJCWH+jdx'#13#10 +
+    'sxPnHKzhm+/b5DtFUkWWqcFTzjTIUu61ru2P3mBw4qVUq7ZtDpelQDRrK9O8Zutm'#13#10 +
+    'NHz6a4uPVymZ+DAXXbpyb/uBxa3Shlg9F8fnCbvxK/eG3MHacV3URuPMrSXBiLxg'#13#10 +
+    'Z3Vms/EY96Jc5lP/Ooi2R6X/ExjqmAl3P51T+c8B5fWmcBcUr2Ok/5mzk53cU6cG'#13#10 +
+    '/kiFHaFpriV1uxPMUgP17VGhi9sVAgMBAAGjggEIMIIBBDAOBgNVHQ8BAf8EBAMC'#13#10 +
+    'AYYwHQYDVR0lBBYwFAYIKwYBBQUHAwIGCCsGAQUFBwMBMBIGA1UdEwEB/wQIMAYB'#13#10 +
+    'Af8CAQAwHQYDVR0OBBYEFBQusxe3WFbLrlAJQOYfr52LFMLGMB8GA1UdIwQYMBaA'#13#10 +
+    'FHm0WeZ7tuXkAXOACIjIGlj26ZtuMDIGCCsGAQUFBwEBBCYwJDAiBggrBgEFBQcw'#13#10 +
+    'AoYWaHR0cDovL3gxLmkubGVuY3Iub3JnLzAnBgNVHR8EIDAeMBygGqAYhhZodHRw'#13#10 +
+    'Oi8veDEuYy5sZW5jci5vcmcvMCIGA1UdIAQbMBkwCAYGZ4EMAQIBMA0GCysGAQQB'#13#10 +
+    'gt8TAQEBMA0GCSqGSIb3DQEBCwUAA4ICAQCFyk5HPqP3hUSFvNVneLKYY611TR6W'#13#10 +
+    'PTNlclQtgaDqw+34IL9fzLdwALduO/ZelN7kIJ+m74uyA+eitRY8kc607TkC53wl'#13#10 +
+    'ikfmZW4/RvTZ8M6UK+5UzhK8jCdLuMGYL6KvzXGRSgi3yLgjewQtCPkIVz6D2QQz'#13#10 +
+    'CkcheAmCJ8MqyJu5zlzyZMjAvnnAT45tRAxekrsu94sQ4egdRCnbWSDtY7kh+BIm'#13#10 +
+    'lJNXoB1lBMEKIq4QDUOXoRgffuDghje1WrG9ML+Hbisq/yFOGwXD9RiX8F6sw6W4'#13#10 +
+    'avAuvDszue5L3sz85K+EC4Y/wFVDNvZo4TYXao6Z0f+lQKc0t8DQYzk1OXVu8rp2'#13#10 +
+    'yJMC6alLbBfODALZvYH7n7do1AZls4I9d1P4jnkDrQoxB3UqQ9hVl3LEKQ73xF1O'#13#10 +
+    'yK5GhDDX8oVfGKF5u+decIsH4YaTw7mP3GFxJSqv3+0lUFJoi5Lc5da149p90Ids'#13#10 +
+    'hCExroL1+7mryIkXPeFM5TgO9r0rvZaBFOvV2z0gp35Z0+L4WPlbuEjN/lxPFin+'#13#10 +
+    'HlUjr8gRsI3qfJOQFy/9rKIJR0Y/8Omwt/8oTWgy1mdeHmmjk7j1nYsvC9JSQ6Zv'#13#10 +
+    'MldlTTKB3zhThV1+XWYp6rjd5JW1zbVWEkLNxE7GJThEUG3szgBVGP7pSWTUTsqX'#13#10 +
+    'nLRbwHOoq7hHwg=='#13#10 +
+    '-----END CERTIFICATE-----'#13#10;
+  // so that tests below will continue to work after 2023/11/11
+  _synopse_date = 45203;
+
+  // openssl req -new -x509 -days 36524 -key "ecdsa.key" -sha256 -out ecdsa.crt
+  _selfsigned_pem =
+    '-----BEGIN CERTIFICATE-----'#13#10 +
+    'MIICKTCCAc+gAwIBAgIUWXUw/wRkokMf9BvR/WUrUylq+Y4wCgYIKoZIzj0EAwIw'#13#10 +
+    'aTELMAkGA1UEBhMCRlIxEzARBgNVBAgMClNvbWUtU3RhdGUxFTATBgNVBAoMDFN5'#13#10 +
+    'bm9wc2UgSW5mbzEXMBUGA1UECwwOQWRtaW5pc3RyYXRpb24xFTATBgNVBAMMDHN5'#13#10 +
+    'bm9wc2UuaW5mbzAgFw0yMzEwMDMxMzMzNTBaGA8yMTIzMTAwMzEzMzM1MFowaTEL'#13#10 +
+    'MAkGA1UEBhMCRlIxEzARBgNVBAgMClNvbWUtU3RhdGUxFTATBgNVBAoMDFN5bm9w'#13#10 +
+    'c2UgSW5mbzEXMBUGA1UECwwOQWRtaW5pc3RyYXRpb24xFTATBgNVBAMMDHN5bm9w'#13#10 +
+    'c2UuaW5mbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABF8MFUarr+ZmjZX58Lu2'#13#10 +
+    'EPcnii0AKAQbIifHG/oaSUpx+VjqQZqGNEDQi2Onv3P/i/ZUfV4oJKW2cusnLHhc'#13#10 +
+    'IJSjUzBRMB0GA1UdDgQWBBRR47U5GlhtqxVg6O/fdQGxLlgaqTAfBgNVHSMEGDAW'#13#10 +
+    'gBRR47U5GlhtqxVg6O/fdQGxLlgaqTAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49'#13#10 +
+    'BAMCA0gAMEUCIHJbTCZPNEvNhQ4vDmAJd5Vj8FDEjx/JBlRKvVxAr+yVAiEA4GaI'#13#10 +
+    'siC94x9I5sQUdpYL9Py/IxiRxJzKSD2WlOsytKc='#13#10 +
+    '-----END CERTIFICATE-----'#13#10;
+
+procedure TTestCoreCrypto._X509;
+var
+  bin: RawByteString;
+  x, a: TX509;
+  i: integer;
+  nfo: TX509Parsed;
+  timer: TPrecisionTimer;
+begin
+  {$ifdef OSWINDOWS}
+  Check(WinX509Parse(_synopseinfo_pem, nfo)); // validate our SSPI parser
+  {$else}
+  Check(X509Parse(_synopseinfo_pem, nfo)); // likely to be the OpenSSL parser
+  {$endif OSWINDOWS}
+  // validate with the synopse.info RSA certificate from Let's Encrypt
+  x := TX509.Create;
+  try
+    CheckEqual(x.SerialNumber, '');
+    CheckEqual(x.Signed.SerialNumber, '');
+    Check(x.LoadFromPem(_synopseinfo_pem), 'synopse.info pem');
+    Check(x.SignatureAlgorithm = xsaSha256Rsa);
+    Check(x.Signed.SerialNumber <> '');
+    CheckEqual(x.SerialNumber,
+      '03:cc:83:aa:af:f9:c1:e2:1c:fa:fa:80:af:e6:67:6e:27:4c');
+    CheckEqual(x.SerialNumber, nfo.Serial, 'nfo sn');
+    CheckEqual(x.Signed.SerialNumberText,
+      '330929475774275458452528262248458246563660');
+    CheckEqual(x.Subject[xaCN], 'synopse.info');
+    CheckEqual(x.Issuer[xaCN],  'R3');
+    CheckEqual(x.Issuer[xaO],   'Let''s Encrypt');
+    CheckEqual(x.Issuer[xaC],   'US');
+    CheckEqual(x.SubjectDN,     'CN=synopse.info');
+    CheckEqual(x.SubjectDN, nfo.SubjectDN);
+    CheckEqual(x.IssuerDN,      'CN=R3, C=US, O=Let''s Encrypt');
+    Check(x.Usages =
+      [cuDigitalSignature, cuKeyEncipherment, cuTlsServer, cuTlsClient]);
+    Check(x.Usages = nfo.Usage, 'nfo u');
+    CheckEqual(x.Extension[xeSubjectAlternativeName],
+      'synopse.info,www.synopse.info');
+    CheckEqual(RawUtf8ArrayToCsv(x.SubjectAlternativeNames),
+      'synopse.info,www.synopse.info');
+    CheckEqual(x.Extension[xeSubjectKeyIdentifier],
+      '0d:90:9b:69:67:d5:49:87:9e:ea:9a:40:aa:e3:33:eb:48:ba:40:12');
+    CheckEqual(x.Extension[xeAuthorityKeyIdentifier],
+      '14:2e:b3:17:b7:58:56:cb:ae:50:09:40:e6:1f:af:9d:8b:14:c2:c6');
+    CheckEqual(x.Extension[xeAuthorityInformationAccess],
+      'ocsp=http://r3.o.lencr.org,caIssuers=http://r3.i.lencr.org/');
+    CheckSameTime(nfo.NotBefore, x.NotBefore, 'nfo nb');
+    CheckSameTime(nfo.NotAfter, x.NotAfter, 'nfo na');
+    Check(FindOther(x.Signed.ExtensionOther, '1.3.6.1.5.5.7.1.1') = '');
+    Check(x.Signed.ExtensionOther = nil);
+    CheckEqual(x.Extension[xeCertificatePolicies], '2.23.140.1.2.1');
+    CheckEqual(x.Extension[xeGoogleSignedCertificateTimestamp], '');
+    Check(x.Signed.ExtensionRaw[xeGoogleSignedCertificateTimestamp] <> '');
+    Check(not x.IsSelfSigned);
+    Check(not (cuCa in x.Usages), 'ca1');
+    Check(x.Signed.SubjectPublicKeyAlgorithm = xkaRsa);
+    CheckEqual(x.SignatureSecurityBits, 112, '2048=112');
+    CheckEqual(x.FingerPrint,
+      'd71ab49d1d5eab337c6e570b81b60ec6224fb26e');
+    CheckEqual(x.FingerPrint(hfSHA256),
+      'ea0f4f07abb685f2aaf864a28d9f275ac1e9bb29e82d6a8dc9111cd9162da4e7');
+    CheckEqual(x.SubjectPublicKeyAlgorithm, '2048-bit RSA encryption');
+    //writeln(x.PeerInfo);
+    CheckHash(x.PeerInfo, $DF9578B9, 'peerinfo1a');
+    Check(TX509Parse(_synopseinfo_pem, nfo), 'TX509Parse');
+    CheckHash(nfo.PeerInfo, $DF9578B9, 'peerinfo1b'); // very same parser
+    a := TX509.Create;
+    try
+      // check synopse.info against Let's Encrypt authority certificate
+      Check(a.LoadFromPem(_synopseauth_pem), 'synopse auth');
+      CheckEqual(a.Signed.SerialNumberText,
+        '192961496339968674994309121183282847578');
+      CheckEqual(a.Subject[xaCN], 'R3');
+      CheckEqual(a.SubjectDN, 'CN=R3, C=US, O=Let''s Encrypt');
+      CheckEqual(a.SubjectDN, x.IssuerDN);
+      CheckEqual(a.IssuerDN,
+        'CN=ISRG Root X1, C=US, O=Internet Security Research Group');
+      CheckEqual(a.Extension[xeSubjectKeyIdentifier],
+                 x.Extension[xeAuthorityKeyIdentifier]);
+      Check(cuCa in a.Usages, 'ca2');
+      Check(a.Usages = [cuCA, cuDigitalSignature, cuKeyCertSign,
+        cuCrlSign, cuTlsServer, cuTlsClient]);
+      Check(a.Signed.ExtensionOther = nil);
+      CheckEqual(a.Extension[xeAuthorityInformationAccess],
+        'caIssuers=http://x1.i.lencr.org/');
+      CheckEqual(a.Extension[xeCertificatePolicies],
+        '2.23.140.1.2.1,1.3.6.1.4.1.44947.1.1.1');
+      timer.Start;
+      for i := 1 to 100 do
+        Check(x.Verify(a, [], _synopse_date) = cvValidSigned, 'verify syn');
+      NotifyTestSpeed('RSA2048 verify', 100, 0, @timer);
+      bin := x.Signed.ToDer;
+      Check(a.Verify(pointer(x.SignatureValue), pointer(bin),
+        length(x.SignatureValue), length(bin), [], _synopse_date) =
+          cvValidSigned, 'verbuf syn');
+      CheckEqual(a.SubjectPublicKeyAlgorithm, '2048-bit RSA encryption');
+      CheckHash(a.PeerInfo, $FFE7466C, 'peerinfo2');
+      CheckHash(ObjectToJson(a), $F7A82903);
+      CheckHash(ObjectToJson(x), $7C73C7E0);
+      CheckEqual(x.SignatureSecurityBits, 112, '2048=112');
+    finally
+      a.Free;
+    end;
+  finally
+    x.Free;
+  end;
+  // validate with an OpenSSL generated ECC256 self-signed certificate
+  x := TX509.Create;
+  try
+    Check(x.LoadFromPem(_selfsigned_pem), 'selfsigned pem');
+    Check(x.SignatureAlgorithm = xsaSha256Ecc256);
+    Check(x.Signed.SerialNumber <> '');
+    CheckEqual(x.SerialNumber,
+      '59:75:30:ff:04:64:a2:43:1f:f4:1b:d1:fd:65:2b:53:29:6a:f9:8e');
+    CheckEqual(x.Signed.SerialNumberText,
+      '510713633959117522632981676132379983048564472206');
+    CheckEqual(x.Subject[xaCN], 'synopse.info');
+    CheckEqual(x.Subject[xaO],  'Synopse Info');
+    CheckEqual(x.Subject[xaC],  'FR');
+    CheckEqual(x.Issuer[xaCN],  'synopse.info');
+    CheckEqual(x.Issuer[xaO],   'Synopse Info');
+    CheckEqual(x.Issuer[xaC],   'FR');
+    CheckEqual(x.IssuerDN,
+      'CN=synopse.info, C=FR, ST=Some-State, O=Synopse Info, OU=Administration');
+    CheckEqual(x.Extension[xeSubjectAlternativeName], '');
+    Check(x.SubjectAlternativeNames = nil);
+    CheckEqual(x.Extension[xeSubjectKeyIdentifier],
+      '51:e3:b5:39:1a:58:6d:ab:15:60:e8:ef:df:75:01:b1:2e:58:1a:a9');
+    CheckEqual(x.Extension[xeAuthorityKeyIdentifier],
+      '51:e3:b5:39:1a:58:6d:ab:15:60:e8:ef:df:75:01:b1:2e:58:1a:a9');
+    Check(x.Usages = [cuCA]);
+    Check(x.IsSelfSigned);
+    Check(cuCa in x.Usages, 'ca3');
+    Check(x.Signed.SubjectPublicKeyAlgorithm = xkaEcc256);
+    CheckEqual(x.SignatureSecurityBits, 128, '256=128');
+    CheckEqual(x.FingerPrint,
+      'd5ae8d642967b01f806cd5c7c1af8b47ff7337bc');
+    CheckEqual(x.FingerPrint(hfSHA256),
+      'b75b01ca2d59f3283a6843b76d777ebe5b5d752f11c686879cf45248564cffa4');
+    timer.Start;
+    for i := 1 to 100 do
+      Check(x.Verify = cvValidSelfSigned, 'verify self');
+    NotifyTestSpeed('ECC256 verify', 100, 0, @timer);
+    bin := x.Signed.ToDer;
+    Check(x.Verify(pointer(x.SignatureValue), pointer(bin),
+      length(x.SignatureValue), length(bin), [cvWrongUsage]) =
+        cvValidSelfSigned, 'verbuf self');
+    CheckEqual(x.SubjectPublicKeyAlgorithm, '256-bit prime256v1 ECDSA');
+    CheckHash(x.PeerInfo, $BCB82372, 'peerinfo3');
+    CheckHash(ObjectToJson(x), $BBCBCFEB);
+  finally
+    x.Free;
+  end;
+end;
+
 
 end.
 

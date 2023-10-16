@@ -581,19 +581,21 @@ end;
 
 procedure TNetworkProtocols.DNSAndLDAP;
 var
-  ip, u, v, dn, sid: RawUtf8;
+  ip, u, v, sid: RawUtf8;
   c: cardinal;
+  withntp: boolean;
   guid: TGuid;
   i, j, k: PtrInt;
   dns, clients: TRawUtf8DynArray;
   l: TLdapClientSettings;
   one: TLdapClient;
   utc1, utc2: TDateTime;
-  ntp: RawUtf8;
+  ntp, usr, pwd, main, txt: RawUtf8;
 begin
   // validate NTP/SNTP client using NTP_DEFAULT_SERVER = time.google.com
   if not Executable.Command.Get('ntp', ntp) then
     ntp := NTP_DEFAULT_SERVER;
+  withntp := not Executable.Command.Option('nontp');
   utc1 := GetSntpTime(ntp);
   //writeln(DateTimeMSToString(utc), ' = ', DateTimeMSToString(NowUtc));
   if utc1 <> 0 then
@@ -601,7 +603,8 @@ begin
     utc2 := NowUtc;
     AddConsole('% : % = %', [ntp, DateTimeMSToString(utc1), DateTimeMSToString(utc2)]);
     // only make a single GetSntpTime call - most servers refuse to scale
-    CheckSame(utc1, utc2, 1, 'NTP system'); // allow 1 day diff
+    if withntp then
+      CheckSame(utc1, utc2, 1, 'NTP system A'); // allow 1 day diff
   end;
   // validate some IP releated process
   Check(not NetIsIP4(nil));
@@ -718,38 +721,73 @@ begin
     for i := 0 to high(dns) do
     begin
       // syntax is -dns server1 [-dns server2]
-      clients := DnsLdapControlersSorted(100, 10, dns[i], false, @dn);
+      clients := DnsLdapServices(dns[i]);
+      if clients = nil then
+      begin
+        CheckUtf8(false, 'no Ldap for --dns %', [dns[i]]);
+        continue;
+      end;
+      main := CldapGetBestLdapController(clients, dns[i], '');
+      utc1 := GetSntpTime(dns[i]);
+      if utc1 <> 0 then
+      begin
+        utc2 := NowUtc;
+        AddConsole('% : % = %', [dns[i], DateTimeMSToString(utc1), DateTimeMSToString(utc2)]);
+        if withntp then
+          CheckSame(utc1, utc2, 1, 'NTP system B'); // allow 1 day diff
+      end;
       for j := 0 to high(clients) do
       begin
         one := TLdapClient.Create;
         try
           one.Settings.TargetUri := clients[j];
-          one.Settings.KerberosDN := dn;
+          one.Settings.KerberosDN := dns[i];
           try
-            if one.BindSaslKerberos then
+            if Executable.Command.Get('ldapusr', usr) and
+               Executable.Command.Get('ldappwd', pwd) then
             begin
-              AddConsole('% = %', [one.Settings.TargetHost, one.NetbiosDN]);
-              Check(one.NetbiosDN <> '', 'NetbiosDN');
-              Check(one.ConfigDN <> '', 'ConfigDN');
-              Check(one.Search(one.WellKnownObjects.Users, {typesonly=}false,
-                    '(cn=Domain Controllers)', ['*']), 'Search');
-              Check(one.SearchResult.Count <> 0, 'SeachResult');
-              for k := 0 to one.SearchResult.Count - 1 do
-                with one.SearchResult.Items[k] do
-                begin
-                  sid := '';
-                  Check(CopyObjectSid(sid), 'objectSid');
-                  Check(sid <> '');
-                  FillZero(guid);
-                  Check(CopyObjectGUID(guid), 'objectGUID');
-                  Check(not IsNullGuid(guid));
-                  CheckEqual(Attributes.Get('cn'), 'Domain Controllers', 'cn');
-                  Check(Attributes.Get('name') <> '', 'name');
-                end;
-              //writeln(one.SearchResult.Dump);
+              one.Settings.UserName := usr;
+              one.Settings.Password := pwd;
+              {$ifdef OSPOSIX}
+              // a valid current kinit session seems mandatory on GSSAPI,
+              // which makes Kerberos password authentication pointless
+              one.Settings.TargetPort := LDAP_TLS_PORT; // TLS needed for safety
+              if not one.Bind then
+              {$else}
+              //  Windows allow a kerberos connection from an unrolled computer
+              if not one.BindSaslKerberos then
+              {$endif OSPOSIX}
+              begin
+                CheckUtf8(false, 'ldap:%', [clients[j]]);
+                continue;
+              end;
             end
-            else
-              CheckUtf8(false, clients[i]);
+            else if not one.BindSaslKerberos then
+              continue;
+            txt := '';
+            if clients[j] = main then
+              txt := ' (main)';
+            Check(one.NetbiosDN <> '', 'NetbiosDN');
+            Check(one.ConfigDN <> '', 'ConfigDN');
+            Check(one.Search(one.WellKnownObjects.Users, {typesonly=}false,
+                  '(cn=users)', ['*']), 'Search');
+            Check(one.SearchResult.Count <> 0, 'SeachResult');
+            AddConsole('%% = % search=%', [one.Settings.TargetHost, txt,
+              one.NetbiosDN, one.SearchResult.Count]);
+            for k := 0 to one.SearchResult.Count - 1 do
+              with one.SearchResult.Items[k] do
+              begin
+                sid := '';
+                if CopyObjectSid(sid) then
+                  Check(sid <> '');
+                FillZero(guid);
+                Check(CopyObjectGUID(guid), 'objectGUID');
+                Check(not IsNullGuid(guid));
+                Check(IdemPropNameU(Attributes.Get('cn'), 'users'), 'cn');
+                Check(Attributes.Get('name') <> '', 'name');
+                Check(Attributes.Get('distinguishedName') <> '', 'distinguishedName');
+              end;
+              //writeln(one.SearchResult.Dump);
           except
             on E: Exception do
               Check(false, E.Message);
@@ -758,7 +796,7 @@ begin
           one.Free;
         end;
       end;
-  end;
+    end;
 end;
 
 procedure TNetworkProtocols.TunnelExecute(Sender: TObject);
@@ -796,7 +834,7 @@ begin
   serverinstance.VerifyCert := clientcert;
   servertunnel := serverinstance;
   servercb := serverinstance;
-  clienttunnel.SetTransmit(servercb); // set before BindPort()
+  clienttunnel.SetTransmit(servercb); // set before Open()
   servertunnel.SetTransmit(clientcb);
   // validate handshaking
   session := Random64;

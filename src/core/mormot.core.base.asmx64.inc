@@ -68,8 +68,9 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         cmp     rax, 96 - 16
         {$else}
         jmp     qword ptr [r10 + rdx * 8]
+@neg:   ret
 @up16:  // >16 or <0
-        jng     @z  // <0
+        jng     @neg  // <0
         mov     r8, rdx
         movups  xmm0, oword ptr [src + rax]    // last 16   = xmm0
         movups  xmm1, oword ptr [src]          // first 16  = xmm1
@@ -168,7 +169,7 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         lea     rax, [rax + dst - 16]
         mov     r10, rax
         neg     rax
-        and     dst,  -16                    // 16-byte aligned writes
+        and     dst, -16                     // 16-byte aligned writes
         lea     rax, [rax + dst + 16]
         cmp     r8, r11
         jb      @fwd                         // bypass cache for cnt>512KB
@@ -205,7 +206,7 @@ asm {$else} asm .noframe {$endif} // rcx/rdi=src rdx/rsi=dst r8/rdx=cnt
         vmovups ymm1, yword ptr [src]        // last 32
         neg     rax
         add     rax, dst
-        and     rax,  -32                    // 32-byte aligned writes
+        and     rax, -32                     // 32-byte aligned writes
         sub     rax, dst
         add     rax, 64
         cmp     r8, r11
@@ -715,7 +716,7 @@ asm
         mov     qword ptr [d], s
         test    rax, rax
         jz      @z
-        lea     d, qword ptr [rax - _STRRECSIZE]
+        lea     d, qword ptr [rax - _STRRECSIZE] // for fpc_freemem() below
         {$ifdef STRCNT32}
         cmp     dword ptr [rax - _STRCNT], 0 // refcnt=-1 for const
         jl      @z
@@ -1630,7 +1631,7 @@ function SortDynArrayAnsiString(const A, B): integer;
         sub     r9, qword ptr [rdx - _STRLEN]   // r9 = length(A)-length(B)
         {$else}
         .align 16
-@s:     mov     r9d,  dword ptr [rax - _STRLEN] // TStrLen=integer on Delphi
+@s:     mov     r9d, dword ptr [rax - _STRLEN]  // TStrLen=integer on Delphi
         mov     r8, r9
         mov     r10d, dword ptr [rdx - _STRLEN]
         sub     r9, r10                         // r9 = length(A)-length(B)
@@ -1741,6 +1742,7 @@ function xxHash32(crc: cardinal; P: PAnsiChar; len: cardinal): cardinal;
         lea     ebx, [r8 + 24234428H]
         lea     edi, [r8 - 7A143589H]
         lea     eax, [r8 + 61C8864FH]
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
 @1:     imul    r9d, dword ptr [rcx], -2048144777
         add     rcx, 16
         imul    r11d, dword ptr [rcx - 12], -2048144777
@@ -2244,7 +2246,7 @@ function MemCmp(P1, P2: PByteArray; L: PtrInt): integer;
           xor     eax, r9d               // not ax
           jnz     @diff                  // difference found
           add     L, 16
-          jz      @eq                     // finished, equal
+          jz      @eq                    // finished, equal
           cmp     L, -16
           jna     @by16                  // next 16 bytes
 @sml:     // less than 16 bytes left
@@ -2449,7 +2451,7 @@ function crc32csse42(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
         not     eax
         mov     ecx, len
         shr     len, 3
-        jnz     @by8 // we don't care for read alignment
+        jnz     @by8 // no read alignment care here - but in crypto.core
 @0:     test    cl, 4
         jz      @4
         crc32   eax, dword ptr [buf]
@@ -2903,13 +2905,13 @@ function IsXmmYmmOSEnabled: boolean;
         sete    al        // true if OS enabled both XMM and YMM
 end;
 
-procedure GetCpuid(param: cardinal; var regs: TIntelRegisters);
+procedure GetCpuid(cpueax, cpuecx: cardinal; var regs: TIntelRegisters);
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
-        mov     eax, param
+        mov     eax, cpueax
+        mov     ecx, cpuecx
         mov     r9, regs
         mov     r10, rbx  // preserve rbx
         xor     ebx, ebx
-        xor     ecx, ecx
         xor     edx, edx
         cpuid
         mov     TIntelRegisters(r9).&eax, eax

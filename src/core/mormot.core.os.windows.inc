@@ -326,7 +326,7 @@ begin
 end;
 
 var
-  // redirect to a separated slower but more accurate API since Windows 8
+  // redirect to a slower but more accurate API available since Windows 8
   // - points to GetSystemTimeAsFileTime() before Windows 8
   GetSystemTimePreciseAsFileTime: procedure(var ft: TFILETIME); stdcall;
 
@@ -775,7 +775,12 @@ end;
 
 function SearchRecToWindowsTime(const F: TSearchRec): integer;
 begin
-  result := F.Time;
+  result := F.Time; // already in the expected legacy format
+end;
+
+function SearchRecToUnixTimeUtc(const F: TSearchRec): TUnixTime;
+begin // return the search record timestamp with no local time conversion
+  result := FileTimeToUnixTime(F.FindData.ftLastWriteTime);
 end;
 
 function FileInfoByHandle(aFileHandle: THandle; out FileId, FileSize: Int64;
@@ -953,7 +958,7 @@ begin
    result := CreateFileW(W32(aFileName, tmp), ACCESS[aMode and 3], SHARE[s],
      nil, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
   else
-    result := THandle(-1);
+    result := INVALID_HANDLE_VALUE;
 end;
 
 function FileSetDateFrom(const Dest: TFileName; SourceHandle: THandle): boolean;
@@ -1779,29 +1784,30 @@ end;
 var
   PsapiDll: THandle;
 
-function EnumAllProcesses(out Count: cardinal): TCardinalDynArray;
-var n: cardinal;
+function EnumAllProcesses: TCardinalDynArray;
+var
+  n, count: cardinal;
 begin
   result := nil;
   if not DelayedProc(EnumProcesses, PsapiDll, 'Psapi.dll', 'EnumProcesses') then
     exit;
-  n := 2048;
+  count := 0;
+  n := 2048; // retrieve 2KB of IDs, i.e. 512 processes, by default
   repeat
     SetLength(result, n);
-    if EnumProcesses(pointer(result), n * 4, Count) then
-      // Count=n if buffer is too small
-      Count := Count shr 2
+    if EnumProcesses(pointer(result), n * 4, count) then
+      count := count shr 2 // from bytes to count
     else
-      // error
-      Count := 0;
-    if Count < n then
-    begin
-      if Count = 0 then
-        result := nil;
-      exit;
-    end;
-    inc(n, 1024); // (very unlikely) too small buffer
+      count := 0; // error
+    if count < n then
+      break;
+    // count=n if buffer was too small
+    inc(n, 1024);
   until n > 8192;
+  if count = 0 then
+    result := nil // on error
+  else
+    DynArrayFakeLength(result, count); // no realloc
 end;
 
 function EnumProcessName(PID: cardinal): RawUtf8;
@@ -1935,6 +1941,8 @@ var
   prov: HCRYPTPROV;
 begin
   result := false;
+  if Len <= 0 then
+    exit;
   // warning: on some Windows versions, this could take up to 30 ms!
   if CryptoApi.Available then
     if CryptoApi.AcquireContextA(prov, nil, nil,
@@ -3262,11 +3270,11 @@ begin
       exit;
     add := address;
     virt := nil;
-    if NtMapViewOfSection(mem, THandle(-1), @virt, 0, size, add, @size,
+    if NtMapViewOfSection(mem, INVALID_HANDLE_VALUE, @virt, 0, size, add, @size,
          1, 0, PAGE_READONLY) = 0 then
     begin
       FastSetRawByteString(result, virt, size);
-      NtUnmapViewOfSection(THandle(-1), virt);
+      NtUnmapViewOfSection(INVALID_HANDLE_VALUE, virt);
     end;
     CloseHandle(mem);
   end;
@@ -3280,11 +3288,10 @@ function InternalGetProcessInfo(aPID: DWord; out aInfo: TWinProcessInfo): boolea
 var
   bytesread: PtrUInt;
   sizeneeded: DWord;
-  pbi: PMS_PROCESS_BASIC_INFORMATION;
+  pbi: MS_PROCESS_BASIC_INFORMATION;
   peb: MS_PEB;
   peb_upp: MS_RTL_USER_PROCESS_PARAMETERS;
   prochandle: THandle;
-  buf: TSynTempBuffer;
 begin
   result := false;
   Finalize(aInfo);
@@ -3298,38 +3305,30 @@ begin
     exit;
   Include(aInfo.AvailableInfo, wpaiPID);
   aInfo.PID := aPid;
-  buf.InitZero(0); // 0 to initialize the whole buf.tmp[] stack buffer to zero
   try
+    // read PBI (Process Basic Information)
     sizeneeded := 0;
-    if NtQueryInformationProcess(prochandle,
-         ProcessBasicInformation, buf.buf, buf.len, @sizeneeded) < 0 then
+    FillCharFast(pbi, SizeOf(pbi), 0);
+    if NtQueryInformationProcess(prochandle, ProcessBasicInformation,
+         @pbi, Sizeof(pbi), @sizeneeded) < 0 then
       exit;
-    if buf.len < integer(sizeneeded) then
-    begin
-      buf.Done;
-      buf.InitZero(sizeneeded);
-      if NtQueryInformationProcess(prochandle,
-           ProcessBasicInformation, buf.buf, buf.len, @sizeneeded) < 0 then
-        exit;
-    end;
-    Include(aInfo.AvailableInfo, wpaiBasic);
-    pbi := buf.buf;
     with aInfo do
     begin
-      PID := pbi^.UniqueProcessId;
-      ParentPID := pbi^.InheritedFromUniqueProcessId;
-      BasePriority := pbi^.BasePriority;
-      ExitStatus := pbi^.ExitStatus;
-      PEBBaseAddress := pbi^.PebBaseAddress;
-      AffinityMask := pbi^.AffinityMask;
+      Include(AvailableInfo, wpaiBasic);
+      PID := pbi.UniqueProcessId;
+      ParentPID := pbi.InheritedFromUniqueProcessId;
+      BasePriority := pbi.BasePriority;
+      ExitStatus := pbi.ExitStatus;
+      PEBBaseAddress := pbi.PebBaseAddress;
+      AffinityMask := pbi.AffinityMask;
     end;
     // read PEB (Process Environment Block)
     if not Assigned(pbi.PebBaseAddress) then
       exit;
     bytesread := 0;
-    FillCharFast(peb, SizeOf(MS_PEB), 0);
+    FillCharFast(peb, SizeOf(peb), 0);
     if not ReadProcessMemory(prochandle, pbi.PebBaseAddress,
-             @peb, SizeOf(MS_PEB), bytesread) then
+             @peb, SizeOf(peb), bytesread) then
       exit;
     Include(aInfo.AvailableInfo, wpaiPEB);
     aInfo.SessionID := peb.SessionId;
@@ -3362,7 +3361,6 @@ begin
     result := true;
   finally
     CloseHandle(prochandle);
-    buf.Done;
   end;
 end;
 
@@ -4696,15 +4694,16 @@ var
       if redirected <> nil then
       begin
         SetLength(redirected^, l + PtrInt(n));
-        MoveFast(tmp, PByteArray(redirected^)[l], n);
+        MoveFast(tmp, PByteArray(redirected^)[l], n); // append without convert
         inc(l, n);
       end;
       if Assigned(onoutput) then
       begin
         SetString(new, PAnsiChar(@tmp), n);
-        if onoutput(new, processinfo.dwProcessId) then
+        if onoutput(new, processinfo.dwProcessId) then // notify new content
+          // onoutput() callback returned true to stop the execution
           if not flush then
-          begin // onoutput() callback returned true to stop the execution
+          begin
             exitcode := WAIT_OBJECT_0;
             break;
           end;
@@ -4776,7 +4775,7 @@ begin
       startupinfo.hStdInput := GetStdHandle(STD_INPUT_HANDLE);
       startupinfo.hStdOutput := wr;
       startupinfo.hStdError := wr;
-      startupinfo.dwFlags := STARTF_USESTDHANDLES;
+      startupinfo.dwFlags := STARTF_USESTDHANDLES or STARTF_USESHOWWINDOW;
       if redirected <> nil then
         redirected^ := '';
       exclude(ram, ramCtrlC); // not compatible with redirection
@@ -4785,8 +4784,9 @@ begin
       rd := 0;
   // https://docs.microsoft.com/en-en/windows/desktop/ProcThread/process-creation-flags
   FillCharFast(processinfo, SizeOf(processinfo), 0);
-  flags := CREATE_UNICODE_ENVIRONMENT or CREATE_DEFAULT_ERROR_MODE or
-           DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP;
+  flags := CREATE_UNICODE_ENVIRONMENT or CREATE_DEFAULT_ERROR_MODE;
+  if not (roWinNoProcessDetach in options) then
+    flags := flags or (DETACHED_PROCESS or CREATE_NEW_PROCESS_GROUP);
   if roWinJobCloseChildren in options then
     // create the child process in a new job object
     flags := flags or CREATE_BREAKAWAY_FROM_JOB;

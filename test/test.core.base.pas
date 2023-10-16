@@ -4081,6 +4081,10 @@ begin
   Check(u = '40640.5028819444', u);
   e := 40640.5028819444;
   CheckSame(d, e, 1e-11);
+  s := '40640e400';
+  d := GetExtended(pointer(s), err);
+  CheckSame(d, 40640.0, DOUBLE_SAME, 'e400=e0');
+  Check(err > 0, 'e400');
   Check(IsAnsiCompatible('t'));
   Check(IsAnsiCompatible('te'));
   Check(IsAnsiCompatible('tes'));
@@ -4251,37 +4255,37 @@ begin
     Check(format('%d', [j]) = u);
     Check(GetInteger(pointer(s)) = j);
     CheckEqual(FormatUtf8('%', [j]), s);
-    CheckEqual(FormatUtf8('?', [], [j]), ':(' + s + '):');
+    CheckEqual(FormatSql('?', [], [j]), ':(' + s + '):');
     CheckEqual(FormatUtf8('%?', [j]), s + '?');
     CheckEqual(FormatUtf8('?%', [j]), '?' + s);
     CheckEqual(FormatUtf8('?%?', [j]), '?' + s + '?');
     CheckEqual(FormatUtf8('?%%?', [j]), '?' + s + '?');
     CheckEqual(FormatUtf8('?%?%  ', [j]), '?' + s + '?  ');
-    CheckEqual(FormatUtf8('?%', [], [j]), ':(' + s + '):');
-    CheckEqual(FormatUtf8('%?', [j], [j]), s + ':(' + s + '):');
-    CheckEqual(FormatUtf8('%?', [s], [s]), s + ':(''' + s + '''):');
+    CheckEqual(FormatSql('?%', [], [j]), ':(' + s + '):');
+    CheckEqual(FormatSql('%?', [j], [j]), s + ':(' + s + '):');
+    CheckEqual(FormatSql('%?', [s], [s]), s + ':(''' + s + '''):');
     CheckEqual(FormatUtf8('% ', [j]), s + ' ');
-    CheckEqual(FormatUtf8('? ', [], [j]), ':(' + s + '): ');
+    CheckEqual(FormatSql('? ', [], [j]), ':(' + s + '): ');
     CheckEqual(FormatUtf8('% %', [j]), s + ' ');
     CheckEqual(FormatUtf8(' % %', [j]), ' ' + s + ' ');
-    CheckEqual(FormatUtf8(' ?? ', [], [j]), ' :(' + s + '): ');
-    CheckEqual(FormatUtf8('?', [], [j], true), s);
-    CheckEqual(FormatUtf8('?%', [], [j], true), s);
-    CheckEqual(FormatUtf8('? ', [], [j], true), s + ' ');
-    CheckEqual(FormatUtf8(' ?? ', [], [j], true), ' ' + s + ' ');
-    CheckEqual(FormatUtf8('?%', [], [s], true), '"' + s + '"');
-    CheckEqual(FormatUtf8(' ?? ', [], [s], true), ' "' + s + '" ');
-    CheckEqual(FormatUtf8('? %', [s], [s], true), '"' + s + '" ' + s);
+    CheckEqual(FormatSql(' ?? ', [], [j]), ' :(' + s + '): ');
+    CheckEqual(FormatJson('?', [], [j]), s);
+    CheckEqual(FormatJson('?%', [], [j]), s);
+    CheckEqual(FormatJson('? ', [], [j]), s + ' ');
+    CheckEqual(FormatJson(' ?? ', [], [j]), ' ' + s + ' ');
+    CheckEqual(FormatJson('?%', [], [s]), '"' + s + '"');
+    CheckEqual(FormatJson(' ?? ', [], [s]), ' "' + s + '" ');
+    CheckEqual(FormatJson('? %', [s], [s]), '"' + s + '" ' + s);
     vj := variant(j);
     RawUtf8ToVariant(s, vs);
-    CheckEqual(FormatUtf8(' ?? ', [], [vj], true), ' ' + s + ' ');
-    CheckEqual(FormatUtf8(' ?? ', [], [vj]), ' :(' + s + '): ');
-    CheckEqual(FormatUtf8('% ?', [vj], [vj]), s + ' :(' + s + '):');
-    CheckEqual(FormatUtf8(' ?? ', [], [vs]), ' :(''' + s + '''): ');
-    CheckEqual(FormatUtf8('% ?', [vj], [vj]), s + ' :(' + s + '):');
-    CheckEqual(FormatUtf8('? %', [vj], [vj], true), s + ' ' + s);
-    CheckEqual(FormatUtf8(' ?? ', [], [vs], true), ' "' + s + '" ');
-    CheckEqual(FormatUtf8('? %', [vs], [vj], true), s + ' ' + s);
+    CheckEqual(FormatJson(' ?? ', [], [vj]), ' ' + s + ' ');
+    CheckEqual(FormatSql(' ?? ', [], [vj]), ' :(' + s + '): ');
+    CheckEqual(FormatSql('% ?', [vj], [vj]), s + ' :(' + s + '):');
+    CheckEqual(FormatSql(' ?? ', [], [vs]), ' :(''' + s + '''): ');
+    CheckEqual(FormatSql('% ?', [vj], [vj]), s + ' :(' + s + '):');
+    CheckEqual(FormatJson('? %', [vj], [vj]), s + ' ' + s);
+    CheckEqual(FormatJson(' ?? ', [], [vs]), ' "' + s + '" ');
+    CheckEqual(FormatJson('? %', [vs], [vj]), s + ' ' + s);
     k := Int64(j) * Random32(MaxInt);
     b := Random32(64);
     s := GetBitCsv(k, b);
@@ -4304,7 +4308,7 @@ begin
     Check(IntToString(k) = u);
     Check(format('%d', [k]) = u);
     Check(FormatUtf8('%', [k]) = s);
-    Check(FormatUtf8('?', [], [k]) = ':(' + s + '):');
+    Check(FormatSql('?', [], [k]) = ':(' + s + '):');
     err := 1;
     l := GetInt64(pointer(s), err);
     Check((err = 0) and
@@ -4352,9 +4356,11 @@ begin
     str(d, a);
     s := RawUtf8(a);
     e := GetExtended(Pointer(s), err);
+    Check(err = 0, 'GetExt1');
     Check(SameValue(e, d, 0)); // validate str()
     s := ExtendedToStr(d, DOUBLE_PRECISION);
     e := GetExtended(Pointer(s), err);
+    Check(err = 0, 'GetExt2');
     Check(SameValue(e, d, 0));
     e := d;
     if (i < 9000) or
@@ -4632,7 +4638,7 @@ procedure TTestCoreBase._UTF8;
     if CP = CP_UTF16 then
       exit;
     Check(length(W) = length(A));
-    CheckUtf8(CompareMem(pointer(W), pointer(A), length(W)), 'CP%', [CP]);
+    CheckUtf8(CompareBuf(W, A), 'CP%', [CP]);
   end;
 
   procedure CheckTrimCopy(const S: RawUtf8; start, count: PtrInt);
@@ -4651,7 +4657,7 @@ var
   SU, SU2: SynUnicode;
   str: string;
   up4: RawUcs4;
-  U, U2, res, Up, Up2, json, json1, json2: RawUtf8;
+  U, U2, res, Up, Up2, json, json1, json2, s1, s2, s3: RawUtf8;
   arr: TRawUtf8DynArray;
   P: PUtf8Char;
   PB: PByte;
@@ -4670,6 +4676,25 @@ const
   CHINESE_TEXT: array[0..8] of byte = (
     $e4, $b8, $ad, $e6, $96, $87, $61, $62, $63);
 begin
+  CheckEqual(TrimChar('abcd', []), 'abcd');
+  CheckEqual(TrimChar('abcd', ['e']), 'abcd');
+  CheckEqual(TrimChar('abcd', ['a']), 'bcd');
+  CheckEqual(TrimChar('abcd', ['b']), 'acd');
+  CheckEqual(TrimChar('abcd', ['d', 'e']), 'abc');
+  CheckEqual(TrimChar('abcd', ['a', 'b']), 'cd');
+  CheckEqual(TrimChar('abcd', ['a', 'b', 'c', 'd']), '');
+  CheckEqual(TrimChar('aaaa', ['a']), '');
+  CheckEqual(TrimChar('aaaab', ['a', 'z']), 'b');
+  CheckEqual(TrimChar('baaaa', ['a', 'c']), 'b');
+  CheckEqual(OnlyChar('abcd', ['a', 'b', 'c', 'd', 'e']), 'abcd');
+  CheckEqual(OnlyChar('abcd', ['a', 'b', 'd', 'e']), 'abd');
+  CheckEqual(OnlyChar('abcd', []), '');
+  CheckEqual(OnlyChar('abcd', ['e']), '');
+  CheckEqual(OnlyChar('abcd', ['a']), 'a');
+  CheckEqual(OnlyChar('abcd', ['b']), 'b');
+  CheckEqual(OnlyChar('abcd', ['d']), 'd');
+  CheckEqual(OnlyChar('abcdz', ['d', 'z']), 'dz');
+  CheckEqual(OnlyChar('abzcd', ['z']), 'z');
   // + on RawByteString seems buggy on FPC - at least inconsistent with Delphi
   rb2 := ARawSetString;
   rb1 := rb2 + RawByteString('test');
@@ -4814,6 +4839,26 @@ begin
   Check(split(res, '*') = res);
   Check(split(res, ',', 5) = 'two');
   Check(split(res, '*', 6) = 'wo,three');
+  CheckEqual(Split('titi-tata-toto', ['-'], [@s1, @s2, @s3]), 3, 'split3');
+  CheckEqual(s1, 'titi', 'split3a');
+  CheckEqual(s2, 'tata', 'split3b');
+  CheckEqual(s3, 'toto', 'split3c');
+  CheckEqual(Split('--', ['-'], [@s1, @s2, @s3]), 3, 'split0');
+  CheckEqual(s1, '', 'split0a');
+  CheckEqual(s2, '', 'split0b');
+  CheckEqual(s3, '', 'split0c');
+  CheckEqual(Split('a-b-c', ['-'], [@s1, @s2, @s3]), 3, 'split1');
+  CheckEqual(s1, 'a', 'split1a');
+  CheckEqual(s2, 'b', 'split1b');
+  CheckEqual(s3, 'c', 'split1c');
+  CheckEqual(Split('-b-c', ['-'], [@s1, @s2, @s3]), 3, 'split2');
+  CheckEqual(s1, '', 'split2a');
+  CheckEqual(s2, 'b', 'split2b');
+  CheckEqual(s3, 'c', 'split2c');
+  CheckEqual(Split('a-b-', ['-'], [@s1, @s2, @s3]), 3, 'split4');
+  CheckEqual(s1, 'a', 'split4a');
+  CheckEqual(s2, 'b', 'split4b');
+  CheckEqual(s3, '', 'split4c');
   Check(mormot.core.base.StrLen(nil) = 0);
   for i := length(res) + 1 downto 1 do
     Check(mormot.core.base.StrLen(Pointer(@res[i])) = length(res) - i + 1);
@@ -4860,7 +4905,7 @@ begin
   Check(GetUnQuoteCsvItem('"""one,""","two "', 1, ',', '"') = 'two ');
   Check(GetUnQuoteCsvItem('''''''one,''''''', 0) = '''one,''');
   Check(GetUnQuoteCsvItem('"""one,', 0, ',', '"') = '');
-  Check(FormatUtf8('abcd', [U], [{%H-}WS]) = 'abcd');
+  Check(FormatSql('abcd', [U], [{%H-}WS]) = 'abcd');
   Check(MakePath([]) = '');
   Check(MakePath([], true) = '');
   Check(MakePath([1], false, '/') = '1');
@@ -5046,7 +5091,7 @@ begin
         P[len120] := bak;
       end;
     end;
-    json := FormatUtf8('{"a":?,"b":%}', [i], [U], {jsonformat=}true);
+    json := FormatJson('{"a":?,"b":%}', [i], [U]);
     Check(IsValidJson(json, {strict=}true));
     json1 := JsonReformat(json, jsonEscapeUnicode);
     Check(IsValidJson(json1, true));
@@ -5075,7 +5120,7 @@ begin
     SU := Utf8ToSynUnicode(U);
     Check(length(SU) = length(Unic) shr 1);
     if SU <> '' then
-      Check(CompareMem(pointer(SU), pointer(Unic), length(SU)));
+      Check(CompareMem(pointer(SU), pointer(Unic), length(Unic)), 'Utf8ToSU');
     WA := IsWinAnsi(pointer(Unic));
     Check(IsWinAnsi(pointer(Unic), length(Unic) shr 1) = WA);
     Check(IsWinAnsiU(pointer(U)) = WA);
@@ -5087,23 +5132,36 @@ begin
     Check(Utf8ILComp(pointer(U), pointer(Up), length(U), length(Up)) = 0);
     Check(Utf8ICompReference(pointer(U), pointer(U)) = 0);
     Check(Utf8ILCompReference(pointer(U), pointer(U), length(U), length(U)) = 0);
-    up4 := UpperCaseUcs4Reference(U);
-    CheckEqual(StrPosIReference(pointer(U), Up4), pointer(U));
-    if U <> '' then
-    begin
-      Up2 := 'abcDE G' + U;
-      CheckEqual(StrPosIReference(pointer(Up2), Up4) - pointer(Up2),  7);
-      SetLength(Up2, length(Up2) - 1);
-      Check(StrPosIReference(pointer(Up2), Up4) = nil);
-      Up2 := 'abcDEF' + U + 'PZE';
-      CheckEqual(StrPosIReference(pointer(Up2), Up4) - pointer(Up2),  6);
+
+    //for j := 1 to 5000 do
+    try
+      //W := WinAnsiString(RandomString(len));
+      //U := WinAnsiToUtf8(W);
+      //check(IsValidUtf8(U), 'IsValidUtf8U');
+      //Up := mormot.core.unicode.UpperCase(U);
+      up4 := UpperCaseUcs4Reference(U);
+      CheckEqual(StrPosIReference(pointer(U), Up4), pointer(U));
+      if U <> '' then
+      begin
+        Up2 := 'abcDE G' + U;
+        CheckEqual(StrPosIReference(pointer(Up2), Up4) - pointer(Up2),  7);
+        SetLength(Up2, length(Up2) - 1);
+        Check(StrPosIReference(pointer(Up2), Up4) = nil);
+        Up2 := 'abcDEF' + U + 'PZE';
+        CheckEqual(StrPosIReference(pointer(Up2), Up4) - pointer(Up2),  6);
+      end;
+      if WA then
+      begin
+        CheckEqual(Utf8ICompReference(pointer(U), pointer(Up)), 0, 'Utf8ICompReference');
+        CheckEqual(Utf8ILCompReference(pointer(U), pointer(Up), length(U), length(Up)),
+          0, 'Utf8ILCompReference');
+      end;
+    except
+      on E: Exception do
+        CheckUtf8(false, '% for %[%]%', [E.ClassType, length(U),
+          EscapeToShort(U), length(up4)]);
     end;
-    if WA then
-    begin
-      CheckEqual(Utf8ICompReference(pointer(U), pointer(Up)), 0, 'Utf8ICompReference');
-      CheckEqual(Utf8ILCompReference(pointer(U), pointer(Up), length(U), length(Up)),
-        0, 'Utf8ILCompReference');
-    end;
+
     CheckEqual(LowerCase(U), LowerCaseAscii7(U));
     L := Length(U);
     SetString(Up, nil, L);
@@ -5112,7 +5170,7 @@ begin
     Check(L <= length(U));
     CheckEqual(ConvertCaseUtf8(Pointer(Up2), NormToUpperByte), L);
     if Up <> '' then
-      Check(CompareMem(Pointer(Up), pointer(Up2), L));
+      Check(CompareBuf(Up, Up2));
     if CurrentAnsiConvert.CodePage = CODEPAGE_US then
        // initial text above is WinAnsiString (CP 1252)
       CheckEqual(StringToUtf8(Utf8ToString(U)), U, '1252');
@@ -5143,33 +5201,33 @@ begin
     FillCharFast(pointer(W)^, length(W), 0);
     Check(IsZero(pointer(W), length(W)));
     Check(FormatUtf8(U, []) = U);
-    res := FormatUtf8(U, [], []); // Delphi 5 bug with high([])>0 :(
+    res := FormatSql(U, [], []); // Delphi 5 bug with high([])>0 :(
     Check(length(res) = Length(U));
     Check(res = U);
     Check(FormatUtf8('%', [U]) = U);
-    Check(FormatUtf8('%', [U], []) = U);
+    Check(FormatSql('%', [U], []) = U);
     q := ':(' + QuotedStr(U) + '):';
-    Check(FormatUtf8('?', [], [U]) = q);
+    Check(FormatSql('?', [], [U]) = q);
     res := 'ab' + U;
     q := 'ab' + q;
     Check(FormatUtf8('ab%', [U]) = res);
     Check(FormatUtf8('%%', ['ab', U]) = res);
-    Check(FormatUtf8('ab%', [U], []) = res);
-    Check(FormatUtf8('%%', ['ab', U], []) = res);
-    Check(FormatUtf8('ab?', [], [U]) = q);
-    Check(FormatUtf8('%?', ['ab'], [U]) = q);
+    Check(FormatSql('ab%', [U], []) = res);
+    Check(FormatSql('%%', ['ab', U], []) = res);
+    Check(FormatSql('ab?', [], [U]) = q);
+    Check(FormatSql('%?', ['ab'], [U]) = q);
     res := res + 'cd';
     q := q + 'cd';
     Check(FormatUtf8('ab%cd', [U]) = res);
-    Check(FormatUtf8('ab%cd', [U], []) = res);
+    Check(FormatSql('ab%cd', [U], []) = res);
     Check(FormatUtf8('a%%cd', ['b', U]) = res);
-    Check(FormatUtf8('a%%cd', ['b', U], []) = res);
+    Check(FormatSql('a%%cd', ['b', U], []) = res);
     Check(FormatUtf8('%%%', ['ab', U, 'cd']) = res);
-    Check(FormatUtf8('ab?cd', [], [U]) = q);
-    Check(FormatUtf8('%?cd', ['ab'], [U]) = q);
-    Check(FormatUtf8('%?%', ['ab', 'cd'], [U]) = q);
-    Check(FormatUtf8('%?c%', ['ab', 'd'], [U]) = q);
-    Check(FormatUtf8('a%?%d', ['b', 'c'], [U]) = q);
+    Check(FormatSql('ab?cd', [], [U]) = q);
+    Check(FormatSql('%?cd', ['ab'], [U]) = q);
+    Check(FormatSql('%?%', ['ab', 'cd'], [U]) = q);
+    Check(FormatSql('%?c%', ['ab', 'd'], [U]) = q);
+    Check(FormatSql('a%?%d', ['b', 'c'], [U]) = q);
   end;
   SetLength(U, 4);
   U[1] := #$F0;
@@ -5875,15 +5933,14 @@ begin
   {$endif OSWINDOWS}
 end;
 
+function IPNUSL(const s1, s2: RawUtf8; len: integer): boolean;
+begin
+  result := IdemPropNameUSameLenNotNull(pointer(s1), pointer(s2), len);
+end;
+
 {$IFDEF FPC} {$PUSH} {$ENDIF} {$HINTS OFF}
 // [dcc64 Hint] H2135 FOR or WHILE loop executes zero times - deleted
 procedure TTestCoreBase._IdemPropName;
-
-  function IPNUSL(const s1, s2: RawUtf8; len: integer): boolean;
-  begin
-    result := IdemPropNameUSameLenNotNull(pointer(s1), pointer(s2), len);
-  end;
-
 const
   abcde: PUtf8Char = 'ABcdE';
   abcdf: PUtf8Char = 'abCDF';

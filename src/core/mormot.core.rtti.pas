@@ -407,7 +407,11 @@ type
   //  as in the TypInfo.GetPropInfos() PPropList usage
   // - for TOrm, you should better use the Properties.Fields[] array,
   // which is faster and contains the properties published in parent classes
+  {$ifdef USERECORDWITHMETHODS}
+  TRttiProps = record
+  {$else}
   TRttiProps = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// number of published properties in this object
     function PropCount: integer;
@@ -435,27 +439,31 @@ type
 
   /// a wrapper to class type information, as defined by the compiler RTTI
   // - get a PRttiClass with PRttiInfo.RttiClass() or GetRttiClass()
+  {$ifdef USERECORDWITHMETHODS}
+  TRttiClass = record
+  {$else}
   TRttiClass = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// the class type
     function RttiClass: TClass;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// the parent class type information
     function ParentInfo: PRttiInfo;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// the number of published properties of this class and all parents
     // - use RttiProps if you want to properties only published in this class 
     function PropCount: integer;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// the name (without .pas extension) of the unit were the class was defined
     // - then the PRttiProps information follows: use the method
     // RttiProps to retrieve its address
     function UnitName: PShortString;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the information about the published properties of this class
     // - stored after UnitName memory
     function RttiProps: PRttiProps;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// fast and easy find if this class inherits from a specific class type
     // - you should rather consider using TRttiInfo.InheritsFrom directly
     function InheritsFrom(AClass: TClass): boolean;
@@ -470,7 +478,11 @@ type
   // - we use this to store the enumeration values as integer, but easily provide
   // a text equivalent, translated if necessary, from the enumeration type
   // definition itself
+  {$ifdef USERECORDWITHMETHODS}
+  TRttiEnumType = record
+  {$else}
   TRttiEnumType = object
+  {$endif USERECORDWITHMETHODS}
   private
     // as used by TRttiInfo.EnumBaseType/SetBaseType
     function EnumBaseType: PRttiEnumType;
@@ -481,19 +493,19 @@ type
     /// specify ordinal storage size and sign
     // - is prefered to MaxValue to identify the number of stored bytes
     function RttiOrd: TRttiOrd;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// first value of enumeration type, typicaly 0
     // - may be < 0 e.g. for boolean
     function MinValue: PtrInt;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// same as ord(high(type)): not the enumeration count, but the highest index
     function MaxValue: PtrInt;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// a concatenation of shortstrings, containing the enumeration names
     // - those shortstrings are not aligned whatsoever (even if
     // FPC_REQUIRES_PROPER_ALIGNMENT is set)
     function NameList: PShortString;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the corresponding enumeration name
     // - return a void '' ShortString if Value is invalid (>MaxValue)
     function GetEnumNameOrd(Value: cardinal): PShortString;
@@ -538,7 +550,7 @@ type
     // e.g. GetEnumNameValue('Warning') will find sllWarning item
     // - return -1 if not found (don't use directly this value to avoid any GPF)
     function GetEnumNameValue(const EnumName: ShortString): integer; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the corresponding enumeration ordinal value, from its name
     // - if Value does start with lowercases 'a'..'z', they will be searched:
     // e.g. GetEnumNameValue('sllWarning') will find sllWarning item
@@ -546,7 +558,7 @@ type
     // e.g. GetEnumNameValue('Warning') will find sllWarning item
     // - return -1 if not found (don't use directly this value to avoid any GPF)
     function GetEnumNameValue(Value: PUtf8Char): integer; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the corresponding enumeration ordinal value, from its name
     // - if Value does start with lowercases 'a'..'z', they will be searched:
     // e.g. GetEnumNameValue('sllWarning') will find sllWarning item
@@ -563,7 +575,7 @@ type
     // (otDone -> 'Done')
     // - Value will be converted to the matching ordinal value (byte or word)
     function GetEnumNameTrimed(const Value): RawUtf8;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the enumeration names corresponding to a set value
     function GetSetNameCsv(Value: cardinal; SepChar: AnsiChar = ',';
       FullSetsAsStar: boolean = false): RawUtf8; overload;
@@ -580,14 +592,14 @@ type
     function GetEnumNameTrimedValue(Value: PUtf8Char; ValueLen: integer = 0): integer; overload;
     /// compute how many bytes this type will use to be stored as a enumerate
     function SizeInStorageAsEnum: integer;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// compute how many bytes (1, 2, 4) this type will use to be stored as a set
     // - consider using TRttiInfo.SetEnumSize if ISFPC32 conditional is defined
     function SizeInStorageAsSet: integer;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// store an enumeration value from its ordinal representation
     procedure SetEnumFromOrdinal(out Value; Ordinal: PtrUInt);
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
   end;
 
   /// RTTI of a record/object type definition (managed) field
@@ -619,7 +631,11 @@ type
   TRttiIntfFlags = set of TRttiIntfFlag;
 
   /// a wrapper to interface type information, as defined by the the compiler RTTI
+  {$ifdef USERECORDWITHMETHODS}
+  TRttiInterfaceTypeData = record
+  {$else}
   TRttiInterfaceTypeData = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// ancestor interface type
     function IntfParent: PRttiInfo;
@@ -740,7 +756,11 @@ type
   // ! type
   // !   TNewType = type TOldType;
   // here TypeInfo(TNewType) <> TypeInfo(TOldType)
+  {$ifdef USERECORDWITHMETHODS}
+  TRttiInfo = record
+  {$else}
   TRttiInfo = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// the value type family
     // - not defined as an inlined function, since first field is always aligned
@@ -752,7 +772,7 @@ type
     // - will return '' if @self is nil
     // - on FPC, will adjust 'integer'/'cardinal' from 'longint'/'longword' RTTI
     function Name: PShortString;
-      {$ifdef ISDELPHI2006ANDUP}inline;{$endif}
+      {$ifdef ISDELPHI2010}inline;{$endif}
     /// efficiently finalize any (managed) type value
     // - do nothing for unmanaged types (e.g. integer)
     // - if you are sure that your type is managed, you may call directly
@@ -764,45 +784,45 @@ type
     // - if you are sure that your type is managed, you may call directly
     // $ RTTI_MANAGEDCOPY[Info^.Kind](Dest, Source, Info);
     procedure Copy(Dest, Source: pointer);
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// compute extended information about this RTTI type
     procedure ComputeCache(out Cache: TRttiCache);
     /// for ordinal types, get the storage size and sign
     function RttiOrd: TRttiOrd;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// return TRUE if the property is an unsigned 64-bit field (QWord/UInt64)
     function IsQWord: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// return TRUE if the property is a boolean field
     function IsBoolean: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// return TRUE if the property is a currency field
     function IsCurrency: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// return TRUE if the property is a TDateTime/TDateTimeMS/TDate
     function IsDate: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// return true if this property is a BLOB (RawBlob)
     function IsRawBlob: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkFloat: get the storage size and precision
     // - will also properly detect our currency internal type as rfCurr
     function RttiFloat: TRttiFloat;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkEnumeration: get the enumeration type information
     function EnumBaseType: PRttiEnumType; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkEnumeration: get the enumeration values information
     function EnumBaseType(out NameList: PShortString;
       out Min, Max: integer): PRttiEnumType; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkSet: get the type information of its associated enumeration
     function SetEnumType: PRttiEnumType; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkSet: get the associated enumeration values information
     function SetEnumType(out NameList: PShortString;
       out Min, Max: integer): PRttiEnumType; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkSet: in how many bytes this type is stored
     // - is very efficient on latest FPC only - i.e. ifdef ISFPC32
     function SetEnumSize: PtrInt; {$ifdef ISFPC32} inline; {$endif}
@@ -815,7 +835,7 @@ type
     /// for rkRecordTypes: get the record size
     // - returns 0 if the type is not a record/object
     function RecordSize: PtrInt;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkRecordTypes: retrieve RTTI information about all managed fields
     // of this record
     // - non managed fields (e.g. integers, double...) are not listed here
@@ -823,7 +843,7 @@ type
     // - caller should ensure the type is indeed a record/object
     // - note: if FPC_OLDRTTI is defined, unmanaged fields are included
     procedure RecordManagedFields(out Fields: TRttiRecordManagedFields);
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkRecordTypes: check if this record as any managed fields
     function RecordManagedFieldsCount: integer;
       {$ifdef HASINLINE}inline;{$endif}
@@ -840,7 +860,7 @@ type
     // - returns nil if the item has no managed field
     // - caller should ensure the type is indeed a dynamic array
     function DynArrayItemType: PRttiInfo; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkDynArray: get the dynamic array deep RTTI of the stored item
     // - works for both managed and unmanaged types, on FPC and Delphi 2010+
     // - caller should ensure the type is indeed a dynamic array
@@ -849,7 +869,7 @@ type
     // - this overloaded method will also return the item size in bytes
     // - caller should ensure the type is indeed a dynamic array
     function DynArrayItemType(out aDataSize: PtrInt): PRttiInfo; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkDynArray: get the dynamic array size (in bytes) of the stored item
     function DynArrayItemSize: PtrInt;
       {$ifdef HASINLINE}inline;{$endif}
@@ -859,7 +879,7 @@ type
     // the size of each item)
     // - caller should ensure the type is indeed a static array
     function ArrayItemType(out aDataCount, aDataSize: PtrInt): PRttiInfo;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkArray: get the size in bytes of all the static array items
     // - caller should ensure the type is indeed a static array
     function ArraySize: PtrInt;
@@ -867,16 +887,17 @@ type
     /// recognize most used string types, returning their code page
     // - will return the exact code page on FPC and since Delphi 2009, from RTTI
     // - for non Unicode versions of Delphi, will recognize WinAnsiString as
-    // CODEPAGE_US, RawUnicode as CP_UTF16, RawByteString/RawBlob as
+    // CP_WINANSI, RawUnicode as CP_UTF16, RawByteString/RawBlob as
     // CP_RAWBYTESTRING, AnsiString as CP_ACP=0, and any other type as RawUtf8
     // - it will also recognize RawBlob as the fake CP_RAWBLOB codepage
     function AnsiStringCodePage: integer;
-      {$ifdef HASCODEPAGE}inline;{$endif}
+      {$ifdef HASCODEPAGE}{$ifdef HASSAFEINLINE}inline;{$endif}{$endif}
     {$ifdef HASCODEPAGE}
     /// returning the code page stored in the RTTI
     // - without recognizing e.g. RawBlob
     // - caller should ensure the type is indeed a rkLString
-    function AnsiStringCodePageStored: integer; inline;
+    function AnsiStringCodePageStored: integer;
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     {$endif HASCODEPAGE}
     /// retrieve rkLString, rkSString, rkUString, rkWString, rkChar, rkWChar
     // values as RawUtf8, from a pointer to its memory storage
@@ -884,7 +905,7 @@ type
     procedure StringToUtf8(Data: pointer; var Value: RawUtf8);
     /// for rkClass: get the class type information
     function RttiClass: PRttiClass;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkClass: get the class type information
     function RttiNonVoidClass: PRttiClass;
       {$ifdef HASINLINE}inline;{$endif}
@@ -897,7 +918,7 @@ type
     function InheritsFrom(AClass: TClass): boolean;
     /// for rkInterface: get the interface type information
     function InterfaceType: PRttiInterfaceTypeData;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// for rkInterface: get the TGuid of a given interface type information
     // - returns nil if this type is not an interface
     function InterfaceGuid: PGuid;
@@ -936,15 +957,19 @@ type
   /// a wrapper containing a RTTI class property definition
   // - used for direct Delphi / UTF-8 SQL type mapping/conversion
   // - doesn't depend on RTL's TypInfo unit, to enhance cross-compiler support
+  {$ifdef USERECORDWITHMETHODS}
+  TRttiProp = record
+  {$else}
   TRttiProp = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// raw retrieval of the property read access definition
     // - note: 'var Call' generated incorrect code on Delphi XE4 -> use PMethod
     function Getter(Instance: TObject; Call: PMethod): TRttiPropCall;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// raw retrieval of the property access definition
     function Setter(Instance: TObject; Call: PMethod): TRttiPropCall;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// raw retrieval of rkInteger,rkEnumeration,rkSet,rkChar,rkWChar,rkBool
     // - rather call GetOrdValue/GetInt64Value
     // - returns an Int64 to properly support cardinal values
@@ -1011,7 +1036,7 @@ type
     // - is used by a dynamic array property for fast usage of the
     // TOrm.DynArray(DynArrayFieldIndex) method
     function Index: integer;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// contains the default value for an ordinal or set property
     // - NO_DEFAULT=$80000000 indicates none was defined in source code
     // - see also TPropInfo.DefaultOr0
@@ -1027,18 +1052,18 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// the property Name, directly returned from RTTI
     function Name: PShortString;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// the property Name, converted as a RawUtf8
     function NameUtf8: RawUtf8;
     /// the type information of this property
     // - will de-reference the PropType pointer on Delphi and newer FPC compilers
     function TypeInfo: PRttiInfo;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the next property information
     // - no range check: use RttiProps()^.PropCount to determine the properties count
     // - get the first PRttiProp with RttiProps()^.PropList
     function Next: PRttiProp;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// returns rpsTrue/rpsFalse if was marked as "stored true/false" or
     // rpsGetter if IsStoredGetter(Instance) is to be called at runtime
     function IsStoredKind: TRttiPropStored;
@@ -1053,17 +1078,17 @@ type
       {$ifdef FPC} inline; {$endif}
     /// compute in how many bytes this property is stored
     function FieldSize: PtrInt;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// return TRUE if the property has no getter but direct field read
     // - returns FALSE if no "read" attribute was specified: use GetterCall
     // if you want to mimic how Get*() methods could use the "write" field
     function GetterIsField: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// return TRUE if the property has no setter but direct field write
     // - returns FALSE if no "write" attribute is specified: use SetterCall
     // if you want to mimic how Set*() methods could use the "read" field
     function SetterIsField: boolean;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// returns how a property should be retrieved
     // - no "read" attribute specified will return rpcField if "write" is a
     // direct field access - just like any Get*() method would do
@@ -1077,14 +1102,14 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// returns the low-level field read address, if GetterIsField is TRUE
     function GetterAddr(Instance: pointer): pointer;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// returns the low-level field write address, if SetterIsField is TRUE
     function SetterAddr(Instance: pointer): pointer;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
     /// low-level getter of the field value memory pointer
     // - return NIL if both getter and setter are methods
     function GetFieldAddr(Instance: TObject): pointer;
-      {$ifdef HASINLINE}inline;{$endif}
+      {$ifdef HASSAFEINLINE}inline;{$endif}
 
     /// low-level getter of the ordinal property value of a given instance
     // - this method will check if the corresponding property is ordinal
@@ -2012,11 +2037,10 @@ function TypeInfoToDynArrayTypeInfo(ElemInfo: PRttiInfo;
 { ************** RTTI-based Registration for Custom JSON Parsing }
 
 const
-  /// TRttiCustomList stores its TypeInfo() by PRttiInfo.Kind + Name[0][1]
-  // - optimized "hash table of the poor" (tm) for Find(TypeInfo) and Find(Name)
+  /// TRttiCustomList stores its TypeInfo() by Kind + PRttiInfo/Name
+  // - optimized "hash table of the poor" (tm) for FindType() and Find(Name)
   // - should be a bit mask (i.e. power of two minus 1)
-  // - the fact that we use modulo 32 makes Find(Name) case insensitive :)
-  RTTICUSTOMTYPEINFOHASH = 31;
+  RTTIHASH_MAX = {$ifdef NOPATCHVMT} 63 {$else} 31 {$endif};
 
 type
   TRttiCustom = class;
@@ -2108,8 +2132,12 @@ type
   /// store information about one property/field of a given TypeInfo/PRttIinfo
   // - used by both rkClass for published properties, and rkRecord/rkObject
   // for nested fields
+  {$ifdef USERECORDWITHMETHODS}
+  TRttiCustomProp = record
+  {$else}
   TRttiCustomProp = object
-  protected
+  {$endif USERECORDWITHMETHODS}
+  private
     function InitFrom(RttiProp: PRttiProp): PtrInt;
     function ValueIsVoidGetter(Data: pointer): boolean;
     procedure GetValueDirect(Data: PByte; out RVD: TRttiVarData);
@@ -2191,7 +2219,11 @@ type
 
   /// store information about all properties/fields of a given TypeInfo/PRttIinfo
   // - includes parent properties when filled by AddFromClass(IncludeParents=true)
+  {$ifdef USERECORDWITHMETHODS}
+  TRttiCustomProps = record
+  {$else}
   TRttiCustomProps = object
+  {$endif USERECORDWITHMETHODS}
   public
     /// one List[] item per property/field
     List: TRttiCustomPropDynArray;
@@ -2207,6 +2239,8 @@ type
     /// contains List[].Name as a JSON array including a trailing ,
     // - as used by _JS_DynArray() for efficient twoNonExpandedArrays generation
     NamesAsJsonArray: RawUtf8;
+    /// points to List[] items which are managed
+    Managed: PRttiCustomPropDynArray;
     /// locate a property/field by name
     // - just redirect to FindCustomProp() low-level function
     function Find(const PropName: RawUtf8): PRttiCustomProp; overload;
@@ -2235,20 +2269,22 @@ type
     // - Rtti.ByClass[TMyClass].Props.NameChanges() replaces deprecated
     // TJsonSerializer.RegisterCustomSerializerFieldNames(TMyClass, ...)
     procedure NameChanges(const Old, New: array of RawUtf8);
-    /// manuall adding of a property/field definition
+    /// reset all properties
+    procedure InternalClear;
+    /// manual adding of a property/field definition
     // - append as last field, unless AddFirst is set to true
-    procedure Add(Info: PRttiInfo; Offset: PtrInt; const PropName: RawUtf8;
+    procedure InternalAdd(Info: PRttiInfo; Offset: PtrInt; const PropName: RawUtf8;
       AddFirst: boolean = false);
     /// register the published properties of a given class
     // - is called recursively if IncludeParents is true
-    procedure AddFromClass(ClassInfo: PRttiInfo; IncludeParents: boolean);
+    procedure InternalAddFromClass(ClassInfo: PRttiInfo; IncludeParents: boolean);
     /// prepare List[result].Name from TRttiCustom.SetPropsFromText
     function FromTextPrepare(const PropName: RawUtf8): integer;
     /// register the properties specified from extended RTTI (Delphi 2010+ only)
     // - do nothing on FPC or Delphi 2009 and older
     procedure SetFromRecordExtendedRtti(RecordInfo: PRttiInfo);
     /// called once List[] and Size have been defined
-    // - compute the fManaged[] internal list and return the matching flags
+    // - compute the Managed[] internal list and return the matching flags
     function AdjustAfterAdded: TRttiCustomFlags;
     /// retrieve all List[] items as text
     procedure AsText(out Result: RawUtf8; IncludePropType: boolean;
@@ -2257,11 +2293,6 @@ type
     // - it will individually fill the properties, not the whole memory
     // as TRttiCustom.FinalizeAndClear would on a record
     procedure FinalizeAndClearPublishedProperties(Instance: TObject);
-  protected
-    /// points to List[] items which are managed
-    fManaged: PRttiCustomPropDynArray;
-    /// reset all properties
-    procedure InternalClear;
     /// finalize the managed properties of this instance
     // - called e.g. when no RTTI is available, i.e. text serialization
     procedure FinalizeManaged(Data: PAnsiChar);
@@ -2365,7 +2396,8 @@ type
       aParserComplex: TRttiParserComplexType): TRttiCustom; virtual;
   public
     /// initialize the customizer class from known RTTI
-    constructor Create(aInfo: PRttiInfo); virtual;
+    // - is called just after Create
+    procedure FromRtti(aInfo: PRttiInfo); virtual;
     /// initialize abstract custom serialization for a given record
     // - not registered in the main TRttiCustomList: caller should free it
     // - in practice, is used only by test.core.data.pas regression tests
@@ -2558,41 +2590,38 @@ type
   TRttiCustomClass = class of TRttiCustom;
 
   /// efficient PRttiInfo/TRttiCustom pairs for TRttiCustomList hash table
-  // - as stored in TRttiCustomListHashTable[TRttiKind] = one per TRttiKind
+  // - as stored in TRttiCustomList.fHashTable[RK_TOSLOT[TRttiKind]]
+  // - contains hash tables by TypeInfo() and by case-insensitive name
   TRttiCustomListPairs = record
-    /// efficient PerHash[] pairs thread-safety during Find/AddToPairs
+    /// efficient HashInfo/HashName[] pairs thread-safety during Find/AddToPairs
     Safe: TRWLightLock;
     /// speedup search by name e.g. from a loop
     LastName: TRttiCustom;
-    /// speedup search by PRttiInfo e.g. from a loop
+    /// thread-safe speedup search by PRttiInfo e.g. from a loop
     LastInfo: TRttiCustom;
-    /// CPU L1 cache efficient PRttiInfo/TRttiCustom pairs hashed by Name[0][1]
-    // - hashing by name allows fast per-TypeInfo() and per-Name lookup
-    PerHash: array[0..RTTICUSTOMTYPEINFOHASH] of TPointerDynArray;
+    /// thread-safe speedup search by PRttiInfo e.g. from a loop
+    LastHash: array[0..RTTIHASH_MAX] of TRttiCustom;
+    /// CPU L1 cache efficient PRttiInfo/TRttiCustom pairs hashed by PRttiInfo
+    HashInfo: array[0..RTTIHASH_MAX] of TPointerDynArray;
+    /// CPU L1 cache efficient PRttiInfo/TRttiCustom pairs hashed by Name
+    HashName: array[0..RTTIHASH_MAX] of TPointerDynArray;
   end;
   PRttiCustomListPairs = ^TRttiCustomListPairs;
-
-  /// internal structure for TRttiCustomList "hash table of the poor" (tm)
-  // - a per-Kind and per-Name hash table of PRttiInfo/TRttiCustom pairs
-  // - avoid link to mormot.core.data hash table, with a fast access
-  // - consume e.g. around 25KB of memory for all mormot2tests types
-  TRttiCustomListHashTable =
-    array[succ(low(TRttiKind)) .. high(TRttiKind)] of TRttiCustomListPairs;
 
   /// maintain a thread-safe list of PRttiInfo/TRttiCustom/TRttiJson registration
   TRttiCustomList = class
   private
-    // store PRttiInfo/TRttiCustom pairs by TRttiKind.Kind+Name[0][1]
-    PerKind: ^TRttiCustomListHashTable;
+    // store PRttiInfo/TRttiCustom pairs by TRttiKind.Kind+PRttiInfo/Name
+    fHashTable: array of TRttiCustomListPairs;
     // used to release memory used by registered customizations
-    Instances: array of TRttiCustom;
+    fInstances: array of TRttiCustom;
     fGlobalClass: TRttiCustomClass;
     function GetByClass(ObjectClass: TClass): TRttiCustom;
       {$ifdef HASINLINE}inline;{$endif}
     // called by FindOrRegister() for proper inlining
     function DoRegister(Info: PRttiInfo): TRttiCustom; overload;
     function DoRegister(ObjectClass: TClass; ToDo: TRttiCustomFlags): TRttiCustom; overload;
-    procedure AddToPairs(Instance: TRttiCustom);
+    procedure AddToPairs(Instance: TRttiCustom; Info: PRttiInfo);
     procedure SetGlobalClass(RttiClass: TRttiCustomClass); // ensure Count=0
   public
     /// how many TRttiCustom instances have been registered
@@ -2613,19 +2642,23 @@ type
     function FindType(Info: PRttiInfo): TRttiCustom;
     /// efficient search of TRttiCustom from a given TObject class
     // - returns nil if Info is not known
-    // - will use the ObjectClass vmtAutoTable slot for very fast O(1) lookup
-    class function Find(ObjectClass: TClass): TRttiCustom; overload;
+    // - will use the ObjectClass vmtAutoTable slot for very fast O(1) lookup,
+    // or use our "hash table of the poor" (tm) if NOPATCHVMT conditional is set
+    {$ifdef NOPATCHVMT}
+    function FindClass(ObjectClass: TClass): TRttiCustom;
+      {$ifdef HASINLINE}inline;{$endif}
+    {$else}
+    class function FindClass(ObjectClass: TClass): TRttiCustom;
       {$ifdef HASINLINE}static; inline;{$endif}
+    {$endif NOPATCHVMT}
     /// efficient search of TRttiCustom from a given type name
-    // - internally use our "hash table of the poor" (tm) for quick search
-    function Find(Name: PUtf8Char; NameLen: PtrInt;
+    function FindName(Name: PUtf8Char; NameLen: PtrInt;
       Kind: TRttiKind): TRttiCustom; overload;
     /// efficient search of TRttiCustom from a given type name
-    // - internally use our "hash table of the poor" (tm) for quick search
-    function Find(Name: PUtf8Char; NameLen: PtrInt;
+    function FindName(Name: PUtf8Char; NameLen: PtrInt;
       Kinds: TRttiKinds = []): TRttiCustom; overload;
     /// efficient search of TRttiCustom from a given type name
-    function Find(const Name: ShortString; Kinds: TRttiKinds = []): TRttiCustom;
+    function FindName(const Name: ShortString; Kinds: TRttiKinds = []): TRttiCustom;
        overload; {$ifdef HASINLINE}inline;{$endif}
     /// manual search of any matching TRttiCustom.ArrayRtti type
     // - currently not called: IList<T> and IKeyValue<T> just use TypeInfo(T)
@@ -2659,13 +2692,11 @@ type
     /// register a given class type, using its RTTI
     // - returns existing or new TRttiCustom
     // - please call RegisterCollection for TCollection
-    // - will use the ObjectClass vmtAutoTable slot for very fast O(1) lookup
     function RegisterClass(ObjectClass: TClass): TRttiCustom; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// register a given class type, using its RTTI
     // - returns existing or new TRttiCustom
     // - please call RegisterCollection for TCollection
-    // - will use the ObjectClass vmtAutoTable slot for very fast O(1) lookup
     function RegisterClass(aObject: TObject): TRttiCustom; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// low-level registration function called from RegisterClass()
@@ -3656,7 +3687,7 @@ begin
   if @self = TypeInfo(RawUtf8) then
     result := CP_UTF8
   else if @self = TypeInfo(WinAnsiString) then
-    result := CODEPAGE_US
+    result := CP_WINANSI
   {$ifndef PUREMORMOT2}
   else if @self = TypeInfo(RawUnicode) then
     result := CP_UTF16
@@ -6400,7 +6431,7 @@ begin
         cp := Info^.AnsiStringCodePage;
         if cp = CP_UTF8 then
           result := ptRawUtf8
-        else if cp = CODEPAGE_US then
+        else if cp = CP_WINANSI then
           result := ptWinAnsi
         else if cp >= CP_RAWBLOB then
           result := ptRawByteString
@@ -7177,7 +7208,7 @@ begin
   CountNonVoid := FromNames(pointer(List), Count, NamesAsJsonArray);
 end;
 
-procedure TRttiCustomProps.Add(Info: PRttiInfo; Offset: PtrInt;
+procedure TRttiCustomProps.InternalAdd(Info: PRttiInfo; Offset: PtrInt;
   const PropName: RawUtf8; AddFirst: boolean);
 var
   n: PtrInt;
@@ -7239,11 +7270,11 @@ begin
   if Count = 0 then
   begin
     result := [];
-    fManaged := nil;
+    Managed := nil;
     exit;
   end;
   result := [rcfHasNestedProperties, rcfHasOffsetSetJsonLoadProperties];
-  SetLength(fManaged, Count);
+  SetLength(Managed, Count);
   n := 0;
   p := pointer(List);
   for i := 1 to Count do
@@ -7254,7 +7285,7 @@ begin
       if not Assigned(p^.Value.fCopy) then
         raise ERttiException.Create('Paranoid managed Value.Copy');
       include(result, rcfHasNestedManagedProperties);
-      fManaged[n] := p;
+      Managed[n] := p;
       inc(n);
     end;
     if (p^.OffsetSet < 0) or
@@ -7262,7 +7293,7 @@ begin
       exclude(result, rcfHasOffsetSetJsonLoadProperties);
     inc(p);
   end;
-  SetLength(fManaged, n);
+  SetLength(Managed, n);
 end;
 
 procedure TRttiCustomProps.AsText(out Result: RawUtf8; IncludePropType: boolean;
@@ -7300,10 +7331,10 @@ begin
   Count := 0;
   Size := 0;
   NotInheritedIndex := 0;
-  fManaged := nil;
+  Managed := nil;
 end;
 
-procedure TRttiCustomProps.AddFromClass(ClassInfo: PRttiInfo;
+procedure TRttiCustomProps.InternalAddFromClass(ClassInfo: PRttiInfo;
   IncludeParents: boolean);
 var
   rc: PRttiClass;
@@ -7318,7 +7349,7 @@ begin
   rc := ClassInfo^.RttiNonVoidClass;
   if IncludeParents then
     // put parent properties first
-    AddFromClass(rc^.ParentInfo, true);
+    InternalAddFromClass(rc^.ParentInfo, true);
   rs := rc^.RttiProps;
   n := rs^.PropCount;
   if n = 0 then
@@ -7402,7 +7433,7 @@ var
   p: PRttiCustomProp;
   n: integer;
 begin
-  pp := pointer(fManaged);
+  pp := pointer(Managed);
   if pp <> nil then
   begin
     n := PDALen(PAnsiChar(pp) - _DALEN)^ + _DAOFF;
@@ -7462,7 +7493,7 @@ var
   offset: PtrInt;
 begin
   offset := 0;
-  pp := pointer(fManaged);
+  pp := pointer(Managed);
   if pp <> nil then
   begin
     n := PDALen(PAnsiChar(pp) - _DALEN)^ + _DAOFF;
@@ -7544,11 +7575,26 @@ begin
   result := PtrInt(@Message);
 end;
 
+// since "var class" are not available in Delphi 6-7, and is inherited by
+// the children classes under latest Delphi versions (i.e. the "var class" is
+// shared by all inherited classes, whereas we want one var per class), we
+// reused one of the magic VMT slots, i.e. vmtAutoTable as filled for automated
+// methods, a relic from Delphi 2 that is not used  - see
+// http://hallvards.blogspot.com/2007/05/hack17-virtual-class-variables-part-ii.html
+// [you can define the NOPATCHVMT conditional to rely on our Rtti.FindType()
+//  internal hash table instead, for a slower but more conservative approach]
+
 procedure TRttiCustom.SetValueClass(aClass: TClass; aInfo: PRttiInfo);
+{$ifndef NOPATCHVMT}
 var
   vmt: PPointer;
+{$endif NOPATCHVMT}
 begin
   fValueClass := aClass;
+  // we need to register this class ASAP into RTTI list to avoid infinite calls
+  {$ifdef NOPATCHVMT}
+  Rtti.fHashTable[RK_TOSLOT[rkClass]].LastInfo := self; // faster FindType()
+  {$else}
   // set vmtAutoTable slot for efficient Find(TClass) - to be done asap
   vmt := Pointer(PAnsiChar(aClass) + vmtAutoTable);
   if vmt^ = nil then
@@ -7556,7 +7602,8 @@ begin
   if vmt^ <> self then
     raise ERttiException.CreateUtf8(
       '%.SetValueClass(%): vmtAutoTable set to %', [self, aClass, vmt^]);
-  // identify the most known class types
+  {$endif NOPATCHVMT}
+  // identify the most known class types - see also overriden mormot.core.json
   if aClass.InheritsFrom(TCollection) then
     fValueRtlClass := vcCollection
   else if aClass.InheritsFrom(TStrings) then
@@ -7571,15 +7618,14 @@ begin
     fValueRtlClass := vcException
   else if aClass.InheritsFrom(TObjectWithID) then
     fValueRtlClass := vcObjectWithID;
-  // vcSynList/vcRawUtf8List are set in overriden TRttiJson.SetValueClass
-  // register the published properties of this class
-  fProps.AddFromClass(aInfo, {includeparents=}true);
+  // register the published properties of this class using RTTI
+  fProps.InternalAddFromClass(aInfo, {includeparents=}true);
   if fValueRtlClass = vcException then
     // manual registration of the Exception.Message property
-    fProps.Add(TypeInfo(string), EHook(nil).MessageOffset, 'Message');
+    fProps.InternalAdd(TypeInfo(string), EHook(nil).MessageOffset, 'Message');
 end;
 
-constructor TRttiCustom.Create(aInfo: PRttiInfo);
+procedure TRttiCustom.FromRtti(aInfo: PRttiInfo);
 var
   dummy: integer;
   pt: TRttiParserType;
@@ -7679,7 +7725,7 @@ constructor TRttiCustom.CreateFromText(const RttiDefinition: RawUtf8);
 var
   P: PUtf8Char;
 begin
-  Create(nil); // no associated RTTI
+  FromRtti(nil); // no associated RTTI
   P := pointer(RttiDefinition);
   SetPropsFromText(P, eeNothing, {NoRegister=}true);
 end;
@@ -7740,7 +7786,7 @@ begin
   // initialize process
   SetParserType(ParserType, pctNone);
   // register to the internal list
-  Rtti.AddToPairs(self);
+  Rtti.AddToPairs(self, fCache.Info);
 end;
 
 function {%H-}_New_NotImplemented(Rtti: TRttiCustom): pointer;
@@ -8179,7 +8225,8 @@ begin
          not (pt in [ptRecord, ptDynArray]) then
         raise ERttiException.CreateUtf8(
           'Unexpected nested % %', [c, ToText(pt)^]);
-      nested := Rtti.GlobalClass.Create(nil);
+      nested := Rtti.GlobalClass.Create;
+      nested.FromRtti(nil);
       nested.SetPropsFromText(P, ee, NoRegister);
       nested.NoRttiSetAndRegister(ptRecord, '', nil, NoRegister);
       if NoRegister then
@@ -8197,7 +8244,8 @@ begin
          (pt <> ptDynArray) then // paranoid
         raise ERttiException.CreateUtf8(
           'Unexpected array % %', [c, ToText(pt)^]);
-      c := Rtti.GlobalClass.Create(nil);
+      c := Rtti.GlobalClass.Create;
+      c.FromRtti(nil);
       c.NoRttiSetAndRegister(ptDynArray, typname, ac, NoRegister);
       if NoRegister then
         ObjArrayAdd(fOwnedRtti, c);
@@ -8309,7 +8357,7 @@ end;
 
 constructor TRttiCustomList.Create;
 begin
-  PerKind := AllocMem(SizeOf(PerKind^)); // 15KB zeroed hash table allocation
+  SetLength(fHashTable, RK_TOSLOT_MAX + 1); // 6-12KB zeroed allocation
   RegisterSafe.Init;
   fGlobalClass := TRttiCustom;
 end;
@@ -8319,73 +8367,88 @@ var
   i: PtrInt;
 begin
   for i := Count - 1 downto 0 do
-    Instances[i].Free;
-  Dispose(PerKind);
+    fInstances[i].Free;
   RegisterSafe.Done;
   inherited Destroy;
 end;
 
-function LockedFind(Info: PRttiInfo; P: pointer): TRttiCustom;
+function LockedFind(Pairs, PEnd: PPointerArray; Info: PRttiInfo): TRttiCustom;
   {$ifdef HASINLINE}inline;{$endif}
 begin
-  result := P;
-  if result <> nil then
-  begin
-    // efficient brute force search within L1 cache
-    if PPointer(result)^ <> Info then
+  repeat
+    if Pairs[0] <> Info then
     begin
-      P := @PPointerArray(result)[PDALen(PAnsiChar(result) - _DALEN)^ + (_DAOFF - 1)];
-      repeat
-        inc(PByte(result), 2 * SizeOf(pointer));  // PRttiInfo/TRttiCustom pairs
-        if PAnsiChar(result) <= PAnsiChar(P) then // P = P[high(P)]
-          if PPointer(result)^ = Info then
-            break
-          else
-            continue;
-        result := nil; // not found
-        exit;
-      until false;
+      Pairs := @Pairs[2]; // PRttiInfo/TRttiCustom pairs
+      if PAnsiChar(Pairs) >= PAnsiChar(PEnd) then
+        break;
+      continue;
     end;
-    result := PPointerArray(result)[1]; // found
-  end;
+    result := Pairs[1]; // found
+    exit;
+  until false;
+  result := nil; // not found
 end;
 
 function TRttiCustomList.FindType(Info: PRttiInfo): TRttiCustom;
 var
   k: PRttiCustomListPairs;
-  p: PPointer; // ^TPointerDynArray
+  h: PtrUInt;
+  p: PPointerArray; // ^TPointerDynArray
 begin
+  {$ifndef NOPATCHVMT}
   if Info^.Kind <> rkClass then
   begin
-    // our optimized "hash table of the poor" (tm) lookup
-    k := @PerKind^[Info^.Kind];
-    // try latest found RTTI
+  {$endif NOPATCHVMT}
+    // our dedicated "hash table of the poor" (tm) lookup
+    k := @fHashTable[RK_TOSLOT[Info^.Kind]];
+    // try latest found RTTI for this kind of type definition (naive but works)
     result := k^.LastInfo;
     if (result <> nil) and
        (result.Info = Info) then
       exit;
-    // note: we tried to include RawName[2] and $df, but with no gain
-    p := @k^.PerHash[(PtrUInt(Info.RawName[0]) xor
-      PtrUInt(Info.RawName[1])) and RTTICUSTOMTYPEINFOHASH]; // hash before lock
-    result := p^;
+    // O(1) hash of the PRttiInfo pointer using inlined xxHash32 shuffle stage
+    h := xxHash32Mixup(PtrUInt(Info)) and RTTIHASH_MAX;
+    // Knuth's magic number had more collision (even more with KNUTH_HASHPTR_MUL)
+    // h := cardinal(Info * KNUTH_HASH32_MUL) shr (32 - RTTIHASH_BITS);
+    // h := crc32cBy4(0, Info) and RTTICUSTOMTYPEINFOMAX; // slower, not better
+    // try latest found RTTI for this hash slot
+    result := k^.LastHash[h];
+    if (result <> nil) and
+       (result.Info = Info) then
+    begin
+      k^.LastInfo := result; // for faster lookup next time
+      exit; // avoid most ReadLock/ReadUnLock and LockedFind() search
+    end;
+    // thread-safe O(n) search in CPU L1 cache
+    k^.Safe.ReadLock;
+    p := pointer(k^.HashInfo[h]); // read TPointerDynArray within the lock
+    if p <> nil then
+      result := LockedFind(p, @p[PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF], Info);
+    k^.Safe.ReadUnLock;
     if result <> nil then
     begin
-      k^.Safe.ReadLock;
-      result := LockedFind(Info, p^);
-      k^.Safe.ReadUnLock;
-      if result <> nil then
-        k^.LastInfo := result;
+      k^.LastInfo := result;   // aligned pointers are atomically accessed
+      k^.LastHash[h] := result;
     end;
+  {$ifndef NOPATCHVMT}
   end
   else
-    // direct lookup of the vmtAutoTable slot for classes
+    // direct O(1) lookup of the vmtAutoTable slot for classes
     result := PPointer(PAnsiChar(Info.RttiNonVoidClass.RttiClass) + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
 end;
 
-class function TRttiCustomList.Find(ObjectClass: TClass): TRttiCustom;
+{$ifdef NOPATCHVMT}
+function TRttiCustomList.FindClass(ObjectClass: TClass): TRttiCustom;
+begin
+  result := FindType(PPointer(PAnsiChar(ObjectClass) + vmtTypeInfo)^);
+end;
+{$else}
+class function TRttiCustomList.FindClass(ObjectClass: TClass): TRttiCustom;
 begin
   result := PPointer(PAnsiChar(ObjectClass) + vmtAutoTable)^;
 end;
+{$endif NOPATCHVMT}
 
 function LockedFindNameInPairs(Pairs, PEnd: PPointerArray;
   Name: PUtf8Char; NameLen: PtrInt): TRttiCustom;
@@ -8428,7 +8491,20 @@ no:   Pairs := @Pairs[2]; // PRttiInfo/TRttiCustom pairs
   result := nil; // not found
 end;
 
-function TRttiCustomList.Find(Name: PUtf8Char; NameLen: PtrInt;
+function RttiHashName(Name: PByteArray; Len: PtrUInt): byte;
+  {$ifdef HASINLINE}inline;{$endif}
+begin
+  result := Len;
+  repeat
+    dec(Len);
+    if Len = 0 then
+      break;
+    inc(result, Name[Len] and $df); // simple case-insensitive hash
+  until false;
+  result := result and RTTIHASH_MAX;
+end;
+
+function TRttiCustomList.FindName(Name: PUtf8Char; NameLen: PtrInt;
   Kind: TRttiKind): TRttiCustom;
 var
   k: PRttiCustomListPairs;
@@ -8438,20 +8514,19 @@ begin
      (Name <> nil) and
      (NameLen > 0) then
   begin
-    k := @PerKind^[Kind];
+    k := @fHashTable[RK_TOSLOT[Kind]];
     // try latest found name e.g. calling from JsonRetrieveObjectRttiCustom()
     result := k^.LastName;
     if (result <> nil) and
        (PStrLen(PAnsiChar(pointer(result.Name)) - _STRLEN)^ = NameLen) and
        IdemPropNameUSameLenNotNull(pointer(result.Name), Name, NameLen) then
       exit;
-    // our optimized "hash table of the poor" (tm) lookup
-    p := @k^.PerHash[(PtrUInt(NameLen) xor
-      PtrUInt(Name[0])) and RTTICUSTOMTYPEINFOHASH]; // hashed before the lock
+    // our dedicated "hash table of the poor" (tm) lookup
+    p := @k^.HashName[RttiHashName(pointer(Name), NameLen)];
     k^.Safe.ReadLock;
-    result := p^;
+    result := p^; // read TPointerDynArray within the lock
     if result <> nil then
-      result := LockedFindNameInPairs(pointer(result),
+      result := LockedFindNameInPairs(@PPointerArray(result)[0],
         @PPointerArray(result)[PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF],
         Name, NameLen);
     k^.Safe.ReadUnLock;
@@ -8462,7 +8537,7 @@ begin
     result := nil;
 end;
 
-function TRttiCustomList.Find(Name: PUtf8Char; NameLen: PtrInt;
+function TRttiCustomList.FindName(Name: PUtf8Char; NameLen: PtrInt;
   Kinds: TRttiKinds): TRttiCustom;
 var
   k: TRttiKind;
@@ -8473,10 +8548,10 @@ begin
   begin
     if Kinds = [] then
       Kinds := rkAllTypes;
-    for k := low(PerKind^) to high(PerKind^) do
+    for k := succ(low(k)) to high(k) do
       if k in Kinds then
       begin
-        result := Find(Name, NameLen, k);
+        result := FindName(Name, NameLen, k);
         if result <> nil then
           exit;
       end;
@@ -8484,9 +8559,9 @@ begin
   result := nil;
 end;
 
-function TRttiCustomList.Find(const Name: ShortString; Kinds: TRttiKinds): TRttiCustom;
+function TRttiCustomList.FindName(const Name: ShortString; Kinds: TRttiKinds): TRttiCustom;
 begin
-  result := Find(@Name[1], ord(Name[0]), Kinds);
+  result := FindName(@Name[1], ord(Name[0]), Kinds);
 end;
 
 function FindNameInArray(Pairs, PEnd: PPointerArray; ElemInfo: PRttiInfo): TRttiCustom;
@@ -8513,15 +8588,15 @@ begin
     result := nil;
     exit;
   end;
-  k := @PerKind^[rkDynArray];
+  k := @fHashTable[RK_TOSLOT[rkDynArray]];
   k^.Safe.ReadLock;
-  p := @k^.PerHash;
-  n := length(k^.PerHash);
+  p := @k^.HashInfo;
+  n := length(k^.HashInfo);
   repeat
     result := p^;
     if result <> nil then
     begin
-      result := FindNameInArray(pointer(result),
+      result := FindNameInArray(@PPointerArray(result)[1],
         @PPointerArray(result)[PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF], ElemInfo);
       if result <> nil then
         break;
@@ -8544,8 +8619,12 @@ begin
     result := FindType(Info);  // search again (within RegisterSafe context)
     if result <> nil then
       exit; // already registered in the background
-    result := GlobalClass.Create(Info);
-    AddToPairs(result);
+    // initialize a new TRttiCustom/TRttiJson instance for this type
+    result := GlobalClass.Create;
+    // register ASAP to avoid endless recursion in FromRtti
+    AddToPairs(result, Info);
+    // now we can parse and process the RTTI
+    result.FromRtti(Info);
   finally
     RegisterSafe.UnLock;
   end;
@@ -8565,10 +8644,11 @@ begin
     // generate fake RTTI for classes without {$M+}, e.g. TObject or Exception
     RegisterSafe.Lock;
     try
-      result := Find(ObjectClass); // search again (for thread safety)
+      result := FindClass(ObjectClass); // search again (for thread safety)
       if result <> nil then
         exit; // already registered in the background
-      result := GlobalClass.Create(nil);
+      result := GlobalClass.Create;
+      result.FromRtti(nil);
       result.SetValueClass(ObjectClass, nil);
       result.NoRttiSetAndRegister(ptClass, ToText(ObjectClass));
       GetTypeData(result.fCache.Info)^.ClassType := ObjectClass;
@@ -8616,24 +8696,28 @@ begin
   end;
 end;
 
-procedure TRttiCustomList.AddToPairs(Instance: TRttiCustom);
+
+procedure TRttiCustomList.AddToPairs(Instance: TRttiCustom; Info: PRttiInfo);
+
+  procedure AddPair(var List: TPointerDynArray);
+  var
+    n: PtrInt;
+  begin
+    n := length(List);
+    SetLength(List, n + 2);
+    List[n] := Info;
+    List[n + 1] := Instance;
+  end;
+
 var
-  n: PtrInt;
   k: PRttiCustomListPairs;
-  p: ^TPointerDynArray;
 begin
-  // call is made within RegisterSafe but when resizing p^.Pairs,
-  // Table^.PairsSafe.WriteLock should be used
-  k := @PerKind^[Instance.Kind];
-  p := @k^.PerHash[(PtrUInt(Instance.Info.RawName[0]) xor
-    PtrUInt(Instance.Info.RawName[1])) and RTTICUSTOMTYPEINFOHASH];
-  k^.Safe.WriteLock;
+  k := @fHashTable[RK_TOSLOT[Info^.Kind]];
+  k^.Safe.WriteLock; // needed when resizing p^
   try
-    n := length(p^);
-    SetLength(p^, n + 2);
-    p^[n] := Instance.Info;
-    p^[n + 1] := Instance;
-    ObjArrayAddCount(Instances, Instance, Count); // to release memory
+    AddPair(k^.HashInfo[xxHash32Mixup(PtrUInt(Info)) and RTTIHASH_MAX]);
+    AddPair(k^.HashName[RttiHashName(@Info.RawName[1], ord(Info.RawName[0]))]);
+    ObjArrayAddCount(fInstances, Instance, Count); // to release memory
     inc(Counts[Instance.Kind]);
   finally
     k^.Safe.WriteUnLock;
@@ -8652,7 +8736,7 @@ begin
   if Count <> 0 then
   begin
     for i := 0 to Count - 1 do
-      regtypes := {%H-}regtypes + Instances[i].Name + ' ';
+      regtypes := {%H-}regtypes + fInstances[i].Name + ' ';
     newunit := _ClassUnit(RttiClass);
     raise ERttiException.CreateUtf8('Rtti.Count=% at Rtti.GlobalClass := % : ' +
       'some types have been registered as % before % has been loaded and ' +
@@ -8700,7 +8784,7 @@ begin
     inc(Name, i);
     dec(NameLen, i);
   until false;
-  result := Find(Name, NameLen);
+  result := FindName(Name, NameLen);
   if result = nil then
   begin
     // array/record keywords, integer/cardinal FPC types not available by Find()
@@ -8721,7 +8805,11 @@ end;
 
 function TRttiCustomList.RegisterClass(ObjectClass: TClass): TRttiCustom;
 begin
+  {$ifdef NOPATCHVMT}
+  result := FindType(PPointer(PAnsiChar(ObjectClass) + vmtTypeInfo)^);
+  {$else}
   result := PPointer(PAnsiChar(ObjectClass) + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
   if result = nil then
     result := DoRegister(ObjectClass);
 end;
@@ -8733,15 +8821,23 @@ end;
 
 function TRttiCustomList.RegisterClass(aObject: TObject): TRttiCustom;
 begin
+  {$ifdef NOPATCHVMT}
+  result := FindType(PPointer(PPAnsiChar(aObject)^ + vmtTypeInfo)^);
+  {$else}
   result := PPointer(PPAnsiChar(aObject)^ + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
   if result = nil then
     result := DoRegister(PClass(aObject)^);
 end;
 
 function TRttiCustomList.RegisterAutoCreateFieldsClass(ObjectClass: TClass): TRttiCustom;
 begin
+  {$ifdef NOPATCHVMT}
+  result := FindType(PPointer(PAnsiChar(ObjectClass) + vmtTypeInfo)^);
+  {$else}
   result := PPointer(PAnsiChar(ObjectClass) + vmtAutoTable)^;
-  if (result = nil) or // caller is likely to have checked it - paranoiac we are
+  {$endif NOPATCHVMT}
+  if (result = nil) or // caller should have checked it - paranoiac we are
      not (rcfAutoCreateFields in result.Flags) then
     result := DoRegister(ObjectClass, [rcfAutoCreateFields]);
 end;
@@ -8876,10 +8972,13 @@ var
 begin
   RegisterSafe.Lock;
   try
-    result := Find(pointer(TypeName), length(TypeName));
+    result := FindName(pointer(TypeName), length(TypeName));
     new := result = nil;
     if new then
-      result := GlobalClass.Create(nil)
+    begin
+      result := GlobalClass.Create;
+      result.FromRtti(nil);
+    end
     else if not (result.Kind in rkRecordTypes) then
       raise ERttiException.CreateUtf8('Rtti.RegisterFromText: existing % is a %',
         [TypeName, ToText(result.Kind)^]);
@@ -9100,15 +9199,21 @@ end;
 class function TObjectWithCustomCreate.RttiCustom: TRttiCustom;
 begin
   // inlined Rtti.Find(ClassType): we know it is the first slot
+  {$ifdef NOPATCHVMT}
+  result := Rtti.FindType(PPointer(PAnsiChar(self) + vmtTypeInfo)^);
+  {$else}
   result := PPointer(PAnsiChar(self) + vmtAutoTable)^;
+  {$endif NOPATCHVMT}
   // assert(result.InheritsFrom(TRttiCustom));
 end;
 
 class function TObjectWithCustomCreate.NewInstance: TObject;
 begin
+  {$ifndef NOPATCHVMT}
   // register the class to the RTTI cache
   if PPointer(PAnsiChar(self) + vmtAutoTable)^ = nil then
     Rtti.DoRegister(self); // ensure TRttiCustom is set
+  {$endif NOPATCHVMT}
   // bypass vmtIntfTable and vmt^.vInitTable (FPC management operators)
   GetMem(pointer(result), InstanceSize); // InstanceSize is inlined
   FillCharFast(pointer(result)^, InstanceSize, 0);
@@ -9171,7 +9276,7 @@ end;
 
 class procedure TObjectWithID.RttiCustomSetParser(Rtti: TRttiCustom);
 begin
-  Rtti.Props.Add(
+  Rtti.Props.InternalAdd(
     TypeInfo(TID), PtrInt(@TObjectWithID(nil).fID), 'ID', {first=}true);
 end;
 

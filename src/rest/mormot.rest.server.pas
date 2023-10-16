@@ -902,7 +902,7 @@ type
     property TimeOutTix: cardinal
       read fTimeOutTix;
     /// copy of the associated user access rights
-    // - extracted from User.TAuthGroup.SqlAccessRights
+    // - extracted from User.TAuthGroup.OrmAccessRights
     property AccessRights: TOrmAccessRights
       read fAccessRights;
     /// the hexadecimal private key as returned to the connected client
@@ -1789,7 +1789,7 @@ type
     fRootRedirectGet: RawUtf8;
     fRootRedirectForbiddenToAuth: RawUtf8;
     fPublicUri: TRestServerUri;
-    fIPBan, fIPWhiteJWT: TIPBan;
+    fIPBan, fIPWhiteJwt: TIPBan;
     fServicesRouting: TRestServerUriContextClass;
     fRecordVersionSlaveCallbacks: array of IServiceRecordVersionCallback;
     fServer: IRestOrmServer;
@@ -3139,8 +3139,8 @@ begin
       [Server, ParamInterfaceInfo.Name]);
   // Par is the callback ID transmitted from the client side
   fakeid := Ctxt.ParseInteger;
-  if Ctxt.Json = nil then
-    Ctxt.Json := @NULCHAR; // allow e.g. '[12345]' (single interface parameter)
+  if Ctxt.Json = nil then // allow e.g. '[12345]' (single interface parameter)
+    Ctxt.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json := @NULCHAR;
   if (fakeid = 0) or
      (ParamInterfaceInfo.Info = TypeInfo(IInvokable)) then
   begin
@@ -4375,8 +4375,8 @@ begin
   result := inherited AuthenticationCheck(jwt);
   if result and
      (Server <> nil) and
-     (Server.fIPWhiteJWT <> nil) and
-     not Server.fIPWhiteJWT.Exists(fCall^.LowLevelRemoteIP) and
+     (Server.fIPWhiteJwt <> nil) and
+     not Server.fIPWhiteJwt.Exists(fCall^.LowLevelRemoteIP) and
      (fCall^.LowLevelRemoteIP <> '') and
      (fCall^.LowLevelRemoteIP <> '127.0.0.1') then
   begin
@@ -4590,7 +4590,7 @@ begin
       if (par^ = '[') or
          IdemPChar(par, '%5B') then
         // as json array (input is e.g. '+%5B...' for ' [...')
-        UrlDecode(par, RawUtf8(fCall^.InBody))
+        UrlDecodeVar(par, StrLen(par), RawUtf8(fCall^.InBody), {name=}false)
       else
       begin
         // or as a list of parameters (input is 'Param1=Value1&Param2=Value2...')
@@ -4686,7 +4686,7 @@ begin
   // here User.GroupRights and fPrivateKey should have been set
   fTimeOutShr10 := (QWord(User.GroupRights.SessionTimeout) * (1000 * 60)) shr 10;
   fTimeOutTix := tix shr 10 + fTimeOutShr10;
-  fAccessRights := User.GroupRights.SqlAccessRights;
+  fAccessRights := User.GroupRights.OrmAccessRights;
   FormatUtf8('%+%', [fID, fPrivateKey], fPrivateSalt);
   fPrivateSaltHash := crc32(crc32(0, pointer(fPrivateSalt), length(fPrivateSalt)),
     pointer(User.PasswordHashHexa), length(User.PasswordHashHexa));
@@ -7161,17 +7161,17 @@ begin
   result := false;
   if fJwtForUnauthenticatedRequest = nil then
     exit;
-  if fIPWhiteJWT = nil then
+  if fIPWhiteJwt = nil then
   begin
     if aRemoveWhite then
       exit;
-    fIPWhiteJWT := TIPBan.Create;
-    fPrivateGarbageCollector.Add(fIPWhiteJWT);
+    fIPWhiteJwt := TIPBan.Create;
+    fPrivateGarbageCollector.Add(fIPWhiteJwt);
   end;
   if aRemoveWhite then
-    result := fIPWhiteJWT.Delete(aIP)
+    result := fIPWhiteJwt.Delete(aIP)
   else
-    result := fIPWhiteJWT.Add(aIP);
+    result := fIPWhiteJwt.Add(aIP);
   InternalLog('WhiteIP(%,%)=%', [aIP, BOOL_STR[aRemoveWhite], BOOL_STR[result]]);
 end;
 

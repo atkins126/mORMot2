@@ -29,6 +29,9 @@ uses
   contnrs,
   types,
   sysutils,
+  {$ifdef ISDELPHI}
+  typinfo,  // circumvent Delphi inlining issues
+  {$endif ISDELPHI}
   mormot.core.base,
   mormot.core.os,
   mormot.core.rtti,
@@ -3114,7 +3117,7 @@ type
   /// implement an abstract Radix Tree static or <param> node
   TRadixTreeNodeParams = class(TRadixTreeNode)
   protected
-    /// is called for each <param> as Pos/Len pair//
+    /// is called for each <param> as Pos/Len pair
     // - called eventually with Pos^='?' and Len=-1 for the inlined parameters
     // - should return true on success, false to abort
     function LookupParam(Ctxt: TObject; Pos: PUtf8Char; Len: integer): boolean;
@@ -3144,12 +3147,6 @@ type
 
 
 implementation
-
-{$ifdef ISDELPHI}
-uses
-  TypInfo; // avoid Delphi compiler to complain about inlining issues
-{$endif ISDELPHI}
-
 
 
 { ************ RTL TPersistent / TInterfacedObject with Custom Constructor }
@@ -5733,6 +5730,8 @@ end;
 
 { ********** Efficient RTTI Values Binary Serialization and Comparison }
 
+// per-type efficient binary serialization
+
 function _BS_Ord(Data: pointer; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
 begin
   result := ORDTYPE_SIZE[Info^.RttiOrd];
@@ -5743,6 +5742,81 @@ function _BL_Ord(Data: pointer; var Source: TFastReader; Info: PRttiInfo): PtrIn
 begin
   result := ORDTYPE_SIZE[Info^.RttiOrd];
   Source.Copy(Data, result);
+end;
+
+function _BS_Float(Data: pointer; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
+begin
+  result := FLOATTYPE_SIZE[Info^.RttiFloat];
+  Dest.Write(Data, result);
+end;
+
+function _BL_Float(Data: pointer; var Source: TFastReader; Info: PRttiInfo): PtrInt;
+begin
+  result := FLOATTYPE_SIZE[Info^.RttiFloat];
+  Source.Copy(Data, result);
+end;
+
+function _BS_64(Data: PInt64; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
+begin
+  {$ifdef CPU32}
+  Dest.Write8(Data);
+  {$else}
+  Dest.WriteI64(Data^);
+  {$endif CPU32}
+  result := 8;
+end;
+
+function _BL_64(Data: PQWord; var Source: TFastReader; Info: PRttiInfo): PtrInt;
+begin
+  Data^ := Source.Next8;
+  result := 8;
+end;
+
+function _BS_String(Data: PRawByteString; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
+begin
+  Dest.WriteVar(pointer(Data^), length(Data^));
+  result := SizeOf(pointer);
+end;
+
+function _BL_LString(Data: PRawByteString; var Source: TFastReader; Info: PRttiInfo): PtrInt;
+begin
+  with Source.VarBlob do
+    {$ifdef HASCODEPAGE}
+    FastSetStringCP(Data^, Ptr, Len, Info^.AnsiStringCodePageStored);
+    {$else}
+    SetString(Data^, Ptr, Len);
+    {$endif HASCODEPAGE}
+  result := SizeOf(pointer);
+end;
+
+{$ifdef HASVARUSTRING}
+
+function _BS_UString(Data: PUnicodeString; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
+begin
+  Dest.WriteVar(pointer(Data^), length(Data^) * 2);
+  result := SizeOf(pointer);
+end;
+
+function _BL_UString(Data: PUnicodeString; var Source: TFastReader; Info: PRttiInfo): PtrInt;
+begin
+  with Source.VarBlob do
+    SetString(Data^, PWideChar(Ptr), Len shr 1); // length in bytes was stored
+  result := SizeOf(pointer);
+end;
+
+{$endif HASVARUSTRING}
+
+function _BS_WString(Data: PWideString; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
+begin
+  Dest.WriteVar(pointer(Data^), length(Data^) * 2);
+  result := SizeOf(pointer);
+end;
+
+function _BL_WString(Data: PWideString; var Source: TFastReader; Info: PRttiInfo): PtrInt;
+begin
+  with Source.VarBlob do
+    SetString(Data^, PWideChar(Ptr), Len shr 1); // length in bytes was stored
+  result := SizeOf(pointer);
 end;
 
 // efficient branchless comparison of every TRttiOrd/TRttiFloat raw value
@@ -5800,18 +5874,6 @@ begin
   result := RTTI_ORD_COMPARE[Info^.RttiOrd](A, B, Info, Compared);
 end;
 
-function _BS_Float(Data: pointer; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
-begin
-  result := FLOATTYPE_SIZE[Info^.RttiFloat];
-  Dest.Write(Data, result);
-end;
-
-function _BL_Float(Data: pointer; var Source: TFastReader; Info: PRttiInfo): PtrInt;
-begin
-  result := FLOATTYPE_SIZE[Info^.RttiFloat];
-  Source.Copy(Data, result);
-end;
-
 function _BC_Single(A, B: PSingle; Info: PRttiInfo; out Compared: integer): PtrInt;
 begin
   Compared := ord(A^ > B^) - ord(A^ < B^);
@@ -5835,22 +5897,6 @@ begin
   result := RTTI_FLOAT_COMPARE[Info^.RttiFloat](A, B, Info, Compared);
 end;
 
-function _BS_64(Data: PInt64; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
-begin
-  {$ifdef CPU32}
-  Dest.Write8(Data);
-  {$else}
-  Dest.WriteI64(Data^);
-  {$endif CPU32}
-  result := 8;
-end;
-
-function _BL_64(Data: PQWord; var Source: TFastReader; Info: PRttiInfo): PtrInt;
-begin
-  Data^ := Source.Next8;
-  result := 8;
-end;
-
 function _BC_64(A, B: pointer; Info: PRttiInfo; out Compared: integer): PtrInt;
 begin
   if Info^.IsQWord then
@@ -5858,53 +5904,6 @@ begin
   else
     Compared := ord(PInt64(A)^ > PInt64(B)^) - ord(PInt64(A)^ < PInt64(B)^);
   result := 8;
-end;
-
-function _BS_String(Data: PRawByteString; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
-begin
-  Dest.WriteVar(pointer(Data^), length(Data^));
-  result := SizeOf(pointer);
-end;
-
-function _BL_LString(Data: PRawByteString; var Source: TFastReader; Info: PRttiInfo): PtrInt;
-begin
-  with Source.VarBlob do
-    {$ifdef HASCODEPAGE}
-    FastSetStringCP(Data^, Ptr, Len, Info^.AnsiStringCodePageStored);
-    {$else}
-    SetString(Data^, Ptr, Len);
-    {$endif HASCODEPAGE}
-  result := SizeOf(pointer);
-end;
-
-{$ifdef HASVARUSTRING}
-
-function _BS_UString(Data: PUnicodeString; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
-begin
-  Dest.WriteVar(pointer(Data^), length(Data^) * 2);
-  result := SizeOf(pointer);
-end;
-
-function _BL_UString(Data: PUnicodeString; var Source: TFastReader; Info: PRttiInfo): PtrInt;
-begin
-  with Source.VarBlob do
-    SetString(Data^, PWideChar(Ptr), Len shr 1); // length in bytes was stored
-  result := SizeOf(pointer);
-end;
-
-{$endif HASVARUSTRING}
-
-function _BS_WString(Data: PWideString; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
-begin
-  Dest.WriteVar(pointer(Data^), length(Data^) * 2);
-  result := SizeOf(pointer);
-end;
-
-function _BL_WString(Data: PWideString; var Source: TFastReader; Info: PRttiInfo): PtrInt;
-begin
-  with Source.VarBlob do
-    SetString(Data^, PWideChar(Ptr), Len shr 1); // length in bytes was stored
-  result := SizeOf(pointer);
 end;
 
 function _BC_LString(A, B: PRawByteString; Info: PRttiInfo;
@@ -7536,7 +7535,7 @@ begin
           P2 := P1 + n * 16;
           while P1 < P2 do
           begin
-            {$ifdef CPU64}Exchg16{$else}ExchgVariant{$endif}(Pointer(P1),Pointer(P2));
+            {$ifdef CPU64}Exchg16{$else}ExchgVariant{$endif}(pointer(P1), pointer(P2));
             inc(P1, 16);
             dec(P2, 16);
           end;
@@ -7673,7 +7672,7 @@ procedure TDynArray.SaveToJson(out result: RawUtf8; EnumSetsAsText: boolean;
   reformat: TTextWriterJsonFormat);
 begin
   SaveToJson(result, TEXTWRITEROPTIONS_ENUMASTEXT[EnumSetsAsText],
-    TEXTWRITEROBJECTOPTIONS_ENUMASTEXT[EnumSetsAsText]);
+    TEXTWRITEROBJECTOPTIONS_ENUMASTEXT[EnumSetsAsText], reformat);
 end;
 
 procedure TDynArray.SaveToJson(out result: RawUtf8; Options: TTextWriterOptions;
@@ -8073,7 +8072,11 @@ end;
 
 type
   // internal structure used to make QuickSort faster & with less stack usage
+  {$ifdef USERECORDWITHMETHODS}
+  TDynArrayQuickSort = record
+  {$else}
   TDynArrayQuickSort = object
+  {$endif USERECORDWITHMETHODS}
   public
     Compare: TDynArraySortCompare;
     CompareEvent: TOnDynArraySortCompare;
@@ -9871,7 +9874,11 @@ begin
 end;
 
 type
+  {$ifdef USERECORDWITHMETHODS}
+  TFastReHash = record
+  {$else}
   TFastReHash = object // dedicated object for better register allocation
+  {$endif USERECORDWITHMETHODS}
   public
     hc: cardinal;
     {$ifdef DYNARRAYHASHCOLLISIONCOUNT}

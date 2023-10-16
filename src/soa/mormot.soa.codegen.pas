@@ -63,6 +63,12 @@ function ContextFromModel(aServer: TRestServer;
   const aSourcePath: TFileName = '';
   const aDescriptions: TFileName = ''): variant;
 
+/// compute the SOA information, ready to be exported as JSON
+// - will publish the ORM and SOA properties
+// - to be used e.g. for client code generation via Mustache templates
+function ContextFromUsedInterfaces(const aSourcePath: TFileName = '';
+  const aDescriptions: TFileName = ''): variant;
+
 /// compute the information of an interface method, ready to be exported as JSON
 // - to be used e.g. for the implementation of the MVC controller via interfaces
 // - no description text will be included - use ContextFromModel() if needed
@@ -588,19 +594,23 @@ type
     function ContextArgsFromMethod(const meth: TInterfaceMethod): variant;
     procedure AddUnit(const aUnitName: ShortString; addAsProperty: PVariant);
   public
-    constructor Create(const aDescriptions: TFileName);
+    constructor Create(const aSourcePath, aDescriptions: TFileName);
     constructor CreateFromModel(aServer: TRestServer;
       const aSourcePath: TFileName; const aDescriptions: TFileName);
-    constructor CreateFromUsedInterfaces(const aDescriptions: TFileName);
+    constructor CreateFromUsedInterfaces(
+      const aSourcePath, aDescriptions: TFileName);
     function Context: variant;
   end;
 
 
 { TWrapperContext }
 
-constructor TWrapperContext.Create(const aDescriptions: TFileName);
+constructor TWrapperContext.Create(const aSourcePath, aDescriptions: TFileName);
 var
   desc: RawByteString;
+  source: TFileName;
+  src: PChar;
+  n: PtrInt;
 begin
   TDocVariant.NewFast([
     @fORM,
@@ -616,6 +626,21 @@ begin
     ResourceSynLZToRawByteString(WRAPPER_RESOURCENAME, desc);
   if desc <> '' then
     fDescriptions.InitJsonInPlace(Pointer(desc), JSON_FAST);
+  if aSourcePath <> '' then
+  begin
+    src := pointer(aSourcePath);
+    n := 0;
+    repeat
+      source := GetNextItemString(src, ';');
+      if (source <> '') and
+         DirectoryExists(source) then
+      begin
+        SetLength(fSourcePath, n + 1);
+        fSourcePath[n] := IncludeTrailingPathDelimiter(source);
+        inc(n);
+      end;
+    until src = nil;
+  end;
 end;
 
 function TWrapperContext.ContextNestedProperties(rtti: TRttiCustom;
@@ -650,6 +675,16 @@ var
   begin
     if TYPES_LANG[lng, typ] <> '' then
       RawUtf8ToVariant(TYPES_LANG[lng, typ], result)
+    else if typName = '' then
+      SetVariantNull(result)
+    else
+      RawUtf8ToVariant(typName, result);
+  end;
+
+  function VarSwagger: variant;
+  begin
+    if TYPES_LANG[lngSwagger, typ] <> '' then
+      result := _JsonFast(TYPES_LANG[lngSwagger, typ])
     else if typName = '' then
       SetVariantNull(result)
     else
@@ -752,7 +787,7 @@ begin
     'typeCS',      VarName(lngCS),
     'typeJava',    VarName(lngJava),
     'typeTS',      VarName(lngTypeScript),
-    'typeSwagger', VarName(lngSwagger)]);
+    'typeSwagger', VarSwagger]);
   if self = nil then
     // no need to have full info if called e.g. from MVC
     exit;
@@ -868,7 +903,7 @@ end;
 constructor TWrapperContext.CreateFromModel(aServer: TRestServer;
   const aSourcePath, aDescriptions: TFileName);
 var
-  t, f, s, n: PtrInt;
+  t, f, s: PtrInt;
   nfoList: TOrmPropInfoList;
   nfo: TOrmPropInfo;
   nfoOrmFieldRttiTypeName: RawUtf8;
@@ -878,25 +913,8 @@ var
   field, rec: variant;
   srv: TServiceFactoryServer;
   uri: RawUtf8;
-  source: TFileName;
-  src: PChar;
 begin
-  Create(aDescriptions);
-  if aSourcePath <> '' then
-  begin
-    src := pointer(aSourcePath);
-    n := 0;
-    repeat
-      source := GetNextItemString(src, ';');
-      if (source <> '') and
-         DirectoryExists(source) then
-      begin
-        SetLength(fSourcePath, n + 1);
-        fSourcePath[n] := IncludeTrailingPathDelimiter(source);
-        inc(n);
-      end;
-    until src = nil;
-  end;
+  Create(aSourcePath, aDescriptions);
   fServer := aServer;
   TDocVariant.NewFast([
     @fields,
@@ -946,13 +964,13 @@ begin
       fields.AddItem(field);
     end;
     with fServer.Model.TableProps[t] do
-      rec := _JsonFastFmt(
-        '{tableName:?,className:?,classParent:?,fields:?,isInMormotPas:%,unitName:?,comma:%}',
+      rec := _JsonFastFmt('{tableName:?,className:?,classParent:?,' +
+        'fields:?,isInMormotPas:%,unitName:?,comma:%}',
         [NULL_OR_TRUE[(Props.Table = TAuthGroup) or
          (Props.Table = TAuthUser)],
          NULL_OR_COMMA[t < fServer.Model.TablesMax]],
-         [Props.SqlTableName, Props.Table.ClassName,
-          Props.Table.ClassParent.ClassName,
+         [Props.SqlTableName, ClassNameShort(Props.Table)^,
+          ClassNameShort(Props.Table.ClassParent)^,
           Variant(fields),
           Props.TableRtti.Info.RttiClass^.UnitName]);
     if hasRecord then
@@ -1003,13 +1021,13 @@ begin
 end;
 
 constructor TWrapperContext.CreateFromUsedInterfaces(
-  const aDescriptions: TFileName);
+  const aSourcePath, aDescriptions: TFileName);
 var
   interfaces: TSynObjectListLightLocked;
   services: TDocVariantData;
   i: PtrInt;
 begin
-  Create(aDescriptions);
+  Create(aSourcePath, aDescriptions);
   interfaces := TInterfaceFactory.GetUsedInterfaces;
   if interfaces = nil then
     exit;
@@ -1275,7 +1293,7 @@ begin
       if (authClass = TRestServerAuthenticationDefault) or
          (authClass = TRestServerAuthenticationNone) then
       begin
-        _ObjAddProp('authClass', authClass.ClassName, result);
+        _ObjAddProp('authClass', ToText(authClass), result);
         break;
       end;
     end;
@@ -1285,6 +1303,17 @@ function ContextFromModel(aServer: TRestServer;
   const aSourcePath, aDescriptions: TFileName): variant;
 begin
   with TWrapperContext.CreateFromModel(aServer, aSourcePath, aDescriptions) do
+  try
+    result := Context;
+  finally
+    Free;
+  end;
+end;
+
+function ContextFromUsedInterfaces(
+  const aSourcePath, aDescriptions: TFileName): variant;
+begin
+  with TWrapperContext.CreateFromUsedInterfaces(aSourcePath, aDescriptions) do
   try
     result := Context;
   finally
@@ -1409,7 +1438,7 @@ begin
     exit;
   end;
   if unitName = '' then
-    result := template
+    result := template // asked for .mustache template
   else
   begin
     _ObjAddProps(['templateName', templateName,
@@ -1724,7 +1753,7 @@ begin
     DestFileName := 'mORMotInterfaces.pas'
   else if DestFileName[1] = PathDelim then
     DestFileName := ExtractFilePath(TemplateName) + DestFileName;
-  with TWrapperContext.CreateFromUsedInterfaces('') do
+  with TWrapperContext.CreateFromUsedInterfaces('', '') do
   try
     ctxt := context;
   finally
@@ -1794,7 +1823,7 @@ begin
         intf := ToUtf8(TInterfaceFactory.Guid2TypeInfo(services[i])^.RawName);
         if _Safe(context.soa.services)^.
             GetDocVariantByProp('interfaceName', intf, false, service) then
-          service^.AddValue('query', queries[i].ClassName)
+          service^.AddValue('query', ClassNameShort(queries[i])^)
         else
           raise EWrapperContext.CreateUtf8('CustomDelays: unknown %', [intf]);
       end;

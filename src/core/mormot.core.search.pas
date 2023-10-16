@@ -57,7 +57,7 @@ type
     Attr: integer;
     /// the matching file size
     Size: Int64;
-    /// the matching file date/time
+    /// the matching file local date/time
     Timestamp: TDateTime;
     /// fill the item properties from a FindFirst/FindNext's TSearchRec
     procedure FromSearchRec(const Directory: TFileName; const F: TSearchRec);
@@ -116,8 +116,16 @@ type
 /// ensure all files in Dest folder(s) do match the one in Reference
 // - won't copy all files from Reference folders, but will update files already
 // existing in Dest, which did change since last synchronization
+// - file copy will use in-memory loading, so won't work well with huge files
 // - returns the number of files copied during the process
 function SynchFolders(const Reference, Dest: TFileName;
+  Options: TSynchFoldersOptions = []): integer;
+
+/// copy all files from a source folder to a destination folder
+// - will copy only new or changed files, keeping existing identical files
+// - file copy will use stream loading, so would cope with huge files
+// - returns the number of fields copied during the process, -1 on error
+function CopyFolder(const Source, Dest: TFileName;
   Options: TSynchFoldersOptions = []): integer;
 
 
@@ -154,7 +162,11 @@ type
   // - PrepareContains() is the most efficient method for '*contained*' search
   // - consider using TMatchs (or SetMatchs/TMatchDynArray) if you expect to
   // search for several patterns, or even TExprParserMatch for expression search
+  {$ifdef USERECORDWITHMETHODS}
+  TMatch = record
+  {$else}
   TMatch = object
+  {$endif USERECORDWITHMETHODS}
   private
     Pattern, Text: PUtf8Char;
     P, T, PMax, TMax: PtrInt;
@@ -354,8 +366,12 @@ type
   //  in a huge text buffer
   // - this version also handles french and spanish pronunciations on request,
   //  which differs from default Soundex, i.e. English
+  {$ifdef USERECORDWITHMETHODS}
+  TSynSoundEx = record
+  {$else}
   TSynSoundEx = object
-  protected
+  {$endif USERECORDWITHMETHODS}
+  private
     Search, FirstChar: cardinal;
     fValues: PSoundExValues;
   public
@@ -873,8 +889,12 @@ type
   /// allows to iterate over a TDynArray.SaveTo binary buffer
   // - may be used as alternative to TDynArray.LoadFrom, if you don't want
   // to allocate all items at once, but retrieve items one by one
+  {$ifdef USERECORDWITHMETHODS}
+  TDynArrayLoadFrom = record
+  {$else}
   TDynArrayLoadFrom = object
-  protected
+  {$endif USERECORDWITHMETHODS}
+  private
     ArrayLoad: TRttiBinaryLoad;
   public
     /// how many items were saved in the TDynArray.SaveTo binary buffer
@@ -1303,7 +1323,11 @@ type
       read fUtf8Length write fUtf8Length;
   end;
 
+{$ifdef ISDELPHI}
 resourcestring
+{$else}
+const
+{$endif ISDELPHI}
   sInvalidIPAddress = '"%s" is an invalid IP v4 address';
   sInvalidEmailAddress = '"%s" is an invalid email address';
   sInvalidPattern = '"%s" does not match the expected pattern';
@@ -1627,7 +1651,6 @@ begin
     result[i] := Files[i].Name;
 end;
 
-{$I-}
 function SynchFolders(const Reference, Dest: TFileName;
   Options: TSynchFoldersOptions): integer;
 var
@@ -1671,7 +1694,7 @@ begin
         FileFromString(s, dstfn, false, reftime);
         inc(result);
         if sfoWriteFileNameToConsole in Options then
-          writeln('synched ', dstfn);
+          ConsoleWrite('synched %', [dstfn]);
       end
       else if (sfoSubFolder in Options) and
               SearchRecValidFolder(fdst) then
@@ -1679,11 +1702,61 @@ begin
     until FindNext(fdst) <> 0;
     FindClose(fdst);
   end;
-  if sfoWriteFileNameToConsole in Options then
-    IOResult;
 end;
-{$I+}
- 
+
+function CopyFolder(const Source, Dest: TFileName;
+  Options: TSynchFoldersOptions): integer;
+var
+  src, dst, reffn, dstfn: TFileName;
+  sr: TSearchRec;
+  dsize: Int64;
+  dtime: TUnixMSTime;
+  nested: integer;
+begin
+  result := 0;
+  src := IncludeTrailingPathDelimiter(Source);
+  if not DirectoryExists(src) then
+    exit;
+  dst := EnsureDirectoryExists(Dest);
+  if FindFirst(src + FILES_ALL, faAnyFile, sr) = 0 then
+  begin
+    repeat
+      reffn := src + sr.Name;
+      dstfn := dst + sr.Name;
+      if SearchRecValidFile(sr) then
+      begin
+        if FileInfoByName(dstfn, dsize, dtime) and // fast single syscall
+           (sr.Size = dsize) then
+          if sfoByContent in Options then
+          begin
+            if SameFileContent(reffn, dstfn) then
+              continue;
+          end
+          else if abs(SearchRecToUnixTimeUtc(sr) * 1000 - dtime) < 1000 then
+            continue; // allow error of 1 second timestamp resolution
+        if not CopyFile(reffn, dstfn, {failsifexists=}false) then
+          result := -1;
+      end
+      else if not SearchRecValidFolder(sr) then
+        continue
+      else if sfoSubFolder in Options then
+      begin
+        nested := CopyFolder(reffn, dstfn, Options);
+        if nested < 0 then
+          result := nested
+        else
+          inc(result, nested);
+      end;
+      if result < 0 then
+        break;
+      inc(result);
+      if sfoWriteFileNameToConsole in Options then
+        ConsoleWrite('copied %', [reffn]);
+    until (FindNext(sr) <> 0);
+    FindClose(sr);
+  end;
+end;
+
 
 { ****************** ScanUtf8, GLOB and SOUNDEX Text Search }
 
@@ -4503,7 +4576,7 @@ end;
 
 function hash32prime(buf: pointer): cardinal;
 begin
-  // xxhash32-inspired - and won't pollute L1 cache with lookup tables
+  // inlined xxHash32Mixup - won't pollute L1 cache with crc lookup tables
   result := PCardinal(buf)^;
   result := result xor (result shr 15);
   result := result * 2246822519;
@@ -5315,7 +5388,7 @@ end;
 constructor TSynFilterOrValidate.CreateUtf8(const Format: RawUtf8; const Args,
   Params: array of const);
 begin
-  Create(FormatUtf8(Format, Args, Params, true));
+  Create(FormatJson(Format, Args, Params));
 end;
 
 procedure TSynFilterOrValidate.SetParameters(const value: RawUtf8);

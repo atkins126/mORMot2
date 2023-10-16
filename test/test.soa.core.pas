@@ -918,26 +918,26 @@ var
   Nav, Nav2: TConsultaNav;
   {$endif HASNOSTATICRTTI}
 begin
-  Check(Inst.I.Add(1, 2) = 3);
-  Check(Inst.I.Multiply($1111333, $222266667) = $24693E8DB170B85);
-  Check(Inst.I.StackIntMultiply(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) = 3628800);
-  Check(Inst.I.StackFloatMultiply(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) = 3628800);
-  CheckSame(Inst.I.Subtract(23, 20), 3);
+  CheckEqual(Inst.I.Add(1, 2), 3);
+  Check(Inst.I.Multiply($1111333, $222266667) = $24693E8DB170B85, 'I.Mul');
+  CheckEqual(Inst.I.StackIntMultiply(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 3628800, 'sm1');
+  Check(Inst.I.StackFloatMultiply(1, 2, 3, 4, 5, 6, 7, 8, 9, 10) = 3628800, 'sm2');
+  CheckSame(Inst.I.Subtract(23, 20), 3, DOUBLE_SAME, 'substract');
   Inst.I.ToText(3.14, s);
-  Check(s = '3.14');
-  Check(Inst.I.ToTextFunc(777) = '777');
+  CheckEqual(s, '3.14');
+  Check(Inst.I.ToTextFunc(777) = '777', '777');
   x := Inst.CT.GetCurrentThreadID;
   if GlobalInterfaceTestMode <> itmHttp then
   begin
     y := Inst.CT.GetThreadIDAtCreation;
-    Check(x = y);
+    Check(x = y, 'x=y');
   end;
   case GlobalInterfaceTestMode of
     itmMainThread:
-      Check(Inst.CC.GetCurrentThreadID = PtrUInt(MainThreadID));
+      Check(Inst.CC.GetCurrentThreadID = PtrUInt(MainThreadID), 'thrd1');
     itmPerInterfaceThread,
     itmLocked:
-      Check(Inst.CC.GetCurrentThreadID <> PtrUInt(MainThreadID));
+      Check(Inst.CC.GetCurrentThreadID <> PtrUInt(MainThreadID), 'thrd2');
   end;
   TestCalculator(Inst.I);
   TestCalculator(Inst.CC); // test the fact that CC inherits from ICalculator
@@ -2008,7 +2008,10 @@ type
       read GetParent write SetParent;
   end;
 
-  TUseWeakRef = (direct, weakref, zeroing);
+  TUseWeakRef = (
+    direct,
+    weakref
+    {$ifndef NOPATCHVMT} , zeroing {$endif} );
 
 var
   ParentDestroyed, ChildDestroyed: boolean;
@@ -2066,6 +2069,7 @@ begin
   Check(ParentDestroyed = true, 'Manual release');
   Check(ChildDestroyed = true);
   WeakTest(weakref);
+  {$ifndef NOPATCHVMT}
   Init(zeroing);
   Check(ParentDestroyed = false);
   Check(ChildDestroyed = false);
@@ -2098,6 +2102,7 @@ begin
   Parent := nil;
   Check(ParentDestroyed = true);
   Check(ChildDestroyed = false);
+  {$endif NOPATCHVMT}
 end;
 
 
@@ -2128,8 +2133,10 @@ begin
       FChild := Value;
     weakref:
       SetWeak(@FChild, Value);
+    {$ifndef NOPATCHVMT}
     zeroing:
       SetWeakZero(self, @FChild, Value);
+    {$endif NOPATCHVMT}
   end;
 end;
 
@@ -2160,8 +2167,10 @@ begin
       FParent := Value;
     weakref:
       SetWeak(@FParent, Value);
+    {$ifndef NOPATCHVMT}
     zeroing:
       SetWeakZero(self, @FParent, Value);
+    {$endif NOPATCHVMT}
   end;
 end;
 

@@ -310,6 +310,41 @@ type
   PEntry = ^TEntry;
 
 
+const
+  // convention may be to use __ or _ before the type name
+  // put in interface section of the unit to be reused if needed
+  __TTestCustomJsonRecord: RawUtf8 =
+      'A,B,C integer D RawUtf8 E{E1,E2 double} F TDateTime';
+  __TTestCustomJsonArray: RawUtf8 =
+      'A,B,C byte D RawByteString E[E1 double E2 string] F TDateTime';
+  __TTestCustomJsonArraySimple =
+      'A,B Int64 C array of TGuid D RawUtf8 E [F RawUtf8 G array of RawUtf8] H RawUtf8';
+  __TTestCustomJsonArrayVariant =
+      'A,B Int64 C array of variant D RawUtf8';
+  __TTestCustomJsonGitHub =
+      'name RawUtf8 id cardinal description RawUtf8 ' +
+     'fork boolean owner{login RawUtf8 id currency}';
+  __TTestCustomJson2Title =
+      'TITYPE,TIID,TICID,TIDSC30,TIORDER,TIDEL RawUtf8';
+  __TTestCustomJson2 =
+    'Transactions [TRTYPE RawUtf8 TRDATE TDateTime TRAA RawUtf8 ' +
+    'TRCAT1,TRCAT2,TRCAT3,TRACID TTestCustomJson2Title ' +
+    'TRRMK RawUtf8]';
+  __TTestCustomDiscogs =
+    'pagination{per_page,items,page Integer}' +
+    'releases[status,title,format,label,artist RawUtf8 year,id integer]';
+  __TEntry =
+    'ID: Int64; Timestamp512,Tag: cardinal; Json: RawUtf8';
+  __TSubAB =
+    'a : RawUtf8; b : integer;';
+  __TSubCD =
+    'c : byte; d : RawUtf8;';
+  __TAggregate =
+    'abArr : array of TSubAB; cdArr : array of TSubCD;';
+
+  zendframeworkFileName = 'zendframework.json';
+  discogsFileName = 'discogs.json';
+
 
 implementation
 
@@ -368,6 +403,14 @@ var
   ni: TNullableInteger;
   nt: TNullableUtf8Text;
 begin
+  TextToVariant('1E629839-D230-4EEE-BA04-BE1258EB3AF6', {allowdouble=}true, v);
+  Check(VarIsStr(v));
+  TextToVariant('261E306F', true, v);
+  Check(VarIsStr(v));
+  TextToVariant('1e-324', true, v);
+  Check(VarIsStr(v));
+  TextToVariant('1e308', true, v);
+  Check(VarIsStr(v));
   t := nil; // makes the compiler happy
   ValueVarToVariant(nil, 0, oftBoolean, vd, false, t);
   Check(not boolean(v));
@@ -540,9 +583,18 @@ begin
   v := VariantLoadJson('123.1234');
   Check(vd.VType = varCurrency);
   CheckSame(v, 123.1234);
+  v := VariantLoadJson('1E300', nil, true);
+  Check(vd.VType = varDouble);
+  CheckSame(v, 1e300);
+  v := VariantLoadJson('-1E300', nil, true);
+  Check(vd.VType = varDouble);
+  CheckSame(v, -1e300);
   v := VariantLoadJson('-1E-300', nil, true);
   Check(vd.VType = varDouble);
   CheckSame(v, -1e-300);
+  v := VariantLoadJson('1E-300', nil, true);
+  Check(vd.VType = varDouble);
+  CheckSame(v, 1e-300);
   v := VariantLoadJson('[]', @JSON_[mFast]);
   Check(v._kind = ord(dvArray));
   Check(v._count = 0);
@@ -876,16 +928,20 @@ end;
 { TCollTstDynArray}
 
 class procedure TCollTstDynArray.FVReader(
-    var Context: TJsonParserContext; Data: pointer);
+  var Context: TJsonParserContext; Data: pointer);
+var
+  P: PUtf8Char;
 begin
   // '[1,2001,3001,4001,"1","1001"],[2,2002,3002,4002,"2","1002"],...'
   if Context.ParseArray then
     with PFV(Data)^ do
     begin
-      Major := GetNextItemCardinal(Context.Json);
-      Minor := GetNextItemCardinal(Context.Json);
-      Release := GetNextItemCardinal(Context.Json);
-      Build := GetNextItemCardinal(Context.Json);
+      P := Context.Json;
+      Major := GetNextItemCardinal(P);
+      Minor := GetNextItemCardinal(P);
+      Release := GetNextItemCardinal(P);
+      Build := GetNextItemCardinal(P);
+      Context.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json := P;
       Main := Context.ParseString;
       Detailed := Context.ParseString;
       Context.ParseEndOfObject;
@@ -1236,7 +1292,7 @@ type
       read fValue write fValue;
   end;
 
-  {$ifdef HASEXTRECORDRTTI}
+{$ifdef HASEXTRECORDRTTI}
   TStaticArrayOfInt = packed array[1..5] of Integer;
 
   TNewRtti = record
@@ -1256,41 +1312,42 @@ type
       last_name: string;
     end;
   end;
-  {$endif HASEXTRECORDRTTI}
+{$endif HASEXTRECORDRTTI}
 
-const
-  // convention may be to use __ or _ before the type name
-  __TTestCustomJsonRecord: RawUtf8 =
-      'A,B,C integer D RawUtf8 E{E1,E2 double} F TDateTime';
-  __TTestCustomJsonArray: RawUtf8 =
-      'A,B,C byte D RawByteString E[E1 double E2 string] F TDateTime';
-  __TTestCustomJsonArraySimple =
-      'A,B Int64 C array of TGuid D RawUtf8 E [F RawUtf8 G array of RawUtf8] H RawUtf8';
-  __TTestCustomJsonArrayVariant =
-      'A,B Int64 C array of variant D RawUtf8';
-  __TTestCustomJsonGitHub =
-      'name RawUtf8 id cardinal description RawUtf8 ' +
-     'fork boolean owner{login RawUtf8 id currency}';
-  __TTestCustomJson2Title =
-      'TITYPE,TIID,TICID,TIDSC30,TIORDER,TIDEL RawUtf8';
-  __TTestCustomJson2 =
-    'Transactions [TRTYPE RawUtf8 TRDATE TDateTime TRAA RawUtf8 ' +
-    'TRCAT1,TRCAT2,TRCAT3,TRACID TTestCustomJson2Title ' +
-    'TRRMK RawUtf8]';
-  __TTestCustomDiscogs =
-    'pagination{per_page,items,page Integer}' +
-    'releases[status,title,format,label,artist RawUtf8 year,id integer]';
-  __TEntry =
-    'ID: Int64; Timestamp512,Tag: cardinal; Json: RawUtf8';
-  __TSubAB =
-    'a : RawUtf8; b : integer;';
-  __TSubCD =
-    'c : byte; d : RawUtf8;';
-  __TAggregate =
-    'abArr : array of TSubAB; cdArr : array of TSubCD;';
+  TSimpleEnum = (enTest, enTest2);
+  TEnumSet = set of TSimpleEnum;
 
-  zendframeworkFileName = 'zendframework.json';
-  discogsFileName = 'discogs.json';
+  TSimpleExample = class(TSynPersistent)
+  private
+    fFullName: string;
+    fEnumSet: TEnumSet;
+    fEnum: TSimpleEnum;
+    procedure SetEnumSet(const Value: TEnumSet);
+    procedure SetFullName(const Value: string);
+    procedure SetEnum(const Value: TSimpleEnum);
+  published
+    property FullName: string
+      read fFullName write SetFullName;
+    property EnumSet: TEnumSet
+      read fEnumSet write SetEnumSet;
+    property Enum: TSimpleEnum
+      read fEnum write SetEnum;
+  end;
+
+procedure TSimpleExample.SetEnumSet(const Value: TEnumSet);
+begin
+  fEnumSet := Value;
+end;
+
+procedure TSimpleExample.SetFullName(const Value: string);
+begin
+  fFullName := Value;
+end;
+
+procedure TSimpleExample.SetEnum(const Value: TSimpleEnum);
+begin
+  fEnum := Value;
+end;
 
 
 procedure TTestCoreProcess.EncodeDecodeJSON;
@@ -1596,6 +1653,46 @@ var
     Check(Trans.Transactions[0].TRTYPE = 'INCOME');
     Check(Trans.Transactions[0].TRACID.TIDEL = 'false');
     Check(Trans.Transactions[0].TRRMK = 'Remark');
+  end;
+
+  procedure TestSimpleEnum;
+  var
+    x1, x2: TSimpleExample;
+    j: RawUtf8;
+    ok: boolean;
+  begin
+    x1 := TSimpleExample.Create;
+    x2 := TSimpleExample.Create;
+    try
+      Check(ObjectEquals(x1, x2));
+      x1.FullName := 'ABC';
+      Check(not ObjectEquals(x1, x2));
+      x1.EnumSet := [enTest2];
+      x1.Enum := enTest2;
+      Check(not ObjectEquals(x1, x2));
+      j := ObjectToJson(x1, [woEnumSetsAsText]);
+      CheckEqual(j, '{"FullName":"ABC","EnumSet":["enTest2"],"Enum":"enTest2"}');
+      ok := false;
+      JsonToObject(x2, pointer(j), ok);
+      Check(ok);
+      Check(x2.FullName = 'ABC', 'FullName');
+      Check(x2.Enum = enTest2, 'Enum');
+      Check(x2.EnumSet = [enTest2], 'EnumSet');
+      Check(ObjectEquals(x1, x2));
+      x2.EnumSet := [enTest, enTest2];
+      Check(not ObjectEquals(x1, x2));
+      ClearObject(x2);
+      Check(not ObjectEquals(x1, x2));
+      j := ObjectToJson(x1, []);
+      CheckEqual(j, '{"FullName":"ABC","EnumSet":2,"Enum":1}');
+      ok := false;
+      JsonToObject(x2, pointer(j), ok);
+      Check(ok);
+      Check(ObjectEquals(x1, x2));
+    finally
+      x2.Free;
+      x1.Free;
+    end;
   end;
 
   function uct(const s: RawUtf8): TOrmFieldType;
@@ -2108,10 +2205,11 @@ var
     check(info.EndOfObject = eof);
     check(info.Json^ = next);
     check(info.ValueLen = length(v));
-    check(CompareMem(info.Value, pointer(v), info.ValueLen));
+    check(CompareBuf(v, info.Value, info.ValueLen));
   end;
 
 begin
+  TestSimpleEnum;
   FillcharFast(F, SizeOf(F), 0); // initialize all fields before DA.Add(F)
   TestGetJsonField('', '', false, true, #0, #0);
   TestGetJsonField('true,false', 'true', false, false, ',', 'f');
@@ -2380,17 +2478,17 @@ begin
     check(PInteger(J)^ and $00ffffff = JSON_BASE64_MAGIC_C);
     RB := BlobToRawBlob(pointer(J));
     check(length(RB) = length(U)); // RB=U is buggy under FPC :(
-    check(CompareMem(pointer(RB), pointer(U), length(U)));
+    check(CompareBuf(RB, U));
     Base64MagicToBlob(@J[4], K);
     RB := BlobToRawBlob(pointer(K));
     check(length(RB) = length(U));
-    check(CompareMem(pointer(RB), pointer(U), length(U)));
+    check(CompareBuf(RB, U));
     BlobToRawBlob(pointer(K), RB, length(K));
     check(length(RB) = length(U));
-    check(CompareMem(pointer(RB), pointer(U), length(U)));
+    check(CompareBuf(RB, U));
     RB := BlobToRawBlob(K);
     check(length(RB) = length(U));
-    check(CompareMem(pointer(RB), pointer(U), length(U)));
+    check(CompareBuf(RB, U));
 {    J := TRestServer.JsonEncodeResult([r]);
     Check(SameValue(GetExtended(pointer(JsonDecode(J)),err),r)); }
     with TJsonWriter.CreateOwnedStream do
@@ -4810,13 +4908,13 @@ begin
   Check(Doc.ToJson = '["one",2,3]');
   Check(Variant(Doc)._Json = '["one",2,3]');
   Doc.ToArrayOfConst(vr);
-  s := FormatUtf8('[?,?,?]', [], vr, true);
+  s := FormatJson('[?,?,?]', [], vr);
   check(s = '["one",2,3]');
-  s := FormatUtf8('[%,%,%]', vr, [], true);
+  s := FormatJson('[%,%,%]', vr, []);
   check(s = '[one,2,3]');
-  s := FormatUtf8('[?,?,?]', [], Doc.ToArrayOfConst, true);
+  s := FormatJson('[?,?,?]', [], Doc.ToArrayOfConst);
   check(s = '["one",2,3]');
-  s := FormatUtf8('[%,%,%]', Doc.ToArrayOfConst, [], true);
+  s := FormatJson('[%,%,%]', Doc.ToArrayOfConst, []);
   check(s = '[one,2,3]');
   V := _Json(' [ "one" ,2,3 ]   ');
   Check(V._count = 3);
@@ -5414,12 +5512,36 @@ var
   s, t, d: RawUtf8;
   hf: TTextWriterHtmlFormat;
 begin
+  CheckEqual(UrlEncode(''), '');
+  CheckEqual(UrlDecode(''), '');
+  CheckEqual(UrlEncodeName(''), '');
+  CheckEqual(UrlDecodeName(''), '');
+  CheckEqual(UrlEncode('abc'), 'abc');
+  CheckEqual(UrlEncode('ab0c'), 'ab0c');
+  CheckEqual(UrlEncode('ab c'), 'ab+c');
+  CheckEqual(UrlEncode('ab+c'), 'ab%2Bc');
+  CheckEqual(UrlEncodeName('abc'), 'abc');
+  CheckEqual(UrlEncodeName('ab0c'), 'ab0c');
+  CheckEqual(UrlEncodeName('ab c'), 'ab%20c');
+  CheckEqual(UrlEncodeName('ab+c'), 'ab%2Bc');
   for i := 1 to 100 do
   begin
+    s := RandomIdentifier(i);
+    Check(not NeedsHtmlEscape(pointer(s), hfNone));
+    t := UrlEncode(s);
+    Check(t <> '');
+    CheckEqual(UrlDecode(t), s);
+    CheckEqual(t, s, 'plain');
+    t := UrlEncodeName(s);
+    Check(t <> '');
+    CheckEqual(UrlDecodeName(t), s);
+    CheckEqual(t, s, 'plainname');
     s := RandomUtf8(i);
     Check(not NeedsHtmlEscape(pointer(s), hfNone));
     t := UrlEncode(s);
     Check(t <> '');
+    Check(PosExChar(' ', t) = 0, 'nospace');
+    Check((PosExChar('+', t) <> 0) = (PosExChar(' ', s) <> 0), 'noplus');
     CheckEqual(UrlDecode(t), s);
     d := 'seleCT=' + t + '&where=' + Int32ToUtf8(i);
     CheckEqual(UrlEncode(['seleCT', s, 'where', i]), '?' + d);
@@ -5431,6 +5553,11 @@ begin
     else
       Check(PosExChar('\', t) <> 0);
     CheckEqual(UnescapeHex(t), s, 'UnescapeHex');
+    t := UrlEncodeName(s);
+    Check(t <> '');
+    Check(PosExChar(' ', t) = 0, 'nospacename');
+    Check(PosExChar('+', t) = 0, 'noplusname');
+    CheckEqual(UrlDecodeName(t), s);
   end;
   for hf := low(hf) to high(hf) do
   begin
@@ -5926,7 +6053,7 @@ var
   hash: cardinal;
   len, i: Integer;
 begin
-  Check(CRC32string('TestCRC32') = $2CB8CDF3);
+  Check(Crc32String('TestCRC32') = $2CB8CDF3);
   for i := 1 to 10 do
   begin
     tmp := RandomTextParagraph(1000 * i * i * i);
@@ -5997,7 +6124,8 @@ var
       Check(UnZip(i) = Data, 'unzip6');
       tmpFN := WorkDir + 'mormot2zipformat.tmp';
       Check(UnZip('REP1\one.exe', tmpFN, true), 'unzipa');
-      Check(StringFromFile(tmpFN) = Data, 'unzipb');
+      //Check(StringFromFile(tmpFN) = Data, 'unzipb');
+      Check(SameFileContent(DataFile, tmpFN), 'unzipb');
       Check(DeleteFile(tmpFN), 'unzipc');
     finally
       Free;

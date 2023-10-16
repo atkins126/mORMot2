@@ -1095,6 +1095,12 @@ type
     // - in expanded mode, the fields order won't be checked, as with TOrmTableJson
     // - warning: the incoming JSON buffer will be modified in-place: so you should
     // make a private copy before running this method, as overloaded procedures do
+    // - some numbers on a Core i5-13500, extracted from our regression tests:
+    // $ TDocVariant InitJsonInPlace in 72.91ms i.e. 2.1M rows/s, 268.8 MB/s
+    // $ TDocVariant InitJsonInPlace no guess in 69.49ms i.e. 2.2M rows/s, 282 MB/s
+    // $ TDocVariant InitJsonInPlace dvoIntern in 68.41ms i.e. 2.2M rows/s, 286.5 MB/s
+    // $ TDocVariant FromResults exp in 31.69ms i.e. 4.9M rows/s, 618.6 MB/s
+    // $ TDocVariant FromResults not exp in 24.48ms i.e. 6.4M rows/s, 352.1 MB/s
     function InitArrayFromResults(Json: PUtf8Char; JsonLen: PtrInt;
       aOptions: TDocVariantOptions = JSON_FAST_FLOAT): boolean; overload;
     /// fill a TDocVariant array from standard or non-expanded JSON ORM/DB result
@@ -5168,14 +5174,6 @@ begin
   end;
 end;
 
-{ Some numbers on Linux x86_64:
-    TDocVariant exp in 135.36ms i.e. 1.1M/s, 144.8 MB/s
-    TDocVariant exp no guess in 139.10ms i.e. 1.1M/s, 140.9 MB/s
-    TDocVariant exp dvoIntern in 139.19ms i.e. 1.1M/s, 140.8 MB/s
-    TDocVariant FromResults exp in 60.86ms i.e. 2.5M/s, 322 MB/s
-    TDocVariant FromResults not exp in 47ms i.e. 3.3M/s, 183.4 MB/s
-}
-
 function TDocVariantData.InitArrayFromResults(Json: PUtf8Char; JsonLen: PtrInt;
   aOptions: TDocVariantOptions): boolean;
 var
@@ -6236,7 +6234,11 @@ begin
 end;
 
 type
+  {$ifdef USERECORDWITHMETHODS}
+  TQuickSortDocVariant = record
+  {$else}
   TQuickSortDocVariant = object
+  {$endif USERECORDWITHMETHODS}
   public
     names: PPointerArray;
     values: PVariantArray;
@@ -6417,6 +6419,7 @@ end;
 type
   TQuickSortByFieldLookup = array[0..3] of PVariant;
   PQuickSortByFieldLookup = ^TQuickSortByFieldLookup;
+
   {$ifdef USERECORDWITHMETHODS}
   TQuickSortDocVariantValuesByField = record
   {$else}
@@ -8102,7 +8105,7 @@ procedure _JsonFmt(const Format: RawUtf8; const Args, Params: array of const;
 var
   temp: RawUtf8;
 begin
-  temp := FormatUtf8(Format, Args, Params, true);
+  FormatParams(Format, Args, Params, {json=}true, temp);
   if TDocVariantData(Result).InitJsonInPlace(pointer(temp), Options) = nil then
     TDocVariantData(Result).ClearFast;
 end;
@@ -8548,6 +8551,9 @@ exponent:         inc(Json); // inlined custom GetInteger()
   end;
 end;
 
+const
+  CURRENCY_FACTOR: array[-4 .. -1] of integer = (1, 10, 100, 1000);
+
 function GetNumericVariantFromJson(Json: PUtf8Char; var Value: TVarData;
   AllowVarDouble: boolean): PUtf8Char;
 var
@@ -8664,28 +8670,24 @@ begin
   begin
     // currency as ###.0123
     TRttiVarData(Value).VType := varCurrency;
-    inc(frac, 4);
-    if frac <> 0 then // stored as round(CurrValue*10000)
-      repeat
-        {$ifdef CPU64}
-        v64 := v64 * 10;
-        {$else}
-        v64 := v64 shl 3 + v64 + v64;
-        {$endif CPU64}
-        dec(frac);
-      until frac = 0;
-    Value.VInt64 := v64;
+    Value.VInt64 := v64 * CURRENCY_FACTOR[frac]; // as round(CurrValue*10000)
   end
-  else if AllowVarDouble then
+  else if AllowVarDouble and
+          (frac > -324) then // 5.0 x 10^-324 .. 1.7 x 10^308
   begin
     // converted into a double value
-    TRttiVarData(Value).VType := varDouble;
-    if (frac >= -31) and
-       (frac <= 31) then
-      d := POW10[frac]
+    exp := PtrUInt(@POW10);
+    if frac >= -31 then
+      if frac <= 31 then
+        d := PPow10(exp)[frac]                 // -31 .. + 31
+      else if (18 - remdigit) + integer(frac) >= 308 then
+        exit                                   // +308 ..
+      else
+        d := HugePower10Pos(frac, PPow10(exp)) // +32 .. +307
     else
-      d := HugePower10(frac, @POW10);
+      d := HugePower10Neg(frac, PPow10(exp));  // .. -32
     Value.VDouble := d * v64;
+    TRttiVarData(Value).VType := varDouble;
   end
   else
     exit;
@@ -8711,9 +8713,12 @@ end;
 procedure TextToVariant(const aValue: RawUtf8; AllowVarDouble: boolean;
   out aDest: variant);
 begin
-  if not GetVariantFromNotStringJson(
-           pointer(aValue), TVarData(aDest), AllowVarDouble) then
-    RawUtf8ToVariant(aValue, aDest);
+  try
+    if GetVariantFromNotStringJson(pointer(aValue), TVarData(aDest), AllowVarDouble) then
+      exit;
+  except // some obscure floating point exception may occur
+  end;
+  RawUtf8ToVariant(aValue, aDest);
 end;
 
 function GetNextItemToVariant(var P: PUtf8Char; out Value: Variant;
@@ -8940,7 +8945,7 @@ begin
             ct := DocVariantType; // recognize our TDocVariant
             if t = ct.VarType then
               goto direct;
-            ct := LastDispInvoke; // atomic load
+            ct := LastDispInvoke; // atomic pointer load
             if (ct <> nil) and
                (ct.VarType = t) then
               // most calls are grouped within the same custom variant type

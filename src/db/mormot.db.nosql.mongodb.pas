@@ -2970,9 +2970,9 @@ begin
       // https://www.mongodb.com/docs/manual/reference/command/getMore
       msg := TMongoMsg.Create(
         Client, Request.DatabaseName, Request.CollectionName,
-        BsonVariant(['getMore',    reply.CursorID,
-                     'collection',  Request.CollectionName,
-                     'batchSize',  Client.GetMoreBatchSize]),
+        BsonVariant(['getMore', reply.CursorID,
+                     'collection', Request.CollectionName,
+                     'batchSize', Client.GetMoreBatchSize]),
         [], Request.NumberToReturn);
       try
         SendAndGetCursor(msg, reply);
@@ -3676,7 +3676,7 @@ begin
     // SCRAM-SHA-1
     // https://tools.ietf.org/html/rfc5802#section-5
     user := StringReplaceAll(UserName, ['=', '=3D', ',', '=2C']);
-    TAesPrng.Main.FillRandom(rnd);
+    RandomBytes(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
     nonce := BinToBase64(@rnd, SizeOf(rnd));
     FormatUtf8('n=%,r=%', [user, nonce], first);
     BsonVariantType.FromBinary('n,,' + first, bbtGeneric, bson);
@@ -3769,11 +3769,11 @@ begin
                      '{',
                          'application',
                          '{',
-                             'name',    Executable.ProgramName,
+                             'name', Executable.ProgramName,
                          '}',
                          'driver',
                          '{',
-                             'name',    SYNOPSE_FRAMEWORK_NAME,
+                             'name', SYNOPSE_FRAMEWORK_NAME,
                              'version', SYNOPSE_FRAMEWORK_VERSION,
                          '}',
                          'os',
@@ -4231,7 +4231,7 @@ var
   cmd, query: RawUtf8;
   res: variant;
 begin
-  query := FormatUtf8(Criteria, Args, Params, true);
+  FormatParams(Criteria, Args, Params, {json=}true, query);
   FormatUtf8('{count:"%",query:%', [fName, query], cmd);
   if MaxNumberToReturn > 0 then
     cmd := FormatUtf8('%,limit:%', [cmd, MaxNumberToReturn]);
@@ -4541,7 +4541,7 @@ end;
 function OneMongoDelete(const Query: variant;
   Flags: TMongoDeleteFlags): variant;
 begin
-  result := _ObjFast(['q',     Query,
+  result := _ObjFast(['q', Query,
                       'limit', ord(mdfSingleRemove in Flags)]);
 end;
 

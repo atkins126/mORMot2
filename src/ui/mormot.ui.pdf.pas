@@ -65,10 +65,10 @@ implementation
 {$endif USE_SYNGDIPLUS}
 
 {$define USE_METAFILE}
-// if defined, the PDF engine will support TMetaFile/TMetaFileCanvas
+// if defined, the PDF engine will support TMetaFile / TPdfDocumentGdi
 {$ifdef NO_USE_METAFILE}
-  // this special conditional can be set globaly for an application which doesn't
-  // need the TMetaFile features
+  // this special conditional can be set globaly for an application which
+  // doesn't need the TMetaFile / TPdfDocumentGdi features
   {$undef USE_METAFILE}
 {$endif USE_METAFILE}
 
@@ -383,6 +383,9 @@ type
   // - pgcLink/pgcLinkNoBorder will create a asLink annotation, expecting the data
   // to be filled with TRect inclusive-inclusive bounding rectangle coordinates,
   // followed by the corresponding bookmark name
+  // - pgcJpegDirect will include a JPEG image directly from its file content
+  // - pgcBeginMarkContent/pgcEndMarkContent will map
+  // BeginMarkedContent/EndMarkedContent sections
   // - use the GdiComment*() functions to append the corresponding
   // EMR_GDICOMMENT message to a metafile content
   TPdfGdiComment = (
@@ -390,7 +393,9 @@ type
     pgcBookmark,
     pgcLink,
     pgcLinkNoBorder,
-    pgcJpegDirect);
+    pgcJpegDirect,
+    pgcBeginMarkContent,
+    pgcEndMarkContent);
 
 {$ifdef USE_PDFSECURITY}
 
@@ -570,26 +575,6 @@ function CurrentPrinterPaperSize: TPdfPaperSize;
 
 /// retrieve the current printer resolution
 function CurrentPrinterRes: TPoint;
-
-/// append a EMR_GDICOMMENT message for handling PDF bookmarks
-// - will create a PDF destination at the current position (i.e. the last Y
-// parameter of a Move), with some text supplied as bookmark name
-procedure GdiCommentBookmark(MetaHandle: HDC; const aBookmarkName: RawUtf8);
-
-/// append a EMR_GDICOMMENT message for handling PDF outline
-// - used to add an outline at the current position (i.e. the last Y parameter of
-// a Move): the text is the associated title, UTF-8 encoded and the outline tree
-// is created from the specified numerical level (0=root)
-procedure GdiCommentOutline(MetaHandle: HDC; const aTitle: RawUtf8; aLevel: integer);
-
-/// append a EMR_GDICOMMENT message for creating a Link into a specified bookmark
-procedure GdiCommentLink(MetaHandle: HDC; const aBookmarkName: RawUtf8; const
-  aRect: TRect; NoBorder: boolean);
-
-/// append a EMR_GDICOMMENT message for adding jpeg direct
-procedure GdiCommentJpegDirect(MetaHandle: HDC; const aFileName: RawUtf8; const
-  aRect: TRect);
-
 
 
 {************ Internal classes mapping PDF objects }
@@ -1349,11 +1334,10 @@ type
     fForceNoBitmapReuse: boolean;
     fUseFontFallBack: boolean;
     fFontFallBackIndex: integer;
-    /// a list of Bookmark text keys, associated to a TPdfDest object
+    // a list of Bookmark text keys, associated to a TPdfDest object
     fBookMarks: TRawUtf8List;
     fMissingBookmarks: TRawUtf8List;
-    /// internal temporary variable - used by CreateOutline
-    fLastOutline: TPdfOutlineEntry;
+    fLastOutline: TPdfOutlineEntry; // used by CreateOutline
     fFileFormat: TPdfFileFormat;
     fPdfA: TPdfALevel;
     fSaveToStreamWriter: TPdfWrite;
@@ -2800,7 +2784,37 @@ type
 
 {************ TPdfDocumentGdi for GDI/TCanvas rendering support }
 
+
 {$ifdef USE_METAFILE}
+
+/// append a EMR_GDICOMMENT message for handling PDF bookmarks
+// - will create a PDF destination at the current position (i.e. the last Y
+// parameter of a Move), with some text supplied as bookmark name
+procedure GdiCommentBookmark(MetaHandle: HDC; const aBookmarkName: RawUtf8);
+
+/// append a EMR_GDICOMMENT message for handling PDF outline
+// - used to add an outline at the current position (i.e. the last Y parameter of
+// a Move): the text is the associated title, UTF-8 encoded and the outline tree
+// is created from the specified numerical level (0=root)
+procedure GdiCommentOutline(MetaHandle: HDC;
+  const aTitle: RawUtf8; aLevel: integer);
+
+/// append a EMR_GDICOMMENT message for creating a Link into a specified bookmark
+procedure GdiCommentLink(MetaHandle: HDC; const aBookmarkName: RawUtf8;
+  const aRect: TRect; NoBorder: boolean);
+
+/// append a EMR_GDICOMMENT message for adding jpeg direct
+procedure GdiCommentJpegDirect(MetaHandle: HDC; const aFileName: RawUtf8;
+  const aRect: TRect);
+
+/// append a EMR_GDICOMMENT message mapping BeginMarkedContent
+// - associate optionally a CreateOptionalContentGroup() instance from the
+// current PDF document
+procedure GdiCommentBeginMarkContent(MetaHandle: HDC;
+  Group: TPdfOptionalContentGroup = nil);
+
+/// append a EMR_GDICOMMENT message mapping EndMarkedContent
+procedure GdiCommentEndMarkContent(MetaHandle: HDC);
 
 type
   /// a PDF page, with its corresponding Meta File and Canvas
@@ -3250,80 +3264,6 @@ begin
     on Exception do // raised e.g. if no Printer is existing
       exit;
   end;
-end;
-
-procedure SetGdiCommentApi(h: HDC; n: integer; p: pointer);
-begin
-  {$ifdef FPC}
-  Windows.GdiComment(h, n, PByte(p)^); 
-  {$else}
-  Windows.GdiComment(h, n, p);
-  {$endif FPC}
-end;
-
-procedure GdiCommentBookmark(MetaHandle: HDC; const aBookmarkName: RawUtf8);
-var
-  tmp: RawByteString;
-  D: PAnsiChar;
-  L: integer;
-begin // high(TPdfGdiComment)<$47 so it will never begin with GDICOMMENT_IDENTIFIER
-  L := length(aBookmarkName);
-  SetLength(tmp, L + 1);
-  D := pointer(tmp);
-  D^ := AnsiChar(pgcBookmark);
-  MoveFast(pointer(aBookmarkName)^, D[1], L);
-  SetGdiCommentApi(MetaHandle, L + 1, D);
-end;
-
-procedure GdiCommentOutline(MetaHandle: HDC; const aTitle: RawUtf8; aLevel: integer);
-var
-  tmp: RawByteString;
-  D: PAnsiChar;
-  L: integer;
-begin // high(TPdfGdiComment)<$47 so it will never begin with GDICOMMENT_IDENTIFIER
-  L := length(aTitle);
-  SetLength(tmp, L + 2);
-  D := pointer(tmp);
-  D[0] := AnsiChar(pgcOutline);
-  D[1] := AnsiChar(aLevel);
-  MoveFast(pointer(aTitle)^, D[2], L);
-  SetGdiCommentApi(MetaHandle, L + 2, D);
-end;
-
-procedure GdiCommentLink(MetaHandle: HDC; const aBookmarkName: RawUtf8; const
-  aRect: TRect; NoBorder: boolean);
-var
-  tmp: RawByteString;
-  D: PAnsiChar;
-  L: integer;
-begin // high(TPdfGdiComment)<$47 so it will never begin with GDICOMMENT_IDENTIFIER
-  L := length(aBookmarkName);
-  SetLength(tmp, L + (1 + sizeof(TRect)));
-  D := pointer(tmp);
-  if NoBorder then
-    D^ := AnsiChar(pgcLinkNoBorder)
-  else
-    D^ := AnsiChar(pgcLink);
-  PRect(D + 1)^ := aRect;
-  MoveFast(pointer(aBookmarkName)^, D[1 + sizeof(TRect)], L);
-  SetGdiCommentApi(MetaHandle, L + (1 + sizeof(TRect)), D);
-end;
-
-procedure GdiCommentJpegDirect(MetaHandle: HDC; const aFileName: RawUtf8;
-  const aRect: TRect);
-var
-  tmp: RawByteString;
-  D: PAnsiChar;
-  L: integer;
-begin
-  // high(TPdfGdiComment)<$47 so it will never begin with GDICOMMENT_IDENTIFIER
-  L := length(aFileName);
-  SetLength(tmp, L + (1 + sizeof(TRect)));
-  D := pointer(tmp);
-  D^ := AnsiChar(pgcJpegDirect);
-  PRect(D + 1)^ := aRect;
-  MoveFast(pointer(aFileName)^, D[1 + sizeof(TRect)], L);
-  SetGdiCommentApi(MetaHandle, L + (1 + sizeof(TRect)), D);
 end;
 
 function CombineTransform(xform1, xform2: XFORM): XFORM;
@@ -7113,6 +7053,9 @@ const
     2500788224, 542792024, 0, 824573952, 789577728, 2629697536);
 begin
   fLastOutline := nil;
+  fRawPages.Clear;
+  fBookMarks.Clear;
+  fMissingBookmarks.Clear;
   FreeDoc;
   fXRef := TPdfXref.Create;
   fTrailer := TPdfTrailer.Create(fXRef);
@@ -9956,6 +9899,102 @@ end;
 
 {$ifdef USE_METAFILE}
 
+procedure SetGdiCommentApi(h: HDC; n: integer; p: pointer);
+begin
+  {$ifdef FPC}
+  Windows.GdiComment(h, n, PByte(p)^);
+  {$else}
+  Windows.GdiComment(h, n, p);
+  {$endif FPC}
+end;
+
+procedure GdiCommentBookmark(MetaHandle: HDC; const aBookmarkName: RawUtf8);
+var
+  tmp: RawByteString;
+  D: PAnsiChar;
+  L: integer;
+begin
+  // high(TPdfGdiComment)<$47 so it will never begin with GDICOMMENT_IDENTIFIER
+  L := length(aBookmarkName);
+  SetLength(tmp, L + 1);
+  D := pointer(tmp);
+  D^ := AnsiChar(pgcBookmark);
+  MoveFast(pointer(aBookmarkName)^, D[1], L);
+  SetGdiCommentApi(MetaHandle, L + 1, D);
+end;
+
+procedure GdiCommentOutline(MetaHandle: HDC; const aTitle: RawUtf8; aLevel: integer);
+var
+  tmp: RawByteString;
+  D: PAnsiChar;
+  L: integer;
+begin
+  L := length(aTitle);
+  SetLength(tmp, L + 2);
+  D := pointer(tmp);
+  D[0] := AnsiChar(pgcOutline);
+  D[1] := AnsiChar(aLevel);
+  MoveFast(pointer(aTitle)^, D[2], L);
+  SetGdiCommentApi(MetaHandle, L + 2, D);
+end;
+
+procedure GdiCommentLink(MetaHandle: HDC; const aBookmarkName: RawUtf8; const
+  aRect: TRect; NoBorder: boolean);
+var
+  tmp: RawByteString;
+  D: PAnsiChar;
+  L: integer;
+begin
+  L := length(aBookmarkName);
+  SetLength(tmp, L + (1 + sizeof(TRect)));
+  D := pointer(tmp);
+  if NoBorder then
+    D^ := AnsiChar(pgcLinkNoBorder)
+  else
+    D^ := AnsiChar(pgcLink);
+  PRect(D + 1)^ := aRect;
+  MoveFast(pointer(aBookmarkName)^, D[1 + sizeof(TRect)], L);
+  SetGdiCommentApi(MetaHandle, L + (1 + sizeof(TRect)), D);
+end;
+
+procedure GdiCommentJpegDirect(MetaHandle: HDC; const aFileName: RawUtf8;
+  const aRect: TRect);
+var
+  tmp: RawByteString;
+  D: PAnsiChar;
+  L: integer;
+begin
+  L := length(aFileName);
+  SetLength(tmp, L + (1 + sizeof(TRect)));
+  D := pointer(tmp);
+  D^ := AnsiChar(pgcJpegDirect);
+  PRect(D + 1)^ := aRect;
+  MoveFast(pointer(aFileName)^, D[1 + sizeof(TRect)], L);
+  SetGdiCommentApi(MetaHandle, L + (1 + sizeof(TRect)), D);
+end;
+
+procedure GdiCommentBeginMarkContent(MetaHandle: HDC;
+  Group: TPdfOptionalContentGroup);
+var
+  tmp: packed record
+    pgc: TPdfGdiComment;
+    group: TPdfOptionalContentGroup;
+  end;
+begin
+  tmp.pgc := pgcBeginMarkContent;
+  tmp.group := Group;
+  SetGdiCommentApi(MetaHandle, SizeOf(tmp), @tmp);
+end;
+
+procedure GdiCommentEndMarkContent(MetaHandle: HDC);
+var
+  pgc: TPdfGdiComment;
+begin
+  pgc := pgcEndMarkContent;
+  SetGdiCommentApi(MetaHandle, 1, @pgc);
+end;
+
+
 { TPdfDocumentGdi }
 
 function TPdfDocumentGdi.AddPage: TPdfPage;
@@ -10278,7 +10317,7 @@ type
     // intersect - clipping
     function IntersectClipRect(
       const ClpRect: TPdfBox; const CurrRect: TPdfBox): TPdfBox;
-    procedure ExtSelectClipRgn(Data: PRgnDataHeader; iMode: DWord);
+    procedure ExtSelectClipRgn(data: PEMRExtSelectClipRgn);
     // get current clipping area
     function GetClipRect: TPdfBox;
     procedure GradientFill(Data: PEMGradientFill);
@@ -10899,7 +10938,7 @@ begin
               PEMRTransparentBLT(R)^.dwRop); // dwRop stores the transparent color
       EMR_GDICOMMENT:
         with PEMRGDICOMMENT(R)^ do
-          if cbData > 1 then
+          if cbData >= 1  then
             E.HandleComment(
               TPdfGdiComment(Data[0]), PAnsiChar(@Data) + 1, cbData - 1);
       EMR_MODIFYWORLDTRANSFORM:
@@ -10921,8 +10960,7 @@ begin
       EMR_SETMETARGN:
         E.SetMetaRgn;
       EMR_EXTSELECTCLIPRGN:
-        E.ExtSelectClipRgn(@PEMRExtSelectClipRgn(R)^.RgnData[0],
-          PEMRExtSelectClipRgn(R)^.iMode);
+        E.ExtSelectClipRgn(PEMRExtSelectClipRgn(R));
       EMR_INTERSECTCLIPRECT:
         ClipRgn := E.IntersectClipRect(E.Canvas.BoxI(
           TRect(PEMRIntersectClipRect(R)^.rclClip), true), ClipRgn);
@@ -11182,6 +11220,8 @@ begin
     begin
       R := TRect(Rect(xd, yd, wd + xd, hd + yd));
       NormalizeRect(R);
+      inc(R.Bottom);
+      inc(R.Right);
       box := BoxI(R, true);
       clp := GetClipRect;
       if (clp.Width > 0) and
@@ -11473,7 +11513,6 @@ end;
 procedure TPdfEnum.HandleComment(Kind: TPdfGdiComment; P: PAnsiChar; Len: integer);
 var
   Text: RawUtf8;
-  W: integer;
   Img: TPdfImage;
   ImgName: PdfString;
   ImgRect: TPdfRect;
@@ -11497,11 +11536,8 @@ begin
         if Len > Sizeof(TRect) then
         begin
           FastSetString(Text, P + SizeOf(TRect), Len - SizeOf(TRect));
-          if Kind = pgcLink then
-            W := 1
-          else
-            W := 0;
-          Canvas.Doc.CreateLink(Canvas.RectI(PRect(P)^, true), Text, abSolid, W);
+          Canvas.Doc.CreateLink(
+            Canvas.RectI(PRect(P)^, true), Text, abSolid, ord(Kind = pgcLink));
         end;
       pgcJpegDirect:
         if Len > Sizeof(TRect) then
@@ -11517,9 +11553,14 @@ begin
           Canvas.DrawXObject(ImgRect.Left, ImgRect.Top,
             ImgRect.Right - ImgRect.Left, ImgRect.Bottom - ImgRect.Top, ImgName);
         end;
+      pgcBeginMarkContent:
+        if Len = SizeOf(Pointer) then
+          Canvas.BeginMarkedContent(PPointer(P)^);
+      pgcEndMarkContent:
+        Canvas.EndMarkedContent;
     end;
   except
-    on e: Exception do
+    on Exception do
       ; // ignore any error (continue EMF enumeration)
   end;
 end;
@@ -11795,20 +11836,44 @@ begin
   end;
 end;
 
-procedure TPdfEnum.ExtSelectClipRgn(data: PRgnDataHeader; iMode: DWord);
+procedure TPdfEnum.ExtSelectClipRgn(data: PEMRExtSelectClipRgn);
+var
+  i: integer;
+  d: PRgnData;
+  pr: PRect;
+  r: TRect;
 begin
-  try
-    with DC[nDC] do
-      case iMode of
-        RGN_COPY:
-          begin
-            ClipRgn := MetaRgn;
-            ClipRgnNull := false;
-          end;
-      end;
-  except
-    on e: Exception do
-      ; // ignore any error (continue EMF enumeration)
+  // see http://www.codeproject.com/Articles/1944/Guide-to-WIN-Regions
+  if data^.iMode <> RGN_COPY then
+    exit; // we are handling RGN_COPY (5) only
+  if not DC[nDC].ClipRgnNull then // if current clip then finish
+  begin
+    Canvas.GRestore;
+    Canvas.NewPath;
+    Canvas.fNewPath := false;
+    DC[nDC].ClipRgnNull := true;
+    fFillColor := -1;
+  end;
+  if Data^.cbRgnData > 0 then
+  begin
+    Canvas.GSave;
+    Canvas.NewPath;
+    DC[nDC].ClipRgnNull := False;
+    d := @Data^.RgnData;
+    pr := @d^.Buffer;
+    for i := 1 to d^.rdh.nCount do
+    begin
+      r := pr^;
+      inc(r.Bottom);
+      inc(r.Right);
+      with Canvas.BoxI(r, false) do
+        Canvas.Rectangle(Left, Top, Width, Height);
+      inc(pr);
+    end;
+    Canvas.Closepath;
+    Canvas.Clip;
+    Canvas.NewPath;
+    Canvas.FNewPath := false;
   end;
 end;
 
@@ -12162,14 +12227,6 @@ begin
       else
         Canvas.ShowText(pointer(tmp));
       Canvas.EndText;
-      case po of
-        tpSetTextJustification:
-          if nspace > 0 then
-            Canvas.SetWordSpace(0);
-        tpKerningFromAveragePosition:
-          if hscale <> 100 then
-            Canvas.SetHorizontalScaling(100); //reset hor. scaling
-      end;
       // handle underline or strike out styles (direct draw PDF lines on canvas)
       if Font.LogFont.lfUnderline <> 0 then
         DrawLine(posi, ss / 8 / Canvas.fWorldFactorX / Canvas.fDevScaleX);
@@ -12180,6 +12237,15 @@ begin
       begin
         Canvas.GRestore;
         fFillColor := -1; // force set drawing color
+      end;
+      // restore previous text justification (after GRestore if clipped)
+      case po of
+        tpSetTextJustification:
+          if nspace > 0 then
+            Canvas.SetWordSpace(0);
+        tpKerningFromAveragePosition:
+          if hscale <> 100 then
+            Canvas.SetHorizontalScaling(100); // reset horizontal scaling
       end;
       if not Canvas.fNewPath then
       begin
