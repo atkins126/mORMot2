@@ -8,9 +8,10 @@ unit mormot.crypt.x509;
 
    X.509 Certificates Implementation - see RFC 5280
     - X.509 Fields Logic
-    - RSA and ECC Public/Private Key support for X.509
-    - X.509 Certificates and CSR
-    - Registration of our X.509 Engine to the TCryptCert Factory
+    - X.509 Certificates and Certificate Signing Request (CSR)
+    - X.509 Certificate Revocation List (CRL)
+    - X.509 Private Key Infrastructure (PKI)
+    - Registration of our X.509 Engine to the TCryptCert/TCryptStore Factories
 
   *****************************************************************************
 
@@ -206,6 +207,8 @@ type
     function Get(const Rdn: RawUtf8): RawUtf8;
     /// return the hash of the normalized Binary of this field
     function ToDigest(algo: THashAlgo = hfSha1): RawUtf8;
+    /// compare the ToBinary content of two X.501 names
+    function Compare(var Another: TXName): integer;
     /// return the UTF-8 text value of a given text OID
     // - search in Other[] then Name[]
     function FindOid(const oid: RawUtf8): RawUtf8;
@@ -233,9 +236,6 @@ function ToText(a: TXPublicKeyAlgorithm): PShortString; overload;
 function TextToXa(const Rdn: RawUtf8; out Xa: TXAttr): boolean;
 
 const
-  /// set of the Public Key Algorithms using RSA cryptography
-  xkaRsas = [xkaRsa, xkaRsaPss];
-
   /// internal lookup table from X.509 Signature to Public Key Algorithms
   XSA_TO_XKA: array[TXSignatureAlgorithm] of TXPublicKeyAlgorithm = (
     xkaNone,     // xsaNone
@@ -259,7 +259,7 @@ const
     hfSha256);   // xsaSha256Ecc256
 
   /// internal lookup table from X.509 Signature to ICryptCert Algorithms
-  XSA_TO_AA: array[TXSignatureAlgorithm] of TCryptAsymAlgo = (
+  XSA_TO_CAA: array[TXSignatureAlgorithm] of TCryptAsymAlgo = (
     caaES256K,   // xsaNone
     caaRS256,    // xsaSha256Rsa
     caaRS384,    // xsaSha384Rsa
@@ -269,9 +269,23 @@ const
     caaPS512,    // xsaSha512RsaPss
     caaES256);   // xsaSha256Ecc256
 
+  /// internal lookup table from ICryptCert Algorithms to X.509 Signature
+  CAA_TO_XSA: array[TCryptAsymAlgo] of TXSignatureAlgorithm = (
+    xsaSha256Ecc256,  // caaES256
+    xsaNone,          // caaES384
+    xsaNone,          // caaES512
+    xsaNone,          // caaES256K
+    xsaSha256Rsa,     // caaRS256
+    xsaSha384Rsa,     // caaRS384
+    xsaSha512Rsa,     // caaRS512
+    xsaSha256RsaPss,  // caaPS256
+    xsaSha384RsaPss,  // caaPS384
+    xsaSha512RsaPss,  // caaPS512
+    xsaNone);         // caaEdDSA
+
   /// internal lookup table from X.509 Signature Algorithm as text
   XSA_TXT: array[TXSignatureAlgorithm] of RawUtf8 = (
-    '',                               // xsaNone
+    'none',                           // xsaNone
     'SHA256 with RSA encryption',     // xsaSha256Rsa
     'SHA384 with RSA encryption',     // xsaSha384Rsa
     'SHA512 with RSA encryption',     // xsaSha512Rsa
@@ -286,6 +300,33 @@ const
     'RSA encryption',      // xkaRsa
     'RSA-PSS encryption',  // xkaRsaPss
     'prime256v1 ECDSA');   // xkaEcc256
+
+  /// internal lookup table from X.509 Public Key Algorithm to our key algorithm
+  XKA_TO_CKA: array[TXPublicKeyAlgorithm] of TCryptKeyAlgo = (
+    ckaNone,      // xkaNone
+    ckaRsa,       // xkaRsa
+    ckaRsaPss,    // xkaRsaPss
+    ckaEcc256);   // xkaEcc256
+
+  /// internal lookup table from our key algorithm to X.509 Public Key Algorithm
+  // - this unit does not support all key types yet
+  CKA_TO_XKA: array[TCryptKeyAlgo] of TXPublicKeyAlgorithm = (
+    xkaNone,      // ckaNone
+    xkaRsa,       // ckaRsa
+    xkaRsaPss,    // ckaRsaPss
+    xkaEcc256,    // ckaEcc256
+    xkaNone,      // ckaEcc384
+    xkaNone,      // ckaEcc512
+    xkaNone,      // ckaEcc256k
+    xkaNone);     // ckaEdDSA
+
+  /// internal lookup table from X.509 Public Key Algorithm to our key algorithm
+  // - this unit does not support all key types yet
+  XKA_TO_CAA: array[TXPublicKeyAlgorithm] of TCryptAsymAlgo = (
+    caaES256,  // xkaNone
+    caaRS256,  // xkaRsa
+    caaPS256,  // xkaRsaPss
+    caaES256); // xkaEcc256
 
   /// the OID of all known TX509Name attributes, as defined in RFC 5280 A.1
   XA_OID: array[TXAttr] of PUtf8Char = (
@@ -342,7 +383,7 @@ const
     '1.3.6.1.5.5.7.3.9');  // xkuOcspSigning
 
   /// the OID of all known X.509 Signature Algorithms
-  // - RSA-PSS store ASN1_OID_PKCS1_RSA_PSS with the THashAlgo as parameters
+  // - RSA-PSS store CKA_OID[ckaRsaPss] with the THashAlgo as parameters
   ASN1_OID_SIGNATURE: array[TXSignatureAlgorithm] of RawUtf8 = (
      '',
      '1.2.840.113549.1.1.11',  // xsaSha256Rsa
@@ -351,17 +392,16 @@ const
      '2.16.840.1.101.3.4.2.1', // xsaSha256RsaPss = ASN1_OID_HASH[hfSHA256]
      '2.16.840.1.101.3.4.2.2', // xsaSha384RsaPss = ASN1_OID_HASH[hfSHA384]
      '2.16.840.1.101.3.4.2.3', // xsaSha512RsaPss = ASN1_OID_HASH[hfSHA256]
-     '1.2.840.10045.4.3.2');   // xsaSha256Ecc256
+     '1.2.840.10045.4.3.2');   // xsaSha256Ecc256 = sha256ECDSA
 
-  ASN1_OID_PKCS1_RSA       = '1.2.840.113549.1.1.1';
   ASN1_OID_PKCS1_MGF       = '1.2.840.113549.1.1.8';
-  ASN1_OID_PKCS1_RSA_PSS   = '1.2.840.113549.1.1.10';
   ASN1_OID_PKCS9_EXTREQ    = '1.2.840.113549.1.9.14';
-  ASN1_OID_X962_PUBLICKEY  = '1.2.840.10045.2.1';
-  ASN1_OID_X962_ECDSA_P256 = '1.2.840.10045.3.1.7';
+
+  ASN1_OID_X509_CRL_REASON  = '2.5.29.21';
+  ASN1_OID_X509_CRL_INVDATE = '2.5.29.24';
+  ASN1_OID_X509_CRL_ISSUER  = '2.5.29.29';
 
 function XsaToSeq(xsa: TXSignatureAlgorithm): TAsnObject;
-function XkaToSeq(xka: TXPublicKeyAlgorithm): RawByteString;
 function OidToXsa(const oid: RawUtf8; out xsa: TXSignatureAlgorithm): boolean;
 function OidToXka(const oid, oid2: RawUtf8; out xka: TXPublicKeyAlgorithm): boolean;
 function OidToXa(const oid: RawByteString): TXAttr;
@@ -370,87 +410,7 @@ function OidToXku(const oid: RawByteString): TXExtendedKeyUsage;
 function XkuToOids(usages: TXExtendedKeyUsages): RawByteString;
 
 
-{ **************** RSA and ECC Public/Private Key support for X.509 }
-
-type
-  /// store a RSA or ECC public key for TX509
-  TXPublicKey = class
-  protected
-    fRsa: TRsa;
-    fEcc: TEcc256r1VerifyAbstract;
-    fEccPub: TEccPublicKey;
-    fSubjectPublicKey: RawByteString;
-    fAlgo: TXPublicKeyAlgorithm;
-  public
-    /// unserialized the public key from raw binary stored in a X.509 certificate
-    function Load(Algorithm: TXPublicKeyAlgorithm;
-      const SubjectPublicKey: RawByteString): boolean;
-    /// finalize this instance
-    destructor Destroy; override;
-    /// verify the RSA or ECC signature of a given hash
-    // - also checking the store OID for RSA so that it do match the Hash algorithm
-    function Verify(Sig: pointer; Dig: THash512Rec; SigLen, DigLen: integer;
-      Hash: THashAlgo): boolean; overload;
-    /// verify the RSA or ECC signature of a memory buffer
-    function Verify(DigAlgo: TXSignatureAlgorithm;
-      Data, Sig: pointer; DataLen, SigLen: integer): boolean; overload;
-    /// verify the RSA or ECC signature of a memory buffer
-    function Verify(DigAlgo: TXSignatureAlgorithm;
-      const Data, Sig: RawByteString): boolean; overload;
-    /// as used by TCryptCertX509.GetPrivateKeyParams
-    function GetParams(out x, y: RawByteString): boolean;
-    /// use EciesSeal or RSA sealing, i.e. encryption with this public key
-    function Seal(const Message: RawByteString;
-      const Cipher: RawUtf8): RawByteString;
-  end;
-
-  /// store a RSA or ECC private key for TX509
-  TXPrivateKey = class
-  protected
-    fRsa: TRsa;
-    fEcc: TEccPrivateKey;
-    fAlgo: TXPublicKeyAlgorithm;
-  public
-    /// unserialized the private key from DER binary or PEM text
-    // - will also ensure the private key do match the associated public key
-    function Load(Algorithm: TXPublicKeyAlgorithm; AssociatedKey: TXPublicKey;
-      const PrivateKeySaved: RawByteString; const Password: SpiUtf8): boolean;
-    /// create a new private / public key pair
-    // - returns the associated public key binary in SubjectPublicKey format
-    function Generate(Algorithm: TXPublicKeyAlgorithm): RawByteString;
-    /// compute a self-signed Certificate Signing Request as PEM
-    // - generate a new private / public key pair if none is already available
-    function ComputeSelfSignedCsr(Algorithm: TXSignatureAlgorithm;
-      const Subjects: RawUtf8; Usages: TCryptCertUsages;
-      Fields: PCryptCertFields): RawUtf8;
-    /// finalize this instance
-    destructor Destroy; override;
-    /// return the private key as raw binary
-    function ToDer: RawByteString;
-    /// return the associated public key as stored in a X509 certificate
-    function ToSubjectPublicKey: RawByteString;
-    /// return the private key in the TCryptCertX509.Save expected format
-    function Save(Format: TCryptCertFormat; const Password: SpiUtf8): RawByteString;
-    /// sign a memory buffer digest with RSA or ECC using the stored private key
-    // - storing the DigAlgo Hash algorithm OID for RSA
-    function Sign(const Dig: THash512Rec; DigLen: integer;
-      DigAlgo: TXSignatureAlgorithm): RawByteString; overload;
-    /// sign a memory buffer with RSA or ECC using the stored private key
-    function Sign(DigAlgo: TXSignatureAlgorithm;
-      Data: pointer; DataLen: integer): RawByteString; overload;
-    /// sign a memory buffer with RSA or ECC using the stored private key
-    function Sign(DigAlgo: TXSignatureAlgorithm;
-      const Data: RawByteString): RawByteString; overload;
-    /// use EciesSeal or RSA un-sealing, i.e. decryption with this private key
-    function Open(const Message: RawByteString;
-      const Cipher: RawUtf8): RawByteString;
-    /// compute the shared-secret with another public key
-    // - by design, ECDHE is only available for ECC
-    function SharedSecret(pub: TXPublicKey): RawByteString;
-  end;
-
-
-{ **************** X.509 Certificates and CSR }
+{ **************** X.509 Certificates and Certificate Signing Request (CSR) }
 
 type
   /// X.509 Certificate fields, as defined in RFC 5280 #4.1.2 and in TX509.Signed
@@ -477,11 +437,14 @@ type
     // - maps PBigInt.Save binary serialization
     // - use SerialNumberHex/SerialNumberText functions for human readable text
     SerialNumber: RawByteString;
+    /// hexadecimal text of the integer assigned by the CA to each certificate
+    // - e.g. '03:cc:83:aa:af:f9:c1:e2:1c:fa:fa:80:af:e6:67:6e:27:4c'
+    SerialNumberHex: RawUtf8;
     /// the cryptographic algorithm used by the CA over the TX509.Signed field
     // - match TX509.SignatureAlgorithm field
     Signature: TXSignatureAlgorithm;
-    /// identifies the entity that has signed and issued the certificate
-    Issuer: TXName;
+    /// decoded AlgorithmIdentifier structure of the stored public key
+    SubjectPublicKeyAlgorithm: TXPublicKeyAlgorithm;
     /// date on which the certificate validity period begins
     NotBefore: TDateTime;
     /// date on which the certificate validity period ends
@@ -491,8 +454,8 @@ type
     /// identifies the entity associated with the public key stored in the
     // subject public key field of this certificate
     Subject: TXName;
-    /// decoded AlgorithmIdentifier structure of the stored public key
-    SubjectPublicKeyAlgorithm: TXPublicKeyAlgorithm;
+    /// identifies the entity that has signed and issued the certificate
+    Issuer: TXName;
     /// decoded number of bits of the stored public key
     // - typically 2048 for RSA, or 256 for ECC
     SubjectPublicKeyBits: integer;
@@ -500,7 +463,7 @@ type
     SubjectPublicKey: RawByteString;
     /// decoded extensions as defined for X.509 v3 certificates
     // - will contain the ready-to-use UTF-8 text of the value
-    // - some types are not fully decoded, so you may need to use ExtensionRaw[]
+    // - some types are not yet decoded, so you may need to use ExtensionRaw[]
     Extension: TXExtensions;
     /// if a decoded extension was marked as Critical
     ExtensionCritical: array[TXExtension] of boolean;
@@ -516,14 +479,14 @@ type
     // - aggregate KeyUsages and ExtendedKeyUsages X.509 fields with
     // cuCA from Extension[xeBasicConstraints]
     CertUsages: TCryptCertUsages;
-    /// hexadecimal of a positive integer assigned by the CA to each certificate
-    // - e.g. '03:cc:83:aa:af:f9:c1:e2:1c:fa:fa:80:af:e6:67:6e:27:4c'
-    function SerialNumberHex: RawUtf8;
     /// decimal text of a positive integer assigned by the CA to each certificate
     // - e.g. '330929475774275458452528262248458246563660'
     function SerialNumberText: RawUtf8;
     /// convert Extension[x] from CSV to an array of RawUtf8
     function ExtensionArray(x: TXExtension): TRawUtf8DynArray;
+    /// check a date/time coherency with NotBefore/NotAfter
+    function IsValidDate(timeutc: TDateTime = 0): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
     /// reset all internal context
     procedure Clear;
     /// serialize those fields into ASN.1 DER binary
@@ -541,37 +504,38 @@ type
 
   /// a X.509 signed Certificate, as defined in RFC 5280
   TX509 = class(TSynPersistent)
+  public
+    /// actual to-be-signed Certificate content
+    Signed: TXTbsCertificate;
   protected
     fSafe: TLightLock;
-    fCachedDer: RawByteString;
-    fCachedSha1: RawUtf8;
-    fCachedPeerInfo: RawUtf8;
     fSignatureValue: RawByteString;
     fSignatureAlgorithm: TXSignatureAlgorithm;
-    fPublicKey: TXPublicKey;
+    fPublicKey: ICryptPublicKey;
+    fCachedDer: RawByteString;
+    fCachedHash: array[THashAlgo] of RawUtf8;
+    fCachedPeerInfo: RawUtf8;
+    fLastVerifyAuthPublicKey: RawByteString;
+    fRawSubjectKeyIdentifier: RawByteString;
+    fRawAuthorityKeyIdentifier: TRawByteStringDynArray;
+    fIsSelfSigned: boolean;
+    fIsRevokedTag: integer; // <0 if revoked, or should = TCryptStoreX509 tag
+    procedure AfterLoaded;
     procedure ComputeCachedDer;
     procedure ComputeCachedPeerInfo;
-    function GetSerialNumber: RawUtf8;
-      {$ifdef HASINLINE} inline; {$endif}
+    procedure ComputeCachedHash(algo: THashAlgo);
     function GetIssuerDN: RawUtf8;
       {$ifdef HASINLINE} inline; {$endif}
     function GetSubjectDN: RawUtf8;
       {$ifdef HASINLINE} inline; {$endif}
     function GetSubjectPublicKeyAlgorithm: RawUtf8;
   public
-    /// actual to-be-signed Certificate content
-    Signed: TXTbsCertificate;
-    /// raw binary digital signature computed upon Signed.ToDer
-    property SignatureValue: RawByteString
-      read fSignatureValue;
-  public
-    /// finalize this instance
-    destructor Destroy; override;
     /// reset all internal context
     procedure Clear;
     /// verify the digital signature of this Certificate using a X.509 Authority
     // - some errors can be ignored, e.g. cvWrongUsage or cvDeprecatedAuthority
     // - certificate expiration date can be specified instead of current time
+    // - use a cache so the next calls with the same Authority will be immediate
     // - this method is thread-safe
     function Verify(Authority: TX509 = nil; IgnoreError: TCryptCertValidities = [];
       TimeUtc: TDateTime = 0): TCryptCertValidity; overload;
@@ -589,6 +553,8 @@ type
     // - following RFC 5280 #4.1.1 encoding
     // - value is cached internally after LoadFromDer() or re-computation
     function SaveToDer: TCertDer;
+    /// serialize those fields into ASN.1 PEM text
+    function SaveToPem: TCertPem;
     /// unserialize those fields from ASN.1 DER binary
     // - following RFC 5280 #4.1.1 encoding
     function LoadFromDer(const der: TCertDer): boolean;
@@ -600,46 +566,74 @@ type
     /// the lowercase hexa hash of the normalized Binary of this Certificate
     // - default hfSha1 value is cached internally so is efficient for lookup
     function FingerPrint(algo: THashAlgo = hfSha1): RawUtf8;
-    /// check if the Certificate Issuer is also its Subject
-    function IsSelfSigned: boolean;
+    /// check if a FingerPrint() hexa hash match a supplied value
+    // - will inline the hash computation to avoid temporary string allocation
+    function FingerPrintCompare(const Value: RawUtf8;
+      Algo: THashAlgo = hfSha1): integer; overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// check if a FingerPrint() hexa hash match the hash of another certificate
+    // - will inline the hash computation to avoid temporary string allocation
+    function FingerPrintCompare(Another: TX509;
+      Algo: THashAlgo = hfSha1): integer; overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// check if this certificate has been issued by the specified certificate
+    // - ensure Authority xeSubjectKeyIdentifier is in xeAuthorityKeyIdentifier
+    function IsAuthorizedBy(Authority: TX509): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// compare two certificates
+    function Compare(Another: TX509; Method: TCryptCertComparer = ccmBinary): integer;
     /// return the associated Public Key instance
     // - initialize it from stored Signed.SubjectPublicKey, if needed
-    function PublicKey: TXPublicKey;
+    // - may be a faster TCryptPublicKeyOpenSsl, if available
+    function PublicKey: ICryptPublicKey;
     /// compute the number of security bits of the digital signature
     // - e.g. 112 for RSA-2048, 128 for ECC-256
     function SignatureSecurityBits: integer;
     /// an array of (DNS) Subject names covered by this Certificate
     // - convert the Extension[xeSubjectAlternativeName] CSV as a RawUtf8 array
     function SubjectAlternativeNames: TRawUtf8DynArray;
+    /// an array of (DNS) Subject names covered by the Issuer of this Certificate
+    // - convert the Extension[xeIssuerAlternativeName] CSV as a RawUtf8 array
+    function IssuerAlternativeNames: TRawUtf8DynArray;
     /// return some multi-line text of the main information of this Certificate
     // - in a layout similar to X509_print() OpenSSL usual formatting
     // - is cached internally for efficiency
     function PeerInfo: RawUtf8;
     /// return the main information of this Certificate into
     procedure ToParsedInfo(out Info: TX509Parsed);
+    /// true if the Certificate Issuer is also its Subject
+    property IsSelfSigned: boolean
+      read fIsSelfSigned;
     /// main properties of the entity associated with the public key stored
     // in this certificate
     // - e.g. for an Internet certificate, Subject[xaCN] is 'synopse.info'
+    // - see SubjectDN to retrieve the full Distinguished Name of the Subject
     property Subject: TXAttrNames
       read Signed.Subject.Name;
     /// main properties of the entity that has signed and issued the certificate
     // - e.g. for an Internet certificate, Issuer[xaO] may be 'Let''s Encrypt'
+    // - see IssuerDN to retrieve the full Distinguished Name of the Issuer
     property Issuer: TXAttrNames
       read Signed.Issuer.Name;
     /// main extensions as defined for X.509 v3 certificates
     // - will contain the ready-to-use UTF-8 CSV text of each value
     // - Extension[xeSubjectKeyIdentifier] and Extension[xeAuthorityKeyIdentifier]
     // are also useful to validate a full PKI certification paths and trust
+    // (as used by function IsAuthorizedBy() method)
     // - see also the SubjectAlternativeName property
     property Extension: TXExtensions
       read Signed.Extension;
+    /// raw binary digital signature computed upon Signed.ToDer
+    property SignatureValue: RawByteString
+      read fSignatureValue;
   published
     /// hexadecimal of a positive integer assigned by the CA to each certificate
     // - e.g. '03:cc:83:aa:af:f9:c1:e2:1c:fa:fa:80:af:e6:67:6e:27:4c'
     property SerialNumber: RawUtf8
-      read GetSerialNumber;
+      read Signed.SerialNumberHex;
     /// issuer entity of this Certificate as Distinguished Name text
     // - e.g. 'CN=R3, C=US, O=Let''s Encrypt'
+    // - see Issuer[] property to retrieve one specific field of the DN
     property IssuerDN: RawUtf8
       read GetIssuerDN;
     /// date on which the certificate validity period begins
@@ -657,6 +651,7 @@ type
       read Signed.CertUsages;
     /// subject entity of this Certificate as Distinguished Name text
     // - e.g. 'CN=synopse.info'
+    // - see Subject[] property to retrieve one specific field of the DN
     property SubjectDN: RawUtf8
       read GetSubjectDN;
     /// Subject names covered by this Certificate, as CSV
@@ -673,11 +668,418 @@ type
   end;
 
 
-{ **************** Registration of our X.509 Engine to the TCryptCert Factory }
+{ **************** X.509 Certificate Revocation List (CRL) }
+
+type
+  /// known X.509 CRL v2 extensions
+  // - standard extensions as defined in RFC 5280 5.2
+  // - currently only the mandatory xceAuthorityKeyIdentifier,
+  // xceIssuerAlternativeName and xceCrlNumber are handled from and to DER/PEM
+  TXCrlExtension = (
+    xceNone,
+    xceAuthorityKeyIdentifier,
+    xceIssuerAlternativeName,
+    xceCrlNumber,
+    xceDeltaCrlIndicator,
+    xceIssuingDistributionPoints,
+    xceDeltaCrlDistributionPoints,
+    xceAuthorityInformationAccess);
+
+  /// decoded extensions as defined for X.509 v2 CRL
+  // - as used in TXTbsCertList.Extension[] and TX509Crt.Extension
+  TXCrlExtensions = array[TXCrlExtension] of RawUtf8;
+
+  /// store one revoked certificate as defined in RFC 5280 5.1.2.6 and 5.3
+  // and used in TXTbsCertList.Revoked[]
+  {$ifdef USERECORDWITHMETHODS}
+  TXCrlRevokedCert = record
+  {$else}
+  TXCrlRevokedCert = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    /// revoked certificates are listed by their raw binary Serial Number
+    SerialNumber: RawByteString;
+    /// date on which the revocation occurred
+    RevocationDate: TDateTime;
+    /// non-critical CRL entry extension that identifies the reason for
+    // the certificate revocation
+    ReasonCode: TCryptCertRevocationReason;
+    /// non-critical CRL entry extension that provides the date on which it is
+    // known or suspected that the private key was compromised or that the
+    // certificate otherwise became invalid
+    InvalidityDate: TDateTime;
+    /// optional distinguished name (DN) from the issuer field of the
+    // certificate that corresponds to this CRL entry
+    // - present only if the certificate issuer was not the CRL issuer
+    // - should be marked as critital
+    CertificateIssuerDN: RawUtf8;
+    /// serialize those fields into ASN.1 DER binary
+    function ToDer: TAsnObject;
+    /// unserialize those fields from ASN.1 DER binary
+    // - following RFC 5280 encoding
+    function FromDer(const der: TCertDer): boolean;
+  end;
+
+  // a pointer to one revoked certificate as stored in TXTbsCertList.Revoked[]
+  PXCrlRevokedCert = ^TXCrlRevokedCert;
+
+  /// the revoked certificates as stored in TXTbsCertList.Revoked[]
+  TXCrlRevokedCerts = array of TXCrlRevokedCert;
+
+  /// the X.509 CRL fields, as defined in RFC 5280 and in TX509Crl.Signed
+  // - contains information associated with the subject of the certificate
+  // and the CA that issued it
+  {$ifdef USERECORDWITHMETHODS}
+  TXTbsCertList = record
+  {$else}
+  TXTbsCertList = object
+  {$endif USERECORDWITHMETHODS}
+  private
+  public
+    /// describes the version of the encoded X.509 CRL
+    // - equals usually 2, once extensions are used
+    Version: integer;
+    /// the cryptographic algorithm used by the CA over the TX509Crl.Signed field
+    // - match TX509Crl.SignatureAlgorithm field
+    Signature: TXSignatureAlgorithm;
+    /// date on which the CRL validity period begins
+    ThisUpdate: TDateTime;
+    /// date on which the CRL validity period ends
+    // - may equal 0 if the "nextUpdate" Time optional field was not present
+    NextUpdate: TDateTime;
+    /// identifies the entity that has signed and issued this CRL
+    Issuer: TXName;
+    /// list of revoked certificates
+    Revoked: TXCrlRevokedCerts;
+    /// decoded known X.509 CRL v2 extensions as defined in RFC 5280 5.2
+    // - will contain the ready-to-use UTF-8 text of the value
+    // - only xceAuthorityKeyIdentifier, xceIssuerAlternativeName and xceCrlNumber
+    // are decoded yet, so you may need to use ExtensionRaw[] for other values
+    Extension: TXCrlExtensions;
+    /// raw ASN1_OCTSTR of decoded Extension[] after FromDer()
+    ExtensionRaw: array[TXCrlExtension] of RawByteString;
+    /// reset all internal context
+    procedure Clear;
+    /// return the entry in Revoked[] from the supplied binary Serial Number
+    // - returns nil if the serial is not found in the internal list
+    function FindRevoked(const RawSerialNumber: RawByteString): PXCrlRevokedCert;
+    /// serialize those fields into ASN.1 DER binary
+    function ToDer: TAsnObject;
+    /// unserialize those fields from ASN.1 DER binary
+    // - following RFC 5280 #5.1.2 encoding
+    function FromDer(const der: TCertDer): boolean;
+  end;
+
+  /// a X.509 signed Certificate Revocation List (CRL), as defined in RFC 5280
+  TX509Crl = class(TSynPersistent)
+  protected
+    fCachedDer: RawByteString;
+    fSignatureValue: RawByteString;
+    fSignatureAlgorithm: TXSignatureAlgorithm;
+    fCrlNumber: QWord;
+    fRawAuthorityKeyIdentifier: RawByteString; // for TX509CrlList search
+    function GetIssuerDN: RawUtf8;
+      {$ifdef HASINLINE} inline; {$endif}
+    function GetCrlNumber: QWord;
+      {$ifdef HASINLINE} inline; {$endif}
+    procedure SetCrlNumber(Value: QWord);
+  public
+    /// actual to-be-signed revoked Certificate List content
+    Signed: TXTbsCertList;
+    /// raw binary digital signature computed upon Signed.ToDer
+    property SignatureValue: RawByteString
+      read fSignatureValue;
+  public
+    /// reset all internal context
+    procedure Clear;
+    /// append a revoked certificate to the internal list
+    // - will initialize the internal fields, if possible
+    // - caller should eventually call Sign() with the corresponding CA
+    function AddRevocation(const Serial: RawUtf8;
+      Reason: TCryptCertRevocationReason; ValidDays: integer = 0;
+      Date: TDateTime = 0; CertIssuerDN: RawUtf8 = ''): boolean;
+    /// serialize those fields into ASN.1 DER binary
+    // - following RFC 5280 #5.1.1 encoding
+    // - value is not cached internally
+    function SaveToDer: TCertDer;
+    /// serialize those fields into ASN.1 PEM text
+    function SaveToPem: TCertPem;
+    /// unserialize those fields from ASN.1 DER binary
+    // - following RFC 5280 #5.1.1 encoding
+    function LoadFromDer(const der: TCertDer): boolean;
+    /// unserialize those fields from ASN.1 DER binary
+    // - following RFC 5280 #5.1.1 encoding
+    function LoadFromPem(const pem: TCertPem): boolean;
+    /// to be called once any field has been changed to refresh internal caches
+    procedure AfterModified;
+    /// quickly check if a date is compatible with ThisUpdate/NextUpdate values
+    function IsValidDate(TimeUtc: TDateTime): boolean;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// check if an hexadecimal Serial Number is part of Signed.Revoked[]
+    // - returns crrNotRevoked if this Serial Number was not found, or
+    // the notified revocation reason
+    function IsRevoked(const SerialNumber: RawUtf8): TCryptCertRevocationReason;
+    /// return Signed.Revoked[].SerialNumber values as hexadecimal
+    function Revoked: TRawUtf8DynArray;
+    /// verify the digital signature of this CRL using a X.509 Authority
+    // - the supplied authority should have the cuCrlSign usage
+    // - some errors can be ignored, e.g. cvWrongUsage or cvDeprecatedAuthority
+    // - detection / revocation date can be specified instead of the current time
+    // - this method is thread-safe
+    function Verify(Authority: TX509 = nil; IgnoreError: TCryptCertValidities = [];
+      TimeUtc: TDateTime = 0): TCryptCertValidity;
+    /// let a X.509 authority verify the digital signature of this CRL
+    // - accept TCryptCertX509 or TCryptCertOpenSsl kind of authorities
+    // - the supplied authority should have the cuCrlSign usage
+    // - will use internally a TCryptCertX509 instance for the computation
+    function VerifyCryptCert(const Authority: ICryptCert;
+      IgnoreError: TCryptCertValidities = []; TimeUtc: TDateTime = 0): TCryptCertValidity;
+    /// let a X.509 authority compute the digital signature of this CRL
+    // - accept TCryptCertX509 or TCryptCertOpenSsl kind of authorities
+    // - the supplied authority should have the cuCrlSign usage
+    // - will use internally a TCryptCertX509 instance for the computation
+    procedure SignCryptCert(const Authority: ICryptCert;
+      AuthorityCrlNumber: QWord);
+    /// main properties of the entity that has signed and issued the CRL
+    // - e.g. for an Internet certificate, Issuer[xaO] may be 'Cloudflare'
+    property Issuer: TXAttrNames
+      read Signed.Issuer.Name;
+  published
+    /// the cryptographic algorithm used by the CA over the Signed field
+    // - match Signed.Signature internal field
+    property SignatureAlgorithm: TXSignatureAlgorithm
+      read fSignatureAlgorithm;
+    /// issuer entity of this Certificate as Distinguished Name text
+    // - e.g. 'CN=Cloudflare Inc ECC CA-3, C=US, O=Cloudflare, O=Inc.'
+    // - see Issuer[] property to retrieve one specific field of the DN
+    property IssuerDN: RawUtf8
+      read GetIssuerDN;
+    /// date on which the CRL validity period begins
+    property ThisUpdate: TDateTime
+      read Signed.ThisUpdate;
+    /// date on which the CRL validity period ends
+    // - may equal 0 if the "nextUpdate" Time optional field was not present
+    property NextUpdate: TDateTime
+      read Signed.NextUpdate;
+    /// the KeyID of the public key corresponding to the private key used to
+    // sign this CRL
+    // - this value may be more precise than IssuerDN
+    property AuthorityKeyIdentifier: RawUtf8
+      read Signed.Extension[xceAuthorityKeyIdentifier];
+    /// monotonically increasing sequence number for a given CRL scope and
+    // CRL issuer as defined in RFC 5280 5.2.3
+    // - any number > 63-bit should use Signed.ExtensionRaw[xceCrlNumber]
+    property CrlNumber: QWord
+      read GetCrlNumber write SetCrlNumber;
+  end;
+
+  /// a dynamic array of TX509Crl instances
+  TX509CrlObjArray = array of TX509Crl;
+
+  /// store several TX509Crl instances
+  TX509CrlList = class(TSynPersistent)
+  protected
+    fSafe: TRWLightLock;
+    fList: TX509CrlObjArray;
+    fCount: integer;
+    fDA: TDynArray;
+    function GetRevoked: integer;
+  public
+    /// initialize this instance
+    constructor Create; override;
+    /// finalize this list
+    destructor Destroy; override;
+    /// include a X.509 CRL instance to the internal list
+    // - from now on, it will be owned by this TX509CrlList class
+    // - will replace any existing CRL with its AKID, if older
+    procedure Add(Crl: TX509Crl);
+    /// include a X.509 CRL from its DER binary representation to the list
+    function AddFromDer(const Der: TCertDer): boolean;
+    /// append a revoked certificate to the corresponding CRL in the list
+    // - will add a new TX509Crl item, if needed
+    // - caller should eventually call Sign() with the corresponding CA
+    function AddRevocation(const AuthorityKeyIdentifier, Serial: RawUtf8;
+      Reason: TCryptCertRevocationReason; ValidDays: integer = 0;
+      Date: TDateTime = 0; CertIssuerDN: RawUtf8 = ''): boolean;
+    /// search the most recent X.509 CRL of a given authority from its own AKID
+    function FindByKeyIssuer(const AuthorityKeyIdentifier: RawUtf8): TX509Crl;
+    /// search the most recent X.509 CRL of a given authority from its own AKID
+    function FindByKeyIssuerRaw(const AuthorityKeyIdentifier: RawByteString): TX509Crl;
+    /// search the most recent X.509 CRL of a given authority from a DNS name
+    // - the DNS name value search is case-insensitive
+    function FindByAlternativeName(const DnsName: RawUtf8;
+      TimeUtc: TDateTime = 0): TX509CrlObjArray;
+    /// quickly check if a given certificate was part of one known CRL
+    // - the proper CRL(s) will be first checked with AuthorityKeyIdentifiers,
+    // then the method will search if the Serial Number is part of it
+    // - returns crrNotRevoked is the serial is not known as part of the CRL
+    // - returns the reason why this certificate has been revoked otherwise
+    function IsRevoked(const AuthorityKeyIdentifiers,
+      SerialNumber: RawUtf8): TCryptCertRevocationReason;
+    /// quickly check if a given certificate was part of one known CRL
+    // - internal method directly working on binary buffers
+    function IsRevokedRaw(akid: PRawByteString; n: integer;
+      const sn: RawByteString): TCryptCertRevocationReason;
+    /// return a copy of the internal list items
+    // - the list is sorted by AuthorityKeyIdentifier and CrlNumber
+    // - caller should NOT free the returned items
+    function List: TX509CrlObjArray;
+    /// persist all stored CRL in PEM format
+    procedure SaveToPem(W: TTextWriter; WithExplanatoryText: boolean = false);
+  published
+    /// how many CRL are currently in the list
+    property Count: integer
+      read fCount;
+    /// how many certificates are currently revoked
+    property Revoked: integer
+      read GetRevoked;
+  end;
+
+
+const
+  /// the OID of all known X.509 CRL v2 extensions, as in RFC 5280 5.2
+  XCE_OID: array[TXCrlExtension] of PUtf8Char = (
+    '',                     // xceNone
+    '2.5.29.35',            // xceAuthorityKeyIdentifier
+    '2.5.29.18',            // xceIssuerAlternativeName
+    '2.5.29.20',            // xceCrlNumber
+    '2.5.29.27',            // xceDeltaCrlIndicator
+    '2.5.29.28',            // xceIssuingDistributionPoints
+    '2.5.29.46',            // xceDeltaCrlDistributionPoints
+    '1.3.6.1.5.5.7.1.1');   // xceAuthorityInformationAccess
+
+function OidToXce(const oid: RawByteString): TXCrlExtension;
+
+
+{ **************** X.509 Private Key Infrastructure (PKI) }
+
+type
+  /// 'x509-pki' ICryptStore algorithm using TX509 and TX509Crl for its process
+  TCryptStoreAlgoX509 = class(TCryptStoreAlgo)
+  public
+    function New: ICryptStore; override; // = TCryptStoreX509.Create(self)
+  end;
+
+  /// 'x509-pki' ICryptStore using TX509 and TX509Crl as a full featured PKI
+  // - will maintain a cache of ICryptCert instances, a list of trusted
+  // certificates, a list of signed CRL (received from a CA) and a list
+  // of unsigned CRL (manually registered via the Revoke method)
+  // - Certification Path Validation follows RFC 5280 section 6 requirements
+  // - published here to make it expandable if needed by proper inheritance
+  TCryptStoreX509 = class(TCryptStore)
+  protected
+    fTrust: TCryptCertList;
+    fCA: TCryptCertList;
+    fSignedCrl: TX509CrlList;   // from a CA
+    fUnsignedCrl: TX509CrlList; // from manual Revoke()
+    fValidDepth: integer;
+    fIsRevokedTag: integer; // always >= 0 - to store in TX509.fIsRevokedTag
+    function GetRevoked: integer;
+    function GetCacheCount: integer;
+    function GetCACount: integer;
+    function ComputeIsRevoked(cert: TX509): TCryptCertRevocationReason;
+  public
+    /// initialize a 'x509-pki' ICryptStore
+    constructor Create(algo: TCryptAlgo); override;
+    /// finalize this ICryptStore instance
+    destructor Destroy; override;
+    /// check both signed CRL list (for CA) and unsigned CRL list (manual Revoke)
+    // - use TX509.fIsRevokedTag instance cache if possible
+    function IsRevokedX509(cert: TX509): TCryptCertRevocationReason;
+      {$ifdef HASINLINE} inline; {$endif}
+    // ICryptStore methods
+    procedure Clear; override;
+    function Save: RawByteString; override;
+    function GetBySerial(const Serial: RawUtf8): ICryptCert; override;
+    function GetBySubjectKey(const Key: RawUtf8): ICryptCert; override;
+    function FindOne(const Value: RawByteString;
+      Method: TCryptCertComparer): ICryptCert; override;
+    function IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason; override;
+    function Add(const cert: ICryptCert): boolean; override;
+    function AddFromBuffer(const Content: RawByteString): TRawUtf8DynArray; override;
+    function Revoke(const Cert: ICryptCert; Reason: TCryptCertRevocationReason;
+      RevocationDate: TDateTime): boolean; override;
+    function IsValid(const cert: ICryptCert;
+      date: TDateTime): TCryptCertValidity; override;
+    function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
+      IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity; override;
+    function Count: integer; override;
+    function CrlCount: integer; override;
+    function DefaultCertAlgo: TCryptCertAlgo; override;
+  public
+    /// how many levels IsValid() should iterate over the trusted certificates
+    // before finding a self-signed "root anchor"
+    // - equals 32 by default which is more than enough for most PKI, and don't
+    // affect performance because most context is cached during the process
+    // - 0 would mean that IsValid() checks for a single issuer in the known
+    // Trust[] list, and consider it successfull even if the "root anchor" was
+    // not reached - but may be unsafe if the "root anchor" has been revoked
+    property ValidDepth: integer
+      read fValidDepth write fValidDepth;
+    /// access to the internal trusted ICryptCert list of this PKI
+    // - i.e. all trusted certificates, some being self-signed "root anchors",
+    // others being intermediate certificates
+    // - you usually should not need to access this list, but call ICryptStore
+    // IsValid() and IsRevoked() convenient methods
+    property Trust: TCryptCertList
+      read fTrust;
+    /// access to the internal list of CRL signed by some root CA
+    // - never change directly, but in the context of its CA owner
+    property SignedCrl: TX509CrlList
+      read fSignedCrl;
+    /// access to the internal list of unsigned CRL, set by Revoke() calls
+    // - will be persisted as PEM with no signature, which is mORMot-specific
+    // - never change directly, e.g. don't call UnSignedCrl.AddRevocation()
+    property UnsignedCrl: TX509CrlList
+      read fUnsignedCrl;
+  published
+    /// how many trusted certificates are actually stored
+    property Trusted: integer
+      read Count;
+    /// how many certificates are currently revoked
+    // - in both SignedCrl and UnsignedCrl lists
+    property Revoked: integer
+      read GetRevoked;
+    /// how many ICryptCert instances are actually cached
+    property Cached: integer
+      read GetCacheCount;
+  end;
+
+  /// maintain a cache of X.509 ICryptCert instances, from their DER/binary
+  // - to speed up typical PKI process, no DER parsing would be necessary
+  // and ECC/RSA digital signature verifications and certificate revocation
+  // state will be cached at TX509 level, in this bounded context
+  // - this class is thread-safe and will flush its oldest entries automatically
+  TCryptCertCacheX509 = class(TCryptCertCache)
+  protected
+    // properly overidden to call X509Load() and return a TCryptCertX509
+    function InternalLoad(const Cert: RawByteString): ICryptCert; override;
+  end;
+
+
+{ ******** Registration of our X.509 Engine to the TCryptCert/TCryptStore Factories }
 
 /// high-level function to decode X.509 certificate main properties using TX509
 // - assigned to mormot.core.secure X509Parse() redirection by this unit
 function TX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
+
+/// compute a new ICryptCert instance from DER or PEM input
+// - returns nil if the input is not correct or not supported
+// - or returns a TCryptCertX509 instance from function TX509.LoadFromDer()
+// - will guess the proper TCryptCertAlgoX509 to use for the ICryptCert
+// - called e.g. by TCryptCertCacheX509 which is the preferred factory
+function X509Load(const Cert: RawByteString): ICryptCert;
+
+{
+  NOTICE:
+  - the algorithms of this unit are available as 'x509-es256' and 'x509-rs256'
+    to 'x509-ps256', and 'x509-pki'
+  - mormot.crypt.secure also exposes CryptCertX509[] and CryptStoreX509 globals
+  - if OpenSSL is loaded, the 'x509-*' algorithms will be overriden but you can
+    still have access to 'x509-rs256-int' 'x509-ps256-int' and 'x509-es256-int'
+  - they are fully compatible with X.509 certificates, and the 'x509-pki' store
+    from TCryptStoreX509 is the only fully compliant with RFC recommendations
+}
 
 
 implementation
@@ -710,7 +1112,7 @@ begin
      (n > 0) and
      (OidBinary <> '') then
     repeat
-      if o^.Oid = OidBinary then // efficient search
+      if SortDynArrayRawByteString(o^.Oid, OidBinary) = 0 then // O(n) search
       begin
         result := o^.Value;
         exit;
@@ -768,6 +1170,8 @@ end;
 function XsaToSeq(xsa: TXSignatureAlgorithm): TAsnObject;
 begin
   case xsa of
+    xsaNone:
+      result := AsnSeq([Asn(ASN1_OBJID, [])]); // e.g. for fUnsignedCrl
     xsaSha256Rsa .. xsaSha512Rsa:
       result := AsnSeq([
                   AsnOid(pointer(ASN1_OID_SIGNATURE[xsa])),
@@ -777,7 +1181,7 @@ begin
       // ASN1_OID_SIGNATURE[xsa] is the hash algorithm for RSA-PSS
       result :=
         AsnSeq([
-          AsnOid(ASN1_OID_PKCS1_RSA_PSS),
+          AsnOid(pointer(CKA_OID[ckaRsaPss])),
           AsnSeq([ // RSASSA-PSS-params - see RFC 8017 A.2.3
             Asn(ASN1_CTC0, [AsnSeq([ // HashAlgorithm
                               AsnOid(pointer(ASN1_OID_SIGNATURE[xsa])),
@@ -799,30 +1203,6 @@ begin
       result := AsnSeq([
                   AsnOid(pointer(ASN1_OID_SIGNATURE[xsa]))
                 ]);
-  else
-    raise EX509.CreateUtf8('Unexpected XsaToSeq(%)', [ord(xsa)]);
-  end;
-end;
-
-function XkaToSeq(xka: TXPublicKeyAlgorithm): RawByteString;
-begin
-  case xka of
-    xkaRsa:
-      result := AsnSeq([
-                  AsnOid(ASN1_OID_PKCS1_RSA),
-                  ASN1_NULL_VALUE // optional
-                ]);
-    xkaRsaPss:
-      result := AsnSeq([
-                  AsnOid(ASN1_OID_PKCS1_RSA_PSS)
-                ]);
-    xkaEcc256:
-      result := AsnSeq([
-                  AsnOid(ASN1_OID_X962_PUBLICKEY),
-                  AsnOid(ASN1_OID_X962_ECDSA_P256)
-                ]);
-  else
-    raise EX509.CreateUtf8('Unexpected XkaToSeq(%)', [ord(xka)]);
   end;
 end;
 
@@ -834,8 +1214,7 @@ var
 begin
   p := 1;
   result := (AsnNextRaw(pos, der, seq) = ASN1_SEQ) and
-            (AsnNext(p, seq, @oid) = ASN1_OBJID) and // decode OID as text
-            ({%H-}oid <> '');
+            (AsnNext(p, seq, @oid) = ASN1_OBJID); // decode OID as text
   if result then
     case AsnNext(p, seq, @oid2) of
       ASN1_OBJID:
@@ -862,7 +1241,7 @@ var
   x: TXSignatureAlgorithm;
 begin
   for x := succ(low(x)) to high(x) do
-    if oid = ASN1_OID_SIGNATURE[x] then
+    if SortDynArrayRawByteString(oid, ASN1_OID_SIGNATURE[x]) = 0 then
     begin
       xsa := x;
       result := true;
@@ -873,28 +1252,21 @@ end;
 
 function OidToXka(const oid, oid2: RawUtf8; out xka: TXPublicKeyAlgorithm): boolean;
 begin
-  result := true;
-  if oid = ASN1_OID_PKCS1_RSA then
-    xka := xkaRsa
-  else if oid = ASN1_OID_PKCS1_RSA_PSS then
-    xka := xkaRsaPss
-  else if (oid = ASN1_OID_X962_PUBLICKEY) and
-          (oid2 = ASN1_OID_X962_ECDSA_P256) then
-    xka := xkaEcc256
-  else
-    result := false;
+  xka := CKA_TO_XKA[OidToCka(oid, oid2)];
+  result := xka <> xkaNone;
 end;
 
 var
   // fast OID binary comparison search - initialized at unit startup
   XA_OID_ASN: array[TXAttr] of TAsnObject;
   XE_OID_ASN: array[TXExtension] of TAsnObject;
+  XCE_OID_ASN: array[TXCrlExtension] of TAsnObject;
   XKU_OID_ASN: array[TXExtendedKeyUsage] of TAsnObject;
 
 function OidToXa(const oid: RawByteString): TXAttr;
 begin
   for result := succ(low(result)) to high(result) do
-    if oid = XA_OID_ASN[result] then
+    if SortDynArrayRawByteString(oid, XA_OID_ASN[result]) = 0 then
       exit;
   result := xaNone;
 end;
@@ -902,15 +1274,23 @@ end;
 function OidToXe(const oid: RawByteString): TXExtension;
 begin
   for result := succ(low(result)) to high(result) do
-    if oid = XE_OID_ASN[result] then
+    if SortDynArrayRawByteString(oid, XE_OID_ASN[result]) = 0 then
       exit;
   result := xeNone;
+end;
+
+function OidToXce(const oid: RawByteString): TXCrlExtension;
+begin
+  for result := succ(low(result)) to high(result) do
+    if SortDynArrayRawByteString(oid, XCE_OID_ASN[result]) = 0 then
+      exit;
+  result := xceNone;
 end;
 
 function OidToXku(const oid: RawByteString): TXExtendedKeyUsage;
 begin
   for result := succ(low(result)) to high(result) do
-    if oid = XKU_OID_ASN[result] then
+    if SortDynArrayRawByteString(oid, XKU_OID_ASN[result]) = 0 then
       exit;
   result := xkuNone;
 end;
@@ -1032,6 +1412,16 @@ begin
   end;
 end;
 
+function TXName.Compare(var Another: TXName): integer;
+begin
+  // update cache manually to avoid temporary strings with ToBinary calls
+  if fCachedAsn = '' then
+    ComputeAsn;
+  if Another.fCachedAsn = '' then
+    Another.ComputeAsn;
+  result := SortDynArrayRawByteString(fCachedAsn, Another.fCachedAsn);
+end;
+
 function TXName.NameArray(a: TXAttr): TRawUtf8DynArray;
 begin
   result := nil;
@@ -1055,6 +1445,8 @@ begin
   fCachedAsn := seq; // store exact binary since used for comparison
   fCachedText := '';
   posseq := 1;
+  if AsnNext(posseq, seq) <> ASN1_SEQ then
+    exit;
   while AsnNextRaw(posseq, seq, one) = ASN1_SETOF do
   begin
     posone := 1;
@@ -1082,7 +1474,7 @@ function TXName.FromAsnNext(var pos: integer; const der: TAsnObject): boolean;
 var
   seq: RawByteString;
 begin
-  result := (AsnNextRaw(pos, der, seq) = ASN1_SEQ) and
+  result := (AsnNextRaw(pos, der, seq, {includeheader=}true) = ASN1_SEQ) and
             FromAsn(seq);
 end;
 
@@ -1161,7 +1553,7 @@ begin
   else
     sub := RawUtf8ArrayToCsv(subs); // normalized
   Extension[xeSubjectAlternativeName] := sub;
-  Subject.Name[xaCN] := GetCsvItem(pointer(sub), 0);
+  Subject.Name[xaCN] := GetFirstCsvItem(sub);
   if Fields <> nil then
   begin
     Subject.FromFields(Fields^);
@@ -1176,12 +1568,6 @@ begin
   RandomBytes(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
   rnd[0] := rnd[0] and $7f;     // ensure > 0
   ToHumanHex(result, @rnd, 20); // 20 bytes = 160-bit as a common size
-end;
-
-function HumanHexToBin(const hex: RawUtf8): RawByteString;
-begin
-  // reverse ToHumanHex() layout
-  result := HexToBin(StringReplaceAll(hex, ':', '')); // fast enough
 end;
 
 function CsvToDns(p: PUtf8Char): RawByteString;
@@ -1273,422 +1659,7 @@ begin
 end;
 
 
-{ **************** RSA and ECC Public/Private Key support for X.509 }
-
-{ TXPublicKey }
-
-const
-  XKA_RSA: array[TXPublicKeyAlgorithm] of TRsaClass = (
-    nil,      // xkaNone
-    TRsa,     // xkaRsa
-    TRsaPss,  // xkaRsaPss
-    nil  );   // xkaEcc256
-
-function TXPublicKey.Load(Algorithm: TXPublicKeyAlgorithm;
-  const SubjectPublicKey: RawByteString): boolean;
-begin
-  result := false;
-  if (fAlgo <> xkaNone) or
-     (SubjectPublicKey = '') then
-    exit;
-  fAlgo := Algorithm;
-  case Algorithm of
-    xkaRsa,
-    xkaRsaPss:
-      begin
-        fRsa := XKA_RSA[Algorithm].Create;
-        if fRsa.LoadFromPublicKeyDer(SubjectPublicKey) then
-          result := true
-        else
-          FreeAndNil(fRsa);
-      end;
-    xkaEcc256:
-      if Ecc256r1CompressAsn1(SubjectPublicKey, fEccPub) then
-      begin
-        fEcc := TEcc256r1Verify.Create(fEccPub); // OpenSSL or mormot.crypt
-        fSubjectPublicKey := SubjectPublicKey;
-        result := true;
-      end;
-  else
-    raise EX509.CreateUtf8('%.Create: unsupported %', [self, ToText(fAlgo)^]);
-  end;
-end;
-
-destructor TXPublicKey.Destroy;
-begin
-  inherited Destroy;
-  fRsa.Free;
-  fEcc.Free;
-end;
-
-function TXPublicKey.Verify(Sig: pointer; Dig: THash512Rec;
-  SigLen, DigLen: integer; Hash: THashAlgo): boolean;
-var
-  eccsig: TEccSignature;
-begin
-  result := false;
-  if (self <> nil) and
-     (DigLen <> 0) then
-    case fAlgo of
-      xkaRsa,
-      xkaRsaPss:
-        // RSA digital signature verification (thread-safe but blocking)
-        result := fRsa.Verify(@Dig, Sig, Hash, SigLen);
-      xkaEcc256:
-        if DerToEcc(Sig, SigLen, eccsig) then
-          // secp256r1 digital signature verification
-          result := fEcc.Verify(Dig.Lo, eccsig); // thread-safe
-    end;
-end;
-
-function TXPublicKey.Verify(DigAlgo: TXSignatureAlgorithm; Data, Sig: pointer;
-  DataLen, SigLen: integer): boolean;
-var
-  hasher: TSynHasher;
-  dig: THash512Rec;
-  diglen: PtrInt;
-begin
-  diglen := hasher.Full(XSA_TO_HF[DigAlgo], Data, DataLen, dig);
-  result := (diglen <> 0) and
-            Verify(Sig, dig, SigLen, diglen, XSA_TO_HF[DigAlgo]);
-end;
-
-function TXPublicKey.Verify(DigAlgo: TXSignatureAlgorithm;
-  const Data, Sig: RawByteString): boolean;
-begin
-  result := Verify(DigAlgo, pointer(Data), pointer(Sig), length(Data), length(Sig));
-end;
-
-function TXPublicKey.GetParams(out x, y: RawByteString): boolean;
-var
-  k: TEccPublicKeyUncompressed;
-begin
-  result := false;
-  if self <> nil then
-    case fAlgo of
-      xkaRsa,
-      xkaRsaPss:
-        begin
-          // for RSA, x is set to the Exponent (e), and y to the Modulus (n)
-          x := fRsa.E^.Save;
-          y := fRsa.M^.Save;
-          result := (x <> '') and
-                    (y <> '');
-        end;
-      xkaEcc256:
-        // for ECC, returns the x,y uncompressed coordinates from stored ASN.1
-        if Ecc256r1ExtractAsn1(fSubjectPublicKey, k) then
-        begin
-          FastSetRawByteString(x, nil, ECC_BYTES);;
-          FastSetRawByteString(y, nil, ECC_BYTES);;
-          bswap256(@PHash512Rec(@k)^.Lo, pointer(x));
-          bswap256(@PHash512Rec(@k)^.Hi, pointer(y));
-          result := true;
-        end;
-    end;
-end;
-
-function TXPublicKey.Seal(const Message: RawByteString;
-  const Cipher: RawUtf8): RawByteString;
-begin
-  result  := '';
-  if self <> nil then
-    case fAlgo of
-      xkaRsa,
-      xkaRsaPss:
-        result := fRsa.Seal(Cipher, Message);
-      xkaEcc256:
-        result := EciesSeal(Cipher, fEcc.PublicKey, Message);
-    end;
-end;
-
-
-{ TXPrivateKey }
-
-const
-  // those values match EccPrivateKeyEncrypt/EccPrivateKeyDecrypt for xkaEcc256
-  // xkaRsa and xkaRsaPss share the same public/private key files by definition
-  XKA_SALT: array[TXPublicKeyAlgorithm] of RawUtf8 = (
-    '', 'synrsa', 'synrsa', 'synecc');
-  XKA_ROUNDS: array[TXPublicKeyAlgorithm] of byte = (
-    0, 3, 3, 31);
-
-function TXPrivateKey.Load(Algorithm: TXPublicKeyAlgorithm; AssociatedKey: TXPublicKey;
-  const PrivateKeySaved: RawByteString; const Password: SpiUtf8): boolean;
-var
-  saved, der: RawByteString;
-begin
-  result := false;
-  if (self = nil) or
-     (fAlgo <> xkaNone) or
-     (Algorithm = xkaNone) or
-     (PrivateKeySaved = '') then
-    exit;
-  try
-    saved := PrivateKeySaved;
-    if Password <> '' then
-    begin
-      // use mormot.core.secure encryption, not standard PKCS#8
-      der := PemToDer(saved); // see also TCryptCertX509.Load
-      saved := PrivateKeyDecrypt(
-        der, XKA_SALT[Algorithm], Password, XKA_ROUNDS[Algorithm]);
-      if saved = '' then
-        exit;
-    end;
-    fAlgo := Algorithm;
-    case fAlgo of
-      xkaRsa,
-      xkaRsaPss:
-        begin
-          fRsa := XKA_RSA[fAlgo].Create;
-          if fRsa.LoadFromPrivateKeyPem(saved) and
-             ((AssociatedKey = nil) or
-              fRsa.MatchKey(AssociatedKey.fRsa)) then
-            result := true
-          else
-            FreeAndNil(fRsa);
-        end;
-      xkaEcc256:
-        if PemDerRawToEcc(saved, fEcc) and
-           ((AssociatedKey = nil) or
-            Ecc256r1MatchKeys(fEcc, AssociatedKey.fEcc.PublicKey)) then
-          result := true
-        else
-          FillZero(fEcc);
-    end;
-  finally
-    FillZero(saved);
-    FillZero(der);
-  end;
-end;
-
-function TXPrivateKey.Generate(Algorithm: TXPublicKeyAlgorithm): RawByteString;
-var
-  eccpub: TEccPublicKey;
-begin
-  result := '';
-  if (self = nil) or
-     (fAlgo <> xkaNone) then
-    exit;
-  fAlgo := Algorithm;
-  case fAlgo of
-    xkaRsa,
-    xkaRsaPss:
-      if fRsa = nil then
-      begin
-        fRsa := XKA_RSA[fAlgo].Create;
-        if fRsa.Generate(RSA_DEFAULT_GENERATION_BITS) then
-          result := fRsa.SavePublicKey.ToSubjectPublicKey;
-      end;
-    xkaEcc256:
-      if IsZero(fEcc) and
-         Ecc256r1MakeKey(eccpub, fEcc) then
-        result := Ecc256r1UncompressAsn1(eccpub);
-  end;
-end;
-
-function TXPrivateKey.ComputeSelfSignedCsr(
-  Algorithm: TXSignatureAlgorithm; const Subjects: RawUtf8;
-  Usages: TCryptCertUsages; Fields: PCryptCertFields): RawUtf8;
-var
-  pub, extreq, der: RawByteString;
-  sub: TXName;
-  ext: TXExtensions;
-  xu: TXKeyUsages;
-  xku: TXExtendedKeyUsages;
-begin
-  result := '';
-  if self = nil then
-    exit;
-  // create a new key pair if needed
-  if fAlgo <> xkaNone then
-    pub := ToSubjectPublicKey
-  else
-    pub := Generate(XSA_TO_XKA[Algorithm]);
-  if pub = '' then
-    exit;
-  // setup the CSR fields
-  FillCharFast(sub, SizeOf(sub), 0);
-  CertInfoPrepare(sub, ext, Subjects, Fields);
-  extreq := CertInfoCompute(Usages, ext, xu, xku);
-  if extreq <> '' then
-    // extensionRequest (PKCS #9 via CRMF)
-    extreq := Asn(ASN1_CTC0, [
-                AsnSeq([
-                  AsnOid(ASN1_OID_PKCS9_EXTREQ),
-                  Asn(ASN1_SETOF, [
-                    AsnSeq(extreq)
-                  ])
-                ])
-              ]);
-  // compute the main CSR body
-  der := AsnSeq([
-           Asn(0), // version
-           sub.ToBinary,
-           AsnSeq([
-             XkaToSeq(fAlgo),
-             Asn(ASN1_BITSTR, [pub])
-           ]),
-           extreq
-         ]);
-  // sign and return the whole CSR as PEM
-  result := DerToPem(AsnSeq([
-                      der,
-                      XsaToSeq(Algorithm),
-                      Asn(ASN1_BITSTR, [Sign(Algorithm, der)])
-                    ]), pemCertificateRequest);
-end;
-
-destructor TXPrivateKey.Destroy;
-begin
-  inherited Destroy;
-  FillZero(fEcc);
-  fRsa.Free;
-end;
-
-function TXPrivateKey.ToDer: RawByteString;
-begin
-  if self = nil then
-    result := ''
-  else if fRsa <> nil then
-    result := fRsa.SavePrivateKeyDer
-  else
-    result := EccToDer(fEcc); // does IsZero()
-end;
-
-function TXPrivateKey.ToSubjectPublicKey: RawByteString;
-var
-  eccpub: TEccPublicKey;
-begin
-  result := '';
-  if self <> nil then
-    if fRsa <> nil then
-      result := fRsa.SavePublicKey.ToSubjectPublicKey
-    else if not IsZero(fEcc) then
-    begin
-      Ecc256r1PublicFromPrivate(fEcc, eccpub);
-      result := Ecc256r1UncompressAsn1(eccpub);
-    end;
-end;
-
-function TXPrivateKey.Save(Format: TCryptCertFormat;
-  const Password: SpiUtf8): RawByteString;
-var
-  der, bin: RawByteString;
-  k: TPemKind;
-begin
-  if self = nil then
-    result := ''
-  else
-  try
-    der := ToDer;
-    if Password = '' then
-      // save as plain unencrypted PEM/DER
-      if Format = ccfPem then
-        if fAlgo in xkaRsas then
-          k := pemRsaPrivateKey
-        else
-          k := pemEcPrivateKey
-      else
-        k := pemUnspecified // save as ccfBinary
-    else
-    begin
-      // use mormot.core.secure encryption, not standard PKCS#8
-      bin := der; // for FillZero()
-      der := PrivateKeyEncrypt(bin, XKA_SALT[fAlgo], Password, XKA_ROUNDS[fAlgo]);
-      if Format = ccfPem then
-        if fAlgo in xkaRsas then
-          k := pemSynopseRsaEncryptedPrivateKey
-        else
-          k := pemSynopseEccEncryptedPrivateKey
-        else
-          k := pemUnspecified;
-    end;
-    if k = pemUnspecified then
-      result := der
-    else
-      result := DerToPem(der, k);
-  finally
-    FillZero(der);
-    FillZero(bin);
-  end;
-end;
-
-function TXPrivateKey.Sign(const Dig: THash512Rec; DigLen: integer;
-  DigAlgo: TXSignatureAlgorithm): RawByteString;
-var
-  eccsig: TEccSignature;
-begin
-  result := '';
-  if (self <> nil) and
-     (XSA_TO_XKA[DigAlgo] = fAlgo) and
-     (HASH_SIZE[XSA_TO_HF[DigAlgo]] = DigLen) then
-    case fAlgo of
-      xkaRsa,
-      xkaRsaPss:
-        if fRsa <> nil then
-          result := fRsa.Sign(@Dig.b, XSA_TO_HF[DigAlgo]); // thread-safe
-      xkaEcc256:
-        if Ecc256r1Sign(fEcc, Dig.Lo, eccsig) then // thread-safe
-          result := EccToDer(eccsig);
-    end;
-end;
-
-function TXPrivateKey.Sign(DigAlgo: TXSignatureAlgorithm; Data: pointer;
-  DataLen: integer): RawByteString;
-var
-  hasher: TSynHasher;
-  dig: THash512Rec;
-  diglen: PtrInt;
-begin
-  diglen := hasher.Full(XSA_TO_HF[DigAlgo], Data, DataLen, dig);
-  result := Sign(dig, diglen, DigAlgo);
-end;
-
-function TXPrivateKey.Sign(DigAlgo: TXSignatureAlgorithm;
-  const Data: RawByteString): RawByteString;
-begin
-  result := Sign(DigAlgo, pointer(Data), length(Data));
-end;
-
-function TXPrivateKey.Open(const Message: RawByteString;
-  const Cipher: RawUtf8): RawByteString;
-begin
-  result := '';
-  if self <> nil then
-    case fAlgo of
-      xkaRsa,
-      xkaRsaPss:
-        result := fRsa.Open(Cipher, Message);
-      xkaEcc256:
-        result := EciesOpen(Cipher, fEcc, Message);
-    end;
-end;
-
-function TXPrivateKey.SharedSecret(pub: TXPublicKey): RawByteString;
-var
-  sec: TEccSecretKey;
-begin
-  result := '';
-  if (self <> nil) and
-     (pub <> nil) and
-     (pub.fAlgo = fAlgo) then
-    case fAlgo of
-      xkaRsa,
-      xkaRsaPss:
-        ; // not possible by definition
-      xkaEcc256:
-        try
-          if Ecc256r1SharedSecret(pub.fEccPub, fEcc, sec) then
-            FastSetRawByteString(result{%H-}, @sec, SizeOf(sec));
-        finally
-          FillZero(sec);
-        end;
-    end;
-end;
-
-
-{ **************** X.509 Certificates and CSR }
+{ **************** X.509 Certificates and Certificate Signing Request (CSR) }
 
 { TXTbsCertificate }
 
@@ -1720,10 +1691,8 @@ begin
                         AsnTime(NotAfter)
                       ]),
                       Subject.ToBinary,
-                      AsnSeq([
-                        XkaToSeq(SubjectPublicKeyAlgorithm),
-                        Asn(ASN1_BITSTR, [SubjectPublicKey])
-                      ]),
+                      X509PubKeyToDer(XKA_TO_CKA[SubjectPublicKeyAlgorithm],
+                        SubjectPublicKey),
                       ext
                     ]);
     end;
@@ -1884,17 +1853,13 @@ var
 begin
   // fill the main certificate fields
   Version := 3;
-  SerialNumber := HumanHexToBin(HumanRandomID);
+  SerialNumberHex := HumanRandomID;
+  SerialNumber := HumanHexToBin(SerialNumberHex);
   Extension[xeSubjectKeyIdentifier] := HumanRandomID;
   // ValidDays and ExpireDays are relative to the current time
   start := NowUtc;
   NotBefore := start + ValidDays;
   NotAfter := start + ExpireDays;
-end;
-
-function TXTbsCertificate.SerialNumberHex: RawUtf8;
-begin
-  ToHumanHex(result, pointer(SerialNumber), length(SerialNumber));
 end;
 
 function TXTbsCertificate.SerialNumberText: RawUtf8;
@@ -1906,6 +1871,16 @@ function TXTbsCertificate.ExtensionArray(x: TXExtension): TRawUtf8DynArray;
 begin
   result := nil;
   CsvToRawUtf8DynArray(pointer(Extension[x]), result);
+end;
+
+function TXTbsCertificate.IsValidDate(timeutc: TDateTime): boolean;
+begin
+  if timeutc = 0 then
+    timeutc := NowUtc;
+  result := ((NotAfter = 0) or
+             (timeutc < NotAfter + CERT_DEPRECATION_THRESHOLD)) and
+            ((NotBefore = 0) or
+             (timeutc + CERT_DEPRECATION_THRESHOLD > NotBefore));
 end;
 
 function TXTbsCertificate.ToDer: TAsnObject;
@@ -1944,7 +1919,6 @@ begin
      not OidToXka(oid, oid2, SubjectPublicKeyAlgorithm) or
      (AsnNextRaw(pos, der, SubjectPublicKey) <> ASN1_BITSTR) then
     exit;
-  SubjectPublicKeyBits := X509PubKeyBits(SubjectPublicKey);
   // handle X.509 v3 extensions
   if (Version = 3) and
      (AsnNext(pos, der) = ASN1_CTC3) and
@@ -1974,51 +1948,33 @@ end;
 
 { TX509 }
 
-destructor TX509.Destroy;
-begin
-  inherited Destroy;
-  fPublicKey.Free;
-end;
-
 procedure TX509.Clear;
 begin
-  fCachedDer := '';
-  fCachedSha1 := '';
-  fCachedPeerInfo := '';
   Signed.Clear;
+  fCachedDer := '';
+  Finalize(fCachedHash);
+  fCachedPeerInfo := '';
+  fLastVerifyAuthPublicKey := '';
+  fRawSubjectKeyIdentifier := '';
+  fRawAuthorityKeyIdentifier := nil;
   fSignatureAlgorithm := xsaNone;
   fSignatureValue := '';
-  FreeAndNil(fPublicKey);
+  fPublicKey := nil;
 end;
-
-const
-  DEPRECATION_THRESHOLD = 0.5; // allow a half day margin
 
 function CanVerify(auth: TX509; usage: TCryptCertUsage; selfsigned: boolean;
   ignored: TCryptCertValidities; timeutc: TDateTime): TCryptCertValidity;
-var
-  na, nb: TDateTime;
 begin
   if auth = nil then
     result := cvUnknownAuthority
   else if (not (cvWrongUsage in ignored)) and
           (not (selfsigned or (usage in auth.Signed.CertUsages))) then
     result := cvWrongUsage
+  else if (cvDeprecatedAuthority in ignored) or
+     auth.Signed.IsValidDate(timeutc) then
+    result := cvValidSigned
   else
-  begin
-    result := cvValidSigned;
-    if cvDeprecatedAuthority in ignored then
-      exit;
-    if timeutc = 0 then
-      timeutc := NowUtc;
-    na := auth.Signed.NotAfter; // 0 if was not specified in X.509 cert
-    nb := auth.Signed.NotBefore;
-    if ((na <> 0) and
-        (timeutc > na + DEPRECATION_THRESHOLD)) or
-       ((nb <> 0) and
-        (timeutc < nb - DEPRECATION_THRESHOLD)) then
-      result := cvDeprecatedAuthority;
-  end;
+    result := cvDeprecatedAuthority;
 end;
 
 function TX509.Verify(Authority: TX509; IgnoreError: TCryptCertValidities;
@@ -2027,29 +1983,47 @@ begin
    result := cvBadParameter;
    if self = nil then
      exit;
+   // check the supplied Authority
    if IsSelfSigned then
      Authority := self
    else if Authority <> nil then
    begin
      result := cvInvalidSignature;
      if (SignatureAlgorithm = xsaNone) or
+        (Authority.Signed.SubjectPublicKey = '') or
         (Authority.Signed.SubjectPublicKeyAlgorithm <>
-           XSA_TO_XKA[SignatureAlgorithm]) then
+          XSA_TO_XKA[SignatureAlgorithm]) then
        exit;
      result := cvUnknownAuthority;
-     if (Authority.Signed.Extension[xeSubjectKeyIdentifier] <>
-          Signed.Extension[xeAuthorityKeyIdentifier]) or
-        (Authority.Signed.SubjectPublicKey = '') then
-       exit;
+     if not IsAuthorizedBy(Authority) then
+       exit; // Auth xeSubjectKeyIdentifier is not in xeAuthorityKeyIdentifier
    end;
+   // check the verification context (e.g. date, usage)
    result := CanVerify(
      Authority, cuKeyCertSign, Authority = self, IgnoreError, TimeUtc);
-   if result = cvValidSigned then
-     if not Authority.PublicKey.Verify(
-              SignatureAlgorithm, Signed.ToDer, SignatureValue) then
-       result := cvInvalidSignature
-     else if Authority = self then
-       result := cvValidSelfSigned;
+   if result <> cvValidSigned then
+     exit;
+   // verify the digital signature
+   result := cvInvalidSignature;
+   if (fLastVerifyAuthPublicKey = '') or
+      (SortDynArrayRawByteString(fLastVerifyAuthPublicKey,
+        Authority.Signed.SubjectPublicKey) <> 0) then
+   begin
+     // check signature with asymmetric RSA or ECC cryptography
+     if Signed.fCachedDer = '' then
+       Signed.ComputeCachedDer;
+     if (Authority.PublicKey = nil) or
+        not Authority.fPublicKey.Verify(XSA_TO_CAA[SignatureAlgorithm],
+              Signed.fCachedDer, SignatureValue) then
+        exit;
+     // don't call slow PublicKey.Verify() the next time with this authority
+     fLastVerifyAuthPublicKey := Authority.Signed.SubjectPublicKey;
+   end;
+   // if we reached here, this certificate content has been verified
+   if Authority = self then
+     result := cvValidSelfSigned
+   else
+     result := cvValidSigned;
 end;
 
 function TX509.Verify(Sig, Data: pointer; SigLen, DataLen: integer;
@@ -2063,7 +2037,8 @@ begin
     exit;
   result := CanVerify(self, cuDigitalSignature, false, IgnoreError, TimeUtc);
   if result = cvValidSigned then
-    if fPublicKey.Verify(SignatureAlgorithm, Data, Sig, DataLen, SigLen) then
+    if fPublicKey.Verify(
+         XSA_TO_CAA[SignatureAlgorithm], Data, Sig, DataLen, SigLen) then
       if IsSelfSigned then
         result := cvValidSelfSigned
       else
@@ -2072,27 +2047,28 @@ begin
       result := cvInvalidSignature;
 end;
 
-function TX509.PublicKey: TXPublicKey;
+function TX509.PublicKey: ICryptPublicKey;
+var
+  cka: TCryptKeyAlgo;
 begin
   result := nil;
   if self = nil then
     exit;
   result := fPublicKey;
-  if result <> nil then
-    exit;
-  if (Signed.SubjectPublicKey = '') or
+  if (result <> nil) or
+     (Signed.SubjectPublicKey = '') or
      (Signed.SubjectPublicKeyAlgorithm = xkaNone) then
     exit;
   fSafe.Lock;
   try
     if fPublicKey = nil then
     begin
-      fPublicKey := TXPublicKey.Create;
-      if fPublicKey.Load(Signed.SubjectPublicKeyAlgorithm,
-          Signed.SubjectPublicKey) then
+      cka := XKA_TO_CKA[Signed.SubjectPublicKeyAlgorithm];
+      fPublicKey := CryptPublicKey[cka].Create;
+      if fPublicKey.Load(cka, Signed.SubjectPublicKey) then
         result := fPublicKey
       else
-        FreeAndNil(fPublicKey);
+        fPublicKey := nil;
     end;
   finally
     fSafe.UnLock;
@@ -2124,12 +2100,9 @@ begin
   result := fCachedDer;
 end;
 
-function TX509.GetSerialNumber: RawUtf8;
+function TX509.SaveToPem: TCertPem;
 begin
-  if self = nil then
-    result := ''
-  else
-    result := Signed.SerialNumberHex;
+  result := DerToPem(SaveToDer, pemCertificate);
 end;
 
 function TX509.GetIssuerDN: RawUtf8;
@@ -2154,6 +2127,30 @@ begin
     XKA_TXT[Signed.SubjectPublicKeyAlgorithm]], result);
 end;
 
+procedure TX509.AfterLoaded;
+var
+  akid: TRawUtf8DynArray;
+  i: PtrInt;
+begin
+  ToHumanHex(Signed.SerialNumberHex, pointer(Signed.SerialNumber), length(Signed.SerialNumber));
+  Signed.SubjectPublicKeyBits := X509PubKeyBits(Signed.SubjectPublicKey);
+  if (fCachedDer = '') and
+     (SignatureValue <> '') then // not possible yet (e.g. after LoadFromCsr)
+    ComputeCachedDer;
+  if Signed.Issuer.fCachedAsn = '' then
+    Signed.Issuer.ComputeAsn;
+  if Signed.Subject.fCachedAsn = '' then
+    Signed.Subject.ComputeAsn;
+  fIsSelfSigned := Signed.Issuer.fCachedAsn = Signed.Subject.fCachedAsn;
+  HumanHexToBin(Signed.Extension[xeSubjectKeyIdentifier], fRawSubjectKeyIdentifier);
+  CsvToRawUtf8DynArray(pointer(Signed.Extension[xeAuthorityKeyIdentifier]), akid);
+  SetLength(fRawAuthorityKeyIdentifier, length(akid));
+  for i := 0 to length(akid) - 1 do
+    HumanHexToBin(akid[i], fRawAuthorityKeyIdentifier[i]);
+  fIsRevokedTag := 0;
+  fLastVerifyAuthPublicKey := '';
+end;
+
 procedure TX509.ComputeCachedDer;
 begin
   if (SignatureAlgorithm = xsaNone) or
@@ -2163,7 +2160,7 @@ begin
   try
     if fCachedDer = '' then
     begin
-      fCachedSha1 := '';
+      Finalize(fCachedHash);
       fCachedPeerInfo := '';
       fCachedDer := AsnSeq([
                       Signed.ToDer,
@@ -2171,6 +2168,7 @@ begin
                       Asn(ASN1_BITSTR, [SignatureValue])
                     ]);
     end;
+    AfterLoaded;
   finally
     fSafe.UnLock;
   end;
@@ -2182,6 +2180,19 @@ var
 begin
   ToParsedInfo(info);
   fCachedPeerInfo := info.PeerInfo;
+end;
+
+procedure TX509.ComputeCachedHash(algo: THashAlgo);
+var
+  tmp: RawUtf8;
+begin
+  tmp := HashFull(algo, SaveToDer); // SaveToDer should be done outside the lock
+  fSafe.Lock;
+  try
+    fCachedHash[algo] := tmp;
+  finally
+    fSafe.UnLock;
+  end;
 end;
 
 function TX509.LoadFromDer(const der: TCertDer): boolean;
@@ -2200,6 +2211,7 @@ begin
             OidToXsa(oid, fSignatureAlgorithm) and
             (AsnNextRaw(pos, der, fSignatureValue) = ASN1_BITSTR) and
             (fSignatureAlgorithm = Signed.Signature);
+  AfterLoaded;
 end;
 
 function TX509.LoadFromPem(const pem: TCertPem): boolean;
@@ -2234,9 +2246,8 @@ begin
      AsnNextAlgoOid(pos, der, oid, oid2) and
      OidToXsa(oid, xsa) and
      (AsnNextRaw(pos, der, sig) = ASN1_BITSTR) and
-     PublicKey.Verify(xsa, nfo, sig) then // check self-signature
+     PublicKey.Verify(XSA_TO_CAA[xsa], nfo, sig) then // check self-signature
   begin
-    Signed.SubjectPublicKeyBits := X509PubKeyBits(Signed.SubjectPublicKey);
     // load any extensionRequest (PKCS #9 via CRMF)
     if (AsnNext(posnfo, nfo) = ASN1_CTC0) and // optional attributes sequence
        (AsnNext(posnfo, nfo) = ASN1_SEQ) and
@@ -2245,6 +2256,7 @@ begin
        (AsnNext(posnfo, nfo) = ASN1_SETOF) and
        (AsnNext(posnfo, nfo) = ASN1_SEQ) then
       Signed.AddNextExtensions(posnfo, nfo);
+    AfterLoaded;
     result := true;
   end;
 end;
@@ -2255,29 +2267,118 @@ begin
     result := ''
   else
   begin
-    if algo = hfSHA1 then
-    begin
-      result := fCachedSha1;
-      if result <> '' then
-        exit;
-    end;
-    result := HashFull(algo, SaveToDer);
-    if algo = hfSHA1 then
-    begin
-      fSafe.Lock;
-      try
-        fCachedSha1 := result;
-      finally
-        fSafe.UnLock;
-      end;
-    end;
+    result := fCachedHash[algo];
+    if result <> '' then
+      exit;
+    ComputeCachedHash(algo);
+    result := fCachedHash[algo];
   end;
 end;
 
-function TX509.IsSelfSigned: boolean;
+function TX509.FingerPrintCompare(const Value: RawUtf8; Algo: THashAlgo): integer;
 begin
-  result := (self <> nil) and
-            (Signed.Issuer.ToBinary = Signed.Subject.ToBinary);
+  if fCachedHash[Algo] = '' then
+    ComputeCachedHash(Algo);
+  result := SortDynArrayAnsiString(fCachedHash[Algo], Value);
+end;
+
+function TX509.FingerPrintCompare(Another: TX509; Algo: THashAlgo): integer;
+begin
+  if Another <> nil then
+  begin
+    if Another.fCachedHash[Algo] = '' then
+      Another.ComputeCachedHash(Algo);
+    result := FingerPrintCompare(Another.fCachedHash[algo], Algo);
+  end
+  else
+    result := 1;
+end;
+
+function TX509.IsAuthorizedBy(Authority: TX509): boolean;
+var
+  n: integer;
+  s, a: PRawByteString;
+begin
+  if (self <> nil) and
+     (Authority <> nil) and
+     (Authority.Signed.SubjectPublicKey <> '') then
+  begin
+    // fast search with no memory allocation
+    result := true;
+    s := @Authority.fRawSubjectKeyIdentifier;
+    a := pointer(fRawAuthorityKeyIdentifier);
+    if a <> nil then
+    begin
+      n := PDALen(PAnsiChar(pointer(a)) - _DALEN)^ + _DAOFF;
+      repeat
+        if SortDynArrayRawByteString(a^, s^) = 0 then
+        begin
+          if PPointer(a)^ <> PPointer(s)^ then
+            a^ := s^; // for a faster pointer comparison next time
+          exit;
+        end;
+        dec(n);
+        if n = 0 then
+          break;
+        inc(a);
+      until false;
+    end;
+  end;
+  result := false;
+end;
+
+function TX509.Compare(Another: TX509; Method: TCryptCertComparer): integer;
+begin
+  // no memory allocation occurs during this comparison
+  if self <> nil then
+    if Another <> nil then
+      case Method of
+        ccmSerialNumber:
+          result := SortDynArrayRawByteString(
+                      Signed.SerialNumber, Another.Signed.SerialNumber);
+        ccmSubjectName:
+          result := Signed.Subject.Compare(Another.Signed.Subject);
+        ccmIssuerName:
+          result := Signed.Issuer.Compare(Another.Signed.Issuer);
+        ccmSubjectCN:
+          result := SortDynArrayAnsiString(
+                      Signed.Subject.Name[xaCN], Another.Signed.Subject.Name[xaCN]);
+        ccmIssuerCN:
+          result := SortDynArrayAnsiString(
+                      Signed.Issuer.Name[xaCN], Another.Signed.Issuer.Name[xaCN]);
+        ccmSubjectKey:
+          result := SortDynArrayRawByteString(
+                      Signed.ExtensionRaw[xeSubjectKeyIdentifier],
+                      Another.Signed.ExtensionRaw[xeSubjectKeyIdentifier]);
+        ccmAuthorityKey:
+          result := SortDynArrayRawByteString(
+                      Signed.ExtensionRaw[xeAuthorityKeyIdentifier],
+                      Another.Signed.ExtensionRaw[xeAuthorityKeyIdentifier]);
+        ccmSubjectAltName:
+          result := SortDynArrayAnsiString(
+            Signed.Extension[xeSubjectAlternativeName],
+            Another.Signed.Extension[xeSubjectAlternativeName]);
+        ccmIssuerAltName:
+          result := SortDynArrayAnsiString(
+            Signed.Extension[xeIssuerAlternativeName],
+            Another.Signed.Extension[xeIssuerAlternativeName]);
+        ccmUsage:
+          result := word(Signed.CertUsages) - word(Another.Signed.CertUsages);
+        ccmBinary: // fCachedDer should have been set by AfterLoaded
+          result := SortDynArrayRawByteString(fCachedDer, Another.fCachedDer);
+        ccmSha1:
+          result := FingerPrintCompare(Another, hfSHA1);
+        ccmSha256:
+          result := FingerPrintCompare(Another, hfSHA256);
+      else
+        result := ComparePointer(self, Another); // e.g. ccmInstance
+      end
+    else
+      result := 1
+  else if Another = nil then
+    result := 0
+  else
+    result := -1;
 end;
 
 function TX509.SignatureSecurityBits: integer;
@@ -2285,7 +2386,7 @@ begin
   if (self <> nil) and
      (SignatureAlgorithm <> xsaNone) then
     result := GetSignatureSecurityBits(
-      XSA_TO_AA[SignatureAlgorithm], length(SignatureValue))
+      XSA_TO_CAA[SignatureAlgorithm], length(SignatureValue))
   else
     result := 0;
 end;
@@ -2296,6 +2397,14 @@ begin
     result := nil
   else
     result := Signed.ExtensionArray(xeSubjectAlternativeName);
+end;
+
+function TX509.IssuerAlternativeNames: TRawUtf8DynArray;
+begin
+  if self = nil then
+    result := nil
+  else
+    result := Signed.ExtensionArray(xeIssuerAlternativeName);
 end;
 
 function TX509.PeerInfo: RawUtf8;
@@ -2315,8 +2424,9 @@ begin
   fSafe.Lock;
   try
     fCachedDer := '';
-    fCachedSha1 := '';
+    Finalize(fCachedHash);
     fCachedPeerInfo := '';
+    fLastVerifyAuthPublicKey := '';
     fSignatureValue := '';
   finally
     fSafe.UnLock;
@@ -2325,21 +2435,766 @@ begin
 end;
 
 
+{ **************** X.509 Certificate Revocation List (CRL) }
 
-{ **************** Registration of our X.509 Engine to the TCryptCert Factory }
+{ TXCrlRevokedCert }
 
-function TX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
+function TXCrlRevokedCert.ToDer: TAsnObject;
 var
-  x: TX509;
+  ext: RawByteString;
 begin
-  x := TX509.Create;
-  try
-    result := x.LoadFromPem(Cert); // support PEM or DER input
-    if result then
-      x.ToParsedInfo(Info);
-  finally
-    x.Free;
+  if not (ReasonCode in [crrUnspecified, crrNotRevoked]) then
+    ext := AsnSeq([AsnOid(ASN1_OID_X509_CRL_REASON),
+                   Asn(ASN1_OCTSTR, [Asn(ord(ReasonCode), ASN1_ENUM)])
+           ]);
+  if InvalidityDate <> 0 then
+    Append(ext, AsnSeq([AsnOid(ASN1_OID_X509_CRL_INVDATE),
+                        Asn(ASN1_OCTSTR, [AsnTime(InvalidityDate)])
+                ]));
+  if CertificateIssuerDN <> '' then
+    Append(ext, AsnSeq([AsnOid(ASN1_OID_X509_CRL_ISSUER),
+                        Asn(ASN1_OCTSTR, [Asn(ASN1_CTX2, [CertificateIssuerDN])])
+                ]));
+  if ext <> '' then
+    ext := AsnSeq(ext);
+  result := AsnSeq([Asn(ASN1_INT, [SerialNumber]),
+                    AsnTime(RevocationDate),
+                    ext]);
+end;
+
+function TXCrlRevokedCert.FromDer(const der: TCertDer): boolean;
+var
+  pos, extpos, vpos, vint: integer;
+  ext, v, dn: RawByteString;
+  oid: RawUtf8;
+begin
+  result := false;
+  pos := 1;
+  if (AsnNextRaw(pos, der, SerialNumber) <> ASN1_INT) or
+     not AsnNextTime(pos, der, RevocationDate) then
+    exit;
+  extpos := 1;
+  if AsnNextRaw(pos, der, ext) = ASN1_SEQ then
+    while (AsnNext(extpos, ext) = ASN1_SEQ) and
+          (AsnNext(extpos, ext, @oid) = ASN1_OBJID) and
+          (AsnNextRaw(extpos, ext, v) = ASN1_OCTSTR) do
+    begin
+      vpos := 1;
+      if oid = ASN1_OID_X509_CRL_REASON then
+      begin
+        if AsnNextInt32(vpos, v, vint) = ASN1_ENUM then
+        begin
+          ReasonCode := TCryptCertRevocationReason(vint);
+          if (ReasonCode > high(TCryptCertRevocationReason)) or
+             (ReasonCode = crrNotRevoked) then
+            ReasonCode := crrUnspecified;
+        end;
+      end
+      else if oid = ASN1_OID_X509_CRL_INVDATE then
+        AsnNextTime(vpos, v, InvalidityDate)
+      else if oid = ASN1_OID_X509_CRL_ISSUER then
+        if AsnNextRaw(vpos, v, dn) = ASN1_CTX2 then
+        begin
+          EnsureRawUtf8(dn);
+          CertificateIssuerDN := dn;
+        end;
+    end;
+  result := true;
+end;
+
+
+{ TXTbsCertList }
+
+procedure TXTbsCertList.Clear;
+begin
+  Finalize(self);
+  FillCharFast(self, SizeOf(self), 0);
+end;
+
+function TXTbsCertList.FindRevoked(const RawSerialNumber: RawByteString): PXCrlRevokedCert;
+var
+  n: integer;
+begin
+  result := pointer(Revoked);
+  if result = nil then
+    exit;
+  n := PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF;
+  repeat
+    if SortDynArrayRawByteString(result^.SerialNumber, RawSerialNumber) = 0 then
+      exit;
+    dec(n);
+    if n = 0 then
+      break;
+    inc(result);
+  until false;
+  result := nil;
+end;
+
+procedure AddCrlExt(var result: TAsnObject; xce: TXCrlExtension;
+  const value: RawByteString);
+begin
+  Append(result, AsnSeq([
+                   Asn(ASN1_OBJID, [XCE_OID_ASN[xce]]),
+                   Asn(ASN1_OCTSTR, [value])
+                 ]));
+end;
+
+function TXTbsCertList.ToDer: TAsnObject;
+var
+  nextup, rev, ext: RawByteString;
+  i: PtrInt;
+begin
+  // optional nextUpdate time
+  if NextUpdate <> 0 then
+    nextup := AsnTime(NextUpdate);
+  // compute the revoked certificate(s) sequence content
+  for i := 0 to length(Revoked) - 1 do
+    Append(rev, Revoked[i].ToDer);
+  // export known extensions - no ExtensionRaw[] support yet
+  if Extension[xceAuthorityKeyIdentifier] <> '' then
+    AddCrlExt(ext, xceAuthorityKeyIdentifier,
+      AsnSeq(Asn(ASN1_CTX0, [HumanHexToBin(Extension[xceAuthorityKeyIdentifier])])));
+  if Extension[xceIssuerAlternativeName] <> '' then
+    AddCrlExt(ext, xceIssuerAlternativeName,
+      AsnSeq(CsvToDns(pointer(Extension[xceIssuerAlternativeName]))));
+  if Extension[xceCrlNumber] <> '' then
+    AddCrlExt(ext, xceCrlNumber,
+      Asn(GetInt64(pointer(Extension[xceCrlNumber])))); // 63-bit resolution
+  if ext <> '' then
+    ext := Asn(ASN1_CTC0, [AsnSeq(ext)]);
+  // generate the whole CRL DER content
+  result := AsnSeq([
+              Asn(1),  // write X.509 CRL version 2, including extensions
+              XsaToSeq(Signature),
+              Issuer.ToBinary,
+              AsnTime(ThisUpdate),
+              nextup,
+              AsnSeq([
+                rev
+              ]),
+              ext
+            ]);
+end;
+
+function TXTbsCertList.FromDer(const der: TCertDer): boolean;
+var
+  pos, posv, vt, nrev: integer;
+  v64: QWord;
+  oid, oid2, v, rev, ext: RawByteString;
+  xce: TXCrlExtension;
+begin
+  result := false;
+  // decode main CRL fields
+  pos := 1;
+  if AsnNext(pos, der) <> ASN1_SEQ then
+    exit;
+  Version := AsnNextInteger(pos, der, vt) + 1;
+  if (vt <> ASN1_INT) or
+     not (Version in [1..2]) or
+     not AsnNextAlgoOid(pos, der, oid, oid2) or
+     ((oid <> '') and // allow fUnsignedCrl
+      not OidToXsa(oid, Signature)) or
+     not Issuer.FromAsnNext(pos, der) or
+     not AsnNextTime(pos, der, ThisUpdate) or
+     (pos > length(der)) or
+     ((ord(der[pos]) in [ASN1_UTCTIME, ASN1_GENTIME]) and // optional
+       not AsnNextTime(pos, der, NextUpdate)) or
+     (AsnNextRaw(pos, der, v) <> ASN1_SEQ) then
+    exit;
+  if v <> '' then
+  begin
+    // retrieve the revoked certificates list
+    SetLength(Revoked, 8);
+    nrev := 0;
+    posv := 1;
+    while (AsnNextRaw(posv, v, rev) = ASN1_SEQ) and
+          Revoked[nrev].FromDer(rev) do
+    begin
+      inc(nrev);
+      if nrev = length(Revoked) then
+        SetLength(Revoked, NextGrow(nrev));
+    end;
+    if nrev = 0 then
+      Revoked := nil
+    else
+      DynArrayFakeLength(Revoked, nrev);
   end;
+  // parse X.509 CRL version 2 extensions
+  if (Version >= 2) and
+     (AsnNext(pos, der) = ASN1_CTC0) then
+    if AsnNext(pos, der) <> ASN1_SEQ then
+      exit
+    else
+      while (AsnNext(pos, der) = ASN1_SEQ) and
+            (AsnNextRaw(pos, der, oid) = ASN1_OBJID) and
+            (AsnNextRaw(pos, der, v) = ASN1_OCTSTR) do
+      begin
+        xce := OidToXce(oid);
+        if xce = xceNone then
+          continue;
+        ExtensionRaw[xce] := v;
+        posv := 1;
+        case xce of
+          xceAuthorityKeyIdentifier:
+            if (AsnNext(posv, v) = ASN1_SEQ) and
+               (AsnNextRaw(posv, v, ext) <> ASN1_NULL) then
+              ToHumanHex(Extension[xceAuthorityKeyIdentifier],
+                pointer(ext), length(ext));
+          xceIssuerAlternativeName:
+            if AsnNext(posv, v) = ASN1_SEQ then
+              repeat
+                case AsnNextRaw(posv, v, ext) of
+                  ASN1_NULL:
+                    break;
+                  ASN1_CTX1, // rfc8722Name
+                  ASN1_CTX2, // dnsName
+                  ASN1_CTX6: // uri
+                    EnsureRawUtf8(v); // was stored as IA5String
+                end;
+                if v <> '' then
+                  AddToCsv(v, Extension[xceIssuerAlternativeName]);
+              until false;
+          xceCrlNumber:
+            begin
+              v64 := AsnNextInteger(posv, v, vt);
+              if vt = ASN1_INT then
+                UInt64ToUtf8(v64, Extension[xceCrlNumber]);
+              // any number > 63-bit should use ExtensionRaw[xceCrlNumber]
+            end;
+        end;
+      end;
+  result := true;
+end;
+
+
+{ TX509Crl }
+
+function TX509Crl.GetIssuerDN: RawUtf8;
+begin
+  if self = nil then
+    result := ''
+  else
+    result := Signed.Issuer.AsDNText;
+end;
+
+function TX509Crl.GetCrlNumber: QWord;
+begin
+  if fCrlNumber = 0 then // simple cache
+    SetQWord(pointer(Signed.Extension[xceCrlNumber]), fCrlNumber);
+  result := fCrlNumber;
+end;
+
+procedure TX509Crl.SetCrlNumber(Value: QWord);
+begin
+  if (self = nil) and
+     (Value <> fCrlNumber) then
+     exit;
+  fCrlNumber := Value;
+  UInt64ToUtf8(Value, Signed.Extension[xceCrlNumber]);
+end;
+
+procedure TX509Crl.Clear;
+begin
+  Signed.Clear;
+  fCachedDer := '';
+  fSignatureAlgorithm := xsaNone;
+  fSignatureValue := '';
+  fCrlNumber := 0;
+end;
+
+function TX509Crl.AddRevocation(const Serial: RawUtf8;
+  Reason: TCryptCertRevocationReason; ValidDays: integer;
+  Date: TDateTime; CertIssuerDN: RawUtf8): boolean;
+var
+  n: PtrInt;
+  next: TDateTime;
+  sn: RawByteString;
+begin
+  result := false;
+  if (self = nil) or
+     (Reason = crrNotRevoked) or
+     not HumanHexToBin(Serial, sn) then
+    exit;
+  AfterModified;
+  if Date = 0 then
+    Date := NowUtc;
+  Signed.Version := 2;
+  if Signed.ThisUpdate = 0 then
+    Signed.ThisUpdate := Date;
+  if ValidDays > 0 then
+  begin
+    next := Date + ValidDays;
+    if (Signed.NextUpdate = 0) or
+       (Signed.NextUpdate > next) then
+      Signed.NextUpdate := next;
+  end;
+  n := length(Signed.Revoked);
+  SetLength(Signed.Revoked, n + 1);
+  with Signed.Revoked[n] do
+  begin
+    SerialNumber := sn;
+    RevocationDate := Date;
+    ReasonCode := Reason;
+    InvalidityDate := Date;
+    CertificateIssuerDN := CertIssuerDN;
+  end;
+  result := true;
+end;
+
+function TX509Crl.SaveToDer: TCertDer;
+begin
+  if fCachedDer = '' then
+    fCachedDer := AsnSeq([
+                    Signed.ToDer,
+                    XsaToSeq(SignatureAlgorithm),
+                    Asn(ASN1_BITSTR, [SignatureValue])
+                  ]);
+  result := fCachedDer;
+end;
+
+function TX509Crl.SaveToPem: TCertPem;
+begin
+  result := DerToPem(SaveToDer, pemCrl);
+end;
+
+function TX509Crl.LoadFromDer(const der: TCertDer): boolean;
+var
+  pos: integer;
+  tbs, oid, oid2: RawByteString;
+begin
+  Clear;
+  fCachedDer := der;
+  pos := 1;
+  result := (der <> '') and
+            (AsnNext(pos, der) = ASN1_SEQ) and
+            (AsnNextRaw(pos, der, tbs, {includeheader=}true) = ASN1_SEQ) and
+            Signed.FromDer(tbs) and
+            AsnNextAlgoOid(pos, der, oid, oid2) and
+            ((oid = '') or // allow fUnsignedCrl
+             OidToXsa(oid, fSignatureAlgorithm)) and
+            (AsnNextRaw(pos, der, fSignatureValue) = ASN1_BITSTR) and
+            (fSignatureAlgorithm = Signed.Signature);
+end;
+
+function TX509Crl.LoadFromPem(const pem: TCertPem): boolean;
+begin
+  result := LoadFromDer(PemToDer(pem));
+end;
+
+procedure TX509Crl.AfterModified;
+begin
+  fCachedDer := '';
+end;
+
+function TX509Crl.IsValidDate(TimeUtc: TDateTime): boolean;
+begin
+  result := (TimeUtc + CERT_DEPRECATION_THRESHOLD > Signed.ThisUpdate) and
+            ((Signed.NextUpdate = 0) or
+             (Signed.NextUpdate + CERT_DEPRECATION_THRESHOLD < TimeUtc));
+end;
+
+function TX509Crl.IsRevoked(const SerialNumber: RawUtf8): TCryptCertRevocationReason;
+var
+  bin: RawByteString;
+  res: PXCrlRevokedCert;
+begin
+  result := crrNotRevoked;
+  if (self = nil) or
+     (Signed.Revoked = nil) or
+     not HumanHexToBin(SerialNumber, bin) then
+    exit;
+  res := Signed.FindRevoked(bin);
+  if res <> nil then
+    result := res^.ReasonCode;
+end;
+
+function TX509Crl.Revoked: TRawUtf8DynArray;
+var
+  i, n: PtrInt;
+begin
+  if self = nil then
+    n := 0
+  else
+    n := length(Signed.Revoked);
+  SetLength(result, n);
+  for i := 0 to n - 1 do
+    with Signed.Revoked[i] do
+      ToHumanHex(result[i], pointer(SerialNumber), length(SerialNumber));
+end;
+
+function TX509Crl.Verify(Authority: TX509; IgnoreError: TCryptCertValidities;
+  TimeUtc: TDateTime): TCryptCertValidity;
+begin
+   result := cvBadParameter;
+   if (self = nil) or
+      (Authority = nil) or
+      (PClass(Authority)^ <> TX509) then
+     exit;
+   result := cvInvalidSignature;
+   if (SignatureAlgorithm = xsaNone) or
+      (Authority.Signed.SubjectPublicKeyAlgorithm <>
+         XSA_TO_XKA[SignatureAlgorithm]) then
+     exit;
+   result := cvUnknownAuthority;
+   if (Authority.Signed.Extension[xeSubjectKeyIdentifier] <>
+        Signed.Extension[xceAuthorityKeyIdentifier]) or // no CsvContains() need
+      (Authority.Signed.SubjectPublicKey = '') then
+     exit;
+   result := CanVerify(
+     Authority, cuCrlSign, {selfsigned=}false, IgnoreError, TimeUtc);
+   if result = cvValidSigned then
+     if not Authority.PublicKey.Verify(XSA_TO_CAA[SignatureAlgorithm],
+              Signed.ToDer, SignatureValue) then
+       result := cvInvalidSignature;
+end;
+
+
+{ TX509CrlList }
+
+function TX509CrlCompareWithAkid(const A, B): integer;
+begin
+  // FastLocateSorted() calls fCompare(Item, P[n * fInfo.Cache.ItemSize])
+  result := SortDynArrayAnsiString(A, TX509Crl(B).fRawAuthorityKeyIdentifier);
+end;
+
+constructor TX509CrlList.Create;
+begin
+  inherited Create;
+  fDA.Init(TypeInfo(TX509CrlObjArray), fList, @fCount);
+  fDA.Compare := TX509CrlCompareWithAkid; // FastLocateSorted() search by AKID
+end;
+
+destructor TX509CrlList.Destroy;
+begin
+  inherited Destroy;
+  ObjArrayClear(fList, fCount);
+end;
+
+procedure TX509CrlList.Add(Crl: TX509Crl);
+var
+  i: integer;
+  akid: RawByteString;
+begin
+  if (Crl = nil) or
+     not HumanHexToBin(Crl.Signed.Extension[xceAuthorityKeyIdentifier], akid) then
+  begin
+    Crl.Free; // avoid memory leak
+    exit;
+  end;
+  Crl.fRawAuthorityKeyIdentifier := akid; // as expected by FastLocateSorted()
+  fSafe.WriteLock;
+  try
+    // use fast O(log(n)) binary search of this AKID
+    if fDA.FastLocateSorted(akid, i) then
+      // there is already a CRL with this AKID
+      if fList[i].CrlNumber < Crl.CrlNumber then
+      begin
+        fList[i].Free; // replace existing CRL
+        fList[i] := Crl;
+      end
+      else
+        Crl.Free // this supplied CRL is older than the existing -> ignore
+    else if i >= 0 then
+      // add this CRL with its unknown SKID at the expected sorted position
+      fDA.FastAddSorted(i, Crl)
+    else
+      raise EX509.CreateUtf8('Inconsistent %.Add order', [self]); // paranoid
+  finally
+    fSafe.WriteUnLock;
+  end;
+end;
+
+function TX509CrlList.AddFromDer(const Der: TCertDer): boolean;
+var
+  crl: TX509Crl;
+begin
+  result := false;
+  crl := TX509Crl.Create;
+  try
+    if not crl.LoadFromDer(Der) then
+      exit;
+    Add(crl);
+    crl := nil; // will be owned by fList from now on
+  finally
+    crl.Free;
+  end;
+  result := true;
+end;
+
+function TX509CrlList.AddRevocation(const AuthorityKeyIdentifier,
+  Serial: RawUtf8; Reason: TCryptCertRevocationReason; ValidDays: integer;
+  Date: TDateTime; CertIssuerDN: RawUtf8): boolean;
+var
+  i: integer;
+  crl: TX509Crl;
+  akid: RawByteString;
+begin
+  result := false;
+  if (self = nil) or
+     (Serial = '') or
+     (Reason = crrNotRevoked) or
+     not HumanHexToBin(AuthorityKeyIdentifier, akid) then
+    exit;
+  fSafe.WriteLock;
+  try
+    if fDA.FastLocateSorted(akid, i) then
+      crl := fList[i]
+    else if i >= 0 then
+    begin
+      crl := TX509Crl.Create;
+      crl.Signed.Issuer.Name[xaCN] := Executable.Host;
+      crl.Signed.Extension[xceAuthorityKeyIdentifier] := AuthorityKeyIdentifier;
+      crl.fRawAuthorityKeyIdentifier := akid; // for internal search
+      fDA.FastAddSorted(i, crl);
+    end
+    else
+      raise EX509.CreateUtf8('Inconsistent % order', [self]); // paranoid
+    result := crl.AddRevocation(Serial, Reason, ValidDays, Date, CertIssuerDN);
+    if result then
+      crl.CrlNumber := crl.CrlNumber + 1; // ensure in increasing sequence
+  finally
+    fSafe.WriteUnLock;
+  end;
+end;
+
+function TX509CrlList.GetRevoked: integer;
+var
+  i: integer;
+begin
+  result := 0;
+  if (self = nil) or
+     (fCount = 0) then
+    exit;
+  fSafe.ReadLock;
+  try
+    for i := 0 to fCount - 1 do
+      inc(result, length(fList[i].Signed.Revoked));
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+function TX509CrlList.FindByKeyIssuer(const AuthorityKeyIdentifier: RawUtf8): TX509Crl;
+var
+  akid: RawByteString;
+begin
+  if HumanHexToBin(AuthorityKeyIdentifier, akid) then
+    result := FindByKeyIssuerRaw(akid)
+  else
+    result := nil;
+end;
+
+function TX509CrlList.FindByKeyIssuerRaw(
+  const AuthorityKeyIdentifier: RawByteString): TX509Crl;
+var
+  i: integer;
+begin
+  result := nil;
+  if (self = nil) or
+     (fCount = 0) then
+    exit;
+  fSafe.ReadLock;
+  try
+    // efficient O(log(n)) binary search
+    if fDA.FastLocateSorted(AuthorityKeyIdentifier, i) then
+      result := fList[i]; // Add() should have made this unique per AKID
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+function TX509CrlList.FindByAlternativeName(const DnsName: RawUtf8;
+  TimeUtc: TDateTime): TX509CrlObjArray;
+var
+  p: ^TX509Crl;
+  i: integer;
+begin
+  result := nil;
+  if (self = nil) or
+     (fCount = 0) or
+     (DnsName = '') then
+    exit;
+  if TimeUtc = 0 then
+    TimeUtc := NowUtc;
+  fSafe.ReadLock;
+  try
+    // brute force O(n) linear search
+    p := pointer(fList);
+    for i := 1 to fCount do
+    begin
+      if CsvContains(p^.Signed.Extension[xceIssuerAlternativeName],
+           DnsName, ',', {casesensitive=}false) and
+         p^.IsValidDate(TimeUtc) then
+        ObjArrayAdd(result, p^);
+      inc(p);
+    end;
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+function TX509CrlList.IsRevoked(const AuthorityKeyIdentifiers,
+  SerialNumber: RawUtf8): TCryptCertRevocationReason;
+var
+  akid: RawUtf8;
+  sn: RawByteString;
+  p: PUtf8Char;
+  crl: TX509Crl;
+  res: PXCrlRevokedCert;
+begin
+  result := crrNotRevoked;
+  if (self = nil) or
+     (fCount = 0) or
+     (AuthorityKeyIdentifiers = '') or
+     (SerialNumber = '') then
+    exit;
+  p := nil;
+  akid := AuthorityKeyIdentifiers;
+  if PosExChar(',', akid) <> 0 then
+    p := pointer(akid); // needs specific CSV process
+  fSafe.ReadLock; // reentrant multi-read lock
+  try
+    repeat
+      if p <> nil then
+        GetNextItem(p, ',', akid);
+      crl := FindByKeyIssuer(akid); // O(log(n)) binary search
+      if (crl = nil) or
+         not HumanHexToBin(SerialNumber, sn)  then
+        continue;
+      res := crl.Signed.FindRevoked(sn); // few items O(n) search
+      if res = nil then
+        continue;
+      result := res^.ReasonCode;
+      break;
+    until p = nil;
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+function TX509CrlList.IsRevokedRaw(akid: PRawByteString; n: integer;
+  const sn: RawByteString): TCryptCertRevocationReason;
+var
+  i: integer;
+  res: PXCrlRevokedCert;
+begin
+  result := crrNotRevoked;
+  if (self = nil) or
+     (fCount = 0) or
+     (akid = nil) or
+     (n = 0) or
+     (sn = '') then
+    exit;
+  fSafe.ReadLock; // reentrant multi-read lock
+  try
+    repeat
+      if fDA.FastLocateSorted(akid^, i) then // inlined FindByKeyIssuerRaw()
+        with fList[i].Signed do
+        begin
+          res := FindRevoked(sn); // few items O(n) search
+          if res <> nil then
+          begin
+            result := res^.ReasonCode;
+            exit;
+          end;
+        end;
+      dec(n);
+      if n = 0 then
+        break;
+      inc(akid);
+    until false;
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+function TX509CrlList.List: TX509CrlObjArray;
+begin
+  fSafe.ReadLock;
+  try
+    SetLength(result, fCount);
+    MoveFast(pointer(fList)^, pointer(result)^, fCount * SizeOf(TX509Crl));
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+procedure TX509CrlList.SaveToPem(W: TTextWriter; WithExplanatoryText: boolean);
+var
+  i: PtrInt;
+  c: TX509Crl;
+begin
+  fSafe.ReadLock;
+  try
+    for i := 0 to fCount - 1 do
+    begin
+      c := fList[i];
+      if WithExplanatoryText then
+        // see https://datatracker.ietf.org/doc/html/rfc7468#section-5.2
+        W.Add('Issuer: %'#13#10'Validity: from % to %'#13#10'Signature: %'#13#10,
+         [c.IssuerDN, DateTimeToIso8601Short(c.ThisUpdate),
+          DateTimeToIso8601Short(c.NextUpdate), XSA_TXT[c.SignatureAlgorithm]]);
+      W.AddString(c.SaveToPem);
+      W.AddCR;
+    end;
+  finally
+    fSafe.ReadUnLock;
+  end;
+end;
+
+
+
+{ **************** X.509 Private Key Infrastructure (PKI) }
+
+function ComputeSelfSignedCsr(const PrivateKey: ICryptPrivateKey;
+  Algorithm: TXSignatureAlgorithm; const Subjects: RawUtf8;
+  Usages: TCryptCertUsages; Fields: PCryptCertFields): RawUtf8;
+var
+  pub, extreq, der: RawByteString;
+  caa: TCryptAsymAlgo;
+  sub: TXName;
+  ext: TXExtensions;
+  xu: TXKeyUsages;
+  xku: TXExtendedKeyUsages;
+begin
+  result := '';
+  if PrivateKey = nil then
+    exit;
+  // create a new key pair if not supplied
+  caa := XSA_TO_CAA[Algorithm];
+  if PrivateKey.KeyAlgo <> ckaNone then
+    pub := PrivateKey.ToSubjectPublicKey
+  else
+    pub := PrivateKey.Generate(caa);
+  if pub = '' then
+    exit;
+  // setup the CSR fields
+  FillCharFast(sub, SizeOf(sub), 0);
+  CertInfoPrepare(sub, ext, Subjects, Fields);
+  extreq := CertInfoCompute(Usages, ext, xu, xku);
+  if extreq <> '' then
+    // extensionRequest (PKCS #9 via CRMF)
+    extreq := Asn(ASN1_CTC0, [
+                AsnSeq([
+                  AsnOid(ASN1_OID_PKCS9_EXTREQ),
+                  Asn(ASN1_SETOF, [
+                    AsnSeq(extreq)
+                  ])
+                ])
+              ]);
+  // compute the main CSR body
+  der := AsnSeq([
+           Asn(0), // version
+           sub.ToBinary,
+           X509PubKeyToDer(PrivateKey.KeyAlgo, pub),
+           extreq
+         ]);
+  // sign and return the whole CSR as PEM
+  result := DerToPem(AsnSeq([
+                      der,
+                      XsaToSeq(Algorithm),
+                      Asn(ASN1_BITSTR, [PrivateKey.Sign(caa, der)])
+                    ]), pemCertificateRequest);
 end;
 
 type
@@ -2361,17 +3216,21 @@ type
   end;
 
   /// class implementing ICryptCert using our TX509 class
-  // - will store a certificate as TX509 and/or a TXPrivateKey private key
+  // - will store a certificate as TX509 and/or a ICryptPrivateKey instance
   TCryptCertX509 = class(TCryptCert)
   protected
     fX509: TX509;
-    fPrivateKey: TXPrivateKey;
-    function Xsa: TXSignatureAlgorithm;
+    fPrivateKey: ICryptPrivateKey; // may be a TCryptPrivateKeyOpenSsl
+    function Xsa: TXSignatureAlgorithm; // from TCryptCertAlgoX509
       {$ifdef HASINLINE} inline; {$endif}
-    function Xka: TXPublicKeyAlgorithm;
+    function Xka: TXPublicKeyAlgorithm; // from TCryptCertAlgoX509
       {$ifdef HASINLINE} inline; {$endif}
     function VerifyAuthority(const Authority: ICryptCert): TCryptCertX509;
     procedure GeneratePrivateKey;
+    // overriden to use a faster search with no temporary memory allocation
+    class procedure InternalFind(Cert: PICryptCert; const Value: RawByteString;
+      Method: TCryptCertComparer; Count, MaxCount: integer;
+      out Chain: ICryptCerts); override;
   public
     destructor Destroy; override;
     procedure Clear;
@@ -2387,11 +3246,15 @@ type
     function GetSubjects: TRawUtf8DynArray; override;
     function GetIssuerName: RawUtf8; override;
     function GetIssuer(const Rdn: RawUtf8): RawUtf8; override;
+    function GetIssuers: TRawUtf8DynArray; override;
     function GetSubjectKey: RawUtf8; override;
     function GetAuthorityKey: RawUtf8; override;
     function IsSelfSigned: boolean; override;
+    function IsAuthorizedBy(const Authority: ICryptCert): boolean; override;
+    function Compare(const Another: ICryptCert; Method: TCryptCertComparer): integer; override;
     function GetNotBefore: TDateTime; override;
     function GetNotAfter: TDateTime; override;
+    function IsValidDate(date: TDateTime): boolean; override;
     function GetUsage: TCryptCertUsages; override;
     function GetPeerInfo: RawUtf8; override;
     function GetSignatureInfo: RawUtf8; override;
@@ -2417,7 +3280,7 @@ type
     function SharedSecret(const pub: ICryptCert): RawByteString; override;
     function Handle: pointer; override; // a TX509 instance
     function PrivateKeyHandle: pointer; override;
-    function GetPrivateKeyParams(out x, y: RawByteString): boolean; override;
+    function GetKeyParams(out x, y: RawByteString): boolean; override;
     property X509: TX509
       read fX509;
   end;
@@ -2432,8 +3295,8 @@ begin
     raise ECryptCertX509.CreateUtf8('Unexpected %.Create(%)', [self, ToText(xsa)^]);
   fXsa := xsa;
   fXka := XSA_TO_XKA[xsa];
-  fOsa := XSA_TO_AA[xsa];
-  inherited Create('x509-' + LowerCase(CAA_JWT[fOsa]) + suffix);
+  fCaa := XSA_TO_CAA[xsa];
+  inherited Create('x509-' + LowerCase(CAA_JWT[fCaa]) + suffix);
 end;
 
 function TCryptCertAlgoX509.New: ICryptCert;
@@ -2467,25 +3330,23 @@ function TCryptCertAlgoX509.CreateSelfSignedCsr(const Subjects: RawUtf8;
   end;
 
 var
-  key: TXPrivateKey;
+  cka: TCryptKeyAlgo;
+  key: ICryptPrivateKey;
 begin
   if Subjects = '' then
     RaiseError('no Subjects');
-  key := TXPrivateKey.Create;
-  try
-    // load or generate a public/private key pair
-    if PrivateKeyPem <> '' then
-      if not key.Load(fXka, nil, PrivateKeyPem, PrivateKeyPassword) then
-        RaiseError('PrivateKeyPem');
-    // setup the CSR fields, self-sign the CSR and return it as PEM
-    result := key.ComputeSelfSignedCsr(fXsa, Subjects, Usages, Fields);
-    // save the generated private key (if was not previously loaded)
-    if (result <> '') and
-       (PrivateKeyPem = '') then
-      PrivateKeyPem := key.Save(ccfPem, PrivateKeyPassword);
-  finally
-    key.Free;
-  end;
+  cka := XKA_TO_CKA[fXka];
+  key := CryptPrivateKey[cka].Create;
+  // load or generate a public/private key pair
+  if PrivateKeyPem <> '' then
+    if not key.Load(cka, nil, PrivateKeyPem, PrivateKeyPassword) then
+      RaiseError('PrivateKeyPem');
+  // setup the CSR fields, self-sign the CSR and return it as PEM
+  result := ComputeSelfSignedCsr(key, fXsa, Subjects, Usages, Fields);
+  // save the generated private key (if was not previously loaded)
+  if (result <> '') and
+     (PrivateKeyPem = '') then
+    PrivateKeyPem := key.Save({aspem=}true, PrivateKeyPassword);
 end;
 
 
@@ -2500,7 +3361,7 @@ end;
 procedure TCryptCertX509.Clear;
 begin
   FreeAndNil(fX509);
-  FreeAndnil(fPrivateKey);
+  fPrivateKey := nil;
 end;
 
 function TCryptCertX509.Xsa: TXSignatureAlgorithm;
@@ -2521,7 +3382,7 @@ begin
   result := self; // self-signed
   if Authority <> nil then
     if Authority.HasPrivateSecret then
-      if Authority.Instance.InheritsFrom(TCryptCertX509) then
+      if PClass(Authority.Instance)^ = PClass(self)^ then
         result := TCryptCertX509(Authority.Instance)
       else
         RaiseErrorGenerate('Authority is not a TCryptCertX509')
@@ -2533,13 +3394,90 @@ procedure TCryptCertX509.GeneratePrivateKey;
 begin
   if HasPrivateSecret then
     RaiseErrorGenerate('duplicated GeneratePrivateKey');
-  fPrivateKey := TXPrivateKey.Create;
-  fX509.Signed.SubjectPublicKey := fPrivateKey.Generate(xka);
+  fPrivateKey := CryptPrivateKey[XKA_TO_CKA[Xka]].Create;
+  fX509.Signed.SubjectPublicKey := fPrivateKey.Generate(XKA_TO_CAA[Xka]);
   if fX509.Signed.SubjectPublicKey = '' then
     RaiseErrorGenerate('GeneratePrivateKey failed');
   fX509.Signed.SubjectPublicKeyAlgorithm := Xka;
   fX509.Signed.SubjectPublicKeyBits :=
     X509PubKeyBits(fX509.Signed.SubjectPublicKey);
+end;
+
+class procedure TCryptCertX509.InternalFind(Cert: PICryptCert;
+  const Value: RawByteString; Method: TCryptCertComparer;
+  Count, MaxCount: integer; out Chain: ICryptCerts);
+var
+  found: boolean;
+  res: integer;
+  bin: RawByteString;
+begin
+  // prepare the search
+  case Method of
+    ccmSerialNumber,
+    ccmSubjectKey:
+      if not HumanHexToBin(Value, bin) then
+        bin := Value; // allow Value to be in hexadecimal or raw binary
+  end;
+  if MaxCount <= 0 then
+    MaxCount := MaxInt;
+  // O(n) efficient search loop with no temporary memory allocation
+  res := 0;
+  while Count <> 0 do
+  begin
+    with TX509(Cert^.Handle) do // retrieve the TX509 in a single method call
+      case Method of
+        ccmSerialNumber:
+          found := SortDynArrayRawByteString(Signed.SerialNumber, bin) = 0;
+        ccmSubjectName:
+          with Signed.Subject do
+          begin
+            if fCachedText = '' then
+              ComputeText;
+            found := SortDynArrayAnsiString(fCachedText, Value) = 0;
+          end;
+        ccmIssuerName:
+          with Signed.Issuer do
+          begin
+            if fCachedText = '' then
+              ComputeText;
+            found := SortDynArrayAnsiString(fCachedText, Value) = 0;
+          end;
+        ccmSubjectCN:
+          found := IdemPropNameU(Signed.Subject.Name[xaCN], Value);
+        ccmIssuerCN:
+          found := IdemPropNameU(Signed.Issuer.Name[xaCN], Value);
+        ccmSubjectKey:
+          found := SortDynArrayRawByteString(
+               Signed.ExtensionRaw[xeSubjectKeyIdentifier], bin) = 0;
+        ccmAuthorityKey:
+          found := CsvContains(Signed.Extension[xeAuthorityKeyIdentifier], Value);
+        ccmSubjectAltName:
+          found := CsvContains(Signed.Extension[xeSubjectAlternativeName],
+                     Value, ',', {casesensitive=}false);
+        ccmIssuerAltName:
+          found := CsvContains(Signed.Extension[xeIssuerAlternativeName],
+                     Value, ',', {casesensitive=}false);
+        ccmBinary: // fCachedDer has been set by AfterLoaded
+          found := SortDynArrayRawByteString(fCachedDer, Value) = 0;
+        ccmSha1:
+          found := FingerPrintCompare(Value, hfSHA1) = 0;
+        ccmSha256:
+          found := FingerPrintCompare(Value, hfSHA256) = 0;
+      else
+        found := false; // unsupported search method (e.g. ccmUsage)
+      end;
+    if found then
+    begin
+      InterfaceArrayAddCount(Chain, res, Cert^);
+      dec(MaxCount);
+      if MaxCount = 0 then
+        break;
+    end;
+    inc(Cert);
+    dec(Count);
+  end;
+  if res <> length({%H-}Chain) then
+    DynArrayFakeLength(Chain, res);
 end;
 
 function TCryptCertX509.Generate(Usages: TCryptCertUsages;
@@ -2548,6 +3486,8 @@ function TCryptCertX509.Generate(Usages: TCryptCertUsages;
 var
   auth: TCryptCertX509;
 begin
+  if fX509 <> nil then
+    RaiseErrorGenerate('duplicated call');
   auth := VerifyAuthority(Authority);
   fX509 := TX509.Create;
   try
@@ -2560,6 +3500,11 @@ begin
     GeneratePrivateKey;
     // (self-)sign this certificate
     Sign(auth);
+    // ensure all TX509 DER/raw binary fields are properly set
+    fX509.LoadFromDer(fX509.SaveToDer);
+    if fPrivateKey.ToSubjectPublicKey <> fX509.Signed.SubjectPublicKey then
+      RaiseErrorGenerate('inconsistent DER generation');
+    // we successully generated a new signed X.509 certificate
     result := self;
   except
     Clear;
@@ -2571,6 +3516,8 @@ function TCryptCertX509.GenerateFromCsr(const Csr: RawByteString;
 var
   auth: TCryptCertX509;
 begin
+  if fX509 <> nil then
+    RaiseErrorGenerate('(FromCsr) duplicated call');
   auth := VerifyAuthority(Authority);
   fX509 := TX509.Create;
   try
@@ -2583,6 +3530,9 @@ begin
       // the CSR has only a public key: generate a new key pair
       GeneratePrivateKey;
     Sign(auth);
+    // ensure all TX509 DER/raw binary fields are properly set
+    fX509.LoadFromDer(fX509.SaveToDer);
+    // we successully generated a new signed X.509 certificate from this CSR
     result := self;
   except
     Clear;
@@ -2591,7 +3541,10 @@ end;
 
 function TCryptCertX509.GetSerial: RawUtf8;
 begin
-  result := fX509.GetSerialNumber;
+  if fX509 <> nil then
+    result := fX509.Signed.SerialNumberHex
+  else
+    result := '';
 end;
 
 function TCryptCertX509.GetSubjectName: RawUtf8;
@@ -2600,17 +3553,16 @@ begin
 end;
 
 function TCryptCertX509.GetSubject(const Rdn: RawUtf8): RawUtf8;
-var
-  subs: TRawUtf8DynArray;
 begin
   result := '';
-  if fX509 <> nil then
-    result := fX509.Signed.Subject.Get(Rdn); // RDN or hash
-  if result <> '' then
+  if (Rdn = '') or
+     (fX509 = nil) then
     exit;
-  subs := fX509.SubjectAlternativeNames;
-  if subs <> nil then
-    result := subs[0];  // return the first DNS: as with mormot.crypt.ecc
+  result := fX509.Signed.Subject.Get(Rdn); // RDN or hash or OID
+  if (result = '') and
+     IsCN(Rdn) then
+    // CN fallback to first DNS: as with mormot.crypt.ecc and mormot.crypt.openssl
+    result := GetFirstCsvItem(fX509.Extension[xeSubjectAlternativeName]);
 end;
 
 function TCryptCertX509.GetSubjects: TRawUtf8DynArray;
@@ -2625,10 +3577,16 @@ end;
 
 function TCryptCertX509.GetIssuer(const Rdn: RawUtf8): RawUtf8;
 begin
-  if fX509 = nil then
+  if (Rdn = '') or
+     (fX509 = nil) then
     result := ''
   else
-    result := fX509.Signed.Issuer.Get(Rdn); // RDN or hash
+    result := fX509.Signed.Issuer.Get(Rdn); // RDN or hash or OID
+end;
+
+function TCryptCertX509.GetIssuers: TRawUtf8DynArray;
+begin
+  result := fX509.IssuerAlternativeNames;
 end;
 
 function TCryptCertX509.GetSubjectKey: RawUtf8;
@@ -2636,7 +3594,7 @@ begin
   if fX509 = nil then
     result := ''
   else
-    result := fX509.Extension[xeSubjectKeyIdentifier];
+    result := fX509.Signed.Extension[xeSubjectKeyIdentifier];
 end;
 
 function TCryptCertX509.GetAuthorityKey: RawUtf8;
@@ -2644,12 +3602,44 @@ begin
   if fX509 = nil then
     result := ''
   else
-    result := fX509.Extension[xeAuthorityKeyIdentifier];
+    result := fX509.Signed.Extension[xeAuthorityKeyIdentifier];
 end;
 
 function TCryptCertX509.IsSelfSigned: boolean;
 begin
-  result := fX509.IsSelfSigned;
+  result := (fX509 <> nil) and
+            fX509.IsSelfSigned;
+end;
+
+function TCryptCertX509.IsAuthorizedBy(const Authority: ICryptCert): boolean;
+var
+  a: TCryptCertX509;
+begin
+  if Assigned(Authority) then
+  begin
+    a := pointer(Authority.Instance);
+    result := (PClass(a)^ = PClass(self)^) and
+      // ensure Authority xeSubjectKeyIdentifier is in xeAuthorityKeyIdentifier
+      fX509.IsAuthorizedBy(a.fX509);
+  end
+  else
+    result := false;
+end;
+
+function TCryptCertX509.Compare(const Another: ICryptCert;
+  Method: TCryptCertComparer): integer;
+var
+  a: TCryptCertX509;
+begin
+  if Assigned(Another) then
+  begin
+    a := pointer(Another.Instance);
+    result := PPtrInt(a)^ - PPtrInt(self)^;
+    if result = 0 then // both are TCryptCertX509
+      result := fX509.Compare(a.fX509, Method);
+  end
+  else
+    result := 1;
 end;
 
 function TCryptCertX509.GetNotBefore: TDateTime;
@@ -2657,7 +3647,7 @@ begin
   if fX509 = nil then
     result := 0
   else
-    result := fX509.NotBefore;
+    result := fX509.Signed.NotBefore;
 end;
 
 function TCryptCertX509.GetNotAfter: TDateTime;
@@ -2665,7 +3655,13 @@ begin
   if fX509 = nil then
     result := 0
   else
-    result := fX509.NotAfter;
+    result := fX509.Signed.NotAfter;
+end;
+
+function TCryptCertX509.IsValidDate(date: TDateTime): boolean;
+begin
+  result := (fX509 <> nil) and
+            fX509.Signed.IsValidDate(date);
 end;
 
 function TCryptCertX509.GetUsage: TCryptCertUsages;
@@ -2673,7 +3669,7 @@ begin
   if fX509 = nil then
     result := []
   else
-    result := fX509.Usages;
+    result := fX509.Signed.CertUsages;
 end;
 
 function TCryptCertX509.GetPeerInfo: RawUtf8;
@@ -2708,24 +3704,27 @@ begin
     case Content of
       cccPrivateKeyOnly:
         begin
-          // use mormot.core.secure encryption, not standard PKCS#8
-          der := PemToDer(Saved); // see also TXPrivateKey.Load
-          bin := PrivateKeyDecrypt(
-            der, XKA_SALT[Xka], PrivatePassword, XKA_ROUNDS[Xka]);
-          result := SetPrivateKey(bin);
+          // may use mormot.core.secure encryption, not standard PKCS#8
+          der := PemToDer(Saved); // see also TCryptPrivateKey.Load
+          fPrivateKey := CryptPrivateKey[XKA_TO_CKA[Xka]].Create; // replace
+          if fPrivateKey.Load(
+               XKA_TO_CKA[Xka], fX509.PublicKey, der, PrivatePassword) then
+            result := true
+          else
+            fPrivateKey := nil;
         end;
       cccCertOnly:
         begin
+          EnsureCanWrite('Load');
           Clear;
           fX509 := TX509.Create;
-          //FileFromString(Saved, '/home/ab/Downloads/generated.der');
           if fX509.LoadFromPem(Saved) then
             result := true
           else
             FreeAndNil(fX509);
         end;
       cccCertWithPrivateKey:
-        // concatenate certificate PEM and private key PEM - no PKCS#12 yet
+        // unconcatenate certificate PEM and private key PEM - no PKCS#12 yet
         result := PemToCertAndPrivKey(Saved, der, bin) and
                   Load(der, cccCertOnly, '') and
                   Load(bin, cccPrivateKeyOnly, PrivatePassword)
@@ -2770,7 +3769,7 @@ begin
             RaiseError('Save(cccCertWithPrivateKey) with no Private Key');
       cccPrivateKeyOnly:
         if HasPrivateSecret then
-          result := fPrivateKey.Save(Format, PrivatePassword)
+          result := fPrivateKey.Save(Format = ccfPem, PrivatePassword)
         else
           RaiseError('Save(cccPrivateKeyOnly) with no Private Key');
     end;
@@ -2791,25 +3790,24 @@ end;
 
 function TCryptCertX509.GetPrivateKey: RawByteString;
 begin
-  result := fPrivateKey.ToDer;
+  if fPrivateKey = nil then
+    result := ''
+  else
+    result := fPrivateKey.ToDer;
 end;
 
 function TCryptCertX509.SetPrivateKey(const saved: RawByteString): boolean;
-var
-  pub: TXPublicKey;
 begin
   result := false;
-  FreeAndNil(fPrivateKey); // always release - SetPrivateKey('') is "wipe out"
+  fPrivateKey := nil; // always release - SetPrivateKey('') is "wipe out"
   if saved <> '' then
   begin
-    pub := nil; // SetPrivateKey() may be called without a public key yet
-    if fX509 <> nil then
-      pub := fX509.PublicKey;
-    fPrivateKey := TXPrivateKey.Create;
-    if fPrivateKey.Load(Xka, pub, saved, '') then
+    // note: SetPrivateKey() may be called without a public key yet
+    fPrivateKey := CryptPrivateKey[XKA_TO_CKA[Xka]].Create;
+    if fPrivateKey.Load(XKA_TO_CKA[Xka], fX509.PublicKey, saved, '') then
       result := true
     else
-      FreeAndNil(fPrivateKey);
+      fPrivateKey := nil;
   end;
 end;
 
@@ -2818,7 +3816,7 @@ begin
   if HasPrivateSecret and
      (fX509 <> nil) and
      (cuDigitalSignature in fX509.Usages) then
-    result := fPrivateKey.Sign(Xsa, Data, Len)
+    result := fPrivateKey.Sign(XSA_TO_CAA[Xsa], Data, Len)
   else
     result := '';
 end;
@@ -2827,6 +3825,7 @@ procedure TCryptCertX509.Sign(const Authority: ICryptCert);
 var
   auth: TCryptCertX509;
 begin
+  EnsureCanWrite('Sign');
   if Assigned(Authority) and
     Authority.HasPrivateSecret then
   begin
@@ -2839,13 +3838,16 @@ begin
       RaiseError('Sign: no cuKeyCertSign');
     // assign the Issuer information
     fX509.Signed.Issuer := auth.fX509.Signed.Subject; // may be self
-    fX509.Signed.Extension[xeAuthorityKeyIdentifier] :=
-       auth.fX509.Signed.Extension[xeSubjectKeyIdentifier];
+    if auth <> self then // same as OpenSSL: no AKID for for self-signed certs
+      fX509.Signed.Extension[xeAuthorityKeyIdentifier] :=
+         auth.fX509.Signed.Extension[xeSubjectKeyIdentifier];
     // compute the digital signature
     fX509.AfterModified;
     fX509.Signed.Signature := Xsa;
-    fX509.fSignatureValue := auth.fPrivateKey.Sign(Xsa, fX509.Signed.ToDer);
+    fX509.fSignatureValue := auth.fPrivateKey.Sign(
+                               XSA_TO_CAA[Xsa], fX509.Signed.ToDer);
     fX509.fSignatureAlgorithm := Xsa;
+    fX509.ComputeCachedDer;
   end
   else
     RaiseError('Sign: not a CA');
@@ -2867,10 +3869,11 @@ begin
     exit;
   auth := nil;
   if Authority <> nil then
-    if Authority.Instance.InheritsFrom(TCryptCertX509) then
+    if PClass(Authority.Instance)^ = PClass(self)^ then
       auth := Authority.Handle
     else
       exit;
+  // TX509 has a cache so the next calls with the same auth will be immediate
   result := fX509.Verify(auth, IgnoreError, TimeUtc);
 end;
 
@@ -2901,7 +3904,7 @@ begin
      (fPrivateKey <> nil) and
      (cuKeyAgreement in fX509.Usages) and
      Assigned(pub) and
-     pub.Instance.InheritsFrom(TCryptCertX509) and
+     (PClass(pub.Instance)^ = PClass(self)^) and
      (pub.Handle <> nil) and
      (cuKeyAgreement in TX509(pub.Handle).Usages) then
     result := fPrivateKey.SharedSecret(TX509(pub.Handle).PublicKey)
@@ -2916,12 +3919,489 @@ end;
 
 function TCryptCertX509.PrivateKeyHandle: pointer;
 begin
-  result := fPrivateKey;
+  result := pointer(fPrivateKey);
 end;
 
-function TCryptCertX509.GetPrivateKeyParams(out x, y: RawByteString): boolean;
+function TCryptCertX509.GetKeyParams(out x, y: RawByteString): boolean;
 begin
   result := fX509.PublicKey.GetParams(x, y);
+end;
+
+
+{ those methods are defined here for proper TCryptCertX509 knowledge }
+
+// retrieve a TCryptCertX509 compatible authority instance
+function ToCryptCertX509(const Authority: ICryptCert; Content: TCryptCertContent;
+  var TempCryptCert: ICryptCert): TCryptCertX509;
+var
+  xsa: TXSignatureAlgorithm;
+  auth: TCryptCertX509;
+  pem: RawUtf8; // TCryptCertX509.Load(cccCertWithPrivateKey) only supports PEM
+begin
+  result := nil;
+  xsa := CAA_TO_XSA[Authority.AsymAlgo];
+  if xsa = xsaNone then
+    exit;
+  auth := pointer(Authority.Instance);
+  if auth.InheritsFrom(TCryptCertX509) then
+    result := auth
+  else
+  try
+    pem := Authority.Save(Content, '', ccfPem); // e.g. a TCryptCertAlgoOpenSsl
+    if pem = '' then
+      exit;
+    TempCryptCert := CryptCertX509[Authority.AsymAlgo].New;
+    if TempCryptCert.Load(pem, Content, '') then
+      result := TempCryptCert.Instance as TCryptCertX509;
+  finally
+    FillZero(pem);
+  end;
+end;
+
+procedure TX509Crl.SignCryptCert(const Authority: ICryptCert;
+  AuthorityCrlNumber: QWord);
+var
+  auth: TCryptCertX509;
+  temp: ICryptCert;
+begin
+  if (self <> nil) and
+     Assigned(Authority) and
+     Authority.HasPrivateSecret then
+  begin
+    // retrieve a compatible authority instance
+    auth := ToCryptCertX509(Authority, cccCertWithPrivateKey, temp);
+    if auth = nil then
+      raise EX509.CreateUtf8('%.Sign: unsupported Authority % %',
+        [self, Authority.Instance, ToText(Authority.AsymAlgo)^]);
+    if auth.fX509 = nil then
+      raise EX509.CreateUtf8('%.Sign: authority has no public key', [self]);
+    // validate usage
+    if not (cuCrlSign in auth.fX509.Usages) then
+      EX509.CreateUtf8('%.Sign: authority has no cuCrlSign', [self]);
+    // assign the Issuer information
+    Signed.Issuer := auth.fX509.Signed.Subject;
+    Signed.Extension[xceAuthorityKeyIdentifier] :=
+      auth.fX509.Signed.Extension[xeSubjectKeyIdentifier];
+    if AuthorityCrlNumber = 0 then
+      // we need some increasing value for conformity
+      AuthorityCrlNumber := UnixTimeMinimalUtc; // increase every second
+    SetCrlNumber(AuthorityCrlNumber);
+    // compute the digital signature
+    AfterModified;
+    Signed.Signature := auth.Xsa;
+    fSignatureValue := auth.fPrivateKey.Sign(
+                         XSA_TO_CAA[auth.Xsa], Signed.ToDer);
+    fSignatureAlgorithm := auth.Xsa;
+  end
+  else
+    raise EX509.CreateUtf8('%.Sign: not a CA', [self]);
+end;
+
+function TX509Crl.VerifyCryptCert(const Authority: ICryptCert;
+  IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
+var
+  auth: TCryptCertX509;
+  temp: ICryptCert;
+begin
+  result := cvBadParameter;
+  if (self <> nil) and
+     Assigned(Authority) and
+     (Authority.Handle <> nil) then
+  begin
+    // use a compatible authority instance for digitial signature verification
+    auth := ToCryptCertX509(Authority, cccCertOnly, temp);
+    if auth <> nil then
+      result := Verify(auth.fX509, IgnoreError, TimeUtc);
+  end;
+end;
+
+
+{ TCryptCertCacheX509 }
+
+function TCryptCertCacheX509.InternalLoad(const Cert: RawByteString): ICryptCert;
+begin
+  result := X509Load(Cert);
+end;
+
+
+{ TCryptStoreAlgoX509 }
+
+function TCryptStoreAlgoX509.New: ICryptStore;
+begin
+  result := TCryptStoreX509.Create(self);
+end;
+
+
+{ TCryptStoreX509 }
+
+function TCryptStoreX509.GetCacheCount: integer;
+begin
+  result := fCache.Count;
+end;
+
+function TCryptStoreX509.GetRevoked: integer;
+begin
+  result := fSignedCrl.Revoked + fUnsignedCrl.Revoked;
+end;
+
+function TCryptStoreX509.GetCACount: integer;
+begin
+  result := fCA.Count;
+end;
+
+constructor TCryptStoreX509.Create(algo: TCryptAlgo);
+begin
+  inherited Create(algo);
+  fIsRevokedTag := Random32 shr 10; // to force ComputeIsRevoked between stores
+  fCache := TCryptCertCacheX509.Create;
+  TCryptCertCacheX509(fCache).SetCryptCertClass(TCryptCertX509);
+  fValidDepth := 32;
+  fTrust := fCache.NewList;
+  fCA := fCache.NewList;
+  fSignedCrl := TX509CrlList.Create;
+  fUnsignedCrl := TX509CrlList.Create;
+end;
+
+destructor TCryptStoreX509.Destroy;
+begin
+  inherited Destroy;
+  fUnsignedCrl.Free;
+  fSignedCrl.Free;
+  fCA.Free;
+  fTrust.Free;
+end;
+
+procedure TCryptStoreX509.Clear;
+begin
+  // keep fCache intact, just re-create all nested storage classes
+  fUnsignedCrl.Free;
+  fSignedCrl.Free;
+  fCA.Free;
+  fTrust.Free;
+  fTrust := fCache.NewList;
+  fCA := fCache.NewList;
+  fSignedCrl := TX509CrlList.Create;
+  fUnsignedCrl := TX509CrlList.Create;
+end;
+
+function TCryptStoreX509.Save: RawByteString;
+var
+  tmp: TTextWriterStackBuffer;
+  w: TTextWriter;
+begin
+  w := TTextWriter.CreateOwnedStream(tmp);
+  try
+    fTrust.SaveToPem(W, {WithExplanatoryText=}true);
+    W.AddCR;
+    fSignedCrl.SaveToPem(W, {WithExplanatoryText=}true);
+    W.AddCR;
+    fUnsignedCrl.SaveToPem(W, {WithExplanatoryText=}true);
+    W.SetText(RawUtf8(result));
+  finally
+    w.Free;
+  end;
+end;
+
+function TCryptStoreX509.GetBySerial(const Serial: RawUtf8): ICryptCert;
+begin
+  result := fTrust.FindOne(Serial, ccmSerialNumber);
+end;
+
+function TCryptStoreX509.GetBySubjectKey(const Key: RawUtf8): ICryptCert;
+begin
+  result := fTrust.FindBySubjectKey(Key);
+end;
+
+function TCryptStoreX509.FindOne(const Value: RawByteString;
+  Method: TCryptCertComparer): ICryptCert;
+begin
+  result := fTrust.FindOne(Value, Method);
+end;
+
+function TCryptStoreX509.ComputeIsRevoked(cert: TX509): TCryptCertRevocationReason;
+var
+  id: PRawByteString;
+  idcount, ownertag: integer;
+begin
+  ownertag := fIsRevokedTag; // multi-thread safety: get sequence before searches
+  // retrieve the AKID of this certificate (maybe SKID if self-signed)
+  id := pointer(cert.fRawAuthorityKeyIdentifier);
+  if id = nil then
+  begin
+    id := @cert.fRawSubjectKeyIdentifier; // self-signed
+    idcount := 1;
+  end
+  else
+    idcount := PDALen(PAnsiChar(pointer(id)) - _DALEN)^ + _DAOFF;
+  // ask the fSignedCrl and fUnsignedCrl lists
+  result := fSignedCrl.IsRevokedRaw(id, idcount, cert.Signed.SerialNumber);
+  if result = crrNotRevoked then
+    result := fUnsignedCrl.IsRevokedRaw(id, idcount, cert.Signed.SerialNumber);
+  // cache the result into cert.fIsRevokedTag
+  if result = crrNotRevoked then
+    cert.fIsRevokedTag := ownertag // no need to test until next revocation
+  else
+    cert.fIsRevokedTag := -(integer(result) + 1); // -1..-11 to mark as revoked
+    // as a nice side effect: once revoked, always revoked
+end;
+
+function TCryptStoreX509.IsRevokedX509(cert: TX509): TCryptCertRevocationReason;
+var
+  flags: integer;
+begin
+  // very quick resolution using the per-TX509 instance cache tag
+  result := crrNotRevoked; // most common case is "known as not revoked"
+  if cert = nil then
+    exit;
+  flags := cert.fIsRevokedTag;
+  if flags <> fIsRevokedTag then // are we in sync with the store?
+    if flags < 0 then
+      result := TCryptCertRevocationReason(-(flags + 1)) // revoked
+    else
+      result := ComputeIsRevoked(cert); // ask both TX509CrlList
+end;
+
+function TCryptStoreX509.IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason;
+var
+  x: TCryptCert;
+begin
+  result := crrNotRevoked;
+  if not Assigned(cert) then
+    exit;
+  x := cert.Instance;
+  if PClass(x)^ = TCryptCertX509 then
+    result := IsRevokedX509(TCryptCertX509(x).fX509);
+end;
+
+function TCryptStoreX509.Add(const cert: ICryptCert): boolean;
+begin
+  result := (cert <> nil) and
+            (PClass(cert.Instance)^ = TCryptCertX509) and
+            fTrust.Add(cert);
+end;
+
+function TCryptStoreX509.AddFromBuffer(const Content: RawByteString): TRawUtf8DynArray;
+var
+  k: TPemKind;
+  p: PUtf8Char;
+  der: TCertDer;
+  crl: TX509Crl;
+  cert: ICryptCert;
+  new: ICryptCerts;
+  i: PtrInt;
+begin
+  result := nil;
+  if IsPem(Content) then
+  begin
+    // expect certificate(s) and/or CRL(s) stored as (concatenated) PEM text
+    p := pointer(Content);
+    repeat
+      der := NextPemToDer(p, @k);
+      if der = '' then
+        break;
+      case k of
+        pemUnspecified,
+        pemCertificate:
+          begin
+            cert := fCache.Load(der);
+            if cert <> nil then
+              ChainAdd(new, cert);
+          end;
+        pemCrl:
+          begin
+            crl := TX509Crl.Create;
+            try
+              if crl.LoadFromDer(der) then
+              begin
+                if crl.SignatureValue = '' then
+                  fUnsignedCrl.Add(crl)   // unsigned: from AddRevocation()
+                else
+                  fSignedCrl.Add(crl);    // signed by a CA
+                inc(fIsRevokedTag);
+                crl := nil; // owned by one of the two lists
+              end;
+            finally
+              crl.Free;
+            end;
+          end;
+      end;
+    until false;
+  end
+  else
+    // a single DER file should be a certificate
+    new := fCache.Load([Content]);
+  for i := 0 to high(new) do
+    if Add(new[i]) then
+      AddRawUtf8(result, new[i].GetSerial);
+  if fIsRevokedTag < 0 then
+    fIsRevokedTag := 0; // paranoid 31-bit overflow
+end;
+
+function TCryptStoreX509.Revoke(const Cert: ICryptCert;
+  Reason: TCryptCertRevocationReason; RevocationDate: TDateTime): boolean;
+var
+  akid: RawUtf8;
+begin
+  result := false;
+  if Cert = nil then
+    exit;
+  akid := Cert.GetAuthorityKey;
+  if akid = '' then
+    akid := Cert.GetSubjectKey; // self-signed certificate
+  result := fUnsignedCrl.AddRevocation(
+              akid, Cert.GetSerial, Reason, 0, RevocationDate);
+  if not result then
+    exit;
+  inc(fIsRevokedTag);
+  if fIsRevokedTag < 0 then
+    fIsRevokedTag := 0; // paranoid 31-bit overflow
+end;
+
+function TCryptStoreX509.IsValid(const cert: ICryptCert;
+  date: TDateTime): TCryptCertValidity;
+var
+  c: TCryptCert;
+  x, xa: TX509;
+  a, f: ICryptCert;
+  skid, akid: PRawByteString;
+  level: integer;
+begin
+  // validate this certificate context
+  result := cvUnknownAuthority;
+  if not Assigned(cert) then
+    exit;
+  c := cert.Instance;
+  if (c = nil) or
+     (PClass(c)^ <> TCryptCertX509) then
+    exit;
+  x := TCryptCertX509(c).fX509;
+  if x = nil then
+    exit;
+  result := cvInvalidDate;
+  if not x.Signed.IsValidDate(date) then
+    exit;
+  result := cvRevoked;
+  if IsRevokedX509(x) <> crrNotRevoked then // has a TX509 cache
+    exit;
+  // search within our database of known certificates
+  result := cvCorrupted;
+  skid := @x.fRawSubjectKeyIdentifier;
+  if skid^ = '' then
+    exit;
+  f := fTrust.FindBySubjectKeyRaw(skid^);
+  if (f <> nil) and
+     (x.Compare(f.Handle, ccmBinary) <> 0) then
+    exit; // this certificate was forged
+  result := cvUnknownAuthority;
+  if fTrust.Count = 0 then
+    exit;
+  if x.IsSelfSigned then
+  begin
+    if f <> nil then // self-signed certs should be known
+      // verify the self signature of this trusted cert
+      result := x.Verify(x, [], x.NotBefore);
+    exit;
+  end;
+  // check all known issuers until we reach ValidDepth or a root anchor
+  for level := 0 to ValidDepth do
+  begin
+    result := cvCorrupted;
+    akid := pointer(x.fRawAuthorityKeyIdentifier); // check only first auth
+    if akid = nil then
+      if x.IsSelfSigned then
+        akid := skid // typical on X.509
+      else
+        exit; // missing field
+    result := cvUnknownAuthority;
+    a := fTrust.FindBySubjectKeyRaw(akid^);
+    if a = nil then
+      exit;
+    // verify the cert digital signature with the issuer public key
+    xa := a.Handle;
+    result := x.Verify(xa, [], x.NotBefore); // has a TX509 cache
+    if result = cvValidSelfSigned then
+    begin
+      // we reached a root anchor: success
+      if not cert.IsSelfSigned then
+        result := cvValidSigned;
+      exit;
+    end else if result <> cvValidSigned then
+      exit;
+    // continue to the next level
+    skid := akid;
+    x := xa;
+    result := cvRevoked;
+    if IsRevokedX509(x) <> crrNotRevoked then
+      exit;
+  end;
+  // if we reached as many level as requested, consider it done
+  if cert.IsSelfSigned then
+    result := cvValidSelfSigned
+  else
+    result := cvValidSigned;
+end;
+
+function TCryptStoreX509.Verify(const Signature: RawByteString;
+  Data: pointer; Len: integer; IgnoreError: TCryptCertValidities;
+  TimeUtc: TDateTime): TCryptCertValidity;
+begin
+  result := cvNotSupported; // we don't know which signing authority to use
+end;
+
+function TCryptStoreX509.Count: integer;
+begin
+  result := fTrust.Count;
+end;
+
+function TCryptStoreX509.CrlCount: integer;
+begin
+  result := fSignedCrl.Count + fUnsignedCrl.Count;
+end;
+
+function TCryptStoreX509.DefaultCertAlgo: TCryptCertAlgo;
+begin
+  result := CryptCertX509[CryptAlgoDefault];
+end;
+
+
+
+{ **************** Registration of our X.509 Engine to the TCryptCert Factory }
+
+function TX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
+var
+  x: TX509;
+begin
+  x := TX509.Create;
+  try
+    result := x.LoadFromPem(Cert); // support PEM or DER input
+    if result then
+      x.ToParsedInfo(Info);
+  finally
+    x.Free;
+  end;
+end;
+
+function X509Load(const Cert: RawByteString): ICryptCert;
+var
+  x: TX509;
+  der: RawByteString;
+begin
+  result := nil;
+  der := PemToDer(Cert);
+  if not AsnDecChunk(der) then // basic input validation
+    exit;
+  x := TX509.Create;
+  try
+    if x.LoadFromDer(der) and
+       (x.SignatureAlgorithm <> xsaNone) then // support PEM or DER input
+    begin
+      result := CryptCertX509[XSA_TO_CAA[x.SignatureAlgorithm]].FromHandle(x);
+      if result <> nil then
+        x := nil;
+    end;
+  finally
+    x.Free;
+  end;
 end;
 
 
@@ -2929,6 +4409,7 @@ procedure InitializeUnit;
 var
   a: TXAttr;
   o: TXExtension;
+  c: TXCrlExtension;
   k: TXExtendedKeyUsage;
   xsa: TXSignatureAlgorithm;
 begin
@@ -2936,23 +4417,27 @@ begin
     XA_OID_ASN[a] := AsnEncOid(XA_OID[a]);
   for o := succ(low(o)) to high(o) do
     XE_OID_ASN[o] := AsnEncOid(XE_OID[o]);
+  for c := succ(low(c)) to high(c) do
+    XCE_OID_ASN[c] := AsnEncOid(XCE_OID[c]);
   for k := succ(low(k)) to high(k) do
     XKU_OID_ASN[k] := AsnEncOid(XKU_OID[k]);
-  // register TX509 to our high-level cryptographic catalog
-  // - 'x509-rs256-int' 'x509-ps256-int' and 'x509-es256-int' match this unit
-  // - 'x509-rs/ps384/512-int' methods seem superfluous
+  // register this unit to our high-level cryptographic catalog
+  // 'x509-rs256-int' 'x509-ps256-int' and 'x509-es256-int' match this unit
+  // ('x509-rs/ps384/512-int' methods seem superfluous so are not defined)
   TCryptCertAlgoX509.Create(xsaSha256Rsa,    {suffix=}'-int');
   TCryptCertAlgoX509.Create(xsaSha256RsaPss, {suffix=}'-int');
   TCryptCertAlgoX509.Create(xsaSha256Ecc256, {suffix=}'-int');
   // register 'x509-rs256' 'x509-rs384' 'x509-rs512' 'x509-ps256' 'x509-ps384'
   // 'x509-ps512' and 'x509-es256' certificates
   // - may be overriden by the faster mormot.crypt.openssl if included
+  // - but still accessible from CryptCertX509[] global factories
   for xsa := succ(low(xsa)) to high(xsa) do
-    TCryptCertAlgoX509.Create(xsa, {suffix=}'');
+    CryptCertX509[XSA_TO_CAA[xsa]] := TCryptCertAlgoX509.Create(xsa, '');
+  // register 'x509-pki' store to our catalog
+  CryptStoreX509 := TCryptStoreAlgoX509.Create('x509-pki');
   // use our class for X.509 parsing - unless mormot.crypt.openssl is included
   X509Parse := @TX509Parse;
 end;
-
 
 
 initialization

@@ -2282,9 +2282,6 @@ function PostMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): BOO
 function RtlCaptureStackBackTrace(FramesToSkip, FramesToCapture: cardinal;
   BackTrace, BackTraceHash: pointer): byte; stdcall;
 
-/// compatibility function, wrapping Win32 API available since XP
-function IsDebuggerPresent: BOOL; stdcall;
-
 /// retrieves the current thread ID
 // - redefined in mormot.core.os to avoid dependency to the Windows unit
 function GetCurrentThreadId: DWORD; stdcall;
@@ -3554,11 +3551,31 @@ function ReadSystemMemory(address, size: PtrUInt): RawByteString;
 // - on Linux, will enumerate /proc/* pseudo-files
 function EnumAllProcesses: TCardinalDynArray;
 
-/// return the process name of a given PID
+/// return the process name of a given process  ID
 // - under Windows, is a wrapper around
 // QueryFullProcessImageNameW/GetModuleFileNameEx PsAPI call
 // - on Linux, will query /proc/[pid]/exe or /proc/[pid]/cmdline pseudo-file
 function EnumProcessName(PID: cardinal): RawUtf8;
+
+/// return the process ID of the parent of a given PID
+// - by default (PID = 0), will search for the parent of the current process
+// - returns 0 if the PID was not found
+function GetParentProcess(PID: cardinal = 0): cardinal;
+
+/// check if this process is currently running into the debugger
+// - redirect to the homonymous WinAPI function on Windows, or check if the
+// /proc/self/status "TracerPid:" value is non zero on Linux, or search if
+// "lazarus" is part of the parent process name for BSD
+{$ifdef OSWINDOWS}
+function IsDebuggerPresent: BOOL; stdcall;
+{$else}
+function IsDebuggerPresent: boolean;
+{$endif ODWINDOWS}
+
+/// return the time and memory usage information about a given process
+// - under Windows, is a wrapper around GetProcessTimes/GetProcessMemoryInfo
+function RetrieveProcessInfo(PID: cardinal; out KernelTime, UserTime: Int64;
+  out WorkKB, VirtualKB: cardinal): boolean;
 
 /// return the system-wide time usage information
 // - under Windows, is a wrapper around GetSystemTimes() kernel API call
@@ -3569,11 +3586,6 @@ function RetrieveSystemTimes(out IdleTime, KernelTime, UserTime: Int64): boolean
 // - on LINUX, retrieve /proc/loadavg or on OSX/BSD call libc getloadavg()
 // - return '' on Windows - call RetrieveSystemTimes() instead
 function RetrieveLoadAvg: RawUtf8;
-
-/// return the time and memory usage information about a given process
-// - under Windows, is a wrapper around GetProcessTimes/GetProcessMemoryInfo
-function RetrieveProcessInfo(PID: cardinal; out KernelTime, UserTime: Int64;
-  out WorkKB, VirtualKB: cardinal): boolean;
 
 /// retrieve low-level information about current memory usage
 // - as used by TSynMonitorMemory
@@ -3895,8 +3907,9 @@ type
   {$endif USERECORDWITHMETHODS}
   private
     Flags: PtrUInt; // bit 0 = WriteLock, >0 = ReadLock
-    // low-level function called by the Lock method when inlined
+    // low-level functions called by the Lock methods when inlined
     procedure ReadLockSpin;
+    procedure WriteLockSpin;
   public
     /// to be called if the instance has not been filled with 0
     // - e.g. not needed if TRWLightLock is defined as a class field
@@ -3920,6 +3933,7 @@ type
     // - warning: nested WriteLock call after a ReadLock or another WriteLock
     // would deadlock
     procedure WriteLock;
+      {$ifdef HASINLINE} inline; {$endif}
     /// try to enter a non-rentrant non-upgradable exclusive write lock
     // - if returned true, caller should eventually call WriteUnLock
     // - warning: nested TryWriteLock call after a ReadLock or another WriteLock
@@ -8685,27 +8699,11 @@ procedure TLightLock.Done;
 begin // just for compatibility with TOSLock
 end;
 
-procedure TLightLock.LockSpin;
-var
-  spin: PtrUInt;
-begin
-  spin := SPIN_COUNT;
-  repeat
-    spin := DoSpin(spin);
-  until (Flags = 0) and // when spinning, first check without atomicity
-        LockedExc(Flags, 1, 0);
-end;
-
 procedure TLightLock.Lock;
 begin
   // we tried a dedicated asm but it was slower: inlining is preferred
   if not LockedExc(Flags, 1, 0) then
     LockSpin;
-end;
-
-function TLightLock.TryLock: boolean;
-begin
-  result := LockedExc(Flags, 1, 0);
 end;
 
 procedure TLightLock.UnLock;
@@ -8718,24 +8716,28 @@ begin
   {$endif CPUINTEL}
 end;
 
+function TLightLock.TryLock: boolean;
+begin
+  result := (Flags = 0) and // first check without any (slow) atomic opcode
+            LockedExc(Flags, 1, 0);
+end;
+
+procedure TLightLock.LockSpin;
+var
+  spin: PtrUInt;
+begin
+  spin := SPIN_COUNT;
+  repeat
+    spin := DoSpin(spin);
+  until TryLock;
+end;
+
 
 { TRWLightLock }
 
 procedure TRWLightLock.Init;
 begin
   Flags := 0; // bit 0=WriteLock, >0=ReadLock counter
-end;
-
-procedure TRWLightLock.ReadLockSpin;
-var
-  f, spin: PtrUInt;
-begin
-  spin := SPIN_COUNT;
-  repeat
-    spin := DoSpin(spin);
-    f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
-  until (Flags = f) and
-        LockedExc(Flags, f + 2, f);
 end;
 
 procedure TRWLightLock.ReadLock;
@@ -8762,19 +8764,14 @@ begin
   LockedDec(Flags, 2);
 end;
 
-procedure TRWLightLock.WriteLock;
+procedure TRWLightLock.ReadLockSpin;
 var
-  spin, f: PtrUInt;
+  spin: PtrUInt;
 begin
   spin := SPIN_COUNT;
-  // acquire the WR flag bit
   repeat
-    f := Flags and not 1; // bit 0=WriteLock, >0=ReadLock counter
-    if (Flags = f) and
-       LockedExc(Flags, f + 1, f) then
-      exit;
     spin := DoSpin(spin);
-  until false;
+  until TryReadLock;
 end;
 
 function TRWLightLock.TryWriteLock: boolean;
@@ -8786,9 +8783,25 @@ begin
             LockedExc(Flags, f + 1, f);
 end;
 
+procedure TRWLightLock.WriteLock;
+begin
+  if not TryWriteLock then
+    WriteLockSpin;
+end;
+
 procedure TRWLightLock.WriteUnLock;
 begin
   LockedDec(Flags, 1);
+end;
+
+procedure TRWLightLock.WriteLockSpin;
+var
+  spin: PtrUInt;
+begin
+  spin := SPIN_COUNT;
+  repeat
+    spin := DoSpin(spin);
+  until TryWriteLock;
 end;
 
 

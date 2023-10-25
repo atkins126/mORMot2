@@ -189,9 +189,17 @@ function GetUnQuoteCsvItem(P: PUtf8Char; Index: PtrUInt; Sep: AnsiChar = ',';
 // therefore can be used with ready to be displayed text (i.e. the VCL)
 function GetCsvItemString(P: PChar; Index: PtrUInt; Sep: Char = ','): string;
 
+/// return first CSV string in the supplied UTF-8 content
+function GetFirstCsvItem(const Csv: RawUtf8; Sep: AnsiChar = ','): RawUtf8;
+  {$ifdef HASINLINE} inline; {$endif}
+
 /// return last CSV string in the supplied UTF-8 content
 function GetLastCsvItem(const Csv: RawUtf8; Sep: AnsiChar = ','): RawUtf8;
   {$ifdef HASINLINE} inline; {$endif}
+
+/// quickly check if Value is in Csv with no temporary memory allocation
+function CsvContains(const Csv, Value: RawUtf8; Sep: AnsiChar = ',';
+  CaseSensitive: boolean = true): boolean;
 
 /// return the index of a Value in a CSV string
 // - start at Index=0 for first one
@@ -985,10 +993,12 @@ function EscapeHex(const src: RawUtf8;
   const toescape: TSynAnsicharSet; escape: AnsiChar = '\'): RawUtf8;
 
 /// un-escape \xx or \c encoded chars from a pre-allocated buffer
+// - any CR/LF after \ will also be ignored
 // - dest^ should have at least the same length than src^
 function UnescapeHexBuffer(src, dest: PUtf8Char; escape: AnsiChar = '\'): PUtf8Char;
 
 /// un-escape \xx or \c encoded chars into a new RawUtf8 string
+// - any CR/LF after \ will also be ignored
 function UnescapeHex(const src: RawUtf8; escape: AnsiChar = '\'): RawUtf8;
 
 /// escape as \char pair some chars from a set into a pre-allocated buffer
@@ -1486,12 +1496,14 @@ function UInt2DigitsToShortFast(Value: byte): TShort4;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert an IPv4 'x.x.x.x' text into its 32-bit value
+// - result is in little endian order, not network order: 1.2.3.4 becomes $04030201
 // - returns TRUE if the text was a valid IPv4 text, unserialized as 32-bit aValue
 // - returns FALSE on parsing error, also setting aValue=0
 // - '' or '127.0.0.1' will also return false
 function IPToCardinal(aIP: PUtf8Char; out aValue: cardinal): boolean; overload;
 
 /// convert an IPv4 'x.x.x.x' text into its 32-bit value
+// - result is in little endian order, not network order: 1.2.3.4 becomes $04030201
 // - returns TRUE if the text was a valid IPv4 text, unserialized as 32-bit aValue
 // - returns FALSE on parsing error, also setting aValue=0
 // - '' or '127.0.0.1' will also return false
@@ -1499,6 +1511,7 @@ function IPToCardinal(const aIP: RawUtf8; out aValue: cardinal): boolean; overlo
   {$ifdef HASINLINE}inline;{$endif}
 
 /// convert an IPv4 'x.x.x.x' text into its 32-bit value, 0 or localhost
+// - result is in little endian order, not network order: 1.2.3.4 becomes $04030201
 // - returns <> 0 value if the text was a valid IPv4 text, 0 on parsing error
 // - '' or '127.0.0.1' will also return 0
 function IPToCardinal(const aIP: RawUtf8): cardinal; overload;
@@ -1675,6 +1688,9 @@ procedure Append(var Text: RawByteString; Added: pointer; AddedLen: PtrInt); ove
 
 /// prepend some text to a RawByteString variable with no code page conversion
 procedure Prepend(var Text: RawByteString; const Added: RawByteString); overload;
+
+/// prepend one char to a RawByteString variable with no code page conversion
+procedure Prepend(var Text: RawByteString; Added: AnsiChar); overload;
 
 /// prepend some text items at the beginning of a RawUtf8 variable
 procedure Prepend(var Text: RawUtf8; const Args: array of const); overload;
@@ -1997,6 +2013,20 @@ function HexToBin(const Hex: RawUtf8): RawByteString; overload;
 /// fast conversion from hexa chars into binary data
 function HexToBin(Hex: PAnsiChar; HexLen: PtrInt;
   var Bin: RawByteString): boolean; overload;
+
+/// fast conversion from ToHumanHex() hexa chars into binary data
+function HumanHexToBin(const hex: RawUtf8; var Bin: RawByteString): boolean; overload;
+
+/// fast conversion from ToHumanHex() hexa chars into binary data
+function HumanHexToBin(const hex: RawUtf8): RawByteString; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// fast comparison between two ToHumanHex() hexa values
+function HumanHexCompare(const a, b: RawUtf8): integer; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// fast comparison between two ToHumanHex() hexa values
+function HumanHexCompare(a, b: PUtf8Char): integer; overload;
 
 /// fast conversion from binary data into hexa chars
 function BinToHex(const Bin: RawByteString): RawUtf8; overload;
@@ -2953,6 +2983,17 @@ begin
       GetNextItem(P, Sep, Quote, result);
 end;
 
+function GetFirstCsvItem(const Csv: RawUtf8; Sep: AnsiChar): RawUtf8;
+var
+  i: PtrInt;
+begin
+  i := PosExChar(Sep, Csv);
+  if i = 0 then
+    result := Csv
+  else
+    FastSetString(result, pointer(Csv), i - 1);
+end;
+
 function GetLastCsvItem(const Csv: RawUtf8; Sep: AnsiChar): RawUtf8;
 begin
   result := SplitRight(Csv, Sep, nil);
@@ -2969,6 +3010,51 @@ begin
       result := GetNextItemString(P, Sep);
 end;
 
+function CsvContains(const Csv, Value: RawUtf8; Sep: AnsiChar;
+  CaseSensitive: boolean): boolean;
+var
+  i, l: PtrInt;
+  p, s: PUtf8Char;
+  match: TIdemPropNameUSameLen;
+begin
+  if (Csv = '') or
+     (Value = '') then
+  begin
+    result := false;
+    exit;
+  end;
+  // note: all search sub-functions do use fast SSE2 asm on i386 and x86_64
+  match := IdemPropNameUSameLen[CaseSensitive];
+  p := pointer(Csv);
+  l := PStrLen(PAnsiChar(pointer(Value)) - _STRLEN)^;
+  if l >= PStrLen(p - _STRLEN)^ then
+    result := (l = PStrLen(p - _STRLEN)^) and
+              match(p, pointer(Value), l)
+  else
+  begin
+    i := PosExChar(Sep, Csv);
+    if i <> 0 then
+    begin
+      result := true;
+      s := p + i - 1;
+      repeat
+        if (s - p = l) and
+           match(p, pointer(Value), l) then
+          exit;
+        p := s + 1;
+        s := PosChar(p, Sep);
+        if s <> nil then
+          continue;
+        if (PStrLen(PAnsiChar(pointer(Csv)) - _STRLEN)^ - (p - pointer(Csv)) = l) and
+           match(p, pointer(Value), l) then
+          exit;
+        break;
+      until false;
+    end;
+    result := false;
+  end;
+end;
+
 function FindCsvIndex(Csv: PUtf8Char; const Value: RawUtf8; Sep: AnsiChar;
   CaseSensitive, TrimValue: boolean): integer;
 var
@@ -2982,7 +3068,7 @@ begin
       TrimSelf(s);
     if CaseSensitive then
     begin
-      if s = Value then
+      if SortDynArrayRawByteString(s, Value) = 0 then
         exit;
     end
     else if SameTextU(s, Value) then
@@ -5195,7 +5281,14 @@ begin
       if src^ = escape then
       begin
         inc(src);
-        if HexToChar(PAnsiChar(src), @c) then // \xx
+        if src^ in [#10, #13] then // \CRLF or \LF
+        begin
+          repeat
+            inc(src);
+          until not (src^ in [#10, #13]);
+          continue;
+        end
+        else if HexToChar(PAnsiChar(src), @c) then // \xx
         begin
           result^ := c;
           inc(src, 2);
@@ -8362,6 +8455,16 @@ begin
     end;
 end;
 
+procedure Prepend(var Text: RawByteString; Added: AnsiChar);
+var
+  t: PtrInt;
+begin
+  t := length(Text);
+  SetLength(Text, t + 1); // is likely to avoid any reallocmem
+  MoveFast(PByteArray(Text)[0], PByteArray(Text)[1], t);
+  PByteArray(Text)[0] := ord(Added);
+end;
+
 procedure Prepend(var Text: RawByteString; const Args: array of const);
 var
   f: TFormatUtf8;
@@ -8826,6 +8929,137 @@ end;
 function HexToBin(const Hex: RawUtf8): RawByteString;
 begin
   HexToBin(pointer(Hex), length(Hex), result);
+end;
+
+function HexaToByte(P: PUtf8Char; var Dest: byte; tab: PByteArray): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
+var
+  b, c: byte;
+begin
+  b := tab[Ord(P[0]) + 256]; // + 256 for shl 4
+  if b <> 255 then
+  begin
+    c := tab[Ord(P[1])];
+    if c <> 255 then
+    begin
+      inc(b, c);
+      Dest := b;
+      result := true;
+      exit;
+    end;
+  end;
+  result := false; // mark error
+end;
+
+function HumanHexToBin(const hex: RawUtf8; var Bin: RawByteString): boolean;
+var
+  len: PtrInt;
+  h, p: PAnsiChar;
+  tab: PByteArray;
+begin
+  Bin := '';
+  result := false;
+  len := length(hex);
+  if len = 0 then
+    exit;
+  p := FastNewString(len shr 1, CP_RAWBYTESTRING); // shr 1 = maximum length
+  pointer(Bin) := p;
+  h := pointer(hex);
+  tab := @ConvertHexToBin;
+  repeat
+    while h^ = ' ' do
+      inc(h);
+    if not HexaToByte(pointer(h), PByte(p)^, tab) then
+      break; // invalid 'xx' pair - may be len < 2
+    inc(p);
+    inc(h, 2);
+    dec(len, 2);
+    if len = 0 then
+    begin
+      result := true; // properly ended with 'xx' last hexa byte
+      break;
+    end;
+    while h^ = ' ' do
+      inc(h);
+    if h^ <> ':' then
+      continue;
+    dec(len);
+    if len = 0 then
+      break; // should not end with ':'
+    inc(h);
+  until false;
+  if result then
+    FakeLength(Bin, p - pointer(Bin))
+  else
+    Bin := '';
+end;
+
+function HumanHexCompare(a, b: PUtf8Char): integer;
+var
+  ca, cb: byte;
+  tab: PByteArray;
+begin
+  result := 0;
+  if a <> b then
+    if a <> nil then
+      if b <> nil then
+      begin
+        tab := @ConvertHexToBin;
+        repeat
+          while a^ = ' ' do
+            inc(a);
+          while b^ = ' ' do
+            inc(b);
+          if not HexaToByte(pointer(a), ca{%H-}, tab) or
+             not HexaToByte(pointer(b), cb{%H-}, tab) then
+          begin
+            result := ComparePointer(a, b); // consistent but not zero
+            break;
+          end;
+          result := ca - cb;
+          if result <> 0 then
+            break;
+          inc(a, 2);
+          inc(b, 2);
+          while a^ = ' ' do
+            inc(a);
+          while b^ = ' ' do
+            inc(b);
+          case a^ of
+            #0:
+              begin
+                if b^ <> #0 then
+                  dec(result);
+                break;
+              end;
+            ':':
+              inc(a);
+          end;
+          case b^ of
+            #0:
+              begin
+                inc(result); // we know a^<>#0
+                break;
+              end;
+            ':':
+              inc(b);
+          end;
+        until false;
+      end
+      else
+        inc(result)
+    else
+      dec(result);
+end;
+
+function HumanHexCompare(const a, b: RawUtf8): integer;
+begin
+  result := HumanHexCompare(pointer(a), pointer(b));
+end;
+
+function HumanHexToBin(const hex: RawUtf8): RawByteString;
+begin
+  HumanHexToBin(hex, result);
 end;
 
 function ByteToHex(P: PAnsiChar; Value: byte): PAnsiChar;
@@ -9430,26 +9664,6 @@ begin
   result := GuidToRawUtf8(guid);
 end;
 {$endif UNICODE}
-
-function HexaToByte(P: PUtf8Char; var Dest: byte; tab: PByteArray): boolean;
-  {$ifdef HASINLINE}inline;{$endif}
-var
-  b, c: byte;
-begin
-  b := tab[Ord(P[0]) + 256]; // + 256 for shl 4
-  if b <> 255 then
-  begin
-    c := tab[Ord(P[1])];
-    if c <> 255 then
-    begin
-      inc(b, c);
-      Dest := b;
-      result := true;
-      exit;
-    end;
-  end;
-  result := false; // mark error
-end;
 
 function TextToGuid(P: PUtf8Char; guid: PByteArray): PUtf8Char;
 var

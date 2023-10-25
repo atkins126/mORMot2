@@ -302,6 +302,11 @@ type
     /// append some text to the current console
     procedure AddConsole(const Fmt: RawUtf8; const Args: array of const;
       OnlyLog: boolean = false); overload;
+    /// append some text to the current console in real time, on the same line
+    // - the information is flushed to the console immediately, whereas
+    // AddConsole() append it into a buffer to be written once
+    procedure NotifyProgress(const Args: array of const;
+      Color: TConsoleColor = ccGreen);
     /// the test suit which owns this test case
     property Owner: TSynTests
       read fOwner;
@@ -353,16 +358,22 @@ type
     fSafe: TSynLocker;
     fFailed: TSynTestFaileds;
     fFailedCount: integer;
+    fNotifyProgressLineLen: integer;
+    fNotifyProgress: RawUtf8;
     function GetFailedCount: integer;
     function GetFailed(Index: integer): TSynTestFailed;
     procedure CreateSaveToFile; virtual;
-    procedure Color(aColor: TConsoleColor);
-    procedure Text(const value: RawUtf8); overload; virtual;
-    procedure Text(const values: array of const); overload;
-    procedure TextLn(const values: array of const); overload;
-    /// could be overriden to redirect the content to proper TSynLog.Log()
-    procedure DoLog(Level: TSynLogInfo; const TextFmt: RawUtf8;
-      const TextArgs: array of const); virtual;
+    /// low-level output on the console - use TSynTestCase.AddConsole instead
+    procedure DoText(const value: RawUtf8); overload; virtual;
+    /// low-level output on the console - use TSynTestCase.AddConsole instead
+    procedure DoText(const values: array of const); overload;
+    /// low-level output on the console - use TSynTestCase.AddConsole instead
+    procedure DoTextLn(const values: array of const); overload;
+    /// low-level set the console text color - use TSynTestCase.AddConsole instead
+    procedure DoColor(aColor: TConsoleColor);
+    /// low-level output on the console with automatic formatting
+    // - use TSynTestCase.NotifyProgress() instead
+    procedure DoNotifyProgress(const value: RawUtf8; cc: TConsoleColor);
     /// called when a test case failed: default is to add item to fFailed[]
     procedure AddFailed(const msg: string); virtual;
     /// this method is called before every run
@@ -379,7 +390,7 @@ type
   public
     /// you can put here some text to be displayed at the end of the messages
     // - some internal versions, e.g.
-    // - every line of text must explicitly BEGIN with #13#10
+    // - every line of text must explicitly BEGIN with CRLF
     CustomVersions: string;
     /// allow redirection to any kind of output
     // - will be called in addition to default console write()
@@ -439,12 +450,15 @@ type
     // information, e.g.
     // ! function TMySynTests.Run: boolean;
     // ! begin // need mormot.db.raw.sqlite3 unit in the uses clause
-    // !   CustomVersions := format(#13#10#13#10'%s'#13#10'    %s'#13#10 +
-    // !     'Using mORMot %s'#13#10'    %s %s', [OSVersionText, CpuInfoText,
+    // !   CustomVersions := format(CRLF + CRLF + '%s' + CRLF + '    %s' + CRLF +
+    // !     'Using mORMot %s' + CRLF + '    %s %s', [OSVersionText, CpuInfoText,
     // !      SYNOPSE_FRAMEWORK_FULLVERSION, sqlite3.ClassName, sqlite3.Version]);
     // !   result := inherited Run;
     // ! end;
     function Run: boolean; virtual;
+    /// could be overriden to redirect the content to proper TSynLog.Log()
+    procedure DoLog(Level: TSynLogInfo; const TextFmt: RawUtf8;
+      const TextArgs: array of const); virtual;
     /// number of failed tests after the last call to the Run method
     property FailedCount: integer
       read GetFailedCount;
@@ -709,7 +723,7 @@ end;
 
 function TSynTestCase.CheckEqual(const a, b: RawUtf8; const msg: RawUtf8): boolean;
 begin
-  result := CompareBuf(a, b);
+  result := SortDynArrayRawByteString(a, b) = 0;
   CheckUtf8(result, EQUAL_MSG, [a, b, msg]);
 end;
 
@@ -727,7 +741,7 @@ end;
 
 function TSynTestCase.CheckNotEqual(const a, b: RawUtf8; const msg: RawUtf8): boolean;
 begin
-  result := not CompareBuf(a, b);
+  result := SortDynArrayRawByteString(a, b) <> 0;
   CheckUtf8(result, NOTEQUAL_MSG, [a, b, msg]);
 end;
 
@@ -1015,13 +1029,13 @@ end;
 
 procedure TSynTestCase.AddConsole(const msg: string; OnlyLog: boolean);
 begin
-  fOwner.DoLog(sllMonitoring, '% %', [ClassType, msg]);
+  fOwner.DoLog(sllMonitoring, '% %', [self, msg]);
   if OnlyLog then
     exit;
   fOwner.fSafe.Lock;
   try
     if fRunConsole <> '' then
-      fRunConsole := fRunConsole + #13#10'     ' + msg
+      fRunConsole := fRunConsole + (CRLF + '     ') + msg
     else
       fRunConsole := fRunConsole + msg;
   finally
@@ -1077,6 +1091,16 @@ begin
   result := NotifyTestSpeed(str, ItemCount, SizeInBytes, Timer, OnlyLog);
 end;
 
+procedure TSynTestCase.NotifyProgress(const Args: array of const;
+  Color: TConsoleColor);
+var
+  msg: RawUtf8;
+begin
+  msg := ' ';
+  Append(msg, Args);
+  fOwner.DoNotifyProgress(msg, Color);
+end;
+
 
 { TSynTests }
 
@@ -1114,21 +1138,21 @@ end;
 
 {$I-}
 
-procedure TSynTests.Color(aColor: TConsoleColor);
+procedure TSynTests.DoColor(aColor: TConsoleColor);
 begin
   if (StdOut <> 0) and
      (THandle(TTextRec(fSaveToFile).Handle) = StdOut) then
     TextColor(aColor);
 end;
 
-procedure TSynTests.Text(const value: RawUtf8);
+procedure TSynTests.DoText(const value: RawUtf8);
 begin
   write(fSaveToFile, value);
   if Assigned(CustomOutput) then
     CustomOutput(value);
 end;
 
-procedure TSynTests.Text(const values: array of const);
+procedure TSynTests.DoText(const values: array of const);
 var
   i: PtrInt;
   s: RawUtf8;
@@ -1136,14 +1160,39 @@ begin
   for i := 0 to high(values) do
   begin
     VarRecToUtf8(values[i], s);
-    Text(s);
+    DoText(s);
   end;
 end;
 
-procedure TSynTests.TextLn(const values: array of const);
+procedure TSynTests.DoTextLn(const values: array of const);
 begin
-  Text(values);
-  Text(#13#10);
+  DoText(values);
+  DoText(CRLF);
+end;
+
+procedure TSynTests.DoNotifyProgress(const value: RawUtf8; cc: TConsoleColor);
+var
+  len: integer;
+begin
+  if fNotifyProgress = '' then
+  begin
+    DoColor(ccGreen);
+    DoTextLn(['  - ', fCurrentMethodInfo^.TestName, ':']);
+    DoText('     ');
+    fNotifyProgressLineLen := 0;
+  end;
+  len := length(value);
+  inc(fNotifyProgressLineLen, len);
+  if (fNotifyProgress <> '') and
+     (fNotifyProgressLineLen > 73) then
+  begin
+    DoText([CRLF + '     ']);
+    fNotifyProgressLineLen := len;
+  end;
+  Append(fNotifyProgress, value);
+  DoColor(cc);
+  DoText(value);
+  DoColor(ccLightGray);
 end;
 
 procedure TSynTests.DoLog(Level: TSynLogInfo; const TextFmt: RawUtf8;
@@ -1159,9 +1208,6 @@ procedure TSynTests.CreateSaveToFile;
 begin
   System.Assign(fSaveToFile, '');
   Rewrite(fSaveToFile);
-  {$ifdef OSPOSIX}
-  TTextRec(fSaveToFile).LineEnd := #13#10;
-  {$endif OSPOSIX}
   StdOut := TTextRec(fSaveToFile).Handle;
 end;
 
@@ -1210,8 +1256,9 @@ var
 begin
   if TTextRec(fSaveToFile).Handle = 0 then
     CreateSaveToFile;
-  Color(ccLightCyan);
-  TextLn([#13#10'   ', Ident, #13#10'  ', RawUtf8OfChar('-', length(Ident) + 2)]);
+  DoColor(ccLightCyan);
+  DoTextLn([CRLF + '   ', Ident,
+            CRLF + '  ', RawUtf8OfChar('-', length(Ident) + 2)]);
   RunTimer.Start;
   Randomize;
   fFailed := nil;
@@ -1220,9 +1267,9 @@ begin
   dir := GetCurrentDir;
   for m := 0 to Count - 1 do
   try
-    Color(ccWhite);
-    TextLn([#13#10#13#10, m + 1, '. ', fTests[m].TestName]);
-    Color(ccLightGray);
+    DoColor(ccWhite);
+    DoTextLn([CRLF + CRLF, m + 1, '. ', fTests[m].TestName]);
+    DoColor(ccLightGray);
     fTests[m].Method(); // call AddCase() to add instances into fTestCaseClass
     try
       for i := 0 to high(fTestCaseClass) do
@@ -1250,9 +1297,9 @@ begin
               SetCurrentDir(fWorkDir);
               TotalTimer.Start;
               C.Setup;
-              Color(ccWhite);
-              TextLn([#13#10' ', m + 1, '.', i + 1, '. ', C.Ident, ': ']);
-              Color(ccLightGray);
+              DoColor(ccWhite);
+              DoTextLn([CRLF + ' ', m + 1, '.', i + 1, '. ', C.Ident, ': ']);
+              DoColor(ccLightGray);
               started := true;
             end;
             C.fAssertionsBeforeRun := C.fAssertions;
@@ -1271,35 +1318,35 @@ begin
           except
             on E: Exception do
             begin
-              Color(ccLightRed);
+              DoColor(ccLightRed);
               AddFailed(E.ClassName + ': ' + E.Message);
-              Text(['! ', fCurrentMethodInfo^.IdentTestName]);
+              DoText(['! ', fCurrentMethodInfo^.IdentTestName]);
               if E.InheritsFrom(EControlC) then
                 raise; // Control-C should just abort whole test
-              TextLn([#13#10'! ', GetLastExceptionText]); // with extended info
-              Color(ccLightGray);
+              DoTextLn([CRLF + '! ', GetLastExceptionText]); // with extended info
+              DoColor(ccLightGray);
             end;
           end;
           if not started then
             continue;
           C.CleanUp; // should be done before Destroy call
           if C.AssertionsFailed = 0 then
-            Color(ccLightGreen)
+            DoColor(ccLightGreen)
           else
-            Color(ccLightRed);
+            DoColor(ccLightRed);
           if C.fRunConsole <> '' then
           begin
-            TextLn(['   ', C.fRunConsole]);
+            DoTextLn(['   ', C.fRunConsole]);
             C.fRunConsole := '';
           end;
-          Text(['  Total failed: ', IntToThousandString(C.AssertionsFailed),
+          DoText(['  Total failed: ', IntToThousandString(C.AssertionsFailed),
             ' / ', IntToThousandString(C.Assertions), '  - ', C.Ident]);
           if C.AssertionsFailed = 0 then
-            Text(' PASSED')
+            DoText(' PASSED')
           else
-            Text(' FAILED');
-          TextLn(['  ', TotalTimer.Stop]);
-          Color(ccLightGray);
+            DoText(' FAILED');
+          DoTextLn(['  ', TotalTimer.Stop]);
+          DoColor(ccLightGray);
           inc(fAssertions, C.fAssertions); // compute global assertions count
           inc(fAssertionsFailed, C.fAssertionsFailed);
         finally
@@ -1314,39 +1361,40 @@ begin
     on E: Exception do
     begin
       // assume any exception not intercepted above is a failure
-      Color(ccLightRed);
+      DoColor(ccLightRed);
       err := E.ClassName + ': ' + E.Message;
       AddFailed(err);
-      Text(['! ', err]);
+      DoText(['! ', err]);
     end;
   end;
   SetCurrentDir(dir);
-  Color(ccLightCyan);
+  DoColor(ccLightCyan);
   result := (fFailedCount = 0);
   if Executable.Version.Major <> 0 then
-    Version := FormatUtf8(#13#10'Software version tested: % (%)',
+    Version := FormatUtf8(CRLF +'Software version tested: % (%)',
       [Executable.Version.Detailed, Executable.Version.BuildDateTimeString]);
-  FormatUtf8(#13#10#13#10'Time elapsed for all tests: %'#13#10'Performed % by % on %',
+  FormatUtf8(CRLF + CRLF + 'Time elapsed for all tests: %' + CRLF +
+    'Performed % by % on %',
     [RunTimer.Stop, NowToString, Executable.User, Executable.Host], Elapsed);
-  TextLn([#13#10, Version, CustomVersions, #13#10'Generated with: ',
+  DoTextLn([CRLF, Version, CustomVersions, CRLF +'Generated with: ',
     COMPILER_VERSION, ' ' + OS_TEXT + ' compiler', Elapsed]);
   if result then
-    Color(ccWhite)
+    DoColor(ccWhite)
   else
-    Color(ccLightRed);
-  Text([#13#10'Total assertions failed for all test suits:  ',
+    DoColor(ccLightRed);
+  DoText([CRLF + 'Total assertions failed for all test suits:  ',
     IntToThousandString(AssertionsFailed), ' / ', IntToThousandString(Assertions)]);
   if result then
   begin
-    Color(ccLightGreen);
-    TextLn([#13#10'! All tests passed successfully.']);
+    DoColor(ccLightGreen);
+    DoTextLn([CRLF + '! All tests passed successfully.']);
   end
   else
   begin
-    TextLn([#13#10'! Some tests FAILED: please correct the code.']);
+    DoTextLn([CRLF + '! Some tests FAILED: please correct the code.']);
     ExitCode := 1;
   end;
-  Color(ccLightGray);
+  DoColor(ccLightGray);
 end;
 
 procedure TSynTests.AfterOneRun;
@@ -1359,39 +1407,48 @@ begin
   C := fCurrentMethodInfo^.Test as TSynTestCase;
   Run := C.Assertions - C.fAssertionsBeforeRun;
   Failed := C.AssertionsFailed - C.fAssertionsFailedBeforeRun;
+  if fNotifyProgress <> '' then
+  begin
+    DoLog(sllMonitoring, '% %', [C, fNotifyProgress]);
+    DoText(CRLF);
+  end;
   if Failed = 0 then
   begin
-    Color(ccGreen);
-    Text(['  - ', fCurrentMethodInfo^.TestName, ': ']);
-    if Run = 0 then
-      Text('no assertion')
-    else if Run = 1 then
-      Text('1 assertion passed')
+    DoColor(ccGreen);
+    if fNotifyProgress <> '' then
+      DoText('        ')
     else
-      Text([IntToThousandString(Run), ' assertions passed']);
+      DoText(['  - ', fCurrentMethodInfo^.TestName, ': ']);
+    if Run = 0 then
+      DoText('no assertion')
+    else if Run = 1 then
+      DoText('1 assertion passed')
+    else
+      DoText([IntToThousandString(Run), ' assertions passed']);
   end
   else
   begin
-    Color(ccLightRed);   // ! to highlight the line
-    Text(['!  - ', fCurrentMethodInfo^.TestName, ': ', IntToThousandString(
+    DoColor(ccLightRed);   // ! to highlight the line
+    DoText(['!  - ', fCurrentMethodInfo^.TestName, ': ', IntToThousandString(
       Failed), ' / ', IntToThousandString(Run), ' FAILED']);
   end;
-  Text(['  ', TestTimer.Stop]);
+  fNotifyProgress := '';
+  DoText(['  ', TestTimer.Stop]);
   if C.fRunConsoleOccurenceNumber > 0 then
-    Text(['  ', IntToThousandString(TestTimer.PerSec(
+    DoText(['  ', IntToThousandString(TestTimer.PerSec(
       C.fRunConsoleOccurenceNumber)), '/s']);
   if C.fRunConsoleMemoryUsed > 0 then
   begin
-    Text(['  ', KB(C.fRunConsoleMemoryUsed)]);
+    DoText(['  ', KB(C.fRunConsoleMemoryUsed)]);
     C.fRunConsoleMemoryUsed := 0; // display only once
   end;
-  TextLn([]);
+  DoTextLn([]);
   if C.fRunConsole <> '' then
   begin
-    TextLn(['     ', C.fRunConsole]);
+    DoTextLn(['     ', C.fRunConsole]);
     C.fRunConsole := '';
   end;
-  Color(ccLightGray);
+  DoColor(ccLightGray);
 end;
 
 class procedure TSynTests.DescribeCommandLine;
@@ -1487,7 +1544,7 @@ begin
     begin
       tests.SaveToFile(redirect); // export to file if named on command line
       {$I-} // minimal console output during blind regression tests
-      Writeln(tests.Ident, #13#10#13#10' Running tests... please wait');
+      Writeln(tests.Ident, CRLF + CRLF + ' Running tests... please wait');
       {$I+}
     end;
     tests.Run;
@@ -1498,8 +1555,8 @@ begin
   if ParamCount = 0 then
   begin
     // direct exit if an external file was generated
-    WriteLn(#13#10'Done - Press ENTER to Exit');
-    ReadLn;
+    WriteLn(CRLF + 'Done - Press ENTER to Exit');
+    ConsoleWaitForEnterKey;
   end;
   {$endif OSPOSIX}
 end;

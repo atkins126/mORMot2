@@ -1426,6 +1426,7 @@ type
     function Final: RawUtf8; overload;
   end;
 
+  {$M+}
   /// abstract class implemented e.g. by TCryptHash/TCryptCipher/TCryptKey
   TCryptInstance = class(TInterfacedObject)
   protected
@@ -1439,6 +1440,7 @@ type
     property CryptAlgo: TCryptAlgo
       read fCryptAlgo;
   end;
+  {$M-}
 
   /// randomness generator parent class, as resolved by Rnd()
   TCryptRandom = class(TCryptAlgo)
@@ -1513,7 +1515,7 @@ type
     function NewPbkdf2(const secret, salt: RawUtf8; rounds: integer): ICryptHash;
   end;
 
-  /// interface as implemented e.g. by TCryptCipher
+  /// interface as implemented e.g. by TCryptCipher from TCryptCipherAlgo.New
   ICryptCipher = interface
     /// quickly generate a cipher with the same algorithm, direction and key
     function Clone: ICryptCipher;
@@ -1624,27 +1626,18 @@ type
       const hashername: RawUtf8 = ''): boolean; overload;
   end;
 
-  /// exception class raised by our High-Level Certificates Process
-  ECryptCert = class(ESynException);
-
-  /// the supported asymmetric algorithms, e.g. as published by OpenSSL
-  // - as implemented e.g. by TJwtAbstractOsl inherited classes, or
-  // TCryptAsymOsl/TCryptCertAlgoOpenSsl implementing TCryptAsym/ICryptCert,
-  // accessible via CryptAsymOpenSsl[] and CryptCertAlgoOpenSsl[] factories
-  // - mormot.crypt.ecc unit implements only caaES256
-  // - mormot.crypt.x509 unit implements caaES256/caaRS256/caaRS384/caaRS512
-  // - mormot.crypt.openssl unit implements them all
-  // - caaES256, caaES384 and caaES512 match OpenSSL EVP_PKEY_EC with
-  // prime256v1, NID_secp384r1 and NID_secp512r1 curves
+  /// the supported asymmetric algorithms, following the JWT high-level naming
+  // - caaES256, caaES384, caaES512 and caaES256K match OpenSSL EVP_PKEY_EC with
+  // prime256v1, NID_secp384r1, NID_secp512r1 and NID_secp256k1 curves
   // - caaRS256, caaRS384 and caaRS512 match OpenSSL EVP_PKEY_RSA with
-  // 2048-bit from SHA-256, SHA-384 and SHA-512 digest method
+  // SHA-256, SHA-384 and SHA-512 digest method
   // - caaPS256, caaPS384 and caaPS512 match OpenSSL EVP_PKEY_RSA_PSS with
-  // 2048-bit from SHA-256, SHA-384 and SHA-512 digest method
+  // SHA-256, SHA-384 and SHA-512 digest method
   // - caaEdDSA match OpenSSL EVP_PKEY_ED25519 curve
-  // - note that caaES256K is NID_secp256k1 which was defined for completeness,
-  // but should appear for special needs only: caaES256 is to be preferred,
-  // and is also significantly faster
-  // - our RSA algorithms generates RSA_DEFAULT_GENERATION_BITS = 2048-bit,
+  // - mormot.crypt.ecc unit implements caaES256 with native pascal
+  // - mormot.crypt.rsa unit implements all caaRS256 .. caaPS512 algorithms
+  // - mormot.crypt.openssl unit implements all those algorithms
+  // - our RSA wrappers generate with RSA_DEFAULT_GENERATION_BITS = 2048-bit,
   // but our units can read and manage any other size of existing certificates
   // generated e.g. by OpenSSL or our mormot.crypt.rsa unit
   TCryptAsymAlgo = (
@@ -1662,6 +1655,154 @@ type
 
   /// set of supported asymmetric algorithms
   TCryptAsymAlgos = set of TCryptAsymAlgo;
+
+  /// the algorithms supported by a ICryptPublicKey/ICryptPrivateKey
+  // - does not match TCryptAsymAlgo because ckaRsa/ckaRsaPss do not define the
+  // hash algorithm needed, so dedicated caaRSxxx/caaPSxxx items are needed
+  TCryptKeyAlgo = (
+    ckaNone,
+    ckaRsa,
+    ckaRsaPss,
+    ckaEcc256,
+    ckaEcc384,
+    ckaEcc512,
+    ckaEcc256k,
+    ckaEdDSA);
+
+  TCryptAbstractKey = class;
+
+  /// abstract interface to a Public Key, as returned by CryptPublicKey[] factory
+  ICryptPublicKey = interface
+    /// unserialize a public key content
+    // - this instance should be void, i.e. just created with no prior Load
+    // - will first try from X.509 SubjectPublicKey raw binary, then the main
+    // known PEM or DER usual serialization formats
+    function Load(Algorithm: TCryptKeyAlgo;
+      const PublicKeySaved: RawByteString): boolean;
+    /// verify the RSA or ECC signature of a memory buffer
+    function Verify(Algorithm: TCryptAsymAlgo;
+      Data, Sig: pointer; DataLen, SigLen: integer): boolean; overload;
+    /// verify the RSA or ECC signature of a memory buffer
+    function Verify(Algorithm: TCryptAsymAlgo;
+      const Data, Sig: RawByteString): boolean; overload;
+    /// as used by TCryptCert.GetKeyParams
+    // - for ECC, returns the x,y coordinates
+    // - for RSA, x is set to the Exponent (e), and y to the Modulus (n)
+    // - return false if there is no compliant key information in the provider
+    function GetParams(out x, y: RawByteString): boolean;
+    /// use EciesSeal or RSA sealing, i.e. encryption with this public key
+    function Seal(const Message: RawByteString;
+      const Cipher: RawUtf8): RawByteString;
+    /// the high-level asymmetric algorithm used for this public key
+    function KeyAlgo: TCryptKeyAlgo;
+    /// direct access to the class instance implementing this interface
+    function Instance: TCryptAbstractKey;
+  end;
+
+  /// abstract interface to a Private Key, as returned by CryptPrivateKey[] factory
+  ICryptPrivateKey = interface
+    /// unserialized the private key from DER binary or PEM text
+    // - this instance should be void, i.e. just created with no prior Load
+    // - will also ensure the private key do match the associated public key
+    // - is able to decode and potentially decrypt a serialized key, with a
+    // PKCS#8 Password for OpenSSL, and our proprietary PrivateKeyDecrypt()
+    function Load(Algorithm: TCryptKeyAlgo; const AssociatedKey: ICryptPublicKey;
+      const PrivateKeySaved: RawByteString; const Password: SpiUtf8): boolean;
+    /// create a new private / public key pair
+    // - this instance should be void, i.e. just created with no prior Load
+    // - returns the associated public key binary in X.509 SubjectPublicKey format
+    function Generate(Algorithm: TCryptAsymAlgo): RawByteString;
+    /// return the private key as raw binary
+    // - follow PKCS#8 PrivateKeyInfo encoding for RSA and prime256v1
+    function ToDer: RawByteString;
+    /// return the associated public key as stored in a X509 certificate
+    function ToSubjectPublicKey: RawByteString;
+    /// return the private key in the TCryptCertX509.Save expected format
+    // - is able to encode and potentially encrypt a serialized key, with a
+    // PKCS#8 Password for OpenSSL, and our proprietary PrivateKeyEncrypt()
+    function Save(AsPem: boolean; const Password: SpiUtf8): RawByteString;
+    /// sign a memory buffer with RSA or ECC using the stored private key
+    function Sign(Algorithm: TCryptAsymAlgo;
+      Data: pointer; DataLen: integer): RawByteString; overload;
+    /// sign a memory buffer with RSA or ECC using the stored private key
+    function Sign(Algorithm: TCryptAsymAlgo;
+      const Data: RawByteString): RawByteString; overload;
+    /// use EciesSeal or RSA un-sealing, i.e. decryption with this private key
+    function Open(const Message: RawByteString;
+      const Cipher: RawUtf8): RawByteString;
+    /// compute the shared-secret with another public key
+    // - by design, ECDHE is only available for ECC
+    function SharedSecret(const PeerKey: ICryptPublicKey): RawByteString;
+    /// the high-level asymmetric algorithm used for this private key
+    function KeyAlgo: TCryptKeyAlgo;
+    /// direct access to the class instance implementing this interface
+    function Instance: TCryptAbstractKey;
+  end;
+
+  /// abstract parent class to TCryptPublicKey and TCryptPrivateKey
+  TCryptAbstractKey = class(TInterfacedObjectWithCustomCreate)
+  protected
+    fKeyAlgo: TCryptKeyAlgo;
+  public
+    // ICryptPublicKey methods
+    function KeyAlgo: TCryptKeyAlgo;
+    function Instance: TCryptAbstractKey;
+  end;
+
+  /// abstract public key parent class, as returned by CryptPublicKey[] factory
+  TCryptPublicKey = class(TCryptAbstractKey, ICryptPublicKey)
+  protected
+    /// verify the signature of a given hash using this public key
+    function VerifyDigest(Sig: pointer; Dig: THash512Rec; SigLen, DigLen: integer;
+      Hash: THashAlgo): boolean; virtual;
+  public
+    // ICryptPublicKey methods
+    function Load(Algorithm: TCryptKeyAlgo;
+      const PublicKeySaved: RawByteString): boolean; virtual; abstract;
+    function Verify(Algorithm: TCryptAsymAlgo; Data, Sig: pointer;
+      DataLen, SigLen: integer): boolean; overload; virtual;
+    function Verify(Algorithm: TCryptAsymAlgo;
+      const Data, Sig: RawByteString): boolean; overload;
+    function GetParams(out x, y: RawByteString): boolean; virtual; abstract;
+    function Seal(const Message: RawByteString;
+      const Cipher: RawUtf8): RawByteString; virtual; abstract;
+  end;
+
+  /// abstract public key metaclass, as stored by the CryptPublicKey[] factory
+  TCryptPublicKeyClass = class of TCryptPublicKey;
+
+  /// abstract private key parent class, as returned by the CryptPrivateKey[] factory
+  TCryptPrivateKey = class(TCryptAbstractKey, ICryptPrivateKey)
+  protected
+    /// default Load() will call PrivateKeyDecrypt() then FromDer()
+    function FromDer(algo: TCryptKeyAlgo; const der: RawByteString;
+      pub: TCryptPublicKey): boolean; virtual;
+    /// sign a memory buffer digest with the stored private key
+    function SignDigest(const Dig: THash512Rec; DigLen: integer;
+      DigAlgo: TCryptAsymAlgo): RawByteString; virtual;
+  public
+    // ICryptPrivateKey methods
+    function Load(Algorithm: TCryptKeyAlgo; const AssociatedKey: ICryptPublicKey;
+      const PrivateKeySaved: RawByteString; const Password: SpiUtf8): boolean; virtual;
+    function Generate(Algorithm: TCryptAsymAlgo): RawByteString; virtual; abstract;
+    function ToDer: RawByteString; virtual; abstract;
+    function ToSubjectPublicKey: RawByteString; virtual; abstract;
+    function Save(AsPem: boolean; const Password: SpiUtf8): RawByteString; virtual;
+    function Sign(Algorithm: TCryptAsymAlgo;
+      Data: pointer; DataLen: integer): RawByteString; overload; virtual;
+    function Sign(Algorithm: TCryptAsymAlgo;
+      const Data: RawByteString): RawByteString; overload;
+    function Open(const Message: RawByteString;
+      const Cipher: RawUtf8): RawByteString; virtual; abstract;
+    function SharedSecret(
+      const PeerKey: ICryptPublicKey): RawByteString; virtual;
+  end;
+
+  /// abstract public key metaclass class, as stored by the CryptPrivateKey factory
+  TCryptPrivateKeyClass = class of TCryptPrivateKey;
+
+  /// exception class raised by our High-Level Certificates Process
+  ECryptCert = class(ESynException);
 
   /// the known Key Usages for a given Certificate
   // - is an exact match of TX509Usage enumerate in mormot.lib.openssl11.pas
@@ -1693,37 +1834,53 @@ type
   // - used for each item in a Certificate Revocation List (CRL)
   // - crrNotRevoked (item 7) is not used in the RFC, and used internally here
   TCryptCertRevocationReason = (
-    crrUnspecified,
-    crrCompromised,
-    crrAuthorityCompromised,
-    crrUnAffiliated,
-    crrSuperseded,
-    crrReplaced,
-    crrTempHold,
-    crrNotRevoked,
-    crrRemoved,
-    crrWithdrawn,
-    crrServerCompromised);
+    crrUnspecified,            // (0)
+    crrCompromised,            // (1)
+    crrAuthorityCompromised,   // (2)
+    crrUnAffiliated,           // (3)
+    crrSuperseded,             // (4)
+    crrReplaced,               // (5)
+    crrTempHold,               // (6)
+    crrNotRevoked,             // (7) - not used in the RFC, but used internally
+    crrRemoved,                // (8)
+    crrWithdrawn,              // (9)
+    crrServerCompromised);     // (10)
 
   /// the Digital Signature results for a given Certificate
   // - is an exact match of TEccValidity enumerate in mormot.crypt.ecc256r1.pas
   // - see CV_VALIDSIGN constant for verification success
   TCryptCertValidity = (
-    cvUnknown,
-    cvValidSigned,
-    cvValidSelfSigned,
-    cvNotSupported,
-    cvBadParameter,
-    cvCorrupted,
-    cvInvalidDate,
-    cvUnknownAuthority,
-    cvDeprecatedAuthority,
-    cvInvalidSignature,
-    cvRevoked,
-    cvWrongUsage);
+    cvUnknown,                // (0)
+    cvValidSigned,            // (1)
+    cvValidSelfSigned,        // (2)
+    cvNotSupported,           // (3)
+    cvBadParameter,           // (4)
+    cvCorrupted,              // (5)
+    cvInvalidDate,            // (6)
+    cvUnknownAuthority,       // (7)
+    cvDeprecatedAuthority,    // (8)
+    cvInvalidSignature,       // (9)
+    cvRevoked,                // (10)
+    cvWrongUsage);            // (11)
 
   /// a set of Digital Signature results
   TCryptCertValidities = set of TCryptCertValidity;
+
+  /// ICryptCert.Save possible output formats
+  // - 'syn-es256' from mormot.crypt.ecc certificate will use its own proprietary
+  // format, i.e. SaveToBinary/SaveToSecureBinary for ccfBinary, or non-standard
+  // '-----BEGIN/END SYNECC CERTIFICATE-----' headers for ccfPem
+  // - 'x509-rs256'..'x509-es256' from mormot.crypt.openssl will use the standard
+  // x509 format, as DER (or PKCS12 if PrivatePassword is set) for ccfBinary,
+  // or PEM for ccfPEM (concatenating the private key if PrivatePassword is set)
+  // - ccfHexa, ccfBase64 and ccfBase64Uri will use the ccfBinary output, then
+  // encode it as Hexadecimal or Base-64 (URI)
+  TCryptCertFormat = (
+    ccfBinary,
+    ccfPem,
+    ccfHexa,
+    ccfBase64,
+    ccfBase64Uri);
 
   /// convenient wrapper of X.509 Certificate subject name X.501 fields
   // - not always implemented - mainly our 'syn-es256' certificate won't
@@ -1752,22 +1909,6 @@ type
   end;
   PCryptCertFields = ^TCryptCertFields;
 
-  /// ICryptCert.Save possible output formats
-  // - 'syn-es256' from mormot.crypt.ecc certificate will use its own proprietary
-  // format, i.e. SaveToBinary/SaveToSecureBinary for ccfBinary, or non-standard
-  // '-----BEGIN/END SYNECC CERTIFICATE-----' headers for ccfPem
-  // - 'x509-rs256'..'x509-es256' from mormot.crypt.openssl will use the standard
-  // x509 format, as DER (or PKCS12 if PrivatePassword is set) for ccfBinary,
-  // or PEM for ccfPEM (concatenating the private key if PrivatePassword is set)
-  // - ccfHexa, ccfBase64 and ccfBase64Uri will use the ccfBinary output, then
-  // encode it as Hexadecimal or Base-64 (URI)
-  TCryptCertFormat = (
-    ccfBinary,
-    ccfPem,
-    ccfHexa,
-    ccfBase64,
-    ccfBase64Uri);
-
   /// the ICryptCert.Load/Save content
   // - cccCertOnly will store the certificate as PEM or DER with its public key
   // - cccCertWithPrivateKey will include the private key to the output,
@@ -1777,6 +1918,25 @@ type
     cccCertOnly,
     cccCertWithPrivateKey,
     cccPrivateKeyOnly);
+
+  /// how ICryptCert.Compare() should compare two certificates
+  // - ccmSubjectCN/ccmIssuerCN/ccmSubjectAltName/ccmIssuerAltName lookup is
+  // case-insensitive
+  TCryptCertComparer = (
+    ccmInstance,
+    ccmSerialNumber,
+    ccmSubjectName,
+    ccmIssuerName,
+    ccmSubjectCN,
+    ccmIssuerCN,
+    ccmSubjectKey,
+    ccmAuthorityKey,
+    ccmSubjectAltName,
+    ccmIssuerAltName,
+    ccmUsage,
+    ccmBinary,
+    ccmSha1,
+    ccmSha256);
 
   TCryptCert = class;
   TCryptCertAlgo = class;
@@ -1841,7 +2001,10 @@ type
     // - can search another Relative Distinguished Name (RDN) e.g. 'O' or 'OU'
     // - if Rdn is a hash, e.g. 'SHA1'/'SHA256', will return the issuer digest
     function GetIssuer(const Rdn: RawUtf8 = 'CN'): RawUtf8;
-    /// the Subject Issuer Key Identifier (SKID) of this Certificate
+    /// an array of all Subject names covered by the issuer of this Certificate
+    // - e.g. read from X.509 v3 Issuer Alternative Names extension
+    function GetIssuers: TRawUtf8DynArray;
+    /// the Subject Key Identifier (SKID) of this Certificate
     // - e.g. '14:2E:B3:17:B7:58:56:CB:AE:50:09:40:E6:1F:AF:9D:8B:14:C2:C6'
     // - match the SKID on X.509, or the serial number for syn-es256
     function GetSubjectKey: RawUtf8;
@@ -1852,6 +2015,17 @@ type
     function GetAuthorityKey: RawUtf8;
     /// check if this certificate has been self-signed
     function IsSelfSigned: boolean;
+    /// check if this certificate has been issued by the specified certificate
+    // - e.g. on X.509 will efficiently check the certificate AKID with the
+    // Authority SKID
+    function IsAuthorizedBy(const Authority: ICryptCert): boolean;
+    /// compare one Certificate instance with another
+    function Compare(const Another: ICryptCert; Method: TCryptCertComparer): integer;
+    /// compare two Certificates, which should share the same algorithm
+    // - will compare the internal properties and the public key, not the
+    // private key: you could e.g. use it to verify that a ICryptCert with
+    // HasPrivateSecret=false matches another with HasPrivateSecret=true
+    function IsEqual(const Another: ICryptCert): boolean;
     /// the minimum Validity timestamp of this Certificate
     function GetNotBefore: TDateTime;
     /// the maximum Validity timestamp of this Certificate
@@ -1939,6 +2113,7 @@ type
     /// verify another certificate signature with this certificate public key
     // (if self-signed), or a supplied Authority reference
     // - Authority certificate should have the cuKeyCertSign usage
+    // - mormot.crypt.x509 will cache the last valid Authority for fast process
     function Verify(const Authority: ICryptCert;
       IgnoreError: TCryptCertValidities = [];
       TimeUtc: TDateTime = 0): TCryptCertValidity; overload;
@@ -1958,6 +2133,15 @@ type
       Payload: PDocVariantData = nil; Signature: PRawByteString = nil;
       IgnoreError: TCryptCertValidities = [];
       TimeUtc: TDateTime = 0): TCryptCertValidity;
+    /// returns the JSON Web Key (JWT) corresponding to the public key of this
+    // certificate
+    // - the returned JWK is computed with no whitespace or line breaks before
+    // or after any syntaxic elements, and the required members are ordered
+    // lexicographically, as expected for a direct thumbprint
+    // - typical pattern is '{"crv":..,"kty":"EC","x":..,"y":.. }' for ECC
+    // or '{"e":..,"kty":"RSA","n":..}' for RSA
+    // - is implemented by default as a wrapper to GetKeyParams() results
+    function JwkCompute: RawUtf8;
     /// encrypt a message using the public key of this certificate
     // - only RSA and ES256 algorithms do support this method by now
     // - 'x509-rs*' and 'x509-ps*' RSA algorithms use an OpenSSL Envelope key
@@ -2000,11 +2184,6 @@ type
     // SetPrivateKey('') will wipe any private key currently stored in memory
     // - warning: don't forget FillZero() once done with this sensitive input
     function SetPrivateKey(const saved: RawByteString): boolean;
-    /// compare two Certificates, which should share the same algorithm
-    // - will compare the internal properties and the public key, not the
-    // private key: you could e.g. use it to verify that a ICryptCert with
-    // HasPrivateSecret=false matches another with HasPrivateSecret=true
-    function IsEqual(const another: ICryptCert): boolean;
     /// the high-level asymmetric algorithm used for this certificate
     function AsymAlgo: TCryptAsymAlgo;
     /// the high-level asymmetric algorithm class used for this certificate
@@ -2028,8 +2207,15 @@ type
     // - for ECC, returns the x,y coordinates
     // - for RSA, x is set to the Exponent (e), and y to the Modulus (n)
     // - return false if there is no compliant key information in the provider
-    function GetPrivateKeyParams(out x, y: RawByteString): boolean;
+    function GetKeyParams(out x, y: RawByteString): boolean;
   end;
+
+  /// a dynamic array of Certificate interface instances
+  ICryptCerts = array of ICryptCert;
+  /// holds a Certificate chain, the first being the main certificate
+  ICryptCertChain = ICryptCerts;
+  /// a pointer to a Certificate interface instance
+  PICryptCert = ^ICryptCert;
 
   /// abstract parent class to implement ICryptCert, as returned by Cert() factory
   // - you should never use this class, but the ICryptCert instances
@@ -2037,9 +2223,15 @@ type
   TCryptCert = class(TCryptInstance, ICryptCert)
   protected
     fLastLoadFromFileName: TFileName;
+    fIndexer: TObject; // a TCryptCertAbstractList owner for EnsureCanWrite
     procedure RaiseError(const Msg: shortstring); overload;
     procedure RaiseError(const Fmt: RawUtf8; const Args: array of const); overload;
     procedure RaiseErrorGenerate(const api: ShortString);
+    procedure EnsureCanWrite(const Context: shortstring); virtual;
+    // used by TCryptCertList.Find and TCryptCertCache.Find
+    class procedure InternalFind(Cert: PICryptCert; const Value: RawByteString;
+      Method: TCryptCertComparer; Count, MaxCount: integer;
+      out Chain: ICryptCerts); virtual;
   public
     // ICryptCert methods
     function Generate(Usages: TCryptCertUsages; const Subjects: RawUtf8;
@@ -2053,9 +2245,13 @@ type
     function GetSubjects: TRawUtf8DynArray; virtual; abstract;
     function GetIssuerName: RawUtf8; virtual; abstract;
     function GetIssuer(const Rdn: RawUtf8): RawUtf8; virtual; abstract;
+    function GetIssuers: TRawUtf8DynArray; virtual; abstract;
     function GetSubjectKey: RawUtf8; virtual; abstract;
     function GetAuthorityKey: RawUtf8; virtual; abstract;
     function IsSelfSigned: boolean; virtual; abstract;
+    function IsAuthorizedBy(const Authority: ICryptCert): boolean; virtual;
+    function Compare(const Another: ICryptCert; Method: TCryptCertComparer): integer; virtual;
+    function IsEqual(const Another: ICryptCert): boolean; virtual;
     function GetNotBefore: TDateTime; virtual; abstract;
     function GetNotAfter: TDateTime; virtual; abstract;
     function IsValidDate(date: TDateTime): boolean; virtual;
@@ -2078,7 +2274,6 @@ type
     function GetPublicKey: RawByteString; virtual; abstract;
     function GetPrivateKey: RawByteString; virtual; abstract;
     function SetPrivateKey(const saved: RawByteString): boolean; virtual; abstract;
-    function IsEqual(const another: ICryptCert): boolean; virtual;
     function Sign(Data: pointer; Len: integer): RawByteString;
       overload; virtual; abstract;
     function Sign(const Data: RawByteString): RawByteString; overload; virtual;
@@ -2098,6 +2293,7 @@ type
     function JwtVerify(const Jwt: RawUtf8; Issuer, Subject, Audience: PRawUtf8;
       Payload: PDocVariantData; Signature: PRawByteString;
       IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity; virtual;
+    function JwkCompute: RawUtf8; virtual;
     function Encrypt(const Message: RawByteString;
       const Cipher: RawUtf8): RawByteString; virtual; abstract;
     function Decrypt(const Message: RawByteString;
@@ -2108,7 +2304,7 @@ type
     function Instance: TCryptCert;
     function Handle: pointer; virtual; abstract;
     function PrivateKeyHandle: pointer; virtual;
-    function GetPrivateKeyParams(out x, y: RawByteString): boolean; virtual;
+    function GetKeyParams(out x, y: RawByteString): boolean; virtual;
   end;
 
   /// meta-class of the abstract parent to implement ICryptCert interface
@@ -2117,7 +2313,7 @@ type
   /// abstract parent class for ICryptCert factories
   TCryptCertAlgo = class(TCryptAlgo)
   protected
-    fOsa: TCryptAsymAlgo; // should be set by the overwritten constructor
+    fCaa: TCryptAsymAlgo; // should be set by the overriden constructor
   public
     /// main factory to create a new Certificate instance with this algorithm
     // - return a new void instance, ready to call e.g. ICryptCert.Load
@@ -2170,57 +2366,88 @@ type
   published
     /// the asymmetric algorithm used for these certificates
     property AsymAlgo: TCryptAsymAlgo
-      read fOsa;
+      read fCaa;
   end;
+
+  TCryptCertCache = class;
 
   /// abstract interface to a Certificates Store, as returned by Store() factory
   // - may be X.509 or not, OpenSSL implemented or not
   ICryptStore = interface
+    /// delete all stored Certificates or CRL information
+    procedure Clear;
     /// load a Certificates Store from a ICryptStore.Save memory buffer content
     function Load(const Saved: RawByteString): boolean;
     /// serialize the Certificates Store into a memory buffer
     // - may be our TEccCertificateChain proprietary binary, or a chain of
     // X.509 Certificates and CRLs in PEM text format
     function Save: RawByteString;
-    /// search for a certificate from its (hexadecimal) identifier
+    /// get the associated ICryptCert instances cache
+    // - use Cache.Load() to retrieve a ICryptCert from its DER/PEM content
+    function Cache: TCryptCertCache;
+    /// search for a trusted certificate from its (hexadecimal) identifier
+    // - note that in the X.509 context, serial may be duplicated, so
+    // it is safer to use GetBySubjectKey()
     function GetBySerial(const Serial: RawUtf8): ICryptCert;
-    /// quickly check if a given certificate ID is part of the CRL
-    // - returns crrNotRevoked if the serial is not known as part of the CRL
-    // - returns the reason why this certificate has been revoked otherwise
-    function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason; overload;
-    /// quickly check if a given certificate is part of the CRL
+    /// search for a trusted certificate from its (hexadecimal) Subject Key Identifier
+    // - e.g. '14:2E:B3:17:B7:58:56:CB:AE:50:09:40:E6:1F:AF:9D:8B:14:C2:C6'
+    // - search the SKID on X.509, or the serial number for syn-es256
+    function GetBySubjectKey(const Key: RawUtf8): ICryptCert;
+    /// search for a trusted certificate from a given attribute
+    // - return the first certificate matching a given value
+    // - warning: some engines don't support this advanced search feature
+    function FindOne(const Value: RawByteString;
+      Method: TCryptCertComparer): ICryptCert;
+    /// quickly check if a given certificate is part of the internal CRL
     // - returns crrNotRevoked is the serial is not known as part of the CRL
     // - returns the reason why this certificate has been revoked otherwise
-    function IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason; overload;
+    function IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason;
     /// register a certificate in the internal certificate chain
     // - returns false e.g. if the certificate was not valid, or its serial was
     // already part of the internal list, or not of a compatible class
     // - self-signed certificates could be included - but add them with caution
     // because they will become root CA, or "trust anchors" in X.509 terminology
-    // - the Certificate should have one of cuCA, cuDigitalSignature usages
-    function Add(const cert: ICryptCert): boolean;
-    /// load a register a certificate or certificate chain from a memory buffer
+    // - the Certificate should have cuCA or cuKeyCertSign typical usages
+    function Add(const cert: ICryptCert): boolean; overload;
+    /// register several certificates in the internal certificate chain
     // - returns the serials of added certificate(s)
+    function Add(const cert: array of ICryptCert): TRawUtf8DynArray; overload;
+    /// load and register a certificate or certificate chain from a memory buffer
+    // - returns the serials of added certificate(s)
+    // - if there are any valid CRL, they will also be loaded to the store
     function AddFromBuffer(const Content: RawByteString): TRawUtf8DynArray;
-    /// load a register a certificate file or file chain
+    /// load and register a certificate file or file chain
     // - returns the serials of added certificate(s)
-    // - the Certificate should have one of cuCA, cuDigitalSignature usages
+    // - the Certificate(s) should have cuCA or cuKeyCertSign typical usages
+    // - if there are any valid CRL, they will also be loaded to the store
     function AddFromFile(const FileName: TFileName): TRawUtf8DynArray;
     /// search and register all certificate files from a given folder
     // - returns the serials of added certificate(s)
-    // - the Certificate(s) should have one of cuCA, cuDigitalSignature usages
+    // - the Certificate(s) should have cuCA or cuKeyCertSign typical usages
+    // - if there are any valid CRL, they will also be loaded to the store
     function AddFromFolder(const Folder: TFileName;
       const Mask: TFileName = FILES_ALL; Recursive: boolean = false): TRawUtf8DynArray;
-    /// add a new Serial number to the internal Certificate Revocation List
+    /// add a Certificate information to the global Certificate Revocation List
     // - on some engines (our internal ECC, but not OpenSSL), Reason=crrNotRevoked
     // could be used to unregister a certificate revocation
-    function Revoke(const Cert: ICryptCert; RevocationDate: TDateTime;
-      Reason: TCryptCertRevocationReason): boolean;
+    function Revoke(const Cert: ICryptCert; Reason: TCryptCertRevocationReason;
+      RevocationDate: TDateTime = 0): boolean;
     /// check if the certificate is valid, against known certificates chain
     // - will check internal properties of the certificate (e.g. validity dates),
     // and validate the stored digital signature according to the public key of
-    // the associated signing authority, as found within the store
-    function IsValid(const cert: ICryptCert): TCryptCertValidity;
+    // the associated signing authority, as found within the store, for as
+    // many level as needed until a self-signed "root anchor" is reached
+    function IsValid(const cert: ICryptCert;
+      date: TDateTime = 0): TCryptCertValidity;
+    /// check a certificate against its supplied chain and known certificates
+    // - with a large PKI as on the Internet, a certificates chain is usually
+    // supplied for authentication with only some "trust anchors" certificates
+    // - this overloaded method accept a chain as input, so that the first
+    // item is to be validated against the other members of the chain as
+    // intermediates (not part of the store), then eventually validating the
+    // last items of the chain with the store trusted certificates
+    function IsValidChain(const chain: ICryptCertChain;
+      date: TDateTime = 0): TCryptCertValidity;
     /// verify the digital signature of a given memory buffer
     // - this signature should have come from a previous ICryptCert.Sign() call
     // - will check internal properties of the certificate (e.g. validity dates),
@@ -2230,7 +2457,7 @@ type
     // has no way to lookup the X.509 certificate which actually signed the buffer
     function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
       IgnoreError: TCryptCertValidities = []; TimeUtc: TDateTime = 0): TCryptCertValidity;
-    /// how many certificates are currently stored
+    /// how many trusted certificates are currently stored
     function Count: integer;
     /// how many CRLs are currently stored
     function CrlCount: integer;
@@ -2241,22 +2468,32 @@ type
 
   /// abstract parent class to implement ICryptCert, as returned by Cert() factory
   TCryptStore = class(TCryptInstance, ICryptStore)
+  protected
+    fCache: TCryptCertCache;
   public
+    destructor Destroy; override;
     // ICryptStore methods
-    function Load(const Saved: RawByteString): boolean; virtual; abstract;
+    procedure Clear; virtual; abstract;
+    function Load(const Saved: RawByteString): boolean; virtual;
     function Save: RawByteString; virtual; abstract;
+    function Cache: TCryptCertCache; virtual;
     function GetBySerial(const Serial: RawUtf8): ICryptCert; virtual; abstract;
-    function IsRevoked(const Serial: RawUtf8): TCryptCertRevocationReason;
-      overload; virtual; abstract;
-    function IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason; overload; virtual;
-    function Add(const cert: ICryptCert): boolean; virtual; abstract;
+    function GetBySubjectKey(const Key: RawUtf8): ICryptCert; virtual; abstract;
+    function FindOne(const Value: RawByteString;
+      Method: TCryptCertComparer): ICryptCert; virtual;
+    function IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason; virtual; abstract;
+    function Add(const cert: ICryptCert): boolean; overload; virtual; abstract;
+    function Add(const cert: array of ICryptCert): TRawUtf8DynArray; overload; virtual;
     function AddFromBuffer(const Content: RawByteString): TRawUtf8DynArray; virtual; abstract;
     function AddFromFile(const FileName: TFileName): TRawUtf8DynArray; virtual;
     function AddFromFolder(const Folder, Mask: TFileName;
        Recursive: boolean): TRawUtf8DynArray; virtual;
-    function Revoke(const Cert: ICryptCert; RevocationDate: TDateTime;
-      Reason: TCryptCertRevocationReason): boolean; virtual; abstract;
-    function IsValid(const cert: ICryptCert): TCryptCertValidity; virtual; abstract;
+    function Revoke(const Cert: ICryptCert; Reason: TCryptCertRevocationReason;
+       RevocationDate: TDateTime): boolean; virtual; abstract;
+    function IsValid(const cert: ICryptCert;
+      date: TDateTime): TCryptCertValidity; virtual; abstract;
+    function IsValidChain(const chain: ICryptCertChain;
+      date: TDateTime): TCryptCertValidity; virtual;
     function Verify(const Signature: RawByteString; Data: pointer; Len: integer;
       IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
         virtual; abstract;
@@ -2277,11 +2514,139 @@ type
     function NewFrom(const Binary: RawByteString): ICryptStore; virtual;
   end;
 
+  /// abstract parent of TCryptCertList and TCryptCertCache storage classes
+  TCryptCertAbstractList = class(TSynPersistent)
+  protected
+    fList: TSynDictionary; // thread-safe RawByteString(SKID/DER)/ICryptCert
+    fCryptCertClass: TCryptCertClass;
+    procedure SetCryptCertClass(c: TCryptCertClass); // from TCryptStore.Create
+    function GetCount: integer;
+      {$ifdef HASINLINE} inline; {$endif}
+  public
+    // finalize the ICryptCert storage
+    destructor Destroy; override;
+    /// search the internal list for a given attribute
+    // - return all the certificates matching a given value
+    // - will use brute-force O(n) search algorithm with lockfree multi-read
+    function Find(const Value: RawByteString;
+      Method: TCryptCertComparer = ccmSerialNumber;
+      MaxCount: integer = 0): ICryptCerts; virtual;
+    /// search the internal list for a given attribute
+    // - return the first certificate matching a given value
+    function FindOne(const Value: RawByteString;
+      Method: TCryptCertComparer = ccmSerialNumber): ICryptCert; virtual;
+    /// return a copy of the internal list items
+    function List: ICryptCerts;
+    /// persist all stored Certificates in PEM format
+    procedure SaveToPem(W: TTextWriter; WithExplanatoryText: boolean = false);
+    /// direct low-level to the internal raw dictionary
+    // - store a hash table of ICryptCert values
+    // - for TCryptCertCache, RawByteString keys are DER certificates content
+    // - for TCryptCertList, RawByteString keys are SKID/GetSubjectKey binary
+    // - use rather the List function if you just want to access the stored values
+    property RawList: TSynDictionary
+      read fList;
+  published
+    /// the class of TCryptCert currently stored in this list
+    // - is either set in the overriden constructor, or retrieved at runtime
+    property CryptCertClass: TCryptCertClass
+      read fCryptCertClass;
+    /// how many instances are currently stored in this instance
+    property Count: integer
+      read GetCount;
+  end;
+
+  /// store several ICryptCert instances
+  // - those instances are likely to come from a TCryptCertCache holder
+  // - maintain a hashed index of ICryptCert.GetSubjectKey values for
+  // fast certification path validation e.g. during ICryptStore.IsValid
+  TCryptCertList = class(TCryptCertAbstractList)
+  public
+    /// initialize the ICryptCert storage
+    constructor Create; override;
+    /// include once a X.509 Certificate instance to the internal list
+    // - return false if its GetSubjectKey was already present
+    function Add(const Cert: ICryptCert): boolean; overload;
+    /// include once several X.509 Certificate instances to the internal list
+    procedure Add(const Cert: array of ICryptCert); overload;
+    /// search the list for a ICryptCert.GetSubjectKey using a hashed index
+    // - i.e. the Subject Key Identifier (SKID) of a X.509 Certificate or
+    // the serial number for syn-ecc
+    function FindBySubjectKey(const Key: RawUtf8): ICryptCert;
+    /// search the list for binary ICryptCert.GetSubjectKey using a hashed index
+    // - could be used instead of FindBySubjectKey() if the key is already
+    // decoded into its HumanHexToBin() raw binary format (as stored internally)
+    function FindBySubjectKeyRaw(const Key: RawByteString): ICryptCert;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// search the internal list for a given attribute
+    // - overriden to let ccmSubjectKey search use the hashed index
+    function Find(const Value: RawByteString;
+      Method: TCryptCertComparer = ccmSerialNumber;
+      MaxCount: integer = 0): ICryptCerts; override;
+    /// remove a ICryptCert from the list using its indexed GetSubjectKey
+    function DeleteBySubjectKey(const Key: RawUtf8): boolean;
+  end;
+
+  /// abstract class to cache ICryptCert instances, from their DER/binary
+  // - should be overriden to let its InternalLoad() method be implemented
+  // - to speed up typical PKI process, no DER parsing would be necessary
+  // - this class is thread-safe and will flush its oldest entries automatically
+  // - use TCryptCertCacheX509 or TCryptCertCacheOpenSsl, not this abstract class
+  TCryptCertCache = class(TCryptCertAbstractList)
+  protected
+    function OnDelete(const aKey, aValue; aIndex: integer): boolean;
+    // this abstract method should be properly overriden to load a DER buffer
+    function InternalLoad(const Cert: RawByteString): ICryptCert; virtual; abstract;
+  public
+    /// instantiate a ICryptCert instances cache
+    // - you can have several TCryptCertCache, dedicated to each bounded context
+    // - by default, internal cache will clean up instances with RefCnt = 1
+    // after 10 min of inactivity
+    constructor Create(TimeOutSeconds: integer = 10 * 6); reintroduce;
+    /// retrieve a potentially shared ICryptCert instance from DER or PEM input
+    // - returns nil if the input is not correct or not supported
+    // - will guess the proper TCryptCertAlgoX509 to use for the ICryptCert
+    function Load(const Cert: RawByteString): ICryptCert; overload;
+    /// retrieve a chain of ICryptCert instances from an array of DER input
+    // - any invalid Cert[] will just be ignored and not part of the result
+    function Load(const Cert: array of RawByteString): ICryptCerts; overload;
+    /// retrieve a chain of ICryptCert instances from a PEM input
+    // - any invalid chunk in the PEM will be ignored and not part of the result
+    function LoadPem(const Pem: RawUtf8): ICryptCerts;
+    /// search the internal list for a given attribute
+    // - overriden to let ccmBinary search use the hashed index
+    function Find(const Value: RawByteString;
+      Method: TCryptCertComparer = ccmSerialNumber;
+      MaxCount: integer = 0): ICryptCerts; override;
+    /// allocate a new TCryptCertList instance in the context of this cache
+    function NewList: TCryptCertList; overload; virtual;
+    /// allocate a new TCryptCertList instance in the context of this cache
+    // - filling the list with certificates from some PEM input
+    function NewList(const Pem: RawUtf8): TCryptCertList; overload;
+  end;
+
+
+/// append a ICryptCert to a certificates chain
+procedure ChainAdd(var chain: ICryptCertChain; const cert: ICryptCert);
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// search for a ICryptCert to a certificates chain
+// - will search for the ICryptCert instance itself, or by TCryptCertComparer
+function ChainFind(var chain: ICryptCertChain; const cert: ICryptCert;
+  comparer: TCryptCertComparer = ccmInstance): PtrInt;
+
+/// sort a certificate chain by mutual authentication
+// - returns the certificates in IsAuthorizedBy() order
+function ChainConsolidate(const chain: ICryptCertChain): ICryptCertChain;
+
+
+type
   /// maintains a list of ICryptCert, easily reachable per TCryptCertUsage
-  // - could be seen as a certificates store of the poor (tm)
+  // - could be seen as a basic certificates store or "PKI of the poor" (tm)
   // - per usage lookup is in O(1) so faster than iterative ICryptCert.GetUsage
   // - also features simple PEM / binary serialization methods
-  // - should be initialized by Clear at startup, or set as a class field
+  // - no CRL nor complex intermediate certificates lookup are available
+  // - should be initialized by Clear at startup, or zeroed as a class field
   {$ifdef USERECORDWITHMETHODS}
   TCryptCertPerUsage = record
   {$else}
@@ -2289,7 +2654,7 @@ type
   {$endif USERECORDWITHMETHODS}
   public
     /// the stored ICryptCert Instances
-    List: array of ICryptCert;
+    List: ICryptCerts;
     /// all usages currently stored in this list
     Usages: TCryptCertUsages;
     /// lookup table used by GetUsage()/PerUsage()
@@ -2331,7 +2696,11 @@ type
     function FromBinary(algo: TCryptCertAlgo; const bin: RawByteString): TCryptCertUsages;
   end;
 
+
 const
+  /// allow half a day margin when checking a Certificate date validity
+  CERT_DEPRECATION_THRESHOLD = 0.5;
+
   /// our units generate RSA keypairs with 2048-bit by default
   // - anything lower than 2048-bit is unsafe and should not be used
   // - 2048-bit is today's norm, creating 112-bit of security
@@ -2342,7 +2711,7 @@ const
   RSA_DEFAULT_GENERATION_BITS = 2048;
 
   /// the JWT algorithm names according to our known asymmetric algorithms
-  // - as implemented e.g. by TJwtAbstractOsl
+  // - as implemented e.g. by mormot.crypt.jwt
   CAA_JWT: array[TCryptAsymAlgo] of RawUtf8 = (
     'ES256',      // caaES256
     'ES384',      // caaES384
@@ -2355,6 +2724,21 @@ const
     'PS384',      // caaPS384
     'PS512',      // caaPS512
     'EdDSA');     // caaEdDSA
+
+  /// the JWS ECC curve names according to our known asymmetric algorithms
+  // - see https://www.iana.org/assignments/jose/jose.xhtml#web-key-elliptic-curve
+  CAA_CRV: array[TCryptAsymAlgo] of RawUtf8 = (
+    'P-256',     // caaES256
+    'P-384',     // caaES384
+    'P-521',     // caaES512, note that P-521 is not a typo ;)
+    'secp256k1', // caaES256K
+    '',          // caaRS256
+    '',          // caaRS384
+    '',          // caaRS512
+    '',          // caaPS256
+    '',          // caaPS384
+    '',          // caaPS512
+    'Ed25519');  // caaEdDSA
 
   /// the THashAlgo according to our known asymmetric algorithms
   CAA_HF: array[TCryptAsymAlgo] of THashAlgo = (
@@ -2370,11 +2754,31 @@ const
     hfSHA512,     // caaPS512
     hfSHA512);    // caaEdDSA - SHA-512 is included in the algorithm
 
+  /// the TCryptKeyAlgo according to our known asymmetric algorithms
+  CAA_CKA: array[TCryptAsymAlgo] of TCryptKeyAlgo = (
+    ckaEcc256,    // caaES256
+    ckaEcc384,    // caaES384
+    ckaEcc512,    // caaES512
+    ckaEcc256K,   // caaES256K
+    ckaRsa,       // caaRS256
+    ckaRsa,       // caaRS384
+    ckaRsa,       // caaRS512
+    ckaRsaPss,    // caaPS256
+    ckaRsaPss,    // caaPS384
+    ckaRsaPss,    // caaPS512
+    ckaEdDSA);    // caaEdDSA
+
   /// the known asymmetric algorithms which implement ECC cryptography
   CAA_ECC = [caaES256, caaES384, caaES512, caaES256K, caaEdDSA];
 
   /// the known asymmetric algorithms which implement RSA cryptography
   CAA_RSA = [caaRS256, caaRS384, caaRS512, caaPS256, caaPS384, caaPS512];
+
+  /// the known key algorithms which implement ECC cryptography
+  CKA_ECC = [ckaEcc256, ckaEcc384, ckaEcc512, ckaEcc256k, ckaEdDSA];
+
+  /// the known key algorithms which implement RSA cryptography
+  CKA_RSA = [ckaRsa, ckaRsaPss];
 
   /// such a Certificate could be used for anything
   CU_ALL = [low(TCryptCertUsage) .. high(TCryptCertUsage)];
@@ -2429,17 +2833,16 @@ const
     'OCSP Signing',                  // cuOcspSign
     'Time Stamping');                // cuTimestamp
 
-/// compute the number of security bits of a digital signature
-// - ECC security size is half of its X,Y coordinates storage size
-// - RSA security depends on the signature size, not the hash size
-// - e.g. 112 for RSA-2048, 128 for ECC-256
-function GetSignatureSecurityBits(a: TCryptAsymAlgo; len: integer): integer;
-
 function ToText(a: TCryptAsymAlgo): PShortString; overload;
+function ToText(a: TCryptKeyAlgo): PShortString; overload;
 function ToText(r: TCryptCertRevocationReason): PShortString; overload;
 function ToText(u: TCryptCertUsage): PShortString; overload;
 function ToText(u: TCryptCertUsages; from_cu_text: boolean = false): ShortString; overload;
 function ToText(v: TCryptCertValidity): PShortString; overload;
+
+/// fast case-insensitive check of the 'CN' Relative Distinguished Name identifier
+function IsCN(const Rdn: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// main resolver of the randomness generators
 // - the shared TCryptRandom of this algorithm is returned: caller should NOT free it
@@ -2556,41 +2959,90 @@ function StoreAlgo(const name: RawUtf8): TCryptStoreAlgo;
 function Store(const name: RawUtf8): ICryptStore;
 
 var
-  /// direct access to the mormot.crypt.ecc.pas 'syn-ecc' algorithm
-  // - may be nil if this unit was not included
-  CryptCertAlgoSyn: TCryptCertAlgo;
+  /// the prefered/default algorithm to be used wth X.509 certificates
+  // - NISTP-256 seems the new default, even if RSA-2048 (i.e. caaRS256) may
+  // still be used for compatiblity with legacy systems
+  // - used e.g. by 'x509-store' or 'x509-pki' for its DefaultCertAlgo method
+  CryptAlgoDefault: TCryptAsymAlgo = caaES256;
 
-  /// direct access to the mormot.crypt.ecc.pas 'syn-store' algorithm
-  // - may be nil if this unit was not included
-  CryptStoreAlgoSyn: TCryptStoreAlgo;
 
-  /// direct access to the mormot.crypt.ecc.pas 'syn-store-nocache' algorithm
-  // - may be nil if this unit was not included
-  CryptStoreAlgoSynNoCache: TCryptStoreAlgo;
+  (* TCryptAsym factories *)
 
-  /// direct access to the mormot.crypt.openssl.pas 'x509-store' algorithm
-  // - may be nil if this unit was not included or if OpenSSL is not available
-  // - is currently nil because TCryptStoreOpenSsl is not stable yet
-  // - call RegisterOpenSsl once to initialize this lookup table
-  CryptStoreAlgoOpenSsl: TCryptStoreAlgo;
+  /// direct access to the internal TCryptAsym factories
+  // - may be nil if mormot.crypt.ecc.pas or mormot.crypt.rsa.pas units
+  // were not included
+  // - you may use rather CryptAsymOpenSsl[] if OpenSSL is available
+  CryptAsym: array[TCryptAsymAlgo] of TCryptAsym;
 
   /// direct access to the mormot.crypt.openssl.pas TCryptAsym factories
   // - may be nil if this unit was not included or if OpenSSL is not available
   // - call RegisterOpenSsl once to initialize this lookup table
   CryptAsymOpenSsl: array[TCryptAsymAlgo] of TCryptAsym;
 
+
+  (* ICryptPublicKey / ICryptPrivateKey factories *)
+
+  /// RSA/ECC public key factory
+  // - implemented e.g. by mormot.crypt.ecc with TCryptPublicKeyEcc,
+  // mormot.crypt.rsa with TCryptPublicKeyRsa or mormot.crypt.opensssl with
+  // with TCryptPublicKeyOpenSsl
+  // - use as such:
+  // $ var key: ICryptPublicKey;
+  // $ ...
+  // $   key := CryptPublicKey[ckaEcc].Create;
+  // $   if key.Load(...) then ...
+  CryptPublicKey: array[TCryptKeyAlgo] of TCryptPublicKeyClass;
+
+  /// RSA/ECC private key factory
+  // - implemented e.g. by mormot.crypt.ecc with TCryptPrivateKeyEcc,
+  // mormot.crypt.rsa with TCryptPrivateKeyRsa or mormot.crypt.opensssl with
+  // with TCryptPrivateKeyOpenSsl
+  // - use as such:
+  // $ var key: ICryptPrivateKey;
+  // $ ...
+  // $   key := CryptPrivateKey[ckaEcc].Create;
+  // $   if key.Load(...) then ...
+  CryptPrivateKey: array[TCryptKeyAlgo] of TCryptPrivateKeyClass;
+
+
+  (* ICryptCert factories *)
+
+  /// direct access to the mormot.crypt.ecc.pas 'syn-ecc' algorithm
+  // - may be nil if this unit was not included
+  CryptCertSyn: TCryptCertAlgo;
+
+  /// direct access to the mormot.crypt.x509.pas ICryptCert factories
+  // - may be nil if this unit was not included
+  // - to get a new ICryptCert using OpenSSL RSA 2048 key over SHA-256, use e.g.
+  // $ CryptCertX509[caaRS256].New
+  CryptCertX509: array[TCryptAsymAlgo] of TCryptCertAlgo;
+
   /// direct access to the mormot.crypt.openssl.pas ICryptCert factories
   // - may be nil if this unit was not included or if OpenSSL is not available
   // - to return a ICryptCert instance using OpenSSL RSA 2048 key, use e.g.
-  // $ CryptCertAlgoOpenSsl[caaRS256].New
+  // $ CryptCertOpenSsl[caaRS256].New
   // - call RegisterOpenSsl once to initialize this lookup table
-  CryptCertAlgoOpenSsl: array[TCryptAsymAlgo] of TCryptCertAlgo;
+  CryptCertOpenSsl: array[TCryptAsymAlgo] of TCryptCertAlgo;
 
-  /// the prefered/default algorithm to be used wth OpenSsl X.509 certificates
-  // - NISTP-256 seems the new default, even if RSA-2048 (i.e. caaRS256) may
-  // still be used for compatiblity with legacy systems
-  // - as returned e.g. by 'x509-store' for its DefaultCertAlgo method
-  CryptCertAlgoOpenSslDefault: TCryptAsymAlgo = caaES256;
+
+  (* ICryptStore factories *)
+
+  /// direct access to the mormot.crypt.ecc.pas 'syn-store' algorithm
+  // - may be nil if this unit was not included
+  CryptStoreSyn: TCryptStoreAlgo;
+
+  /// direct access to the mormot.crypt.ecc.pas 'syn-store-nocache' algorithm
+  // - may be nil if this unit was not included
+  CryptStoreSynNoCache: TCryptStoreAlgo;
+
+  /// direct access to the mormot.crypt.x509.pas ICryptStore factory
+  CryptStoreX509: TCryptStoreAlgo;
+
+  /// direct access to the mormot.crypt.openssl.pas 'x509-store' algorithm
+  // - may be nil if this unit was not included or if OpenSSL is not available
+  // - is currently nil because TCryptStoreOpenSsl is not stable yet
+  // - call RegisterOpenSsl once to initialize this lookup table
+  CryptStoreOpenSsl: TCryptStoreAlgo;
 
 
 
@@ -2615,8 +3067,8 @@ type
     pemPublicKey,
     pemRsaPrivateKey,
     pemRsaPublicKey,
-    pemEcPublicKey,
     pemEcPrivateKey,
+    pemEcPublicKey,
     pemEncryptedPrivateKey,
     pemCertificateRequest,
     pemDhParameters,
@@ -2642,8 +3094,8 @@ const
     '-----BEGIN PUBLIC KEY-----'#13#10,
     '-----BEGIN RSA PRIVATE KEY-----'#13#10,
     '-----BEGIN RSA PUBLIC KEY-----'#13#10,
-    '-----BEGIN EC PUBLIC KEY-----'#13#10,
     '-----BEGIN EC PRIVATE KEY-----'#13#10,
+    '-----BEGIN EC PUBLIC KEY-----'#13#10,
     '-----BEGIN ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----BEGIN CERTIFICATE REQUEST-----'#13#10,
     '-----BEGIN DH PARAMETERS-----'#13#10,
@@ -2666,8 +3118,8 @@ const
     '-----END PUBLIC KEY-----'#13#10,
     '-----END RSA PRIVATE KEY-----'#13#10,
     '-----END RSA PUBLIC KEY-----'#13#10,
-    '-----END EC PUBLIC KEY-----'#13#10,
     '-----END EC PRIVATE KEY-----'#13#10,
+    '-----END EC PUBLIC KEY-----'#13#10,
     '-----END ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----END CERTIFICATE REQUEST-----'#13#10,
     '-----END DH PARAMETERS-----'#13#10,
@@ -2681,12 +3133,39 @@ const
     '-----END SYNRSA ENCRYPTED PRIVATE KEY-----'#13#10,
     '-----END SYNECC BOUNDED CERTIFICATE-----'#13#10);
 
-  /// our proprietary SYNECC TPemKind formats
+  /// our proprietary SYNECC TPemKind supported formats
   PEM_SYNECC =  [pemSynopseSignature,
                  pemSynopseCertificate,
                  pemSynopseUnencryptedPrivateKey,
                  pemSynopsePrivateKeyAndCertificate,
                  pemSynopseEccEncryptedPrivateKey];
+
+  /// the OID of the supported hash algorithms, decoded as text
+  ASN1_OID_HASH: array[THashAlgo] of RawUtf8 = (
+    '1.2.840.113549.2.5',       // hfMD5
+    '1.3.14.3.2.26',            // hfSHA1
+    '2.16.840.1.101.3.4.2.1',   // hfSHA256
+    '2.16.840.1.101.3.4.2.2',   // hfSHA384
+    '2.16.840.1.101.3.4.2.3',   // hfSHA512
+    '2.16.840.1.101.3.4.2.6',   // hfSHA512_256
+    '2.16.840.1.101.3.4.2.8',   // hfSHA3_256
+    '2.16.840.1.101.3.4.2.10'); // hfSHA3_512
+
+  /// the OID of all ECC public keys (X962)
+  // - is stored as prefix to CKA_OID[ckaEcc256..ckaEcc256k] parameter
+  ASN1_OID_X962_PUBLICKEY  = '1.2.840.10045.2.1';
+
+  /// the OID of all supported ICryptPublicKey/ICryptPrivateKey algorithms
+  CKA_OID: array[TCryptKeyAlgo] of RawUtf8 = (
+    '',                       // ckaNone
+    '1.2.840.113549.1.1.1',   // ckaRsa
+    '1.2.840.113549.1.1.10',  // ckaRsaPss
+    '1.2.840.10045.3.1.7',    // ckaEcc256  (with ASN1_OID_X962_PUBLICKEY)
+    '1.3.132.0.34',           // ckaEcc384  (with ASN1_OID_X962_PUBLICKEY)
+    '1.3.132.0.35',           // ckaEcc512  (with ASN1_OID_X962_PUBLICKEY)
+    '1.3.132.0.10',           // ckaEcc256k (with ASN1_OID_X962_PUBLICKEY)
+    '1.3.101.112');           // ckaEdDSA
+
 
 /// convert a binary DER content into a single-instance PEM text
 function DerToPem(der: pointer; len: PtrInt; kind: TPemKind): TCertPem; overload;
@@ -2733,18 +3212,56 @@ function DerParse(P: PAnsiChar; buf: PByteArray; buflen: PtrInt): PAnsiChar;
 
 /// cipher any private key buffer into safe binary
 // - encryption uses safe PBKDF2 HMAC-SHA256 AES-CTR-128 and AF-32 algorithms
-// - as used by pemSynopseEncryptedPrivateKey format and EccPrivateKeyEncrypt()
+// - as used by pemSynopseEccEncryptedPrivateKey format and EccPrivateKeyEncrypt()
+// or TXPrivateKey.Save and TCryptCertX509.Save
 function PrivateKeyEncrypt(const Input, Salt: RawByteString;
   const PrivatePassword: SpiUtf8; AfSplitRounds: integer = 31;
   Pbkdf2Rounds: integer = 1000): RawByteString;
 
 /// uncipher some binary into a raw private key buffer
 // - encryption uses safe PBKDF2 HMAC-SHA256 AES-CTR-128 and AF-32 algorithms
-// - as used by pemSynopseEncryptedPrivateKey format and EccPrivateKeyDecrypt()
+// - as used by pemSynopseEccEncryptedPrivateKey format and EccPrivateKeyDecrypt()
+// or TXPrivateKey.Load and TCryptCertX509.Load
 function PrivateKeyDecrypt(const Input, Salt: RawByteString;
   const PrivatePassword: SpiUtf8; AfSplitRounds: integer = 31;
   Pbkdf2Rounds: integer = 1000): RawByteString;
 
+
+/// compute the number of security bits of a digital signature
+// - RSA security depends on the signature size, not the hash size
+// - ECC security size is half of its X,Y coordinates storage size
+// - e.g. 112 for RSA-2048, 128 for ECC-256
+function GetSignatureSecurityBits(a: TCryptAsymAlgo; len: integer): integer;
+
+/// extract the raw binary of a ASN.1/DER digital signature
+// - input comes e.g. from ICryptCert.Sign or ICryptPrivateKey.Sign content
+// - resulting raw binary can be used e.g. for JSON Web Signature (JWS) content
+// - RSA and EdDSA signatures are not encoded, so are returnde directly
+// - ECC are decoded from their ASN1_SEQ into their raw xy coordinates concatenation
+function GetSignatureSecurityRaw(algo: TCryptAsymAlgo;
+  const signature: RawByteString): RawUtf8;
+
+/// raw function to recognize the OID(s) of a public key ASN1_SEQ definition
+function OidToCka(const oid, oid2: RawUtf8): TCryptKeyAlgo;
+
+/// raw function to generation a public key ASN1_SEQ definition with its OID(s)
+function CkaToSeq(cka: TCryptKeyAlgo): RawByteString;
+
+/// compute the public key ASN.1 from a raw binary as stored in X.509 certificate
+// - see e.g. "A.1.1. RSA Public Key Syntax" of RFC 8017
+function X509PubKeyToDer(Algorithm: TCryptKeyAlgo;
+  const SubjectPublicKey: RawByteString): RawByteString;
+
+/// compute the raw binary as stored in X.509 certificate from a ASN.1 public key
+// - i.e. extract the ASN1_BITSTR raw section as encoded by X509PubKeyToDer()
+function X509PubKeyFromDer(const PkcsDer: RawByteString): RawByteString;
+
+/// return the number of bits of a X.509 certificate SubjectPublicKey ASN1_BITSTR
+// - will recognize RSA ASN1_SEQ and ECC uncompressed keys as stored in X.509
+// - returns typically 2048 for RSA, or 256 for ecc256r1
+// - can format the key as its hexa members for ParsedToText(TX509Parsed)
+function X509PubKeyBits(const SubjectPublicKey: RawByteString;
+  PubText: PRawUtf8 = nil): integer;
 
 type
   /// output of the X509Parse() function
@@ -2756,13 +3273,6 @@ type
     NotBefore, NotAfter: TDateTime;
     PubKey: RawByteString;
   end;
-
-/// return the number of bits of a X.509 certificate SubjectPublicKey ASN1_BITSTR
-// - will recognize RSA ASN1_SEQ and ECC uncompressed keys as stored in X.509
-// - returns typically 2048 for RSA, or 256 for ecc256r1
-// - can format the key as its hexa members for ParsedToText(TX509Parsed)
-function X509PubKeyBits(const PubKey: RawByteString;
-  PubText: PRawUtf8 = nil): integer;
 
 /// return some multi-line text of the main TX509Parsed fields
 // - in a layout similar to X509_print() OpenSSL formatting
@@ -2911,6 +3421,8 @@ function Asn(Value: Int64; AsnType: integer = ASN1_INT): TAsnObject; overload;
 // - the raw buffer is likely to come from mormot.crypt.rsa TBigInt.Save result
 // - will trim unneeded leading zeros, and ensure will be stored as unsigned
 // even if starts with a $80 byte
+// - any temporary string will be zeroed during the process for anti-forensic,
+// since a BigInt may be sensitive information (e.g. a RSA secret prime)
 function AsnBigInt(const BigInt: RawByteString;
   AsnType: integer = ASN1_INT): TAsnObject;
 
@@ -2936,6 +3448,10 @@ function AsnText(const Text: RawUtf8): TAsnObject;
 // assigned (see RFC 5280 #4.1.2.5)
 function AsnTime(dt: TDateTime): TAsnObject;
 
+/// internal function used to wipe any temporary string for anti-forensic
+// - warning: all Content[] will be filled with zeroes even if marked as  "const"
+function AsnSafeOct(const Content: array of TAsnObject): TAsnObject;
+
 /// raw append some binary to an ASN.1 object buffer
 procedure AsnAdd(var Data: TAsnObject; const Buffer: TAsnObject);
   overload; {$ifdef HASINLINE} inline; {$endif}
@@ -2950,6 +3466,9 @@ function AsnDecLen(var Start: integer; const Buffer: TAsnObject): cardinal;
 /// decode the header of a ASN.1 binary item
 function AsnDecHeader(var Pos: integer; const Buffer: TAsnObject;
   out AsnType, AsnSize: integer): boolean;
+
+/// check if a DER memory buffer is a full block, e.g. a full ASN1_SEQ
+function AsnDecChunk(const der: RawByteString; exptyp: integer = ASN1_SEQ): boolean;
 
 /// decode an ASN1_INT ASN1_ENUM ASN1_BOOL value
 function AsnDecInt(var Start: integer; const Buffer: TAsnObject;
@@ -2966,9 +3485,16 @@ function AsnDecIp(p: PAnsiChar; len: integer): RawUtf8;
 function AsnNext(var Pos: integer; const Buffer: TAsnObject;
   Value: PRawByteString = nil; CtrEndPos: PInteger = nil): integer;
 
-/// parse the next ASN1_INT ASN1_ENUM ASN1_BOOL value as integer
+/// parse the next ASN1_INT ASN1_ENUM ASN1_BOOL value as 64-bit integer
 function AsnNextInteger(var Pos: integer; const Buffer: TAsnObject;
   out ValueType: integer): Int64;
+
+/// parse the next ASN1_INT ASN1_ENUM ASN1_BOOL value as 32-bit integer
+// - warning: parameters do NOT match AsnNextInteger() signature
+// - returns the ASN.1 value type, and optionally the ASN.1 value blob itself
+function AsnNextInt32(var Pos: integer; const Buffer: TAsnObject;
+  out Value: integer): integer;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// parse the next ASN.1 value as raw buffer
 // - returns the ASN.1 value type, and the ASN.1 raw value blob itself
@@ -5499,6 +6025,7 @@ begin
   if name = '' then
     raise ECrypt.CreateUtf8('Unexpected %.Create('''')', [self]);
   fName := LowerCase(name);
+  RegisterGlobalShutdownRelease(self);
   GlobalCryptAlgo.AddOrReplaceObject(fName, self);
 end;
 
@@ -6369,6 +6896,200 @@ begin
 end;
 
 
+const
+  /// per algorithm PrivateKeyEncrypt/PrivateKeyDecrypt salt
+  // - ckaRsa/ckaRsaPss share the same public/private key files by definition
+  // - ckaEcc256 matches EccPrivateKeyEncrypt/EccPrivateKeyDecrypt encoding
+  CKA_SALT: array[TCryptKeyAlgo] of RawUtf8 = (
+    '',           // ckaNone
+    'synrsa',     // ckaRsa
+    'synrsa',     // ckaRsaPss
+    'synecc',     // ckaEcc256
+    'syne384',    // ckaEcc384
+    'syne512',    // ckaEcc512
+    'synecck',    // ckaEcc256k
+    'syneddsa');  // ckaEdDSA
+
+  /// per algorithm PrivateKeyEncrypt/PrivateKeyDecrypt AF-32 rounds
+  // - ckaRsa/ckaRsaPss share the same public/private key files by definition
+  // - ckaEcc256 matches EccPrivateKeyEncrypt/EccPrivateKeyDecrypt encoding
+  CKA_ROUNDS: array[TCryptKeyAlgo] of byte = (
+    0,    // ckaNone
+    3,    // ckaRsa
+    3,    // ckaRsaPss
+    31,    // ckaEcc256
+    23,    // ckaEcc384
+    15,    // ckaEcc512
+    31,    // ckaEcc256k
+    31);   // ckaEdDSA
+
+{ TCryptAbstractKey }
+
+function TCryptAbstractKey.KeyAlgo: TCryptKeyAlgo;
+begin
+  result := fKeyAlgo;
+end;
+
+function TCryptAbstractKey.Instance: TCryptAbstractKey;
+begin
+  result := self;
+end;
+
+
+{ TCryptPublicKey }
+
+function TCryptPublicKey.VerifyDigest(Sig: pointer; Dig: THash512Rec; SigLen,
+  DigLen: integer; Hash: THashAlgo): boolean;
+begin
+  result := false; // to be overriden if needed (not for OpenSSL)
+end;
+
+function TCryptPublicKey.Verify(Algorithm: TCryptAsymAlgo; Data, Sig: pointer;
+  DataLen, SigLen: integer): boolean;
+var
+  hasher: TSynHasher;
+  dig: THash512Rec;
+  diglen: PtrInt;
+begin
+  diglen := hasher.Full(CAA_HF[Algorithm], Data, DataLen, dig);
+  result := (diglen <> 0) and
+            VerifyDigest(Sig, dig, SigLen, diglen, CAA_HF[Algorithm]);
+end;
+
+function TCryptPublicKey.Verify(Algorithm: TCryptAsymAlgo;
+  const Data, Sig: RawByteString): boolean;
+begin
+  result := Verify(Algorithm, pointer(Data), pointer(Sig), length(Data), length(Sig));
+end;
+
+
+{ TCryptPrivateKey }
+
+function TCryptPrivateKey.Save(AsPem: boolean;
+  const Password: SpiUtf8): RawByteString;
+var
+  der, bin: RawByteString;
+  k: TPemKind;
+begin
+  // use our proprietary mormot.core.secure encryption, not standard PKCS#8
+  // - overriden in mormot.crypt.openssl to use PEVP_PKEY standard serialization
+  if self = nil then
+    result := ''
+  else
+  try
+    // call overriden TCryptPrivateKeyEcc.ToDer and TCryptPrivateKeyRsa.ToDer
+    der := ToDer;
+    // persist in the expected (may be encrypted) format
+    if Password = '' then
+      // save as plain unencrypted PEM/DER
+      if AsPem then
+        if fKeyAlgo in CKA_RSA then
+          k := pemRsaPrivateKey
+        else
+          k := pemEcPrivateKey
+      else
+        k := pemUnspecified // save as ccfBinary
+    else
+    begin
+      bin := der; // for FillZero()
+      der := PrivateKeyEncrypt(
+               bin, CKA_SALT[fKeyAlgo], Password, CKA_ROUNDS[fKeyAlgo]);
+      if AsPem then
+        if fKeyAlgo in CKA_RSA then
+          k := pemSynopseRsaEncryptedPrivateKey
+        else
+          k := pemSynopseEccEncryptedPrivateKey
+        else
+          k := pemUnspecified;
+    end;
+    if k = pemUnspecified then
+      result := der
+    else
+      result := DerToPem(der, k);
+  finally
+    FillZero(der);
+    FillZero(bin);
+  end;
+end;
+
+function TCryptPrivateKey.FromDer(algo: TCryptKeyAlgo; const der: RawByteString;
+  pub: TCryptPublicKey): boolean;
+begin
+  result := false; // to be overriden if needed (not for OpenSSL)
+end;
+
+function TCryptPrivateKey.SignDigest(const Dig: THash512Rec; DigLen: integer;
+  DigAlgo: TCryptAsymAlgo): RawByteString;
+begin
+  result := ''; // to be overriden if needed (not for OpenSSL)
+end;
+
+function TCryptPrivateKey.Load(Algorithm: TCryptKeyAlgo;
+  const AssociatedKey: ICryptPublicKey; const PrivateKeySaved: RawByteString;
+  const Password: SpiUtf8): boolean;
+var
+  saved, der: RawByteString;
+  pub: TCryptPublicKey;
+begin
+  // use our proprietary mormot.core.secure encryption, not standard PKCS#8
+  // - overriden in mormot.crypt.openssl to use PEVP_PKEY standard serialization
+  result := false;
+  if (self = nil) or
+     (fKeyAlgo <> ckaNone) or
+     (Algorithm = ckaNone) or
+     (PrivateKeySaved = '') then
+    exit;
+  try
+    // compute the raw DER content (may be decrypt)
+    saved := PrivateKeySaved;
+    if Password <> '' then
+    begin
+      der := PemToDer(saved); // see also TCryptCertX509.Load
+      saved := PrivateKeyDecrypt(
+        der, CKA_SALT[Algorithm], Password, CKA_ROUNDS[Algorithm]);
+      if saved = '' then
+        exit;
+    end;
+    if Assigned(AssociatedKey) then
+      pub := AssociatedKey.Instance as TCryptPublicKey
+    else
+      pub := nil;
+    // call overriden TCryptPrivateKeyEcc.FromDer and TCryptPrivateKeyRsa.FromDer
+    if not FromDer(Algorithm, saved, pub) then
+      exit;
+    fKeyAlgo := Algorithm;
+    result := true;
+  finally
+    FillZero(saved);
+    FillZero(der);
+  end;
+end;
+
+function TCryptPrivateKey.Sign(Algorithm: TCryptAsymAlgo;
+  Data: pointer; DataLen: integer): RawByteString;
+var
+  hasher: TSynHasher;
+  dig: THash512Rec;
+  diglen: PtrInt;
+begin
+  diglen := hasher.Full(CAA_HF[Algorithm], Data, DataLen, dig);
+  result := SignDigest(dig, diglen, Algorithm);
+end;
+
+function TCryptPrivateKey.Sign(Algorithm: TCryptAsymAlgo;
+  const Data: RawByteString): RawByteString;
+begin
+  result := Sign(Algorithm, pointer(Data), length(Data));
+end;
+
+function TCryptPrivateKey.SharedSecret(
+  const PeerKey: ICryptPublicKey): RawByteString;
+begin
+  result := ''; // unsupported by this algorithm (only ECC by now)
+end;
+
+
+
 { TCryptCertAlgo }
 
 function TCryptCertAlgo.Load(const Saved: RawByteString;
@@ -6413,7 +7134,7 @@ end;
 
 function TCryptCertAlgo.JwtName: RawUtf8;
 begin
-  result := CAA_JWT[fOsa];
+  result := CAA_JWT[fCaa];
 end;
 
 
@@ -6438,11 +7159,72 @@ begin
   RaiseError('Generate: % error', [api]); // raise ECryptCert
 end;
 
+procedure TCryptCert.EnsureCanWrite(const Context: shortstring);
+begin
+  if (fIndexer <> nil) and
+     not IsVoid then
+    RaiseError('% not allowed: currently indexed by a %', [Context, fIndexer]);
+end;
+
+class procedure TCryptCert.InternalFind(Cert: PICryptCert;
+  const Value: RawByteString; Method: TCryptCertComparer;
+  Count, MaxCount: integer; out Chain: ICryptCerts);
+var
+  found: boolean;
+  res: integer;
+begin
+  // O(n) efficient search loop with some temporary memory allocation
+  res := 0;
+  while Count <> 0 do
+  begin
+    case Method of
+      ccmSerialNumber:
+        found := HumanHexCompare(Cert^.GetSerial, Value) = 0;
+      ccmSubjectName:
+        found := EqualBuf(Cert^.GetSubjectName, Value);
+      ccmIssuerName:
+        found := EqualBuf(Cert^.GetIssuerName, Value);
+      ccmSubjectCN:
+        found := IdemPropNameU(Cert^.GetSubject('CN'), Value);
+      ccmIssuerCN:
+        found := IdemPropNameU(Cert^.GetIssuer('CN'), Value);
+      ccmSubjectKey:
+        found := HumanHexCompare(Cert^.GetSubjectKey, Value) = 0;
+      ccmAuthorityKey:
+        found := CsvContains(Cert^.GetAuthorityKey, Value);
+      ccmSubjectAltName:
+        found := FindRawUtf8(Cert^.GetSubjects, Value, {casesens=}false) >= 0;
+      ccmIssuerAltName:
+        found := FindRawUtf8(Cert^.GetIssuers, Value, {casesens=}false) >= 0;
+      ccmBinary:
+        found := EqualBuf(Cert^.Save, Value);
+      ccmSha1:
+        found := IdemPropNameU(Cert^.GetDigest(hfSha1), Value);
+      ccmSha256:
+        found := IdemPropNameU(Cert^.GetDigest(hfSha256), Value);
+    else
+      found := false; // unsupported search method (e.g. ccmUsage)
+    end;
+    if found then
+    begin
+      InterfaceArrayAddCount(Chain, res, Cert^);
+      dec(MaxCount);
+      if MaxCount = 0 then
+        break;
+    end;
+    inc(Cert);
+    dec(Count);
+  end;
+  if res <> length({%H-}Chain) then
+    DynArrayFakeLength(Chain, res);
+end;
+
 function TCryptCert.GenerateFromCsr(const Csr: RawByteString;
   const Authority: ICryptCert; ExpireDays, ValidDays: integer): ICryptCert;
 var
   x: ICryptCert;
 begin
+  EnsureCanWrite('GenerateFromCsr');
   // by default, CreateSelfSignedCsr generates a self-signed certificate as CSR
   // - mormot.crypt.openssl and mormot.crypt.x509 will generate a proper CSR
   result := nil;
@@ -6456,6 +7238,59 @@ begin
     // note: Fields=nil since TCryptCertInternal does not support them
 end;
 
+function TCryptCert.IsAuthorizedBy(const Authority: ICryptCert): boolean;
+begin
+  result := (Authority <> nil) and
+            IdemPropNameU(GetAuthorityKey, Authority.GetSubjectKey);
+end;
+
+function TCryptCert.Compare(const Another: ICryptCert;
+  Method: TCryptCertComparer): integer;
+begin
+  if Assigned(Another) and
+     (Another.Handle <> nil) then
+    case Method of
+      ccmSerialNumber:
+        result := HumanHexCompare(GetSerial, Another.GetSerial);
+      ccmSubjectName:
+        result := CompareBuf(GetSubjectName, Another.GetSubjectName);
+      ccmIssuerName:
+        result := CompareBuf(GetIssuerName, Another.GetIssuerName);
+      ccmSubjectCN:
+        result := CompareBuf(GetSubject('CN'), Another.GetSubject('CN'));
+      ccmIssuerCN:
+        result := CompareBuf(GetIssuer('CN'), Another.GetIssuer('CN'));
+      ccmSubjectKey:
+        result := HumanHexCompare(GetSubjectKey, Another.GetSubjectKey);
+      ccmAuthorityKey:
+        result := HumanHexCompare(GetAuthorityKey, Another.GetAuthorityKey);
+      ccmSubjectAltName:
+        result := CompareBuf(RawUtf8ArrayToCsv(GetSubjects),
+                    RawUtf8ArrayToCsv(Another.GetSubjects));
+      ccmIssuerAltName:
+        result := CompareBuf(RawUtf8ArrayToCsv(GetIssuers),
+                    RawUtf8ArrayToCsv(Another.GetIssuers));
+      ccmUsage:
+        result := word(GetUsage) - word(Another.GetUsage);
+      ccmBinary:
+        result := CompareBuf(Save(cccCertOnly, '', ccfBinary),
+                             Another.Save(cccCertOnly, '', ccfBinary));
+      ccmSha1:
+        result := CompareBuf(GetDigest(hfSHA1), Another.GetDigest(hfSHA1));
+      ccmSha256:
+        result := CompareBuf(GetDigest(hfSHA256), Another.GetDigest(hfSHA256));
+    else // e.g. ccmInstance
+      result := ComparePointer(pointer(self), pointer(Another));
+    end
+  else
+    result := 1;
+end;
+
+function TCryptCert.IsEqual(const Another: ICryptCert): boolean;
+begin
+  result := Compare(Another, ccmBinary) = 0;
+end;
+
 function TCryptCert.IsValidDate(date: TDateTime): boolean;
 var
   na, nb: TDateTime;
@@ -6465,8 +7300,8 @@ begin
   na := GetNotAfter;
   nb := GetNotBefore;
   result := (not IsVoid) and
-            ((na <= 0) or (na > date)) and
-            ((nb <= 0) or (nb <= date));
+            ((na <= 0) or (na + CERT_DEPRECATION_THRESHOLD > date)) and
+            ((nb <= 0) or (nb < date + CERT_DEPRECATION_THRESHOLD));
 end;
 
 function TCryptCert.IsVoid: boolean;
@@ -6482,6 +7317,7 @@ end;
 function TCryptCert.LoadFromFile(const Source: TFileName;
   Content: TCryptCertContent; const PrivatePassword: SpiUtf8): boolean;
 begin
+  EnsureCanWrite('LoadFromFile');
   fLastLoadFromFileName := Source;
   result := Load(StringFromFile(Source), Content, PrivatePassword);
 end;
@@ -6520,14 +7356,6 @@ begin
   s := Save(Content, PrivatePassword, Format);
   FileFromString(s, fn);
   FillZero(s); // may be a private key with no password :(
-end;
-
-function TCryptCert.IsEqual(const another: ICryptCert): boolean;
-begin
-  // HasPrivateKey is not part of the comparison
-  result := Assigned(another) and
-            (Save(cccCertOnly, '', ccfBinary) =
-             another.Save(cccCertOnly, '', ccfBinary));
 end;
 
 function TCryptCert.Sign(const Data: RawByteString): RawByteString;
@@ -6632,6 +7460,25 @@ begin
   if Payload <> nil then
     Payload^ := pl;
 end;
+
+function TCryptCert.JwkCompute: RawUtf8;
+var
+  x, y: RawByteString;
+  bx, by: RawUtf8;
+begin
+  result := '';
+  if not GetKeyParams(x, y) then
+    exit;
+  bx := BinToBase64uri(x);
+  by := BinToBase64uri(y);
+  // parameters are ordered lexicographically, as expected for thumbprints
+  if AsymAlgo in CAA_ECC then
+    FormatUtf8('{"crv":"%","kty":"EC","x":"%","y":"%"}',
+      [CAA_CRV[AsymAlgo], bx, by], result)
+  else
+    FormatUtf8('{"e":"%","kty":"RSA","n":"%"}', [bx, by], result);
+end;
+
 function TCryptCert.SharedSecret(const pub: ICryptCert): RawByteString;
 begin
   result := ''; // unsupported by default
@@ -6657,7 +7504,7 @@ begin
   result := nil; // unsupported
 end;
 
-function TCryptCert.GetPrivateKeyParams(out x, y: RawByteString): boolean;
+function TCryptCert.GetKeyParams(out x, y: RawByteString): boolean;
 begin
   result := false; // unsupported
 end;
@@ -6665,12 +7512,44 @@ end;
 
 { TCryptStore }
 
-function TCryptStore.IsRevoked(const cert: ICryptCert): TCryptCertRevocationReason;
+destructor TCryptStore.Destroy;
 begin
-  if Assigned(cert) then
-    result := IsRevoked(cert.GetSerial)
+  inherited Destroy;
+  fCache.Free;
+end;
+
+function TCryptStore.Load(const Saved: RawByteString): boolean;
+begin
+  Clear;
+  result := AddFromBuffer(Saved) <> nil; // expect chain of PEM Cert + CRLs
+end;
+
+function TCryptStore.Cache: TCryptCertCache;
+begin
+  result := fCache;
+end;
+
+function TCryptStore.FindOne(const Value: RawByteString;
+  Method: TCryptCertComparer): ICryptCert;
+begin
+  case Method of
+    ccmSerialNumber:
+      result := GetBySerial(Value);
+    ccmSubjectKey:
+      result := GetBySubjectKey(Value);
   else
-    result := crrNotRevoked;
+    result := nil; // other methods are unsupported by default
+  end;
+end;
+
+function TCryptStore.Add(const cert: array of ICryptCert): TRawUtf8DynArray;
+var
+  i: PtrInt;
+begin
+  result := nil;
+  for i := 0 to high(cert) do
+    if Add(cert[i]) then
+      AddRawUtf8(result, cert[i].GetSerial);
 end;
 
 function TCryptStore.AddFromFile(const FileName: TFileName): TRawUtf8DynArray;
@@ -6719,6 +7598,58 @@ begin
   SetLength(result, n);
 end;
 
+function TCryptStore.IsValidChain(const chain: ICryptCertChain;
+  date: TDateTime): TCryptCertValidity;
+var
+  i, n: PtrInt;
+  c: ICryptCertChain;
+begin
+  // we need something to validate
+  result := cvBadParameter;
+  if (chain = nil) or
+     (chain[0] = nil) then
+    exit;
+  // ensure main certificate is not deprecated
+  result := cvInvalidDate;
+  if not chain[0].IsValidDate(date) then
+    exit;
+  // compute the exact authority sequence (if not supplied in proper order)
+  result := cvUnknownAuthority;
+  c := ChainConsolidate(chain);
+  n := length(c);
+  if (n = 0) or
+     ((n = 1) and
+      not c[0].IsSelfSigned) then
+    exit;
+  // check the usages of all intermediate certificates
+  result := cvWrongUsage;
+  for i := 1 to n - 1 do
+    if c[i].GetUsage * [cuKeyCertSign, cuCA] = [] then
+      exit;
+  // ensure no certificate in the sequence has been explicitly revoked
+  result := cvRevoked;
+  for i := 0 to n - 1 do
+    if IsRevoked(c[i]) <> crrNotRevoked then
+      exit;
+  // check the cascaded dates (before any digital signature verification)
+  result := cvDeprecatedAuthority;
+  for i := 1 to n - 1 do
+    if not c[i].IsValidDate(c[i - 1].GetNotBefore) then
+      exit;
+  // check the cascaded digital signatures
+  for i := 0 to n - 2 do
+  begin
+    result := c[i].Verify(c[i + 1], [cvWrongUsage, cvDeprecatedAuthority]);
+    // note: TCryptCertX509.Verify has a per-authority cache so is very fast
+    if result <> cvValidSigned then
+      exit;
+  end;
+  // eventually check the trusted anchor of the chain
+  if n > 1 then
+    date := c[n - 2].GetNotBefore; // anchor is not main: adjust date
+  result := IsValid(c[n - 1], date);
+end;
+
 
 
 { TCryptStoreAlgo }
@@ -6728,6 +7659,338 @@ begin
   result := New;
   if not result.Load(Binary) then
     result := nil;
+end;
+
+
+{ TCryptCertAbstractList }
+
+procedure TCryptCertAbstractList.SetCryptCertClass(c: TCryptCertClass);
+begin
+  fCryptCertClass := c;
+end;
+
+function TCryptCertAbstractList.GetCount: integer;
+begin
+  result := fList.Count;
+end;
+
+destructor TCryptCertAbstractList.Destroy;
+begin
+  fList.Free;
+  inherited Destroy;
+end;
+
+function TCryptCertAbstractList.Find(const Value: RawByteString;
+  Method: TCryptCertComparer; MaxCount: integer): ICryptCerts;
+begin
+  result := nil;
+  if (self = nil) or
+     (fList.Count = 0) or
+     (Value = '') then
+    exit;
+  fList.Safe^.ReadLock;
+  try
+    // non-blocking O(n) search - overriden in TCryptCertX509 for performance
+    if fCryptCertClass <> nil then
+      fCryptCertClass.InternalFind(
+        fList.Values.Value^, Value, Method, fList.Count, MaxCount, result);
+  finally
+    fList.Safe^.ReadUnLock;
+  end;
+end;
+
+function TCryptCertAbstractList.FindOne(const Value: RawByteString;
+  Method: TCryptCertComparer): ICryptCert;
+var
+  res: ICryptCerts;
+begin
+  res := Find(Value, Method, 1);
+  if res = nil then
+    result := nil
+  else
+    result := res[0];
+end;
+
+function TCryptCertAbstractList.List: ICryptCerts;
+begin
+  fList.CopyValues(result);
+end;
+
+procedure TCryptCertAbstractList.SaveToPem(W: TTextWriter;
+  WithExplanatoryText: boolean);
+var
+  i: PtrInt;
+  c: ^ICryptCert;
+begin
+  fList.Safe.ReadLock;
+  try
+    c := fList.Values.Value^;
+    for i := 1 to fList.Count do
+    begin
+      if WithExplanatoryText then
+        // see https://datatracker.ietf.org/doc/html/rfc7468#section-5.2
+        W.Add('Subject: %'#13#10'Issuer: %'#13#10'Validity: from % to %'#13#10,
+         [c^.GetSubjectName, c^.GetIssuerName, DateTimeToIso8601Short(
+            c^.GetNotBefore), DateTimeToIso8601Short(c^.GetNotAfter)]);
+      W.AddString(c^.Save(cccCertOnly, '', ccfPem));
+      W.AddCR;
+      inc(c);
+    end;
+  finally
+    fList.Safe.ReadUnLock;
+  end;
+end;
+
+
+{ TCryptCertCache }
+
+function TCryptCertCache.OnDelete(const aKey, aValue; aIndex: integer): boolean;
+begin
+  // return true to delete the deprecated item - only if not currently in use
+  result := ICryptCert(aValue).Instance.RefCount = 1;
+end;
+
+constructor TCryptCertCache.Create(TimeOutSeconds: integer);
+begin
+  fList := TSynDictionary.Create(TypeInfo(TRawByteStringDynArray),
+    TypeInfo(ICryptCerts), {caseins=}false, TimeOutSeconds);
+  fList.OnCanDeleteDeprecated := OnDelete;
+  fList.ThreadUse := uRWLock; // non-blocking Load() and Find()
+end;
+
+function TCryptCertCache.Load(const Cert: RawByteString): ICryptCert;
+var
+  der: RawByteString;
+  inst: TCryptCert;
+begin
+  result := nil;
+  // normalize and validate input
+  if AsnDecChunk(Cert) then
+    der := Cert
+  else
+  begin
+    der := PemToDer(Cert);
+    if not AsnDecChunk(der) then
+      exit;
+  end;
+  // try to retrieve and share an existing instance
+  if fList.FindAndCopy(der, result) then
+    exit;
+  // we need to create a new TCryptCert instance
+  result := InternalLoad(der);
+  if result = nil then
+    exit;
+  // ensure it has a coherent implementation class
+  inst := result.Instance;
+  if pointer(fCryptCertClass) <> PPointer(inst)^ then
+    if fCryptCertClass <> nil then
+      exit // return the instance, but don't cache it
+    else
+      fCryptCertClass := PPointer(inst)^;
+  inst.fIndexer := self; // don't touch once indexed
+  // add this new instance to the internal cache
+  if fList.Count > 128 then
+    fList.DeleteDeprecated; // make some room (once a second and if RefCount=1)
+  fList.Add(der, result);   // der key will be shared with TX509.fCachedDer
+end;
+
+function TCryptCertCache.Load(const Cert: array of RawByteString): ICryptCerts;
+var
+  i, n: PtrInt;
+begin
+  result := nil;
+  SetLength(result, length(Cert));
+  n := 0;
+  for i := 0 to high(Cert) do
+  begin
+    result[n] := Load(Cert[i]);
+    if Assigned(result[n]) then
+      inc(n);
+  end;
+  SetLength(result, n);
+end;
+
+function TCryptCertCache.LoadPem(const Pem: RawUtf8): ICryptCerts;
+var
+  p: PUtf8Char;
+  k: TPemKind;
+  der: TCertDer;
+  c: ICryptCert;
+begin
+  result := nil;
+  p := pointer(Pem);
+  if p <> nil then
+    repeat
+      der := NextPemToDer(p, @k);
+      if der = '' then
+        break;
+      if not (k in [pemUnspecified, pemCertificate]) then
+        continue; // no need to try loading something which is not a X.509 cert
+      c := Load(der);
+      if c <> nil then
+        ChainAdd(result, c);
+    until false;
+end;
+
+function TCryptCertCache.Find(const Value: RawByteString;
+  Method: TCryptCertComparer; MaxCount: integer): ICryptCerts;
+begin
+  if Method = ccmBinary then
+  begin
+    SetLength(result, 1);
+    if not fList.FindAndCopy(Value, result) then
+      result := nil;
+  end
+  else
+    result := inherited Find(Value, Method, MaxCount);
+end;
+
+function TCryptCertCache.NewList: TCryptCertList;
+begin
+  result := TCryptCertList.Create;
+  result.fCryptCertClass := fCryptCertClass; // propagate the class
+end;
+
+function TCryptCertCache.NewList(const Pem: RawUtf8): TCryptCertList;
+begin
+  result := NewList;
+  result.Add(LoadPem(Pem));
+end;
+
+
+{ TCryptCertList }
+
+constructor TCryptCertList.Create;
+begin
+  inherited Create;
+  fList := TSynDictionary.Create(
+    TypeInfo(TRawByteStringDynArray), TypeInfo(ICryptCerts));
+  fList.ThreadUse := uRWLock; // non-blocking Find()
+end;
+
+function TCryptCertList.Add(const Cert: ICryptCert): boolean;
+var
+  bin: RawByteString;
+  inst: TCryptCert;
+begin
+  result := false;
+  if not Assigned(Cert) then
+    exit;
+  inst := Cert.Instance;
+  if pointer(fCryptCertClass) <> PPointer(inst)^ then
+    if fCryptCertClass = nil then
+      fCryptCertClass := PPointer(inst)^
+    else
+      raise ECryptCert.CreateUtf8('%.Add(%) but we already store %',
+        [self, inst, fCryptCertClass]);
+  inst.fIndexer := self; // don't touch once indexed
+  result := HumanHexToBin(inst.GetSubjectKey, bin) and
+            (fList.Add(bin, Cert) >= 0);
+end;
+
+procedure TCryptCertList.Add(const Cert: array of ICryptCert);
+var
+  i: PtrInt;
+begin
+  for i := 0 to high(Cert) do
+    Add(Cert[i]);
+end;
+
+function TCryptCertList.FindBySubjectKey(const Key: RawUtf8): ICryptCert;
+var
+  bin: RawByteString;
+begin
+  result := nil;
+  if HumanHexToBin(Key, bin) then
+    fList.FindAndCopy(bin, result);
+end;
+
+function TCryptCertList.FindBySubjectKeyRaw(const Key: RawByteString): ICryptCert;
+begin
+  fList.FindAndCopy(Key, result);
+end;
+
+function TCryptCertList.Find(const Value: RawByteString;
+  Method: TCryptCertComparer; MaxCount: integer): ICryptCerts;
+begin
+  if Method = ccmSubjectKey then
+  begin
+    SetLength(result, 1);
+    result[0] := FindBySubjectKey(Value); // use the TSynDictionary hash table
+    if result[0] = nil then
+      result := nil;
+  end
+  else
+    result := inherited Find(Value, Method, MaxCount);
+end;
+
+function TCryptCertList.DeleteBySubjectKey(const Key: RawUtf8): boolean;
+var
+  bin: RawByteString;
+begin
+  result := HumanHexToBin(Key, bin) and
+            (fList.Delete(Key) >= 0);
+end;
+
+
+procedure ChainAdd(var chain: ICryptCertChain; const cert: ICryptCert);
+begin
+  InterfaceArrayAdd(chain, cert);
+end;
+
+function ChainFind(var chain: ICryptCertChain; const cert: ICryptCert;
+  comparer: TCryptCertComparer): PtrInt;
+begin
+  if comparer = ccmInstance then
+    result := InterfaceArrayFind(chain, cert)
+  else
+  begin
+    for result := 0 to length(chain) - 1 do
+      if cert.Compare(chain[result], comparer) = 0 then
+        exit;
+    result := -1;
+  end;
+end;
+
+function ChainConsolidate(const chain: ICryptCertChain): ICryptCertChain;
+var
+  ref: array[0..127] of pointer; // weak references of ICryptCert
+  count, n: PtrInt;
+
+  procedure RecursiveCompute(var one: pointer);
+  var
+    i: PtrInt;
+    r: PPointer;
+  begin
+    result[n] := ICryptCert(one);
+    inc(n);
+    if n = count then
+      exit; // paranoid
+    r := @ref[1];
+    for i := 1 to count - 1 do
+      if (r^ <> nil) and
+         ICryptCert(one).IsAuthorizedBy(ICryptCert(r^)) then
+      begin
+        one := nil; // faster and avoid endless loop on circular references
+        RecursiveCompute(r^);
+        break;
+      end
+      else
+        inc(r);
+  end;
+
+begin
+  result := nil;
+  count := length(chain);
+  if (chain = nil) or
+     (chain[0] = nil) or
+     (count >= high(ref)) then // a typical chain has 2 or 3 certificates
+    exit;
+  n := 0;
+  SetLength(result, count);
+  MoveFast(pointer(chain)^, ref[0], count * SizeOf(ref[0]));
+  RecursiveCompute(ref[0]); // fill result[0..n-1] in auth order
+  DynArrayFakeLength(result, n);
 end;
 
 
@@ -6866,41 +8129,14 @@ begin
 end;
 
 
-function GetSignatureSecurityBits(a: TCryptAsymAlgo; len: integer): integer;
-begin
-  result := 0;
-  len := len shl 3; // into bits
-  if len > 128 then
-    case a of
-      // ECC security size is half of its X,Y coordinates storage size
-      caaES256,
-      caaES256K,
-      caaEdDSA:
-        result := 128;
-      caaES384:
-        result := 192;
-      caaES512:
-        result := 256;
-      // RSA security depends on the signature size, not the hash size
-      caaRS256 .. caaPS512:
-        if len < 1024 then
-          result := 30           // 512-bit
-        else if len < 2048 then
-          result := 80           // 1024-bit
-        else if len < 3072 then
-          result := 112          // 2048-bit
-        else if len < 7680 then
-          result := 128          // 3072-bit
-        else if len < 15360 then
-          result := 192          // 7680-bit: very unlikely since very slow
-        else
-          result := 256; // the lower RS256 hash has 256-bit of security anyway
-    end;
-end;
-
 function ToText(a: TCryptAsymAlgo): PShortString; overload;
 begin
   result := GetEnumName(TypeInfo(TCryptAsymAlgo), ord(a));
+end;
+
+function ToText(a: TCryptKeyAlgo): PShortString; overload;
+begin
+  result := GetEnumName(TypeInfo(TCryptKeyAlgo), ord(a));
 end;
 
 function ToText(r: TCryptCertRevocationReason): PShortString;
@@ -6933,6 +8169,11 @@ begin
   result := GetEnumName(TypeInfo(TCryptCertValidity), ord(v));
 end;
 
+function IsCN(const Rdn: RawUtf8): boolean;
+begin
+  result := (length(Rdn) = 2) and
+            (PWord(Rdn)^ and $dfdf = ord('C') + ord('N') shl 8);
+end;
 
 
 { Register mormot.crypt.core and mormot.crypt.secure Algorithms }
@@ -6949,7 +8190,7 @@ begin
     if GlobalCryptAlgo <> nil then
       exit;
     GlobalCryptAlgo := RegisterGlobalShutdownRelease(
-      TRawUtf8List.CreateEx([fObjectsOwned, fNoDuplicate, fThreadSafe]));
+      TRawUtf8List.CreateEx([fNoDuplicate, fThreadSafe])); // no fObjectsOwned
     // register mormot.crypt.core engines into our factories
     TCryptRandomEntropy.Implements(RndAlgosText);
     TCryptRandomAesPrng.Implements('rnd-default,rnd-aes');
@@ -7272,7 +8513,7 @@ begin
     if pem = '' then
       break;
     if k = pemCertificate then
-      if Cert <> '' then
+      if {%H-}Cert <> '' then
         exit // should contain a single Certificate
       else
         Cert := PemToDer(pem)
@@ -7662,7 +8903,153 @@ begin
     end;
 end;
 
-function X509PubKeyBits(const PubKey: RawByteString;
+const
+  CAA_SIZE: array[TCryptAsymAlgo] of Integer = (
+    32,  // caaES256
+    48,  // caaES384
+    66,  // caaES512
+    32,  // caaES256K
+    0,   // caaRS256
+    0,   // caaRS384
+    0,   // caaRS512
+    0,   // caaPS256
+    0,   // caaPS384
+    0,   // caaPS512
+    32); // caaEdDSA
+
+function GetSignatureSecurityBits(a: TCryptAsymAlgo; len: integer): integer;
+begin
+  result := 0;
+  len := len shl 3; // into bits
+  if len < 128 then
+    exit;
+  result := CAA_SIZE[a];
+  if result <> 0 then
+    // ECC security size is half of its X,Y coordinates storage size
+    result := result shl 2
+  else
+    // RSA security depends on the signature size, not the hash size
+    if len < 1024 then
+      result := 30           // 512-bit
+    else if len < 2048 then
+      result := 80           // 1024-bit
+    else if len < 3072 then
+      result := 112          // 2048-bit
+    else if len < 7680 then
+      result := 128          // 3072-bit
+    else if len < 15360 then
+      result := 192          // 7680-bit: very unlikely since very slow
+    else
+      result := 256; // the lower RS256 hash has 256-bit of security anyway
+end;
+
+function GetSignatureSecurityRaw(algo: TCryptAsymAlgo;
+  const signature: RawByteString): RawUtf8;
+var
+  derlen: cardinal;
+  der: PByteArray;
+  eccbytes, len: integer;
+  buf: array [0..131] of AnsiChar;
+begin
+  if algo in (CAA_RSA + [caaEdDSA]) then
+  begin
+    // no need to be decoded, since RSA and EdDSA have no SEQ
+    result := BinToBase64uri(pointer(signature), length(signature));
+    exit;
+  end;
+  result := '';
+  derlen := length(signature);
+  der := pointer(signature);
+  if (derlen < 50) or
+     (der[0] <> ASN1_SEQ) or
+     (der[1] > derlen - 2) then
+    exit;
+  eccbytes := CAA_SIZE[algo];
+  if der[1] and $80 <> 0 then
+  begin
+    // 2-byte length
+    assert((der[1] and $7f) = 1);
+    len := der[2];
+    if DerParse(DerParse(@der[3], @buf[0], eccbytes),
+        @buf[eccbytes], eccbytes) <> PAnsiChar(@der[len + 3]) then
+      exit;
+  end
+  else
+  begin
+    len := der[1];
+    if DerParse(DerParse(@der[2], @buf[0], eccbytes),
+        @buf[eccbytes], eccbytes) <> PAnsiChar(@der[len + 2]) then
+      exit;
+  end;
+  result := BinToBase64uri(@buf[0], eccbytes * 2);
+end;
+
+function OidToCka(const oid, oid2: RawUtf8): TCryptKeyAlgo;
+begin
+  if oid = CKA_OID[ckaRsa] then
+    result := ckaRsa
+  else if oid = CKA_OID[ckaRsaPss] then
+    result := ckaRsaPss
+  else if oid = ASN1_OID_X962_PUBLICKEY then
+  begin
+    for result := ckaEcc256 to ckaEcc256k do
+      if oid2 = CKA_OID[result] then
+        exit;
+    result := ckaNone;
+  end
+  else if oid = CKA_OID[ckaEdDSA] then
+    result := ckaEdDSA
+  else
+    result := ckaNone;
+end;
+
+function CkaToSeq(cka: TCryptKeyAlgo): RawByteString;
+begin
+  case cka of
+    ckaRsa:
+      result := AsnSeq([
+                  AsnOid(pointer(CKA_OID[ckaRsa])),
+                  ASN1_NULL_VALUE // optional
+                ]);
+    ckaRsaPss,
+    ckaEdDSA:
+      result := AsnSeq([
+                  AsnOid(pointer(CKA_OID[cka]))
+                ]);
+    ckaEcc256 .. ckaEcc256k:
+      result := AsnSeq([
+                  AsnOid(ASN1_OID_X962_PUBLICKEY),
+                  AsnOid(pointer(CKA_OID[cka]))
+                ]);
+  else
+    raise ECrypt.CreateUtf8('Unexpected CkaToSeq(%)', [ToText(cka)^]);
+  end;
+end;
+
+function X509PubKeyToDer(Algorithm: TCryptKeyAlgo;
+  const SubjectPublicKey: RawByteString): RawByteString;
+begin
+  result := AsnSeq([
+              CkaToSeq(Algorithm),
+              Asn(ASN1_BITSTR, [
+                SubjectPublicKey
+              ])
+            ]);
+end;
+
+function X509PubKeyFromDer(const PkcsDer: RawByteString): RawByteString;
+var
+  pos: integer;
+  algoseq: RawByteString; // algorithm OID(s) as encoded by CkaToSeq()
+begin
+  pos := 1;
+  if (AsnNext(pos, PkcsDer) <> ASN1_SEQ) or
+     (AsnNextRaw(pos, PkcsDer, algoseq) <> ASN1_SEQ) or
+     (AsnNextRaw(pos, PkcsDer, result) <> ASN1_BITSTR) then
+    result := '';
+end;
+
+function X509PubKeyBits(const SubjectPublicKey: RawByteString;
   PubText: PRawUtf8): integer;
 var
   pub: PByte;
@@ -7670,11 +9057,11 @@ var
   modulo, exp: RawByteString;
   name, bits: RawUtf8;
 begin
-  pub := pointer(PubKey);
-  publen := length(PubKey);
+  pub := pointer(SubjectPublicKey);
+  publen := length(SubjectPublicKey);
   result := publen;
   if result <> 0 then
-    case PubKey[1] of
+    case SubjectPublicKey[1] of
       #$04:
         begin
           // ECC uncompressed key
@@ -7688,9 +9075,9 @@ begin
         begin
           // RSA sequence
           pos := 1;
-          if (AsnNext(pos, PubKey) = ASN1_SEQ) and
-             AsnNextBigInt(pos, PubKey, modulo) and
-             AsnNextBigInt(pos, PubKey, exp) then
+          if (AsnNext(pos, SubjectPublicKey) = ASN1_SEQ) and
+             AsnNextBigInt(pos, SubjectPublicKey, modulo) and
+             AsnNextBigInt(pos, SubjectPublicKey, exp) then
           begin
             result := length(modulo);
             if PubText <> nil then
@@ -7849,21 +9236,22 @@ var
   tmp: ShortString; // no temporary memory allocation
 begin
   tmp[0] := #0;
-  // first byte = two first numbers modulo 40
-  x := GetNextItemCardinal(OidText, '.') * 40;
-  y := 0;
-  while OidText <> nil do
+  if OidText <> nil then
   begin
-    y := GetNextItemCardinal(OidText, '.');
-    if y = 0 then
-      break;
-    inc(x, y);
-    AsnEncOidItem(x, tmp);
-    x := 0;
+    // first byte = two first numbers modulo 40
+    x := GetNextItemCardinal(OidText, '.') * 40;
+    y := 0;
+    while OidText <> nil do
+    begin
+      y := GetNextItemCardinal(OidText, '.'); // warning: y=0 is a valid value
+      inc(x, y);
+      AsnEncOidItem(x, tmp);
+      x := 0;
+    end;
+    if (y = 0) or
+       (tmp[0] < #3) then
+      tmp[0] := #0; // clearly invalid input
   end;
-  if (y = 0) or
-     (tmp[0] < #3) then
-    tmp[0] := #0; // clearly invalid input
   FastSetRawByteString(result, @tmp[1], ord(tmp[0]));
 end;
 
@@ -7975,7 +9363,7 @@ var
 begin
   result := 0;
   if (AsnSize <= 0) or
-     (Start + AsnSize > length(Buffer)) then
+     (Start - 1 + AsnSize > length(Buffer)) then
     exit;
   neg := ord(Buffer[Start]) > $7f;
   while AsnSize > 0 do
@@ -8042,7 +9430,7 @@ end;
 function AsnBigInt(const BigInt: RawByteString; AsnType: integer): TAsnObject;
 var
   i, l: PtrInt;
-  v: TAsnObject;
+  v: RawByteString;
 begin
   l := length(BigInt);
   i := 1;
@@ -8053,15 +9441,13 @@ begin
     v := ASN1_ZERO_VALUE
   else
   begin
-    if i = 1 then
-      v := BigInt
-    else
-      v := copy(BigInt, i, l);
+    v := copy(BigInt, i, l); // always make a new string for FillZero() below
     if (v <> '') and
        (ord(v[1]) and $80 <> 0) then
       Prepend(v, #0); // prepend 0 to ensure not parsed as negative number
   end;
   result := Asn(AsnType, [v]);
+  FillZero(v); // anti-forensic
 end;
 
 function AsnSeq(const Data: TAsnObject): TAsnObject;
@@ -8137,6 +9523,18 @@ begin
     raise ECrypt.CreateUtf8('Invalid AsnTime(%)', [dt]);
 end;
 
+function AsnSafeOct(const Content: array of TAsnObject): TAsnObject;
+var
+  i: PtrInt;
+  seq: RawByteString;
+begin
+  seq := AsnSeq(Content);
+  result := Asn(ASN1_OCTSTR, [seq]);
+  FillZero(seq);
+  for i := 0 to high(Content) do // wipe temporary "const" memory buffers
+    FillCharFast(pointer(Content[i])^, length(Content[i]), 0);
+end;
+
 procedure AsnAdd(var Data: TAsnObject; const Buffer: TAsnObject);
 begin
   Append(Data, Buffer);
@@ -8181,19 +9579,30 @@ end;
 function AsnDecHeader(var Pos: integer; const Buffer: TAsnObject;
   out AsnType, AsnSize: integer): boolean;
 var
-  t, l: integer;
+  vtype, len: integer;
 begin
   result := false;
-  l := length(Buffer);
-  if Pos > l then
+  len := length(Buffer);
+  if Pos > len then
     exit;
-  t := ord(Buffer[Pos]);
+  vtype := ord(Buffer[Pos]);
   inc(Pos);
   AsnSize := AsnDecLen(Pos, Buffer);
-  if (Pos + AsnSize - 1) > l then
+  if (Pos + AsnSize - 1) > len then
     exit; // avoid overflow
-  AsnType := t;
+  AsnType := vtype;
   result := true;
+end;
+
+function AsnDecChunk(const der: RawByteString; exptyp: integer): boolean;
+var
+  pos, typ, siz: integer;
+begin
+  pos := 1;
+  result := (der <> '') and
+            AsnDecHeader(pos, der, typ, siz) and
+            (typ = exptyp) and
+            (pos + siz = length(der) + 1);
 end;
 
 function AsnNextTime(var Pos: integer; const Buffer: TAsnObject;
@@ -8237,6 +9646,12 @@ begin
     ValueType := ASN1_NULL;
     result := -1;
   end;
+end;
+
+function AsnNextInt32(var Pos: integer; const Buffer: TAsnObject;
+  out Value: integer): integer;
+begin
+  Value := AsnNextInteger(Pos, Buffer, result);
 end;
 
 function AsnNextRaw(var Pos: integer; const Buffer: TAsnObject;
@@ -8361,7 +9776,7 @@ begin
         else
           // consider null-terminated strings as non-binary, but truncate
           SetLength(Value, n - 1);
-      1..8, // consider TAB char as text
+      1..8, // consider TAB (#9) char as text
       10..31:
         exit;
     end;

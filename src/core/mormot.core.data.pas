@@ -1907,7 +1907,7 @@ type
 {$endif CPU32DELPHI}
 
 // use Power-Of-Two sizes for smallest HashTables[], to reduce the hash with AND
-// - and Delphi Win32 has a not efficient 64-bit multiplication, anyway
+// - and Delphi Win32 is not efficient at 64-bit multiplication, anyway
 {$define DYNARRAYHASH_PO2}
 
 // use 16-bit Hash table when indexes fit in a word (array Capacity < 65535)
@@ -2312,7 +2312,8 @@ procedure DynArraySortIndexed(Values: pointer; ItemSize, Count: integer;
 function DynArraySortOne(Kind: TRttiParserType; CaseInsensitive: boolean): TDynArraySortCompare;
 
 /// sort any TObjArray with a given comparison function
-procedure ObjArraySort(var aValue; Compare: TDynArraySortCompare);
+procedure ObjArraySort(var aValue; Compare: TDynArraySortCompare;
+  CountPointer: PInteger = nil);
 
 
 { *************** Integer Arrays Extended Process }
@@ -5062,7 +5063,8 @@ begin
           if obj = nil then
             raise ESynException.CreateUtf8(
               '%.AddOrReplaceObject with no object at [%]', [self, aText]);
-          FreeAndNil(fObjects[result]);
+          if fObjectsOwned in fFlags then
+            FreeAndNil(fObjects[result]);
           fObjects[result] := aObject;
         end
         else
@@ -7054,9 +7056,10 @@ begin
   result := PT_SORT[CaseInsensitive, Kind];
 end;
 
-procedure ObjArraySort(var aValue; Compare: TDynArraySortCompare);
+procedure ObjArraySort(var aValue; Compare: TDynArraySortCompare;
+  CountPointer: PInteger);
 begin
-  DynArray(TypeInfo(TObjectDynArray), aValue).Sort(Compare);
+  DynArray(TypeInfo(TObjectDynArray), aValue, CountPointer).Sort(Compare);
 end;
 
 
@@ -8022,7 +8025,7 @@ begin
       Index := 0; // more efficient code if we use Index and not a local var
       repeat
         i := (Index + n) shr 1;
-        cmp := fCompare(P[i * fInfo.Cache.ItemSize], Item);
+        cmp := fCompare(Item, P[i * fInfo.Cache.ItemSize]);
         if cmp = 0 then
         begin
           // returns true + index of existing Item
@@ -8030,7 +8033,7 @@ begin
           result := True;
           exit;
         end
-        else if cmp < 0 then
+        else if cmp > 0 then
           Index := i + 1
         else
           n := i - 1;

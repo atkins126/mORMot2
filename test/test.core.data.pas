@@ -2205,7 +2205,7 @@ var
     check(info.EndOfObject = eof);
     check(info.Json^ = next);
     check(info.ValueLen = length(v));
-    check(CompareBuf(v, info.Value, info.ValueLen));
+    check(CompareBuf(v, info.Value, info.ValueLen) = 0);
   end;
 
 begin
@@ -2478,17 +2478,17 @@ begin
     check(PInteger(J)^ and $00ffffff = JSON_BASE64_MAGIC_C);
     RB := BlobToRawBlob(pointer(J));
     check(length(RB) = length(U)); // RB=U is buggy under FPC :(
-    check(CompareBuf(RB, U));
+    check(EqualBuf(RB, U));
     Base64MagicToBlob(@J[4], K);
     RB := BlobToRawBlob(pointer(K));
     check(length(RB) = length(U));
-    check(CompareBuf(RB, U));
+    check(EqualBuf(RB, U));
     BlobToRawBlob(pointer(K), RB, length(K));
     check(length(RB) = length(U));
-    check(CompareBuf(RB, U));
+    check(EqualBuf(RB, U));
     RB := BlobToRawBlob(K);
     check(length(RB) = length(U));
-    check(CompareBuf(RB, U));
+    check(EqualBuf(RB, U));
 {    J := TRestServer.JsonEncodeResult([r]);
     Check(SameValue(GetExtended(pointer(JsonDecode(J)),err),r)); }
     with TJsonWriter.CreateOwnedStream do
@@ -5524,6 +5524,17 @@ begin
   CheckEqual(UrlEncodeName('ab0c'), 'ab0c');
   CheckEqual(UrlEncodeName('ab c'), 'ab%20c');
   CheckEqual(UrlEncodeName('ab+c'), 'ab%2Bc');
+  CheckEqual(UnescapeHex(''), '');
+  CheckEqual(UnescapeHex('\'), '');
+  CheckEqual(UnescapeHex('\3'), '3');
+  CheckEqual(UnescapeHex('\31'), '1');
+  CheckEqual(UnescapeHex('\3123456'), '123456');
+  CheckEqual(UnescapeHex('123\3456'), '123456');
+  CheckEqual(UnescapeHex('123\\56'), '123\56');
+  CheckEqual(UnescapeHex('12345\36'), '123456');
+  CheckEqual(UnescapeHex('12345\6'), '123456');
+  CheckEqual(UnescapeHex('123\'#10'456'), '123456');
+  CheckEqual(UnescapeHex('12\'#13#10#13#10'3456'), '123456');
   for i := 1 to 100 do
   begin
     s := RandomIdentifier(i);

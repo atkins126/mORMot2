@@ -74,9 +74,10 @@ Rivest-Shamir-Adleman (RSA) Public-Key Cryptography
 
 X.509 Certificates Implementation - see RFC 5280
 - X.509 Fields Logic
-- RSA and ECC Public/Private Key support for X.509
-- X.509 Certificates and CSR
-- Registration of our X.509 Engine to the `TCryptCert` Factory
+- X.509 Certificates and Certificate Signing Request (CSR)
+- X.509 Certificate Revocation List (CRL)
+- X.509 Private Key Infrastructure (PKI)
+- Registration of our X.509 Engine to the `TCryptCert`/`TCryptStore` Factories
 
 ### mormot.crypt.jwt
 
@@ -85,6 +86,7 @@ JSON Web Tokens (JWT) Implementation - see RFC 7797
 - JWT Implementation of `HS*` and `S3*` Symmetric Algorithms
 - JWT Implementation of `ES256` Asymmetric Algorithm
 - JWT Implementation of `RS256`/`RS384`/`RS512` Asymmetric Algorithms
+- `TJwtCrypt` Implementation via `ICryptPublicKey`/`ICryptPrivateKey` Factories
 
 ### mormot.crypt.openssl
 

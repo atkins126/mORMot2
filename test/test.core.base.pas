@@ -85,11 +85,16 @@ type
     fYearOfBirth: integer;
     fYearOfDeath: word;
   published
-    property FirstName: RawUtf8 read fFirstName write fFirstName;
-    property LastName: RawUtf8 read fLastName write fLastName;
-    property Data: RawBlob read fData write fData;
-    property YearOfBirth: integer read fYearOfBirth write fYearOfBirth;
-    property YearOfDeath: word read fYearOfDeath write fYearOfDeath;
+    property FirstName: RawUtf8
+      read fFirstName write fFirstName;
+    property LastName: RawUtf8
+      read fLastName write fLastName;
+    property Data: RawBlob
+      read fData write fData;
+    property YearOfBirth: integer
+      read fYearOfBirth write fYearOfBirth;
+    property YearOfDeath: word
+      read fYearOfDeath write fYearOfDeath;
   public
     /// method used to test the Client-Side
     // ModelRoot/TableName/ID/MethodName RESTful request, i.e.
@@ -2460,8 +2465,8 @@ end;
 
 procedure TTestCoreBase._GUID;
 var
-  i: integer;
-  s: RawUtf8;
+  i, j: integer;
+  s, x, x2: RawUtf8;
   st, st2: string;
   g, g2: TGuid;
   h, h2: THash512Rec;
@@ -2483,9 +2488,39 @@ begin
   CheckEqual(MacTextFromHex('123'), '');
   CheckEqual(MacTextFromHex('1234'), '12:34');
   CheckEqual(MacTextFromHex('12345'), '');
-  CheckEqual(MacTextFromHex(s), 'c9:a6:46:d3:9c:61:4c:b7:bf:cd:ee:25:22:c8:f6:33');
-  CheckEqual(MacTextFromHex(UpperCase(s)), 'c9:a6:46:d3:9c:61:4c:b7:bf:cd:ee:25:22:c8:f6:33');
+  x := 'c9:a6:46:d3:9c:61:4c:b7:bf:cd:ee:25:22:c8:f6:33';
+  CheckEqual(MacTextFromHex(s), x);
+  CheckEqual(MacTextFromHex(UpperCase(s)), x);
+  CheckEqual(HumanHexCompare(x, x), 0);
+  CheckEqual(HumanHexCompare(x, MacTextFromHex(s)), 0);
+  for i := 1 to 100 do
+  begin
+    x2 := x;
+    delete(x2, Random32(length(x2)) + 1, 2);
+    Check(x <> x2);
+    Check(HumanHexCompare(x, x2) <> 0);
+    HumanHexCompare(x, x2);
+  end;
+  for i := 1 to 100 do
+  begin
+    x2 := x;
+    j := Random32(length(x2)) + 1;
+    delete(x2, j, 1);
+    Check(x <> x2);
+    Check((HumanHexCompare(x, x2) = 0) = (x[j] = ':'));
+  end;
+  x2 := x;
+  repeat
+    i := PosExChar(':', x2);
+    if i = 0 then
+      break;
+    delete(x2, i, 1);
+    CheckEqual(HumanHexCompare(x, x2), 0);
+  until false;
+  delete(x2, 10, 2);
+  Check(HumanHexCompare(x, x2) <> 0);
   s := s + s; // validates also our patched RTL
+  CheckEqual(HumanHexCompare(s, s), 0);
   repeat
     i := Random32(length(s)) + 1;
     delete(s, i, 1);
@@ -3375,7 +3410,7 @@ var
     crc: cardinal;
   end;
   totallen: Cardinal;
-  s2: RawByteString;
+  s2, msg: RawByteString;
 
   procedure Test(hash: THasher; const name: string);
   var
@@ -3399,7 +3434,7 @@ var
     for i := 0 to High(crc) do
       with crc[i] do
         Check(hash(0, pointer(S), length(S)) = crc);
-    fRunConsole := format('%s %s %s/s', [fRunConsole, name, KB(Timer.PerSec(totallen))]);
+    msg := FormatUtf8('% %:%/s', [msg, name, KBNoSpace(Timer.PerSec(totallen))]);
   end;
 
   procedure test16(const text: RawUtf8; expected: cardinal);
@@ -3538,6 +3573,7 @@ begin
   if @crc32c <> @crc32cfast then
     Test(crc32c, 'armv8');
   {$endif CPUINTEL}
+  AddConsole('%', [msg]);
 end;
 
 procedure TTestCoreBase.intadd(const Sender; Value: integer);
@@ -4488,13 +4524,11 @@ begin
   Timer.Start;
   for i := 0 to 99999 do
     SysUtils.IntToStr(Int64(7777) * Random32);
-  fRunConsole := format('%s SysUtils.IntToStr %s %s/s', [fRunConsole, Timer.Stop,
-    IntToThousandString(Timer.PerSec(100000))]);
+  NotifyTestSpeed('SysUtils.IntToStr', 100000, 0, @Timer);
   Timer.Start;
   for i := 0 to 99999 do
     StrInt64(@varint[31], Int64(7777) * Random32);
-  fRunConsole := format('%s StrInt64 %s %s/s', [fRunConsole, Timer.Stop,
-    IntToThousandString(Timer.PerSec(100000))]);
+  NotifyTestSpeed('StrInt64', 100000, 0, @Timer);
 end;
 
 function LowerCaseAscii7(const S: RawByteString): RawByteString;
@@ -4638,7 +4672,7 @@ procedure TTestCoreBase._UTF8;
     if CP = CP_UTF16 then
       exit;
     Check(length(W) = length(A));
-    CheckUtf8(CompareBuf(W, A), 'CP%', [CP]);
+    CheckUtf8(EqualBuf(W, A), 'CP%', [CP]);
   end;
 
   procedure CheckTrimCopy(const S: RawUtf8; start, count: PtrInt);
@@ -4905,6 +4939,57 @@ begin
   Check(GetUnQuoteCsvItem('"""one,""","two "', 1, ',', '"') = 'two ');
   Check(GetUnQuoteCsvItem('''''''one,''''''', 0) = '''one,''');
   Check(GetUnQuoteCsvItem('"""one,', 0, ',', '"') = '');
+  Check(not CsvContains('', 'b'));
+  Check(not CsvContains('a', ''));
+  Check(CsvContains('a', 'a'));
+  Check(CsvContains('ab', 'ab'));
+  Check(not CsvContains('a', 'b'));
+  Check(not CsvContains('a', 'ab'));
+  Check(not CsvContains('ab', 'a'));
+  Check(CsvContains('a,b,c', 'a'));
+  Check(CsvContains('a,b,c', 'b'));
+  Check(CsvContains('a,b,c', 'c'));
+  Check(not CsvContains('a,b,c', 'A'));
+  Check(not CsvContains('a,b,c', ''));
+  Check(CsvContains('aa,bb,cc', 'aa'));
+  Check(CsvContains('aa,bb,cc', 'bb'));
+  Check(CsvContains('aa,bb,cc', 'cc'));
+  Check(not CsvContains('aa,bb,cc', 'cb'));
+  Check(not CsvContains('aa,bb,cc', 'a'));
+  Check(not CsvContains('', 'b', ',', false));
+  Check(not CsvContains('a', '', ',', false));
+  Check(CsvContains('a', 'a', ',', false));
+  Check(CsvContains('ab', 'ab', ',', false));
+  Check(CsvContains('a', 'A', ',', false));
+  Check(CsvContains('ab', 'Ab', ',', false));
+  Check(CsvContains('ab', 'AB', ',', false));
+  Check(CsvContains('ab', 'aB', ',', false));
+  Check(not CsvContains('a', 'b', ',', false));
+  Check(not CsvContains('a', 'ab', ',', false));
+  Check(not CsvContains('ab', 'a', ',', false));
+  Check(CsvContains('a,b,c', 'a', ',', false));
+  Check(CsvContains('a,b,c', 'b', ',', false));
+  Check(CsvContains('a,b,c', 'c', ',', false));
+  Check(CsvContains('a,b,c', 'A', ',', false));
+  Check(CsvContains('a,b,c', 'B', ',', false));
+  Check(CsvContains('a,b,c', 'C', ',', false));
+  Check(not CsvContains('a,b,c', '', ',', false));
+  Check(CsvContains('aa,bb,cc', 'aa', ',', false));
+  Check(CsvContains('aa,bb,cc', 'bb', ',', false));
+  Check(CsvContains('aa,bb,cc', 'cc', ',', false));
+  Check(CsvContains('aa,bb,cc', 'AA', ',', false));
+  Check(CsvContains('aa,bb,cc', 'Bb', ',', false));
+  Check(CsvContains('aa,bb,cc', 'cC', ',', false));
+  Check(not CsvContains('aa,bb,cc', 'cb', ',', false));
+  Check(not CsvContains('aa,bb,cc', 'a', ',', false));
+  CheckEqual(GetFirstCsvItem(''), '');
+  CheckEqual(GetFirstCsvItem('a'), 'a');
+  CheckEqual(GetFirstCsvItem('ab'), 'ab');
+  CheckEqual(GetFirstCsvItem('ab,'), 'ab');
+  CheckEqual(GetFirstCsvItem('ab,c'), 'ab');
+  CheckEqual(GetFirstCsvItem('ab,c,de,fg'), 'ab');
+  CheckEqual(GetFirstCsvItem(','), '');
+  CheckEqual(GetFirstCsvItem(',a'), '');
   Check(FormatSql('abcd', [U], [{%H-}WS]) = 'abcd');
   Check(MakePath([]) = '');
   Check(MakePath([], true) = '');
@@ -5170,7 +5255,7 @@ begin
     Check(L <= length(U));
     CheckEqual(ConvertCaseUtf8(Pointer(Up2), NormToUpperByte), L);
     if Up <> '' then
-      Check(CompareBuf(Up, Up2));
+      Check(EqualBuf(Up, Up2));
     if CurrentAnsiConvert.CodePage = CODEPAGE_US then
        // initial text above is WinAnsiString (CP 1252)
       CheckEqual(StringToUtf8(Utf8ToString(U)), U, '1252');

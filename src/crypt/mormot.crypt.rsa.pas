@@ -675,8 +675,8 @@ type
       read fModulusBits;
   end;
 
-  /// meta-class of the RSA processing classes
-  // - mainly TRsa or TRsaPss
+  /// meta-class of the RSA processing classes, mainly TRsa or TRsaPss
+  // - see e.g. CKA_TO_RSA[] global constant as a potential factory
   TRsaClass = class of TRsa;
 
   /// RSA processing class using Probabilistic Signature Scheme (PSS) signatures
@@ -704,20 +704,69 @@ type
   end;
 
 
-const
-  /// the OID of a RSA encryption public key (PKCS#1)
-  ASN1_OID_RSAPUB = '1.2.840.113549.1.1.1';
 
-  /// the OID of the supported hash algorithms, decoded as text
-  ASN1_OID_HASH: array[THashAlgo] of RawUtf8 = (
-    '1.2.840.113549.2.5',       // hfMD5
-    '1.3.14.3.2.26',            // hfSHA1
-    '2.16.840.1.101.3.4.2.1',   // hfSHA256
-    '2.16.840.1.101.3.4.2.2',   // hfSHA384
-    '2.16.840.1.101.3.4.2.3',   // hfSHA512
-    '2.16.840.1.101.3.4.2.6',   // hfSHA512_256
-    '2.16.840.1.101.3.4.2.8',   // hfSHA3_256
-    '2.16.840.1.101.3.4.2.10'); // hfSHA3_512
+{ *********** Registration of our RSA Engine to the TCryptAsym Factory }
+
+const
+  /// lookup to be used as convenient CKA_TO_RSA[cka].Create factory
+  CKA_TO_RSA: array[TCryptKeyAlgo] of TRsaClass = (
+    nil,      // ckaNone
+    TRsa,     // ckaRsa
+    TRsaPss,  // ckaRsaPss
+    nil,      // ckaEcc256
+    nil,      // ckaEcc384
+    nil,      // ckaEcc512
+    nil,      // ckaEcc256k
+    nil);     // ckaEdDSA
+
+type
+  /// store a RSA public key in ICryptPublicKey format
+  // - using our pure pascal TRsa/TRsaPss engines of this unit
+  TCryptPublicKeyRsa = class(TCryptPublicKey)
+  protected
+    fRsa: TRsa;
+    // TCryptPublicKey.Verify overloads will call this overriden method
+    function VerifyDigest(Sig: pointer; Dig: THash512Rec; SigLen, DigLen: integer;
+      Hash: THashAlgo): boolean; override;
+  public
+    /// finalize this instance
+    destructor Destroy; override;
+    /// unserialized the public key from most known formats
+    function Load(Algorithm: TCryptKeyAlgo;
+      const PublicKeySaved: RawByteString): boolean; override;
+    /// as used by ICryptCert.GetKeyParams
+    function GetParams(out x, y: RawByteString): boolean; override;
+    /// use RSA sealing, i.e. encryption with this public key
+    function Seal(const Message: RawByteString;
+      const Cipher: RawUtf8): RawByteString; override;
+  end;
+
+  /// store a RSA private key in ICryptPrivateKey format
+  // - using our pure pascal TRsa/TRsaPss engines of this unit
+  TCryptPrivateKeyRsa = class(TCryptPrivateKey)
+  protected
+    fRsa: TRsa;
+    // decode the RSA private key ASN.1 and check for any associated public key
+    function FromDer(algo: TCryptKeyAlgo; const der: RawByteString;
+      pub: TCryptPublicKey): boolean; override;
+    // TCryptPrivateKey.Sign overloads will call this overriden method
+    function SignDigest(const Dig: THash512Rec; DigLen: integer;
+      DigAlgo: TCryptAsymAlgo): RawByteString; override;
+  public
+    /// finalize this instance
+    destructor Destroy; override;
+    /// create a new private / public key pair
+    // - returns the associated public key binary in SubjectPublicKey format
+    function Generate(Algorithm: TCryptAsymAlgo): RawByteString; override;
+    /// return the private key as raw binary
+    // - follow PKCS#8 PrivateKeyInfo encoding for RSA
+    function ToDer: RawByteString; override;
+    /// return the associated public key as stored in a X509 certificate
+    function ToSubjectPublicKey: RawByteString; override;
+    /// use EciesSeal or RSA un-sealing, i.e. decryption with this private key
+    function Open(const Message: RawByteString;
+      const Cipher: RawUtf8): RawByteString; override;
+  end;
 
 
 implementation
@@ -2084,21 +2133,17 @@ var
   vt, i: integer;
 begin
   AsnNextInit(pos, 3);
-  result := (der <> '') and
-            (AsnNext(pos[0], der) = ASN1_SEQ);
-  if not result then
+  result := false;
+  if (der = '') or
+     (AsnNext(pos[0], der) <> ASN1_SEQ) or
+     ((version <> nil) and
+      (AsnNextInt32(pos[0], der, version^) <> ASN1_INT)) then
     exit;
-  if version <> nil then
-  begin
-    version^ := AsnNextInteger(pos[0], der, vt);
-    result := vt = ASN1_INT;
-  end;
-  result := result and
-            (AsnNextRaw(pos[0], der, seq) = ASN1_SEQ) and
-              (AsnNextRaw(pos[1], seq, oid) = ASN1_OBJID) and
-                (oid = AsnEncOid(ASN1_OID_RSAPUB)) and
+  result := (AsnNextRaw(pos[0], der, seq) = ASN1_SEQ) and
+            (AsnNext(pos[1], seq, @oid) = ASN1_OBJID) and
+            (oid = CKA_OID[ckaRsa]) and
             (AsnNextRaw(pos[0], der, str) = seqtype) and
-              (AsnNext(pos[2], str) = ASN1_SEQ);
+            (AsnNext(pos[2], str) = ASN1_SEQ);
   if result and
      (version <> nil) then
     result := AsnNextInteger(pos[2], str, vt) = version^;
@@ -2118,10 +2163,7 @@ begin
   else
     // see "A.1.1. RSA Public Key Syntax" of RFC 8017
     result := AsnSeq([
-                AsnSeq([
-                  AsnOid(ASN1_OID_RSAPUB),
-                  ASN1_NULL_VALUE // optional
-                ]),
+                CkaToSeq(ckaRsa),
                 Asn(ASN1_BITSTR, [
                   AsnSeq([
                     AsnBigInt(Modulus),
@@ -2166,37 +2208,36 @@ end;
 { TRsaPrivateKey }
 
 function TRsaPrivateKey.ToDer: TCertDer;
+var
+  oct: RawByteString;
 begin
+  result := '';
   if (Modulus = '') or
      (PublicExponent = '') then
-    result := ''
-  else
-    // PKCS#8 format (default as with openssl)
-    result := AsnSeq([
-                Asn(Version),
-                AsnSeq([
-                  AsnOid(ASN1_OID_RSAPUB),
-                  ASN1_NULL_VALUE // optional
-                ]),
-                Asn(ASN1_OCTSTR, [
-                  AsnSeq([
-                    Asn(Version),
-                    AsnBigInt(Modulus),
-                    AsnBigInt(PublicExponent), // typically 65537
-                    AsnBigInt(PrivateExponent),
-                    AsnBigInt(Prime1),
-                    AsnBigInt(Prime2),
-                    AsnBigInt(Exponent1),
-                    AsnBigInt(Exponent2),
-                    AsnBigInt(Coefficient)
-                  ])
-                ])
-              ]);
+    exit;
+  // PKCS#8 format (default as with openssl)
+  oct := AsnSafeOct([
+           Asn(Version),
+           AsnBigInt(Modulus),
+           AsnBigInt(PublicExponent), // typically 65537
+           AsnBigInt(PrivateExponent),
+           AsnBigInt(Prime1),
+           AsnBigInt(Prime2),
+           AsnBigInt(Exponent1),
+           AsnBigInt(Exponent2),
+           AsnBigInt(Coefficient)
+         ]);
+  result := AsnSeq([
+              Asn(Version),
+              CkaToSeq(ckaRsa),
+              oct
+            ]);
+  FillZero(oct);
 end;
 
 function TRsaPrivateKey.FromDer(const der: TCertDer): boolean;
 var
-  n, vt: integer;
+  pos: integer;
 begin
   if (Modulus <> '') or
      (PublicExponent <> '') then
@@ -2215,20 +2256,18 @@ begin
   if result then
     exit;
   // also try PKCS#1 from RFC 8017
-  n := 1;
-  if (der = '') or
-     (AsnNext(n, der) <> ASN1_SEQ) then
-    exit;
-  Version := AsnNextInteger(n, der, vt);
-  result := (vt = ASN1_INT) and
-            AsnNextBigInt(n, der, Modulus) and
-            AsnNextBigInt(n, der, PublicExponent) and
-            AsnNextBigInt(n, der, PrivateExponent) and
-            AsnNextBigInt(n, der, Prime1) and
-            AsnNextBigInt(n, der, Prime2) and
-            AsnNextBigInt(n, der, Exponent1) and
-            AsnNextBigInt(n, der, Exponent2) and
-            AsnNextBigInt(n, der, Coefficient);
+  pos := 1;
+  result := (der <> '') and
+            (AsnNext(pos, der) = ASN1_SEQ) and
+            (AsnNextInt32(pos, der, Version) = ASN1_INT) and
+            AsnNextBigInt(pos, der, Modulus) and
+            AsnNextBigInt(pos, der, PublicExponent) and
+            AsnNextBigInt(pos, der, PrivateExponent) and
+            AsnNextBigInt(pos, der, Prime1) and
+            AsnNextBigInt(pos, der, Prime2) and
+            AsnNextBigInt(pos, der, Exponent1) and
+            AsnNextBigInt(pos, der, Exponent2) and
+            AsnNextBigInt(pos, der, Coefficient);
 end;
 
 function TRsaPrivateKey.Match(const Pub: TRsaPublicKey): boolean;
@@ -2821,7 +2860,7 @@ begin
   else
     exit;
   end;
-  result := CompareBuf(digest, Hash, HASH_SIZE[HashAlgo]);
+  result := CompareBuf(digest, Hash, HASH_SIZE[HashAlgo]) = 0;
 end;
 
 function TRsa.Sign(Hash: PHash512; HashAlgo: THashAlgo): RawByteString;
@@ -3133,6 +3172,7 @@ begin
   inherited Create(name);
   if fDefaultHasher = nil then
     fDefaultHasher := Hasher('sha256');
+  // RSASSA and RSASSA-PSS share the very same key file format
   fPemPrivate := ord(pemRsaPrivateKey);
   fPemPublic := ord(pemRsaPublicKey);
 end;
@@ -3221,15 +3261,189 @@ begin
 end;
 
 
+{ TCryptPublicKeyRsa }
+
+destructor TCryptPublicKeyRsa.Destroy;
+begin
+  inherited Destroy;
+  fRsa.Free;
+end;
+
+function TCryptPublicKeyRsa.Load(Algorithm: TCryptKeyAlgo;
+  const PublicKeySaved: RawByteString): boolean;
+begin
+  result := false;
+  if (fKeyAlgo <> ckaNone) or
+     (PublicKeySaved = '') then
+    exit;
+  case Algorithm of
+    ckaRsa,
+    ckaRsaPss:
+      begin
+        fRsa := CKA_TO_RSA[Algorithm].Create;
+        if fRsa.LoadFromPublicKeyPem(PublicKeySaved) then
+        begin
+          fKeyAlgo := Algorithm;
+          result := true;
+        end
+        else
+          FreeAndNil(fRsa);
+      end;
+  else
+    raise ERsaException.CreateUtf8('%.Create: unsupported %',
+            [self, ToText(fKeyAlgo)^]);
+  end;
+end;
+
+function TCryptPublicKeyRsa.VerifyDigest(Sig: pointer; Dig: THash512Rec;
+  SigLen, DigLen: integer; Hash: THashAlgo): boolean;
+begin
+  result := false;
+  if (self <> nil) and
+     (DigLen <> 0) then
+    case fKeyAlgo of
+      ckaRsa,
+      ckaRsaPss:
+        // RSA digital signature verification (thread-safe but blocking)
+        result := fRsa.Verify(@Dig, Sig, Hash, SigLen);
+    end;
+end;
+
+function TCryptPublicKeyRsa.GetParams(out x, y: RawByteString): boolean;
+begin
+  result := false;
+  if self <> nil then
+    case fKeyAlgo of
+      ckaRsa,
+      ckaRsaPss:
+        begin
+          // for RSA, x is set to the Exponent (e), and y to the Modulus (n)
+          x := fRsa.E^.Save;
+          y := fRsa.M^.Save;
+          result := (x <> '') and
+                    (y <> '');
+        end;
+    end;
+end;
+
+function TCryptPublicKeyRsa.Seal(const Message: RawByteString;
+  const Cipher: RawUtf8): RawByteString;
+begin
+  result  := '';
+  if self <> nil then
+    case fKeyAlgo of
+      ckaRsa,
+      ckaRsaPss:
+        result := fRsa.Seal(Cipher, Message);
+    end;
+end;
+
+
+{ TCryptPrivateKeyRsa }
+
+function TCryptPrivateKeyRsa.FromDer(algo: TCryptKeyAlgo;
+  const der: RawByteString; pub: TCryptPublicKey): boolean;
+begin
+  result := false;
+  if fRsa = nil then
+    case algo of
+      ckaRsa,
+      ckaRsaPss:
+        begin
+          fRsa := CKA_TO_RSA[algo].Create;
+          if fRsa.LoadFromPrivateKeyPem(der) and
+             ((pub = nil) or
+              fRsa.MatchKey((pub as TCryptPublicKeyRsa).fRsa)) then
+            result := true
+          else
+            FreeAndNil(fRsa);
+        end;
+    end;
+end;
+
+function TCryptPrivateKeyRsa.Generate(Algorithm: TCryptAsymAlgo): RawByteString;
+begin
+  result := '';
+  if (self = nil) or
+     (fKeyAlgo <> ckaNone) then
+    exit;
+  if Algorithm in CAA_RSA then
+    if fRsa = nil then
+    begin
+      fKeyAlgo := CAA_CKA[Algorithm];
+      fRsa := CKA_TO_RSA[fKeyAlgo].Create;
+      if fRsa.Generate(RSA_DEFAULT_GENERATION_BITS) then
+        result := fRsa.SavePublicKey.ToSubjectPublicKey;
+    end;
+end;
+
+destructor TCryptPrivateKeyRsa.Destroy;
+begin
+  inherited Destroy;
+  fRsa.Free;
+end;
+
+function TCryptPrivateKeyRsa.ToDer: RawByteString;
+begin
+  if (self = nil) or
+     (fRsa = nil) then
+    result := ''
+  else
+    result := fRsa.SavePrivateKeyDer;
+end;
+
+function TCryptPrivateKeyRsa.ToSubjectPublicKey: RawByteString;
+begin
+  if (self = nil) or
+     (fRsa = nil) then
+    result := ''
+  else
+    result := fRsa.SavePublicKey.ToSubjectPublicKey
+end;
+
+function TCryptPrivateKeyRsa.SignDigest(const Dig: THash512Rec; DigLen: integer;
+  DigAlgo: TCryptAsymAlgo): RawByteString;
+begin
+  result := '';
+  if (self <> nil) and
+     (CAA_CKA[DigAlgo] = fKeyAlgo) and
+     (HASH_SIZE[CAA_HF[DigAlgo]] = DigLen) then
+    case fKeyAlgo of
+      ckaRsa,
+      ckaRsaPss:
+        if fRsa <> nil then
+          result := fRsa.Sign(@Dig.b, CAA_HF[DigAlgo]); // thread-safe
+    end;
+end;
+
+function TCryptPrivateKeyRsa.Open(const Message: RawByteString;
+  const Cipher: RawUtf8): RawByteString;
+begin
+  result := '';
+  if self <> nil then
+    case fKeyAlgo of
+      ckaRsa,
+      ckaRsaPss:
+        if fRsa <> nil then
+          result := fRsa.Open(Cipher, Message);
+    end;
+end;
+
+
+
 procedure InitializeUnit;
 begin
   // register this unit methods to our high-level cryptographic catalog
-  TCryptAsymRsa.Implements('RS256,RS256-int');
-  TCryptAsymRsa.Create('RS384', 'sha384');
-  TCryptAsymRsa.Create('RS512', 'sha512');
-  TCryptAsymRsa.Implements('PS256,PS256-int');
-  TCryptAsymRsa.Create('PS384', 'sha384');
-  TCryptAsymRsa.Create('PS512', 'sha512');
+  CryptAsym[caaRS256] := TCryptAsymRsa.Implements(['RS256', 'RS256-int']);
+  CryptAsym[caaRS384] := TCryptAsymRsa.Create('RS384', 'sha384');
+  CryptAsym[caaRS512] := TCryptAsymRsa.Create('RS512', 'sha512');
+  CryptAsym[caaPS256] := TCryptAsymRsa.Implements(['PS256', 'PS256-int']);
+  CryptAsym[caaPS384] := TCryptAsymRsa.Create('PS384', 'sha384');
+  CryptAsym[caaPS512] := TCryptAsymRsa.Create('PS512', 'sha512');
+  CryptPublicKey[ckaRsa]     := TCryptPublicKeyRsa;
+  CryptPublicKey[ckaRsaPss]  := TCryptPublicKeyRsa;
+  CryptPrivateKey[ckaRsa]    := TCryptPrivateKeyRsa;
+  CryptPrivateKey[ckaRsaPss] := TCryptPrivateKeyRsa;
   // RS256 RS384 RS512 may be overriden by faster mormot.crypt.openssl
   // but RS256-int PS256-int will stil be available to use this unit if needed
 end;

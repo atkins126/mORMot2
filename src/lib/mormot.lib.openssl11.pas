@@ -745,6 +745,7 @@ const
   NID_subject_key_identifier = 82;
   NID_key_usage = 83;
   NID_subject_alt_name = 85;
+  NID_issuer_alt_name = 86;
   NID_basic_constraints = 87;
   NID_authority_key_identifier = 90;
   NID_ext_key_usage = 126;
@@ -1658,6 +1659,7 @@ type
     function StackX509_CRL(addref: boolean = true): Pstack_st_X509_CRL;
     // caller should make result.Free once done (to decrease refcount)
     function BySerial(const serial: RawUtf8): PX509;
+    function BySkid(const id: RawUtf8): PX509;
     function HasSerial(serial: PASN1_INTEGER): boolean;
     // returns the revocation reason
     function IsRevoked(const serial: RawUtf8): integer; overload;
@@ -1744,6 +1746,8 @@ type
     // - will search and remove the 'DNS:' trailer by default (dns=true)
     // - e.g. ['synopse.info', 'www.synopse.info']
     function SubjectAlternativeNames(dns: boolean = true): TRawUtf8DynArray;
+    /// an array of (DNS) Subject names covered by the Issuer of this Certificate
+    function IssuerAlternativeNames(dns: boolean = true): TRawUtf8DynArray;
     /// the High-Level Certificate Issuer
     // - e.g. '/C=US/O=Let''s Encrypt/CN=R3'
     function IssuerName: RawUtf8;
@@ -1795,6 +1799,7 @@ type
     function SubjectKeyIdentifier: RawUtf8;
     /// the X509v3 Authority Key Identifier (AKID) of this Certificate
     // - e.g. '14:2E:B3:17:B7:58:56:CB:AE:50:09:40:E6:1F:AF:9D:8B:14:C2:C6'
+    // - if there are several AKID, only returns the first
     function AuthorityKeyIdentifier: RawUtf8;
     /// set the Not Before / Not After Vailidy of this Certificate
     // - ValidDays and ExpireDays are relative to the current time - ValidDays
@@ -7497,7 +7502,7 @@ function EVP_PKEY.Verify(Algo: PEVP_MD; Sig, Msg: pointer;
 var
   ctx: PEVP_MD_CTX;
 begin
-  // expects @self to be a public key
+  // expects @self to be a public (or private) key
   // we don't check "if @self = nil" because may be called without EVP_PKEY
   // we don't check "Algo = nil" because algo may have its built-in hashing
   ctx := EVP_MD_CTX_new;
@@ -7863,7 +7868,10 @@ end;
 function LoadPrivateKey(const Saved: RawByteString;
   const Password: SpiUtf8): PEVP_PKEY;
 begin
-  result := LoadPrivateKey(pointer(Saved), length(Saved), Password);
+  if Saved <> '' then
+    result := LoadPrivateKey(pointer(Saved), length(Saved), Password)
+  else
+    result := nil;
 end;
 
 function LoadPublicKey(PublicKey: pointer; PublicKeyLen: integer;
@@ -7894,7 +7902,10 @@ end;
 function LoadPublicKey(const Saved: RawByteString;
   const Password: SpiUtf8): PEVP_PKEY;
 begin
-  result := LoadPublicKey(pointer(Saved), length(Saved), Password);
+  if Saved <> '' then
+    result := LoadPublicKey(pointer(Saved), length(Saved), Password)
+  else
+    result := nil;
 end;
 
 
@@ -8818,6 +8829,22 @@ begin
   result := nil;
 end;
 
+function X509_STORE.BySkid(const id: RawUtf8): PX509;
+var
+  i: PtrInt;
+  c: PX509DynArray;
+begin
+  c := Certificates;
+  for i := 0 to length(c) - 1 do
+    if c[i].SubjectKeyIdentifier = id then
+    begin
+      result := c[i];
+      result.Acquire;
+      exit;
+    end;
+  result := nil;
+end;
+
 function X509_STORE.HasSerial(serial: PASN1_INTEGER): boolean;
 var
   i: PtrInt;
@@ -9384,6 +9411,7 @@ end;
 function X509.IsSelfSigned: boolean;
 begin
   // X509 usually does not compare serial numbers nor SKID/AKID but the names
+  // in practice, OpenSSL self-signed certificates have SKID set but no AKID
   result := (@self <> nil) and
       (X509_get_issuer_name(@self).Compare(X509_get_subject_name(@self)) = 0);
 end;
@@ -9502,17 +9530,12 @@ begin
     FakeLength(result, i - 1);
 end;
 
-function X509.SubjectAlternativeNames(dns: boolean): TRawUtf8DynArray;
+function AlternativeNames(p: PUtf8Char; dns: boolean): TRawUtf8DynArray;
 var
-  alt: RawUtf8;
-  p, s: PUtf8Char;
+  s: PUtf8Char;
   n: PtrInt;
 begin
   result := nil;
-  if @self = nil then
-    exit;
-  alt := ExtensionText(NID_subject_alt_name);
-  p := pointer(alt);
   if p = nil then
     exit;
   n := 0;
@@ -9540,6 +9563,22 @@ begin
       inc(n);
     end;
   until P^ = #0;
+end;
+
+function X509.SubjectAlternativeNames(dns: boolean): TRawUtf8DynArray;
+begin
+  if @self = nil then
+    result := nil
+  else
+    result := AlternativeNames(pointer(ExtensionText(NID_subject_alt_name)), dns);
+end;
+
+function X509.IssuerAlternativeNames(dns: boolean): TRawUtf8DynArray;
+begin
+  if @self = nil then
+    result := nil
+  else
+    result := AlternativeNames(pointer(ExtensionText(NID_issuer_alt_name)), dns);
 end;
 
 function X509.NotBefore: TDateTime;

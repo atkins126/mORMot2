@@ -7,7 +7,6 @@ unit mormot.net.acme;
   *****************************************************************************
 
    Automatic Certificate Management Environment (ACME v2) Client
-    - Low-Level Cryptographic Wrappers
     - JWS HTTP-client implementation
     - ACME client implementation
     - Let's Encrypt TLS / HTTPS Encryption Certificates Support
@@ -48,16 +47,6 @@ uses
   mormot.net.server; // for HTTP-01 challenge server
 
 
-{ **************** Low-Level Cryptographic Wrappers }
-
-/// convert a DER signature into its raw base-64-uri encoded value
-// - as expected by JSON Web Signature (JWS)
-// - RSA is just directly encoded
-// - ECC are ASN1-decoded into their raw xy coordinates concatenation
-function DerToJwsSign(algo: TCryptAsymAlgo; const sign_der: RawByteString): RawUtf8;
-
-
-
 { **************** JWS HTTP-client implementation }
 
 type
@@ -89,22 +78,6 @@ type
     property JwkThumbprint: RawUtf8
       read fJwkThumbprint;
   end;
-
-const
-  /// the JWS ECC curve names according to our known asymmetric algorithms
-  // - see https://www.iana.org/assignments/jose/jose.xhtml#web-key-elliptic-curve
-  CAA_CRV: array[TCryptAsymAlgo] of PUtf8Char = (
-    'P-256',     // caaES256
-    'P-384',     // caaES384
-    'P-521',     // caaES512, note that P-521 is not a typo ;)
-    'secp256k1', // caaES256K
-    '',          // caaRS256
-    '',          // caaRS384
-    '',          // caaRS512
-    '',          // caaPS256
-    '',          // caaPS384
-    '',          // caaPS512
-    'Ed25519');  // caaEdDSA
 
 
 { **************** ACME client implementation }
@@ -407,69 +380,6 @@ type
 implementation
 
 
-{ **************** Low-Level Cryptographic Wrappers }
-
-function DerToEccSign(algo: TCryptAsymAlgo; const sign_der: RawByteString): RawUtf8;
-const
-  DER_SEQUENCE = #$30;
-  CAA_ECCBYTES: array[TCryptAsymAlgo] of Integer = (
-    32, // caaES256
-    48, // caaES384
-    66, // caaES512
-    32, // caaES256K
-    0,  // caaRS256
-    0,  // caaRS384
-    0,  // caaRS512
-    0,  // caaPS256
-    0,  // caaPS384
-    0,  // caaPS512
-    32); // caaEdDSA
-var
-  derlen: cardinal;
-  der: PByteArray;
-  eccbytes, len: integer;
-  buf: array [0..131] of AnsiChar;
-begin
-  if algo = caaEdDSA then
-  begin
-    result := BinToBase64uri(pointer(sign_der), length(sign_der));
-    exit;
-  end;
-  result := '';
-  derlen := length(sign_der);
-  der := pointer(sign_der);
-  if (derlen < 50) or
-     (der[0] <> ord(DER_SEQUENCE)) or
-     (der[1] > derlen - 2) then
-    exit;
-  eccbytes := CAA_ECCBYTES[algo];
-  if der[1] and $80 <> 0 then
-  begin
-    // 2-byte length
-    assert((der[1] and $7f) = 1);
-    len := der[2];
-    if DerParse(DerParse(@der[3], @buf[0], eccbytes),
-        @buf[eccbytes], eccbytes) <> PAnsiChar(@der[len + 3]) then
-      exit;
-  end
-  else
-  begin
-    len := der[1];
-    if DerParse(DerParse(@der[2], @buf[0], eccbytes),
-        @buf[eccbytes], eccbytes) <> PAnsiChar(@der[len + 2]) then
-      exit;
-  end;
-  result := BinToBase64uri(@buf[0], eccbytes * 2);
-end;
-
-function DerToJwsSign(algo: TCryptAsymAlgo; const sign_der: RawByteString): RawUtf8;
-begin
-  if algo in CAA_ECC then
-    result := DerToEccSign(algo, sign_der)
-  else
-    result := BinToBase64uri(pointer(sign_der), length(sign_der));
-end;
-
 
 { **************** JWS HTTP-client implementation }
 
@@ -519,7 +429,6 @@ end;
 
 function TJwsHttpClient.Post(const aUrl: RawUtf8; const aJson: RawJson): RawJson;
 var
-  x, y: RawByteString;
   jwk, header: RawUtf8;
   thumb: TSha256Digest;
   header_enc, json_enc, body_enc: RawUtf8;
@@ -534,16 +443,10 @@ begin
   end
   else
   begin
-    if fCert.PrivateKeyHandle = nil then
+    // no key identifier, need to provide JSON Web Key
+    if not fCert.HasPrivateSecret then
       raise EJwsHttp.Create('No private key');
-    // No key identifier, need to provide JSON Web Key
-    if fCert.GetPrivateKeyParams(x, y) then
-      if fCert.AsymAlgo in CAA_ECC then
-        jwk := FormatJson('{"crv":?,"kty":"EC","x":?,"y":?}',
-          [], [CAA_CRV[fCert.AsymAlgo], BinToBase64uri(x), BinToBase64uri(y)])
-      else
-        jwk := FormatJson('{"e":?,"kty":"RSA","n":?}',
-          [], [BinToBase64uri(x), BinToBase64uri(y)]);
+    jwk := fCert.JwkCompute;
     // the thumbprint of a JWK is computed with no whitespace or line breaks
     // before or after any syntaxic elements and with the required members
     // ordered lexicographically, using SHA-256 hashing
@@ -555,7 +458,7 @@ begin
   header_enc := BinToBase64uri(header);
   json_enc := BinToBase64uri(aJson);
   body_enc := header_enc + '.' + json_enc;
-  sign := DerToJwsSign(fCert.AsymAlgo, fCert.Sign(body_enc));
+  sign := GetSignatureSecurityRaw(fCert.AsymAlgo, fCert.Sign(body_enc));
   data := FormatJson('{"protected":?,"payload":?,"signature":?}',
     [], [header_enc, json_enc, sign]);
   Request(aUrl, 'POST', '', data, 'application/jose+json');
@@ -660,7 +563,7 @@ begin
   if aUriLen > 0 then
     for i := 1 to length(fChallenges) do
     begin
-      if CompareBuf(c^.Token, aUri, aUriLen) then
+      if CompareBuf(c^.Token, aUri, aUriLen) = 0 then
       begin
         if Assigned(fLog) then
           fLog.Add.Log(sllTrace, 'GetChallenge %', [c^.Token], self);

@@ -1199,6 +1199,10 @@ function GetInt64(P: PUtf8Char): Int64; overload;
 // - if P if nil or not start with a valid numerical value, returns Default
 function GetInt64Def(P: PUtf8Char; const Default: Int64): Int64;
 
+/// return 1 if 'TRUE' or 'YES', or 0 otherwise
+function GetTrue(P: PUtf8Char): integer;
+  {$ifdef HASINLINE}inline;{$endif}
+
 /// get the 64-bit integer value from P^, recognizing true/false/yes/no input
 // - return true on correct parsing, false if P is no number or boolean
 function GetInt64Bool(P: PUtf8Char; out V: Int64): boolean;
@@ -1945,6 +1949,10 @@ procedure InterfacesNilSafe(const aInterfaces: array of pointer);
 
 /// wrapper to add an item to a T*InterfaceArray dynamic array storage
 function InterfaceArrayAdd(var aInterfaceArray; const aItem: IUnknown): PtrInt;
+
+/// wrapper to add an item to a T*InterfaceArray dynamic array storage
+function InterfaceArrayAddCount(var aInterfaceArray; var aCount: integer;
+  const aItem: IUnknown): PtrInt;
 
 /// wrapper to add once an item to a T*InterfaceArray dynamic array storage
 procedure InterfaceArrayAddOnce(var aInterfaceArray; const aItem: IUnknown);
@@ -2756,13 +2764,18 @@ function MemCmp(P1, P2: PByteArray; L: PtrInt): integer;
 function CompareMem(P1, P2: Pointer; Length: PtrInt): boolean;
   {$ifdef CPUX64}inline;{$endif}
 
-/// overload wrapper of CompareMem() to compare a RawByteString vs a memory buffer
-function CompareBuf(const P1: RawByteString; P2: Pointer; P2Len: PtrInt): boolean;
+/// overload wrapper of MemCmp() to compare a RawByteString vs a memory buffer
+function CompareBuf(const P1: RawByteString; P2: Pointer; P2Len: PtrInt): integer;
   overload; {$ifdef HASINLINE}inline;{$endif}
 
-/// overload wrapper of CompareMem() to compare two RawByteString variables
+/// overload wrapper to SortDynArrayRawByteString(P1, P2)
 // - won't involve any code page - so may be safer e.g. on FPC
-function CompareBuf(const P1, P2: RawByteString): boolean;
+function CompareBuf(const P1, P2: RawByteString): integer;
+  overload; {$ifdef HASINLINE}inline;{$endif}
+
+/// overload wrapper to SortDynArrayRawByteString(P1, P2) = 0
+// - won't involve any code page - so may be safer e.g. on FPC
+function EqualBuf(const P1, P2: RawByteString): boolean;
   overload; {$ifdef HASINLINE}inline;{$endif}
 
 {$ifdef HASINLINE}
@@ -5151,6 +5164,16 @@ end;
 function GetBoolean(const value: RawUtf8): boolean;
 begin
   result := GetBoolean(pointer(value));
+end;
+
+function GetTrue(P: PUtf8Char): integer;
+begin
+  result := PInteger(P)^ and $dfdfdfdf;
+  if (result = ord('T') + ord('R') shl 8 + ord('U') shl 16 + ord('E') shl 24) or
+     (result = ord('Y') + ord('E') shl 8 + ord('S') shl 16) then
+    result := 1
+  else
+    result := 0;
 end;
 
 function GetInt64Bool(P: PUtf8Char; out V: Int64): boolean;
@@ -7569,6 +7592,18 @@ begin
   a[result] := aItem;
 end;
 
+function InterfaceArrayAddCount(var aInterfaceArray; var aCount: integer;
+  const aItem: IUnknown): PtrInt;
+var
+  a: TInterfaceDynArray absolute aInterfaceArray;
+begin
+  result := aCount;
+  if result = length(a) then
+    SetLength(a, NextGrow(result));
+  a[result] := aItem;
+  inc(aCount);
+end;
+
 procedure InterfaceArrayAddOnce(var aInterfaceArray; const aItem: IUnknown);
 var
   a: TInterfaceDynArray absolute aInterfaceArray;
@@ -8186,7 +8221,6 @@ begin
           inc(Str2);
         until false;
         result := PWord(Str1)^ - PWord(Str2)^;
-        exit;
       end
       else
         inc(result) // Str2=''
@@ -10990,20 +11024,21 @@ end;
 
 {$endif ASMX86}
 
-function CompareBuf(const P1: RawByteString; P2: Pointer; P2Len: PtrInt): boolean;
+function CompareBuf(const P1: RawByteString; P2: Pointer; P2Len: PtrInt): integer;
 begin
-  result := (length(P1) = P2Len) and
-            CompareMem(pointer(P1), P2, P2Len);
+  result := ComparePtrInt(length(P1), P2Len);
+  if result = 0 then
+    result := MemCmp(pointer(P1), P2, P2Len);
 end;
 
-function CompareBuf(const P1, P2: RawByteString): boolean;
-var
-  l: PtrInt;
+function CompareBuf(const P1, P2: RawByteString): integer;
 begin
-  l := length(P1);
-  result := (pointer(P1) = pointer(P2)) or
-            ((l = length(P2)) and
-             CompareMem(pointer(P1), pointer(P2), l));
+  result := SortDynArrayRawByteString(P1, P2);
+end;
+
+function EqualBuf(const P1, P2: RawByteString): boolean;
+begin
+  result := SortDynArrayRawByteString(P1, P2) = 0;
 end;
 
 procedure crcblocksfast(crc128, data128: PBlock128; count: integer);

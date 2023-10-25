@@ -2180,7 +2180,21 @@ end;
 
 function EnumProcessName(PID: cardinal): RawUtf8;
 begin
-  result := '';
+  result := ''; // not implemented yet on BSD/Darwin
+end;
+
+function _IsDebuggerPresent: boolean;
+begin
+  // rough detection for FPC on BSD
+  result := PosEx('lazarus', LowerCase(EnumProcessName(FpGetppid))) <> 0;
+end;
+
+function GetParentProcess(PID: cardinal): cardinal;
+begin
+  if PID = 0 then
+    result := FpGetppid // we have a system call for the currrent process :)
+  else
+    result := 0; // not implemented yet on BSD/Darwin
 end;
 
 function fpsysctlhwint(hwid: cint): Int64;
@@ -2415,6 +2429,32 @@ begin
     tryprocexe := false; // no need to try again next time
 end;
 
+function GetParentProcess(PID: cardinal): cardinal;
+var
+  status, ppid: RawUtf8;
+begin
+  if PID = 0 then
+    result := FpGetppid // we have a system call for the current process :)
+  else
+  begin
+    result := 0;
+    status := StringFromFile('/proc/' + IntToStr(PID) + '/status', {nosize=}true);
+    if status = '' then
+      exit; // no such process
+    FindNameValue(status, 'PPID:', ppid);
+    result := GetCardinal(pointer(ppid));
+  end;
+end;
+
+function _IsDebuggerPresent: boolean;
+var
+  status, tracerpid: RawUtf8;
+begin
+  status := StringFromFile('/proc/self/status', {nosize=}true);
+  FindNameValue(status, 'TRACERPID:', tracerpid);
+  result := (tracerpid <> '0');
+end;
+
 function RetrieveLoadAvg: RawUtf8;
 begin
   // the libc parses this file anyway :)
@@ -2538,6 +2578,19 @@ end;
 {$endif OSANDROID}
 
 {$endif OSBSDDARWIN}
+
+var
+  __IsDebuggerPresent: (idpUntested, idpNone, idpPresent);
+
+function IsDebuggerPresent: boolean;
+begin
+  if __IsDebuggerPresent = idpUntested then
+    if _IsDebuggerPresent then
+      __IsDebuggerPresent := idpPresent
+    else
+      __IsDebuggerPresent := idpNone;
+  result := __IsDebuggerPresent = idpPresent;
+end;
 
 {$ifndef OSDARWIN}
 // on POSIX systems, /dev/mem may be available from root
@@ -3695,7 +3748,8 @@ var
   {$endif OSDARWIN}
 begin
   // retrieve Kernel and Hardware information
-  StdOutIsTTY := (IsATTY(StdOutputHandle) = 1) and
+  StdOutIsTTY := not IsDebuggerPresent and
+                 (IsATTY(StdOutputHandle) = 1) and
                  IdemPChars(RawUtf8(GetEnvironmentVariable('TERM')), [
                    'XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']);
   modname := nil;

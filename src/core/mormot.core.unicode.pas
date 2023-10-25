@@ -1222,7 +1222,15 @@ function IdemPropNameU(const P1: RawUtf8; P2: PUtf8Char; P2Len: PtrInt): boolean
 // IdemPropNameU(const P1,P2: RawUtf8), which would be slightly faster by
 // using the length stored before the actual text buffer of each RawUtf8
 function IdemPropNameUSameLenNotNull(P1, P2: PUtf8Char; P1P2Len: PtrInt): boolean;
-  {$ifdef FPC}inline;{$endif} // Delphi does not like to inline labels/goto
+  {$ifdef FPC}inline;{$endif} // Delphi does not like to inline goto
+
+type
+  TIdemPropNameUSameLen = function(P1, P2: pointer; P1P2Len: PtrInt): boolean;
+
+const
+  /// case (in)sensitive comparison of ASCII 7-bit identifiers of same length
+  IdemPropNameUSameLen: array[{casesensitive=}boolean] of TIdemPropNameUSameLen = (
+    @IdemPropNameUSameLenNotNull, mormot.core.base.CompareMem);
 
 /// case insensitive comparison of ASCII 7-bit identifiers
 // - use it with property names values (i.e. only including A..Z,0..9,_ chars)
@@ -1728,6 +1736,9 @@ procedure TrimChars(var S: RawUtf8; Left, Right: PtrInt);
 /// returns the supplied text content, without any specified char
 // - specify a custom char set to be excluded, e.g. as [#0 .. ' ']
 function TrimChar(const text: RawUtf8; const exclude: TSynAnsicharSet): RawUtf8;
+
+/// returns the supplied text content, without one specified char
+function TrimOneChar(const text: RawUtf8; exclude: AnsiChar): RawUtf8;
 
 /// returns the supplied text content, without any other char than specified
 // - specify a custom char set to be included, e.g. as ['A'..'Z']
@@ -5322,8 +5333,8 @@ end;
 function IdemPropName(P1, P2: PUtf8Char; P1Len, P2Len: PtrInt): boolean;
 begin
   result := (P1Len = P2Len) and
-            ((P2Len = 0) or
-             IdemPropNameUSameLenNotNull(P1, P2, P2Len));
+            ((P1Len = 0) or
+             IdemPropNameUSameLenNotNull(P1, P2, P1Len));
 end;
 
 function IdemPropNameU(const P1: RawUtf8; P2: PUtf8Char; P2Len: PtrInt): boolean;
@@ -7550,6 +7561,35 @@ begin
       exit;
     end;
   result := text; // no exclude char found
+end;
+
+function TrimOneChar(const text: RawUtf8; exclude: AnsiChar): RawUtf8;
+var
+  first, len, i: PtrInt;
+  c: AnsiChar;
+  P: PAnsiChar;
+begin
+  len := length(text);
+  first := ByteScanIndex(pointer(text), len, ord(exclude));
+  if first < 0 then
+  begin
+    result := text; // no exclude char found
+    exit;
+  end;
+  FastSetString(result, nil, len - 1);
+  P := pointer(result);
+  MoveFast(pointer(text)^, P^, first);
+  inc(P, first);
+  for i := first + 1 to len do
+  begin
+    c := text[i];
+    if c <> exclude then
+    begin
+      P^ := c;
+      inc(P);
+    end;
+  end;
+  FakeSetLength(result, P - pointer(result));
 end;
 
 function OnlyChar(const text: RawUtf8; const only: TSynAnsicharSet): RawUtf8;

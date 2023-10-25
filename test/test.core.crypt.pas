@@ -15,6 +15,7 @@ uses
   mormot.core.buffers,
   mormot.core.unicode,
   mormot.core.rtti,
+  mormot.core.datetime,
   mormot.crypt.core,
   mormot.crypt.openssl,
   mormot.crypt.secure,
@@ -779,6 +780,16 @@ const
     'ZHhnT2RzGDGHrq115yC+T8SwTo7/h5p/2AuO4fXWP6MWXMJcXUGs6MshY5vgH4QY'#13#10 +
     'BPyNxBYuEhvuYUZ3nJXJZZ0='#13#10 +
     '-----END PRIVATE KEY-----'#13#10;
+  _rsapub = // see _rsapriv defined above
+    '-----BEGIN PUBLIC KEY-----'#13#10 +
+    'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtQ4/dhzEXlDpj71dwF3T'#13#10 +
+    't1Sx/COvd6Y8R4kxgcLblmdt3BCmGAYgNS2yf0ORcGKse+wYLG+BV8rIT2zRPbrI'#13#10 +
+    'XfEJmnjlnsQ635n9bMpfhFIyr9pE4w5y5ZUAzJStwYmudykFAfA7/1BWqD+uE3z5'#13#10 +
+    'PqfnmZHEbYNHeBGt0vIRSfQQXXxj+wnpaQ+/GTYQr5OHynyJS8esD9dpKfsExc7r'#13#10 +
+    'Bx4VH1tCx1SH9yVAMHts0674HjnnyFyveoXOajN1gxn4/iN1lfWZzzoWqyVvKWZ5'#13#10 +
+    'XitCD/FEdhbjFbWKibrku9c/P7HNz7oqMx2QkhGa+asefQNnwFv+Nqac9rTCP7ld'#13#10 +
+    'ewIDAQAB'#13#10 +
+    '-----END PUBLIC KEY-----'#13#10;
 
 procedure TTestCoreCrypto._JWT;
 
@@ -856,7 +867,7 @@ procedure TTestCoreCrypto._JWT;
       one.Free;
   end;
 
-  procedure Benchmark(J: TJwtAbstract; N: integer = 1000);
+  procedure Benchmark(J: TJwtAbstract; ctx: PUtf8Char; N: integer = 1000);
   var
     i: integer;
     tok: RawUtf8;
@@ -878,7 +889,7 @@ procedure TTestCoreCrypto._JWT;
       jwt.result := jwtNoToken;
       J.Verify(tok, jwt);
       check(jwt.result in [jwtInvalidSignature, jwtWrongFormat], 'detection');
-      NotifyTestSpeed('%', [J.Algorithm], N, 0, @tim);
+      NotifyTestSpeed('% %', [ctx, J.Algorithm], N, 0, @tim);
     finally
       J.Free;
     end;
@@ -894,27 +905,26 @@ const
     TJwtPs512);
 {$ifdef USE_OPENSSL}
   OSSL_JWT: array[0..10] of TJwtAbstractOslClass = (
+    TJwtEs256Osl,
+    TJwtEs384Osl,
+    TJwtEs512Osl,
+    TJwtEs256KOsl,
     TJwtRs256Osl,
     TJwtRs384Osl,
     TJwtRs512Osl,
     TJwtPs256Osl,
     TJwtPs384Osl,
     TJwtPs512Osl,
-    TJwtEs256Osl,
-    TJwtEs384Osl,
-    TJwtEs512Osl,
-    TJwtEs256KOsl,
     TJwtEddsaOsl);
-var
-  priv, pub: RawUtf8;
 {$endif USE_OPENSSL}
 var
   i: integer;
   j: TJwtAbstract;
   jwt: TJwtContent;
   secret: TEccCertificateSecret;
-  tok: RawUtf8;
+  tok, priv, pub: RawUtf8;
   a: TSignAlgo;
+  caa: TCryptAsymAlgo;
 begin
   test(TJwtNone.Create(
     [jrcIssuer, jrcExpirationTime], [], 60));
@@ -966,32 +976,50 @@ begin
   end;
   for a := saSha256 to high(a) do
     Benchmark(JWT_CLASS[a].Create(
-      'secret', 0, [jrcIssuer, jrcExpirationTime], []));
+      'secret', 0, [jrcIssuer, jrcExpirationTime], []), 'mORMot');
   secret := TEccCertificateSecret.CreateNew(nil);
   try
     Benchmark(TJwtEs256.Create(
-      secret, [jrcIssuer, jrcExpirationTime], [], 60), 100);
+      secret, [jrcIssuer, jrcExpirationTime], [], 60), 'mORMot', 100);
   finally
     secret.Free;
   end;
   for i := 0 to high(JWT_RSA) do
   begin
     j := JWT_RSA[i].Create(_rsapriv, [jrcIssuer, jrcExpirationTime], [], 60);
-    {$ifdef USE_OPENSSL}
-    test(j, {nofree=}false);
-    {$else}
     test(j, {nofree=}true);
-    Benchmark(j, 100);
-    {$endif USE_OPENSSL}
+    Benchmark(j, 'mORMot', 100);
   end;
+  for caa := low(caa) to high(caa) do
+    if TJwtCrypt.Supports(caa) then
+    begin
+      // RSA is very slow at key computing and signing, but fast to verify
+      if caa in CAA_RSA then
+      begin
+        priv := _rsapriv; // pre-computed RSA key pair
+        pub := _rsapub;
+      end
+      else
+        pub := ''; // ECC algorithms are fast enough to generate a new key
+      j := TJwtCrypt.Create(caa, pub, [jrcIssuer, jrcExpirationTime], [], 60);
+      if pub <> '' then
+        Check(TJwtCrypt(j).LoadPrivateKey(priv));
+      test(j, {nofree=}true);
+      Benchmark(j, 'TJwtCrypt', 100);
+    end;
   {$ifdef USE_OPENSSL}
   for i := 0 to high(OSSL_JWT) do
     if OSSL_JWT[i].IsAvailable then
     begin
-      // RSA is very slow at key computing and signing, but fast to verify
-      OSSL_JWT[i].GenerateKeys(priv, pub);
-      Benchmark(OSSL_JWT[i].Create(
-        priv, pub, '', '', [jrcIssuer, jrcExpirationTime], [], 60), 100);
+      if OSSL_JWT[i].GetAsymAlgo in CAA_RSA then
+      begin
+        priv := _rsapriv; // pre-computed RSA key pair
+        pub := _rsapub;
+      end
+      else
+        OSSL_JWT[i].GenerateKeys(priv, pub);
+      Benchmark(OSSL_JWT[i].Create(priv, pub, '', '',
+        [jrcIssuer, jrcExpirationTime], [], 60), 'OpenSSL', 100);
     end;
   {$endif USE_OPENSSL}
 end;
@@ -1141,17 +1169,34 @@ begin
           bRC4:
             RC4.EncryptBuffer(pointer(data), pointer(encrypted), SIZ[s]);
           {$ifdef USE_OPENSSL}
-          bAES128CFBO, bAES128OFBO, bAES128CTRO,
-          bAES256CFBO, bAES256OFBO, bAES256CTRO,
+          bAES128CFBO,
+          bAES128OFBO,
+          bAES128CTRO,
+          bAES256CFBO,
+          bAES256OFBO,
+          bAES256CTRO,
           {$endif USE_OPENSSL}
-          bAES128CFB, bAES128OFB, bAES128C64, bAES128CTR,
-          bAES256CFB, bAES256OFB, bAES256C64, bAES256CTR:
+          bAES128CFB,
+          bAES128OFB,
+          bAES128C64,
+          bAES128CTR,
+          bAES256CFB,
+          bAES256OFB,
+          bAES256C64,
+          bAES256CTR:
             AES[b].EncryptPkcs7(data, {encrypt=}true);
           {$ifdef USE_OPENSSL}
-          bAES128GCMO, bAES256GCMO,
+          bAES128GCMO,
+          bAES256GCMO,
           {$endif USE_OPENSSL}
-          bAES128CFC, bAES128OFC, bAES128CTC, bAES128GCM,
-          bAES256CFC, bAES256OFC, bAES256CTC, bAES256GCM:
+          bAES128CFC,
+          bAES128OFC,
+          bAES128CTC,
+          bAES128GCM,
+          bAES256CFC,
+          bAES256OFC,
+          bAES256CTC,
+          bAES256GCM:
             AES[b].MacAndCrypt(data, {encrypt=}true, {ivatbeg=}true);
           bSHAKE128:
             SHAKE128.Cypher(pointer(data), pointer(encrypted), SIZ[s]);
@@ -1681,7 +1726,7 @@ begin
   b32 := BinToBase32(tmp);
   tmp2 := Base32ToBin(b32);
   CheckEqual(length(tmp2), length(tmp));
-  Check(CompareBuf(tmp, tmp2), 'tmp=tmp2'); // tmp = tmp2 fails on FPC :(
+  Check(EqualBuf(tmp, tmp2), 'tmp=tmp2'); // tmp = tmp2 fails on FPC :(
   tmp2 := Zeroed(UnZeroed(tmp));
   {$ifdef FPC}
   SetCodePage(tmp2, StringCodePage(tmp)); // circumvent FPC inconsistency/bug
@@ -2050,8 +2095,8 @@ begin
     {$ifdef CPUINTEL}
     if noaesni then
     begin
-      fRunConsole := format('%s cypher with AES-NI: %s, without: %s',
-        [fRunConsole, Timer[false].Stop, Timer[true].Stop]);
+      AddConsole('cypher with AES-NI: %, without: %',
+        [Timer[false].Stop, Timer[true].Stop]);
       Include(CpuFeatures, cfAESNI); // revert Exclude() below from previous loop
     end;
     if A.UsesAesni then
@@ -2606,23 +2651,8 @@ var
   fmt: TCryptCertFormat;
   cv: TCryptCertValidity;
   u: TCryptCertUsage;
-  namelen: integer;
-  names: RawUtf8;
   timer: TPrecisionTimer;
-
-  procedure AddAlgName;
-  begin
-    inc(namelen, length(alg[a].AlgoName) + 1);
-    if namelen > 73 then
-    begin
-      names := names + CRLF + '     ';
-      namelen := length(alg[a].AlgoName) + 1;
-    end;
-    names := names + ' ' + alg[a].AlgoName;
-  end;
-
 begin
-  namelen := 0;
   // validate AesAlgoNameEncode / TAesMode
   FillZero(key);
   for k := 0 to 2 do
@@ -2649,7 +2679,7 @@ begin
   for a := 0 to high(alg) do
   begin
     rnd := alg[a] as TCryptRandom;
-    AddAlgName;
+    NotifyProgress([rnd.AlgoName]);
     Check(mormot.crypt.secure.Rnd(rnd.AlgoName) = rnd);
     cprev := 0;
     dprev := 0;
@@ -2672,7 +2702,7 @@ begin
   for a := 0 to high(alg) do
   begin
     hsh := alg[a] as TCryptHasher;
-    AddAlgName;
+    NotifyProgress([hsh.AlgoName]);
     Check(mormot.crypt.secure.Hasher(hsh.AlgoName) = hsh);
     h := hsh.Full(n);
     for i := 1 to length(n) do
@@ -2688,7 +2718,7 @@ begin
   for a := 0 to high(alg) do
   begin
     sig := alg[a] as TCryptSigner;
-    AddAlgName;
+    NotifyProgress([sig.AlgoName]);
     Check(mormot.crypt.secure.Signer(sig.AlgoName) = sig);
     h := sig.Full('key', n);
     for i := 1 to length(n) do
@@ -2711,7 +2741,7 @@ begin
   for a := 0 to high(alg) do
   begin
     cip := alg[a] as TCryptCipherAlgo;
-    AddAlgName;
+    NotifyProgress([cip.AlgoName]);
     Check(mormot.crypt.secure.CipherAlgo(cip.AlgoName) = cip);
     if cip.IsAead then
       aead := cip.AlgoName
@@ -2734,22 +2764,24 @@ begin
   for a := 0 to high(alg) do
   begin
     asy := alg[a] as TCryptAsym;
-    AddAlgName;
+    NotifyProgress([asy.AlgoName]);
     Check(mormot.crypt.secure.Asym(asy.AlgoName) = asy);
+    timer.STart;
     asy.GeneratePem(pub, priv, '');
     Check(pub <> '');
     Check(priv <> '');
+    asy.GeneratePem(pub2, priv2, '');
+    NotifyTestSpeed('%.Generate', [asy], 2, 0, @timer, {onlylog=}true);
+    Check(pub2 <> '');
+    Check(priv2 <> '');
+    Check(pub <> pub2);
+    Check(priv <> priv2);
     CheckUtf8(asy.Sign(n, priv, s), asy.AlgoName);
     Check(s <> '');
     Check(asy.Verify(n, pub, s));
     inc(n[1]);
     Check(not asy.Verify(n, pub, s));
     dec(n[1]);
-    asy.GeneratePem(pub2, priv2, '');
-    Check(pub2 <> '');
-    Check(priv2 <> '');
-    Check(pub <> pub2);
-    Check(priv <> priv2);
   end;
   // validate Cert High-Level Algorithms Factory
   alg := TCryptCertAlgo.Instances;
@@ -2757,7 +2789,7 @@ begin
   begin
     timer.Start;
     crt := alg[a] as TCryptCertAlgo;
-    AddAlgName;
+    NotifyProgress([crt.AlgoName]);
     check(PosEx(UpperCase(CAA_JWT[crt.AsymAlgo]), UpperCase(crt.AlgoName)) > 0);
     c1 := crt.New;
     check(c1.AsymAlgo = crt.AsymAlgo);
@@ -2807,9 +2839,9 @@ begin
     CheckEqual(iss, 'myself');
     CheckEqual(sub, 'me');
     check(c1.Handle <> nil);
-    check(c1.IsValidDate);
-    check(c1.GetNotBefore <= NowUtc);
-    check(c1.GetNotAfter > NowUtc);
+    check(c1.IsValidDate, 'isvaliddate');
+    check(c1.GetNotBefore <= NowUtc + CERT_DEPRECATION_THRESHOLD, 'nbef');
+    check(c1.GetNotAfter > NowUtc - CERT_DEPRECATION_THRESHOLD, 'naft');
     check(c1.SetPrivateKey(c1.GetPrivateKey), 'in-place pk replace');
     for fmt := ccfBinary to ccfPem do
     begin
@@ -2862,6 +2894,7 @@ begin
       CheckEqual(word(c3.GetUsage), word(c1.GetUsage));
       if fmt = ccfPem then // PKCS12 seems to add some information to X509 :(
         CheckEqual(c3.GetPeerInfo, c1.GetPeerInfo);
+      checkEqual(c3.GetPublicKey, c1.GetPublicKey);
       s := c1.Save;
       check(c2.load(s));
       checkEqual(c2.GetPrivateKey, '');
@@ -2895,6 +2928,8 @@ begin
       CheckEqual(c3.GetSubject, s3);
     Check(c3.HasPrivateSecret);
     CheckEqual(c3.GetAuthorityKey, c1.GetSubjectKey);
+    Check(c3.IsAuthorizedBy(c1), 'isauthby1');
+    Check(not c3.IsAuthorizedBy(c3), 'isauthby2');
     Check(c3.Verify(nil) = cvUnknownAuthority, 'Verify(nil)');
     Check(c3.Verify(c1) = cvValidSigned, 'cvValidSigned1');
     Check(c3.Verify(c2) = cvValidSigned, 'cvValidSigned2');
@@ -2913,6 +2948,7 @@ begin
     fields.CommonName := s2;
     c2.Generate([cuDigitalSignature, cuKeyAgreement], '', nil, 30, -1, @fields);
     Check(c2.IsSelfSigned);
+    Check(not c3.IsAuthorizedBy(c2), 'isauthby3');
     if crt.AlgoName <> 'syn-es256-v1' then
       CheckEqual(c2.GetSubject, s2);
     if c2.GetAuthorityKey <> c2.GetSubjectKey then
@@ -2925,6 +2961,7 @@ begin
     CheckUtf8(cv = cvValidSelfSigned, 'self2=%', [ToText(cv)^]);
     c2.Sign(c1); // change signature
     CheckEqual(c2.GetAuthorityKey, c1.GetSubjectKey);
+    Check(not c2.IsSelfSigned);
     Check(c2.Verify(c1) = cvValidSigned, 'self3');
     Check(c2.Verify(nil) = cvUnknownAuthority, 'self4');
     if crt.AlgoName = 'syn-es256-v1' then
@@ -3062,7 +3099,7 @@ begin
       check(not c2.IsSelfSigned, 'csr self2');
       CheckEqual(c2.GetAuthorityKey, c1.GetSubjectKey, 'csr auth2');
     end;
-    //NotifyTestSpeed(Utf8ToString(crt.AlgoName), 1, 0, @timer);
+    NotifyTestSpeed('% %', [c2.Instance, crt.AlgoName], 1, 0, @timer, {onlylog=}true);
   end;
   // validate Store High-Level Algorithms Factory
   r := RandomAnsi7(100);
@@ -3070,8 +3107,9 @@ begin
   for a := 0 to high(alg) do
   begin
     str := alg[a] as TCryptStoreAlgo;
-    AddAlgName;
+    NotifyProgress([str.AlgoName]);
     //writeln(str.AlgoName);
+    timer.Start;
     st1 := str.New;
     CheckEqual(st1.Count, 0);
     // set c1 as self-signed root certificate (in v1 format)
@@ -3131,8 +3169,8 @@ begin
       CheckUtf8(cv = cvValidSigned, 's1=%', [ToText(cv)^]);
     // persist the Store
     st2 := str.NewFrom(st1.Save);
-    CheckEqual(st2.Count, 3);
     Check(st2 <> nil);
+    CheckEqual(st2.Count, 3);
     Check(st2.IsValid(c1) = cvValidSelfSigned, '2c1');
     Check(st2.IsValid(c2) = cvValidSigned, '2c2');
     Check(st2.IsValid(c3) = cvValidSigned, '2c3');
@@ -3144,14 +3182,13 @@ begin
       inc(r[1]);
       Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2c');
       // validate CRL on buffers (not OpenSSL)
-      Check(st2.Revoke(c3, 0, crrWithdrawn));
+      Check(st2.Revoke(c3, crrWithdrawn));
       Check(st2.Verify(s, pointer(r), length(r)) = cvRevoked, 's2d');
-      Check(st2.Revoke(c3, 0, crrNotRevoked));
+      Check(st2.Revoke(c3, crrNotRevoked));
       Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2e');
     end;
     // validate CRL on certificates
-    Check(st2.Revoke(c3, 0, crrWithdrawn));
-    Check(st2.IsRevoked(c3.GetSerial) = crrWithdrawn);
+    Check(st2.Revoke(c3, crrWithdrawn));
     Check(st2.IsRevoked(c3) = crrWithdrawn);
     // note: st2.Save fails with OpenSSL because the CRL is not signed
     // ensure new certs are not recognized by previous stores
@@ -3165,8 +3202,8 @@ begin
         Check(st3.Verify(s, pointer(r), length(r)) = cvUnknownAuthority, 's3');
     end;
     st3 := st2;
+    NotifyTestSpeed('%', [str.AlgoName], 1, 0, @timer, {onlylog=}true);
   end;
-  AddConsole(Utf8ToString(names));
 end;
 
 procedure TTestCoreCrypto._TBinaryCookieGenerator;
@@ -3239,17 +3276,6 @@ begin
 end;
 
 const
-  _rsapub = // "openssl rsa -in priv.pem -outform PEM -pubout -out pub.pem"
-    // see _rsapriv defined above (used for TJwtRs* validation)
-    '-----BEGIN PUBLIC KEY-----'#13#10 +
-    'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtQ4/dhzEXlDpj71dwF3T'#13#10 +
-    't1Sx/COvd6Y8R4kxgcLblmdt3BCmGAYgNS2yf0ORcGKse+wYLG+BV8rIT2zRPbrI'#13#10 +
-    'XfEJmnjlnsQ635n9bMpfhFIyr9pE4w5y5ZUAzJStwYmudykFAfA7/1BWqD+uE3z5'#13#10 +
-    'PqfnmZHEbYNHeBGt0vIRSfQQXXxj+wnpaQ+/GTYQr5OHynyJS8esD9dpKfsExc7r'#13#10 +
-    'Bx4VH1tCx1SH9yVAMHts0674HjnnyFyveoXOajN1gxn4/iN1lfWZzzoWqyVvKWZ5'#13#10 +
-    'XitCD/FEdhbjFbWKibrku9c/P7HNz7oqMx2QkhGa+asefQNnwFv+Nqac9rTCP7ld'#13#10 +
-    'ewIDAQAB'#13#10 +
-    '-----END PUBLIC KEY-----'#13#10;
   // from FPC RTL
   _modulus =
     'bb32b4d0d89e9a9e8c79294c2ba8ef5c43d4933b9478ff3054c71bc8e52f1b99cd108d' +
@@ -3849,12 +3875,33 @@ const
     'siC94x9I5sQUdpYL9Py/IxiRxJzKSD2WlOsytKc='#13#10 +
     '-----END CERTIFICATE-----'#13#10;
 
+  _crl_pem = // from http://crl3.digicert.com/CloudflareIncECCCA-3.crl
+    '-----BEGIN X509 CRL-----'#13#10 +
+    'MIIBTDCB8wIBATAKBggqhkjOPQQDAjBKMQswCQYDVQQGEwJVUzEZMBcGA1UEChMQ'#13#10 +
+    'Q2xvdWRmbGFyZSwgSW5jLjEgMB4GA1UEAxMXQ2xvdWRmbGFyZSBJbmMgRUNDIENB'#13#10 +
+    'LTMXDTIzMTAxNjA0MDAyMFoXDTIzMTAyMzA0MDAyMFowRjAhAhALvx7d/AXWY+kC'#13#10 +
+    'OhO32r3mFw0yMzA2MjAyMjA4MjlaMCECEAjvt5OCw8Z/b6We0DwiL+wXDTIzMDYy'#13#10 +
+    'MDIyMTcwM1qgMDAuMB8GA1UdIwQYMBaAFKXON+rrsHUOlGeItEX62SQQh5YfMAsG'#13#10 +
+    'A1UdFAQEAgIFSDAKBggqhkjOPQQDAgNIADBFAiEA86qhZ80IYV7PqU79mz8T9Afp'#13#10 +
+    'b+30K8FXr3J7GyoEQDMCIH+7vnTK09Ryqvdp+p0OqLjLGen3So7Wy981pObr8FRE'#13#10 +
+    '-----END X509 CRL-----'#13#10;
+
 procedure TTestCoreCrypto._X509;
 var
-  bin: RawByteString;
+  bin, der: RawByteString;
+  pem, sav, sn: RawUtf8;
   x, a: TX509;
   i: integer;
   nfo: TX509Parsed;
+  crl: TX509Crl;
+  num: QWord;
+  ca, cint, cc: ICryptCert;
+  st: ICryptStore;
+  c: array[cuKeyAgreement .. cuTlsClient] of ICryptCert;
+  chain, chain2: ICryptCertChain;
+  cu: TCryptCertUsage;
+  cus: TCryptCertUsages;
+  utc: TDateTime;
   timer: TPrecisionTimer;
 begin
   {$ifdef OSWINDOWS}
@@ -3936,10 +3983,8 @@ begin
         'caIssuers=http://x1.i.lencr.org/');
       CheckEqual(a.Extension[xeCertificatePolicies],
         '2.23.140.1.2.1,1.3.6.1.4.1.44947.1.1.1');
-      timer.Start;
-      for i := 1 to 100 do
-        Check(x.Verify(a, [], _synopse_date) = cvValidSigned, 'verify syn');
-      NotifyTestSpeed('RSA2048 verify', 100, 0, @timer);
+      for i := 1 to 1000 do // will use TX509.fLastVerifyAuthPublicKey cache
+        Check(x.Verify(a, [], _synopse_date) = cvValidSigned, 'verify 1000');
       bin := x.Signed.ToDer;
       Check(a.Verify(pointer(x.SignatureValue), pointer(bin),
         length(x.SignatureValue), length(bin), [], _synopse_date) =
@@ -3988,10 +4033,8 @@ begin
       'd5ae8d642967b01f806cd5c7c1af8b47ff7337bc');
     CheckEqual(x.FingerPrint(hfSHA256),
       'b75b01ca2d59f3283a6843b76d777ebe5b5d752f11c686879cf45248564cffa4');
-    timer.Start;
-    for i := 1 to 100 do
+    for i := 1 to 1000 do // will use TX509.fLastVerifyAuthPublicKey cache
       Check(x.Verify = cvValidSelfSigned, 'verify self');
-    NotifyTestSpeed('ECC256 verify', 100, 0, @timer);
     bin := x.Signed.ToDer;
     Check(x.Verify(pointer(x.SignatureValue), pointer(bin),
       length(x.SignatureValue), length(bin), [cvWrongUsage]) =
@@ -3999,9 +4042,276 @@ begin
     CheckEqual(x.SubjectPublicKeyAlgorithm, '256-bit prime256v1 ECDSA');
     CheckHash(x.PeerInfo, $BCB82372, 'peerinfo3');
     CheckHash(ObjectToJson(x), $BBCBCFEB);
+    Check(AsnDecChunk(x.SaveToDer), 'x.SaveToDer');
   finally
     x.Free;
   end;
+  // validate our X.509 CRL class
+  crl := TX509Crl.Create;
+  try
+    Check(crl.SignatureAlgorithm = xsaNone);
+    Check(crl.IsRevoked('08efb79382c3c67f6fa59ed03c222fec') = crrNotRevoked);
+    Check(crl.LoadFromPem(_crl_pem));
+    Check(crl.SignatureAlgorithm = xsaSha256Ecc256);
+    CheckEqual(DateTimeToIso8601Text(crl.ThisUpdate), '2023-10-16T04:00:20');
+    CheckEqual(DateTimeToIso8601Text(crl.NextUpdate), '2023-10-23T04:00:20');
+    CheckEqual(crl.CrlNumber, 1352);
+    CheckEqual(crl.AuthorityKeyIdentifier,
+      'a5:ce:37:ea:eb:b0:75:0e:94:67:88:b4:45:fa:d9:24:10:87:96:1f');
+    CheckEqual(RawUtf8ArrayToCsv(crl.Revoked),
+      '0b:bf:1e:dd:fc:05:d6:63:e9:02:3a:13:b7:da:bd:e6,' +
+      '08:ef:b7:93:82:c3:c6:7f:6f:a5:9e:d0:3c:22:2f:ec');
+    Check(crl.IsRevoked('08efb79382c3c67f6fa59ed03c222fec') = crrUnspecified);
+    Check(crl.IsRevoked('08efb79382c3c67f6fa59ed03c222feb') = crrNotRevoked);
+    CheckEqual(crl.IssuerDN,
+      'CN=Cloudflare Inc ECC CA-3, C=US, O=Cloudflare, O=Inc.');
+    der := crl.SaveToDer;
+    Check(AsnDecChunk(der), 'crl.SaveToDer');
+    pem := DerToPem(der, pemCrl);
+    CheckEqual(pem, _crl_pem);
+    crl.AfterModified; // force regenerate DER/PEM
+    pem := DerToPem(crl.SaveToDer, pemCrl);
+    CheckEqual(pem, _crl_pem);
+  finally
+    crl.Free;
+  end;
+  crl := TX509Crl.Create;
+  try
+    Check(crl.LoadFromPem(pem));
+    Check(crl.SignatureAlgorithm = xsaSha256Ecc256);
+    CheckEqual(DateTimeToIso8601Text(crl.ThisUpdate), '2023-10-16T04:00:20');
+    CheckEqual(DateTimeToIso8601Text(crl.NextUpdate), '2023-10-23T04:00:20');
+    CheckEqual(crl.CrlNumber, 1352);
+    CheckEqual(crl.AuthorityKeyIdentifier,
+      'a5:ce:37:ea:eb:b0:75:0e:94:67:88:b4:45:fa:d9:24:10:87:96:1f');
+    CheckEqual(RawUtf8ArrayToCsv(crl.Revoked),
+      '0b:bf:1e:dd:fc:05:d6:63:e9:02:3a:13:b7:da:bd:e6,' +
+      '08:ef:b7:93:82:c3:c6:7f:6f:a5:9e:d0:3c:22:2f:ec');
+    crl.Clear;
+    Check(crl.SignatureAlgorithm = xsaNone);
+    CheckEqual(crl.CrlNumber, 0);
+    CheckEqual(crl.AuthorityKeyIdentifier, '');
+  finally
+    crl.Free;
+  end;
+  // create some prime256v1 certificates for PKI testing
+  ca := CryptCertX509[caaES256].Generate(
+    [cuCA, cuCrlSign, cuKeyCertSign], 'trust anchor');
+  cint := ca.CertAlgo.Generate([cuCrlSign, cuKeyCertSign], 'intermediate', ca);
+  Check(ca.Verify(nil) = cvValidSelfSigned);
+  Check(cint.Verify(ca) = cvValidSigned);
+  for cu := low(c) to high(c) do
+  begin
+    cus := [];
+    include(cus, cu);
+    c[cu] := ca.CertAlgo.Generate(cus, ShortStringToUtf8(ToText(cu)^), cint);
+    Check(c[cu].Verify(ca) = cvUnknownAuthority);
+    Check(c[cu].Verify(cint) = cvValidSigned);
+  end;
+  SetLength(chain, 3); // create an unordered chain - should be consolidated
+  chain[1] := ca.CertAlgo.Generate([cuKeyCertSign], 'cint1', cint);
+  chain[2] := ca.CertAlgo.Generate([cuKeyCertSign], 'cint2', chain[1]);
+  chain[0] := ca.CertAlgo.Generate([cuTlsClient], 'www.toto.com', chain[2]);
+  // validate a X.509 CRL generation and signature with a temporay authority
+  crl := TX509Crl.Create;
+  try
+    CheckEqual(crl.CrlNumber, 0);
+    Check(crl.IsRevoked('abcd') = crrNotRevoked);
+    Check(crl.AddRevocation('ab:cd', crrCompromised));
+    Check(crl.IsRevoked('abcd') = crrCompromised);
+    Check(crl.IsRevoked('abce') = crrNotRevoked);
+    Check(crl.AddRevocation('ef:01', crrReplaced));
+    Check(crl.IsRevoked('EF:01') = crrReplaced);
+    CheckEqual(RawUtf8ArrayToCsv(crl.Revoked), 'ab:cd,ef:01');
+    Check(crl.SignatureAlgorithm = xsaNone);
+    Check(crl.VerifyCryptCert(ca) = cvInvalidSignature);
+    Check(crl.VerifyCryptCert(cint) = cvInvalidSignature);
+    CheckEqual(crl.AuthorityKeyIdentifier, '');
+    sn := c[cuNonRepudiation].GetSerial;
+    Check(crl.AddRevocation(sn, crrCompromised));
+    num := Random64 shr 1;
+    crl.SignCryptCert(cint, num);
+    CheckEqual(crl.Issuer[xaCN], 'intermediate');
+    Check(crl.SignatureAlgorithm = xsaSha256Ecc256);
+    Check(IdemPropNameU(crl.AuthorityKeyIdentifier, cint.GetSubjectKey));
+    Check(crl.VerifyCryptCert(ca) = cvUnknownAuthority);
+    Check(crl.VerifyCryptCert(cint) = cvValidSigned);
+    bin := crl.SaveToDer;
+    pem := crl.SaveToPem;
+    Check(pem <> '');
+    Check(PemToDer(pem) = bin);
+    CheckEqual(crl.CrlNumber, num);
+  finally
+    crl.Free;
+  end;
+  crl := TX509Crl.Create;
+  try
+    CheckEqual(crl.Issuer[xaCN], '');
+    Check(crl.LoadFromDer(bin));
+    CheckEqual(crl.CrlNumber, num);
+    Check(crl.SignatureAlgorithm = xsaSha256Ecc256);
+    Check(IdemPropNameU(crl.AuthorityKeyIdentifier, cint.GetSubjectKey));
+    CheckEqual(crl.Issuer[xaCN], 'intermediate');
+    CheckEqual(RawUtf8ArrayToCsv(crl.Revoked), 'ab:cd,ef:01,' + sn);
+    Check(crl.VerifyCryptCert(cint) = cvValidSigned);
+    Check(crl.Verify(cint.Handle) = cvValidSigned);
+    Check(crl.IsRevoked('abce') = crrNotRevoked);
+    Check(crl.IsRevoked('ab:CD') = crrCompromised);
+    Check(crl.IsRevoked('ef01') = crrReplaced);
+    Check(crl.IsRevoked(sn) = crrCompromised);
+    CheckEqual(crl.SaveToPem, pem);
+    crl.AfterModified; // force regenerate DER/PEM
+    CheckEqual(crl.SaveToPem, pem);
+  finally
+    crl.Free;
+  end;
+  // validate our PKI
+  Check(cint.Verify(ca) = cvValidSigned);
+  for cu := low(c) to high(c) do
+    Check(c[cu].Verify(cint) = cvValidSigned);
+  st := CryptStoreX509.New;
+  CheckEqual(st.Count, 0);
+  CheckEqual(st.CrlCount, 0);
+  CheckEqual(length(st.Add([ca, cint])), 2);
+  CheckEqual(st.Count, 2);
+  CheckEqual(st.CrlCount, 0);
+  Check(st.IsValid(ca) = cvValidSelfSigned);
+  Check(st.IsValid(cint) = cvValidSigned);
+  for cu := low(c) to high(c) do
+    Check(st.IsValid(c[cu]) = cvValidSigned);
+  Check(st.IsValidChain(chain) = cvValidSigned, 'chain consolidate');
+  chain2 := chain;
+  ChainAdd(chain2, c[cuNonRepudiation]);
+  Check(st.IsValidChain(chain2) = cvValidSigned, 'chain ignore irrelevant');
+  Check(st.FindOne('IntermediatE', ccmSubjectCN) = cint);
+  Check(st.FindOne('Trust Anchor', ccmSubjectCN) = ca);
+  Check(st.FindOne('TRUST Anchor', ccmIssuerCN) = ca);
+  Check(st.Cache.FindOne('IntermediatE', ccmSubjectCN) = nil);
+  Check(st.Cache.FindOne('Trust Anchor', ccmSubjectCN) = nil);
+  Check(st.Cache.FindOne('TRUST Anchor', ccmIssuerCN) = nil);
+  sav := st.Save;
+  // try store certificate persistence as PEM
+  st := CryptStoreX509.NewFrom(sav);
+  CheckEqual(st.Count, 2);
+  CheckEqual(st.CrlCount, 0);
+  Check(st.IsValid(cint) = cvValidSigned);
+  Check(st.IsValid(ca) = cvValidSelfSigned);
+  Check(st.IsValidChain(chain) = cvValidSigned);
+  CheckEqual(st.Save, sav);
+  for cu := low(c) to high(c) do
+  begin
+    Check(st.IsRevoked(c[cu]) = crrNotRevoked);
+    Check(st.IsValid(c[cu]) = cvValidSigned);
+  end;
+  // ensure dates are taken into account
+  utc := NowUtc; // is likely to be cached on server side
+  utc := utc - 100;
+  for cu := low(c) to high(c) do
+    Check(st.IsValid(c[cu], utc) = cvInvalidDate);
+  utc := utc + 100;
+  for cu := low(c) to high(c) do
+    Check(st.IsValid(c[cu], utc) = cvValidSigned);
+  utc := utc + 1000;
+  for cu := low(c) to high(c) do
+    Check(st.IsValid(c[cu], utc) = cvInvalidDate);
+  utc := utc - 900;
+  for cu := low(c) to high(c) do
+    Check(st.IsValid(c[cu], utc) = cvValidSigned);
+  // add a signed CRL generated by the CA
+  Check(st.AddFromBuffer(pem) = nil, 'add crl');
+  CheckEqual(st.Count, 2);
+  CheckEqual(st.CrlCount, 1);
+  for i := 1 to 5 do
+    for cu := low(c) to high(c) do
+      if cu <> cuNonRepudiation then
+      begin
+        Check(st.IsRevoked(c[cu]) = crrNotRevoked, 'r1');
+        Check(st.IsValid(c[cu]) = cvValidSigned, 'r2');
+      end
+      else
+      begin
+        Check(st.IsRevoked(c[cu]) = crrCompromised, 'r3');
+        Check(st.IsValid(c[cu]) = cvRevoked, 'r4');
+      end;
+  // should not affect the chain
+  Check(st.IsValidChain(chain) = cvValidSigned);
+  chain2 := chain;
+  for cu := low(c) to high(c) do
+    ChainAdd(chain2, c[cu]);
+  Check(st.IsValidChain(chain2) = cvValidSigned, 'chain irrelevants');
+  // benchmark a typical load DER + validate chain for a certificate
+  bin := c[cuTlsClient].Save; // as retrieved e.g. from a TLS handshake
+  timer.Start;
+  for i := 1 to 10000 do
+  begin
+    cc := st.Cache.Load(bin);
+    Check(cc <> nil, 'cc load');
+    Check(st.IsValid(cc, utc) = cvValidSigned, 'cc valid');
+  end;
+  NotifyTestSpeed('x509-pki Load+IsValid', 10000, 0, @timer);
+  Check(st.Cache.FindOne('Intermediate', ccmIssuerCN) = cc);
+  // revoke a certificate (in the midddle of the chain)
+  Check(st.IsValidChain(chain) = cvValidSigned);
+  Check(st.IsValid(chain[0]) = cvUnknownAuthority);
+  Check(st.IsValid(chain[2]) = cvUnknownAuthority);
+  Check(st.IsValid(chain[1]) = cvValidSigned);
+  st.Revoke(chain[2], crrServerCompromised);
+  Check(st.IsValidChain(chain) = cvRevoked);
+  Check(st.IsValid(chain[0]) = cvUnknownAuthority);
+  Check(st.IsValid(chain[2]) = cvRevoked);
+  Check(st.IsValid(chain[1]) = cvValidSigned);
+  Check(st.IsRevoked(chain[0]) = crrNotRevoked);
+  Check(st.IsRevoked(chain[1]) = crrNotRevoked);
+  Check(st.IsRevoked(chain[2]) = crrServerCompromised);
+  // ensure non-CA Revoke() as properly persistence as unsigned PEM CRL
+  sav := st.Save;
+  st := CryptStoreX509.NewFrom(sav);
+  Check(PosEx('Signature: none', sav) <> 0, 'unsigned CRL');
+  CheckEqual(st.Count, 2);
+  CheckEqual(st.CrlCount, 2);
+  Check(st.IsValid(cint) = cvValidSigned);
+  Check(st.IsValid(ca) = cvValidSelfSigned);
+  Check(st.IsValidChain(chain) = cvRevoked);
+  Check(st.IsValid(chain[0]) = cvUnknownAuthority);
+  Check(st.IsValid(chain[2]) = cvRevoked);
+  Check(st.IsValid(chain[1]) = cvValidSigned);
+  CheckEqual(st.Save, sav);
+  // revoke the head of our chain
+  st.Revoke(chain[0], crrCompromised);
+  Check(st.IsValidChain(chain) = cvRevoked);
+  Check(st.IsValid(chain[0]) = cvRevoked);
+  Check(st.IsValid(chain[2]) = cvRevoked);
+  Check(st.IsValid(chain[1]) = cvValidSigned);
+  CheckEqual(st.Count, 2);
+  CheckEqual(st.CrlCount, 3);
+  Check(st.IsRevoked(chain[0]) = crrCompromised);
+  Check(st.IsRevoked(chain[1]) = crrNotRevoked);
+  Check(st.IsRevoked(chain[2]) = crrServerCompromised);
+  sav := st.Save;
+  // validate store persistence once again
+  st := CryptStoreX509.NewFrom(sav);
+  CheckEqual(st.Count, 2);
+  CheckEqual(st.CrlCount, 3);
+  CheckEqual(st.Save, sav);
+  Check(st.IsValidChain(chain) = cvRevoked);
+  Check(st.IsValid(chain[0]) = cvRevoked);
+  Check(st.IsValid(chain[2]) = cvRevoked);
+  Check(st.IsValid(chain[1]) = cvValidSigned);
+  Check(st.IsRevoked(chain[0]) = crrCompromised);
+  Check(st.IsRevoked(chain[1]) = crrNotRevoked);
+  Check(st.IsRevoked(chain[2]) = crrServerCompromised);
+  // revoke the CA, and observe the whole pyramid collapse
+  Check(st.Revoke(ca, crrAuthorityCompromised));
+  Check(st.IsValidChain(chain) = cvRevoked);
+  Check(st.IsValid(chain[0]) = cvRevoked);
+  Check(st.IsValid(chain[2]) = cvRevoked);
+  Check(st.IsValid(chain[1]) = cvRevoked);
+  for cu := low(c) to high(c) do
+    Check(st.IsValid(c[cu]) = cvRevoked);
+  // but individual certificates revocation state was not affected
+  Check(st.IsRevoked(chain[0]) = crrCompromised);
+  Check(st.IsRevoked(chain[1]) = crrNotRevoked);
+  Check(st.IsRevoked(chain[2]) = crrServerCompromised);
 end;
 
 
