@@ -7,7 +7,6 @@ unit mormot.net.tftp.server;
   *****************************************************************************
 
     TFTP Server Processing with RFC 1350/2347/2348/2349/7440 Support
-    - Abstract UDP Server
     - TFTP Connection Thread and State Machine
     - TTftpServerThread Server Class
 
@@ -35,42 +34,10 @@ uses
   mormot.core.buffers,
   mormot.core.json,
   mormot.net.sock,
+  mormot.net.server, // for TUdpServerThread
   mormot.net.tftp.client;
 
 
-
-{ ******************** Abstract UDP Server }
-
-type
-  EUdpServer = class(ENetSock);
-
-  /// work memory buffer of the maximum size of UDP frame (64KB)
-  TUdpFrame = array[word] of byte;
-
-  /// pointer to a memory buffer of the maximum size of UDP frame
-  PUdpFrame = ^TUdpFrame;
-
-  /// abstract UDP server thread
-  TUdpServerThread = class(TLoggedThread)
-  protected
-    fSock: TNetSocket;
-    fSockAddr: TNetAddr;
-    fExecuteMessage: RawUtf8;
-    fFrame: PUdpFrame;
-    procedure AfterBind; virtual;
-    /// will loop for any pending UDP frame, and execute FrameReceived method
-    procedure DoExecute; override;
-    // this is the main processing method for all incoming frames
-    procedure OnFrameReceived(len: integer; var remote: TNetAddr); virtual; abstract;
-    procedure OnIdle(tix64: Int64); virtual; // called every 512 ms at most
-    procedure OnShutdown; virtual; abstract;
-  public
-    /// initialize and bind the server instance, in non-suspended state
-    constructor Create(LogClass: TSynLogClass;
-      const BindAddress, BindPort, ProcessName: RawUtf8); reintroduce;
-    /// finalize the processing thread
-    destructor Destroy; override;
-  end;
 
 
 { ******************** TFTP Connection Thread and State Machine }
@@ -143,10 +110,7 @@ type
     fRangeLow, fRangeHigh: word;
     fFileCache: TSynDictionary; // thread-safe <16MB files content cache
     {$ifdef OSPOSIX}
-    // file names cache for ttoCaseInsensitiveFileName
-    fFileNamesSafe: TLightLock;
-    fFileNames: TRawUtf8DynArray;
-    fFileNamesTix: cardinal; // flush cache every minute
+    fPosixFileNames: TPosixFileCaseInsensitive; // ttoCaseInsensitiveFileName
     {$endif OSPOSIX}
     function GetConnectionCount: integer;
     function GetContextOptions: TTftpContextOptions;
@@ -205,101 +169,6 @@ type
 
 
 implementation
-
-
-{ ******************** Abstract UDP Server }
-
-{ TUdpServerThread }
-
-procedure TUdpServerThread.OnIdle(tix64: Int64);
-begin
-  // do nothing by default
-end;
-
-constructor TUdpServerThread.Create(LogClass: TSynLogClass;
-  const BindAddress, BindPort, ProcessName: RawUtf8);
-var
-  ident: RawUtf8;
-  res: TNetResult;
-begin
-  GetMem(fFrame, SizeOf(fFrame^));
-  ident := ProcessName;
-  if ident = '' then
-    FormatUtf8('udp%srv', [BindPort], ident);
-  if LogClass <> nil then
-     LogClass.Add.Log(sllTrace, 'Create: bind %:% for input requests on %',
-       [BindAddress, BindPort, ident], self);
-  res := NewSocket(BindAddress, BindPort, nlUdp, {bind=}true,
-    5000, 5000, 5000, 10, fSock, @fSockAddr);
-  if res <> nrOk then
-    // on binding error, raise exception before the thread is actually created
-    raise EUdpServer.Create('%s.Create binding error on %s:%s',
-      [ClassNameShort(self)^, BindAddress, BindPort], res);
-  AfterBind;
-  inherited Create({suspended=}false, LogClass, ident);
-end;
-
-destructor TUdpServerThread.Destroy;
-begin
-  fLogClass.Add.Log(sllDebug, 'Destroy: ending %', [fProcessName]);
-  TerminateAndWaitFinished;
-  inherited Destroy;
-  if fSock <> nil then
-    fSock.ShutdownAndClose({rdwr=}true);
-  FreeMem(fFrame);
-end;
-
-procedure TUdpServerThread.AfterBind;
-begin
-  // do nothing by default
-end;
-
-procedure TUdpServerThread.DoExecute;
-var
-  len: integer;
-  tix64: Int64;
-  tix, lasttix: cardinal;
-  remote: TNetAddr;
-  res: TNetResult;
-begin
-  fProcessing := true;
-  lasttix := 0;
-  // main server process loop
-  try
-    if fSock = nil then // paranoid check
-      raise EUdpServer.CreateFmt('%s.Execute: Bind failed', [ClassNameShort(self)^]);
-    while not Terminated do
-    begin
-      if fSock.WaitFor(1000, [neRead]) <> [] then
-      begin
-        if Terminated then
-          break;
-        res := fSock.RecvPending(len);
-        if (res = nrOk) and
-           (len >= 4) then
-        begin
-          PInteger(fFrame)^ := 0;
-          len := fSock.RecvFrom(fFrame, SizeOf(fFrame^), remote);
-          if len >= 0 then // -1=error, 0=shutdown
-            OnFrameReceived(len, remote);
-        end;
-      end;
-      tix64 := mormot.core.os.GetTickCount64;
-      tix := tix64 shr 9;
-      if tix <> lasttix then
-      begin
-        lasttix := tix;
-        OnIdle(tix64); // called every 512 ms at most
-      end;
-    end;
-    OnShutdown; // should close all connections
-  except
-    on E: Exception do
-      // any exception would break and release the thread
-      FormatUtf8('% [%]', [E, E.Message], fExecuteMessage);
-  end;
-  fProcessing := false;
-end;
 
 
 { ******************** TFTP Connection Thread and State Machine }
@@ -461,7 +330,7 @@ begin
   fMaxConnections := 100; // = 100 threads, good enough for regular TFTP server
   fMaxRetry := 2;
   fOptions := Options;
-  inherited Create(LogClass, BindAddress, BindPort, ProcessName); // bind port
+  inherited Create(LogClass, BindAddress, BindPort, ProcessName, 5000); // bind
   {$ifdef OSPOSIX}
   if ttoDropPriviledges in fOptions then
   begin
@@ -481,6 +350,9 @@ begin
     LogClass.Add.Log(LOG_INFOWARNING[not ok],
       'Create: ChangeRoot(%)=%', [SourceFolder, ok], self);
   end;
+  if ttoCaseInsensitiveFileName in fOptions then
+    fPosixFileNames := TPosixFileCaseInsensitive.Create(
+      SourceFolder, ttoAllowSubFolders in fOptions);
   {$endif OSPOSIX}
   if CacheTimeoutSecs > 0 then
     fFileCache := TSynDictionary.Create(
@@ -501,6 +373,9 @@ begin
     exit;
   NotifyShutdown;
   FreeAndNil(fConnection);
+  {$ifdef OSPOSIX}
+  FreeAndNil(fPosixFileNames);
+  {$endif OSPOSIX}
 end;
 
 procedure TTftpServerThread.NotifyShutdown;
@@ -556,7 +431,7 @@ begin
     exit;
   fFileFolder := IncludeTrailingPathDelimiter(Value);
   {$ifdef OSPOSIX}
-  fFileNames := nil;
+  fPosixFileNames.Folder := fFileFolder;
   {$endif OSPOSIX}
 end;
 
@@ -564,9 +439,7 @@ function TTftpServerThread.GetFileName(const FileName: RawUtf8): TFileName;
 var
   fn: TFileName;
   {$ifdef OSPOSIX}
-  i: PtrInt;
-  n: RawUtf8;
-  start, stop: Int64;
+  readms: integer;
   {$endif OSPOSIX}
 begin
   result := '';
@@ -581,31 +454,16 @@ begin
       (Pos(PathDelim, result) = 0)) then
   begin
     {$ifdef OSPOSIX}
-    if ttoCaseInsensitiveFileName in fOptions then
+    if Assigned(fPosixFileNames) then
     begin
-      fFileNamesSafe.Lock;
-      try
-        if fFileNames = nil then
-        begin
-          // use direct getdents aggregated syscalls instead of slower FindFirst
-          QueryPerformanceMicroSeconds(start);
-          fFileNames := PosixFileNames(fFileFolder, ttoAllowSubFolders in fOptions);
-          QuickSortRawUtf8(fFileNames, length(fFileNames), nil, @StrIComp);
-          QueryPerformanceMicroSeconds(stop);
-          if ttoLowLevelLog in fOptions then
-            fLog.Log(sllDebug, 'GetFileName: cached % filenames from % in %',
-              [length(fFileNames), fFileFolder, MicroSecToString(stop - start)],
-              self); // e.g. 4392 filenames from /home/ab/dev/lib/ in 7.20ms
-        end;
-        StringToUtf8(fn, n);
-        i := FastFindPUtf8CharSorted( // efficient O(log(n)) binary search
-          pointer(fFileNames), high(fFileNames), pointer(n),@StrIComp);
-        if i < 0 then
-          exit; // file does not exist
-        Utf8ToFileName(fFileNames[i], fn); // use exact file name case from OS
-      finally
-        fFileNamesSafe.UnLock;
-      end;
+      fn := fPosixFileNames.Find(fn, @readms);
+      if (readms <> 0) and
+         (ttoLowLevelLog in fOptions) then
+        // e.g. 4392 filenames from /home/ab/dev/lib/ in 7.20ms
+        fLog.Log(sllDebug, 'GetFileName: cached % filenames from % in %',
+          [fPosixFileNames.Count, fFileFolder, MicroSecToString(readms)], self);
+      if fn = '' then
+        exit; // file does not exist
     end;
     {$endif OSPOSIX}
     result := fFileFolder + fn;
@@ -783,17 +641,9 @@ procedure TTftpServerThread.OnIdle(tix64: Int64);
 begin
   fFileCache.DeleteDeprecated(tix64);
   {$ifdef OSPOSIX}
-  // refresh the fFileNames[] cache from disk every minute
-  if fFileNames = nil then
-    exit;
-  tix64 := tix64 shr 16; // changes every 65,536 seconds
-  if tix64 <> fFileNamesTix then
-  begin
-    fFileNamesTix := tix64;
-    fFileNamesSafe.Lock;
-    fFileNames := nil;
-    fFileNamesSafe.UnLock;
-  end;
+  if fPosixFileNames <> nil then
+    // refresh the fPosixFileNames cache from disk every minute
+    fPosixFileNames.OnIdle(tix64);
   {$endif OSPOSIX}
 end;
 

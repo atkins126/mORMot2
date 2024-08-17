@@ -1940,19 +1940,19 @@ asm
   jmp libc_log // Delphi Win64 ln() is buggy -> redirect to msvcrt
 end;
 
-function memcpy(dest, src: Pointer; count: PtrInt): Pointer; cdecl;
+function memcpy(dest, src: pointer; count: PtrInt): pointer; cdecl;
 begin
   MoveFast(src^, dest^, count);
   result := dest;
 end;
 
-function memmove(dest, src: Pointer; count: PtrInt): Pointer; cdecl;
+function memmove(dest, src: pointer; count: PtrInt): pointer; cdecl;
 begin
   MoveFast(src^, dest^, count);
   result := dest;
 end;
 
-function memset(dest: Pointer; val: Integer; count: PtrInt): Pointer; cdecl;
+function memset(dest: pointer; val: integer; count: PtrInt): pointer; cdecl;
 begin
   FillCharFast(dest^, count, val);
   result := dest;
@@ -3000,7 +3000,7 @@ begin
     JS_TAG_UNDEFINED:
       begin
         if raiseIfNotFound then
-          raise EQuickJS.CreateUtf8('GetValue(%) not found', [prop]);
+          EQuickJS.RaiseUtf8('GetValue(%) not found', [prop]);
         result := false;
       end;
     JS_TAG_EXCEPTION:
@@ -3534,7 +3534,7 @@ begin
     vtObject:
       FromClass(val.VObject, result);
   else
-    raise EQuickJS.CreateUtf8('Unhandled JSContext.From(VType=%)', [val.VType]);
+    EQuickJS.RaiseUtf8('Unhandled JSContext.From(VType=%)', [val.VType]);
   end;
 end;
 

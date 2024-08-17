@@ -1721,7 +1721,7 @@ asm     // Windows x64 calling convention expects to preserve XMM6-XMM15
 end;
 
 // Synopse's x64 asm, optimized for both in+out-order pipelined CPUs
-procedure KeccakPermutationKernel(B, A, C: Pointer);
+procedure KeccakPermutationKernel(B, A, C: pointer);
 {$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
         {$ifndef WIN64ABI}  // input: rcx=B, rdx=A, r8=C (Linux: rdi,rsi,rdx)
         mov     r8, rdx
@@ -2465,6 +2465,24 @@ function _sub256(out Output: THash256Rec; const Left, Right: THash256Rec): PtrUI
         mov    qword ptr [Output + 16], r11
         mov    qword ptr [Output+ 24], Left
         adc    eax, eax
+end;
+
+procedure _rshift1(var V: THash256Rec);
+{$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
+        mov     rax, qword ptr [V + 3 * 8]
+        mov     rdx, qword ptr [V + 2 * 8]
+        mov     r9,  qword ptr [V + 1 * 8]
+        mov     r10, qword ptr [V + 0 * 8]
+        mov     r8, rdx
+        mov     r11, r9
+        shrd    rdx, rax, 1     // 2 3
+        shr     rax, 1          // 3
+        shrd    r9, r8, 1       // 1 2
+        shrd    r10, r11, 1     // 0 1
+        mov     qword ptr [V + 3 * 8], rax
+        mov     qword ptr [V + 2 * 8], rdx
+        mov     qword ptr [V + 1 * 8], r9
+        mov     qword ptr [V + 0 * 8], r10
 end;
 
 {$ifdef FPC} // constref to force passing by reference (as Delphi does)
@@ -4184,7 +4202,7 @@ procedure ShiftAesNi(KeySize: cardinal; pk: pointer);
         call    @exp128
 end;
 
-procedure MakeDecrKeyAesNi(Rounds: integer; RK: Pointer);
+procedure MakeDecrKeyAesNi(Rounds: integer; RK: pointer);
 {$ifdef FPC} nostackframe; assembler; asm {$else} asm .noframe {$endif}
         mov     eax, Rounds
         sub     eax, 9

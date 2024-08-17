@@ -33,7 +33,10 @@ On Windows, some Operating-System high-level features like Windows HTTP and WebS
 
 Cross-Platform and Cross-Compiler `zlib` API
 - Low-Level ZLib Streaming Access
+- Low-Level libdeflate in-memory Compression Library
 - Simple Wrapper Functions for Deflate/ZLib Process
+
+FPC Intel-Linux and Win32 use the faster libdeflate for in-memory compression.
 
 ### mormot.lib.lizard
 
@@ -62,7 +65,9 @@ Implementation notes:
 - OpenSSL 1.1 features TLS 1.3, and is a LTS revision (until 2023-09-11).
 - OpenSSL 3.x is also supported on some platforms (currently Windows and Linux), as the next major version.
 - OpenSSL 1.1 / 3.x API adaptation is done at runtime by dynamic loading.
-- The Full OpenSSL 1.1 API can be defined if `OPENSSLFULLAPI` conditional is set.
+- The Full OpenSSL 1.1 API can be defined if `OPENSSLFULLAPI` conditional is set (untested).
+
+**Warning**: on Windows, you need to define the `USE_OPENSSL` conditional in YOUR project options to have this code actually link to the OpenSSL library.
 
 **Legal Notice**: as stated by our LICENSE.md terms, make sure that you comply to any restriction about the use of cryptographic software in your country.
 

@@ -25,7 +25,6 @@ uses
   sysutils,
   classes,
   variants,
-  mormot.lib.z, // use crc32() for contract hashing
   mormot.core.base,
   mormot.core.os,
   mormot.core.buffers,
@@ -196,17 +195,49 @@ type
     moaInclude,
     moaExclude);
 
+  /// used by TServiceAuthorization to stored its authorizations
+  TServiceAuthorizationState = (
+    idAllowAll,
+    idDenyAll,
+    idAllowed,
+    idDenied);
+
+  /// used by TServiceFactoryExecution to store its authorizations
+  {$ifdef USERECORDWITHMETHODS}
+  TServiceAuthorization = record
+  {$else}
+  TServiceAuthorization = object
+  {$endif USERECORDWITHMETHODS}
+    /// set if all TAuthGroup ID(s) should be defined for this factory
+    // - used on server side within TRestServerUriContext.ExecuteSoaByInterface
+    // - idAllowed, idDenied define what ID[] are storing
+    // - default is idAllowAll
+    StateID: TServiceAuthorizationState;
+    /// the sorted list of allowed/denied TAuthGroup ID(s)
+    // - used on server side within TRestServerUriContext.ExecuteSoaByInterface
+    // - IDs should be in 32-bit range, to reduce memory/cache size
+    // - idAllowed, idDenied define what ID[] are storing
+    SortedID: TIntegerDynArray;
+    /// quickly check if this TAuthGroup ID can execute this method
+    function IsDenied(const ID: TID): boolean;
+    /// define idAllowAll for this method, and remove any previous SortedID
+    procedure AllowAll;
+    /// define idDenyAll for this method, and remove any previous SortedID
+    procedure DenyAll;
+    /// deny one TAuthGroup ID for this method, likely to use idDenied state
+    // - can also remove a previous Allow(ID) during idAllowed state
+    procedure Deny(const ID: TID);
+    /// allow one TAuthGroup ID for this method, likely to use idAllowed state
+    // - can also remove a previous Deny(ID) during idDenied state
+    procedure Allow(const ID: TID);
+  end;
+
   /// internal per-method list of execution context as hold in TServiceFactory
   TServiceFactoryExecution = record
-    /// the list of denied TAuthGroup ID(s)
-    // - used on server side within TRestServerUriContext.ExecuteSoaByInterface
-    // - bit 0 for client TAuthGroup.ID=1 and so on...
-    // - is therefore able to store IDs up to 256 (maximum bit of 255 is a
-    // limitation of the pascal compiler itself)
-    // - void by default, i.e. no denial = all groups allowed for this method
-    Denied: set of 0..255;
     /// execution options for this method (about thread safety or logging)
     Options: TInterfaceMethodOptions;
+    /// store the current defined authorization of this method
+    Auth: TServiceAuthorization;
     /// where execution information should be written as TOrmServiceLog
     // - is a weak pointer to a IRestOrm instance to avoid reference counting
     LogRest: pointer;
@@ -370,7 +401,6 @@ const
   /// the Server-side instance implementation patterns without any ID
   // - so imFree won't be supported
   SERVICE_IMPLEMENTATION_NOID = [sicSingle, sicShared];
-
 
 function ToText(si: TServiceInstanceImplementation): PShortString; overload;
 
@@ -1037,7 +1067,7 @@ begin
   fInterfaceMangledUri := BinToBase64Uri(@fInterface.InterfaceIID, SizeOf(TGUID));
   fInterfaceUri := fInterface.InterfaceUri;
   if fOrm.Model.GetTableIndex(fInterfaceUri) >= 0 then
-    raise EServiceException.CreateUtf8('%.Create: I% routing name is ' +
+    EServiceException.RaiseUtf8('%.Create: I% routing name is ' +
       'already used by a % SQL table name', [self, fInterfaceUri, fInterfaceUri]);
   SetLength(fExecution, fInterface.MethodsCount);
   // compute interface signature (aka "contract"), serialized as a JSON object
@@ -1045,7 +1075,8 @@ begin
     [fInterfaceUri, LowerCase(TrimLeftLowerCaseShort(ToText(InstanceCreation))),
      fInterface.Contract], fContract);
   fContractHash := '"' + CardinalToHex(Hash32(fContract)) +
-    CardinalToHex(Crc32String(fContract)) + '"'; // 2 hashes to avoid collision
+    CardinalToHex(crc32(0, pointer(fContract), length(fContract))) + '"';
+    // 2 hashes to avoid collision
   if aContractExpected <> '' then // override default contract
     if aContractExpected[1] <> '"' then
       // stored as JSON string
@@ -1122,20 +1153,100 @@ end;
 
 { ************ TServiceFactoryServerAbstract Abstract Service Provider }
 
-function TServiceFactoryServerAbstract.GetAuthGroupIDs(
-  const aGroup: array of RawUtf8; out IDs: TIDDynArray): boolean;
+{ TServiceAuthorization }
+
+function TServiceAuthorization.IsDenied(const ID: TID): boolean;
+begin
+  result := true;
+  if (ID > 0) and
+     (ID <= MaxInt) then
+    case StateID of
+      idAllowAll:
+        result := false;
+      idAllowed: // FastFindIntegerSorted() has branchless x86_64 asm
+        result := FastFindIntegerSorted(
+                    pointer(SortedID), length(SortedID) - 1, ID) < 0;
+      idDenied:
+        result := FastFindIntegerSorted(
+                    pointer(SortedID), length(SortedID) - 1, ID) >= 0;
+    end;
+end;
+
+procedure TServiceAuthorization.AllowAll;
+begin
+  SortedID := nil;
+  StateID := idAllowAll;
+end;
+
+procedure TServiceAuthorization.DenyAll;
+begin
+  SortedID := nil;
+  StateID := idDenyAll;
+end;
+
+procedure TServiceAuthorization.Allow(const ID: TID);
 var
   i: PtrInt;
+begin
+  if (ID <= 0) or
+     (ID > MaxInt) then
+    EServiceException.RaiseUtf8('TServiceFactoryServer: Unexpected Allow(%)', [ID]);
+  case StateID of
+    idAllowAll:
+      exit;
+    idDenyAll:
+      StateID := idAllowed;
+    idDenied:
+      begin
+        i := FastFindIntegerSorted(pointer(SortedID), length(SortedID) - 1, ID);
+        if i < 0 then
+          EServiceException.RaiseUtf8(
+            'TServiceFactoryServer: Allow(%) after no matching Deny()', [ID]);
+        DeleteInteger(SortedID, i);
+        if SortedID = nil then
+          StateID := idAllowAll;
+        exit;
+      end;
+  end;
+  AddSortedInteger(SortedID, ID)
+end;
+
+procedure TServiceAuthorization.Deny(const ID: TID);
+var
+  i: PtrInt;
+begin
+  if (ID <= 0) or
+     (ID > MaxInt) then
+    EServiceException.RaiseUtf8('TServiceFactoryServer: Unexpected Deny(%)', [ID]);
+  case StateID of
+    idDenyAll:
+      exit;
+    idAllowAll:
+      StateID := idDenied;
+    idAllowed:
+      begin
+        i := FastFindIntegerSorted(pointer(SortedID), length(SortedID) - 1, ID);
+        if i < 0 then
+          EServiceException.RaiseUtf8(
+            'TServiceFactoryServer: Deny(%) after no matching Allow()', [ID]);
+        DeleteInteger(SortedID, i);
+        if SortedID = nil then
+          StateID := idDenyAll;
+        exit;
+      end;
+  end;
+  AddSortedInteger(SortedID, ID)
+end;
+
+
+{ TServiceFactoryServerAbstract }
+
+function TServiceFactoryServerAbstract.GetAuthGroupIDs(
+  const aGroup: array of RawUtf8; out IDs: TIDDynArray): boolean;
 begin
   result := (self <> nil) and
     fOrm.MainFieldIDs(
       fOrm.Model.GetTableInherited(DefaultTAuthGroupClass), aGroup, IDs);
-  if result then
-    for i := 0 to high(IDs) do
-      // fExecution[].Denied set is able to store IDs up to 256 only
-      if IDs[i] > 255 then
-        raise EServiceException.CreateUtf8(
-          'Unsupported %.Allow/Deny with GroupID=% >255', [self, IDs[i]]);
 end;
 
 function TServiceFactoryServerAbstract.AllowAll: TServiceFactoryServerAbstract;
@@ -1144,7 +1255,7 @@ var
 begin
   if self <> nil then
     for m := 0 to fInterface.MethodsCount - 1 do
-      FillcharFast(fExecution[m].Denied, SizeOf(fExecution[m].Denied), 0);
+      fExecution[m].Auth.AllowAll;
   result := self;
 end;
 
@@ -1155,9 +1266,8 @@ var
 begin
   if self <> nil then
     for m := 0 to fInterface.MethodsCount - 1 do
-      with fExecution[m] do
-        for g := 0 to high(aGroupID) do
-          exclude(Denied, aGroupID[g] - 1);
+      for g := 0 to high(aGroupID) do
+        fExecution[m].Auth.Allow(aGroupID[g]);
   result := self;
 end;
 
@@ -1177,7 +1287,7 @@ var
 begin
   if self <> nil then
     for m := 0 to fInterface.MethodsCount - 1 do
-      FillcharFast(fExecution[m].Denied, SizeOf(fExecution[m].Denied), 255);
+      fExecution[m].Auth.DenyAll;
   result := self;
 end;
 
@@ -1188,9 +1298,8 @@ var
 begin
   if self <> nil then
     for m := 0 to fInterface.MethodsCount - 1 do
-      with fExecution[m] do
-        for g := 0 to high(aGroupID) do
-          include(Denied, aGroupID[g] - 1);
+      for g := 0 to high(aGroupID) do
+        fExecution[m].Auth.Deny(aGroupID[g]);
   result := self;
 end;
 
@@ -1211,9 +1320,7 @@ var
 begin
   if self <> nil then
     for m := 0 to high(aMethod) do
-      FillcharFast(
-        fExecution[fInterface.CheckMethodIndex(aMethod[m])].Denied,
-        SizeOf(fExecution[0].Denied), 0);
+      fExecution[fInterface.CheckMethodIndex(aMethod[m])].Auth.AllowAll;
   result := self;
 end;
 
@@ -1222,13 +1329,15 @@ function TServiceFactoryServerAbstract.AllowByID(
   const aGroupID: array of TID): TServiceFactoryServerAbstract;
 var
   m, g: PtrInt;
+  e: PServiceFactoryExecution;
 begin
   if self <> nil then
-    if high(aGroupID) >= 0 then
-      for m := 0 to high(aMethod) do
-        with fExecution[fInterface.CheckMethodIndex(aMethod[m])] do
-          for g := 0 to high(aGroupID) do
-            exclude(Denied, aGroupID[g] - 1);
+    for m := 0 to high(aMethod) do
+    begin
+      e := @fExecution[fInterface.CheckMethodIndex(aMethod[m])];
+      for g := 0 to high(aGroupID) do
+        e^.Auth.Allow(aGroupID[g]);
+    end;
   result := self;
 end;
 
@@ -1250,9 +1359,7 @@ var
 begin
   if self <> nil then
     for m := 0 to high(aMethod) do
-      FillcharFast(
-        fExecution[fInterface.CheckMethodIndex(aMethod[m])].Denied,
-        SizeOf(fExecution[0].Denied), 255);
+      fExecution[fInterface.CheckMethodIndex(aMethod[m])].Auth.DenyAll;
   result := self;
 end;
 
@@ -1261,12 +1368,15 @@ function TServiceFactoryServerAbstract.DenyByID(
   const aGroupID: array of TID): TServiceFactoryServerAbstract;
 var
   m, g: PtrInt;
+  e: PServiceFactoryExecution;
 begin
   if self <> nil then
-    for m := 0 to high(aMethod) do
-      with fExecution[fInterface.CheckMethodIndex(aMethod[m])] do
-        for g := 0 to high(aGroupID) do
-          include(Denied, aGroupID[g] - 1);
+  for m := 0 to high(aMethod) do
+    begin
+      e := @fExecution[fInterface.CheckMethodIndex(aMethod[m])];
+      for g := 0 to high(aGroupID) do
+        e^.Auth.Deny(aGroupID[g]);
+    end;
   result := self;
 end;
 
@@ -1293,14 +1403,14 @@ begin
     {$ifdef OSWINDOWS}
     if Assigned(ServiceSingle) and
        (opt * [optExecInMainThread, optFreeInMainThread] <> []) then
-       raise EServiceException.CreateUtf8('%.SetOptions(I%): [%] are not ' +
+       EServiceException.RaiseUtf8('%.SetOptions(I%): [%] are not ' +
          'compatible with a Windows Service which has no main thread',
          [self, fInterfaceUri, ToText(opt)]);
     {$endif OSWINDOWS}
     if (opt <> []) and
        (aAction in [moaReplace, moaInclude]) and
        (fInstanceCreation = sicPerThread) then
-      raise EServiceException.CreateUtf8(
+      EServiceException.RaiseUtf8(
         '%.SetOptions(I%,[%]) is not compatible with sicPerThread',
         [self, fInterfaceUri, ToText(opt)]);
     ExecutionAction(aMethod, aOptions, aAction);
@@ -1308,7 +1418,7 @@ begin
     if opt <> [] then
       if (optFreeInPerInterfaceThread in opt) and
          not (optExecInPerInterfaceThread in opt) then
-        raise EServiceException.CreateUtf8(
+        EServiceException.RaiseUtf8(
           '%.SetOptions(I%,optFreeInPerInterfaceThread)' +
           ' without optExecInPerInterfaceThread', [self, fInterfaceUri])
       else for m := 0 to high(INTERFACEMETHOD_PERTHREADOPTIONS) do
@@ -1316,7 +1426,7 @@ begin
         mode := INTERFACEMETHOD_PERTHREADOPTIONS[m];
         if (opt * mode <> []) and
            (opt - mode <> []) then
-        raise EServiceException.CreateUtf8('%.SetOptions(I%): incompatible [%]',
+        EServiceException.RaiseUtf8('%.SetOptions(I%): incompatible [%]',
           [self, fInterfaceUri, ToText(opt)]);
       end;
   end;
@@ -1395,7 +1505,7 @@ var
 begin
   if (self = nil) or
      (aService = nil) then
-    raise EServiceException.CreateUtf8('%.AddServiceInternal(%)', [self, aService]);
+    EServiceException.RaiseUtf8('%.AddServiceInternal(%)', [self, aService]);
   // add TServiceFactory to the im list
   if ExpectMangledUri then
     uri := aService.fInterfaceMangledUri
@@ -1418,17 +1528,17 @@ var
 begin
   for i := 0 to high(aInterfaces) do
     if aInterfaces[i] = nil then
-      raise EServiceException.CreateUtf8('%: aInterfaces[%]=nil', [self, i])
+      EServiceException.RaiseUtf8('%: aInterfaces[%]=nil', [self, i])
     else
       with aInterfaces[i]^ do
         if InterfaceGuid = nil then
-          raise EServiceException.CreateUtf8('%: % is not an interface',
+          EServiceException.RaiseUtf8('%: % is not an interface',
             [self, RawName])
         else if not (ifHasGuid in InterfaceType^.IntfFlags) then
-          raise EServiceException.CreateUtf8('%: % interface has no GUID',
+          EServiceException.RaiseUtf8('%: % interface has no GUID',
             [self, RawName])
         else if Info(InterfaceGuid^) <> nil then
-          raise EServiceException.CreateUtf8('%: % GUID already registered',
+          EServiceException.RaiseUtf8('%: % GUID already registered',
             [self, RawName])
 
 end;
@@ -1456,7 +1566,7 @@ begin
   FillCharFast(bits, SizeOf(bits), 0);
   n := length(fInterfaceMethod);
   if n > SizeOf(bits) shl 3 then
-    raise EServiceException.CreateUtf8('%.SetInterfaceMethodBits: n=%', [self, n]);
+    EServiceException.RaiseUtf8('%.SetInterfaceMethodBits: n=%', [self, n]);
   if IncludePseudoMethods then
     for i := 0 to n - 1 do
       if fInterfaceMethod[i].InterfaceMethodIndex < SERVICE_PSEUDO_METHOD_COUNT then
@@ -1600,14 +1710,13 @@ begin
     exit;
   WR := TTextWriter.CreateOwnedStream(temp);
   try
-    WR.Add('[');
+    WR.AddDirect('[');
     for i := 0 to high(fInterface) do
     begin
       WR.AddString(fInterface[i].Service.Contract);
       WR.AddComma;
     end;
-    WR.CancelLastComma;
-    WR.Add(']');
+    WR.CancelLastComma(']');
     WR.SetText(RawUtf8(result));
   finally
     WR.Free;
@@ -1781,8 +1890,7 @@ begin
             aWriter.AddRecordJson(@List[i].PublicUri, TypeInfo(TRestServerUri));
             aWriter.AddComma;
           end;
-    aWriter.CancelLastComma;
-    aWriter.Add(']');
+    aWriter.CancelLastComma(']');
   finally
     Safe.ReadUnLock;
   end;

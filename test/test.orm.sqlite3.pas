@@ -456,7 +456,7 @@ begin
   // Inserting data 1x without transaction ');
   InsertData(1);
   { Insert some sample data - now with transaction. Multiple records are
-    inserted and not yet commited until the transaction is finally ended.
+    inserted and not yet committed until the transaction is finally ended.
     This single transaction is very fast compared to multiple individual
     transactions. It is even faster than other database engines. }
   Demo.TransactionBegin;
@@ -885,9 +885,8 @@ type
       read fPersistent;
   end;
 
-  TOrmPeopleID = type TID;
-
-  TOrmPeopleToBeDeletedID = type TID;
+  TOrmPeopleID = type TID;        // validate ON DELETE SET DEFAULT at ORM level
+  TOrmPeopleToBeDeletedID = type TID; // validate ON DELETE CASCADE at ORM level
 
   TOrmCustomProps = class(TOrmPeople)
   protected
@@ -905,9 +904,9 @@ type
   published
     property PeopleID: TID
       read fPeopleID write fPeopleID;
-    property People: TOrmPeopleID
+    property People: TOrmPeopleID  // ON DELETE SET DEFAULT
       read fPeople write fPeople;
-    property PeopleCascade: TOrmPeopleToBeDeletedID
+    property PeopleCascade: TOrmPeopleToBeDeletedID // ON DELETE CASCADE
       read fPeopleCascade write fPeopleCascade;
     {$ifdef PUBLISHRECORD}
     property GUidXE6: TGuid

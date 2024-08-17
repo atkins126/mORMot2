@@ -72,6 +72,10 @@ type
     procedure RTSPOverHTTPBufferedWrite;
     /// validate mormot.net.tunnel
     procedure _TTunnelLocal;
+    /// validate IP processing functions
+    procedure IPAddresses;
+    /// validate THttpPeerCache process
+    procedure _THttpPeerCache;
   end;
 
 
@@ -185,6 +189,7 @@ begin
       for r := 0 to rmax do
         with req[r] do
         begin
+          test.Check(get.SockConnected);
           post := TCrtSocket.Open('localhost', proxy.Server.Port);
           post.SndLow('POST /sw.mov HTTP/1.0'#13#10 +
             'User-Agent: QTS (qtver=4.1;cpu=PPC;os=Mac 8.6)'#13#10 +
@@ -194,6 +199,10 @@ begin
             'Cache-Control: no-cache'#13#10 +
             'Content-Length: 32767'#13#10 +
             'Expires: Sun, 9 Jan 1972 00:00:00 GMT'#13#10#13#10);
+          if log <> nil then
+            log.Log(sllTrace, 'req[%].get=% connected=%',
+              [r, get.Sock, get.SockConnected], proxy);
+          test.Check(get.SockConnected);
           stream := streamer.AcceptIncoming(nil, {async=}false);
           if stream = nil then
           begin
@@ -239,7 +248,7 @@ begin
             //if log <> nil then
             //  log.Log(sllCustom1, 'RegressionTests % #%/% received %',
             //    [clientcount, r, rmax, text], proxy);
-            test.check(text = session);
+            test.CheckEqual(text, session);
           end;
       end;
       if log <> nil then
@@ -337,7 +346,7 @@ procedure TNetworkProtocols._TUriTree;
 var
   tree: TUriTree;
   router: TUriRouter;
-  ctxt: THttpServerRequestAbstract;
+  ctxt: THttpServerRequest;
   i: PtrInt;
   n: TRadixTreeNode;
   timer: TPrecisionTimer;
@@ -372,7 +381,7 @@ var
   end;
 
 begin
-  tree := TUriTree.Create;
+  tree := TUriTree.Create(TUriTreeNode);
   try
     tree.insert('romane');
     tree.insert('romanus');
@@ -387,7 +396,7 @@ begin
   finally
     tree.Free;
   end;
-  tree := TUriTree.Create([rtoCaseInsensitiveUri]);
+  tree := TUriTree.Create(TUriTreeNode, [rtoCaseInsensitiveUri]);
   try
     tree.insert('romanus');
     tree.insert('romane');
@@ -402,7 +411,7 @@ begin
   finally
     tree.Free;
   end;
-  tree := TUriTree.Create;
+  tree := TUriTree.Create(TUriTreeNode);
   try
     tree.insert('/plaintext');
     tree.insert('/');
@@ -412,7 +421,7 @@ begin
   finally
     tree.Free;
   end;
-  tree := TUriTree.Create;
+  tree := TUriTree.Create(TUriTreeNode);
   try
     for i := 0 to high(NODES) do
       CheckEqual(tree.Insert(NODES[i]).FullText, NODES[i]);
@@ -434,7 +443,7 @@ begin
   finally
     tree.Free;
   end;
-  tree := TUriTree.Create;
+  tree := TUriTree.Create(TUriTreeNode);
   try
     for i := 0 to high(rnd) do
       rnd[i] := RandomIdentifier(Random32(24) * 2 + 1);
@@ -447,8 +456,8 @@ begin
   finally
     tree.Free;
   end;
-  ctxt := THttpServerRequestAbstract.Create;
-  router := TUriRouter.Create;
+  ctxt := THttpServerRequest.Create(nil, 0, nil, [], nil);
+  router := TUriRouter.Create(TUriTreeNode);
   try
     Call('/plaintext', '', '', false, -1, 0);
     Call('/', '', '', false, -1, 0);
@@ -590,22 +599,30 @@ var
   l: TLdapClientSettings;
   one: TLdapClient;
   utc1, utc2: TDateTime;
-  ntp, usr, pwd, main, txt: RawUtf8;
+  ntp, usr, pwd, ku, main, txt: RawUtf8;
+  hasinternet: boolean;
 begin
+  CheckEqual(1 shl ord(uacPartialSecretsRodc), $04000000, 'uacHigh');
   // validate NTP/SNTP client using NTP_DEFAULT_SERVER = time.google.com
   if not Executable.Command.Get('ntp', ntp) then
     ntp := NTP_DEFAULT_SERVER;
   withntp := not Executable.Command.Option('nontp');
-  utc1 := GetSntpTime(ntp);
-  //writeln(DateTimeMSToString(utc), ' = ', DateTimeMSToString(NowUtc));
-  if utc1 <> 0 then
+  hasinternet := DnsLookups('yahoo.com') <> nil; // avoid waiting for nothing
+  if hasinternet then
   begin
-    utc2 := NowUtc;
-    AddConsole('% : % = %', [ntp, DateTimeMSToString(utc1), DateTimeMSToString(utc2)]);
-    // only make a single GetSntpTime call - most servers refuse to scale
-    if withntp then
-      CheckSame(utc1, utc2, 1, 'NTP system A'); // allow 1 day diff
-  end;
+    utc1 := GetSntpTime(ntp);
+    //writeln(DateTimeMSToString(utc), ' = ', DateTimeMSToString(NowUtc));
+    if utc1 <> 0 then
+    begin
+      utc2 := NowUtc;
+      AddConsole('% : % = %', [ntp, DateTimeMSToString(utc1), DateTimeMSToString(utc2)]);
+      // only make a single GetSntpTime call - most servers refuse to scale
+      if withntp then
+        CheckSame(utc1, utc2, 1, 'NTP system A'); // allow 1 day diff
+    end;
+  end
+  else
+    AddConsole('no Internet connection');
   // validate some IP releated process
   Check(not NetIsIP4(nil));
   Check(not NetIsIP4('1'));
@@ -633,18 +650,24 @@ begin
   CheckEqual(DnsLookup('LocalHost'), '127.0.0.1');
   CheckEqual(DnsLookup('::1'), '127.0.0.1');
   CheckEqual(DnsLookup('1.2.3.4'), '1.2.3.4');
-  ip := DnsLookup('synopse.info');
-  CheckEqual(ip, '62.210.254.173', 'dns1');
-  ip := DnsLookup('blog.synopse.info');
-  CheckEqual(ip, '62.210.254.173', 'dns2');
-  CheckEqual(DnsReverseLookup(ip), '62-210-254-173.rev.poneytelecom.eu', 'rev');
-  Check(DnsLookups('yahoo.com') <> nil, 'dns3');
+  if hasinternet then
+  begin
+    ip := DnsLookup('synopse.info');
+    CheckEqual(ip, '62.210.254.173', 'dns1');
+    ip := DnsLookup('blog.synopse.info');
+    CheckEqual(ip, '62.210.254.173', 'dns2');
+    CheckEqual(DnsReverseLookup(ip), '62-210-254-173.rev.poneytelecom.eu', 'rev');
+  end;
   // validate LDAP distinguished name conversion (no client)
   CheckEqual(DNToCN('CN=User1,OU=Users,OU=London,DC=xyz,DC=local'),
     'xyz.local/London/Users/User1');
   CheckEqual(DNToCN(
     'cn=JDoe,ou=Widgets,ou=Manufacturing,dc=USRegion,dc=OrgName,dc=com'),
     'USRegion.OrgName.com/Manufacturing/Widgets/JDoe');
+  CheckEqual(DNToCN(
+    'OU=d..zaf(fds )da\,z \"\"((''\\/ df\3D\3Dez,OU=test_wapt,OU=computers,' +
+    'OU=tranquilit,DC=ad,DC=tranquil,DC=it'),
+    'ad.tranquil.it/tranquilit/computers/test_wapt/d\.\.zaf(fds )da,z ""((''\\\/ df==ez');
   // validate LDAP escape/unescape
   for c := 0 to 200 do
   begin
@@ -732,12 +755,16 @@ begin
       if utc1 <> 0 then
       begin
         utc2 := NowUtc;
-        AddConsole('% : % = %', [dns[i], DateTimeMSToString(utc1), DateTimeMSToString(utc2)]);
+        AddConsole('% : % = %',
+          [dns[i], DateTimeMSToString(utc1), DateTimeMSToString(utc2)]);
         if withntp then
           CheckSame(utc1, utc2, 1, 'NTP system B'); // allow 1 day diff
       end;
       for j := 0 to high(clients) do
       begin
+        txt := '';
+        if clients[j] = main then
+          txt := ' (main)';
         one := TLdapClient.Create;
         try
           one.Settings.TargetUri := clients[j];
@@ -748,25 +775,43 @@ begin
             begin
               one.Settings.UserName := usr;
               one.Settings.Password := pwd;
-              {$ifdef OSPOSIX}
-              // a valid current kinit session seems mandatory on GSSAPI,
-              // which makes Kerberos password authentication pointless
-              one.Settings.TargetPort := LDAP_TLS_PORT; // TLS needed for safety
-              if not one.Bind then
-              {$else}
-              //  Windows allow a kerberos connection from an unrolled computer
-              if not one.BindSaslKerberos then
-              {$endif OSPOSIX}
+              if Executable.Command.Option('ldaps') then
               begin
-                CheckUtf8(false, 'ldap:%', [clients[j]]);
+                // plain over TLS
+                one.Settings.TargetPort := LDAP_TLS_PORT; // force TLS
+                if one.Bind then
+                  AddConsole('connected to % with TLS + plain Bind',
+                    [one.Settings.TargetUri])
+                else
+                begin
+                  CheckUtf8(false, 'Bind % res=% [%]%',
+                    [one.Settings.TargetUri, one.ResultCode, one.ResultString, txt]);
+                  continue;
+                end;
+              end
+              else
+                // Windows/SSPI and POSIX/GSSAPI with no prior loggued user
+                if one.BindSaslKerberos('', @ku) then
+                  AddConsole('connected to % with specific user % = %',
+                    [one.Settings.TargetUri, usr, ku])
+                else
+                begin
+                  CheckUtf8(false, '% on ldap:% [%]%',
+                    [usr, clients[j], one.ResultString, txt]);
+                  continue;
+                end;
+            end
+            else
+              // Windows/SSPI and POSIX/GSSAPI with a prior loggued user (kinit)
+              if one.BindSaslKerberos('', @ku) then
+                AddConsole('connected to % with current Kerberos user %',
+                  [one.Settings.TargetUri, ku])
+              else
+              begin
+                CheckUtf8(false, 'currentuser on ldap:% [%]%',
+                  [clients[j], one.ResultString, txt]);
                 continue;
               end;
-            end
-            else if not one.BindSaslKerberos then
-              continue;
-            txt := '';
-            if clients[j] = main then
-              txt := ' (main)';
             Check(one.NetbiosDN <> '', 'NetbiosDN');
             Check(one.ConfigDN <> '', 'ConfigDN');
             Check(one.Search(one.WellKnownObjects.Users, {typesonly=}false,
@@ -916,6 +961,155 @@ begin
   // ECDHE encrypted tunnelling with mutual authentication
   options := [toEcdhe];
   TunnelTest(c, s);
+end;
+
+procedure TNetworkProtocols.IPAddresses;
+var
+  i: PtrInt;
+  s: shortstring;
+  txt: RawUtf8;
+  ip: THash128Rec;
+begin
+  FillZero(ip.b);
+  Check(IsZero(ip.b));
+  IP4Short(@ip, s);
+  Check(s = '0.0.0.0');
+  IP4Text(@ip, txt);
+  CheckEqual(txt, '');
+  IP6Short(@ip, s);
+  Check(s = '::', '::');
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '');
+  ip.b[15] := 1;
+  IP6Short(@ip, s);
+  Check(s = '::1', '::1');
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '127.0.0.1', 'IPv6 loopback');
+  ip.b[0] := 1;
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '100::1');
+  ip.b[15] := 0;
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '100::');
+  ip.b[6] := $70;
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '100:0:0:7000::');
+  for i := 0 to 7 do
+    ip.b[i] := i;
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '1:203:405:607::');
+  for i := 8 to 15 do
+    ip.b[i] := i;
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '1:203:405:607:809:a0b:c0d:e0f');
+  for i := 0 to 15 do
+    ip.b[i] := i or $70;
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '7071:7273:7475:7677:7879:7a7b:7c7d:7e7f');
+  Check(mormot.core.text.HexToBin('200100B80A0B12F00000000000000001', PByte(@ip), 16));
+  IP6Text(@ip, txt);
+  CheckEqual(txt, '2001:b8:a0b:12f0::1');
+  CheckEqual(IP4Netmask(1), $00000080);
+  CheckEqual(IP4Netmask(8), $000000ff);
+  CheckEqual(IP4Netmask(24), $00ffffff);
+  CheckEqual(IP4Netmask(31), $feffffff);
+  CheckEqual(IP4Netmask(32), $ffffffff);
+  CheckEqual(IP4Netmask(0),  0, 'invalid prefix=0');
+  CheckEqual(IP4Netmask(33), 0, 'invalid prefix=33');
+  CheckEqual(IP4Prefix('128.0.0.0'), 1);
+  CheckEqual(IP4Prefix('192.0.0.0'), 2);
+  CheckEqual(IP4Prefix('254.0.0.0'), 7);
+  CheckEqual(IP4Prefix('255.0.0.0'), 8);
+  CheckEqual(IP4Prefix('255.128.0.0'), 9);
+  CheckEqual(IP4Prefix('255.192.0.0'), 10);
+  CheckEqual(IP4Prefix('255.254.0.0'), 15);
+  CheckEqual(IP4Prefix('255.255.0.0'), 16);
+  CheckEqual(IP4Prefix('255.255.128.0'), 17);
+  CheckEqual(IP4Prefix('255.255.192.0'), 18);
+  CheckEqual(IP4Prefix('255.255.254.0'), 23);
+  CheckEqual(IP4Prefix('255.255.255.0'), 24);
+  CheckEqual(IP4Prefix('255.255.255.128'), 25);
+  CheckEqual(IP4Prefix('255.255.255.252'), 30);
+  CheckEqual(IP4Prefix('255.255.255.254'), 31);
+  CheckEqual(IP4Prefix('255.255.255.255'), 32);
+  CheckEqual(IP4Prefix(''), 0, 'invalid netmask 1');
+  CheckEqual(IP4Prefix('0.0.0.0'), 0, 'invalid netmask 2');
+  CheckEqual(IP4Prefix('0.0.0.1'), 0, 'invalid netmask 3');
+  CheckEqual(IP4Prefix('255.254.1.0'), 0, 'invalid netmask 4');
+  CheckEqual(IP4Prefix('255.255.255.256'), 0, 'invalid netmask 5');
+  CheckEqual(IP4Subnet('192.168.1.135', '255.255.255.0'), '192.168.1.0/24');
+  Check(IP4Match('192.168.1.1', '192.168.1.0/24'), 'match1');
+  Check(IP4Match('192.168.1.135', '192.168.1.0/24'), 'match2');
+  Check(IP4Match('192.168.1.250', '192.168.1.0/24'), 'match3');
+  Check(not IP4Match('192.168.2.135', '192.168.1.0/24'), 'match4');
+  Check(not IP4Match('191.168.1.250', '192.168.1.0/24'), 'match5');
+  Check(not IP4Match('192.168.1', '192.168.1.0/24'), 'match6');
+  Check(not IP4Match('192.168.1.135', '192.168.1/24'), 'match7');
+  Check(not IP4Match('192.168.1.135', '192.168.1.0/65'), 'match8');
+  Check(not IP4Match('193.168.1.1', '192.168.1.0/24'), 'match9');
+end;
+
+type
+  THttpPeerCacheHook = class(THttpPeerCache); // to test protected methods
+
+procedure TNetworkProtocols._THttpPeerCache;
+var
+  hpc: THttpPeerCacheHook;
+  hps: THttpPeerCacheSettings;
+  msg, msg2: THttpPeerCacheMessage;
+  i, n, alter: integer;
+  tmp: RawByteString;
+  timer: TPrecisionTimer;
+begin
+  // for further tests, use the dedicated "mORMot GET" (mget) sample
+  hps := THttpPeerCacheSettings.Create;
+  try
+    hps.CacheTempPath := Executable.ProgramFilePath + 'peercachetemp';
+    hps.CachePermPath := Executable.ProgramFilePath + 'peercacheperm';
+    hps.Port := 8008; // don't use default 8099
+    hps.Options := [pcoVerboseLog {,pcoSelfSignedHttps}];
+    try
+      hpc := THttpPeerCacheHook.Create(hps, 'secret');
+      try
+        timer.Start;
+        hpc.MessageInit(pcfBearer, 0, msg);
+        msg.Hash.Algo := hfSHA256;
+        n := 1000;
+        for i := 1 to n do
+        begin
+          msg.Size := i;
+          msg.Hash.Hash.i0 := i;
+          tmp := hpc.MessageEncode(msg);
+          Check(tmp <> '');
+          Check(hpc.MessageDecode(pointer(tmp), length(tmp), msg2));
+          CheckEqual(msg2.Size, i);
+          Check(CompareMem(@msg, @msg2, SizeOf(msg)));
+        end;
+        NotifyTestSpeed('messages', n * 2, n * 2 * SizeOf(msg), @timer);
+        Check(ToText(msg) = ToText(msg2));
+        timer.Start;
+        n := 10000;
+        for i := 1 to n do
+        begin
+          alter := Random32(length(tmp));
+          inc(PByteArray(tmp)[alter]); // should be detected at crc level
+          Check(not hpc.MessageDecode(pointer(tmp), length(tmp), msg2));
+          dec(PByteArray(tmp)[alter]);
+        end;
+        NotifyTestSpeed('altered', n, n * SizeOf(msg), @timer);
+        Check(hpc.MessageDecode(pointer(tmp), length(tmp), msg2));
+        Check(CompareMem(@msg, @msg2, SizeOf(msg)));
+        for i := 1 to 10 do
+          Check(hpc.Ping = nil);
+      finally
+        hpc.Free;
+      end;
+    except
+      // exception here is likely to be port 8089 already used -> continue
+    end;
+  finally
+    hps.Free;
+  end;
 end;
 
 end.

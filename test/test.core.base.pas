@@ -43,6 +43,10 @@ const
   {$endif OSWINDOWS}
 
 
+{$ifdef FPC_EXTRECORDRTTI}
+  {$rtti explicit fields([vcPublic])} // mantadory :(
+{$endif FPC_EXTRECORDRTTI}
+
 type
   /// a test class, used by TTestServiceOrientedArchitecture
   // - to test TPersistent objects used as parameters for remote service calls
@@ -209,8 +213,6 @@ type
     procedure FastStringCompare;
     /// test IdemPropName() and IdemPropNameU() functions
     procedure _IdemPropName;
-    /// test UrlEncode() and UrlDecode() functions
-    procedure UrlEncoding;
     /// test our internal fast TGUID process functions
     procedure _GUID;
     /// test ParseCommandArguments() function
@@ -948,22 +950,19 @@ type
     Latitude: double;
     Longitude: double;
   end;
-
   TCityDynArray = array of TCity;
 
   TAmount = packed record
     firmID: integer;
     amount: RawUtf8;
   end;
-
-  TAmountCollection = array of TAmount;
+  TAmountDynArray = array of TAmount;
 
   TAmountI = packed record
     firmID: integer;
     amount: integer;
   end;
-
-  TAmountICollection = array of TAmountI;
+  TAmountIDynArray = array of TAmountI;
 
 procedure TTestCoreBase._TDynArrayHashed;
 var
@@ -976,15 +975,15 @@ var
   i, j: integer;
   A: TAmount;
   AI: TAmountI;
-  AmountCollection: TAmountCollection;
-  AmountICollection: TAmountICollection;
+  AmountCollection: TAmountDynArray;
+  AmountICollection: TAmountIDynArray;
   AmountDA, AmountIDA1, AmountIDA2: TDynArrayHashed;
 const
   CITIES_MAX = 200000;
 begin
 //FIXME - too slow on FullDebugMode exit;
   // default Init() will hash and compare binary content before string, i.e. firmID
-  AmountDA.Init(TypeInfo(TAmountCollection), AmountCollection);
+  AmountDA.Init(TypeInfo(TAmountDynArray), AmountCollection);
   Check(AmountDA.Info.Parser = ptDynArray);
   Check(AmountDA.Info.ArrayFirstField = ptInteger);
   Check(@AmountDA.HashItem = @DynArrayHashOne(ptInteger));
@@ -998,7 +997,7 @@ begin
   for i := 1 to length(AmountCollection) do
     Check(AmountDA.FindHashed(i) = i - 1);
   // default Init() will hash and compare the WHOLE binary content, i.e. 8 bytes
-  AmountIDA1.Init(TypeInfo(TAmountICollection), AmountICollection);
+  AmountIDA1.Init(TypeInfo(TAmountIDynArray), AmountICollection);
   Check(AmountIDA1.Info.Parser = ptDynArray);
   Check(AmountIDA1.Info.ArrayFirstField = ptInt64);
   Check(@AmountIDA1.HashItem = @DynArrayHashOne(ptInt64));
@@ -1018,7 +1017,7 @@ begin
   AmountIDA1.Clear;
   // specific hash & compare of the firmID integer first field
   AmountIDA2.InitSpecific(
-    TypeInfo(TAmountICollection), AmountICollection, ptInteger);
+    TypeInfo(TAmountIDynArray), AmountICollection, ptInteger);
   Check(AmountIDA2.Info.Parser = ptDynArray);
   Check(AmountIDA2.Info.ArrayFirstField = ptInt64); // global TRttiCustom untouched
   Check(@AmountIDA2.HashItem = @DynArrayHashOne(ptInteger));
@@ -1293,10 +1292,10 @@ begin
   {
   h := TypeInfoToHash(TypeInfo(TAmount));
   Check(h=$9032161B,'TypeInfoToHash(TAmount)');
-  h := TypeInfoToHash(TypeInfo(TAmountCollection));
-  Check(h=$887ED692,'TypeInfoToHash(TAmountCollection)');
-  h := TypeInfoToHash(TypeInfo(TAmountICollection));
-  Check(h=$4051BAC,'TypeInfoToHash(TAmountICollection)');
+  h := TypeInfoToHash(TypeInfo(TAmountDynArray));
+  Check(h=$887ED692,'TypeInfoToHash(TAmountDynArray)');
+  h := TypeInfoToHash(TypeInfo(TAmountIDynArray));
+  Check(h=$4051BAC,'TypeInfoToHash(TAmountIDynArray)');
   }
   Check(not IsRawUtf8DynArray(nil), 'IsRawUtf8DynArray0');
   Check(IsRawUtf8DynArray(TypeInfo(TRawUtf8DynArray)), 'IsRawUtf8DynArray1');
@@ -1305,7 +1304,7 @@ begin
   Check(not IsRawUtf8DynArray(TypeInfo(TAmount)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TIntegerDynArray)), 'IsRawUtf8DynArray2');
   Check(not IsRawUtf8DynArray(TypeInfo(TPointerDynArray)), 'IsRawUtf8DynArray3');
-  Check(not IsRawUtf8DynArray(TypeInfo(TAmountCollection)), 'IsRawUtf8DynArray4');
+  Check(not IsRawUtf8DynArray(TypeInfo(TAmountDynArray)), 'IsRawUtf8DynArray4');
   W := TJsonWriter.CreateOwnedStream;
   // validate TBooleanDynArray
   dyn1.Init(TypeInfo(TBooleanDynArray), AB);
@@ -1790,7 +1789,7 @@ begin
   for i := 0 to 1000 do
   begin
     Fill(F, i);
-    Check(RecordEquals(F, AF[i], AFP.Info.Cache.ItemInfo));
+    Check(RecordEquals(F, AF[i], AFP.Info.Cache.ItemInfoRaw));
   end;
   for i := 0 to 1000 do
   begin
@@ -2227,7 +2226,6 @@ begin
   {$endif ASMX64}
 end;
 
-procedure TTestCoreBase._RecordCopy;
 type
   TR = record
     One: integer;
@@ -2241,6 +2239,7 @@ type
     Dyn: array of integer;
     Bulk: array[0..19] of byte;
   end;
+
   TLicenseData = record
     CustomerNum: Integer;
     CustomerName: RawUtf8;
@@ -2248,10 +2247,57 @@ type
     LicenceDate: TDate;
     ProductName: RawUtf8;
   end;
+
+  TEnum = (e0, e1, e2, e3, e4);
+
+  TPeople2 = class(TSynPersistent)
+  private
+    fFirstName: string;
+    fLastName: RawUtf8;
+    fYearOfBirth: Int64;
+    fYearOfDeath: integer;
+    fEnum: TEnum;
+    function GetEnum: TEnum;
+    procedure SetEnum(const Value: TEnum);
+  published // properties are in another order
+    property YearOfBirth: Int64
+      read fYearOfBirth write fYearOfBirth;
+    property LastName: RawUtf8
+      read fLastName write fLastName;
+    property FirstName: string
+      read fFirstName write fFirstName;
+    property YearOfDeath: integer
+      read fYearOfDeath write fYearOfDeath;
+    property Enum: TEnum
+      read GetEnum write SetEnum;
+  end;
+
+  TPeopleR = packed record
+    LastName, FirstName: RawUtf8;
+    YearOfBirth, Unused: integer;
+    Enum: TEnum;
+  end;
+
+function TPeople2.GetEnum: TEnum;
+begin
+  result := fEnum;
+end;
+
+procedure TPeople2.SetEnum(const Value: TEnum);
+begin
+  fEnum := Value;
+end;
+
+procedure TTestCoreBase._RecordCopy;
 var
   A, B, C: TR;
   i, j: PtrInt;
   lic: TLicenseData;
+  o1: TOrmPeople;
+  o2: TPeople2;
+  r: TPeopleR;
+  p: TRecordPeople;
+  m: TRttiMap;
 begin
   CheckEqual(lic.CustomerName, '');
   FillZeroRtti(TypeInfo(TLicenseData), lic);
@@ -2301,6 +2347,8 @@ begin
       dec(B.Bulk[j]);
     end;
     Check(CompareMem(@A.Bulk, @B.Bulk, i));
+    Check(CompareMemSmall(@A.Bulk, @B.Bulk, i));
+    Check(CompareMemFixed(@A.Bulk, @B.Bulk, i));
   end;
   for i := 0 to High(B.Bulk) do
     Check(CompareMemSmall(@A.Bulk, @B.Bulk, i));
@@ -2316,18 +2364,134 @@ begin
   B.Three := 3;
   B.Dyn[0] := 10;
   RecordCopy(C, B, TypeInfo(TR)); // mORMot 2 doesn't overload RecordCopy()
-  Check(A.One = C.One);
+  CheckEqual(A.One, C.One);
   Check(A.S1 = C.S1);
-  Check(C.Three = 3);
+  CheckEqual(C.Three, 3);
   Check(A.S2 = C.S2);
   Check(A.Five = C.Five);
-  Check(A.V = C.V);
+  Check(A.v = C.v);
   Check(Int64(A.R) = Int64(C.R));
   Check(A.Arr[5] = C.Arr[5]);
   Check(A.Arr[0] = C.Arr[0]);
-  Check(A.Dyn[9] = C.Dyn[9]);
+  CheckEqual(A.Dyn[9], C.Dyn[9]);
   {Check(A.Dyn[0]=0) bug in original VCL?}
-  Check(C.Dyn[0] = 10);
+  CheckEqual(C.Dyn[0], 10);
+  // TPeople2 <--> TOrmPeople class mapping
+  o1 := TOrmPeople.Create;
+  o2 := TPeople2.Create;
+  o1.FirstName := 'toto';
+  o1.LastName := 'titi';
+  o1.YearOfBirth := 1926;
+  o1.YearOfDeath := 2010;
+  CopyObject(o1, o2);
+  CheckEqual(o1.FirstName, 'toto');
+  Check(o2.FirstName = 'toto');
+  CheckEqual(o1.LastName, 'titi');
+  CheckEqual(o1.LastName, o2.LastName);
+  CheckEqual(o1.YearOfBirth, o2.YearOfBirth);
+  CheckEqual(o1.YearOfDeath, o2.YearOfDeath);
+  // TRecordPeople <--> TOrmPeople record/class mapping
+  p.YearOfBirth := -1;
+  CheckEqual(p.YearOfBirth, -1);
+  RecordZero(@p, TypeInfo(TRecordPeople));
+  CheckEqual(p.FirstName, '');
+  CheckEqual(p.LastName, '');
+  CheckEqual(p.YearOfBirth, 0);
+  CheckEqual(p.YearOfDeath, 0);
+  ObjectToRecord(o2, p, TypeInfo(TRecordPeople));
+  CheckEqual(p.FirstName, 'toto');
+  CheckEqual(p.LastName, 'titi');
+  CheckEqual(p.YearOfBirth, o2.YearOfBirth);
+  CheckEqual(p.YearOfDeath, o2.YearOfDeath);
+  o2.Enum := e1;
+  ClearObject(o2);
+  Check(o2.FirstName = '');
+  CheckEqual(o2.LastName, '');
+  CheckEqual(o2.YearOfBirth, 0);
+  CheckEqual(o2.YearOfDeath, 0);
+  Check(o2.Enum = e0);
+  RecordToObject(p, o2, TypeInfo(TRecordPeople));
+  Check(o2.FirstName = 'toto');
+  CheckEqual(o2.LastName, 'titi');
+  CheckEqual(o2.YearOfBirth, p.YearOfBirth);
+  CheckEqual(o2.YearOfDeath, p.YearOfDeath);
+  // TPeopleR <--> TOrmPeople record/class mapping
+  o2.Enum := e4;
+  {$ifndef HASEXTRECORDRTTI} // oldest Delphi or FPC
+  Rtti.RegisterType(TypeInfo(TEnum));
+  Rtti.RegisterFromText(TypeInfo(TPeopleR),
+    'LastName,FirstName:RawUtf8 YearOfBirth,Unused:integer Enum:TEnum');
+  {$endif HASEXTRECORDRTTI}
+  r.YearOfBirth := -1;
+  CheckEqual(r.YearOfBirth, -1);
+  RecordZero(@r, TypeInfo(TPeopleR));
+  CheckEqual(r.FirstName, '');
+  CheckEqual(r.LastName, '');
+  CheckEqual(r.YearOfBirth, 0);
+  CheckEqual(r.Unused, 0);
+  Check(r.Enum = e0);
+  ObjectToRecord(o2, r, TypeInfo(TPeopleR));
+  CheckEqual(r.FirstName, 'toto');
+  CheckEqual(r.LastName, 'titi');
+  CheckEqual(r.YearOfBirth, o2.YearOfBirth);
+  CheckEqual(r.Unused, 0);
+  Check(r.Enum = e4);
+  ClearObject(o2);
+  Check(o2.FirstName = '');
+  CheckEqual(o2.LastName, '');
+  CheckEqual(o2.YearOfBirth, 0);
+  CheckEqual(o2.YearOfDeath, 0);
+  Check(o2.Enum = e0);
+  RecordToObject(r, o2, TypeInfo(TPeopleR));
+  Check(o2.FirstName = 'toto');
+  CheckEqual(o2.LastName, 'titi');
+  CheckEqual(o2.YearOfBirth, r.YearOfBirth);
+  CheckEqual(o2.YearOfDeath, 0);
+  Check(o2.Enum = e4);
+  // TPeople2 <--> TPeopleR class/record mapping with TRttiMap
+  m.Init(TPeople2, TypeInfo(TPeopleR)).AutoMap;
+  RecordZero(@r, TypeInfo(TPeopleR));
+  CheckEqual(r.FirstName, '');
+  CheckEqual(r.LastName, '');
+  CheckEqual(r.YearOfBirth, 0);
+  CheckEqual(r.Unused, 0);
+  Check(r.Enum = e0);
+  m.ToB(o2, @r); // from class to DTO
+  CheckEqual(r.FirstName, 'toto');
+  CheckEqual(r.LastName, 'titi');
+  CheckEqual(r.YearOfBirth, o2.YearOfBirth);
+  CheckEqual(r.Unused, 0);
+  Check(r.Enum = e4);
+  // TPeople2 <--> TPeopleR class/record custom fields mapping with TRttiMap
+  m.Init(TPeople2, TypeInfo(TPeopleR)).Map([
+    'firstName', 'lastname',   // inverted
+    'lastname', 'firstName',
+    'YearOfBirth', 'Unused']); // moved
+  RecordZero(@r, TypeInfo(TPeopleR));
+  CheckEqual(r.FirstName, '');
+  CheckEqual(r.LastName, '');
+  CheckEqual(r.YearOfBirth, 0);
+  CheckEqual(r.Unused, 0);
+  m.ToB(o2, @r); // from class to DTO
+  CheckEqual(r.LastName, 'toto');
+  CheckEqual(r.FirstName, 'titi');
+  CheckEqual(r.YearOfBirth, 0);
+  CheckEqual(r.Unused, o2.YearOfBirth);
+  Check(r.Enum = e0);
+  // TOrmPeople <--> TRecordPeople class/record fields mapping with TRttiMap
+  m.Init(TypeInfo(TOrmPeople), TypeInfo(TRecordPeople)).AutoMap;
+  CheckEqual(p.FirstName, 'toto');
+  CheckEqual(p.LastName, 'titi');
+  CheckEqual(p.YearOfBirth, o1.YearOfBirth);
+  CheckEqual(p.YearOfDeath, o1.YearOfDeath);
+  o1.Free;
+  o1 := m.ToA(@p); // from DTO to class
+  CheckEqual(o1.FirstName, 'toto');
+  CheckEqual(o1.LastName, 'titi');
+  CheckEqual(p.YearOfBirth, o1.YearOfBirth);
+  CheckEqual(p.YearOfDeath, o1.YearOfDeath);
+  o1.Free;
+  o2.Free;
 end;
 
 procedure TTestCoreBase._TSynList;
@@ -2369,100 +2533,6 @@ begin
   end;
 end;
 
-procedure TTestCoreBase.UrlEncoding;
-var
-  i, j: integer;
-  s: RawByteString;
-  name, value, utf: RawUtf8;
-  str: string;
-  P: PUtf8Char;
-  Guid2: TGuid;
-  U: TUri;
-const
-  guid: TGuid = '{c9a646d3-9c61-4cb7-bfcd-ee2522c8f633}';
-
-  procedure Test(const decoded, encoded: RawUtf8);
-  begin
-    CheckEqual(UrlEncode(decoded), encoded);
-    Check(UrlDecode(encoded) = decoded);
-    Check(UrlDecode(PUtf8Char(encoded)) = decoded);
-  end;
-
-begin
-  str := Utf8ToString(UrlEncode(StringToUtf8('https://test3.diavgeia.gov.gr/doc/')));
-  check(str = 'https%3A%2F%2Ftest3.diavgeia.gov.gr%2Fdoc%2F');
-  Test('abcdef', 'abcdef');
-  Test('abcdefyzABCDYZ01239_-.~ ', 'abcdefyzABCDYZ01239_-.%7E+');
-  Test('"Aardvarks lurk, OK?"', '%22Aardvarks+lurk%2C+OK%3F%22');
-  Test('"Aardvarks lurk, OK%"', '%22Aardvarks+lurk%2C+OK%25%22');
-  Test('where=name like :(''Arnaud%'')', 'where%3Dname+like+%3A%28%27Arnaud%25%27%29');
-  Check(UrlDecode('where=name%20like%20:(%27Arnaud%%27):') =
-    'where=name like :(''Arnaud%''):', 'URI from browser');
-  P := UrlDecodeNextNameValue('where=name+like+%3A%28%27Arnaud%25%27%29%3A', name, value);
-  Check(P <> nil);
-  Check(P^ = #0);
-  Check(name = 'where');
-  Check(value = 'name like :(''Arnaud%''):');
-  P := UrlDecodeNextNameValue('where%3Dname+like+%3A%28%27Arnaud%25%27%29%3A',
-    name, value);
-  Check(P <> nil);
-  Check(P^ = #0);
-  Check(name = 'where');
-  Check(value = 'name like :(''Arnaud%''):');
-  P := UrlDecodeNextNameValue('where%3Dname+like+%3A%28%27Arnaud%%27%29%3A', name, value);
-  Check(P <> nil);
-  Check(P^ = #0);
-  Check(name = 'where');
-  Check(value = 'name like :(''Arnaud%''):', 'URI from browser');
-  P := UrlDecodeNextNameValue('name%2Ccom+plex=value', name, value);
-  Check(P <> nil);
-  Check(P^ = #0);
-  CheckEqual(name, 'name,com plex');
-  CheckEqual(value, 'value');
-  P := UrlDecodeNextNameValue('name%2Ccomplex%3Dvalue', name, value);
-  Check(P <> nil);
-  Check(P^ = #0);
-  CheckEqual(name, 'name,complex');
-  CheckEqual(value, 'value');
-  for i := 0 to 100 do
-  begin
-    j := i * 5; // circumvent weird FPC code generation bug in -O2 mode
-    s := RandomUtf8(j);
-    CheckEqual(UrlDecode(UrlEncode(s)), s, s);
-  end;
-  utf := BinToBase64Uri(@Guid, SizeOf(Guid));
-  Check(utf = '00amyWGct0y_ze4lIsj2Mw');
-  FillCharFast(Guid2, SizeOf(Guid2), 0);
-  Check(Base64uriToBin(utf, @Guid2, SizeOf(Guid2)));
-  Check(IsEqualGuid(Guid2, Guid));
-  Check(IsEqualGuid(@Guid2, @Guid));
-  Check(U.From('toto.com'));
-  CheckEqual(U.Uri, 'http://toto.com/');
-  Check(not U.Https);
-  Check(U.From('toto.com:123'));
-  CheckEqual(U.Uri, 'http://toto.com:123/');
-  Check(not U.Https);
-  Check(U.From('https://toto.com:123/tata/titi'));
-  CheckEqual(U.Uri, 'https://toto.com:123/tata/titi');
-  Check(U.Https);
-  Check(U.From('https://toto.com:123/tata/tutu:tete'));
-  CheckEqual(U.Uri, 'https://toto.com:123/tata/tutu:tete');
-  Check(U.From('http://user:password@server:port/address'));
-  Check(not U.Https);
-  CheckEqual(U.Uri, 'http://server:port/address');
-  CheckEqual(U.User, 'user');
-  CheckEqual(U.Password, 'password');
-  Check(U.From('https://user@server:port/address'));
-  Check(U.Https);
-  CheckEqual(U.Uri, 'https://server:port/address');
-  CheckEqual(U.User, 'user');
-  CheckEqual(U.Password, '');
-  Check(U.From('toto.com/tata/tutu:tete'));
-  CheckEqual(U.Uri, 'http://toto.com/tata/tutu:tete');
-  CheckEqual(U.User, '');
-  CheckEqual(U.Password, '');
-end;
-
 procedure TTestCoreBase._GUID;
 var
   i, j: integer;
@@ -2474,6 +2544,11 @@ var
 const
   Guid: TGuid = '{c9a646d3-9c61-4cb7-bfcd-ee2522c8f633}';
 begin
+  CheckEqual(BitsToBytes(0), 0);
+  for i := 1 to 8 do
+    CheckEqual(BitsToBytes(i), 1);
+  for i := 9 to 15 do
+    CheckEqual(BitsToBytes(i), 2);
   s := GuidToRawUtf8(Guid);
   Check(s = '{C9A646D3-9C61-4CB7-BFCD-EE2522C8F633}');
   Check(TextToGuid(@s[2], @g2)^ = '}');
@@ -2582,7 +2657,7 @@ begin
     CheckUtf8(TextToVariantNumberType(pointer(s)) = varString,
       '%:%', [PT_INFO[pt].RawName, s]);
     FillCharFast(h2, SizeOf(h2), 0);
-    Check(LoadJson(h2, pointer(s), PT_INFO[pt]) <> nil);
+    Check(LoadJsonInPlace(h2, pointer(s), PT_INFO[pt]) <> nil);
     CheckUtf8(CompareMem(@h, @h2, PT_SIZE[pt]), '%', [PT_INFO[pt].RawName]);
   end;
 end;
@@ -2717,11 +2792,22 @@ begin
     CheckEqual(f, '');
     CheckHash(c.DetectUnknown, $5EA096A5);
     CheckHash(c.FullDescription('this is test #3 executable', 'exename'), $DFE40A21);
-//writeln(c.FullDescription('this is test #3 executable', 'exename'));
+    c.Clear;
+    c.RawParams := CsvToRawUtf8DynArray('-o file.txt --y -v -t 1', ' ');
+    c.Parse(#10, '-', '--');
+    CheckEqual(length(c.Args), 0);
+    CheckEqual(length(c.Options), 2);
+    CheckEqual(length(c.Names), 2);
+    CheckEqual(length(c.Values), length(c.Names));
+    Check(c.Option('y'));
+    Check(c.Option('v'));
+    Check(c.Get('o', f));
+    CheckEqual(f, 'file.txt');
+    Check(c.Get('t', t));
+    CheckEqual(t, 1);
   finally
     c.Free;
   end;
-//ConsoleWaitForEnterKey;
 end;
 
 procedure TTestCoreBase._IsMatch;
@@ -3073,7 +3159,7 @@ var
 
   procedure Test(const expression: RawUtf8; const ok, nok: array of RawUtf8);
   var
-    i: integer;
+    i: PtrInt;
   begin
     Check(s.Parse(expression) = eprSuccess);
     for i := 0 to high(ok) do
@@ -3088,24 +3174,36 @@ begin
     check(s.Parse('') = eprNoExpression);
     check(s.Parse('  ') = eprNoExpression);
     check(s.Parse('1+ ') = eprMissingFinalWord);
-    Test('1', ['1', '1 2 3', '2 1'], ['2', '13', '2 3']);
-    Test('   1   ', ['1', '1 2 3', '2 1'], ['2', '13', '2 3']);
-    Test('1+4', ['1', '1 2 3', '2 1', '2 4 3'], ['2', '13', '2 3', '41']);
-    Test(' 1 + 4 ', ['1', '1 2 3', '2 1', '2 4 3'], ['2', '13', '2 3', '41']);
-    Test('1+4+5', ['1', '1 2 3', '2 1', '2 4 3'], ['2', '13', '2 3', '41']);
-    Test('1+(4+5)', ['1', '1 2 3', '2 1', '2 4 3'], ['2', '13', '2 3', '41']);
-    Test('1+4*+5', ['1', '1 2 3', '2 1', '2 4 3', '41'], ['2', '13', '2 3']);
-    Test('1+(4&555)', ['4 555 3', '555 4', '1', '1 2 3', '2 1'], ['2', '13',
-      '2 3', '41', '4 3', '3 555']);
-    Test('1+(4 555)', ['4 555 3', '555 4', '1', '1 2 3', '2 1'], ['2', '13',
-      '2 3', '41', '4 3', '3 555']);
-    Test('1-4', ['1', '1 2 3', '2 1', '2 1 3'], ['1 4', '4 2 1', '2', '13', '2 3', '41']);
-    Test('1-(4&5)', ['1', '1 2 3', '2 1', '1 4', '1 5'], ['2', '5 2 3 4 1',
-      '2 3', '41', '4 3', '3 5', '1 4 5']);
-    Test('1-(4&(5+6))', ['1', '1 2 3', '2 1', '1 4', '1 5', '1 6'], ['2',
-      '5 2 3 4 1', '2 3', '41', '4 3', '3 5', '1 4 5', '1 4 6']);
+    Test('1', ['1', '1 2 3', '2 1'],
+              ['2', '13', '2 3']);
+    Test('   1   ', ['1', '1 2 3', '2 1'],
+                    ['2', '13', '2 3']);
+    Test('1+4', ['1', '1 2 3', '2 1', '2 4 3'],
+                ['2', '13', '2 3', '41']);
+    Test(' 1 + 4 ', ['1', '1 2 3', '2 1', '2 4 3'],
+                    ['2', '13', '2 3', '41']);
+    Test('1+4+5', ['1', '1 2 3', '2 1', '2 4 3'],
+                  ['2', '13', '2 3', '41']);
+    Test('1+(4+5)', ['1', '1 2 3', '2 1', '2 4 3'],
+                    ['2', '13', '2 3', '41']);
+    Test('1+4*+5', ['1', '1 2 3', '2 1', '2 4 3', '41'],
+                   ['2', '13', '2 3']);
+    Test('1+(4&555)', ['4 555 3', '555 4', '1', '1 2 3', '2 1'],
+                      ['2', '13', '2 3', '41', '4 3', '3 555']);
+    Test('1+(4 555)', ['4 555 3', '555 4', '1', '1 2 3', '2 1'],
+                      ['2', '13', '2 3', '41', '4 3', '3 555']);
+    Test('1-4', ['1', '1 2 3', '2 1', '2 1 3'],
+                ['1 4', '4 2 1', '2', '13', '2 3', '41']);
+    Test('1-(4&5)', ['1', '1 2 3', '2 1', '1 4', '1 5'],
+                    ['2', '5 2 3 4 1', '2 3', '41', '4 3', '3 5', '1 4 5']);
+    Test('1-(4&(5+6))', ['1', '1 2 3', '2 1', '1 4', '1 5', '1 6'],
+        ['2', '5 2 3 4 1', '2 3', '41', '4 3', '3 5', '1 4 5', '1 4 6']);
     Test('1 - ( 4 & ( 57 + 6 ) )', ['1', '1 2 3', '2 1', '1 4', '1 57', '1 6'],
-      ['2', '57 2 3 4 1', '2 3', '41', '4 3', '3 5"7', '1 4 57', '1 4 6']);
+        ['2', '57 2 3 4 1', '2 3', '41', '4 3', '3 5"7', '1 4 57', '1 4 6']);
+    Test('1 - ( 4 & ( 5? + 6 ) )', ['1', '1 2 3', '2 1', '1 4', '1 57', '1 6'],
+        ['2', '57 2 3 4 1', '2 3', '41', '4 3', '3 5"7', '1 4 57', '1 4 6']);
+    Test('1 - ( 4 & ( 5* + 6* ) )', ['1', '1 2 3', '2 1', '1 4', '1 57', '1 6'],
+        ['2', '57 2 3 4 1', '2 3', '41', '4 3', '3 5"7', '1 4 57', '1 4 6']);
   finally
     s.Free;
   end;
@@ -3134,7 +3232,7 @@ begin
   for i := 0 to high(c) do
     c[i] := Random32;
   QuickSortInteger(@c, 0, high(c));
-  for i := 1 to high(c) do
+  for i := 0 to high(c) - 1 do
     Check(c[i + 1] <> c[i], 'unique Random32');
   timer.Start;
   Check(Random32(0) = 0);
@@ -3289,7 +3387,7 @@ begin
   if buf <> nil then
     while len > 0 do
     begin
-      result := crc32ctab[0, byte(result xor ord(buf^))] xor (result shr 8);
+      result := crc32ctab[0, ToByte(result xor ord(buf^))] xor (result shr 8);
       dec(len);
       inc(buf);
     end;
@@ -3556,7 +3654,13 @@ begin
       LecuyerEncrypt(i, s2);
       CheckEqual(s2, S, 'LecuyerEncrypt');
     end;
+  Check(crc32fast(0, @crc32tab, 5) = $DF4EC16C, 'crc32a');
+  Check(crc32fast(0, @crc32tab, 1024) = $6FCF9E13, 'crc32b');
+  Check(crc32fast(0, @crc32tab, 1024 - 5) = $70965738, 'crc32c');
+  Check(crc32fast(0, pointer(PtrInt(@crc32tab) + 1), 2) = $41D912FF, 'crc32d');
+  Check(crc32fast(0, pointer(PtrInt(@crc32tab) + 3), 1024 - 5) = $E5FAEC6C, 'crc32e');
   Test(crc32creference, 'pas');
+  Test(crc32cinlined, 'inl');
   Test(crc32cfast, 'fast');
   {$ifdef CPUINTEL}
   {$ifndef OSDARWIN}
@@ -3567,7 +3671,7 @@ begin
   {$ifdef CPUX64}
   if (cfSSE42 in CpuFeatures) and
      (cfAesNi in CpuFeatures) then
-    Test(crc32c, 'sse42+aesni'); // use SSE4.2+pclmulqdq instructions on x64
+    Test(crc32c, 'aesni'); // use SSE4.2+pclmulqdq instructions on x64
   {$endif CPUX64}
   {$else}
   if @crc32c <> @crc32cfast then
@@ -3824,6 +3928,14 @@ begin
       Check(i32[i - 1] <= i32[i]);
     n := n * 10;
   until n > length(i32);
+  SetLength(i32, 1);
+  i32[0] := 1;
+  CheckEqual(length(i32), 1);
+  CheckEqual(i32[0], 1);
+  AddSortedInteger(i32, 2);
+  CheckEqual(length(i32), 2);
+  CheckEqual(i32[0], 1);
+  CheckEqual(i32[1], 2);
 end;
 
 function TestAddFloatStr(const str: RawUtf8): RawUtf8;
@@ -3904,16 +4016,16 @@ begin
   for i := 11 to 150 do
     AppendShortCardinal(i, a);
   CheckHash(a, $1CDCEE09, 'AppendShortCardinal');
-  Check(_oskb(0)            = '0KB');
-  Check(_oskb(1 shl 10 - 1) = '1KB');
-  Check(_oskb(1 shl 10)     = '1KB');
-  Check(_oskb(1 shl 10 + 1) = '1KB');
-  Check(_oskb(1 shl 20 - 1) = '1MB');
-  Check(_oskb(1 shl 20)     = '1MB');
-  Check(_oskb(1 shl 20 + 1) = '1MB');
-  Check(_oskb(1 shl 30 - 1) = '1GB');
-  Check(_oskb(1 shl 30)     = '1GB');
-  Check(_oskb(1 shl 30 + 1) = '1GB');
+  Check(_oskb(0)            = '0KB', 'oskb0');
+  Check(_oskb(1 shl 10 - 1) = '1KB', 'oskb1');
+  Check(_oskb(1 shl 10)     = '1KB', 'oskb2');
+  Check(_oskb(1 shl 10 + 1) = '1KB', 'oskb3');
+  Check(_oskb(1 shl 20 - 1) = '1MB', 'oskb4');
+  Check(_oskb(1 shl 20)     = '1MB', 'oskb5');
+  Check(_oskb(1 shl 20 + 1) = '1MB', 'oskb6');
+  Check(_oskb(1 shl 30 - 1) = '1GB', 'oskb7');
+  Check(_oskb(1 shl 30)     = '1GB', 'oskb8');
+  Check(_oskb(1 shl 30 + 1) = '1GB', 'oskb9');
   n := 100000;
   Timer.Start;
   crc := 0;
@@ -4049,7 +4161,7 @@ begin
   Check(MicroSecToString(1000001) = '1s');
   Check(MicroSecToString(2030001) = '2.03s');
   Check(MicroSecToString(200000070001) = '2d');
-  Check(KB(-123) = '-123 B');
+  Check(KB(-123) = '');
   Check(KB(0) = '0 B');
   Check(KB(123) = '123 B');
   Check(KB(1023) = '1 KB');
@@ -4710,9 +4822,42 @@ const
   CHINESE_TEXT: array[0..8] of byte = (
     $e4, $b8, $ad, $e6, $96, $87, $61, $62, $63);
 begin
+  // Trim*() functions
+  CheckEqual(TrimU(''), '');
+  CheckEqual(TrimU('a'), 'a');
+  CheckEqual(TrimU(' a'), 'a');
+  CheckEqual(TrimU('a '), 'a');
+  CheckEqual(TrimU(' a '), 'a');
+  CheckEqual(TrimU('ab'), 'ab');
+  CheckEqual(TrimU(' ab'), 'ab');
+  CheckEqual(TrimU('ab '), 'ab');
+  CheckEqual(TrimU(' ab '), 'ab');
+  CheckEqual(TrimU(' a b '), 'a b');
+  CheckEqual(TrimLeft(''), '');
+  CheckEqual(TrimLeft('a'), 'a');
+  CheckEqual(TrimLeft(' a'), 'a');
+  CheckEqual(TrimLeft('a '), 'a ');
+  CheckEqual(TrimLeft(' a '), 'a ');
+  CheckEqual(TrimLeft('ab'), 'ab');
+  CheckEqual(TrimLeft(' ab'), 'ab');
+  CheckEqual(TrimLeft('ab '), 'ab ');
+  CheckEqual(TrimLeft(' ab '), 'ab ');
+  CheckEqual(TrimLeft(' a b '), 'a b ');
+  CheckEqual(TrimRight(''), '');
+  CheckEqual(TrimRight('a'), 'a');
+  CheckEqual(TrimRight(' a'), ' a');
+  CheckEqual(TrimRight('a '), 'a');
+  CheckEqual(TrimRight(' a '), ' a');
+  CheckEqual(TrimRight('ab'), 'ab');
+  CheckEqual(TrimRight(' ab'), ' ab');
+  CheckEqual(TrimRight('ab '), 'ab');
+  CheckEqual(TrimRight(' ab '), ' ab');
+  CheckEqual(TrimRight(' a b '), ' a b');
   CheckEqual(TrimChar('abcd', []), 'abcd');
   CheckEqual(TrimChar('abcd', ['e']), 'abcd');
   CheckEqual(TrimChar('abcd', ['a']), 'bcd');
+  CheckEqual(TrimChar('abcdabcd', ['b']), 'acdacd');
+  CheckEqual(TrimChar('abcdabcd', ['a']), 'bcdbcd');
   CheckEqual(TrimChar('abcd', ['b']), 'acd');
   CheckEqual(TrimChar('abcd', ['d', 'e']), 'abc');
   CheckEqual(TrimChar('abcd', ['a', 'b']), 'cd');
@@ -4722,6 +4867,7 @@ begin
   CheckEqual(TrimChar('baaaa', ['a', 'c']), 'b');
   CheckEqual(OnlyChar('abcd', ['a', 'b', 'c', 'd', 'e']), 'abcd');
   CheckEqual(OnlyChar('abcd', ['a', 'b', 'd', 'e']), 'abd');
+  CheckEqual(OnlyChar('abcdabcd', ['a', 'b', 'd', 'e']), 'abdabd');
   CheckEqual(OnlyChar('abcd', []), '');
   CheckEqual(OnlyChar('abcd', ['e']), '');
   CheckEqual(OnlyChar('abcd', ['a']), 'a');
@@ -4729,6 +4875,7 @@ begin
   CheckEqual(OnlyChar('abcd', ['d']), 'd');
   CheckEqual(OnlyChar('abcdz', ['d', 'z']), 'dz');
   CheckEqual(OnlyChar('abzcd', ['z']), 'z');
+  CheckEqual(OnlyChar('zabzcdz', ['z']), 'zzz');
   // + on RawByteString seems buggy on FPC - at least inconsistent with Delphi
   rb2 := ARawSetString;
   rb1 := rb2 + RawByteString('test');
@@ -4805,6 +4952,95 @@ begin
   Check(not SafePathNameU('..\two'));
   Check(not SafePathNameU('/../two'));
   Check(not SafePathNameU('\..\two'));
+  Check(ExtractPath('/var/toto.ext') = '/var/');
+  Check(ExtractPath('c:\var\toto.ext') = 'c:\var\');
+  Check(ExtractPath('toto.ext') = '');
+  Check(ExtractPath('/toto.ext') = '/');
+  Check(ExtractPath('c:toto.ext') = 'c:');
+  CheckEqual(ExtractPathU('/var/toto.ext'), '/var/');
+  CheckEqual(ExtractPathU('c:\var\toto.ext'), 'c:\var\');
+  CheckEqual(ExtractPathU('toto.ext'), '');
+  CheckEqual(ExtractPathU('/toto.ext'), '/');
+  CheckEqual(ExtractPathU('c:toto.ext'), 'c:');
+  Check(ExtractName('/var/toto.ext') = 'toto.ext');
+  Check(ExtractName('c:\var\toto.ext') = 'toto.ext');
+  Check(ExtractName('toto.ext') = 'toto.ext');
+  Check(ExtractName('toto') = 'toto');
+  Check(ExtractName('/toto.ext') = 'toto.ext');
+  Check(ExtractName('c:toto.ext') = 'toto.ext');
+  CheckEqual(ExtractNameU('/var/toto.ext'), 'toto.ext');
+  CheckEqual(ExtractNameU('c:\var\toto.ext'), 'toto.ext');
+  CheckEqual(ExtractNameU('toto.ext'), 'toto.ext');
+  CheckEqual(ExtractNameU('toto'), 'toto');
+  CheckEqual(ExtractNameU('/toto.ext'), 'toto.ext');
+  CheckEqual(ExtractNameU('c:toto.ext'), 'toto.ext');
+  Check(GetFileNameWithoutExt('/var/toto.ext') = '/var/toto');
+  Check(GetFileNameWithoutExt('c:\var\toto.ext') = 'c:\var\toto');
+  Check(ExtractExt('toto.ext') = '.ext');
+  Check(ExtractExt('toto.ext', true) = 'ext');
+  Check(ExtractExt('name') = '');
+  Check(ExtractExt('name.') = '.');
+  Check(ExtractExt('.ext') = '');
+  Check(ExtractExt('/var/toto.ext') = '.ext');
+  Check(ExtractExt('/var/toto.ext', true) = 'ext');
+  Check(ExtractExt('c:\var\toto.ext') = '.ext');
+  Check(ExtractExt('c:\var\toto.ext', true) = 'ext');
+  Check(ExtractExt('/var/toto/') = '');
+  Check(ExtractExt('/var/toto') = '');
+  CheckEqual(ExtractExtU('toto.ext'), '.ext');
+  CheckEqual(ExtractExtU('toto.ext', true), 'ext');
+  CheckEqual(ExtractExtU('name'), '');
+  CheckEqual(ExtractExtU('name.'), '.');
+  CheckEqual(ExtractExtU('.ext'), '');
+  CheckEqual(ExtractExtU('/var/toto.ext'), '.ext');
+  CheckEqual(ExtractExtU('/var/toto.ext', true), 'ext');
+  CheckEqual(ExtractExtU('c:\var\toto.ext'), '.ext');
+  CheckEqual(ExtractExtU('c:\var\toto.ext', true), 'ext');
+  CheckEqual(ExtractExtU('/var/toto/'), '');
+  CheckEqual(ExtractExtU('/var/toto'), '');
+  Check(NormalizeFileName('') = '');
+  Check(NormalizeFileName('toto.ext') = 'toto.ext');
+  {$ifdef OSWINDOWS}
+  Check(NormalizeFileName('var\toto.ext') = 'var\toto.ext');
+  Check(NormalizeFileName('\var\toto.ext') = '\var\toto.ext');
+  Check(NormalizeFileName('titi\var\toto.ext') = 'titi\var\toto.ext');
+  Check(NormalizeFileName('\var\') = '\var\');
+  Check(NormalizeFileName('var/toto.ext') = 'var\toto.ext');
+  Check(NormalizeFileName('/var/toto.ext') = '\var\toto.ext');
+  Check(NormalizeFileName('titi/var/toto.ext') = 'titi\var\toto.ext');
+  Check(NormalizeFileName('/var/') = '\var\');
+  Check(NormalizeFileName('\var/') = '\var\');
+  Check(NormalizeFileName('/var\') = '\var\');
+  U := '';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '');
+  U := '/var';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '\var');
+  U := '/var\';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '\var\');
+  {$else}
+  Check(NormalizeFileName('var\toto.ext') = 'var/toto.ext');
+  Check(NormalizeFileName('\var\toto.ext') = '/var/toto.ext');
+  Check(NormalizeFileName('titi\var\toto.ext') = 'titi/var/toto.ext');
+  Check(NormalizeFileName('\var\') = '/var/');
+  Check(NormalizeFileName('var/toto.ext') = 'var/toto.ext');
+  Check(NormalizeFileName('/var/toto.ext') = '/var/toto.ext');
+  Check(NormalizeFileName('titi/var/toto.ext') = 'titi/var/toto.ext');
+  Check(NormalizeFileName('/var/') = '/var/');
+  Check(NormalizeFileName('\var/') = '/var/');
+  Check(NormalizeFileName('/var\') = '/var/');
+  U := '';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '');
+  U := '/var';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '/var');
+  U := '/var\';
+  NormalizeFileNameU(U);
+  CheckEqual(U, '/var/');
+  {$endif OSWINDOWS}
   CaseFoldingTest;
   for i := 0 to high(ROWIDS) do
     Check(isRowID(ROWIDS[i]) = (i < 8));
@@ -4842,10 +5078,15 @@ begin
   Check(IdemPCharArrayBy2(pointer(res), 'ONTWTH') = 0);
   Check(IdemPCharArrayBy2(pointer(res), 'TWONTW') = 1);
   Check(IdemPCharArrayBy2(pointer(res), 'TWTHON') = 2);
+  Check(StartWith('three', 'THREE'));
+  for i := 1 to length(res) do
+    Check(StartWith(res, UpperCase(copy(res, 1, i))));
   Check(EndWith('three', 'THREE'));
   Check(EndWith(res, 'E'));
   Check(EndWith(res, 'THREE'));
   Check(EndWith(res, ',THREE'));
+  for i := 1 to length(res) do
+    Check(EndWith(res, UpperCase(copy(res, i, 100))));
   Check(not EndWith(res, ',THREe'));
   Check(not EndWith(res, res));
   Check(not EndWith('t', ',THREe'));
@@ -5015,6 +5256,16 @@ begin
   Check(MakeCsv([1, 2, 3]) = '1,2,3');
   Check(MakeCsv([1, '2', 3], true) = '1,2,3,');
   Check(MakeCsv([1, '2 ,', 3]) = '1,2 ,3');
+  Check(Make([]) = '');
+  Check(Make([1]) = '1');
+  Check(Make([1, 2, 3]) = '123');
+  Check(Make([1, '2', 3]) = '123');
+  Check(Make([1, '2 ,', 3]) = '12 ,3');
+  Check(MakeString([]) = '');
+  Check(MakeString([1]) = '1');
+  Check(MakeString([1, 2, 3]) = '123');
+  Check(MakeString([1, '2', 3]) = '123');
+  Check(MakeString([1, '2 ,', 3]) = '12 ,3');
   U := '';
   Append(U, []);
   CheckEqual(U, '');
@@ -5583,7 +5834,66 @@ var
   D: TDateTime;
   tmp: RawUtf8;
   b: TTimeLogBits;
+  st, start: TSynSystemTime;
 begin
+  Check(st.FromText('19821031T142319'));
+  start := st;
+  CheckEqual(st.ToText, '1982-10-31T14:23:19.000');
+  st.Second := 60;
+  st.Normalize;
+  CheckEqual(st.ToText, '1982-10-31T14:24:00.000', 'next minute');
+  st.Minute := 60;
+  st.Normalize;
+  CheckEqual(st.ToText, '1982-10-31T15:00:00.000', 'next hour');
+  st.Hour := 24;
+  st.Normalize;
+  CheckEqual(st.ToText, '1982-11-01T00:00:00.000', 'next day');
+  st.Day := st.DaysInMonth + 1; // + 1 to switch to next month
+  CheckEqual(st.Day, 31);
+  st.Normalize;
+  CheckEqual(st.ToText, '1982-12-01T00:00:00.000', 'next month');
+  st.Month := 13;
+  st.Normalize;
+  CheckEqual(st.ToText, '1983-01-01T00:00:00.000', 'next year 1');
+  st.Month := 13;
+  st.Normalize;
+  CheckEqual(st.ToText, '1984-01-01T00:00:00.000', 'next year 2');
+  // reset each time - as THttpAnalyzer.ComputeConsolidateTime
+  st := start;
+  CheckEqual(st.ToText, '1982-10-31T14:23:19.000');
+  st.Second := 60;
+  st.Normalize;
+  CheckEqual(st.ToText, '1982-10-31T14:24:00.000', 'nextminute');
+  st := start;
+  st.Second := 0;
+  st.Minute := 60;
+  st.Normalize;
+  CheckEqual(st.ToText, '1982-10-31T15:00:00.000', 'nexthour');
+  st := start;
+  st.Second := 0;
+  st.Minute := 0;
+  st.Hour := 24;
+  st.Normalize;
+  CheckEqual(st.ToText, '1982-11-01T00:00:00.000', 'nextday');
+  st := start;
+  st.Second := 0;
+  st.Minute := 0;
+  st.Hour := 0;
+  st.Day := st.DaysInMonth + 1; // + 1 to switch to next month
+  CheckEqual(st.Day, 32);
+  st.Normalize;
+  CheckEqual(st.ToText, '1982-11-01T00:00:00.000', 'nextmonth');
+  st := start;
+  st.Second := 0;
+  st.Minute := 0;
+  st.Hour := 0;
+  st.Day := 1;
+  st.Month := 13;
+  st.Normalize;
+  CheckEqual(st.ToText, '1983-01-01T00:00:00.000', 'nextyear 1');
+  st.Month := 13;
+  st.Normalize;
+  CheckEqual(st.ToText, '1984-01-01T00:00:00.000', 'nextyear 2');
   for i := 1700 to 2500 do
     Check(mormot.core.datetime.IsLeapYear(i) = SysUtils.IsLeapYear(i), 'IsLeapYear');
   // this will test typically from year 1905 to 2065
@@ -5715,6 +6025,8 @@ begin
   CheckEqual(bias, 0);
   Check(ParseTimeZone(' east', bias));
   CheckEqual(bias, -10 * 60);
+  Check(ParseTimeZone('y   ', bias));
+  CheckEqual(bias, -12 * 60);
   Check(ParseTimeZone('gmT ', bias));
   CheckEqual(bias, 0);
   Check(ParseTimeZone('    IDLW    ', bias));
@@ -5726,8 +6038,13 @@ begin
   CheckEqual(m, 1);
   Check(ParseMonth(' DEC ', m));
   CheckEqual(m, 12);
-  CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
-    'Sun, 06 Nov 1994 08:49:37 GMT')), '1994-11-06T08:49:37');
+  Check(ParseMonth(' apr-', m));
+  CheckEqual(m, 4);
+  dt := HttpDateToDateTime('Sun, 06 Nov 1994 08:49:37 GMT');
+  CheckEqual(DateTimeToIso8601Text(dt), '1994-11-06T08:49:37');
+  CheckEqual(DateTimeToHttpDate(dt), 'Sun, 06 Nov 1994 08:49:37 GMT');
+  Check(UnixMSTimeUtcToHttpDate(DateTimeToUnixMSTime(dt)) =
+    'Sun, 06 Nov 1994 08:49:37 GMT');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
     'Sunday, 06-DEC-94 08:49:37 UTC')), '1994-12-06T08:49:37');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
@@ -5740,6 +6057,8 @@ begin
     'Sun, 06 Nov 2021 084937 east')), '');
   CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
     'Tue, 15 Nov 1994 12:45:26 Z')), '1994-11-15T12:45:26');
+  CheckEqual(DateTimeToIso8601Text(HttpDateToDateTime(
+    'Sunday, 06-Nov-94 08:49:37 GMT')), '1994-11-06T08:49:37');
   // validate common TSynTimeZone process
   tz := TSynTimeZone.Create;
   try
@@ -5806,22 +6125,18 @@ begin
   Check(not SameValue(dt, NowUtc),
     'NowUtc should not truncate time (e.g. to 5 sec resolution)');
   // validate zones taken from Windows registry or mormot.tz.res on POSIX
-  tz := TSynTimeZone.CreateDefault;
-  try
-    local := tz.UtcToLocal(dt, 'UTC');
-    check(SameValue(local, dt));
-    check(tz.GetBiasForDateTime(dt, 'UTC', bias, hdl));
-    check(bias = 0);
-    check(not hdl);
-    local := tz.UtcToLocal(dt, 'Romance Standard Time');
-    check(not SameValue(local, dt), 'Paris never aligns with London');
-    check(tz.GetBiasForDateTime(dt, 'Romance Standard Time', bias, hdl));
-    check(hdl);
-    check(bias < 0, 'Paris is always ahead of London');
-    buf := tz.SaveToBuffer;
-  finally
-    tz.Free;
-  end;
+  tz := TSynTimeZone.Default;
+  local := tz.UtcToLocal(dt, 'UTC');
+  check(SameValue(local, dt));
+  check(tz.GetBiasForDateTime(dt, 'UTC', bias, hdl));
+  check(bias = 0);
+  check(not hdl);
+  local := tz.UtcToLocal(dt, 'Romance Standard Time');
+  check(not SameValue(local, dt), 'Perfide Albion never matches the continent');
+  check(tz.GetBiasForDateTime(dt, 'Romance Standard Time', bias, hdl));
+  check(hdl);
+  check(bias < 0, 'Paris is always ahead of London');
+  buf := tz.SaveToBuffer;
   tz := TSynTimeZone.Create;
   try
     tz.LoadFromBuffer(buf);
@@ -5886,20 +6201,20 @@ var
 
   procedure CheckAgainst(const full: TSmbiosInfo; const os: TSmbiosBasicInfos);
   begin
-    CheckEqual(full.Bios.VendorName, os[sbiBiosVendor]);
-    CheckEqual(full.Bios.Version, os[sbiBiosVersion]);
-    CheckEqual(full.Bios.Release, os[sbiBiosRelease]);
-    CheckEqual(full.Bios.Firmware, os[sbiBiosFirmware]);
-    CheckEqual(full.Bios.BuildDate, os[sbiBiosDate]);
-    CheckEqual(full.System.ProductName, os[sbiProductName]);
-    CheckEqual(full.System.Version, os[sbiVersion]);
-    CheckEqual(full.System.Uuid, os[sbiUuid]);
+    CheckEqualTrim(full.Bios.VendorName,    os[sbiBiosVendor], 'vend');
+    CheckEqualTrim(full.Bios.Version,       os[sbiBiosVersion], 'vers');
+    CheckEqualTrim(full.Bios.Release,       os[sbiBiosRelease], 'rel');
+    CheckEqualTrim(full.Bios.Firmware,      os[sbiBiosFirmware], 'firm');
+    CheckEqualTrim(full.Bios.BuildDate,     os[sbiBiosDate], 'date');
+    CheckEqualTrim(full.System.ProductName, os[sbiProductName], 'pname');
+    CheckEqualTrim(full.System.Version,     os[sbiVersion], 'vers');
+    CheckEqualTrim(full.System.Uuid,        os[sbiUuid], 'uuid');
     if full.Processor <> nil then
-      CheckEqual(full.Processor[0].Manufacturer, os[sbiCpuManufacturer]);
+      CheckEqualTrim(full.Processor[0].Manufacturer, os[sbiCpuManufacturer], 'proc');
     if full.Battery <> nil then
-      CheckEqual(full.Battery[0].Manufacturer, os[sbiBatteryManufacturer]);
+      CheckEqualTrim(full.Battery[0].Manufacturer, os[sbiBatteryManufacturer], 'batt');
     if full.Oem <> nil then
-      CheckEqual(full.Oem[0], os[sbiOem]);
+      CheckEqualTrim(full.Oem[0], os[sbiOem], 'oem');
   end;
 
 begin
@@ -5999,13 +6314,15 @@ begin
   CurrentRawSid(s2, wttThread);
   Check(SidCompare(pointer(s1), pointer(s2)) = 0);
   s := RawSidToText(s1);
-  CheckUtf8(IdemPChar(pointer(s), 'S-1-5-21-'), s);
+  CheckUtf8(IdemPChar(pointer(s), 'S-1-'), s);
+  // domain users are S-1-5-21-*, but LOCAL_SYSTEM S-1-5-18 and AD user S-1-12
   sids := CurrentGroupsSid;
   Check(sids <> nil);
   known := CurrentKnownGroups;
   Check(known <> []);
   for k := low(k) to high(k) do
   begin
+    Check(CurrentUserHasGroup(k) = (k in known));
     s := RawSidToText(KnownRawSid(k));
     if k in known then
     begin
@@ -6015,6 +6332,29 @@ begin
     else
       CheckUtf8(not CurrentUserHasGroup(s), s);
   end;
+  Check(IsSystemFolder('c:\program files'));
+  Check(IsSystemFolder('c:\program Files\toto'));
+  Check(IsSystemFolder('c:\Program files (x86)'));
+  Check(IsSystemFolder('d:\Program Files (X86)\toto'));
+  Check(IsSystemFolder('c:\windows'));
+  Check(IsSystemFolder('c:\windows\toto'));
+  Check(not IsSystemFolder('c:\program file'));
+  Check(not IsSystemFolder('c:\program files other\toto'));
+  Check(not IsSystemFolder('c:\windowstorage'));
+  if IsUacVirtualizationEnabled then
+  begin
+    Check(IsUacVirtualFolder('c:\program files'));
+    Check(IsUacVirtualFolder('c:\program Files\toto'));
+    Check(IsUacVirtualFolder('c:\Program files (x86)'));
+    Check(IsUacVirtualFolder('d:\Program Files (X86)\toto'));
+    Check(IsUacVirtualFolder('c:\windows'));
+    Check(IsUacVirtualFolder('c:\windows\toto'));
+    Check(not IsUacVirtualFolder('c:\program file'));
+    Check(not IsUacVirtualFolder('c:\program files other\toto'));
+    Check(not IsUacVirtualFolder('c:\windowstorage'));
+  end
+  else
+    Check(not IsUacVirtualFolder('c:\program files'));
   {$endif OSWINDOWS}
 end;
 
@@ -6389,9 +6729,18 @@ procedure TTestCoreBase.UrlDecoding;
 var
   i, V: integer;
   c: cardinal;
+  v64: Int64;
   s, t, d: RawUtf8;
   U: PUtf8Char;
 begin
+  CheckEqual(StatusCodeToText(100)^, 'Continue');
+  CheckEqual(StatusCodeToText(200)^, 'OK');
+  CheckEqual(StatusCodeToText(206)^, 'Partial Content');
+  CheckEqual(StatusCodeToText(300)^, 'Multiple Choices');
+  CheckEqual(StatusCodeToText(503)^, 'Service Unavailable');
+  CheckEqual(StatusCodeToText(513)^, 'Invalid Request');
+  CheckEqual(StatusCodeToText(514)^, 'Invalid Request');
+  CheckEqual(StatusCodeToText(499)^, 'Invalid Request');
   for i := 1 to 100 do
   begin
     s := DateTimeToIso8601(Now / 20 + RandomDouble * 20, true);
@@ -6401,49 +6750,60 @@ begin
     Check(UrlDecodeNeedParameters(pointer(d), 'where,select'));
     Check(not UrlDecodeNeedParameters(pointer(d), 'foo,select'));
     Check(UrlDecodeValue(pointer(d), 'SELECT=', t, @U));
-    Check(t = s, 'UrlDecodeValue');
+    CheckEqual(t, s, 'UrlDecodeValue');
     Check(IdemPChar(U, 'WHERE='), 'Where');
     Check(UrlDecodeInteger(U, 'WHERE=', V));
-    Check(V = i);
+    CheckEqual(V, i);
+    Check(UrlDecodeInt64(U, 'WHERE=', v64));
+    CheckEqual(v64, i);
     Check(UrlDecodeCardinal(U, 'WHERE=', c));
-    Check(c = cardinal(i));
+    CheckEqual(c, i);
     Check(not UrlDecodeValue(pointer(d), 'NOTFOUND=', t, @U));
     Check(UrlDecodeInteger(U, 'WHERE=', V, @U));
     Check(U = nil);
   end;
   s := '{"b":30,"a":"toto"}'; // temp read-only var for proper overload call
   CheckEqual(UrlEncodeJsonObject('', s, []), '?b=30&a=toto');
+  {$ifdef OSWINDOWS}
+  Check(GetFileNameFromUrl('file:///c:/temp/toto.text') = 'c:\temp\toto.text', 't1');
+  Check(GetFileNameFromUrl('file:///c:\temp\toto.text') = 'c:\temp\toto.text', 't2');
+  Check(GetFileNameFromUrl(
+    'file://someserver/temp/toto.text') = '\\someserver\temp\toto.text', 't3');
+  {$else}
+  Check(GetFileNameFromUrl('file://someserver/temp/toto.text') = '', 'posix1');
+  Check(GetFileNameFromUrl('file:///temp/toto.text') = '/temp/toto.text', 'posix2');
+  {$endif OSWINDOWS}
 end;
 
 procedure TTestCoreBase.MimeTypes;
 const
   MIMES: array[0..51] of TFileName = (
-    'png', 'image/png',
-    'PNg', 'image/png',
-    'gif', 'image/gif',
-    'tif', 'image/tiff',
+    'png',  'image/png',
+    'PNg',  'image/png',
+    'gif',  'image/gif',
+    'tif',  'image/tiff',
     'tiff', 'image/tiff',
-    'jpg', 'image/jpeg',
-    'JPG', 'image/jpeg',
+    'jpg',  'image/jpeg',
+    'JPG',  'image/jpeg',
     'jpeg', 'image/jpeg',
-    'bmp', 'image/bmp',
-    'doc', 'application/msword',
+    'bmp',  'image/bmp',
+    'doc',  'application/msword',
     'docx', 'application/msword',
-    'htm', HTML_CONTENT_TYPE,
+    'htm',  HTML_CONTENT_TYPE,
     'html', HTML_CONTENT_TYPE,
     'HTML', HTML_CONTENT_TYPE,
-    'css', 'text/css',
-    'js', 'application/javascript',
-    'ico', 'image/x-icon',
-    'pdf', 'application/pdf',
-    'PDF', 'application/pdf',
+    'css',  'text/css',
+    'js',   'text/javascript',
+    'ico',  'image/x-icon',
+    'pdf',  'application/pdf',
+    'PDF',  'application/pdf',
     'Json', JSON_CONTENT_TYPE,
     'webp', 'image/webp',
     'manifest', 'text/cache-manifest',
     'appcache', 'text/cache-manifest',
     'h264', 'video/H264',
-    'x', 'application/x-compress',
-    'ogg', 'video/ogg');
+    'x',    'application/x-compress',
+    'ogg',  'video/ogg');
   BIN: array[0..1] of Cardinal = (
     $04034B50, $38464947);
   BIN_MIME: array[0..1] of RawUtf8 = (
@@ -6482,6 +6842,62 @@ var
   end;
 
 begin
+  // user agent bot detection
+  Check(not IsHttpUserAgentBot(
+    'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like ' +
+    'Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36'));
+  Check(not IsHttpUserAgentBot(
+    'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0'));
+  Check(not IsHttpUserAgentBot(
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2_1 like Mac OS X) AppleWebKit/' +
+    '605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1'));
+  Check(not IsHttpUserAgentBot(
+    'Mozilla/5.0 (Windows NT 10.0; Trident/7.0; rv:11.0) like Gecko'));
+  Check(IsHttpUserAgentBot(
+    'Googlebot/2.1 (+http://www.google.com/bot.html)'));
+  Check(IsHttpUserAgentBot(
+    'Googlebot/2.1 (+http://www.google.org/bot.html)'));
+  Check(not IsHttpUserAgentBot(
+    'Googlebot/2.1 (+http://www.google.cam/bot.html)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; adidxbot/2.0;  http://www.bing.com/bingbot.htm)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; Yahoo! Slurp; http://help.yahoo.com/help/us/ysearch/slurp)'));
+  Check(IsHttpUserAgentBot(
+    'adidxbot/1.1 (+http://search.msn.com/msnbot.htm)'));
+  Check(IsHttpUserAgentBot(
+    'Speedy Spider (http://www.entireweb.com/about/search_tech/speedy_spider/'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; coccoc/1.0; +http://help.coccoc.com/searchengine)'));
+  Check(IsHttpUserAgentBot(
+    'DuckDuckBot/1.0; (+http://duckduckgo.com/duckduckbot.html)'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; Applebot/0.3; +http://www.apple.com/go/applebot'));
+  Check(IsHttpUserAgentBot(
+    'Mozilla/5.0 (compatible; AhrefsBot/6.1; +http://ahrefs.com/robot/)'));
+  Check(IsHttpUserAgentBot(
+   'serpstatbot/1.0 (advanced backlink tracking bot; http://serpstatbot.com/;'));
+  // some HTTP methods
+  CheckEqual(PurgeHeaders(''), '');
+  CheckEqual(PurgeHeaders('toto'), 'toto');
+  CheckEqual(PurgeHeaders(#13#10), #13#10);
+  CheckEqual(PurgeHeaders('toto'#13#10), 'toto'#13#10);
+  CheckEqual(PurgeHeaders(#13#10, true), '');
+  CheckEqual(PurgeHeaders('toto'#13#10, true), 'toto');
+  CheckEqual(PurgeHeaders('', true), '');
+  CheckEqual(PurgeHeaders('toto', true), 'toto');
+  CheckEqual(PurgeHeaders('content-length: 10'#13#10'toto'#13#10, true), 'toto');
+  CheckEqual(PurgeHeaders('toto'#13#10'content-length: 10'#13#10, true), 'toto');
+  s := 'toto'#13#10;
+  CheckEqual(PurgeHeaders(s), s);
+  CheckEqual(PurgeHeaders('content-length: 10'#13#10'toto'#13#10), s);
+  CheckEqual(PurgeHeaders('toto'#13#10'content-length: 10'#13#10), s);
+  CheckEqual(PurgeHeaders(
+    'accept: all'#13#10'toto'#13#10'content-length: 10'#13#10), s);
+  CheckEqual(PurgeHeaders(
+    'accept: all'#13#10'content-length: 10'#13#10'toto'#13#10), s);
   Check(HttpMethodWithNoBody('HEAD'));
   Check(HttpMethodWithNoBody('head'));
   Check(HttpMethodWithNoBody('HEADER'));
@@ -6494,6 +6910,7 @@ begin
   Check(not HttpMethodWithNoBody('GET'));
   Check(not HttpMethodWithNoBody('POST'));
   Check(not HttpMethodWithNoBody('PUT'));
+  Check(not HttpMethodWithNoBody('OPT'));
   // mime content types
   CheckEqual(GetMimeContentType(nil, 0, 'toto.h264'), 'video/H264');
   CheckEqual(GetMimeContentType(nil, 0, 'toto', 'def1'), 'def1');
@@ -6509,6 +6926,36 @@ begin
     CheckEqual(GetMimeContentType(@BIN[i], 34, ''), BIN_MIME[i]);
     CheckEqual(GetMimeContentTypeFromBuffer(@BIN[i], 34, ''), BIN_MIME[i]);
   end;
+  s := '<?xml';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtXml);
+  s := '<html><body>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  s := '<!doctype html><html><body>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  s := '<!doctype note>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtXml);
+  s := '<?XML';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtXml);
+  s := '<HTML><body>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  s := '<!DocType HTML<html><body>';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  Check(not IsContentTypeCompressible('anything'));
+  Check(not IsContentTypeCompressible('toto/plain'));
+  Check(IsContentTypeCompressible('text/plain'));
+  Check(IsContentTypeCompressible('text/xml'));
+  Check(IsContentTypeCompressible('text/css'));
+  Check(not IsContentTypeCompressible('texto/xml'));
+  Check(IsContentTypeCompressible('application/json'));
+  Check(IsContentTypeCompressibleU('APPLICATION/JSON'));
+  Check(IsContentTypeCompressible('application/xml'));
+  Check(IsContentTypeCompressible('application/javascript'));
+  Check(IsContentTypeCompressible('application/VND.API+JSON'));
+  Check(not IsContentTypeCompressible('application/plain'));
+  Check(IsContentTypeCompressible('image/svg'));
+  Check(IsContentTypeCompressible('image/X-ico'));
+  Check(IsContentTypeCompressible('image/X-ICO'));
+  Check(not IsContentTypeCompressible('image/png'));
   // mime multipart encoding
   for rfc2388 := false to true do
   begin
@@ -6620,6 +7067,7 @@ procedure TTestCoreBase._TSynLogFile;
   procedure Test(const LOG: RawUtf8; ExpectedDate: TDateTime);
   var
     L: TSynLogFile;
+    o: TLogProcSortOrder;
   begin
     L := TSynLogFile.Create(pointer(LOG), length(LOG));
     try
@@ -6649,8 +7097,10 @@ procedure TTestCoreBase._TSynLogFile;
       Check(L.EventLevel[2] = sllLeave);
       if CheckFailed(L.LogProcCount = 1) then
         exit;
-      Check(L.LogProc[0].Index = 0);
-      Check(L.LogProc[0].Time = 10020006);
+      CheckEqual(L.LogProc[0].Index, 0);
+      CheckEqual(L.LogProc[0].Time, 10020006);
+      for o := low(o) to high(o) do
+        L.LogProcSort(o);
     finally
       L.Free;
     end;
@@ -6829,15 +7279,6 @@ begin
   finally
     gen.Free;
   end;
-end;
-
-function HashAnsiString(Item: PAnsiChar; Hasher: THasher): cardinal;
-begin
-  Item := PPointer(Item)^; // passed by reference
-  if Item = nil then
-    result := 0
-  else
-    result := Hasher(0, Item, PStrLen(Item - _STRLEN)^);
 end;
 
 {  TSynDictionary perf numbers on increasing integers or random guid strings
@@ -7417,8 +7858,8 @@ begin
       b.Insert(@i, SizeOf(i));
     CheckLogTime(b.Inserted = SIZ, 'Insert(%)', [SIZ - 1000]);
     savSIZ := b.SaveTo;
-    CheckLogTime(length(savSIZ) > length(sav1000), 'b.SaveTo(%) len=%', [SIZ, kb
-      (savSIZ)]);
+    CheckLogTime(length(savSIZ) > length(sav1000), 'b.SaveTo(%) len=%',
+      [SIZ, kb (savSIZ)]);
     for i := 1 to SIZ do
       Check(b.MayExist(@i, SizeOf(i)));
     CheckLogTime(b.Inserted = SIZ, 'MayExists(%)=true', [SIZ]);
@@ -7513,7 +7954,7 @@ var
   var
     i: integer;
   begin
-    Check(length(test) = MAX + 1);
+    CheckEqual(length(test), MAX + 1);
     for i := 0 to MAX do
     begin
       CheckSame(test[i].Real, 0.5 + i);
@@ -7532,7 +7973,7 @@ begin
     p := TPersistentAutoCreateFieldsTest.CreateFake;
     ObjArrayAdd(arr, p);
     tmp := DynArraySaveJson(arr, TypeInfo(TPersistentAutoCreateFieldsTestObjArray));
-    check(tmp = '[{"Text":"text","Value1":{"Real":1.5,"Imaginary":2.5},' +
+    checkEqual(tmp, '[{"Text":"text","Value1":{"Real":1.5,"Imaginary":2.5},' +
       '"Value2":{"Real":1.7,"Imaginary":2.7}}]');
     for i := 1 to MAX do
     begin
@@ -7542,9 +7983,9 @@ begin
     end;
     tmp := DynArraySaveJson(arr, TypeInfo(TPersistentAutoCreateFieldsTestObjArray));
     ObjArrayClear(arr);
-    Check(length(arr) = 0);
+    CheckEqual(length(arr), 0);
     DynArrayLoadJson(arr, pointer(tmp), TypeInfo(TPersistentAutoCreateFieldsTestObjArray));
-    Check(length(arr) = MAX + 1);
+    CheckEqual(length(arr), MAX + 1);
     for i := 0 to MAX do
     begin
       Check(arr[i].text = 'text');
@@ -7579,8 +8020,8 @@ begin
   r1 := TOrmArrayTest.CreateFrom(tmp);
   r2 := TOrmArrayTest.CreateFrom(tmp);
   try
-    check(r1.IDValue = 0);
-    check(r2.IDValue = 0);
+    CheckEqual(r1.IDValue, 0);
+    CheckEqual(r2.IDValue, 0);
     CheckValues(r1.Values);
     CheckValues(r2.Values);
     check(r1.SameValues(r2));

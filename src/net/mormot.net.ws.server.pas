@@ -9,6 +9,7 @@ unit mormot.net.ws.server;
     WebSockets Bidirectional Server
     - TWebSocketProcessServer Processing Class
     - TWebSocketServerRest Bidirectional REST Server
+    - Socket.IO / Engine.IO Server Protocol over WebSockets
 
   *****************************************************************************
 
@@ -223,6 +224,9 @@ type
     function Callback(Ctxt: THttpServerRequest; aNonBlocking: boolean): cardinal;
       override;
   end;
+
+
+{ ******************** Socket.IO / Engine.IO Server Protocol over WebSockets }
 
 
 
@@ -445,7 +449,7 @@ begin
   temp.opcode := aFrame.opcode;
   temp.content := aFrame.content;
   len := length(aFrame.payload);
-  tix := GetTickCount64 shr 10;
+  tix := GetTickCount64 shr MilliSecsPerSecShl;
   fWebSocketConnections.Safe.ReadOnlyLock;
   try
     ws := pointer(fWebSocketConnections.List);
@@ -557,6 +561,8 @@ begin
     result := HTTP_NOTFOUND;
 end;
 
+
+{ ******************** Socket.IO / Engine.IO Server Protocol over WebSockets }
 
 
 end.

@@ -55,7 +55,7 @@ type
     Name: TFileName;
     /// the matching file attributes
     Attr: integer;
-    /// the matching file size
+    /// the matching file size, -1 for a folder if ffoIncludeFolder option is set
     Size: Int64;
     /// the matching file local date/time
     Timestamp: TDateTime;
@@ -65,6 +65,7 @@ type
     function ToText: ShortString;
   end;
   {$A+}
+  PFindFiles = ^TFindFiles;
 
   /// result list, as returned by FindFiles()
   TFindFilesDynArray = array of TFindFiles;
@@ -73,10 +74,12 @@ type
   // - ffoSortByName will sort the result files by extension then name
   // - ffoExcludesDir won't include the path in TFindFiles.Name
   // - ffoSubFolder will search within nested folders
+  // - ffoIncludeFolder will add the nested folders
   TFindFilesOption = (
     ffoSortByName,
     ffoExcludesDir,
-    ffoSubFolder);
+    ffoSubFolder,
+    ffoIncludeFolder);
   /// the optional features of FindFiles()
   TFindFilesOptions = set of TFindFilesOption;
 
@@ -88,7 +91,8 @@ function FindFiles(const Directory: TFileName;
   Options: TFindFilesOptions = []): TFindFilesDynArray;
 
 /// search for matching file names
-// - just a wrapper around FindFilesDynArrayToFileNames(FindFiles())
+// - on Windows, just a wrapper around FindFilesDynArrayToFileNames(FindFiles())
+// - on POSIX, calls PosixFileNames() if possible, with fast TMatch mask lookup
 function FileNames(const Directory: TFileName;
   const Mask: TFileName = FILES_ALL; Options: TFindFilesOptions = [];
   const IgnoreFileName: TFileName = ''): TFileNameDynArray; overload;
@@ -100,6 +104,14 @@ function FileNames(const Path: array of const; const Mask: TFileName = FILES_ALL
 
 /// convert a result list, as returned by FindFiles(), into an array of Files[].Name
 function FindFilesDynArrayToFileNames(const Files: TFindFilesDynArray): TFileNameDynArray;
+
+/// sort a FindFiles() result list by its TFindFiles[].Timestamp field
+procedure FindFilesSortByTimestamp(var Files: TFindFilesDynArray);
+
+/// compute the HTML index page corresponding to a local folder
+procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
+  out Html: RawUtf8);
+
 
 type
   /// one optional feature of SynchFolders()
@@ -269,11 +281,45 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// search patterns in the supplied UTF-8 text buffer
     function Match(aText: PUtf8Char; aLen: integer): integer; overload;
-    /// search patterns in the supplied VCL/LCL text
+    /// search patterns in the supplied RTL string text
     // - could be used on a TFileName for instance
     // - will avoid any memory allocation if aText is small enough
     function MatchString(const aText: string): integer;
   end;
+
+  /// store a decoded URI as full path and file/resource name
+  {$ifdef USERECORDWITHMETHODS}
+  TUriMatchName = record
+  {$else}
+  TUriMatchName = object
+  {$endif USERECORDWITHMETHODS}
+  public
+    /// the full URI path
+    Path: TValuePUtf8Char;
+    /// its resource name, as decoded by ParsePath from the Path value
+    Name: TValuePUtf8Char;
+    /// to be called once Path has been populated to compute Name
+    procedure ParsePath;
+  end;
+
+  /// efficient GLOB path or resource name lockup for an URI
+  // - using mORMot fast TMatch engine
+  {$ifdef USERECORDWITHMETHODS}
+  TUriMatch = record
+  {$else}
+  TUriMatch = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    Init: TLightLock;
+    Names, Paths: TMatchDynArray;
+    procedure DoInit(csv: PUtf8Char; caseinsensitive: boolean);
+  public
+    /// main entry point of the GLOB resource/path URI pattern matching
+    // - will thread-safe initialize the internal TMatch instances if necessary
+    function Check(const csv: RawUtf8; const uri: TUriMatchName;
+      caseinsensitive: boolean): boolean;
+  end;
+
 
 
 /// fill the Match[] dynamic array with all glob patterns supplied as CSV
@@ -299,8 +345,16 @@ function MatchExists(const One: TMatch; const Several: TMatchDynArray): boolean;
 /// add one TMach if not already registered in the Several[] dynamic array
 function MatchAdd(const One: TMatch; var Several: TMatchDynArray): boolean;
 
+/// allocate one TMach in the Several[] dynamic array
+function MatchNew(var Several: TMatchDynArray): PMatch;
+
 /// returns TRUE if Match=nil or if any Match[].Match(Text) is TRUE
 function MatchAny(const Match: TMatchDynArray; const Text: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// returns TRUE if Match=nil or if any Match[].Match(Text, TextLen) is TRUE
+// - same signature as the TOnPosixFileName callback
+function MatchAnyP(Match: PMatch; Text: PUtf8Char; TextLen: PtrInt): boolean;
 
 /// apply the CSV-supplied glob patterns to an array of RawUtf8
 // - any text not matching the pattern will be deleted from the array
@@ -329,7 +383,7 @@ procedure FilterMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
 function IsMatch(const Pattern, Text: RawUtf8;
   CaseInsensitive: boolean = false): boolean;
 
-/// return TRUE if the supplied content matches a glob pattern, using VCL strings
+/// return TRUE if the supplied content matches a glob pattern, using RTL strings
 // - is a wrapper around IsMatch() with fast UTF-8 conversion
 function IsMatchString(const Pattern, Text: string;
   CaseInsensitive: boolean = false): boolean;
@@ -611,29 +665,37 @@ type
   // - SaveTo() and LoadFrom() methods allow transmission of the bits array,
   // for a disk/database storage or transmission over a network
   // - internally, several (hardware-accelerated) crc32c hash functions will be
-  // used, with some random seed values, to simulate several hashing functions
+  // used, with some random seed values, to simulate several hashing functions;
+  // you can customize the hash function if needed
   // - all methods are thread-safe, and MayExist can be concurrent (via a TRWLock)
   TSynBloomFilter = class(TSynPersistent)
   private
+    fSafe: TRWLock; // need an upgradable lock for TSynBloomFilterDiff
+    fHasher: THasher;
     fSize: cardinal;
-    fFalsePositivePercent: double;
     fBits: cardinal;
     fHashFunctions: cardinal;
     fInserted: cardinal;
+    fFalsePositivePercent: double;
     fStore: RawByteString;
-    fSafe: TRWLock; // need an upgradable lock for TSynBloomFilterDiff
   public
+    /// don't call this raw constructor, but its overloads
+    constructor Create; overload; override;
     /// initialize the internal bits storage for a given number of items
     // - by default, internal bits array size will be guess from a 1 % false
     // positive rate - but you may specify another value, to reduce memory use
     // - this constructor would compute and initialize Bits and HashFunctions
     // corresponding to the expected false positive ratio
-    constructor Create(aSize: integer;
-      aFalsePositivePercent: double = 1); reintroduce; overload;
+    // - you can specify a custom hash function if you find that the default
+    // crc32c() has too many collisions: but SaveTo/LoadFrom will be tied to it;
+    // see e.g. CryptCrc32(caMd5/caSha1) from mormot.crypt.secure
+    constructor Create(aSize: integer; aFalsePositivePercent: double = 1;
+      aHasher: THasher = nil); reintroduce; overload;
     /// initialize the internal bits storage from a SaveTo() binary buffer
     // - this constructor will initialize the internal bits array calling LoadFrom()
-    constructor Create(const aSaved: RawByteString;
-      aMagic: cardinal = $B1003F11); reintroduce; overload;
+    // - you can specify a custom hash function to match with the one used before
+    constructor Create(const aSaved: RawByteString; aMagic: cardinal = $B1003F11;
+      aHasher: THasher = nil); reintroduce; overload;
     /// add an item in the internal bits array storage
     // - this method is thread-safe
     procedure Insert(const aValue: RawByteString); overload;
@@ -1353,11 +1415,9 @@ function IsValidEmail(P: PUtf8Char): boolean;
 { ***************** Cross-Platform TSynTimeZone Time Zones }
 
 type
-  {$A-} { make all records packed for cross-platform binary serialization }
-
   /// used to store Time Zone bias in TSynTimeZone
-  // - map how low-level information is stored in the Windows Registry
-  TTimeZoneInfo = record
+  // - map low-level information as stored in the Windows Registry 'TZI' entry
+  TTimeZoneInfo = packed record
     Bias: integer;
     bias_std: integer;
     bias_dlt: integer;
@@ -1368,6 +1428,8 @@ type
 
   /// text identifier of a Time Zone, following Microsoft Windows naming
   TTimeZoneID = type RawUtf8;
+
+  {$A-} { make object packed for cross-platform binary serialization }
 
   /// used to store Time Zone information for a single area in TSynTimeZone
   // - Delphi "object" is buggy on stack -> also defined as record with methods
@@ -1386,6 +1448,8 @@ type
     end;
     /// search for the TTimeZoneInfo of a given year
     function GetTziFor(year: integer): PTimeZoneInfo;
+    /// erase all fields of this structure
+    procedure Clear;
   end;
 
   /// used to store the Time Zone information of a TSynTimeZone class
@@ -1410,28 +1474,44 @@ type
     fZones: TDynArrayHashed;
     fLastZone: TTimeZoneID;
     fLastIndex: integer;
+    fCurrentIndex, fUtcIndex: integer;
     fIds: TStringList;
     fDisplays: TStringList;
-    function LockedFindZoneIndex(const TzId: TTimeZoneID): PtrInt;
+    procedure SetIDs;
+    procedure SetDisplays;
+    procedure LockedAfterLoad;
+    function LockedSearch(const TzId: TTimeZoneID): PtrInt;
+    class function LoadDefault: TSynTimeZone;
   public
     /// initialize the internal storage
     // - but no data is available, until Load* methods are called
     constructor Create;
-    /// retrieve the time zones from Windows registry, or from a local file
-    // - under Linux, the file should be located with the executable, renamed
-    // with a .tz extension - may have been created via SaveToFile(''), or
-    // from a 'TSynTimeZone' bound resource
-    // - "dummycpp" parameter exists only to disambiguate constructors for C++
-    constructor CreateDefault(dummycpp: integer = 0);
     /// finalize the instance
     destructor Destroy; override;
     /// will retrieve the default shared TSynTimeZone instance
-    // - locally created via the CreateDefault constructor
+    // - on Windows, will call LoadFromRegistry
+    // - under Linux, try first with LoadFromResource, then LoadFromFile do should be located with the executable,
     // - see also the NowToLocal/LocalToUtc/UtcToLocal global functions
     class function Default: TSynTimeZone;
+      {$ifdef HASINLINE} static; inline; {$endif}
     {$ifdef OSWINDOWS}
     /// read time zone information from the Windows registry
     procedure LoadFromRegistry;
+    /// the current OS time zone as Zones[] Ids[] Displays[] index
+    // - as retrieved by LoadFromRegistry
+    // - equals -1 if was not retrieved
+    property CurrentIndex: integer
+      read fCurrentIndex;
+    /// change the current OS time zone from its Zones[] Ids[] Displays[] index
+    // - currently only available on Windows
+    // - this method is not thread-safe, because it uses an index
+    procedure ChangeOperatingSystemTimeZone(Index: PtrInt); overload;
+    /// change the current Operating System time zone to a given TzId
+    // - currently only available on Windows
+    // - could be used e.g. as
+    // ! TSynTimeZone.Default.ChangeOperatingSystemTimeZone('UTC');
+    // ! TSynTimeZone.Default.ChangeOperatingSystemTimeZone('Romance Standard Time');
+    procedure ChangeOperatingSystemTimeZone(const TzId: TTimeZoneID); overload;
     {$endif OSWINDOWS}
     /// read time zone information from a compressed file
     // - if no file name is supplied, a ExecutableName.tz file would be used
@@ -1456,11 +1536,9 @@ type
     /// write then time zone information into a compressed memory buffer
     function SaveToBuffer: RawByteString;
     /// retrieve the time bias (in minutes) for a given date/time on a TzId
+    // - this is the main search function of this class
     function GetBiasForDateTime(const Value: TDateTime; const TzId: TTimeZoneID;
       out Bias: integer; out HaveDaylight: boolean; ValueIsUtc: boolean = false): boolean;
-    /// retrieve the display text corresponding to a TzId
-    // - returns '' if the supplied TzId is not recognized
-    function GetDisplay(const TzId: TTimeZoneID): RawUtf8;
     /// compute the UTC date/time corrected for a given TzId
     function UtcToLocal(const UtcDateTime: TDateTime; const TzId: TTimeZoneID): TDateTime;
     /// compute the current date/time corrected for a given TzId
@@ -1470,21 +1548,35 @@ type
     // time bias period, so the returned value is informative only, and any
     // stored value should be following UTC
     function LocalToUtc(const LocalDateTime: TDateTime; const TzID: TTimeZoneID): TDateTime;
+    /// retrieve the display text corresponding to a TzId
+    // - returns '' if the supplied TzId is not recognized
+    function GetDisplay(const TzId: TTimeZoneID): RawUtf8;
+    /// low-level thread-unsafe function return the index of a TzID from Ids[]
+    function GetIndex(const TzId: TTimeZoneID): PtrInt;
     /// direct access to the low-level time zone information
     property Zone: TTimeZoneDataDynArray
       read fZone;
     /// direct access to the wrapper over the time zone information array
     property Zones: TDynArrayHashed
       read fZones;
+    /// the number of items in Zone[] Ids[] and Displays[]
+    property Count: integer
+      read fZoneCount;
     /// returns a TStringList of all TzID values
-    // - could be used to fill any VCL component to select the time zone
+    // - could be used to fill any UI component to select the time zone
     // - order in Ids[] array follows the Zone[].id information
     function Ids: TStrings;
+      {$ifdef HASINLINE} inline; {$endif}
     /// returns a TStringList of all Display text values
-    // - could be used to fill any VCL component to select the time zone
+    // - could be used to fill any UI component to select the time zone
     // - order in Displays[] array follows the Zone[].display information
     function Displays: TStrings;
+      {$ifdef HASINLINE} inline; {$endif}
   end;
+
+var
+  /// global variable used when inlining TSynTimeZone.Default method
+  SharedSynTimeZone: TSynTimeZone;
 
 /// retrieve the time bias (in minutes) for a given date/time on a TzId
 // - will use a global shared thread-safe TSynTimeZone instance for the request
@@ -1518,29 +1610,46 @@ function LocalToUtc(const LocalDateTime: TDateTime; const TzID: TTimeZoneID): TD
 implementation
 
 
-
 { ****************** Files Search in Folders }
 
 procedure TFindFiles.FromSearchRec(const Directory: TFileName; const F: TSearchRec);
 begin
   Name := Directory + TFileName(F.Name);
-  {$ifdef OSWINDOWS}
-  {$ifdef HASINLINE} // FPC or Delphi 2006+
-  Size := F.Size;
-  {$else} // F.Size was limited to 32-bit on older Delphi
-  PInt64Rec(@Size)^.Lo := F.FindData.nFileSizeLow;
-  PInt64Rec(@Size)^.Hi := F.FindData.nFileSizeHigh;
-  {$endif HASINLINE}
-  {$else}
-  Size := F.Size;
-  {$endif OSWINDOWS}
   Attr := F.Attr;
+  if Attr and faDirectory <> 0 then // may happen with ffoIncludeFolder option
+    Size := -1
+  else
+  begin
+    {$ifdef OSWINDOWS}
+    {$ifdef HASINLINE} // FPC or Delphi 2006+
+    Size := F.Size;
+    {$else} // F.Size was limited to 32-bit on older Delphi
+    PInt64Rec(@Size)^.Lo := F.FindData.nFileSizeLow;
+    PInt64Rec(@Size)^.Hi := F.FindData.nFileSizeHigh;
+    {$endif HASINLINE}
+    {$else}
+    Size := F.Size;
+    {$endif OSWINDOWS}
+  end;
   Timestamp := SearchRecToDateTime(F);
 end;
 
 function TFindFiles.ToText: ShortString;
 begin
   FormatShort('% % %', [Name, KB(Size), DateTimeToFileShort(Timestamp)], result);
+end;
+
+function SortDynArrayFindFiles(const A, B): integer;
+begin
+  if TFindFiles(A).Size < 0 then
+    if TFindFiles(B).Size < 0 then
+      result := SortDynArrayFileName(A, B) // both are folders
+    else
+      result := -1                         // folders first
+  else if TFindFiles(B).Size < 0 then
+    result := 1                           // files last
+  else
+    result := SortDynArrayFileName(A, B); // both are files
 end;
 
 function FindFiles(const Directory, Mask, IgnoreFileName: TFileName;
@@ -1560,12 +1669,14 @@ var
   begin
     fold := dir + folder;
     name := fold + Mask;
-    if FindFirst(name, faAnyfile - faDirectory, F) = 0 then
+    if FindFirst(name, faAnyfile, F) = 0 then
     begin
       repeat
-        if SearchRecValidFile(F) and
-           ((IgnoreFileName = '') or
-            (AnsiCompareFileName(F.Name, IgnoreFileName) <> 0)) then
+        if (SearchRecValidFile(F) and
+            ((IgnoreFileName = '') or
+             (AnsiCompareFileName(F.Name, IgnoreFileName) <> 0))) or
+           ((ffoIncludeFolder in Options) and
+            SearchRecValidFolder(F)) then
         begin
           if ffoExcludesDir in Options then
             ff.FromSearchRec(folder, F)
@@ -1597,7 +1708,7 @@ begin
     CsvToRawUtf8DynArray(pointer(StringToUtf8(Mask)), masks, ';');
   if masks <> nil then
   begin
-    // recursive calls for each masks[]
+    // recursive calls for each masks[], optionally sorted by mask
     if ffoSortByName in Options then
       QuickSortRawUtf8(masks, length(masks), nil,
         {$ifdef OSWINDOWS} @StrIComp {$else} @StrComp {$endif});
@@ -1616,7 +1727,7 @@ begin
     SearchFolder('');
     if (ffoSortByName in Options) and
        (da.Count > 1) then
-      da.Sort(SortDynArrayFileName);
+      da.Sort(SortDynArrayFindFiles);
   end;
   if count <> 0 then
     DynArrayFakeLength(result, count);
@@ -1624,9 +1735,38 @@ end;
 
 function FileNames(const Directory, Mask: TFileName;
   Options: TFindFilesOptions; const IgnoreFileName: TFileName): TFileNameDynArray;
+{$ifdef OSPOSIX}
+var
+  m: TMatchDynArray;
+  cb: TOnPosixFileName;
+{$endif OSPOSIX}
 begin
-  result := FindFilesDynArrayToFileNames(
-    FindFiles(Directory, Mask, IgnoreFileName, Options));
+  {$ifdef OSPOSIX}
+  if (Options * [ffoIncludeFolder] = []) and
+     ((Options * [ffoSortByName] = []) or
+      (PosExChar(';', Mask) = 0)) then // sort on multi-mask not yet implemented
+  begin
+    // use much faster PosixFileNames() low-level function over TMatchDynArray
+    cb := nil;
+    if Mask <> FILES_ALL then
+    begin
+      cb := @MatchAnyP; // exact same signature than TOnPosixFileName callback
+      SetMatchs(Mask, {caseinsens=}false, m, ';');
+    end;
+    result := PosixFileNames(Directory,
+      ffoSubFolder in Options, cb, pointer(m), ffoExcludesDir in Options);
+    if result = nil then
+      exit;
+    if IgnoreFileName <> '' then
+      DeleteRawUtf8(result, FindRawUtf8(result, IgnoreFileName));
+    if ffoSortByName in Options then
+      QuickSortRawUtf8(result, length(result));
+  end
+  else
+  {$endif OSPOSIX}
+    // use regular FindFirst/FindNext and transient TFindFilesDynArray resultset
+    result := FindFilesDynArrayToFileNames(
+      FindFiles(Directory, Mask, IgnoreFileName, Options));
 end;
 
 function FileNames(const Path: array of const; const Mask: TFileName;
@@ -1651,12 +1791,23 @@ begin
     result[i] := Files[i].Name;
 end;
 
+function SortFindFileTimestamp(const A, B): integer;
+begin
+  result := CompareFloat(TFindFiles(A).Timestamp, TFindFiles(B).Timestamp);
+end;
+
+procedure FindFilesSortByTimestamp(var Files: TFindFilesDynArray);
+begin
+  DynArray(TypeInfo(TFindFilesDynArray), Files).Sort(SortFindFileTimestamp);
+end;
+
 function SynchFolders(const Reference, Dest: TFileName;
   Options: TSynchFoldersOptions): integer;
 var
   ref, dst, reffn, dstfn: TFileName;
-  fref, fdst: TSearchRec;
-  reftime: TDateTime;
+  fdst: TSearchRec;
+  refsize: Int64;
+  reftime: TUnixMSTime;
   s: RawByteString;
 begin
   result := 0;
@@ -1669,32 +1820,24 @@ begin
       if SearchRecValidFile(fdst) then
       begin
         reffn := ref + fdst.Name;
+        if not FileInfoByName(reffn, refsize, reftime) then
+          continue; // only update existing files
+        if not (sfoByContent in Options) then
+          if (refsize = fdst.Size) and
+             (reftime = SearchRecToUnixTimeUtc(fdst)) then
+            continue;
         dstfn := dst + fdst.Name;
-        if sfoByContent in Options then
-          reftime := FileAgeToDateTime(reffn)
-        else if FindFirst(reffn, faAnyFile, fref) = 0 then
-        begin
-          if (fdst.Size = fref.Size) and
-             (fdst.Time = fref.Time) then
-            reftime := 0
-          else
-            reftime := SearchRecToDateTime(fref);
-          FindClose(fref);
-        end
-        else
-          reftime := 0; // "continue" trigger unexpected warning on Delphi
-        if reftime = 0 then
-          continue; // skip if no reference file to copy from
         s := StringFromFile(reffn);
         if (s = '') or
            ((sfoByContent in Options) and
             (length(s) = fdst.Size) and
             (DefaultHasher(0, pointer(s), fdst.Size) = HashFile(dstfn))) then
           continue;
-        FileFromString(s, dstfn, false, reftime);
+        FileFromString(s, dstfn);
+        FileSetDateFromUnixUtc(dstfn, reftime div MilliSecsPerSec);
         inc(result);
         if sfoWriteFileNameToConsole in Options then
-          ConsoleWrite('synched %', [dstfn]);
+          ConsoleWriteRaw(['synched ', dstfn]);
       end
       else if (sfoSubFolder in Options) and
               SearchRecValidFolder(fdst) then
@@ -1718,44 +1861,111 @@ begin
   if not DirectoryExists(src) then
     exit;
   dst := EnsureDirectoryExists(Dest);
-  if FindFirst(src + FILES_ALL, faAnyFile, sr) = 0 then
-  begin
-    repeat
-      reffn := src + sr.Name;
-      dstfn := dst + sr.Name;
-      if SearchRecValidFile(sr) then
+  if (dst = '') or
+     (FindFirst(src + FILES_ALL, faAnyFile, sr) <> 0) then
+    exit;
+  repeat
+    reffn := src + sr.Name;
+    dstfn := dst + sr.Name;
+    if SearchRecValidFile(sr) then
+    begin
+      if FileInfoByName(dstfn, dsize, dtime) and // fast single syscall
+         (sr.Size = dsize) then
+        if sfoByContent in Options then
+        begin
+          if SameFileContent(reffn, dstfn) then
+            continue;
+        end
+        else if abs(SearchRecToUnixTimeUtc(sr) * 1000 - dtime) < 1000 then
+          continue; // allow error of 1 second timestamp resolution
+      if not CopyFile(reffn, dstfn, {failsifexists=}false) then
+        result := -1;
+    end
+    else if not SearchRecValidFolder(sr) then
+      continue
+    else if sfoSubFolder in Options then
+    begin
+      nested := CopyFolder(reffn, dstfn, Options);
+      if nested < 0 then
+        result := nested
+      else
+        inc(result, nested);
+    end;
+    if result < 0 then
+      break;
+    inc(result);
+    if sfoWriteFileNameToConsole in Options then
+      ConsoleWriteRaw(['copied ', reffn]);
+  until (FindNext(sr) <> 0);
+  FindClose(sr);
+end;
+
+procedure FolderHtmlIndex(const Folder: TFileName; const Path, Name: RawUtf8;
+  out Html: RawUtf8);
+const
+  _DIR: array[boolean] of string[7] = ('[dir]', '&nbsp;');
+var
+  w: TTextDateWriter;
+  tmp: TTextWriterStackBuffer;
+  files: TFindFilesDynArray;
+  f: PFindFiles;
+  i: PtrInt;
+  isfile: boolean;
+  n: RawUtf8;
+begin
+  w := TTextDateWriter.CreateOwnedStream(tmp);
+  try
+    w.AddShort('<!DOCTYPE html>'#13#10'<html>'#13#10'<head>'#13#10'<title>Index of /');
+    w.AddHtmlEscapeUtf8(Name); // paranoid
+    w.AddShort('</title>'#13#10'</head>'#13#10 +
+      '<body style="font-family:verdana">'#13#10'<h1>Index of /');
+    w.AddHtmlEscapeUtf8(Name);
+    w.AddShort('</h1>'#13#10'<table>'#13#10 +
+      '<tr><th></th><th>Name</th><th>Last modified</th><th>Size</th></tr>'#13#10 +
+      '<tr><th colspan="4"><hr></th></tr>'#13#10);
+    if Name <> '' then
+      W.Add('<tr><td>%</td><td><a href="..">../</a></td><td></td><td ' +
+        'align="right">-</td><tr>'#13#10, [_DIR[false]]);
+    files := FindFiles(Folder, FILES_ALL, '',
+      [ffoExcludesDir, ffoSortByName, ffoIncludeFolder]);
+    f := pointer(files);
+    for i := 1 to length(files) do
+    begin
+      isfile := f^.Size >= 0; // size = -1 for folders
+      StringToUtf8(f^.Name, n);
+      w.AddShorter('<tr><td>');
+      w.AddShorter(_DIR[isfile]);
+      w.AddShort('</td><td><a href="');
+      if Path <> '' then
       begin
-        if FileInfoByName(dstfn, dsize, dtime) and // fast single syscall
-           (sr.Size = dsize) then
-          if sfoByContent in Options then
-          begin
-            if SameFileContent(reffn, dstfn) then
-              continue;
-          end
-          else if abs(SearchRecToUnixTimeUtc(sr) * 1000 - dtime) < 1000 then
-            continue; // allow error of 1 second timestamp resolution
-        if not CopyFile(reffn, dstfn, {failsifexists=}false) then
-          result := -1;
-      end
-      else if not SearchRecValidFolder(sr) then
-        continue
-      else if sfoSubFolder in Options then
-      begin
-        nested := CopyFolder(reffn, dstfn, Options);
-        if nested < 0 then
-          result := nested
-        else
-          inc(result, nested);
+        w.AddHtmlEscapeUtf8(Path);
+        if Path[length(Path)] <> '/' then
+          w.AddDirect('/');
       end;
-      if result < 0 then
-        break;
-      inc(result);
-      if sfoWriteFileNameToConsole in Options then
-        ConsoleWrite('copied %', [reffn]);
-    until (FindNext(sr) <> 0);
-    FindClose(sr);
+      UrlEncodeName(w, n);
+      if not isFile then
+        w.AddDirect('/');
+      w.AddDirect('"', '>');
+      w.AddHtmlEscapeUtf8(n);
+      if not isFile then
+        w.AddDirect('/');
+      w.AddShort('</a></td><td>');
+      w.AddDateTime(@f^.Timestamp, ' ', #0, false, true);
+      w.AddShort('&nbsp;</td><td align="right">');
+      if isFile then
+        w.AddShort(KB(f^.Size))
+      else
+        w.AddDirect('-');
+      w.AddShort('</td><tr>'#13#10);
+      inc(f);
+    end;
+    w.AddShort('</table>'#13#10'</body>'#13#10'</html>');
+    w.SetText(Html);
+  finally
+    w.Free;
   end;
 end;
+
 
 
 { ****************** ScanUtf8, GLOB and SOUNDEX Text Search }
@@ -1813,7 +2023,7 @@ begin
           'u':
             PCardinal(values[v])^ := GetNextItemCardinal(P, #0);
           'U':
-            PQword(values[v])^ := GetNextItemQword(P, #0);
+            PQWord(values[v])^ := GetNextItemQword(P, #0);
           'f':
             unaligned(PDouble(values[v])^) := GetNextItemDouble(P, #0);
           'F':
@@ -1853,7 +2063,7 @@ begin
           '%':
             goto next;
         else
-          raise ESynException.CreateUtf8(
+          ESynException.RaiseUtf8(
             'ScanUtf8: unknown ''%'' specifier [%]', [F^, fmt]);
         end;
         inc(result);
@@ -2454,7 +2664,7 @@ end;
 function SearchNoPattern(aMatch: PMatch; aText: PUtf8Char; aTextLen: PtrInt): boolean;
 begin
   result := (aMatch.PMax + 1 = aTextLen) and
-            CompareMem(aText, aMatch.Pattern, aTextLen);
+            mormot.core.base.CompareMem(aText, aMatch.Pattern, aTextLen);
 end;
 
 function SearchNoPatternU(aMatch: PMatch; aText: PUtf8Char; aTextLen: PtrInt): boolean;
@@ -2511,7 +2721,7 @@ end;
 function SearchStartWith(aMatch: PMatch; aText: PUtf8Char; aTextLen: PtrInt): boolean;
 begin
   result := (aMatch.PMax < aTextLen) and
-            CompareMem(aText, aMatch.Pattern, aMatch.PMax + 1);
+    mormot.core.base.CompareMem(aText, aMatch.Pattern, aMatch.PMax + 1);
 end;
 
 function SearchStartWithU(aMatch: PMatch; aText: PUtf8Char; aTextLen: PtrInt): boolean;
@@ -2524,7 +2734,7 @@ function SearchEndWith(aMatch: PMatch; aText: PUtf8Char; aTextLen: PtrInt): bool
 begin
   dec(aTextLen, aMatch.PMax);
   result := (aTextLen >= 0) and
-            CompareMem(aText + aTextLen, aMatch.Pattern, aMatch.PMax);
+    mormot.core.base.CompareMem(aText + aTextLen, aMatch.Pattern, aMatch.PMax);
 end;
 
 function SearchEndWithU(aMatch: PMatch; aText: PUtf8Char; aTextLen: PtrInt): boolean;
@@ -2648,7 +2858,7 @@ var
   m: PSBNDMQ2Mask absolute result;
   c: PCardinal;
 begin
-  FastSetRawByteString(result, nil, SizeOf(m^));
+  FastNewRawByteString(result, SizeOf(m^));
   FillCharFast(m^, SizeOf(m^), 0);
   for i := 0 to length(Pattern) - 1 do
   begin
@@ -2769,8 +2979,8 @@ begin
       {$endif CPU64}
   else if pmax >= 1 then
   begin
-    // PMax in [1..30] = len in [2..31]
-    aPattern := SearchSBNDMQ2ComputeMask(aPattern, Upper); // lookup table
+    // PMax=[1..30] -> len=[2..31] -> aPattern becomes a SBNDMQ2 lookup table
+    aPattern := SearchSBNDMQ2ComputeMask(aPattern, Upper);
     if aCaseInsensitive then
       Search := SearchSBNDMQ2U
     else
@@ -2793,8 +3003,9 @@ end;
 
 function TMatch.Match(const aText: RawUtf8): boolean;
 begin
-  if aText <> '' then
-    result := Search(@self, pointer(aText), length(aText))
+  if pointer(aText) <> nil then
+    result := Search(@self,
+                pointer(aText), PStrLen(PAnsiChar(pointer(aText)) - _STRLEN)^)
   else
     result := pmax < 0;
 end;
@@ -2846,7 +3057,7 @@ function TMatch.Equals(const aAnother: TMatch): boolean;
 begin
   result := (pmax = TMatch(aAnother).pmax) and
             (Upper = TMatch(aAnother).Upper) and
-            CompareMem(Pattern, TMatch(aAnother).Pattern, pmax + 1);
+    mormot.core.base.CompareMem(Pattern, TMatch(aAnother).Pattern, pmax + 1);
 end;
 
 function TMatch.PatternLength: integer;
@@ -2862,6 +3073,69 @@ end;
 function TMatch.CaseInsensitive: boolean;
 begin
   result := Upper = @NormToUpperAnsi7;
+end;
+
+
+{ TUriMatchName }
+
+procedure TUriMatchName.ParsePath;
+var
+  i: PtrInt;
+begin
+  Name := Path;
+  i := Name.Len;
+  while i > 0 do // retrieve last
+  begin
+    dec(i);
+    if Name.Text[i] <> '/' then
+      continue;
+    inc(i);
+    inc(Name.Text, i);
+    dec(Name.Len, i);
+    break;
+  end;
+end;
+
+
+{ TUriMatch }
+
+procedure TUriMatch.DoInit(csv: PUtf8Char; caseinsensitive: boolean);
+var
+  s: PUtf8Char;
+  m: ^TMatchDynArray;
+begin
+  if csv <> nil then
+    repeat
+      m := @Names; // default 'file.ext' pattern
+      csv := GotoNextNotSpace(csv);
+      s := csv;
+      repeat
+        case csv^ of
+          #0,
+          ',':
+            break;
+          '/':
+            m := @Paths; // is a 'path/to/file.ext' pattern
+        end;
+        inc(csv);
+      until false;
+      if csv <> s then
+        MatchNew(m^)^.Prepare(s, csv - s, caseinsensitive, true);
+      if csv^ = #0 then
+        break;
+      inc(csv);
+    until false;
+end;
+
+function TUriMatch.Check(const csv: RawUtf8;
+  const uri: TUriMatchName; caseinsensitive: boolean): boolean;
+begin
+  if Init.TryLock then // thread-safe init once from supplied csv
+    DoInit(pointer(csv), caseinsensitive);
+  result := ((Names <> nil) and
+             MatchAnyP(pointer(Names), uri.Name.Text, uri.Name.Len)) or
+            ((Paths <> nil) and
+             MatchAnyP(pointer(Paths), uri.Path.Text, uri.Path.Len));
 end;
 
 
@@ -2934,7 +3208,6 @@ function SetMatchs(const CsvPattern: RawUtf8; CaseInsensitive: boolean;
 var
   P, S: PUtf8Char;
 begin
-  result := 0;
   P := pointer(CsvPattern);
   if P <> nil then
     repeat
@@ -2942,15 +3215,12 @@ begin
       while not (P^ in [#0, CsvSep]) do
         inc(P);
       if P <> S then
-      begin
-        SetLength(Match, result + 1);
-        Match[result].Prepare(S, P - S, CaseInsensitive, {reuse=}true);
-        inc(result);
-      end;
+        MatchNew(Match)^.Prepare(S, P - S, CaseInsensitive, {reuse=}true);
       if P^ = #0 then
         break;
       inc(P);
     until false;
+  result := length(Match);
 end;
 
 function SetMatchs(CsvPattern: PUtf8Char; CaseInsensitive: boolean;
@@ -2984,39 +3254,55 @@ var
   i: PtrInt;
 begin
   result := true;
-  for i := 0 to high(Several) do
+  for i := 0 to length(Several) - 1 do
     if Several[i].Equals(One) then
       exit;
   result := false;
 end;
 
 function MatchAdd(const One: TMatch; var Several: TMatchDynArray): boolean;
-var
-  n: PtrInt;
 begin
   result := not MatchExists(One, Several);
   if result then
-  begin
-    n := length(Several);
-    SetLength(Several, n + 1);
-    Several[n] := One;
-  end;
+    MatchNew(Several)^ := One;
+end;
+
+function MatchNew(var Several: TMatchDynArray): PMatch;
+var
+  n: PtrInt;
+begin
+  n := length(Several);
+  SetLength(Several, n + 1);
+  result := @Several[n];
 end;
 
 function MatchAny(const Match: TMatchDynArray; const Text: RawUtf8): boolean;
+begin
+  result := MatchAnyP(pointer(Match), pointer(Text), length(Text));
+end;
+
+function MatchAnyP(Match: PMatch; Text: PUtf8Char; TextLen: PtrInt): boolean;
 var
-  m: PMatch;
-  i: integer;
+  n: integer;
 begin
   result := true;
   if Match = nil then
     exit;
-  m := pointer(Match);
-  for i := 1 to length(Match) do
-    if m^.Match(Text) then
-      exit
-    else
-      inc(m);
+  if TextLen <= 0 then
+    Text := nil;
+  n := PDALen(PAnsiChar(pointer(Match)) - _DALEN)^ + _DAOFF;
+  repeat
+    // inlined Match^.Match() to avoid internal error on Delphi
+    if Text <> nil then
+    begin
+      if Match^.Search(Match, Text, TextLen) then
+        exit;
+    end
+    else if Match^.pmax < 0 then
+      exit;
+    inc(Match);
+    dec(n);
+  until n = 0;
   result := false;
 end;
 
@@ -3115,7 +3401,7 @@ var
   len: integer;
 begin
   len := StringToUtf8(aText, temp);
-  result := match(temp.buf, len);
+  result := Match(temp.buf, len);
   temp.Done;
 end;
 
@@ -3440,10 +3726,11 @@ var
   pr: PRttiCustomProp;
   p, v: PUtf8Char;
   s: RawUtf8;
-  mapcount, mapped, m: PtrInt;
-  rec: pointer;
+  mapcount, mapped: PtrInt;
+  rec: PAnsiChar;
   map: PRttiCustomPropDynArray;
-  n: integer;
+  m: ^PRttiCustomProp;
+  extcount, mcount: integer;
   ext: PInteger;
 begin
   result := false;
@@ -3477,17 +3764,18 @@ begin
   if mapped = 0 then
     exit; // no field matching any header
   // parse the value rows
-  n := 0;
+  extcount := 0;
   ext := Value.CountExternal;
   if ext = nil then
-    Value.UseExternalCount(@n); // faster Value.NewPtr
+    Value.UseExternalCount(@extcount); // faster Value.NewPtr
   v := Csv;
   while v^ in [#10, #13] do
     inc(v);
   while v^ <> #0 do
   begin
     rec := Value.NewPtr;
-    m := 0;
+    m := pointer(map);
+    mcount := mapcount;
     repeat
       // parse next value
       Csv := v;
@@ -3496,20 +3784,23 @@ begin
       while (v^ <> ',') and
             (v^ > #13) do
         inc(v);
-      if (m < mapcount) and
-         (map[m] <> nil) then // not matching fields are just ignored
+      if mcount <> 0 then
       begin
-        if Csv^ = '"' then
+        if m^ <> nil then // not matching fields are just ignored
         begin
-          UnQuoteSqlStringVar(Csv, s);
-          if Intern <> nil then
-            Intern.UniqueText(s);
-        end
-        else
-          Intern.Unique(s, Csv, v - Csv);
-        map[m].SetValueText(rec, s);
+          if Csv^ = '"' then
+          begin
+            UnQuoteSqlStringVar(Csv, s);
+            if Intern <> nil then
+              Intern.UniqueText(s);
+          end
+          else
+            Intern.Unique(s, Csv, v - Csv);
+          m^.Value.ValueSetText(rec + m^.OffsetSet, s);
+        end;
+        inc(m);
+        dec(mcount);
       end;
-      inc(m);
       if v^ <> ',' then
         break;
       inc(v);
@@ -3889,7 +4180,7 @@ function TExprParserMatch.Search(aText: PUtf8Char; aTextLen: PtrInt): boolean;
 var
   P, PEnd: PUtf8Char;
   n: PtrInt;
-  tab: ^TAnsiCharToByte;
+  tab: PAnsiCharToByte;
 begin
   P := aText;
   if (P = nil) or
@@ -3954,11 +4245,17 @@ const
   BLOOM_VERSION = 0;
   BLOOM_MAXHASH = 32; // only 7 is needed for 1% false positive ratio
 
-constructor TSynBloomFilter.Create(aSize: integer; aFalsePositivePercent: double);
+constructor TSynBloomFilter.Create;
+begin
+  fHasher := @crc32c; // default/standard/mORMot1 hash function
+end;
+
+constructor TSynBloomFilter.Create(aSize: integer;
+  aFalsePositivePercent: double; aHasher: THasher);
 const
   LN2 = 0.69314718056;
 begin
-  inherited Create; // may have been overriden
+  Create; // set fHasher := crc32c + may have been overriden
   if aSize < 0 then
     fSize := 1000
   else
@@ -3969,6 +4266,8 @@ begin
     fFalsePositivePercent := 100
   else
     fFalsePositivePercent := aFalsePositivePercent;
+  if @aHasher <> nil then
+    fHasher := aHasher;
   // see http://stackoverflow.com/a/22467497
   fBits := Round(-ln(fFalsePositivePercent / 100) * aSize / (LN2 * LN2));
   fHashFunctions := Round(fBits / fSize * LN2);
@@ -3979,11 +4278,14 @@ begin
   Reset;
 end;
 
-constructor TSynBloomFilter.Create(const aSaved: RawByteString; aMagic: cardinal);
+constructor TSynBloomFilter.Create(const aSaved: RawByteString;
+  aMagic: cardinal; aHasher: THasher);
 begin
-  inherited Create; // may have been overriden
-  if not LoadFrom(aSaved, aMagic) then
-    raise ESynException.CreateUtf8('%.Create with invalid aSaved content', [self]);
+  Create; // set fHasher := crc32c + may have been overriden
+  if @aHasher <> nil then
+    fHasher := aHasher;
+  if not LoadFrom(aSaved, aMagic) then // will load fSize+fBits+fHashFunctions
+    ESynException.RaiseUtf8('%.Create with invalid aSaved content', [self]);
 end;
 
 procedure TSynBloomFilter.Insert(const aValue: RawByteString);
@@ -4000,11 +4302,11 @@ begin
      (aValueLen <= 0) or
      (fBits = 0) then
     exit;
-  h1 := crc32c(0, aValue, aValueLen);
+  h1 := fHasher(0, aValue, aValueLen);
   if fHashFunctions = 1 then
     h2 := 0
   else
-    h2 := crc32c(h1, aValue, aValueLen);
+    h2 := fHasher(h1, aValue, aValueLen);
   fSafe.WriteLock;
   try
     for h := 0 to fHashFunctions - 1 do
@@ -4033,11 +4335,11 @@ begin
      (aValueLen <= 0) or
      (fBits = 0) then
     exit;
-  h1 := crc32c(0, aValue, aValueLen);
+  h1 := fHasher(0, aValue, aValueLen);
   if fHashFunctions = 1 then
     h2 := 0
   else
-    h2 := crc32c(h1, aValue, aValueLen);
+    h2 := fHasher(h1, aValue, aValueLen);
   fSafe.ReadOnlyLock; // allow concurrent reads
   try
     for h := 0 to fHashFunctions - 1 do
@@ -4095,6 +4397,7 @@ begin
     aDest.Write4(fBits);
     aDest.Write1(fHashFunctions);
     aDest.Write4(fInserted);
+    // warning: fHasher is NOT persisted yet
     ZeroCompress(pointer(fStore), Length(fStore), aDest);
   finally
     fSafe.ReadOnlyUnLock;
@@ -4201,7 +4504,7 @@ begin
     if fSnapShotAfterMinutes = 0 then
       fSnapshotTimestamp := 0
     else
-      fSnapshotTimestamp := GetTickCount64 + fSnapShotAfterMinutes * 60000;
+      fSnapshotTimestamp := GetTickCount64 + fSnapShotAfterMinutes * MilliSecsPerMin;
   finally
     fSafe.WriteUnLock;
   end;
@@ -4234,7 +4537,7 @@ begin
     head.size := length(fStore);
     head.inserted := fInserted;
     head.revision := fRevision;
-    head.crc := crc32c(0, @head, SizeOf(head) - SizeOf(head.crc));
+    head.crc := fHasher(0, @head, SizeOf(head) - SizeOf(head.crc));
     if head.kind = bdUpToDate then
     begin
       FastSetRawByteString(result, @head, SizeOf(head));
@@ -4252,8 +4555,7 @@ begin
         bdDiff:
           ZeroCompressXor(pointer(fStore), pointer(fKnownStore), head.size, W);
       end;
-      W.Flush;
-      result := TRawByteStringStream(W.Stream).DataString;
+      result := W.FlushTo;
     finally
       W.Free;
     end;
@@ -4269,7 +4571,7 @@ begin
   if (length(aDiff) < SizeOf(head^)) or
      (head.kind > high(TBloomDiffHeaderKind)) or
      (head.size <> cardinal(length(fStore))) or
-     (head.crc <> crc32c(0, pointer(head), SizeOf(head^) - SizeOf(head.crc))) then
+     (head.crc <> fHasher(0, pointer(head), SizeOf(head^) - SizeOf(head.crc))) then
     result := 0
   else
     result := head.Revision;
@@ -4286,7 +4588,7 @@ begin
   PLen := length(aDiff);
   if (PLen < SizeOf(head^)) or
      (head.kind > high(head.kind)) or
-     (head.crc <> crc32c(0, pointer(head), SizeOf(head^) - SizeOf(head.crc))) then
+     (head.crc <> fHasher(0, pointer(head), SizeOf(head^) - SizeOf(head.crc))) then
     exit;
   if (fStore <> '') and
      (head.size <> cardinal(length(fStore))) then
@@ -4300,7 +4602,7 @@ begin
         result := LoadFrom(P, PLen);
       bdDiff:
         if fStore <> '' then
-          result := ZeroDecompressOr(pointer(P), Pointer(fStore), PLen, head.size);
+          result := ZeroDecompressOr(pointer(P), pointer(fStore), PLen, head.size);
       bdUpToDate:
         result := true;
     end;
@@ -4398,7 +4700,7 @@ var
 begin
   PEnd := PAnsiChar(P) + Len - 4;
   DestLen := FromVarUInt32(P);
-  FastSetRawByteString(Dest, nil, DestLen); // FPC uses var
+  FastNewRawByteString(Dest, DestLen);
   D := pointer(Dest);
   DEnd := D + DestLen;
   crc := 0;
@@ -4541,7 +4843,7 @@ begin
   end
   else
   begin
-    sp := Pointer(ToVarUInt32(curlen, PByte(sp)));
+    sp := pointer(ToVarUInt32(curlen, PByte(sp)));
     PInteger(sp)^ := curofs;
     inc(sp, curofssize);
   end;
@@ -4834,7 +5136,7 @@ var
 begin
   // 1. special cases
   if (NewSize = OldSize) and
-     CompareMem(Old, New, NewSize) then
+     mormot.core.base.CompareMem(Old, New, NewSize) then
   begin
     Getmem(Delta, 1);
     Delta^ := '=';
@@ -5091,7 +5393,7 @@ begin
      (aTypeInfo^.Kind <> rkDynArray) then
     exit;
   iteminfo := aTypeInfo^.DynArrayItemType(ElemSize);
-  if (iteminfo <> nil) or
+  if (iteminfo <> nil) or // managed elem type is not simple
      (Source = nil) or
      // (Source[0] <> AnsiChar(ElemSize)) or mORMot 2 stores elemsize=0
      (Source[1] <> #0) then
@@ -5165,11 +5467,11 @@ begin
   if (ArrayRtti.Parser <> ptDynArray) or
      Reader.EOF then
     exit;
-  if ArrayRtti.Cache.ItemInfo = nil then
+  if ArrayRtti.Cache.ItemInfoManaged = nil then
     ArrayLoad := nil
   else
-    ArrayLoad := RTTI_BINARYLOAD[ArrayRtti.Cache.ItemInfo^.Kind];
-  Count := DynArrayLoadHeader(Reader, ArrayRtti.Info, ArrayRtti.Cache.ItemInfo);
+    ArrayLoad := RTTI_BINARYLOAD[ArrayRtti.Cache.ItemInfoManaged^.Kind];
+  Count := DynArrayLoadHeader(Reader, ArrayRtti.Info, ArrayRtti.Cache.ItemInfoManaged);
   result := true;
 end;
 
@@ -5185,7 +5487,7 @@ begin
      not Reader.EOF then
   begin
     if Assigned(ArrayLoad) then
-      ArrayLoad(Item, Reader, ArrayRtti.Cache.ItemInfo)
+      ArrayLoad(Item, Reader, ArrayRtti.Cache.ItemInfoManaged)
     else
       Reader.Copy(Item, ArrayRtti.Cache.ItemSize);
     inc(Current);
@@ -5385,8 +5687,8 @@ begin
   SetParameters(aParameters); // should parse the JSON-encoded parameters
 end;
 
-constructor TSynFilterOrValidate.CreateUtf8(const Format: RawUtf8; const Args,
-  Params: array of const);
+constructor TSynFilterOrValidate.CreateUtf8(const Format: RawUtf8;
+  const Args, Params: array of const);
 begin
   Create(FormatJson(Format, Args, Params));
 end;
@@ -5831,25 +6133,24 @@ begin
   end;
 end;
 
+procedure TTimeZoneData.Clear;
+begin
+  Finalize(self);
+  FillcharFast(tzi, SizeOf(tzi), 0);
+end;
 
-{ TTimeZoneInformation }
+
+{ TSynTimeZone }
+
+// a somewhat-official per-country list between IANA and Microsoft names online:
+// https://github.com/unicode-org/cldr/blob/main/common/supplemental/windowsZones.xml
 
 constructor TSynTimeZone.Create;
 begin
+  fCurrentIndex := -1;
+  fUtcIndex := -1;
   fZones.InitSpecific(TypeInfo(TTimeZoneDataDynArray),
     fZone, ptRawUtf8, @fZoneCount);
-end;
-
-constructor TSynTimeZone.CreateDefault(dummycpp: integer);
-begin
-  Create;
-  {$ifdef OSWINDOWS}
-  LoadFromRegistry;
-  {$else}
-  LoadFromFile;
-  if fZoneCount = 0 then
-    LoadFromResource; // if no .tz file is available, try if bound to executable
-  {$endif OSWINDOWS}
 end;
 
 destructor TSynTimeZone.Destroy;
@@ -5859,23 +6160,32 @@ begin
   fDisplays.Free;
 end;
 
-var
-  SharedSynTimeZone: TSynTimeZone;
+class function TSynTimeZone.LoadDefault: TSynTimeZone;
+begin
+  GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
+  try
+    result := SharedSynTimeZone;
+    if result <> nil then
+      exit;
+    result := TSynTimeZone.Create;
+    {$ifdef OSWINDOWS}
+    result.LoadFromRegistry; // use official Windows registry as reference
+    {$else}
+    result.LoadFromResource; // first try if bound to the executable
+    if result.fZoneCount = 0 then
+      result.LoadFromFile;   // fallback search for a local .tz file
+    {$endif OSWINDOWS}
+    SharedSynTimeZone := RegisterGlobalShutdownRelease(result);
+  finally
+    GlobalUnLock;
+  end;
+end;
 
 class function TSynTimeZone.Default: TSynTimeZone;
 begin
-  if SharedSynTimeZone = nil then
-  begin
-    GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
-    try
-      if SharedSynTimeZone = nil then
-        SharedSynTimeZone :=
-          RegisterGlobalShutdownRelease(TSynTimeZone.CreateDefault);
-    finally
-      GlobalUnLock;
-    end;
-  end;
-  result := SharedSynTimeZone;
+  result := SharedSynTimeZone; // efficiently inlined
+  if result = nil then
+    result := LoadDefault;
 end;
 
 function TSynTimeZone.SaveToBuffer: RawByteString;
@@ -5899,16 +6209,57 @@ begin
   FileFromString(SaveToBuffer, FN);
 end;
 
+function TSynTimeZone.LockedSearch(const TzId: TTimeZoneID): PtrInt;
+begin
+  if TzId = '' then
+    result := -1
+  else if TzId = fLastZone then
+    result := fLastIndex
+  else
+  begin
+    result := fZones.FindHashed(TzId);
+    fLastZone := TzId;
+    flastIndex := result;
+  end;
+end;
+
+procedure TSynTimeZone.LockedAfterLoad;
+begin
+  fLastZone := '';
+  FreeAndNil(fIds);
+  FreeAndNil(fDisplays);
+  fZones.ForceReHash;
+  fUtcIndex := LockedSearch('UTC');
+  if fUtcIndex < 0 then
+    fUtcIndex := LockedSearch('GMT Standard Time'); // e.g. for XP
+end;
+
+function IsNotVoidUtc(const TzId: TTimeZoneID): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+begin
+  result := PCardinal(TzId)^ = ord('U') + ord('T') shl 8 + ord('C') shl 16;
+end;
+
+function TSynTimeZone.GetIndex(const TzId: TTimeZoneID): PtrInt;
+begin
+  if TzId = '' then
+    result := -1
+  else if (fUtcIndex >= 0) and
+          IsNotVoidUtc(TzId) then
+    result := fUtcIndex
+  else
+    result := LockedSearch(TzId);
+end;
+
 procedure TSynTimeZone.LoadFromBuffer(const Buffer: RawByteString);
 begin
   if Buffer = '' then
-   exit;
+    exit;
   fSafe.WriteLock;
   try
+    fCurrentIndex := -1;
     fZones.LoadFromBinary(AlgoSynLZ.Decompress(Buffer));
-    fZones.ForceReHash;
-    FreeAndNil(fIds);
-    FreeAndNil(fDisplays);
+    LockedAfterLoad;
   finally
     fSafe.WriteUnLock;
   end;
@@ -5936,17 +6287,27 @@ end;
 
 {$ifdef OSWINDOWS}
 
-procedure TSynTimeZone.LoadFromRegistry;
 const
   REGKEY = 'Software\Microsoft\Windows NT\CurrentVersion\Time Zones\';
+
+procedure TSynTimeZone.LoadFromRegistry;
 var
+  info: TTimeZoneInformation;
+  current: RawUtf8;
   reg: TWinRegistry;
   keys: TRawUtf8DynArray;
   i, first, last, year, n: integer;
-  item: TTimeZoneData;
+  z: TTimeZoneData;
 begin
+  // retrieve current selected system time zone
+  FillCharFast(info, SizeOf(info), 0);
+  GetTimeZoneInformation(info);
+  if info.StandardName[0] <> #0 then
+    current := UnicodeBufferToUtf8(info.StandardName);
+  // read all time zones information from registry
   fSafe.WriteLock;
   try
+    fCurrentIndex := -1;
     fZones.Clear;
     if reg.ReadOpen(wrLocalMachine, REGKEY) then
       keys := reg.ReadEnumEntries
@@ -5955,76 +6316,105 @@ begin
     n := length(keys);
     fZones.Capacity := n;
     for i := 0 to n - 1 do
-    begin
-      Finalize(item);
-      FillcharFast(item.tzi, SizeOf(item.tzi), 0);
       if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i], {reopen=}true) then
       begin
-        item.id := keys[i]; // registry keys are genuine by definition
-        item.display := reg.ReadString('Display');
-        reg.ReadBuffer('TZI', @item.tzi, SizeOf(item.tzi));
+        z.Clear;
+        z.id := keys[i]; // registry keys are genuine by definition
+        z.display := reg.ReadString('Display');
+        reg.ReadBuffer('TZI', @z.tzi, SizeOf(z.tzi));
+        if (fCurrentIndex < 0) and
+           (current <> '') and
+           (reg.ReadString('Std') = current) then
+          fCurrentIndex := fZoneCount;
         if reg.ReadOpen(wrLocalMachine, REGKEY + keys[i] + '\Dynamic DST', true) then
         begin
           // warning: never defined on XP/2003, and not for all entries
           first := reg.ReadDword('FirstEntry');
-          last := reg.ReadDword('LastEntry');
+          last  := reg.ReadDword('LastEntry');
           if (first > 0) and
              (last >= first) then
           begin
             n := 0;
-            SetLength(item.dyn, last - first + 1);
+            SetLength(z.dyn, last - first + 1);
             for year := first to last do
               if reg.ReadBuffer(Utf8ToSynUnicode(UInt32ToUtf8(year)),
-                @item.dyn[n].tzi, SizeOf(TTimeZoneInfo)) then
+                @z.dyn[n].tzi, SizeOf(TTimeZoneInfo)) then
               begin
-                item.dyn[n].year := year;
+                z.dyn[n].year := year;
                 inc(n);
               end;
-            SetLength(item.dyn, n);
+            SetLength(z.dyn, n);
           end;
         end;
-        fZones.Add(item);
+        fZones.Add(z);
       end;
-    end;
+    SetLength(fZone, fZoneCount);
     reg.Close;
-    fZones.ForceReHash;
-    FreeAndNil(fIds);
-    FreeAndNil(fDisplays);
+    LockedAfterLoad;
   finally
     fSafe.WriteUnLock;
   end;
 end;
 
-{$endif OSWINDOWS}
-
-function TSynTimeZone.LockedFindZoneIndex(const TzId: TTimeZoneID): PtrInt;
+procedure TSynTimeZone.ChangeOperatingSystemTimeZone(const TzId: TTimeZoneID);
+var
+  i: PtrInt;
 begin
-  if TzId = '' then
-    result := -1
-  else
-  begin
-    if TzId = fLastZone then
-      result := fLastIndex
-    else
-    begin
-      result := fZones.FindHashed(TzId);
-      fLastZone := TzId;
-      flastIndex := result;
-    end;
+  fSafe.WriteLock;
+  try
+    i := GetIndex(TzId);
+    if i < 0 then
+      ESynException.RaiseUtf8(
+        'Unknown %.ChangeOperatingSystemTimeZone(%)', [self, TzId]);
+    ChangeOperatingSystemTimeZone(i); // may raise exception
+  finally
+    fSafe.WriteUnLock;
   end;
 end;
+
+procedure TSynTimeZone.ChangeOperatingSystemTimeZone(Index: PtrInt);
+var
+  info: TDynamicTimeZoneInformation;
+  z: ^TTimeZoneData;
+  reg: TWinRegistry;
+begin
+  if PtrUInt(Index) >= PtrUInt(fZoneCount) then
+    ESynException.RaiseUtf8(
+      'Unexpected %.ChangeOperatingSystemTimeZone(%)', [self, Index]);
+  // use the existing information for this zone
+  z := @fZone[Index];
+  FillCharFast(info, SizeOf(info), 0);
+  info.TimeZone.Bias := z^.tzi.Bias;
+  info.TimeZone.StandardDate := TSystemTime(z^.tzi.change_time_std);
+  info.TimeZone.DaylightDate := TSystemTime(z^.tzi.change_time_dlt);
+  info.TimeZone.StandardBias := z^.tzi.bias_std;
+  info.TimeZone.DaylightBias := z^.tzi.bias_dlt;
+  Utf8ToWideChar(@info.TimeZoneKeyName, pointer(z^.id), 128, length(z^.id), true);
+  // retrieve additional information from the registry
+  if not reg.ReadOpen(wrLocalMachine, REGKEY + z^.id) then
+    ESynException.RaiseUtf8('%.ChangeOperatingSystemTimeZone: missing % key',
+      [self, z^.id]); // paranoid
+  try // direct copy of the UTF-16 buffer from registry
+    reg.ReadMax('Std', @info.TimeZone.StandardName, 32 * 2);
+    reg.ReadMax('Dlt', @info.TimeZone.DaylightName, 32 * 2);
+  finally
+    reg.Close;
+  end;
+  // actually change the system time zone - may raise EOSException
+  SetSystemTimeZone(info);
+  fCurrentIndex := Index;
+end;
+
+{$endif OSWINDOWS}
 
 function TSynTimeZone.GetDisplay(const TzId: TTimeZoneID): RawUtf8;
 var
   ndx: PtrInt;
 begin
   fSafe.ReadLock;
-  ndx := LockedFindZoneIndex(TzId);
+  ndx := GetIndex(TzId);
   if ndx < 0 then
-    if TzId = 'UTC' then // e.g. on XP
-      result := TzId
-    else
-      result := ''
+    result := ''
   else
     result := fZone[ndx].display;
   fSafe.ReadUnLock;
@@ -6039,16 +6429,21 @@ var
   tzi: PTimeZoneInfo;
   std, dlt: TDateTime;
 begin
+  // handle most obvious cases
+  Bias := 0;
+  HaveDaylight := false;
+  result := false;
+  if TzId = '' then
+    exit;
+  result := IsNotVoidUtc(TzId);
+  if result then
+    exit;
+  // use the internal hash table
   fSafe.ReadLock;
   try
-    ndx := LockedFindZoneIndex(TzId);
+    ndx := LockedSearch(TzId);
     if ndx < 0 then
-    begin
-      Bias := 0;
-      HaveDaylight := false;
-      result := TzId = 'UTC'; // e.g. on XP
       exit;
-    end;
     d.FromDate(Value); // faster than DecodeDate
     tzi := fZone[ndx].GetTziFor(d.Year);
     if tzi.change_time_std.IsZero then
@@ -6080,10 +6475,10 @@ begin
       else
         Bias := tzi.Bias + tzi.bias_std;
     end;
-    result := true;
   finally
     fSafe.ReadUnLock;
   end;
+  result := true;
 end;
 
 function TSynTimeZone.UtcToLocal(const UtcDateTime: TDateTime;
@@ -6093,7 +6488,8 @@ var
   HaveDaylight: boolean;
 begin
   if (self = nil) or
-     (TzId = '') then
+     (TzId = '') or
+     IsNotVoidUtc(TzId) then
     result := UtcDateTime
   else
   begin
@@ -6114,7 +6510,8 @@ var
   HaveDaylight: boolean;
 begin
   if (self = nil) or
-     (TzID = '') then
+     (TzId = '') or
+     IsNotVoidUtc(TzId) then
     result := LocalDateTime
   else
   begin
@@ -6123,33 +6520,45 @@ begin
   end;
 end;
 
-function TSynTimeZone.Ids: TStrings;
+procedure TSynTimeZone.SetIDs;
 var
   i: PtrInt;
 begin
+  fSafe.WriteLock;
   if fIDs = nil then
   begin
     fIDs := TStringList.Create;
-    fSafe.ReadLock;
     for i := 0 to length(fZone) - 1 do
       fIDs.Add(Utf8ToString(RawUtf8(fZone[i].id)));
-    fSafe.ReadUnLock;
   end;
+  fSafe.WriteUnLock;
+end;
+
+procedure TSynTimeZone.SetDisplays;
+var
+  i: PtrInt;
+begin
+  fSafe.WriteLock;
+  if fDisplays = nil then
+  begin
+    fDisplays := TStringList.Create;
+    for i := 0 to length(fZone) - 1 do
+      fDisplays.Add(Utf8ToString(fZone[i].display));
+  end;
+  fSafe.WriteUnLock;
+end;
+
+function TSynTimeZone.Ids: TStrings;
+begin
+  if fIDs = nil then
+    SetIDs;
   result := fIDs;
 end;
 
 function TSynTimeZone.Displays: TStrings;
-var
-  i: PtrInt;
 begin
   if fDisplays = nil then
-  begin
-    fDisplays := TStringList.Create;
-    fSafe.ReadLock;
-    for i := 0 to length(fZone) - 1 do
-      fDisplays.Add(Utf8ToString(fZone[i].display));
-    fSafe.ReadUnLock;
-  end;
+    SetDisplays;
   result := fDisplays;
 end;
 

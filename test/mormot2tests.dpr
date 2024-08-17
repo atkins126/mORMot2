@@ -15,14 +15,18 @@ program mormot2tests;
 {$endif OSWINDOWS}
 
 uses
-  {$I ..\src\mormot.uses.inc} // may include mormot.core.fpcx64mm.pas
+  {$I ..\src\mormot.uses.inc} // follow FPC_X64MM or FPC_LIBCMM conditionals
   {$ifdef UNIX}
   cwstring, // needed as fallback if ICU is not available
   {$endif UNIX}
+  classes,
   sysutils,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.mac,
+  mormot.core.unicode,
   mormot.core.text,
+  mormot.core.datetime,
   mormot.core.log,
   mormot.core.test,
   mormot.db.raw.sqlite3, // for the SQLite3 version below
@@ -43,6 +47,8 @@ uses
   //mormot.db.rad.nexusdb,
   {$endif FPC}
   mormot.lib.openssl11,
+  mormot.lib.gssapi,
+  mormot.crypt.x509,
   mormot.crypt.openssl,
   mormot.tools.ecc         in '..\src\tools\ecc\mormot.tools.ecc.pas',
   test.core.base           in '.\test.core.base.pas',
@@ -84,67 +90,60 @@ begin
     ExeDescription := 'mORMot '+ SYNOPSE_FRAMEWORK_VERSION + ' Regression Tests';
     Param('dns', 'a DNS #server name/IP for LDAP tests via Kerberos ' +
       {$ifdef OSWINDOWS}
-      'with current logged user');
+      'with current logged user or --ldapusr/--ldappwd');
       {$else}
-      'after kinit');
+      'after kinit user or --ldapusr/--ldappwd');
       {$endif OSWINDOWS}
     Param('ldapusr', 'the LDAP #user for --dns, e.g. name@ad.company.com');
     Param('ldappwd', 'the LDAP #password for --dns');
+    Option('ldaps', 'force LDAPS connection + plain auth instead of Kerberos');
     Param('ntp', 'a NTP/SNTP #server name/IP to use instead of time.google.com');
+    Option('nontp', 'disable the NTP/SNTP server tests');
     {$ifdef USE_OPENSSL}
     // refine the OpenSSL library path - RegisterOpenSsl is done in Run method
-    OpenSslDefaultCrypto := Utf8ToString(
-      Param('libcrypto', 'the OpenSSL libcrypto #filename'));
-    OpenSslDefaultSsl := Utf8ToString(
-      Param('libssl', 'the OpenSSL libssl #filename'));
+    OpenSslDefaultCrypto := ParamS(['libcrypto'], 'the OpenSSL libcrypto #filename');
+    OpenSslDefaultSsl := ParamS(['libssl'], 'the OpenSSL libssl #filename');
     {$endif USE_OPENSSL}
+    {$ifdef OSPOSIX}
+    GssLib_Custom := ParamS(['libkrb5'], 'the Kerberos libgssapi #filename');
+    {$endif OSPOSIX}
   end;
 end;
 
 function TIntegrationTests.Run: boolean;
 var
-  cp, ssl: shortstring;
-  mem: TMemoryInfo;
+  ssl: shortstring;
 begin
   ssl[0] := #0;
   {$ifdef USE_OPENSSL}
   // warning: OpenSSL on Windows requires to download the right libraries
   RegisterOpenSsl;
+  RegisterX509; // enable the additional CryptPublicKey[] algorithms for X.509
   if OpenSslIsAvailable then
-    FormatShort(' and OpenSSL %', [OpenSslVersionHexa], ssl);
+    FormatShort(' and %', [OpenSslVersionText], ssl);
   {$endif USE_OPENSSL}
-  case Unicode_CodePage of
-    CP_UTF8:
-      cp := 'utf8';
-    CODEPAGE_US:
-      cp := 'WinAnsi';
-  else
-    FormatShort('cp%', [Unicode_CodePage], cp);
-  end;
-  GetMemoryInfo(mem, false);
-  CustomVersions := Format(#13#10#13#10'%s [%s %s %x]'#13#10 +
-    '    %s'#13#10'    on %s'#13#10'Using mORMot %s%s'#13#10'    %s',
-    [OSVersionText, cp, KBNoSpace(mem.memtotal), OSVersionInt32, CpuInfoText,
-     BiosInfoText, SYNOPSE_FRAMEWORK_FULLVERSION, ssl, sqlite3.Version]);
+  CustomVersions := Format(CRLF + CRLF + '%s [%s %s %x]'+ CRLF +
+    '    %s' + CRLF + '    on %s'+ CRLF + 'Using mORMot %s %s%s'+ CRLF + '    %s',
+    [OSVersionText, CodePageToText(Unicode_CodePage), KBNoSpace(SystemMemorySize),
+     OSVersionInt32, CpuInfoText, BiosInfoText, SYNOPSE_FRAMEWORK_FULLVERSION,
+     UnixTimeToTextDateShort(FileAgeToUnixTimeUtc(Executable.ProgramFileName)),
+     ssl, sqlite3.Version]);
   result := inherited Run;
 end;
 
 procedure TIntegrationTests.CoreUnits;
 begin
-  //
-  AddCase([
-    //TTestCoreBase,
-    //TTestCoreProcess
-  ]);
   //exit;
   AddCase([
-  //
-    TTestCoreBase, TTestCoreProcess,
+    TTestCoreBase,
+    TTestCoreProcess,
     {$ifdef HASGENERICS} // do-nothing on oldest compilers (e.g. <= Delphi XE7)
     TTestCoreCollections,
     {$endif HASGENERICS}
-    TTestCoreCrypto, TTestCoreEcc,
-    TTestCoreCompression, TNetworkProtocols
+    TTestCoreCrypto,
+    TTestCoreEcc,
+    TTestCoreCompression,
+    TNetworkProtocols
   ]);
 end;
 
@@ -152,10 +151,14 @@ procedure TIntegrationTests.ORM;
 begin
   //exit;
   AddCase([
-    //
-    TTestOrmCore, TTestSqliteFile, TTestSqliteFileWAL, TTestSqliteFileMemoryMap,
-    TTestSqliteMemory, TTestExternalDatabase,
-    TTestClientServerAccess, TTestMultiThreadProcess
+    TTestOrmCore,
+    TTestSqliteFile,
+    TTestSqliteFileWAL,
+    TTestSqliteFileMemoryMap,
+    TTestSqliteMemory,
+    TTestExternalDatabase,
+    TTestClientServerAccess,
+    TTestMultiThreadProcess
   ]);
 end;
 
@@ -167,7 +170,6 @@ begin
   {$endif LIBQUICKJSSTATIC}
   //exit;
   AddCase([
-    //
     TTestServiceOrientedArchitecture,
     TTestBidirectionalRemoteConnection
   ]);

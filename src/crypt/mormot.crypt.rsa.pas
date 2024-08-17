@@ -36,10 +36,12 @@ uses
 {
   Implementation notes:
   - new pure pascal OOP design of BigInt computation optimized for RSA process
+  - garbage collection of BigInt instances, with proper anti-forensic wiping
   - use half-registers (HalfUInt) for efficient computation on all CPUs
   - dedicated x86_64/i386 asm for core computation routines (noticeable speedup)
   - slower than OpenSSL, but likely the fastest FPC or Delphi native RSA library
   - includes FIPS-level RSA keypair validation and generation
+  - features both RSASSA-PKCS1-v1_5 and RSASSA-PSS signature schemes
   - started as a fcl-hash fork, but full rewrite inspired by Mbed TLS source
   - references: https://github.com/Mbed-TLS/mbedtls and the Handbook of Applied
     Cryptography (HAC) at https://cacr.uwaterloo.ca/hac/about/chap4.pdf
@@ -340,14 +342,17 @@ const
   // - when profiling, the Miller-Rabin test takes 150 more time than bspMost
   RSA_DEFAULT_GENERATION_KNOWNPRIME = bspMost;
 
-  /// generates RSA keypairs using FIPS 4.48 2^-100 error probability
-  // - TBigInt.FillPrime will ensure FIPS 4.48 minimum iteration is always used
+  /// generates RSA keypairs using a proven 2^-112 error probability from
+  // Miller-Rabin iterations
+  // - TBigInt.FillPrime will ensure FIPS 186-5 minimum iteration is always used
   RSA_DEFAULT_GENERATION_ITERATIONS = 0;
 
+  /// generates RSA keypairs in a time-coherent fashion
   {$ifdef CPUARM}
-  // we have seen some weak Raspberry PI timeout
+  // - we have seen some weak Raspberry PI timeout so 30 seconds seems fair
   RSA_DEFAULT_GENERATION_TIMEOUTMS = 30000;
   {$else}
+  // - allow 10 seconds: typical time is around (or less) 1 second on Intel/AMD
   RSA_DEFAULT_GENERATION_TIMEOUTMS = 10000;
   {$endif CPUARM}
 
@@ -446,7 +451,7 @@ const
 // - wrap PBigInt.ToText from LoadPermanent(der) in a temporary TRsaContext
 function BigIntToText(const der: TCertDer): RawUtf8;
 
-/// branchless comparison of two Big Integer values
+/// branchless comparison of two Big Integer internal buffer values
 function CompareBI(A, B: HalfUInt): integer;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -526,7 +531,7 @@ type
   // - this implementation follows RFC 8017 specifications
   TRsa = class(TRsaContext)
   protected
-    fSafe: TOSLightLock; // for Verify() and Sign()
+    fSafe: TOSLightLock; // for Verify() and Sign() - not reentrant lock
     fM, fE, fD, fP, fQ, fDP, fDQ, fQInv: PBigInt;
     fModulusLen, fModulusBits: integer;
     /// compute the Chinese Remainder Theorem (CRT) for RSA sign/decrypt
@@ -534,7 +539,7 @@ type
     function Pkcs1UnPad(p: PByteArray; verify: boolean): RawByteString;
     function Pkcs1Pad(p: pointer; n: integer; sign: boolean): RawByteString;
   public
-    /// intitialize the RSA key context
+    /// initialize the RSA key context
     constructor Create; override;
     /// finalize the RSA key context
     destructor Destroy; override;
@@ -703,6 +708,10 @@ type
     function Sign(Hash: PHash512; HashAlgo: THashAlgo): RawByteString; override;
   end;
 
+/// low-level computation of the ASN.1 sequence of a hash signature
+// - following RSASSA-PKCS1-v1_5 signature scheme RFC 8017 #9.2 steps 1 and 2
+// - as used by TRsa.Sign() method and expected by CKM_RSA_PKCS signature
+function RsaSignHashToDer(Hash: PHash512; HashAlgo: THashAlgo): TAsnObject;
 
 
 { *********** Registration of our RSA Engine to the TCryptAsym Factory }
@@ -940,7 +949,7 @@ end;
 function TBigInt.SetPermanent: PBigInt;
 begin
   if RefCnt <> 1 then
-    raise ERsaException.CreateUtf8(
+    ERsaException.RaiseUtf8(
       'TBigInt.SetPermanent(%): RefCnt=%', [@self, RefCnt]);
   RefCnt := -1;
   result := @self;
@@ -949,7 +958,7 @@ end;
 function TBigInt.ResetPermanent: PBigInt;
 begin
   if RefCnt >= 0 then
-    raise ERsaException.CreateUtf8(
+    ERsaException.RaiseUtf8(
       'TBigInt.ResetPermanent(%): RefCnt=%', [@self, RefCnt]);
   RefCnt := 1;
   result := @self;
@@ -1142,7 +1151,7 @@ begin
     result := ''
   else
   begin
-    FastSetRawByteString(result, nil, Size * HALF_BYTES);
+    FastNewRawByteString(result, Size * HALF_BYTES);
     Save(pointer(result), length(result), andrelease);
   end;
 end;
@@ -1381,7 +1390,7 @@ const
     302,                        // bspMost < 2000
     high(BIGINT_PRIMES_DELTA)); // bspAll  < 18000
 
-// profiling shows that Miller-Rabin takes 150 times more time than bspMost
+// profiling shows that Miller-Rabin takes 150 times more than bspMost
 
 function TBigInt.MatchKnownPrime(Extend: TBigIntSimplePrime): boolean;
 var
@@ -1486,47 +1495,44 @@ const
   // ensure generated number is at least (nbits - 1) + 0.5 bits
   FIPS_MIN = $b504f334;
 
+function FipsMinIterations(bits: integer): integer;
+begin
+  // ensure 2^-112 error probability - see FIPS 186-5 appendix B.3 table B.1
+  if bits >= 1536  then
+    result := 4
+  else if bits >= 1024 shr HALF_SHR then
+    result := 5
+  else if bits >= 512 shr HALF_SHR then
+    result := 15  // not allowed by FIPS anyway
+  else
+    result := 51; // never used in practice for RSA
+end;
+
 function TBigInt.FillPrime(Extend: TBigIntSimplePrime; Iterations: integer;
   EndTix: Int64): boolean;
 var
   n, min: integer;
   last32: PCardinal;
 begin
+  // ensure it is worth searching (paranoid)
   n := Size;
-  result := n > 2;
-  if not result then
-    exit;
+  if n <= 2 then
+    raise ERsaException.Create('TBigInt.FillPrime: unsupported size');
+  // never wait forever - 1 min seems enough even on slow Arm (tested on RaspPi)
   if EndTix <= 0 then
-    EndTix := GetTickCount64 + 60000; // never wait forever - 1 min seems enough
-  // FIPS 4.48: 2^-100 error probability, number of rounds computed based on HAC
-  if n >= 1450 shr HALF_SHR then
-    min := 4
-  else if n >= 1150 shr HALF_SHR then
-    min := 5
-  else if n >= 1000 shr HALF_SHR then
-    min := 6
-  else if n >= 850 shr HALF_SHR then
-    min := 7
-  else if n >= 750 shr HALF_SHR then
-    min := 8
-  else if n >= 500 shr HALF_SHR then
-    min := 13
-  else if n >= 250 shr HALF_SHR then
-    min := 28
-  else if n >= 150 shr HALF_SHR then
-    min := 40
-  else
-    min := 51;
+    EndTix := GetTickCount64 + MilliSecsPerMin; // time on Intel is around 1 sec
+  // compute number of Miller-Rabin rounds for 2^-112 error probability
+  min := FipsMinIterations(n shl HALF_SHR);
   if Iterations < min then // ensure at least FIPS recommendation
     Iterations := min;
-  // compute a random number following FIPS 186-4 §B.3.3 steps 4.4, 5.5
+  // compute a random number following FIPS 186-4 B.3.3 steps 4.4, 5.5
   min := 16;
   last32 := @Value[n - 1 {$ifdef CPU32} - 1 {$endif}];
-  // since randomness may be a weak point, start from several trusted sources
+  // since randomness may be a weak point, consolidate several trusted sources
   // see https://ieeexplore.ieee.org/document/9014350
-  FillSystemRandom(pointer(Value), n * HALF_BYTES, false); // slow but audited
-  {$ifdef CPUINTEL}
-  RdRand32(pointer(Value), (n * HALF_BYTES) shr 2); // xor with HW CPU
+  FillSystemRandom(pointer(Value), n * HALF_BYTES, false); // slow but approved
+  {$ifdef CPUINTEL} // claimed to be NIST SP 800-90A and FIPS 140-2 compliant
+  RdRand32(pointer(Value), (n * HALF_BYTES) shr 2); // xor with HW CPU prng
   {$endif CPUINTEL}
   repeat
     // xor the original trusted sources with our CSPRNG
@@ -1534,14 +1540,14 @@ begin
     if GetBitsCount(Value^, n * HALF_BITS) < n * (HALF_BITS div 3) then
     begin
       // one CSPRNG iteration is usually enough to reach 1/3 of the bits set
-      // with our TAesPrng, it never occurred after 1,000,000,000 trials
+      // - with our TAesPrng, it never occurred after 1,000,000,000 trials
       dec(min);
-      if min = 0 then
-        exit; // too weak PNRG for sure
+      if min = 0 then // paranoid
+        raise ERsaException.Create('TBigInt.FillPrime: weak CSPRNG');
       continue;
     end;
     // should be a big enough odd number
-    Value[0] := Value[0] or 1; // set lower bit to ensure is an odd number
+    Value[0] := Value[0] or 1; // set lower bit to ensure it is an odd number
     if last32^ < FIPS_MIN then
       last32^ := last32^ or $b5050000; // let's grow up
     if (Value[n - 1] or (RSA_RADIX shr 1) <> 0) and // absolute big enough
@@ -1549,17 +1555,27 @@ begin
       break;
     raise ERsaException.Create('TBigInt.FillPrime FIPS_MIN'); // paranoid
   until false;
-  // search for the next prime starting at this point
+  // brute force search for the next prime starting at this point
+  result := true; 
   repeat
     if IsPrime(Extend, Iterations) then
       exit; // we got lucky
-    IntAdd(2); // incremental search - see HAC 4.51
+    IntAdd(2); // incremental search of odd number - see HAC 4.51
     while last32^ < FIPS_MIN do
     begin
-      // handle IntAdd overflow - paranoid
+      // handle IntAdd overflow - paranoid but safe
       TAesPrng.Main.XorRandom(Value, n * HALF_BYTES);
       Value[0] := Value[0] or 1;
     end;
+    // note 1: HAC 4.53 advices for Gordon's algorithm to generate a "strong
+    //      prime", but it seems not used by mbedtls nor OpenSSL
+    // note 2: mbedtls can ensure (Value-1)/2 is also a prime for DH primes, but
+    //      it seems not necessary for RSA because ECM algo negates its benefits
+    // note 3: our version seems compliant anyway with FIPS 186-5 appendix A+B
+    //      especially because having multiple rounds of Miller-Rabin is plenty
+    //      with keysize >= 2048-bit (FIPS 186-4 appendix B.3.1 item A)
+    // - see https://security.stackexchange.com/a/176396/155098
+    //   and https://crypto.stackexchange.com/a/15761/40200
   until GetTickCount64 > EndTix; // IsPrime() may be slow for sure
   result := false; // timed out
 end;
@@ -1612,7 +1628,7 @@ begin
       0:
         result := SmallUInt32Utf8[0];
       1:
-        UInt32ToUtf8(Value[0], result);
+        UInt32ToUtf8(Value[0], result); // word or cardinal
     else
       begin
         if noclone then
@@ -1903,7 +1919,7 @@ begin
   if ActiveCount <> 0 then
   try
     // warns for memory leaks after memory buffers are wiped and freed
-    raise ERsaException.CreateUtf8('%.Destroy: memory leak - ActiveCount=%',
+    ERsaException.RaiseUtf8('%.Destroy: memory leak - ActiveCount=%',
       [self, ActiveCount]);
   except
     // just notify the debugger, console and mormot log that it was plain wrong
@@ -1959,13 +1975,13 @@ const
 function TRsaContext.Allocate(n: integer; opt: TRsaAllocate): PBigint;
 begin
   if self = nil then
-    raise ERsaException.CreateUtf8('TRsa.Allocate(%): Owner=nil', [n]);
+    ERsaException.RaiseUtf8('TRsa.Allocate(%): Owner=nil', [n]);
   result := fFreeList;
   if result <> nil then
   begin
     // we can recycle a pre-allocated instance
     if result^.RefCnt <> 0 then
-      raise ERsaException.CreateUtf8(
+      ERsaException.RaiseUtf8(
         '%.Allocate(%): % RefCnt=%', [self, n, result, result^.RefCnt]);
     fFreeList := result^.fNextFree;
     dec(FreeCount);
@@ -2152,6 +2168,21 @@ begin
       result := AsnNextBigInt(pos[2], str, values[i]^);
 end;
 
+function RsaSignHashToDer(Hash: PHash512; HashAlgo: THashAlgo): TAsnObject;
+var
+  h: RawByteString;
+begin
+  FastSetRawByteString(h, Hash, HASH_SIZE[HashAlgo]);
+  result := Asn(ASN1_SEQ, [
+              Asn(ASN1_SEQ, [
+                AsnOid(pointer(ASN1_OID_HASH[HashAlgo])),
+                ASN1_NULL_VALUE
+              ]),
+              Asn(ASN1_OCTSTR, [h])
+            ]);
+end;
+
+
 
 { TRsaPublicKey }
 
@@ -2162,10 +2193,10 @@ begin
     result := ''
   else
     // see "A.1.1. RSA Public Key Syntax" of RFC 8017
-    result := AsnSeq([
+    result := Asn(ASN1_SEQ, [
                 CkaToSeq(ckaRsa),
                 Asn(ASN1_BITSTR, [
-                  AsnSeq([
+                  Asn(ASN1_SEQ, [
                     AsnBigInt(Modulus),
                     AsnBigInt(Exponent) // typically 65537
                   ])
@@ -2179,7 +2210,7 @@ begin
      (Exponent = '') then
     result := ''
   else
-    result := AsnSeq([
+    result := Asn(ASN1_SEQ, [
                 AsnBigInt(Modulus),
                 AsnBigInt(Exponent) // typically 65537
               ]);
@@ -2227,7 +2258,7 @@ begin
            AsnBigInt(Exponent2),
            AsnBigInt(Coefficient)
          ]);
-  result := AsnSeq([
+  result := Asn(ASN1_SEQ, [
               Asn(Version),
               CkaToSeq(ckaRsa),
               oct
@@ -2370,6 +2401,7 @@ begin
 end;
 
 const
+  // we force exponent = 65537 - FIPS 5.4 (e)
   BIGINT_65537_BIN: RawByteString = #$01#$00#$01; // Size=2 on CPU32
 
 // see https://www.di-mgt.com.au/rsa_alg.html as reference
@@ -2394,7 +2426,7 @@ begin
     exit;                  // see https://stackoverflow.com/a/589850/458259
   // setup the timeout period
   if TimeOutMS <= 0 then
-    TimeOutMS := 60000; // blocking 1 minute seems fair enough
+    TimeOutMS := MilliSecsPerMin; // blocking 1 minute seems fair enough
   endtix := GetTickCount64 + TimeOutMS;
   // setup local variables
   fModulusBits := Bits;
@@ -2406,7 +2438,7 @@ begin
   try
     // compute two p and q random primes
     repeat
-      // FIPS 186-4 §B.3.1: ensure x mod e<>1 i.e. gcd(x-1,e)=1
+      // FIPS 186-4 B.3.1: ensure x mod e<>1 i.e. gcd(x-1,e)=1
       repeat
         if not _p.FillPrime(Extend, Iterations, endtix) then
           exit; // timed out
@@ -2420,13 +2452,13 @@ begin
         exit // random generator is clearly wrong if p=q
       else if comp < 0 then
         ExchgPointer(@_p, @_q); // ensure p>q for ChineseRemainderTheorem
-      // FIPS 186-4 §B.3.3 step 5.4: ensure enough bits are set in difference
+      // FIPS 186-4 B.3.3 step 5.4: ensure enough bits are set in difference
       _tmp := _p.Clone.Substract(_q.Copy);
       comp := _tmp.BitCount;
       _tmp.Release;
       if comp <= (Bits shr 1) - 99 then
         continue;
-      // FIPS 186-4 §B.3.1 criterion 2: ensure gcd( e, (p-1)*(q-1) ) = 1
+      // FIPS 186-4 B.3.1 criterion 2: ensure gcd( e, (p-1)*(q-1) ) = 1
       _p.IntSub(1);
       _q.IntSub(1);
       _h := _p.Copy.Multiply(_q.Copy); // h = (p-1)*(q-1)
@@ -2438,7 +2470,7 @@ begin
       // compute smallest possible d = e^-1 mod LCM(p-1,q-1)
       _d := _e.ModInverse(_h.Divide(_p.GreatestCommonDivisor(_q)));
       _h.Release;
-      // FIPS 186-4 §B.3.1 criterion 3: ensure enough bits in d
+      // FIPS 186-4 B.3.1 criterion 3: ensure enough bits in d
       comp := _d.BitCount;
       if comp > (Bits + 1) shr 1 then
         break;
@@ -2473,11 +2505,11 @@ procedure TRsa.LoadFromPublicKeyBinary(Modulus, Exponent: pointer;
   ModulusSize, ExponentSize: PtrInt);
 begin
   if not fM.IsZero then
-    raise ERsaException.CreateUtf8(
+    ERsaException.RaiseUtf8(
       '%.LoadFromPublicKey on existing data', [self]);
   if (ModulusSize < 10) or
      (ExponentSize < 2) then
-    raise ERsaException.CreateUtf8(
+    ERsaException.RaiseUtf8(
       '%.LoadFromPublicKey: unexpected ModulusSize=% ExponentSize=%',
       [self, ModulusSize, ExponentSize]);
   fModulusLen := ModulusSize;
@@ -2512,7 +2544,7 @@ var
 begin
   if not HexToBin(pointer(Hexa), length(Hexa), bin) or
      (length(bin) < 13) then
-    raise ERsaException.CreateUtf8('Invalid %.LoadFromPublicKeyHexa', [self]);
+    ERsaException.RaiseUtf8('Invalid %.LoadFromPublicKeyHexa', [self]);
   LoadFromPublicKeyBinary(b + 3, b, length(bin) - 3, 3);
 end;
 
@@ -2525,7 +2557,7 @@ end;
 procedure TRsa.LoadFromPrivateKey(const PrivateKey: TRsaPrivateKey);
 begin
   if not fM.IsZero then
-    raise ERsaException.CreateUtf8('%.LoadFromPrivateKey on existing data', [self]);
+    ERsaException.RaiseUtf8('%.LoadFromPrivateKey on existing data', [self]);
   with PrivateKey do
     if (PrivateExponent = '') or
        (Prime1 = '') or
@@ -2535,7 +2567,7 @@ begin
        (Coefficient = '') or
        (length(Modulus) < 10) or
        (length(PublicExponent) < 2) then
-    raise ERsaException.CreateUtf8('Incorrect %.LoadFromPrivateKey call', [self]);
+    ERsaException.RaiseUtf8('Incorrect %.LoadFromPrivateKey call', [self]);
   LoadFromPublicKeyBinary(
     pointer(PrivateKey.Modulus), pointer(PrivateKey.PublicExponent),
     length(PrivateKey.Modulus),  length(PrivateKey.PublicExponent));
@@ -2866,18 +2898,10 @@ end;
 function TRsa.Sign(Hash: PHash512; HashAlgo: THashAlgo): RawByteString;
 var
   seq: TAsnObject;
-  h: RawByteString;
 begin
   // this virtual method implements RSASSA-PKCS1-v1_5 signature scheme
   // 1. create the ASN.1 sequence of the hash to be encoded
-  FastSetRawByteString(h, Hash, HASH_SIZE[HashAlgo]);
-  seq := AsnSeq([
-           AsnSeq([
-             AsnOid(pointer(ASN1_OID_HASH[HashAlgo])),
-             ASN1_NULL_VALUE
-           ]),
-           Asn(ASN1_OCTSTR, [h])
-         ]);
+  seq := RsaSignHashToDer(Hash, HashAlgo);
   // 2. sign it using the stored private key
   result := Pkcs1Sign(pointer(seq), length(seq));
 end;
@@ -2955,7 +2979,7 @@ begin
     end;
     // concatenate the header, encrypted key and message
     msgpos := SizeOf(head) + length(enckey);
-    FastSetRawByteString(result, nil, msgpos + length(encmsg));
+    FastNewRawByteString(result, msgpos + length(encmsg));
     PRsaSealHeader(result)^ := head;
     MoveFast(pointer(enckey)^, PByteArray(result)[SizeOf(head)], length(enckey));
     MoveFast(pointer(encmsg)^, PByteArray(result)[msgpos], length(encmsg));
@@ -3112,7 +3136,7 @@ begin
      not HasPrivateKey then
     exit;
   if (ModulusBits + 7) shr 3 <> ModulusLen then
-    raise ERsaException.CreateUtf8('%.DoPad: m=p*q is weak', [self]);
+    ERsaException.RaiseUtf8('%.DoPad: m=p*q is weak', [self]);
   bits := ModulusBits - 1;
   len := (bits + 7) shr 3; // could be one less than ModulusLen
   // RFC 8017 9.1.1 encoding operation with saltlen = hashlen
@@ -3167,7 +3191,7 @@ begin
     ord('P') + ord('S') shl 8:
       fRsaClass := TRsaPss;
   else
-    raise ECrypt.CreateUtf8('%.Create: unsupported name=%', [self, name]);
+    ECrypt.RaiseUtf8('%.Create: unsupported name=%', [self, name]);
   end;
   inherited Create(name);
   if fDefaultHasher = nil then
@@ -3181,7 +3205,7 @@ constructor TCryptAsymRsa.Create(const name, hasher: RawUtf8);
 begin
   fDefaultHasher := mormot.crypt.secure.Hasher(hasher); // set before Create()
   if fDefaultHasher = nil then
-    raise ECrypt.CreateUtf8('%.Create: unknown hasher=%', [self, hasher]);
+    ECrypt.RaiseUtf8('%.Create: unknown hasher=%', [self, hasher]);
   Create(name);
 end;
 
@@ -3191,7 +3215,7 @@ var
   rsa: TRsa;
 begin
   if privpwd <> '' then
-    raise ECrypt.CreateUtf8('%.GenerateDer: unsupported privpwd', [self]);
+    ECrypt.RaiseUtf8('%.GenerateDer: unsupported privpwd', [self]);
   rsa := fRsaClass.Create;
   try
     if not rsa.Generate then
@@ -3290,7 +3314,7 @@ begin
           FreeAndNil(fRsa);
       end;
   else
-    raise ERsaException.CreateUtf8('%.Create: unsupported %',
+    ERsaException.RaiseUtf8('%.Create: unsupported %',
             [self, ToText(fKeyAlgo)^]);
   end;
 end;
@@ -3352,6 +3376,7 @@ begin
         begin
           fRsa := CKA_TO_RSA[algo].Create;
           if fRsa.LoadFromPrivateKeyPem(der) and
+             fRsa.CheckPrivateKey and
              ((pub = nil) or
               fRsa.MatchKey((pub as TCryptPublicKeyRsa).fRsa)) then
             result := true
@@ -3405,8 +3430,7 @@ function TCryptPrivateKeyRsa.SignDigest(const Dig: THash512Rec; DigLen: integer;
   DigAlgo: TCryptAsymAlgo): RawByteString;
 begin
   result := '';
-  if (self <> nil) and
-     (CAA_CKA[DigAlgo] = fKeyAlgo) and
+  if (CAA_CKA[DigAlgo] = fKeyAlgo) and
      (HASH_SIZE[CAA_HF[DigAlgo]] = DigLen) then
     case fKeyAlgo of
       ckaRsa,

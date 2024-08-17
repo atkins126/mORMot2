@@ -283,7 +283,7 @@ procedure TTestBidirectionalRemoteConnection.WebsocketsLowLevel(
     try
       for i := 1 to 100 do
       begin
-        C1.Prepare('url', 'POST', 'headers', content, contentType, '');
+        C1.PrepareDirect('url', 'POST', 'headers', content, contentType, '');
         noAnswer1 := opcode = focBinary;
         noAnswer2 := not noAnswer1;
         TWebSocketProtocolRestHook(protocol).InputToFrame(C1, noAnswer1, frame, head);
@@ -455,8 +455,8 @@ begin
   TestRest(fServer);
 end;
 
-function TTestBidirectionalRemoteConnection.NewClient(const port: RawUtf8):
-  TRestHttpClientWebsockets;
+function TTestBidirectionalRemoteConnection.NewClient(
+  const port: RawUtf8): TRestHttpClientWebsockets;
 begin
   result := TRestHttpClientWebsockets.Create(
     '127.0.0.1', port, TOrmModel.Create(fServer.Model));

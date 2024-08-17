@@ -106,9 +106,12 @@ type
       Float1: double; var Float2: double): TEntry;
     /// validates ArgsInputIsOctetStream raw binary upload
     function DirectCall(const Data: RawBlob): integer;
-    /// validates huge RawJson/RawUtf8
+    // validates huge RawJson/RawUtf8
     function RepeatJsonArray(const item: RawUtf8; count: integer): RawJson;
     function RepeatTextArray(const item: RawUtf8; count: integer): RawUtf8;
+    // validates IDocList/IDocDict parameters - cannot be in result
+    procedure TestDocList(var list: IDocList; const data: variant; out input: IDocList);
+    procedure TestDocDict(var dict: IDocDict; const data: variant; out input: IDocDict);
   end;
 
   /// a test interface, used by TTestServiceOrientedArchitecture
@@ -251,6 +254,7 @@ type
     fModel: TOrmModel;
     fClient: TRestClientDB;
     procedure Test(const Inst: TTestServiceInstances; Iterations: Cardinal = 700);
+    procedure TestHttp(withlog: boolean);
     procedure ClientTest(aRouting: TRestServerUriContextClass;
       aAsJsonObject: boolean; aRunInOtherThread: boolean = false;
       aOptions: TInterfaceMethodOptions = []);
@@ -300,17 +304,19 @@ type
     /// test the client-side implementation with SHA3-256 URI signature
     procedure ClientSideRESTSignWithSha3;
     /// test the client-side implementation using TRestServerAuthenticationNone
-    procedure ClientSideRESTWeakAuthentication;
+    procedure ClientSideRESTWeakAuth;
     /// test the client-side implementation using TRestServerAuthenticationHttpBasic
-    procedure ClientSideRESTBasicAuthentication;
+    procedure ClientSideRESTBasicAuth;
     /// test the custom record Json serialization
-    procedure ClientSideRESTCustomRecordLayout;
+    procedure ClientSideRESTCustomRecord;
     /// test the client-side in RESTful mode with all calls logged in a table
     procedure ClientSideRESTServiceLogToDB;
     /// test the client-side implementation in Json-RPC mode
     procedure ClientSideJsonRPC;
     /// test REStful mode using HTTP client/server communication
     procedure TestOverHTTP;
+    /// test REStful mode using HTTP client/server communication and logs
+    procedure TestOverHTTPWithLogs;
     /// test the security features
     procedure Security;
     /// test interface stubbing / mocking
@@ -344,6 +350,8 @@ type
     function DirectCall(const Data: RawBlob): integer;
     function RepeatJsonArray(const item: RawUtf8; count: integer): RawJson;
     function RepeatTextArray(const item: RawUtf8; count: integer): RawUtf8;
+    procedure TestDocList(var list: IDocList; const data: variant; out input: IDocList);
+    procedure TestDocDict(var dict: IDocDict; const data: variant; out input: IDocDict);
     function Test(A, B: Integer): RawUtf8;
   end;
 
@@ -511,8 +519,7 @@ begin
       Add('"', ',');
       dec(count);
     end;
-    CancelLastComma;
-    Add(']');
+    CancelLastComma(']');
     SetText(RawUtf8(Result));
   finally
     Free;
@@ -522,7 +529,7 @@ end;
 function TServiceCalculator.RepeatTextArray(
   const item: RawUtf8; count: integer): RawUtf8;
 var
-  buf: array[word] of byte;
+  buf: array[word] of byte; // 64KB temp buffer
 begin
   with TJsonWriter.CreateOwnedStream(@buf, SizeOf(buf)) do
   try
@@ -535,6 +542,20 @@ begin
   finally
     Free;
   end;
+end;
+
+procedure TServiceCalculator.TestDocList(var list: IDocList;
+  const data: variant; out input: IDocList);
+begin
+  input := list;
+  list := DocList([1, 2, 3, data]);
+end;
+
+procedure TServiceCalculator.TestDocDict(var dict: IDocDict;
+  const data: variant; out input: IDocDict);
+begin
+  input := dict;
+  dict := DocDict(['a', 1, 'b', 2, 'data', data]);
 end;
 
 var
@@ -645,6 +666,8 @@ end;
 
 procedure TServiceComplexCalculator.FillPeople(var People: TOrmPeople);
 begin
+  if People.ID = 0 then
+    exit; // check transmission of LastName/FirstName as ""
   People.LastName  := FormatUtf8('Last %', [People.ID]);
   People.FirstName := FormatUtf8('First %', [People.ID]);
 end;
@@ -809,7 +832,7 @@ procedure TTestServiceOrientedArchitecture.Test(const Inst:
   procedure TestCalculator(const I: ICalculator);
   var
     i1, i2: PtrInt;
-    t, i3: integer;
+    n, t, i3: integer;
     c: cardinal;
     cu: currency;
     n1, n2, s1, s2: double;
@@ -819,20 +842,23 @@ procedure TTestServiceOrientedArchitecture.Test(const Inst:
     Str2: TWideStringDynArray;
     Rec1: TVirtualTableModuleProperties;
     Rec2, RecRes: TEntry;
-    s: RawUtf8;
+    s, u: RawUtf8;
+    p: PUtf8Char;
     r: string;
+    l1, l2: IDocList;
+    d1, d2: IDocDict;
   begin
     Setlength(Ints, 2);
     CSVToRawUtf8DynArray('one,two,three', Strs1);
     CheckEqual(length(strs1), 3);
     for t := 1 to Iterations do
     begin
-      i1 := Random(MaxInt) - Random(MaxInt);
-      i2 := Random(MaxInt) - i1;
+      i1 := Random31 - Random31;
+      i2 := Random31 - i1;
       Check(I.Add(i1, i2) = i1 + i2);
       Check(I.Multiply(i1, i2) = Int64(i1) * Int64(i2));
-      n1 := Random * 1E-9 - Random * 1E-8;
-      n2 := n1 * Random;
+      n1 := RandomDouble * 1E-9 - RandomDouble * 1E-8;
+      n2 := n1 * RandomDouble;
       CheckSame(I.Subtract(n1, n2), n1 - n2);
       s1 := n1;
       s2 := n2;
@@ -851,7 +877,7 @@ procedure TTestServiceOrientedArchitecture.Test(const Inst:
       c := cardinal(i2);
       Check(I.SpecialCall(s, i3, c, [pctNone], [pctModTime, pctCreateTime], o) =
         [pctModTime, pctCreateTime, pctNone]);
-      Check(i3 = i1 + length(s));
+      CheckEqual(i3, i1 + length(s));
       Check(c = cardinal(i2) + 1);
       Check(o = [sicClientDriven, sicPerGroup]);
       Ints[0] := i1;
@@ -876,13 +902,26 @@ procedure TTestServiceOrientedArchitecture.Test(const Inst:
       Check(Rec1.FileExtension = Executable.ProgramFileName);
       Check(Rec2.ID = i1 + 1);
       Check(Rec2.Timestamp512 = c - 1);
-      Check(Rec2.Json = IntegerDynArrayToCSV(pointer(Ints), length(Ints)));
-      Check(RecRes.ID = i1);
+      CheckEqual(Rec2.Json, IntegerDynArrayToCSV(pointer(Ints), length(Ints)));
+      CheckEqual(RecRes.ID, i1);
       Check(RecRes.Timestamp512 = c);
-      Check(RecRes.Json = StringToUtf8(Rec1.FileExtension));
+      CheckEqual(RecRes.Json, StringToUtf8(Rec1.FileExtension));
       CheckSame(n1, n2);
       Rec1.FileExtension := ''; // to avoid memory leak
     end;
+    i1 := Random32;
+    i2 := Random32;
+    l1 := DocList([i1, i2]);
+    I.TestDocList(l1, i1, l2); // l2:=l1 & l1:=DocList([1,2,3,i1])
+    CheckEqual(l1.Json, FormatUtf8('[1,2,3,%]', [i1]));
+    CheckEqual(l2.Len, 2);
+    CheckEqual(l2.I[0], i1);
+    CheckEqual(l2.I[1], i2);
+    d1 := DocDict(['a', i1]);
+    I.TestDocDict(d1, i2, d2); // d2:=d1 & d1:=DocDict(['a',1,'b',2,'data',i2])
+    CheckEqual(d1.Json, FormatUtf8('{"a":1,"b":2,"data":%}', [i2]));
+    CheckEqual(d2.Len, 1);
+    CheckEqual(d2.I['a'], i1);
     n1 := 0;
     RecRes := I.ComplexCall(Ints, nil, Str2, Rec1, Rec2, n1, n2);
     Check(length(Str2) = 5);
@@ -893,11 +932,34 @@ procedure TTestServiceOrientedArchitecture.Test(const Inst:
     Check(Str2[4] = '');
     s := RawUtf8OfChar(#1, 100);
     CheckEqual(I.DirectCall(s), 100);
-    s := RawUtf8OfChar('-', 600);
-    t := length(I.RepeatJsonArray(s, 100));
+    s := RandomUri(600);
+    u := I.RepeatJsonArray(s, 100);
+    t := length(u);
     checkutf8(t = 1 + 100 * 603, 'RawJson %', [KB(t)]);
-    t := length(I.RepeatTextArray(s, 100));
-    checkutf8(t = 100 * 600, 'RawUtf8 %', [KB(t)]);
+    l1 := DocList(u);
+    CheckEqual(l1.Len, 100, 'RJA');
+    for i1 := 0 to l1.Len - 1 do
+      CheckEqual(l1.U[i1], s, 'RJA');
+    c := 1; // within the same process, no need to push this request
+    n := 100;
+    if GlobalInterfaceTestMode = itmHttp then
+    begin
+      c := 50; // >5000 for very agressive tests
+      n := 1000; // generate a 600KB response (e.g. test IOCP background send)
+    end;
+    repeat
+      u := I.RepeatTextArray(s, n);
+      t := length(u);
+      CheckEqual(t, n * 600, 'RepeatTextArray');
+      p := pointer(u);
+      repeat
+        Check(CompareMem(p, pointer(s), 600), 'RTA');
+        inc(p, 600);
+        dec(t, 600)
+      until t = 0;
+      Check(p^ = #0, 'end RTA');
+      dec(c);
+    until c = 0;
   end;
 
 var
@@ -999,8 +1061,16 @@ begin
         people.IDValue := c;
         Inst.CC.FillPeople(people);
         Check(people.ID = c);
-        Check(people.LastName = FormatUtf8('Last %', [c]));
-        Check(people.FirstName = FormatUtf8('First %', [c]));
+        if c = 0 then
+        begin
+          Check(people.LastName = '');
+          Check(people.FirstName = '');
+        end
+        else
+        begin
+          Check(people.LastName = FormatUtf8('Last %', [c]));
+          Check(people.FirstName = FormatUtf8('First %', [c]));
+        end;
       finally
         people.Free;
       end;
@@ -1074,11 +1144,11 @@ begin
   for c := 0 to Iterations shr 2 do
   begin
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);
-    n1 := Random * 1000;
+    n1 := RandomDouble * 1000;
     Inst.CN.Real := n1;
     CheckSame(Inst.CN.Real, n1);
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);
-    n2 := Random * 1000;
+    n2 := RandomDouble * 1000;
     Inst.CN.Imaginary := n2;
     CheckSame(Inst.CN.Real, n1);
     CheckSame(Inst.CN.Imaginary, n2, 1E-9);
@@ -1418,11 +1488,11 @@ begin
   Check(fClient.Server.Services['Calculator'] = S);
   Check(fClient.Server.Services['CALCULAtor'] = S);
   Check(fClient.Server.Services['CALCULAtors'] = nil);
-  if CheckFailed(length(S.InterfaceFactory.Methods) = 13) then
+  if CheckFailed(length(S.InterfaceFactory.Methods) = 15) then
     exit;
   //JsonReformatToFile(S.Contract, 'contract.json');
   //FileFromString(S.ContractHash, 'contract.hash');
-  CheckEqual(S.ContractHash, '"4B6563E68276633B"');
+  CheckEqual(S.ContractHash, '"8AB8C2407CD836D7"');
   Check(TServiceCalculator(nil).Test(1, 2) = '3');
   Check(TServiceCalculator(nil).ToTextFunc(777) = '777');
   for i := 0 to high(ExpectedURI) do // SpecialCall interface not checked
@@ -1581,9 +1651,7 @@ begin
   Test([2, 3, 5], 'this group ID won''t affect the current user');
   S.AllowByID(['Add'], [GroupID]);
   Test([1, 2, 3, 5], 'allow a specific method for the current user');
-  S.AllowAllByID([0]);
-  Test([1, 2, 3, 5], 'invalid group ID won''t affect the current user');
-  S.AllowAllByID([GroupID]);
+  S.AllowAll;
   Test([1, 2, 3, 4, 5], 'restore allowed for the current user');
   Check(not fClient.SetUser('unknown', 'wrongpass'));
   Test([], 'no authentication -> access denied');
@@ -1679,23 +1747,44 @@ begin
 end;
 
 procedure TTestServiceOrientedArchitecture.TestOverHTTP;
+begin
+  TestHttp({withlog=}false);
+end;
+
+procedure TTestServiceOrientedArchitecture.TestOverHTTPWithLogs;
+begin
+  TestHttp({withlog=}true);
+end;
+
+procedure TTestServiceOrientedArchitecture.TestHttp(withlog: boolean);
 var
   HTTPServer: TRestHttpServer;
   HTTPClient: TRestHttpClient;
   Inst: TTestServiceInstances;
   Json: RawUtf8;
   i: integer;
+  opt: TRestHttpServerOptions;
   URI: TRestServerUriDynArray;
 const
   SERVICES: array[0..4] of RawUtf8 = (
-    'Calculator', 'ComplexCalculator',
-    'TestUser', 'TestGroup', 'TestPerThread');
+    'Calculator',
+    'ComplexCalculator',
+    'TestUser',
+    'TestGroup',
+    'TestPerThread');
 begin
   fClient.Server.ServicesRouting := TRestServerRoutingRest; // back to default
   GlobalInterfaceTestMode := itmHttp;
+  opt := HTTPSERVER_DEFAULT_OPTIONS;
+  //opt := opt + [rsoLogVerbose];
+  if withlog then
+    opt := opt + [rsoEnableLogging, rsoTelemetryCsv, rsoTelemetryJson];
   HTTPServer := TRestHttpServer.Create(HTTP_DEFAULTPORT, [fClient.Server], '+',
-    HTTP_DEFAULT_MODE, 8, secNone);
+    useBidirAsync, // HTTP_DEFAULT_MODE,
+    8, secNone, '', '', opt);
   try
+    if withlog then
+      HTTPServer.HttpServer.Logger.Settings.DefaultRotate := hrtAfter1MB;
     FillCharFast(Inst, SizeOf(Inst), 0); // all Expected..ID=0
     HTTPClient := TRestHttpClient.Create('127.0.0.1', HTTP_DEFAULTPORT, fModel);
     try
@@ -1808,7 +1897,7 @@ begin
     TRestServerAuthenticationDefault).Algorithm := suaCRC32;
 end;
 
-procedure TTestServiceOrientedArchitecture.ClientSideRESTWeakAuthentication;
+procedure TTestServiceOrientedArchitecture.ClientSideRESTWeakAuth;
 begin
   fClient.Server.ServicesRouting := TRestServerRoutingJsonRpc; // back to previous
   fClient.Server.AuthenticationUnregister([
@@ -1822,7 +1911,7 @@ begin
   fClient.Server.AuthenticationUnregister(TRestServerAuthenticationNone);
 end;
 
-procedure TTestServiceOrientedArchitecture.ClientSideRESTBasicAuthentication;
+procedure TTestServiceOrientedArchitecture.ClientSideRESTBasicAuth;
 begin
   fClient.SessionClose;
   fClient.Server.AuthenticationRegister(TRestServerAuthenticationHttpBasic);
@@ -1838,7 +1927,7 @@ begin
   fClient.SetUser('User', 'synopse');
 end;
 
-procedure TTestServiceOrientedArchitecture.ClientSideRESTCustomRecordLayout;
+procedure TTestServiceOrientedArchitecture.ClientSideRESTCustomRecord;
 begin
   TRttiJson.RegisterCustomSerializer(TypeInfo(TEntry),
     TTestServiceOrientedArchitecture.CustomReader,
@@ -1871,9 +1960,9 @@ var
   V: PEntry absolute Data;
 begin
   W.AddJsonEscape([
-    'ID', V.ID,
+    'ID',        V.ID,
     'Timestamp', Int64(V.Timestamp512),
-    'Json', V.Json]);
+    'Json',      V.Json]);
 end;
 
 procedure TTestServiceOrientedArchitecture.Cleanup;
@@ -1883,11 +1972,11 @@ begin
   if fClient <> nil then
   begin
     fClient.CallBackGet('stat', [
-      'withtables', true,
-      'withsqlite3', true,
-      'withmethods', true,
+      'withtables',     true,
+      'withsqlite3',    true,
+      'withmethods',    true,
       'withinterfaces', true,
-      'withsessions', true], stats);
+      'withsessions',   true], stats);
     FileFromString(JsonReformat(stats), WorkDir + 'stats.Json');
     FreeAndNil(fClient);
   end;
@@ -2198,8 +2287,8 @@ var
 begin
   U := fUserRepository.GetUserByName(UserName);
   Assert(U.Name = UserName, 'internal verification');
-  U.Password := Int32ToUtf8(Random(MaxInt));
-  U.MobilePhoneNumber := Int32ToUtf8(Random(MaxInt));
+  U.Password := UInt32ToUtf8(Random32);
+  U.MobilePhoneNumber := UInt32ToUtf8(Random32);
   if fSmsSender.Send('Your new password is ' + U.Password, U.MobilePhoneNumber) then
     fUserRepository.Save(U);
 end;

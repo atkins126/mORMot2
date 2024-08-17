@@ -217,6 +217,15 @@ procedure DrawAntiAliased(Source: TMetafile; Dest: HDC; const DestRect: TRect;
   ConvertOptions: TEmfConvertOptions = []; Smoothing: TSmoothingMode = smAntiAlias;
   TextRendering: TTextRenderingHint = trhClearTypeGridFit); overload;
 
+/// draw an EMF TMetaFile using GDI+ anti-aliased rendering
+// - will fallback to plain GDI drawing if GDI+ is not available
+// - this procedure is thread-safe (protected by Gdip.Lock/UnLock)
+procedure DrawAntiAliased(Source: TMetafile; const SourceRect: TRect;
+  Dest: HDC; const DestRect: TRect;
+  ConvertOptions: TEmfConvertOptions = []; Smoothing: TSmoothingMode = smAntiAlias;
+  TextRendering: TTextRenderingHint = trhClearTypeGridFit;
+  u: TUnit = uPixel; attributes: TImageAttributes = nil); overload;
+
 /// draw the corresponding EMF metafile into a bitmap created by the method
 // - this default TGdiplus implementation uses GDI drawing only
 // - use a TGdiplusFull instance for true GDI+ AntiAliaised drawing
@@ -356,7 +365,7 @@ begin
     S := TMemoryStream.Create;
     try
       TGraphic(Source).SaveToStream(S);
-      S.Seek(0, soFromBeginning);
+      S.Seek(0, soBeginning);
       LoadFromStream(S);
     finally
       S.Free;
@@ -600,7 +609,7 @@ begin
   Clear;
   if not FileExists(FileName) then
     exit;
-  s := TFileStreamEx.Create(FileName, fmOpenReadDenyNone);
+  s := TFileStreamEx.Create(FileName, fmOpenReadShared);
   try
     LoadFromStream(s);
   finally
@@ -996,6 +1005,15 @@ begin
     ConvertOptions, Smoothing, TextRendering);
 end;
 
+procedure DrawAntiAliased(Source: TMetafile; const SourceRect: TRect;
+  Dest: HDC; const DestRect: TRect; ConvertOptions: TEmfConvertOptions;
+  Smoothing: TSmoothingMode; TextRendering: TTextRenderingHint;
+  u: TUnit; attributes: TImageAttributes);
+begin
+  DrawAntiAliased(Source.Handle, SourceRect, Dest, DestRect,
+    ConvertOptions, Smoothing, TextRendering, u, attributes);
+end;
+
 function DrawAntiAliased(Source: TMetafile; ScaleX, ScaleY: integer;
   ConvertOptions: TEmfConvertOptions; Smoothing: TSmoothingMode;
   TextRendering: TTextRenderingHint): TBitmap;
@@ -1004,7 +1022,7 @@ var
 begin
   result := nil;
   if Source = nil then // self=nil is OK below
-    Exit;
+    exit;
   R.Left := 0;
   R.Right := (Source.Width * ScaleX) div 100;
   R.Top := 0;

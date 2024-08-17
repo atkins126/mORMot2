@@ -4,7 +4,7 @@
 
 ![Happy mORMot](doc/happymormot.png)
 
-(c) 2008-2023 Synopse Informatique - Arnaud Bouchez
+(c) 2008-2024 Synopse Informatique - Arnaud Bouchez
 
 https://synopse.info  - http://mORMot.net
 
@@ -29,7 +29,7 @@ If you find it worth using, please consider [sponsoring mORMot 2 dev](https://gi
 
 ### mORMot What?
 
-Synopse *mORMot 2* is an Open Source Client-Server ORM SOA MVC framework for Delphi 7 up to Delphi 11 Alexandria and FPC 3.2/trunk, targeting Windows/Linux/BSD/MacOS for servers, and any platform for clients (including mobile or AJAX).
+Synopse *mORMot 2* is an Open Source Client-Server ORM SOA MVC framework for Delphi 7 up to Delphi 12 Athenes and FPC 3.2/trunk, targeting Windows/Linux/BSD/MacOS for servers, and any platform for clients (including mobile or AJAX).
 
 ![mORMot map](doc/IamLost.png)
 
@@ -85,6 +85,8 @@ The framework source code:
 
 Note that [FPC 3.2.2 has a regression with variant late binding](https://gitlab.com/freepascal.org/fpc/source/-/issues/39438) - use FPC 3.2.2 fixes branch instead.
 
+On Delphi, only the Windows target is available for *mORMot* general units, but you can use the cross-platform clients units on all Delphi targets. FPC is a much better and consistent cross-platform compiler, we gladly support.
+
 Please submit pull requests for non-validated versions.
 
 ### Installation
@@ -109,6 +111,8 @@ Please submit pull requests for non-validated versions.
   - Browse the [examples folder](/ex) (work in progress) - especially [Thomas Tutorials](https://github.com/synopse/mORMot2/tree/master/ex/ThirdPartyDemos/tbo) which are realistic and pedagogical.
   - Start from an example, and follow the [documentation](https://synopse.info/files/doc/mORMot2.html).
   - Feel free to contribute by posting enhancements and patches to this quickly evolving project.
+
+For safety, the SHA-256 checksums of the current version of the downloaded binary files, as published in our https://synopse.info/files server, are available in [this repository `static/dev.sha256` file](static/dev.sha256).
 
 ## Coming From Version 2
 

@@ -16,6 +16,9 @@ unit mormot.crypt.openssl;
 
   *****************************************************************************
 
+  Warning: on Windows, you need to define the USE_OPENSSL conditional in YOUR
+   project options to have this code actually link to the OpenSSL library.
+
   TL;DR: On x86_64, our mormot.crypt.core.pas asm is stand-alone and faster
          than OpenSSL for most algorithms, and only 20% slower for AES-GCM.
          For ECC/RSA, mormot.crypt.ecc/rsa are slower than OpenSSL so this
@@ -47,7 +50,7 @@ uses
   mormot.crypt.ecc256r1,
   mormot.crypt.secure,
   mormot.crypt.jwt,
-  // those two units defined here to override their slower implementation
+  // those two units are defined here to complete their implementation
   mormot.crypt.ecc,
   mormot.crypt.rsa;
 
@@ -491,6 +494,7 @@ type
     fGenBitsOrCurve: integer;
     fAlgoMd: PEVP_MD;
     fPrivKey, fPubKey: PEVP_PKEY;
+    fAsymAlgo: TCryptAsymAlgo;
     function ComputeSignature(const headpayload: RawUtf8): RawUtf8; override;
     procedure CheckSignature(const headpayload: RawUtf8; const signature: RawByteString;
       var jwt: TJwtContent); override;
@@ -511,6 +515,9 @@ type
     /// the OpenSSL hash algorithm, as supplied to the constructor
     property HashAlgorithm: RawUtf8
       read fHashAlgorithm;
+    /// the asymmetric algorithm, as defined by inherted classes
+    property AsymAlgo: TCryptAsymAlgo
+      read fAsymAlgo;
   end;
 
   /// abstract parent for OpenSSL JWT algorithms - never use this plain class!
@@ -530,7 +537,7 @@ type
   // $ 100 EdDSA in 11.55ms i.e. 8.4K/s, aver. 115us
   TJwtAbstractOsl = class(TJwtOpenSsl)
   protected
-    // fAlgorithm+fHashAlgorithm+fGenEvpType+fGenBitsOrCurve from GetAsymAlgo
+    // fAlgorithm+fAsymAlgo+fHashAlgorithm+fGenEvpType+fGenBitsOrCurve from GetAsymAlgo
     procedure SetAlgorithms; virtual;
   public
     /// initialize the JWT processing instance calling SetAlgorithms abstract method
@@ -660,9 +667,11 @@ function OpenSslX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boo
 // - to be typically called after function OpenSslInitialize() by your project
 // - redirects TAesGcmFast (and TAesCtrFast on i386) globals to OpenSSL
 // - redirects raw mormot.crypt.ecc256r1 functions to use OpenSSL which is much
-// faster than our stand-alone C/pascal version
-// - register OpenSSL for our Asym() and Cert() high-level factory (via hidden
-// TCryptAsymOsl and TCryptCertAlgoOpenSsl class)
+// faster than our stand-alone pure pascal version
+// - register OpenSSL for our Asym() and Cert() high-level factory, and
+// also for CryptPublicKey[] and CryptPrivateKey[]
+// - RegisterX509 from mormot.crypt.x509.pas can be called after this procedure,
+// to register TCryptCertAlgoX509 with ckaEcc384, ckaEcc512 and ckaEdDSA
 procedure RegisterOpenSsl;
 
 type
@@ -1707,24 +1716,27 @@ end;
 
 function TJwtOpenSsl.ComputeSignature(const headpayload: RawUtf8): RawUtf8;
 var
-  sign: RawByteString;
+  sig: RawByteString;
 begin
   if fPrivKey = nil then
     fPrivKey := LoadPrivateKey(fPrivateKey, fPrivateKeyPassword);
-  sign := fPrivKey^.Sign(fAlgoMd, pointer(headpayload), length(headpayload));
-  if sign = '' then
-    raise EJwtException.CreateUtf8('%.ComputeSignature: OpenSslSign failed [%]',
-      [self, SSL_error_short(ERR_get_error)]);
-  result := BinToBase64Uri(sign);
+  sig := fPrivKey^.Sign(fAlgoMd, pointer(headpayload), length(headpayload));
+  if sig = '' then
+    EJwtException.RaiseUtf8('%.ComputeSignature: OpenSslSign % failed [%]',
+      [self, fAlgorithm, OpenSSL_error_short(ERR_get_error)]);
+  result := GetSignatureSecurityRaw(fAsymAlgo, sig); // into base-64 encoded raw
 end;
 
 procedure TJwtOpenSsl.CheckSignature(const headpayload: RawUtf8;
   const signature: RawByteString; var jwt: TJwtContent);
+var
+  der: RawByteString;
 begin
   if fPubKey = nil then
     fPubKey := LoadPublicKey(fPublicKey, fPublicKeyPassword);
-  if fPubKey^.Verify(fAlgoMd, pointer(signature), pointer(headpayload),
-      length(signature), length(headpayload)) then
+  der := SetSignatureSecurityRaw(fAsymAlgo, signature);
+  if fPubKey^.Verify(fAlgoMd, pointer(der), pointer(headpayload),
+      length(der), length(headpayload)) then
     jwt.result := jwtValid
   else
     jwt.result := jwtInvalidSignature;
@@ -1739,14 +1751,12 @@ begin
 end;
 
 procedure TJwtAbstractOsl.SetAlgorithms;
-var
-  caa: TCryptAsymAlgo;
 begin
-  caa := GetAsymAlgo; // call overriden method
-  fAlgorithm := CAA_JWT[caa];
-  fHashAlgorithm := CAA_MD[caa];
-  fGenEvpType := CAA_EVPTYPE[caa];
-  fGenBitsOrCurve := CAA_BITSORCURVE[caa];
+  fAsymAlgo := GetAsymAlgo; // call overriden method
+  fAlgorithm := CAA_JWT[fAsymAlgo];
+  fHashAlgorithm := CAA_MD[fAsymAlgo];
+  fGenEvpType := CAA_EVPTYPE[fAsymAlgo];
+  fGenBitsOrCurve := CAA_BITSORCURVE[fAsymAlgo];
 end;
 
 constructor TJwtAbstractOsl.Create(const aPrivateKey, aPublicKey: RawByteString;
@@ -1878,7 +1888,7 @@ end;
 constructor TCryptAsymOsl.Create(const name: RawUtf8);
 begin
   if not OpenSslSupports(fCaa) then
-    raise ECrypt.CreateUtf8('%.Create: unsupported %', [self, name]);
+    ECrypt.RaiseUtf8('%.Create: unsupported %', [self, name]);
   fDefaultHashAlgorithm := CAA_MD[fCaa];
   fEvpType := CAA_EVPTYPE[fCaa];
   fBitsOrCurve := CAA_BITSORCURVE[fCaa];
@@ -1895,7 +1905,7 @@ procedure TCryptAsymOsl.GeneratePem(out pub, priv: RawUtf8;
   const privpwd: RawUtf8);
 begin
   if privpwd <> '' then
-    raise ECrypt.CreateUtf8('%.GeneratePem(%): unsupported privpwd', [self, fName]);
+    ECrypt.RaiseUtf8('%.GeneratePem(%): unsupported privpwd', [self, fName]);
   OpenSslGenerateKeys(fEvpType, fBitsOrCurve, priv, pub);
 end;
 
@@ -2171,7 +2181,8 @@ type
     function GetPublicKey: RawByteString; override;
     function GetPrivateKey: RawByteString; override;
     function SetPrivateKey(const saved: RawByteString): boolean; override;
-    function Sign(Data: pointer; Len: integer): RawByteString; override;
+    function Sign(Data: pointer; Len: integer;
+      Usage: TCryptCertUsage): RawByteString; override;
     procedure Sign(const Authority: ICryptCert); override;
     function Verify(Sign, Data: pointer; SignLen, DataLen: integer;
       IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity; override;
@@ -2287,8 +2298,7 @@ function TCryptCertAlgoOpenSsl.CreateSelfSignedCsr(const Subjects: RawUtf8;
 
   procedure RaiseError(const msg: shortstring);
   begin
-    raise ECryptCert.CreateUtf8(
-      '%.CreateSelfSignedCsr %: % error', [self, JwtName, msg]);
+    ECryptCert.RaiseUtf8('%.CreateSelfSignedCsr %: % error', [self, JwtName, msg]);
   end;
 
 var
@@ -2723,11 +2733,12 @@ begin
   end;
 end;
 
-function TCryptCertOpenSsl.Sign(Data: pointer; Len: integer): RawByteString;
+function TCryptCertOpenSsl.Sign(Data: pointer; Len: integer;
+  Usage: TCryptCertUsage): RawByteString;
 begin
   if HasPrivateSecret and
      ((fX509 = nil) or
-      fX509.HasUsage(kuDigitalSignature)) then
+      fX509.HasUsage(TX509Usage(Usage))) then
     result := fPrivKey.Sign(GetMD, Data, Len)
   else
     result := '';
@@ -2946,26 +2957,29 @@ end;
 function TCryptStoreOpenSsl.Save: RawByteString;
 var
   x: PX509DynArray;
-  crl: Pstack_st_X509_CRL;
+  c: PX509_CRLDynArray;
   i: PtrInt;
   tmp: TTextWriterStackBuffer;
 begin
   // since DER has no simple binary array format, use PEM serialization
   with TTextWriter.CreateOwnedStream(tmp) do
   try
-    x := fStore.Certificates;
+    // first write any X.509 certificates
+    x := fStore.CertificatesLocked;
     for i := 0 to length(x) - 1 do
     begin
       AddString(x[i].ToPem);
       AddShorter(CRLF);
     end;
-    crl := fStore.StackX509_CRL;
-    for i := 0 to crl.Count - 1 do
+    fStore.UnLock;
+    // followed by X.509 CRLs
+    c := fStore.CrlsLocked;
+    for i := 0 to length(c) - 1 do
     begin
-      AddString(PX509_CRL(crl.Items[i]).ToPem); // raise EOpenSsl (not signed)
+      AddString(c[i].ToPem); // raise EOpenSsl (not signed)
       AddShorter(CRLF);
     end;
-    crl.Free;
+    fStore.UnLock;
     SetText(RawUtf8(result));
   finally
     Free;
@@ -3124,6 +3138,7 @@ function TCryptStoreOpenSsl.Revoke(const Cert: ICryptCert;
   Reason: TCryptCertRevocationReason; RevocationDate: TDateTime): boolean;
 var
   r, days: integer;
+  c: PX509_CRL;
 begin
   result := false;
   if Cert = nil then
@@ -3132,16 +3147,22 @@ begin
   if r = CRL_REASON_NONE then
     raise EOpenSslCert.CreateFmt(
       'TCryptStoreOpenSsl.Revoke: unsupported %s', [ToText(Reason)^]);
-  if RevocationDate = 0 then
-    days := 0 // revoke now
-  else
-  begin
-    days :=  trunc(RevocationDate - Now);
-    if days < 0 then
-      days := 0;
-  end;
-  result := fStore.MainCrl.AddRevokedCertificate(
-    (cert.Instance as TCryptCertOpenSsl).fX509, nil, r, days);
+  c := fStore.MainCrlAcquired;
+  if c <> nil then
+    try
+      if RevocationDate = 0 then
+        days := 0 // revoke now
+      else
+      begin
+        days :=  trunc(RevocationDate - Now);
+        if days < 0 then
+          days := 0;
+      end;
+      result := c.AddRevokedCertificate(
+        (cert.Instance as TCryptCertOpenSsl).fX509, nil, r, days);
+    finally
+      c.Free;
+    end;
 end;
 
 function ToValidity(err: integer): TCryptCertValidity;
@@ -3223,6 +3244,22 @@ begin
 end;
 
 
+{ TCryptRandomOpenSsl }
+
+type
+  TCryptRandomOpenSsl = class(TCryptRandom)
+  public
+    procedure Get(dst: pointer; dstlen: PtrInt); override;
+  end;
+
+procedure TCryptRandomOpenSsl.Get(dst: pointer; dstlen: PtrInt);
+begin
+  if (dst <> nil) and
+     (dstlen > 0) then
+    RAND_bytes(dst, dstlen);
+end;
+
+
 function ToText(u: TX509Usage): RawUtf8;
 begin
   result := GetEnumNameTrimed(TypeInfo(TX509Usage), ord(u));
@@ -3293,7 +3330,7 @@ begin
   der := PemToDer(Cert);
   if not AsnDecChunk(der) then // basic input validation
     exit;
-  x := LoadCertificate(Cert);
+  x := LoadCertificate(der);
   if x <> nil then
     result := CryptCertOpenSsl[X509Algo(x)].FromHandle(x);
 end;
@@ -3390,13 +3427,15 @@ begin
     {$endif HASAESNI}
   end;
   // redirects raw mormot.crypt.ecc256r1 functions to faster OpenSSL wrappers
-  @Ecc256r1MakeKey := @ecc_make_key_osl;
-  @Ecc256r1Sign := @ecdsa_sign_osl;
-  @Ecc256r1Verify := @ecdsa_verify_osl;
+  @Ecc256r1MakeKey      := @ecc_make_key_osl;
+  @Ecc256r1Sign         := @ecdsa_sign_osl;
+  @Ecc256r1Verify       := @ecdsa_verify_osl;
   @Ecc256r1VerifyUncomp := @ecdsa_verify_uncompressed_osl;
   @Ecc256r1SharedSecret := @ecdh_shared_secret_osl;
   TEcc256r1Verify := TEcc256r1VerifyOsl;
   // register OpenSSL methods to our high-level cryptographic catalog
+  TCryptRandomOpenSsl.Implements('rnd-openssl');
+  @OpenSslRandBytes := @RAND_bytes;
   // may override existing mormot.crypt.ecc/mormot.crypt.rsa implementations
   TCryptAsymOsl.Implements('secp256r1,NISTP-256,prime256v1'); // with caaES256
   for caa := low(caa) to high(caa) do
@@ -3404,10 +3443,11 @@ begin
     begin
       CryptAsymOpenSsl[caa] := TCryptAsymOsl.Create(caa);
       CryptCertOpenSsl[caa] := TCryptCertAlgoOpenSsl.Create(caa);
+      CryptCert[caa] := CryptCertOpenSsl[caa]; // favor OpenSSL for X.509 work
       if caa = caaES256 then
         // mormot.crypt.ecc has less overhead (at least with OpenSSL 3.0)
         continue;
-      CryptPublicKey[CAA_CKA[caa]] := TCryptPublicKeyOpenSsl;
+      CryptPublicKey[CAA_CKA[caa]]  := TCryptPublicKeyOpenSsl;
       CryptPrivateKey[CAA_CKA[caa]] := TCryptPrivateKeyOpenSsl;
     end;
   CryptStoreOpenSsl := TCryptStoreAlgoOpenSsl.Implements(['x509-store']);

@@ -328,7 +328,7 @@ end;
 
 {$endif FPC_X86}
 
-function CompareMem(P1, P2: Pointer; Length: PtrInt): boolean;
+function CompareMem(P1, P2: pointer; Length: PtrInt): boolean;
 {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
         // eax=P1 edx=P2 ecx=Length
@@ -396,18 +396,18 @@ asm
 @setsml:setz    al
 end;
 
-function crc32cfast(crc: cardinal; buf: PAnsiChar; len: cardinal): cardinal;
-{$ifdef FPC}nostackframe; assembler;{$endif}
+function crc32fasttab(crc: cardinal; buf: PAnsiChar; len: cardinal;
+  tab: PCrc32tab): cardinal;
 asm
         // adapted from Aleksandr Sharahov code and Maxim Masiutin remarks
-        test    edx, edx
-        jz      @z
-        neg     ecx
-        jz      @z
-        not     eax
         push    ebx
         push    ebp
-        lea     ebp, [crc32ctab]
+        mov     ebp, tab
+        not     eax
+        neg     ecx       // eax=crc edx=buf ecx=-len ebp=tab
+        jz      @z
+        test    edx, edx
+        jz      @z
 @head:  test    dl, 3
         jz      @align
         movzx   ebx, byte ptr [edx]
@@ -417,16 +417,14 @@ asm
         xor     eax, dword ptr [ebx * 4 + ebp]
         inc     ecx
         jnz     @head
-        pop     ebp
-        pop     ebx
-        not     eax
-@z:     ret
+@z:     jmp     @e
 @align: sub     edx, ecx
         add     ecx, 8
         jg      @done
         push    esi
         push    edi
         mov     edi, edx
+        {$ifdef FPC} align   8 {$endif FPC}
 @by8:   mov     edx, eax
         mov     ebx, [edi + ecx - 4]
         xor     edx, [edi + ecx - 8]
@@ -1281,30 +1279,30 @@ asm
         mov     ebp, esp
         {$endif FPC}
         mov     ecx, eax
-        mov     eax, dword ptr [ebp+8H]
-        mul     dword ptr [ebp+10H]
+        mov     eax, dword ptr [ebp + 8H]
+        mul     dword ptr [ebp + 10H]
         mov     dword ptr [ecx], eax
-        mov     dword ptr [ebp-4H], edx
-        mov     eax, dword ptr [ebp+8H]
-        mul     dword ptr [ebp+14H]
-        add     eax, dword ptr [ebp-4H]
+        mov     dword ptr [ebp - 4H], edx
+        mov     eax, dword ptr [ebp + 8H]
+        mul     dword ptr [ebp + 14H]
+        add     eax, dword ptr [ebp - 4H]
         adc     edx, 0
-        mov     dword ptr [ebp-10H], eax
-        mov     dword ptr [ebp-0CH], edx
-        mov     eax, dword ptr [ebp+0CH]
-        mul     dword ptr [ebp+10H]
-        add     eax, dword ptr [ebp-10H]
+        mov     dword ptr [ebp - 10H], eax
+        mov     dword ptr [ebp - 0CH], edx
+        mov     eax, dword ptr [ebp + 0CH]
+        mul     dword ptr [ebp + 10H]
+        add     eax, dword ptr [ebp - 10H]
         adc     edx, 0
-        mov     dword ptr [ecx+4H], eax
-        mov     dword ptr [ebp-14H], edx
-        mov     eax, dword ptr [ebp+0CH]
-        mul     dword ptr [ebp+14H]
-        add     eax, dword ptr [ebp-0CH]
+        mov     dword ptr [ecx + 4H], eax
+        mov     dword ptr [ebp - 14H], edx
+        mov     eax, dword ptr [ebp + 0CH]
+        mul     dword ptr [ebp + 14H]
+        add     eax, dword ptr [ebp - 0CH]
         adc     edx, 0
-        add     eax, dword ptr [ebp-14H]
+        add     eax, dword ptr [ebp - 14H]
         adc     edx, 0
-        mov     dword ptr [ecx+8H], eax
-        mov     dword ptr [ecx+0CH], edx
+        mov     dword ptr [ecx + 8H], eax
+        mov     dword ptr [ecx + 0CH], edx
         {$ifdef FPC}
         pop     ebp
         {$endif FPC}

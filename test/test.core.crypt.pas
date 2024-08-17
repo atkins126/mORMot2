@@ -7,6 +7,10 @@ interface
 
 {$I ..\src\mormot.defines.inc}
 
+{.$define CATALOGALLGENERATE}
+// by default, we don't validate the very slow RSA keypair generation
+// - define this conditional for slower but full coverage of the tests
+
 uses
   sysutils,
   mormot.core.base,
@@ -24,6 +28,7 @@ uses
   mormot.core.variants,
   mormot.lib.pkcs11,
   mormot.lib.openssl11,
+  mormot.net.sock, // for NetBinToBase64()
   mormot.crypt.jwt,
   mormot.crypt.ecc,
   mormot.crypt.rsa,
@@ -780,7 +785,7 @@ const
     'ZHhnT2RzGDGHrq115yC+T8SwTo7/h5p/2AuO4fXWP6MWXMJcXUGs6MshY5vgH4QY'#13#10 +
     'BPyNxBYuEhvuYUZ3nJXJZZ0='#13#10 +
     '-----END PRIVATE KEY-----'#13#10;
-  _rsapub = // see _rsapriv defined above
+  _rsapub = // openssl rsa -pubout -in priv.pem -out pub.pem
     '-----BEGIN PUBLIC KEY-----'#13#10 +
     'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtQ4/dhzEXlDpj71dwF3T'#13#10 +
     't1Sx/COvd6Y8R4kxgcLblmdt3BCmGAYgNS2yf0ORcGKse+wYLG+BV8rIT2zRPbrI'#13#10 +
@@ -903,6 +908,7 @@ const
     TJwtPs256,
     TJwtPs384,
     TJwtPs512);
+
 {$ifdef USE_OPENSSL}
   OSSL_JWT: array[0..10] of TJwtAbstractOslClass = (
     TJwtEs256Osl,
@@ -917,6 +923,7 @@ const
     TJwtPs512Osl,
     TJwtEddsaOsl);
 {$endif USE_OPENSSL}
+
 var
   i: integer;
   j: TJwtAbstract;
@@ -960,6 +967,25 @@ begin
     Check(jwt.result = jwtValid);
     check(jwt.reg[jrcSubject] = 'subject');
     check(jwt.data.U['uid'] = '{1CCA336D-A78F-4EB6-B701-1DB8E749BD1F}');
+  finally
+    j.Free;
+  end;
+  j := TJwtCrypt.Create(caaES256, '-----BEGIN PUBLIC KEY-----'#13#10 +
+    'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoIQ8m1iBHYoxrdLT1A6MH9naG+hk'#13#10 +
+    '/ccw/Ij0p9Mk7JmNdzCUeEjzlU5/E683I9PZaz2/5RFj1HfKPTgDkxQFkA=='#13#10 +
+    '-----END PUBLIC KEY-----'#13#10, [jrcAudience], ['aud'], 60);
+  try
+    CheckEqual(j.Algorithm, 'ES256');
+  finally
+    j.Free;
+  end;
+  j := TJwtCrypt.Create(caaES256, '-----BEGIN EC PRIVATE KEY-----'#13#10 +
+    'MHcCAQEEIP00000000000000000000000000000000000000000roAoGCCqGSM49'#13#10 +
+    'AwEHoUQDQgAEoIQ8m1iBHYoxrdLT1A6MH9naG+hk/ccw/Ij0p9Mk7JmNdzCUeEjz'#13#10 +
+    'lU5/E683I9PZaz2/5RFj1HfKPTgDkxQFkA=='#13#10 +
+    '-----END EC PRIVATE KEY-----'#13#10, [jrcAudience], ['aud'], 60);
+  try
+    CheckEqual(j.Algorithm, 'ES256');
   finally
     j.Free;
   end;
@@ -1048,14 +1074,18 @@ type
 procedure TTestCoreCrypto.Benchmark;
 const
   bAESLAST = {$ifdef USE_OPENSSL} bAES256GCMO {$else} bAES256GCM {$endif};
+
   bAESOPENSSL = [ {$ifdef USE_OPENSSL} bAES128CFBO .. bAES256GCMO {$endif} ];
+
   SIZ: array[0..4] of integer = (
     8,
     50,
     100,
     1000,
     10000);
+
   COUNT = 500;
+
   AESCLASS: array[bAES128CFB.. bAESLAST] of TAesAbstractClass = (
     TAesCfb, TAesOfb, TAesC64, TAesCtr, TAesCfc, TAesOfc, TAesCtc, TAesGcm,
     TAesCfb, TAesOfb, TAesC64, TAesCtr, TAesCfc, TAesOfc, TAesCtc, TAesGcm
@@ -1063,6 +1093,7 @@ const
     TAesCfbOsl, TAesOfbOsl, TAesCtrOsl, TAesGcmOsl,
     TAesCfbOsl, TAesOfbOsl, TAesCtrOsl, TAesGcmOsl
   {$endif USE_OPENSSL});
+
   AESBITS: array[bAES128CFB..bAESLAST] of integer = (
     128, 128, 128, 128, 128, 128, 128, 128,
     256, 256, 256, 256, 256, 256, 256, 256
@@ -1203,7 +1234,7 @@ begin
           bSHAKE256:
             SHAKE256.Cypher(pointer(data), pointer(encrypted), SIZ[s]);
         else
-          raise ESynCrypto.CreateUtf8('Unexpected %', [TXT[b]]);
+          ESynCrypto.RaiseUtf8('Unexpected %', [TXT[b]]);
         end;
         Check((b >= bRC4) or
               (dig.d0 <> 0) or
@@ -1449,7 +1480,7 @@ var
   P: PAnsiChar;
   msg: string;
   unalign: PtrInt;
-  exp321, exp322, exp323, exp324: cardinal;
+  exp321, exp322, exp323, exp324, exp325: cardinal;
   exp641, exp642: QWord;
   hasher: TSynHasher;
 begin
@@ -1459,6 +1490,7 @@ begin
   exp322 := 0;
   exp323 := 0;
   exp324 := 0;
+  exp325 := 0;
   exp641 := 0;
   exp642 := 0;
   for unalign := 0 to HASHALIGN - 1 do
@@ -1471,6 +1503,7 @@ begin
     Check(Hash32Test(P, @xxHash32, exp323));
     if Assigned(AesNiHash32) then
       Check(Hash32Test(P, @AesNiHash32, exp324));
+    Check(Hash32Test(P, @crc32fast, exp325));
     Check(Hash64Test(P, @crc32cTwice, exp641));
     if Assigned(AesNiHash64) then
       Check(Hash64Test(P, @AesNiHash64, exp642));
@@ -1647,6 +1680,9 @@ begin
   b64 := BinToBase64(tmp);
   Check(IsBase64(b64));
   Check(Base64ToBin(b64) = tmp);
+  b64 := NetBinToBase64(tmp);
+  Check(IsBase64(b64));
+  Check(Base64ToBin(b64) = tmp);
   CheckEqual(BinToBase58('Hello World!'), '2NEpo7TZRRrLZSi2U', 'b58-1');
   CheckEqual(BinToBase58('The quick brown fox jumps over the lazy dog.'),
     'USm3fpXnKG5EUBx2ndxBDMPVciP5hGey2Jh4NDv6gmeo1LkMeiKrLJUUBk6Z', 'b58-2');
@@ -1680,6 +1716,7 @@ begin
     b64 := BinToBase64(tmp);
     Check((tmp = '') or IsBase64(b64));
     Check(Base64ToBin(b64) = tmp);
+    CheckEqual(NetBinToBase64(tmp), b64);
     if tmp <> '' then
     begin
       L := length(b64);
@@ -1728,10 +1765,7 @@ begin
   CheckEqual(length(tmp2), length(tmp));
   Check(EqualBuf(tmp, tmp2), 'tmp=tmp2'); // tmp = tmp2 fails on FPC :(
   tmp2 := Zeroed(UnZeroed(tmp));
-  {$ifdef FPC}
-  SetCodePage(tmp2, StringCodePage(tmp)); // circumvent FPC inconsistency/bug
-  {$endif FPC}
-  Check(tmp2 = tmp, 'unz1MB');
+  Check(CompareBuf(tmp2, tmp) = 0, 'unz1MB');
   b64 := '';
   tmp2 := '';
   SetLength(b64, BinToBase64Length(length(tmp)));
@@ -1866,6 +1900,19 @@ begin
   backup := CpuFeatures;
   {$endif CPUINTEL}
   Check(AesTablesTest, 'Internal Tables');
+  CheckEqual(SizeOf(TMd5Buf), SizeOf(TMd5Digest));
+  CheckEqual(1 shl AesBlockShift, SizeOf(TAesBlock));
+  CheckEqual(SizeOf(TAes), AES_CONTEXT_SIZE);
+  Check(AES_CONTEXT_SIZE <= 300); // see mormot.db.raw.sqlite3.static KEYLENGTH
+  {$ifndef PUREMORMOT2}
+  CheckEqual(SizeOf(TAesFullHeader), SizeOf(TAesBlock));
+  {$endif PUREMORMOT2}
+  CheckEqual(SizeOf(TSha1), SHA_CONTEXT_SIZE);
+  CheckEqual(SizeOf(TSha256), SHA_CONTEXT_SIZE);
+  CheckEqual(SizeOf(TSha256), SizeOf(TSha1));
+  Check(SizeOf(TSha512) > SizeOf(TSha256));
+  Check(SizeOf(TSha3) > SizeOf(TSha512));
+  Check(SizeOf(TSha3) > SizeOf(THmacSha512));
   SetLength(orig, MAX);
   SetLength(crypted, MAX + 256);
   st := '1234essai';
@@ -2601,13 +2648,14 @@ begin
       end;
       // force file refresh (from previously bak state)
       Check(not dig.RefreshFile);
-      FileFromString(bak, fn, false, Now - 1); // as previous day to refresh
-      Check(dig.RefreshFile);
-      Check(not dig.Modified);
+      FileFromString(bak, fn);
+      FileSetDateFromUnixUtc(fn, UnixTimeUtc - SecsPerDay); // as previous day
+      Check(dig.RefreshFile, 'RefreshFile');
+      Check(not dig.Modified, 'not Modified');
       for u := 0 to high(users) do
         Check((dig.CheckCredential(users[u], pwds[u])  = asrMatch) =
               ((u and 7) <> 0), 'check8');
-      Check(length(users) <> dig.Count);
+      Check(length(users) <> dig.Count, 'users<>count');
       // validate GetUsers method
       users2 := dig.GetUsers;
       CheckEqual(length(users2), dig.Count);
@@ -2641,12 +2689,14 @@ var
   cip: TCryptCipherAlgo;
   asy: TCryptAsym;
   en, de: ICryptCipher;
+  caa: TCryptAsymAlgo;
   crt: TCryptCertAlgo;
   c1, c2, c3, c4: ICryptCert;
   fields: TCryptCertFields;
   str: TCryptStoreAlgo;
   st1, st2, st3: ICryptStore;
   cpe: TCryptCertPerUsage;
+  crr: TCryptCertRevocationReason;
   alg: TCryptAlgos;
   fmt: TCryptCertFormat;
   cv: TCryptCertValidity;
@@ -2766,16 +2816,27 @@ begin
     asy := alg[a] as TCryptAsym;
     NotifyProgress([asy.AlgoName]);
     Check(mormot.crypt.secure.Asym(asy.AlgoName) = asy);
-    timer.STart;
-    asy.GeneratePem(pub, priv, '');
-    Check(pub <> '');
-    Check(priv <> '');
-    asy.GeneratePem(pub2, priv2, '');
-    NotifyTestSpeed('%.Generate', [asy], 2, 0, @timer, {onlylog=}true);
-    Check(pub2 <> '');
-    Check(priv2 <> '');
-    Check(pub <> pub2);
-    Check(priv <> priv2);
+    {$ifndef CATALOGALLGENERATE}
+    if (asy.AlgoName[2] = 's') and
+       (asy.AlgoName[1] in ['p', 'r']) then
+    begin
+      pub := _rsapub; // don't validate the very slow RSA keypair generation
+      priv := _rsapriv;
+    end
+    else
+    {$endif CATALOGALLGENERATE}
+    begin
+      timer.Start;
+      asy.GeneratePem(pub, priv, '');
+      Check(pub <> '');
+      Check(priv <> '');
+      asy.GeneratePem(pub2, priv2, '');
+      NotifyTestSpeed('%.Generate', [asy], 2, 0, @timer, {onlylog=}true);
+      Check(pub2 <> '');
+      Check(priv2 <> '');
+      Check(pub <> pub2);
+      Check(priv <> priv2);
+    end;
     CheckUtf8(asy.Sign(n, priv, s), asy.AlgoName);
     Check(s <> '');
     Check(asy.Verify(n, pub, s));
@@ -2792,7 +2853,8 @@ begin
     NotifyProgress([crt.AlgoName]);
     check(PosEx(UpperCase(CAA_JWT[crt.AsymAlgo]), UpperCase(crt.AlgoName)) > 0);
     c1 := crt.New;
-    check(c1.AsymAlgo = crt.AsymAlgo);
+    caa := c1.AsymAlgo;
+    check(caa = crt.AsymAlgo);
     Check(c1.GetSerial = '');
     Check(not c1.HasPrivateSecret);
     Check(c1.IsVoid);
@@ -2811,6 +2873,7 @@ begin
       // X509 and TEccCertificate V2 have proper Usage and Subjects support
       c1.Generate([cuCA, cuDigitalSignature, cuKeyCertSign],
         ' synopse.info, www.synopse.info ', nil);
+      Check(c1.AsymAlgo = caa, 'c1 caa');
       CheckEqual(RawUtf8ArrayToCsv(c1.GetSubjects),
         'synopse.info,www.synopse.info');
       check(c1.GetUsage = [cuCA, cuDigitalSignature, cuKeyCertSign]);
@@ -2930,10 +2993,14 @@ begin
     CheckEqual(c3.GetAuthorityKey, c1.GetSubjectKey);
     Check(c3.IsAuthorizedBy(c1), 'isauthby1');
     Check(not c3.IsAuthorizedBy(c3), 'isauthby2');
-    Check(c3.Verify(nil) = cvUnknownAuthority, 'Verify(nil)');
-    Check(c3.Verify(c1) = cvValidSigned, 'cvValidSigned1');
-    Check(c3.Verify(c2) = cvValidSigned, 'cvValidSigned2');
-    Check(c3.Verify(c3) = cvUnknownAuthority, 'Verify(c3)');
+    cv := c3.Verify(nil);
+    CheckUtf8(cv = cvUnknownAuthority, 'c3.Verify(nil)=%', [ToText(cv)^]);
+    cv := c3.Verify(c1);
+    CheckUtf8(cv = cvValidSigned, 'c3.Verify(c1)=%', [ToText(cv)^]);
+    cv := c3.Verify(c2);
+    CheckUtf8(cv = cvValidSigned, 'c3.Verify(c2)=%', [ToText(cv)^]);
+    cv := c3.Verify(c3);
+    CheckUtf8(cv = cvUnknownAuthority, 'c3.Verify(c3)=%', [ToText(cv)^]);
     n := '0123456789012345012345678901234'; // not a 16-byte multiple length
     r := c3.Encrypt(n);
     if r <> '' then // not all algorithms support encryption (RSA+ES256 only)
@@ -2957,6 +3024,8 @@ begin
       Check(c2.GetUsage = [cuDigitalSignature, cuKeyAgreement]);
     cv := c2.Verify(c1);
     CheckUtf8(cv = cvValidSelfSigned, '%:self1=%', [crt.AlgoName, ToText(cv)^]);
+    if cv <> cvValidSelfSigned then
+      ConsoleWriteRaw(c2.Save(cccCertWithPrivateKey, '', ccfPem)); // for debug
     cv := c2.Verify(nil);
     CheckUtf8(cv = cvValidSelfSigned, 'self2=%', [ToText(cv)^]);
     c2.Sign(c1); // change signature
@@ -2973,7 +3042,7 @@ begin
     end;
     s := c2.SharedSecret(c3);
     check(c3.SharedSecret(c2) = s, 'sharedsecret');
-    check( (s <> '') = (crt.AsymAlgo = caaES256), 'caaES256=sharedsecret');
+    check( (s <> '') = (caa = caaES256), 'caaES256=sharedsecret');
     // c1 has [cuCA, cuDigitalSignature, cuKeyCertSign]
     // c2 has [cuDigitalSignature, cuKeyAgreement]
     // c3 has [cuDataEncipherment, cuKeyAgreement]
@@ -3188,8 +3257,9 @@ begin
       Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2e');
     end;
     // validate CRL on certificates
-    Check(st2.Revoke(c3, crrWithdrawn));
-    Check(st2.IsRevoked(c3) = crrWithdrawn);
+    Check(st2.Revoke(c3, crrWithdrawn), 'rev');
+    crr := st2.IsRevoked(c3);
+    CheckUtf8(crr = crrWithdrawn, 'wdw %', [ToText(crr)^]);
     // note: st2.Save fails with OpenSSL because the CRL is not signed
     // ensure new certs are not recognized by previous stores
     if st3 <> nil then
@@ -3252,27 +3322,31 @@ var
   t: CK_MECHANISM_TYPE;
   r: CK_RV;
 begin
-  Check(1 shl ord(CKF_ERROR_STATE) = $01000000);
-  Check(ord(CKK_SHA512_T_HMAC) = $00000045);
-  Check(cardinal(1 shl ord(CKF_EXTENSION)) = $80000000);
+  CheckEqual(1 shl ord(CKF_ERROR_STATE), $01000000);
+  CheckEqual(ord(CKK_SHA512_T_HMAC), $00000045 + 1);
+  CheckEqual(ToULONG(CKK_SHA512_T_HMAC), $00000045);
+  CheckEqual(ToULONG(CKM_MD5), $0210);
+  CheckEqual(cardinal(1 shl ord(CKF_EXTENSION)), $80000000);
   for o := low(o) to high(o) do
-    Check(OBJECT_CLASS(ToULONG(o)) = o);
+    Check(ToCKO(ToULONG(o)) = o);
   for h := low(h) to high(h) do
-    Check(HW_FEATURE_TYPE(ToULONG(h)) = h);
-  for k := low(k) to high(k) do
-    Check(KEY_TYPE(ToULONG(k)) = k);
+    Check(ToCKH(ToULONG(h)) = h);
+  Check(ToCKK(ToULONG(CKK_none)) = CKK_VENDOR_DEFINED);
+  for k := succ(low(k)) to high(k) do
+    Check(ToCKK(ToULONG(k)) = k);
   for c := low(c) to high(c) do
-    Check(CERTIFICATE_TYPE(ToULONG(c)) = c);
+    Check(ToCKC(ToULONG(c)) = c);
   for a := low(a) to high(a) do
-    Check(ATTRIBUTE_TYPE(ToULONG(a)) = a);
-  for t := low(t) to pred(high(t)) do
+    Check(ToCKA(ToULONG(a)) = a);
+  for t := succ(low(t)) to pred(high(t)) do
     Check(ToULONG(succ(t)) > ToULONG(t));
-  for t := low(t) to high(t) do
-    Check(MECHANISM_TYPE(ToULONG(t)) = t);
+  Check(ToCKM(ToULONG(CKM_none)) = CKM_VENDOR_DEFINED);
+  for t := succ(low(t)) to high(t) do
+    Check(ToCKM(ToULONG(t)) = t);
   for r := low(r) to pred(high(r)) do
     Check(ToULONG(succ(r)) > ToULONG(r));
   for r := low(r) to high(r) do
-    Check(RV(ToULONG(r)) = r);
+    Check(ToCKR(ToULONG(r)) = r);
 end;
 
 const

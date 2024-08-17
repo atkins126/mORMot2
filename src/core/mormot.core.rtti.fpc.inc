@@ -5,7 +5,7 @@
    FPC specific definitions used by mormot.core.rtti.pas implementation
 }
 
-{$ifdef HASDIRECTTYPEINFO}
+{$ifdef HASDIRECTTYPEINFO} // FPC VER3_0 had no redirection
 
 type
   DeRef = pointer;
@@ -192,6 +192,11 @@ begin
   result := DeRef(PTypeData(@self)^.IntfParentRef);
 end;
 
+function InterfaceEntryIsStandard(Entry: PInterfaceEntry): boolean;
+begin
+  result := Entry^.IType = etStandard;
+end;
+
 
 function TRttiProp.TypeInfo: PRttiInfo;
 begin
@@ -212,7 +217,7 @@ end;
 
 function TRttiProp.WriteIsDefined: boolean;
 begin
-  with PPropInfo(@self)^ do // see typinfo.IsWriteableProp
+  with PPropInfo(@self)^ do // see typinfo.IsWritableProp
     result := (SetProc <> nil) and
       ((integer(PropProcs) shr 2) and 3 in [ptField..ptVirtual]);
 end;
@@ -352,6 +357,8 @@ const
   INTEGER_NAME:  string[7] = 'Integer';
   // FPC RTTI names cardinal type as "longword"
   CARDINAL_NAME: string[8] = 'Cardinal';
+  // RawUtf8 is defined as weak system.UTF8String type in mormot.core.base
+  UTF8_NAME: string[7] = 'RawUtf8';
 
 function TRttiInfo.Name: PShortString;
 begin
@@ -360,11 +367,14 @@ begin
   if result <> nil then
     if result <> TypeInfo(integer) then
       if result <> TypeInfo(cardinal) then
-        result := @RawName
+        if result <> TypeInfo(RawUtf8) then
+          result := @RawName     // as stored in RTTI
+        else
+          result := @UTF8_NAME   // instead of 'UTF8String'
       else
-        result := @CARDINAL_NAME
+        result := @CARDINAL_NAME // instead of 'longword'
     else
-      result := @INTEGER_NAME
+      result := @INTEGER_NAME    // instead of 'longint'
   else
     result := @NULCHAR;
 end;
@@ -398,7 +408,7 @@ begin
     info := GetTypeData(init);
   Fields.Count := PRecInitData(info)^.ManagedFieldCount;
   {$ifdef FPC_REQUIRES_PROPER_ALIGNMENT}
-  Fields.Fields := AlignToPtr(Pointer(@PRecInitData(info)^.ManagedFieldCount) +
+  Fields.Fields := AlignToPtr(pointer(@PRecInitData(info)^.ManagedFieldCount) +
     SizeOf(PRecInitData(info)^.ManagedFieldCount));
   {$else}
   Fields.Fields := pointer(PAnsiChar(info) + SizeOf(PRecInitData(info)^));
@@ -447,12 +457,43 @@ end;
 
 {$endif FPC_NEWRTTI}
 
+{$ifdef HASEXTRECORDRTTI} // read enhanced RTTI available since latest trunk
+
+function TRttiInfo.RecordAllFields(out RecSize: PtrInt): TRttiRecordAllFields;
+var
+  tab: PExtendedFieldTable;
+  ent: PExtendedFieldEntry;
+  i: integer;
+begin
+  result := nil; // reset any previous list
+  tab := PRecordData(GetTypeData(@self))^.ExtendedFields;
+  if (tab = nil) or
+     (tab^.FieldCount = 0) then
+    exit; // no extended RTTI
+  SetLength(result, tab^.FieldCount);
+  for i := 0 to tab^.FieldCount - 1 do
+  begin
+    ent := tab^.Field[i];
+    with result[i] do
+    begin
+      TypeInfo := DeRef(ent^.FieldType);
+      Offset := ent^.FieldOffset;
+      Name := ent^.Name;
+      if Name = nil then
+        Name := @NULCHAR; // avoid unexpected GPF on unsufficient RTTI
+    end;
+  end;
+end;
+
+{$else}
 
 function TRttiInfo.RecordAllFields(out RecSize: PtrInt): TRttiRecordAllFields;
 begin
   RecSize := RecordSize;
-  Finalize(result{%H-}); // enhanced RTTI not available yet on FPC
+  result := nil; // extended record information available on latest trunk only
 end;
+
+{$endif HASEXTRECORDRTTI}
 
 function TRttiInfo.IsQWord: boolean;
 begin
@@ -473,7 +514,7 @@ end;
 
 function TRttiInfo.DynArrayItemType: PRttiInfo;
 begin
-  result := DeRef(GetTypeData(@self)^.elTypeRef);
+  result := DeRef(GetTypeData(@self)^.elTypeRef); // nil for unmanaged types
 end;
 
 function TRttiInfo.DynArrayItemTypeExtended: PRttiInfo;
@@ -487,18 +528,15 @@ begin
   end;
 end;
 
-function TRttiInfo.ArrayItemType(out aDataCount, aDataSize: PtrInt): PRttiInfo;
+function TRttiInfo.ArrayItemTypeExtended(out aDataCount, aDataSize: PtrInt): PRttiInfo;
 var
   info: ^TArrayTypeData;
 begin
+  // nfo^.DimCount=1 is not tested explicitly -> assume single dimension array
   info := @GetTypeData(@self)^.ArrayData;
   aDataCount := info^.ElCount;
   aDataSize := info^.Size {$ifdef VER2_6} * info^.ElCount {$endif};
-  result := DeRef(info^.ElTypeRef);
-  if (info^.DimCount <> 1) or
-     (result = nil) or
-     not (result^.Kind in rkManagedTypes) then
-    result := nil;
+  result := DeRef(info^.ElTypeRef); // may be nil for old Delphi unmanaged types
 end;
 
 function TRttiInfo.ArraySize: PtrInt;
@@ -516,7 +554,7 @@ function GetPublishedMethods(Instance: TObject;
   type
     TMethodInfo = packed record
       Name: PShortString;
-      Addr: Pointer;
+      Addr: pointer;
     end;
   var
     Table: PIntegerArray;
@@ -637,7 +675,7 @@ const
     6,   // rkLString
     7,   // rkWString
     8,   // rkVariant
-    0,   // rkArray
+    2,   // rkArray
     9,   // rkRecord
     8,   // rkInterface
     10,  // rkClass
@@ -703,7 +741,7 @@ begin
   rel^ := jmp - PtrUInt(rel) - 4;
 end;
 
-procedure _ansistr_decr_ref(var p: Pointer); nostackframe; assembler;
+procedure _ansistr_decr_ref(var p: pointer); nostackframe; assembler;
 asm
         mov     rax, qword ptr [p]
         xor     edx, edx
@@ -894,7 +932,7 @@ begin
   fpc_freemem(p);
 end;
 
-procedure _dynarray_decr_ref(var p: Pointer; info: pointer); nostackframe; assembler;
+procedure _dynarray_decr_ref(var p: pointer; info: pointer); nostackframe; assembler;
 asm
         mov     rax, qword ptr [p]
         test    rax, rax

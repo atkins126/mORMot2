@@ -436,7 +436,7 @@ end;
 {  MMX 32-bit assembler version based on optimized SHA-3 kernel by Eric Grange
    https://www.delphitools.info/2016/04/19/new-sha-3-permutation-kernel }
 
-procedure KeccakPermutationKernel(B, A, C: Pointer);
+procedure KeccakPermutationKernel(B, A, C: pointer);
   {$ifdef FPC}nostackframe; assembler;{$endif}
 asm
         add     edx, 128
@@ -1496,7 +1496,7 @@ asm // eax=TAesContext ecx=len xmm7=IV esi=BufIn edi=BufOut
         jnz    @s
 end;
 
-procedure MakeDecrKeyAesNi(Rounds: integer; RK: Pointer);
+procedure MakeDecrKeyAesNi(Rounds: integer; RK: pointer);
   {$ifdef FPC}nostackframe; assembler;{$endif}
 asm // eax=Rounds edx=RK
         sub     eax, 9
@@ -3115,7 +3115,7 @@ end;
 {$ifdef USEAESNIHASH}
 
 var
-  /// set to random at startup so hash collisions will be harder to engineer
+  // 256 random bytes set at startup to avoid hash flooding
   // - defined as a pointer from GetMemAligned() which is mandatory on Delphi
   AESNIHASHKEYSCHED: pointer;
   AESNIHASHKEYSCHED_: RawByteString;
@@ -3158,7 +3158,7 @@ function _AesNiHash32(seed: cardinal; data: pointer; len: PtrUInt): cardinal;
   {$ifdef FPC} nostackframe; assembler; {$endif}
 asm
         // eax=seed, edx=data, ecx=len
-        movd    xmm0, seed // explicitly zeroing high bits for consistency
+        movd    xmm0, seed     // explicitly zeroing high bits for consistency
         jmp     _AesNiHashXmm0 // returns in both xmm0 and eax
 end;
 

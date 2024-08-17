@@ -9,6 +9,7 @@ unit mormot.net.ws.client;
     WebSockets Bidirectional Client
     - TWebSocketProcessClient Processing Class
     - THttpClientWebSockets Bidirectional REST Client
+    - Socket.IO / Engine.IO Client Protocol over WebSockets
 
   *****************************************************************************
 
@@ -104,22 +105,22 @@ type
     fOnWebSocketsClosed: TNotifyEvent;
     procedure SetReceiveTimeout(aReceiveTimeout: integer); override;
   public
-    /// low-level client WebSockets connection for host and port
+    /// low-level client WebSockets connection factory for host and port
     // - calls Open() then WebSocketsUpgrade() for a given protocol
-    // - with proper error interception and optional logging, returning nil
+    // - with error interception and optional logging, returning nil on error
     class function WebSocketsConnect(const aHost, aPort: RawUtf8;
       aProtocol: TWebSocketProtocol; aLog: TSynLogClass = nil;
       const aLogContext: RawUtf8 = ''; const aUri: RawUtf8 = '';
-      const aCustomHeaders: RawUtf8 = '';
-      aTls: boolean = false): THttpClientWebSockets; overload;
-    /// low-level client WebSockets connection for a given URI
-    // - would recognize ws://host:port/uri or wss://host:port/uri over TLS
+      const aCustomHeaders: RawUtf8 = ''; aTls: boolean = false;
+      aTLSContext: PNetTlsContext = nil): THttpClientWebSockets; overload;
+    /// low-level client WebSockets connection factory for a given URI
+    // - would recognize ws://host:port/uri or wss://host:port/uri (over TLS)
     // - calls Open() then WebSocketsUpgrade() for a given protocol
-    // - with proper error interception and optional logging, returning nil
+    // - with error interception and optional logging, returning nil on error
     class function WebSocketsConnect(const aUri: RawUtf8;
       aProtocol: TWebSocketProtocol; aLog: TSynLogClass = nil;
-      const aLogContext: RawUtf8 = '';
-      const aCustomHeaders: RawUtf8 = ''): THttpClientWebSockets; overload;
+      const aLogContext: RawUtf8 = ''; const aCustomHeaders: RawUtf8 = '';
+      aTLSContext: PNetTlsContext = nil): THttpClientWebSockets; overload;
     /// common initialization of all constructors
     // - this overridden method will set the UserAgent with some default value
     constructor Create(aTimeOut: PtrInt = 10000); override;
@@ -180,6 +181,53 @@ type
 
 function ToText(st: TWebSocketProcessClientThreadState): PShortString; overload;
 
+
+{ ******************** Socket.IO / Engine.IO Client Protocol over WebSockets }
+
+type
+  TSocketIONamespaceClient = class(TSocketIONamespace)
+  public
+  end;
+  TSocketIONamespaceClients = array of TSocketIONamespaceClient;
+
+  /// a HTTP/HTTPS client, able to upgrade to Socket.IO over WebSockets
+  // - no polling mode is supported by this class
+  TSocketsIOClient = class(TEngineIOAbstract)
+  protected
+    fClient: THttpClientWebSockets;
+    fNameSpace: TSocketIONamespaceClients;
+    function GetNameSpace(const aNameSpace: RawUtf8): TSocketIONamespaceClient;
+      {$ifdef HASINLINE} inline; {$endif}
+  public
+    /// low-level client WebSockets connection factory for host and port
+    // - calls Open() then SioUpgrade() for the Socket.IO protocol
+    // - with error interception and optional logging, returning nil on error
+    class function SioOpen(const aHost, aPort: RawUtf8;
+      aLog: TSynLogClass = nil; const aLogContext: RawUtf8 = '';
+      const aRoot: RawUtf8 = ''; const aCustomHeaders: RawUtf8 = '';
+      aTls: boolean = false; aTLSContext: PNetTlsContext = nil): TSocketsIOClient; overload;
+    /// low-level client WebSockets connection factory for host and port
+    // - calls Open() then SioUpgrade() for the Socket.IO protocol
+    // - with error interception and optional logging, returning nil on error
+    // - would recognize ws://host:port/uri or wss://host:port/uri (over TLS)
+    // - if no root UI is supplied, default /socket.io/ will be used
+    class function SioOpen(const aUri: RawUtf8;
+      aLog: TSynLogClass = nil; const aLogContext: RawUtf8 = '';
+      const aCustomHeaders: RawUtf8 = '';
+      aTls: boolean = false; aTLSContext: PNetTlsContext = nil): TSocketsIOClient; overload;
+    /// setup this instance with a connected and upgraded websockets client
+    constructor Create(aClient: THttpClientWebSockets); reintroduce;
+    /// finalize this instance
+    destructor Destroy; override;
+    /// return the array of connected namespaces as text
+    function NameSpaces: TRawUtf8DynArray;
+    /// access to a given Socket.IO namespace
+    // - makes a connect if needed
+    function Connect(const aNameSpace: RawUtf8): TSocketIONamespaceClient;
+    /// raw access to the associated WebSockets connection
+    property Client: THttpClientWebSockets
+      read fClient;
+  end;
 
 
 implementation
@@ -306,20 +354,23 @@ end;
 class function THttpClientWebSockets.WebSocketsConnect(
   const aHost, aPort: RawUtf8; aProtocol: TWebSocketProtocol; aLog: TSynLogClass;
   const aLogContext, aUri, aCustomHeaders: RawUtf8;
-  aTls: boolean): THttpClientWebSockets;
+  aTls: boolean; aTLSContext: PNetTlsContext): THttpClientWebSockets;
 var
   error: RawUtf8;
 begin
   result := nil;
   if (aProtocol = nil) or
      (aHost = '') then
-    raise EWebSockets.CreateUtf8('%.WebSocketsConnect(nil)', [self]);
+    EWebSockets.RaiseUtf8('%.WebSocketsConnect(nil)', [self]);
   try
-    result := Open(aHost, aPort, nlTcp, 10000, aTls); // constructor
+    // call socket constructor
+    result := Open(aHost, aPort, nlTcp, 10000, aTls, aTLSContext);
     error := result.WebSocketsUpgrade(
       aUri, '', false, [], aProtocol, aCustomHeaders);
     if error <> '' then
       FreeAndNil(result);
+    if Assigned(aLog) then
+      result.OnLog := aLog.DoLog;
   except
     on E: Exception do
     begin
@@ -338,15 +389,16 @@ end;
 
 class function THttpClientWebSockets.WebSocketsConnect(const aUri: RawUtf8;
   aProtocol: TWebSocketProtocol; aLog: TSynLogClass;
-  const aLogContext, aCustomHeaders: RawUtf8): THttpClientWebSockets;
+  const aLogContext, aCustomHeaders: RawUtf8;
+  aTLSContext: PNetTlsContext): THttpClientWebSockets;
 var
   uri: TUri;
 begin
   if (aProtocol = nil) or
      not uri.From(aUri) then
-    raise EWebSockets.CreateUtf8('%.WebSocketsConnect(nil)', [self]);
-  result := WebSocketsConnect(uri.Server, uri.Port, aProtocol, aLog,
-    aLogContext, uri.Address, aCustomHeaders, IdemPropNameU(uri.Scheme, 'WSS'));
+    EWebSockets.RaiseUtf8('%.WebSocketsConnect(nil)', [self]);
+  result := WebSocketsConnect(uri.Server, uri.Port, aProtocol,
+    aLog, aLogContext, uri.Address, aCustomHeaders, uri.Https, aTLSContext);
 end;
 
 destructor THttpClientWebSockets.Destroy;
@@ -380,7 +432,7 @@ begin
         body := Data;
         if InStream <> nil then
           body := body + StreamToRawByteString(InStream);
-        Ctxt.Prepare(url, method, header, body, DataType, '');
+        Ctxt.PrepareDirect(url, method, header, body, DataType, '');
         FindNameValue(header, 'SEC-WEBSOCKET-REST:', resthead);
         if resthead = 'NonBlocking' then
           block := wscNonBlockWithoutAnswer
@@ -536,6 +588,77 @@ end;
 {$ifdef ISDELPHI20062007}
   {$warnings on}
 {$endif ISDELPHI20062007}
+
+
+{ ******************** Socket.IO / Engine.IO Client Protocol over WebSockets }
+
+{ TSocketsIOClient }
+
+class function TSocketsIOClient.SioOpen(const aHost, aPort: RawUtf8;
+  aLog: TSynLogClass; const aLogContext, aRoot, aCustomHeaders: RawUtf8;
+  aTls: boolean; aTLSContext: PNetTlsContext): TSocketsIOClient;
+var
+  c: THttpClientWebSockets;
+begin
+  c := THttpClientWebSockets.WebSocketsConnect(aHost, aPort,
+    nil, aLog, aLogContext, SocketIOHandshakeUri(aRoot),
+    aCustomHeaders, aTls, aTLSContext);
+  if c = nil then
+    result := nil
+  else
+    result := TSocketsIOClient.Create(c);
+end;
+
+class function TSocketsIOClient.SioOpen(const aUri: RawUtf8;
+  aLog: TSynLogClass; const aLogContext, aCustomHeaders: RawUtf8;
+  aTls: boolean; aTLSContext: PNetTlsContext): TSocketsIOClient;
+var
+  uri: TUri;
+begin
+  if uri.From(aUri) then // detect both https:// and wss:// schemes
+    result := SioOpen(uri.Server, uri.Port, aLog, aLogContext, uri.Address,
+      aCustomHeaders, aTls, aTLSContext)
+  else
+    result := nil;
+end;
+
+constructor TSocketsIOClient.Create(aClient: THttpClientWebSockets);
+begin
+  if (aClient = nil) or
+     (aClient.WebSockets = nil) then
+    ESocketIO.RaiseUtf8('Unexpected %.Create with no WebSockets', [self]);
+  inherited Create;
+  fClient := aClient;
+end;
+
+destructor TSocketsIOClient.Destroy;
+begin
+  ObjArrayClear(fNameSpace);
+  fClient.Free;
+  inherited Destroy;
+end;
+
+function TSocketsIOClient.GetNameSpace(const aNameSpace: RawUtf8): TSocketIONamespaceClient;
+begin
+  result := SocketIOGetNameSpace(pointer(fNameSpace), length(fNameSpace), aNameSpace);
+end;
+
+function TSocketsIOClient.NameSpaces: TRawUtf8DynArray;
+begin
+  if fNameSpaces = nil then
+    fNameSpaces := SocketIOGetNameSpaces(pointer(fNameSpace), length(fNameSpace));
+  result := fNameSpaces;
+end;
+
+function TSocketsIOClient.Connect(const aNameSpace: RawUtf8): TSocketIONamespaceClient;
+begin
+  result := GetNameSpace(aNameSpace);
+  if result <> nil then
+    exit;
+  fNameSpaces := nil; // to be reallocated on need
+
+end;
+
 
 
 end.

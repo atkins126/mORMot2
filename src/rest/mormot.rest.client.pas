@@ -66,7 +66,7 @@ type
   // - should return FALSE if the user pressed cancel or the number of Retry
   // reached a defined limit
   // - here input/output parameters are defined as plain string, to match the
-  // type expected by the client's User Interface, via VCL properties, or
+  // type expected by the client's User Interface, via UI properties, or
   // e.g. from TLoginForm as defined in mORMotUILogin.pas unit
   TOnAuthentificationFailed = function(Retry: integer;
     var aUserName, aPassword: string; out aPasswordHashed: boolean): boolean of object;
@@ -88,16 +88,17 @@ type
   // session_signature parameter value for a given URI
   // - by default, suaCRC32 will compute fast but not cryptographically secure
   // ! crc32(crc32(privatesalt, timestamp, 8), url, urllen)
-  // - suaCRC32C and suaXXHASH will be faster and slightly safer
+  // - suaCRC32C and suaXXHASH are similar non-cryptographic alternatives
   // - but you can select other stronger alternatives, which result will be
   // reduced to 32-bit hexadecimal - suaMD5 will be the fastest cryptographic
-  // hash available on all platforms, for enhanced security, by calling e.g.
+  // hash available on all platforms (but if SHA-NI is available), for enhanced
+  // security, by calling e.g.
   // ! (aServer.AuthenticationRegister(TRestClientAuthenticationDefault) as
   // !   TRestServerAuthenticationDefault).Algorithm := suaMD5;
-  // - suaSHA1, suaSHA256, suaSHA512 and suaSHA3 will be the slowest, to provide
+  // - suaSHA1, suaSHA256, suaSHA512 and suaSHA3 will be slower, and may provide
   // additional level of trust, depending on your requirements: note that
   // since the hash is reduced to 32-bit resolution, those may not provide
-  // higher security than suaMD5
+  // higher security than suaMD5 or suaSHA1
   // - note that SynCrossPlatformRest clients only implements suaCRC32 yet
   TRestAuthenticationSignedUriAlgo = (
     suaCRC32,
@@ -317,7 +318,7 @@ type
   {$endif DOMAINRESTAUTH}
 
   /// store the information about the current session
-  // - as set after a sucessfull TRestClientUri.SetUser() method
+  // - as set after a successful TRestClientUri.SetUser() method
   TRestClientSession = record
   {$ifdef HASINLINE}
   private
@@ -338,7 +339,7 @@ type
     // TAuthGroup ID casted as a pointer) properties - you can retrieve any
     // optional binary data associated with this user via RetrieveBlobFields()
     User: TAuthUser;
-    /// the current session ID as set after a successfull SetUser() method call
+    /// the current session ID as set after a successful SetUser() method call
     // - equals 0 (CONST_AUTHENTICATION_SESSION_NOT_STARTED) if the session
     // is not started yet - i.e. if SetUser() call failed
     // - equals 1 (CONST_AUTHENTICATION_NOT_USED) if authentication mode
@@ -406,6 +407,13 @@ type
       ctxt: TRestClientSideInvoke;
       const method, params, clientDrivenID: RawUtf8;
       out sent, head: RawUtf8); virtual; abstract;
+    /// at Client Side, adjust STATUS and BODY according to the routing scheme
+    // - this method does nothing by default
+    // - could be used to adapt to custom BODY output, e.g. on error handling
+    class procedure ClientSideInvoked(const uri: RawUtf8;
+      ctxt: TRestClientSideInvoke;
+      const method, params, clientDrivenID: RawUtf8;
+      var resp, head: RawUtf8; var status: integer); virtual;
     /// could be overriden to notify advances routing features
     // - default returns [] but TRestClientRoutingRest includes csiAsOctetStream
     class function Supports: TRestClientSideInvoke; virtual;
@@ -538,11 +546,12 @@ type
     function FindAndRelease(aID: TRestClientCallbackID): boolean;
   end;
 
-  /// a generic REpresentational State Transfer (REST) client with URI
+  /// abstract REpresentational State Transfer (REST) client with URI
   // - URI are standard Collection/Member implemented as ModelRoot/TableName/TableID
   // - handle RESTful commands GET POST PUT DELETE LOCK UNLOCK
   // - never call this abstract class, but inherit and override the
   // InternalUri/InternalIsOpen/InternalOpen/InternalClose virtual abstract methods
+  // - do NOT use this abstract class, but one of its fully implemented children
   TRestClientUri = class(TRest)
   protected
     fClient: IRestOrmClient;
@@ -816,7 +825,7 @@ type
     // internal methods used by mormot.soa.client
     function FakeCallbackRegister(Sender: TServiceFactory;
       const Method: TInterfaceMethod; const ParamInfo: TInterfaceMethodArgument;
-      ParamValue: Pointer): TRestClientCallbackID; virtual;
+      ParamValue: pointer): TRestClientCallbackID; virtual;
     function FakeCallbackUnregister(Factory: TInterfaceFactory;
       FakeCallbackID: TRestClientCallbackID; Instance: pointer): boolean; virtual;
     property FakeCallbacks: TRestClientCallbacks
@@ -837,12 +846,12 @@ type
     // of high activity
     // - map TOnTextWriterEcho signature, so that you will be able to set e.g.:
     // ! TSqlLog.Family.EchoCustom := aClient.ServerRemoteLog;
-    function ServerRemoteLog(Sender: TEchoWriter; Level: TSynLogInfo;
+    function ServerRemoteLog(Sender: TEchoWriter; Level: TSynLogLevel;
       const Text: RawUtf8): boolean; overload; virtual;
     /// internal method able to emulate a call to TSynLog.Add.Log()
     // - will compute timestamp and event text, than call the overloaded
     // ServerRemoteLog() method
-    function ServerRemoteLog(Level: TSynLogInfo; const FormatMsg: RawUtf8;
+    function ServerRemoteLog(Level: TSynLogLevel; const FormatMsg: RawUtf8;
       const Args: array of const): boolean; overload;
     /// start to send all logs to the server 'RemoteLog' method-based service
     // - will associate the EchoCustom callback of the running log class to the
@@ -900,7 +909,7 @@ type
     // specified by the server at session handshake
     property ComputeSignature: TOnRestAuthenticationSignedUriComputeSignature
       read fComputeSignature write fComputeSignature;
-    /// the current session information as set by a successfull SetUser() call
+    /// the current session information as set by a successful SetUser() call
     property Session: TRestClientSession
       read fSession;
     /// the current user as set by SetUser() method
@@ -926,11 +935,11 @@ type
     /// set a HWND/WM_* pair to let interface-based services notification
     // callbacks be processed safely in the main UI thread, via Windows messages
     // - by default callbacks are executed in the transmission thread, e.g.
-    // the WebSockets client thread: using VCL Synchronize() method may
+    // the WebSockets client thread: using UI Synchronize() method may
     // trigger some unexpected race conditions, e.g. when asynchronous
     // notifications are received during a blocking REST command - this
     // message-based mechanism will allow safe and easy notification for
-    // any VCL client application
+    // any UI client application
     // - the associated ServiceNotificationMethodExecute() method shall be
     // called in the client HWND TForm for the defined WM_* message
     procedure ServiceNotificationMethodViaMessages(hWnd: HWND; Msg: cardinal);
@@ -984,11 +993,11 @@ type
     // - the callback could return false to close the connection
     property OnAfterCall: TOnClientCall
       read fOnAfterCall write fOnAfterCall;
-    /// this Event is called if Uri() was not successfull
+    /// this Event is called if Uri() was not successful
     // - the callback could return true to retry the call
     property OnError: TOnClientCall
       read fOnError write fOnError;
-    /// this Event is called if Uri() was not successfull
+    /// this Event is called if Uri() was not successful
     // - the callback will have all needed information
     // - e.g. Call^.OutStatus=HTTP_NOTIMPLEMENTED indicates a broken connection
     property OnFailed: TOnClientFailed
@@ -1022,7 +1031,7 @@ type
     // into LastErrorCode/LastErrorMessage properties
     property LastErrorException: ExceptClass
       read fLastErrorException;
-    /// maximum additional retry occurence
+    /// maximum additional retry occurrence
     // - defaut is 1, i.e. will retry once
     // - set OnAuthentificationFailed to nil in order to avoid any retry
     property MaximumAuthentificationRetry: integer
@@ -1039,7 +1048,7 @@ type
     // wait and retry until the specified timeout is reached
     property ConnectRetrySeconds: integer
       read fConnectRetrySeconds write fConnectRetrySeconds;
-    /// the current session ID as set after a successfull SetUser() method call
+    /// the current session ID as set after a successful SetUser() method call
     // - equals 0 (CONST_AUTHENTICATION_SESSION_NOT_STARTED) if the session
     // is not started yet - i.e. if SetUser() call failed
     // - equals 1 (CONST_AUTHENTICATION_NOT_USED) if authentication mode
@@ -1176,7 +1185,7 @@ type
       aServerUnregister: boolean = false); virtual;
     /// just a wrapper to reset the internal Event state to evNone
     // - may be used to re-use the same TBlockingCallback instance, after
-    // a successfull WaitFor/CallbackFinished process
+    // a successful WaitFor/CallbackFinished process
     // - returns TRUE on success (i.e. status was not beWaiting)
     // - if there is a WaitFor currently in progress, returns FALSE
     function Reset: boolean; virtual;
@@ -1488,8 +1497,8 @@ begin
   begin
     fSession.LastTick64 := GetTickCount64;
     nonce := CardinalToHexLower(fSession.LastTick64 shr 8); // 256 ms resolution
-    sign := Sender.fComputeSignature(fSession.PrivateKey, Pointer(nonce),
-      Pointer(blankURI), length(blankURI));
+    sign := Sender.fComputeSignature(fSession.PrivateKey, pointer(nonce),
+      pointer(blankURI), length(blankURI));
     Call.url := Call.url + fSession.IDHexa8 + nonce + CardinalToHexLower(sign);
   end;
 end;
@@ -1528,8 +1537,8 @@ begin
   if (Sender <> nil) and
      (Sender.Session.ID <> 0) and
      (Sender.Session.User <> nil) then
-    Call.InHead := TrimU(Call.InHead + // session ID transmitted as HTTP cookie
-      (#13#10'Cookie: ' + REST_COOKIE_SESSION + '=') + Sender.Session.IDHexa8);
+    AppendLine(Call.InHead, [('Cookie: ' + REST_COOKIE_SESSION + '='),
+      Sender.Session.IDHexa8]); // session ID transmitted as HTTP cookie
 end;
 
 class function TRestClientAuthenticationHttpAbstract.ClientSetUser(
@@ -1545,8 +1554,7 @@ begin
      (Sender = nil) then
     exit;
   if aPasswordKind <> passClear then
-    raise ERestException.CreateUtf8(
-      '%.ClientSetUser(%) expects passClear', [self, Sender]);
+    ERestException.RaiseUtf8('%.ClientSetUser(%) expects passClear', [self, Sender]);
   Sender.SessionClose; // ensure Sender.SessionUser=nil
   try
     // inherited ClientSetUser() won't fit with server's Auth() method
@@ -1642,6 +1650,13 @@ end;
 { ************ TRestClientRoutingRest/TRestClientRoutingJsonRpc Routing Schemes }
 
 { TRestClientRouting }
+
+class procedure TRestClientRouting.ClientSideInvoked(const uri: RawUtf8;
+  ctxt: TRestClientSideInvoke; const method, params, clientDrivenID: RawUtf8;
+  var resp, head: RawUtf8; var status: integer);
+begin
+  // nothing to do by default
+end;
 
 class function TRestClientRouting.Supports: TRestClientSideInvoke;
 begin
@@ -1922,7 +1937,7 @@ begin
     if aServicesRouting <> fServicesRouting then
       if (aServicesRouting = nil) or
          (aServicesRouting = TRestClientRouting) then
-         raise EServiceException.CreateUtf8('Unexpected %.SetRoutingClass(%)',
+         EServiceException.RaiseUtf8('Unexpected %.SetRoutingClass(%)',
            [self, aServicesRouting])
       else
       begin
@@ -1993,7 +2008,7 @@ begin
   else
   begin
     fLastErrorException := PPointer(E)^;
-    fLastErrorMessage := ObjectToJsonDebug(E);
+    ObjectToJson(E, fLastErrorMessage, TEXTWRITEROPTIONS_DEBUG);
   end;
   if Assigned(fOnFailed) then
     fOnFailed(self, E, Call);
@@ -2007,10 +2022,10 @@ end;
 
 function TRestClientUri.{%H-}FakeCallbackRegister(Sender: TServiceFactory;
   const Method: TInterfaceMethod; const ParamInfo: TInterfaceMethodArgument;
-  ParamValue: Pointer): TRestClientCallbackID;
+  ParamValue: pointer): TRestClientCallbackID;
 begin
-  raise EServiceException.CreateUtf8('% does not support interface parameters ' +
-    'for %.%(%: %): consider using another kind of client',
+  raise EServiceException.CreateUtf8('% does not support interface ' +
+    'parameters for %.%(%: %): consider using another kind of client',
     [self, Sender.InterfaceFactory.InterfaceName, Method.Uri,
      ParamInfo.ParamName^, ParamInfo.ArgTypeName^]);
 end;
@@ -2104,7 +2119,7 @@ begin
   aUser := nil; // now owned by this instance
   if fSession.ServerTimeout > 0 then
   begin
-    // call _ping_ every half timeout period
+    // call _ping_ every half of the timeout period (received as minutes)
     period := fSession.ServerTimeout * (60 div 2);
     if period > 25 * 60 then
       // default REST heartbeat at least every 25 minutes
@@ -2143,7 +2158,7 @@ begin
        (isDestroying in fInternalState) then
       exit;
     retry := 0;
-    max := fConnectRetrySeconds * 1000;
+    max := fConnectRetrySeconds * MilliSecsPerSec;
     if max = 0 then
       started := 0
     else
@@ -2213,6 +2228,10 @@ end;
 
 constructor TRestClientUri.Create(aModel: TOrmModel);
 begin
+  // avoid coder confusion if this abstract class is instantiated
+  if PClass(self)^ = TRestClientUri then
+    ERestException.RaiseUtf8('Abstract %.Create: use an inherited class', [self]);
+  // setup this client class
   inherited Create(aModel);
   fMaximumAuthentificationRetry := 1;
   fComputeSignature := TRestClientAuthenticationSignedUri.ComputeSignatureCrc32;
@@ -2226,8 +2245,7 @@ end;
 destructor TRestClientUri.Destroy;
 var
   t, i: PtrInt;
-  aID: TID;
-  Table: TOrmClass;
+  tounlock: TIDDynArray; // need a private local copy
 begin
   include(fInternalState, isDestroying);
   if SynLogFileFreeing then // may be owned by a TSynLogFamily
@@ -2237,18 +2255,13 @@ begin
   {$endif OSWINDOWS}
   FreeAndNilSafe(fFakeCallbacks);
   try
-    // unlock all still locked records by this client
+    // unlock all records still locked by this client
     if fModel <> nil then
-      for t := 0 to high(fModel.Locks) do
+      for t := 0 to length(fModel.Locks) - 1 do
       begin
-        Table := fModel.Tables[t];
-        with fModel.Locks[t] do
-          for i := 0 to Count - 1 do
-          begin
-            aID := IDs[i];
-            if aID <> 0 then // 0 is empty after unlock
-              fOrm.UnLock(Table, aID);
-          end;
+        tounlock := fModel.Locks[t].LockedIDs;
+        for i := 0 to length(tounlock) - 1 do
+          fOrm.UnLock(fModel.Tables[t], tounlock[i]); // notify the server
       end;
     SessionClose; // if not already notified
   finally
@@ -2274,7 +2287,7 @@ procedure TRestClientUri.SetOrmInstance(aORM: TRestOrmParent);
 begin
   inherited SetOrmInstance(aORM); // set fOrm
   if not fOrmInstance.GetInterface(IRestOrmClient, fClient) then
-    raise ERestException.CreateUtf8('%.Create with invalid %', [self, fOrmInstance]);
+    ERestException.RaiseUtf8('%.Create with invalid %', [self, fOrmInstance]);
   // enable redirection of Uri() from IRestOrm/IRestOrmClient into this class
   (fOrmInstance as TRestOrmClientUri).Uri := URI;
 end;
@@ -2450,7 +2463,7 @@ begin
         if Ctxt.OutHead = '' then
         begin
           // <>'' if set via TServiceCustomAnswer
-          WR.Add(']', '}');
+          WR.AddDirect(']', '}');
           Ctxt.OutStatus := HTTP_SUCCESS;
         end;
         Ctxt.OutBody := WR.Text;
@@ -2467,7 +2480,7 @@ begin
     on E: Exception do
     begin
       Ctxt.OutHead := '';
-      Ctxt.OutBody := ObjectToJsonDebug(E);
+      ObjectToJson(E, Ctxt.OutBody, TEXTWRITEROPTIONS_DEBUG);
       Ctxt.OutStatus := HTTP_SERVERERROR;
     end;
   end;
@@ -2490,7 +2503,7 @@ var
     if fSession.Authentication <> nil then
       fSession.Authentication.ClientSessionSign(self, Call);
     if fSession.HttpHeader <> '' then
-      Call.InHead := TrimU(Call.InHead + #13#10 + fSession.HttpHeader);
+      AppendLine(Call.InHead, [fSession.HttpHeader]);
     if SendData <> nil then
       Call.InBody := SendData^;
     if Assigned(fOnIdle) then
@@ -2522,7 +2535,7 @@ begin
   end;
   fLastErrorMessage := '';
   fLastErrorException := nil;
-  if fServerTimestamp.Offset = 0 then
+  if fServerTimestampOffset = 0 then
   begin
     if not ServerTimestampSynchronize then
     begin
@@ -2614,7 +2627,7 @@ begin
       aResponseHead^ := header;
     if (log <> nil) and
        (aResponse <> '') and
-       (sllServiceReturn in fLogFamily.Level) then
+       (sllServiceReturn in fLogLevel) then
       if IsHtmlContentTypeTextual(pointer(header)) then
         log.Log(sllServiceReturn, aResponse, self, MAX_SIZE_RESPONSE_LOG)
       else
@@ -2656,7 +2669,7 @@ begin
   begin
     u := fModel.GetUriCallBack(aMethodName, aTable, aID);
     log := fLogClass.Enter('Callback %', [u], self);
-    m := MethodText(method);
+    m := RawUtf8(ToText(method));
     result := Uri(u, m, @aResponse, aResponseHead, @aSentData);
     InternalLog('% result=% resplen=%',
       [m, result, length(aResponse)], sllServiceReturn);
@@ -2679,7 +2692,7 @@ function TRestClientUri.ServiceRegister(const aInterfaces: array of PRttiInfo;
   aInstanceCreation: TServiceInstanceImplementation;
   const aContractExpected: RawUtf8): boolean;
 begin
-  result := False;
+  result := false;
   if (self = nil) or
      (high(aInterfaces) < 0) then
     exit;
@@ -2800,7 +2813,7 @@ begin
   result := false;
   if self = nil then
     exit;
-  fServerTimestamp.Offset := 0.0001; // avoid endless recursive call
+  fServerTimestampOffset := 0.0001; // avoid endless recursive call
   try
     status := CallBackGet('timestamp', [], resp);
     result := (status = HTTP_SUCCESS) and
@@ -2814,12 +2827,12 @@ begin
     end;
   finally
     if not result then
-      fServerTimestamp.Offset := 0; // allow retrial
+      fServerTimestampOffset := 0; // allow retrial
   end;
 end;
 
 function TRestClientUri.ServerRemoteLog(Sender: TEchoWriter;
-  Level: TSynLogInfo; const Text: RawUtf8): boolean;
+  Level: TSynLogLevel; const Text: RawUtf8): boolean;
 begin
   if fRemoteLogThread = nil then
     result := InternalRemoteLogSend(Text)
@@ -2830,7 +2843,7 @@ begin
   end;
 end;
 
-function TRestClientUri.ServerRemoteLog(Level: TSynLogInfo;
+function TRestClientUri.ServerRemoteLog(Level: TSynLogLevel;
   const FormatMsg: RawUtf8; const Args: array of const): boolean;
 begin
   result := ServerRemoteLog(nil, Level, FormatUtf8('%00%    %',
@@ -2846,10 +2859,10 @@ begin
   SetLogClass(TSynLog.Void); // this client won't log anything
   if not ServerRemoteLog(sllClient, 'Remote Client % Connected', [self]) then
     // first test server without threading
-    raise ERestException.CreateUtf8('%.ServerRemoteLogStart: Connection ' +
+    ERestException.RaiseUtf8('%.ServerRemoteLogStart: Connection ' +
       'to RemoteLog server impossible'#13#10'%', [LastErrorMessage]);
   if fRemoteLogThread <> nil then
-    raise ERestException.CreateUtf8('%.ServerRemoteLogStart twice', [self]);
+    ERestException.RaiseUtf8('%.ServerRemoteLogStart twice', [self]);
   fRemoteLogThread := TRemoteLogThread.Create(self);
   fRemoteLogClass := aLogClass.Add;
   aLogClass.Family.EchoRemoteStart(self, ServerRemoteLog, aClientOwnedByFamily);
@@ -2988,7 +3001,7 @@ var
 begin
   h := LibraryOpen(LibraryName);
   if h = 0 then
-    raise ERestException.CreateUtf8('%.Create: LoadLibrary(%) failed',
+    ERestException.RaiseUtf8('%.Create: LoadLibrary(%) failed',
       [self, LibraryName]);
   fRequest := LibraryResolve(h, 'LibraryRequest');
   call.Init;
@@ -2997,7 +3010,7 @@ begin
   begin
     @fRequest := nil;
     LibraryClose(h);
-    raise ERestException.CreateUtf8(
+    ERestException.RaiseUtf8(
       '%.Create: % doesn''t export a valid LibraryRequest() function (ret=%)',
       [self, LibraryName, call.OutStatus]);
   end;

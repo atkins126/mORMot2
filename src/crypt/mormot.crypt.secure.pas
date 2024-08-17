@@ -571,10 +571,10 @@ type
       aNoInit: boolean = false); overload;
     /// one-step digital signature of a buffer as lowercase hexadecimal string
     function Full(aAlgo: TSignAlgo; const aSecret: RawUtf8;
-      aBuffer: Pointer; aLen: integer): RawUtf8; overload;
+      aBuffer: pointer; aLen: integer): RawUtf8; overload;
     /// one-step digital signature of a buffer with PBKDF2 derivation
     function Full(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
-      aSecretPbkdf2Round: integer; aBuffer: Pointer; aLen: integer): RawUtf8; overload;
+      aSecretPbkdf2Round: integer; aBuffer: pointer; aLen: integer): RawUtf8; overload;
     /// convenient wrapper to perform PBKDF2 safe iterative key derivation
     procedure Pbkdf2(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
       aSecretPbkdf2Round: integer; out aDerivatedKey: THash512Rec); overload;
@@ -639,7 +639,7 @@ type
     // - returns false on unknown/unsupported algorithm
     function Init(aAlgo: THashAlgo): boolean;
     /// hash the supplied memory buffer
-    procedure Update(aBuffer: Pointer; aLen: integer); overload;
+    procedure Update(aBuffer: pointer; aLen: integer); overload;
     /// hash the supplied string content
     procedure Update(const aBuffer: RawByteString); overload;
       {$ifdef HASINLINE}inline;{$endif}
@@ -650,7 +650,7 @@ type
     /// set the resulting hash into a binary buffer, and the size as result
     function Final(out aDigest: THash512Rec): integer; overload;
     /// one-step hash computation of a buffer as lowercase hexadecimal string
-    function Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUtf8; overload;
+    function Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer): RawUtf8; overload;
     /// one-step hash computation of a buffer as lowercase hexadecimal string
     function Full(aAlgo: THashAlgo; const aBuffer: RawByteString): RawUtf8; overload;
     /// one-step hash computation of several buffers as lowercase hexadecimal string
@@ -658,7 +658,7 @@ type
       var aResult: RawUtf8); overload;
     /// one-step hash computation of a buffer as a binary buffer
     // - returns the written aDigest size in bytes
-    function Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer;
+    function Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer;
       out aDigest: THash512Rec): integer; overload;
     /// fill a buffer with the MGF1 seed deriviation, following RFC 2437
     // - a Mask Generation Function expands aSeed/aSeedLen into aDestLen buffer
@@ -675,65 +675,68 @@ type
   TStreamRedirectSynHasher = class(TStreamRedirect)
   protected
     fHash: TSynHasher;
-    class function GetAlgo: THashAlgo; virtual; abstract;
     procedure DoHash(data: pointer; len: integer); override;
   public
     constructor Create(aDestination: TStream; aRead: boolean = false); override;
     function GetHash: RawUtf8; override;
+    class function GetAlgo: THashAlgo; virtual; abstract;
     class function GetHashFileExt: RawUtf8; override;
   end;
 
+  /// meta-class of TStreamRedirectSynHasher
+  // - to access e.g. GetAlgo/GetHashFileExt class methods
+  TStreamRedirectSynHasherClass = class of TStreamRedirectSynHasher;
+
   /// TStreamRedirect with MD5 cryptographic hashing
   TStreamRedirectMd5 = class(TStreamRedirectSynHasher)
-  protected
+  public
     class function GetAlgo: THashAlgo; override;
   end;
 
   /// TStreamRedirect with SHA-1 cryptographic hashing
   TStreamRedirectSha1 = class(TStreamRedirectSynHasher)
-  protected
+  public
     class function GetAlgo: THashAlgo; override;
   end;
 
   /// TStreamRedirect with SHA-256 cryptographic hashing
   TStreamRedirectSha256 = class(TStreamRedirectSynHasher)
-  protected
+  public
     class function GetAlgo: THashAlgo; override;
   end;
 
   /// TStreamRedirect with SHA-384 cryptographic hashing
   TStreamRedirectSha384 = class(TStreamRedirectSynHasher)
-  protected
+  public
     class function GetAlgo: THashAlgo; override;
   end;
 
   /// TStreamRedirect with SHA-512 cryptographic hashing
   TStreamRedirectSha512 = class(TStreamRedirectSynHasher)
-  protected
+  public
     class function GetAlgo: THashAlgo; override;
   end;
 
   /// TStreamRedirect with SHA-512/256 cryptographic hashing
   TStreamRedirectSha512_256 = class(TStreamRedirectSynHasher)
-  protected
+  public
     class function GetAlgo: THashAlgo; override;
   end;
 
   /// TStreamRedirect with SHA-3-256 cryptographic hashing
   TStreamRedirectSha3_256 = class(TStreamRedirectSynHasher)
-  protected
+  public
     class function GetAlgo: THashAlgo; override;
   end;
 
   /// TStreamRedirect with SHA-3-512 cryptographic hashing
   TStreamRedirectSha3_512 = class(TStreamRedirectSynHasher)
-  protected
+  public
     class function GetAlgo: THashAlgo; override;
   end;
 
-
   /// the known 32-bit crc algorithms as returned by CryptCrc32()
-  // - ccaCrc32 and ccaAdler32 require mormot.lib.z.pas to be included
+  // - ccaAdler32 requires mormot.lib.z.pas to be included
   // - caDefault may be AesNiHash32(), therefore not persistable between
   // executions, since is randomly seeded at process startup
   // - some cryptographic-level hashes are truncated to 32-bit - caSha1 could
@@ -748,8 +751,21 @@ type
     caMd5,
     caSha1);
 
+const
+  /// convert a THashAlgo into a TStreamRedirectSynHasher class
+  HASH_STREAMREDIRECT: array[THashAlgo] of TStreamRedirectClass = (
+    TStreamRedirectMd5,        // hfMD5
+    TStreamRedirectSha1,       // hfSHA1
+    TStreamRedirectSha256,     // hfSHA256
+    TStreamRedirectSha384,     // hfSHA384
+    TStreamRedirectSha512,     // hfSHA512
+    TStreamRedirectSha512_256, // hfSHA512_256
+    TStreamRedirectSha3_256,   // hfSHA3_256
+    TStreamRedirectSha3_512);  // hfSHA3_512
+
 /// returns the 32-bit crc function for a given algorithm
-// - may return nil, e.g. for caCrc32/caAdler32 when mormot.lib.z is not loaded
+// - may return nil, e.g. for caAdler32 when mormot.lib.z is not loaded
+// - caSha1 has cryptographic level, with high performance on latest SHA-NI CPUs
 function CryptCrc32(algo: TCrc32Algo): THasher;
 
 function ToText(algo: TSignAlgo): PShortString; overload;
@@ -772,7 +788,7 @@ function HashFileRaw(const aFileName: TFileName; aAlgos: THashAlgos): TRawUtf8Dy
 procedure HashFile(const aFileName: TFileName; aAlgos: THashAlgos); overload;
 
 /// one-step hash computation of a buffer as lowercase hexadecimal string
-function HashFull(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUtf8; overload;
+function HashFull(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer): RawUtf8; overload;
 
 /// one-step hash computation of a buffer as lowercase hexadecimal string
 function HashFull(aAlgo: THashAlgo; const aBuffer: RawByteString): RawUtf8; overload;
@@ -1339,7 +1355,7 @@ type
     Crypt: array[byte] of byte;
     /// initialize ephemeral temporary cookie generation
     // - default crc32c is fast and secure enough on most platforms, but you
-    // may consider caDefault or caSha1 on recent Intel/AMD servers
+    // may consider caDefault or caSha1 on recent SHA-NI Intel/AMD servers
     procedure Init(const Name: RawUtf8 = 'mORMot';
       DefaultSessionTimeOutMinutes: cardinal = 0;
       SignAlgo: TCrc32Algo = caCrc32c);
@@ -1628,7 +1644,7 @@ type
 
   /// the supported asymmetric algorithms, following the JWT high-level naming
   // - caaES256, caaES384, caaES512 and caaES256K match OpenSSL EVP_PKEY_EC with
-  // prime256v1, NID_secp384r1, NID_secp512r1 and NID_secp256k1 curves
+  // prime256v1, NID_secp384r1, NID_secp521r1 and NID_secp256k1 curves
   // - caaRS256, caaRS384 and caaRS512 match OpenSSL EVP_PKEY_RSA with
   // SHA-256, SHA-384 and SHA-512 digest method
   // - caaPS256, caaPS384 and caaPS512 match OpenSSL EVP_PKEY_RSA_PSS with
@@ -1685,7 +1701,7 @@ type
     /// verify the RSA or ECC signature of a memory buffer
     function Verify(Algorithm: TCryptAsymAlgo;
       const Data, Sig: RawByteString): boolean; overload;
-    /// as used by TCryptCert.GetKeyParams
+    /// return raw key information as used by TCryptCert.GetKeyParams
     // - for ECC, returns the x,y coordinates
     // - for RSA, x is set to the Exponent (e), and y to the Modulus (n)
     // - return false if there is no compliant key information in the provider
@@ -1703,7 +1719,7 @@ type
   ICryptPrivateKey = interface
     /// unserialized the private key from DER binary or PEM text
     // - this instance should be void, i.e. just created with no prior Load
-    // - will also ensure the private key do match the associated public key
+    // - also ensure the private key do match an associated public key (if not nil)
     // - is able to decode and potentially decrypt a serialized key, with a
     // PKCS#8 Password for OpenSSL, and our proprietary PrivateKeyDecrypt()
     function Load(Algorithm: TCryptKeyAlgo; const AssociatedKey: ICryptPublicKey;
@@ -1986,6 +2002,7 @@ type
     // CN= subject field
     // - can search another Relative Distinguished Name (RDN) e.g. 'O' or 'OU'
     // - if Rdn is a hash, e.g. 'SHA1'/'SHA256', will return the subject digest
+    // - if Rdn is 'DER', will return the raw DER issuer value of this subject
     function GetSubject(const Rdn: RawUtf8 = 'CN'): RawUtf8;
     /// an array of all Subject names covered by this Certificate
     // - e.g. ['synopse.info', 'www.synopse.info']
@@ -2000,6 +2017,7 @@ type
     // - returns by default the CommonName, e.g. 'R3' from a X.509 CN= subject field
     // - can search another Relative Distinguished Name (RDN) e.g. 'O' or 'OU'
     // - if Rdn is a hash, e.g. 'SHA1'/'SHA256', will return the issuer digest
+    // - if Rdn is 'DER', will return the raw DER issuer value of this certificate
     function GetIssuer(const Rdn: RawUtf8 = 'CN'): RawUtf8;
     /// an array of all Subject names covered by the issuer of this Certificate
     // - e.g. read from X.509 v3 Issuer Alternative Names extension
@@ -2087,11 +2105,13 @@ type
     // - this certificate should have the cuDigitalSignature usage
     // - returns '' on failure, e.g. if this Certificate has no private key
     // - returns the binary signature of the Data buffer on success
-    function Sign(Data: pointer; Len: integer): RawByteString; overload;
+    function Sign(Data: pointer; Len: integer;
+      Usage: TCryptCertUsage = cuDigitalSignature): RawByteString; overload;
     /// compute a digital signature of some digital content
     // - will use the private key of this certificate
     // - just a wrapper around the overloaded Sign() function
-    function Sign(const Data: RawByteString): RawByteString; overload;
+    function Sign(const Data: RawByteString;
+      Usage: TCryptCertUsage = cuDigitalSignature): RawByteString; overload;
     /// sign this certificate with the private key of one CA
     // - Authority certificate should have the cuKeyCertSign usage
     procedure Sign(const Authority: ICryptCert); overload;
@@ -2199,7 +2219,7 @@ type
     function Handle: pointer;
     /// access to the low-level implementation handle of the stored private key
     // - e.g. a PEVP_PKEY for OpenSsl, a PEccPrivateKey for mormot.crypt.ecc,
-    // or a TXPrivateKey class for mormot.crypt.x509
+    // or a ICryptPrivateKey weak instance for mormot.crypt.x509
     // - equals nil if there is no associated private key
     function PrivateKeyHandle: pointer;
     /// return the public BigInt values associated to the stored private key
@@ -2224,7 +2244,7 @@ type
   protected
     fLastLoadFromFileName: TFileName;
     fIndexer: TObject; // a TCryptCertAbstractList owner for EnsureCanWrite
-    procedure RaiseError(const Msg: shortstring); overload;
+    procedure RaiseError(const Msg: shortstring); overload; virtual;
     procedure RaiseError(const Fmt: RawUtf8; const Args: array of const); overload;
     procedure RaiseErrorGenerate(const api: ShortString);
     procedure EnsureCanWrite(const Context: shortstring); virtual;
@@ -2263,10 +2283,9 @@ type
     function Load(const Saved: RawByteString; Content: TCryptCertContent;
       const PrivatePassword: SpiUtf8): boolean; virtual; abstract;
     function LoadFromFile(const Source: TFileName; Content: TCryptCertContent;
-      const PrivatePassword: SpiUtf8): boolean;
+      const PrivatePassword: SpiUtf8): boolean; virtual;
     function GetFileName: TFileName; virtual;
-     function Save(Content: TCryptCertContent;
-      const PrivatePassword: SpiUtf8;
+    function Save(Content: TCryptCertContent; const PrivatePassword: SpiUtf8;
       Format: TCryptCertFormat): RawByteString; virtual;
     procedure SaveToFile(const Dest: TFileName; Content: TCryptCertContent;
       const PrivatePassword: SpiUtf8; Format: TCryptCertFormat);
@@ -2274,9 +2293,11 @@ type
     function GetPublicKey: RawByteString; virtual; abstract;
     function GetPrivateKey: RawByteString; virtual; abstract;
     function SetPrivateKey(const saved: RawByteString): boolean; virtual; abstract;
-    function Sign(Data: pointer; Len: integer): RawByteString;
+    function Sign(Data: pointer; Len: integer; Usage: TCryptCertUsage): RawByteString;
       overload; virtual; abstract;
-    function Sign(const Data: RawByteString): RawByteString; overload; virtual;
+    function Sign(const Data: RawByteString;
+      Usage: TCryptCertUsage = cuDigitalSignature): RawByteString;
+      overload; virtual;
     procedure Sign(const Authority: ICryptCert); overload; virtual; abstract;
     function Verify(Sign, Data: pointer; SignLen, DataLen: integer;
       IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity;
@@ -2300,7 +2321,7 @@ type
       const Cipher: RawUtf8): RawByteString; virtual; abstract;
     function SharedSecret(const pub: ICryptCert): RawByteString; virtual;
     function AsymAlgo: TCryptAsymAlgo; virtual;
-    function CertAlgo: TCryptCertAlgo;
+    function CertAlgo: TCryptCertAlgo; virtual;
     function Instance: TCryptCert;
     function Handle: pointer; virtual; abstract;
     function PrivateKeyHandle: pointer; virtual;
@@ -2774,6 +2795,9 @@ const
   /// the known asymmetric algorithms which implement RSA cryptography
   CAA_RSA = [caaRS256, caaRS384, caaRS512, caaPS256, caaPS384, caaPS512];
 
+  /// the known asymmetric algorithms which expects no ASN1_SEQ in JWT/JWS
+  CAA_RAWSIGNATURE = CAA_RSA + [caaEdDSA];
+
   /// the known key algorithms which implement ECC cryptography
   CKA_ECC = [ckaEcc256, ckaEcc384, ckaEcc512, ckaEcc256k, ckaEdDSA];
 
@@ -2840,8 +2864,15 @@ function ToText(u: TCryptCertUsage): PShortString; overload;
 function ToText(u: TCryptCertUsages; from_cu_text: boolean = false): ShortString; overload;
 function ToText(v: TCryptCertValidity): PShortString; overload;
 
+/// return the first usage set, or cuKeyCertSign if [] was supplied
+function GetFirstUsage(u: TCryptCertUsages): TCryptCertUsage;
+
 /// fast case-insensitive check of the 'CN' Relative Distinguished Name identifier
 function IsCN(const Rdn: RawUtf8): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// fast case-insensitive check of the 'DER' fake RDNidentifier
+function IsDer(const Rdn: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// main resolver of the randomness generators
@@ -2960,8 +2991,10 @@ function Store(const name: RawUtf8): ICryptStore;
 
 var
   /// the prefered/default algorithm to be used wth X.509 certificates
-  // - NISTP-256 seems the new default, even if RSA-2048 (i.e. caaRS256) may
-  // still be used for compatiblity with legacy systems
+  // - caaES256 (aka prime256v1 or NISTP-256) seems the new default (faster
+  // and with 128-bit of security), even if RSA-2048 (i.e. caaRS256) may still
+  // be used for compatiblity with legacy systems (but much slower signing and
+  // generation, with only 112-bit of security)
   // - used e.g. by 'x509-store' or 'x509-pki' for its DefaultCertAlgo method
   CryptAlgoDefault: TCryptAsymAlgo = caaES256;
 
@@ -3023,6 +3056,11 @@ var
   // $ CryptCertOpenSsl[caaRS256].New
   // - call RegisterOpenSsl once to initialize this lookup table
   CryptCertOpenSsl: array[TCryptAsymAlgo] of TCryptCertAlgo;
+
+  /// direct access to best known X.509 ICryptCert factories
+  // - may map to CryptCertX509[] if only mormot.crypt.x509.pas is included
+  // - but more standard CryptCertOpenSsl[] will be stored here if available
+  CryptCert: array[TCryptAsymAlgo] of TCryptCertAlgo;
 
 
   (* ICryptStore factories *)
@@ -3176,7 +3214,8 @@ function DerToPem(const der: TCertDer; kind: TPemKind): TCertPem; overload;
 /// convert a single-instance PEM text file into a binary DER
 // - if the supplied buffer doesn't start with '-----BEGIN .... -----'
 // trailer, will expect the input to be plain DER binary and directly return it
-function PemToDer(const pem: TCertPem; kind: PPemKind = nil): TCertDer;
+function PemToDer(const pem: TCertPem; const kind: PPemKind = nil): TCertDer;
+  {$ifdef HASINLINE} inline; {$endif}
 
 /// parse a multi-PEM text input and return the next PEM content
 // - search and identify any PEM_BEGIN/PEM_END markers
@@ -3213,7 +3252,7 @@ function DerParse(P: PAnsiChar; buf: PByteArray; buflen: PtrInt): PAnsiChar;
 /// cipher any private key buffer into safe binary
 // - encryption uses safe PBKDF2 HMAC-SHA256 AES-CTR-128 and AF-32 algorithms
 // - as used by pemSynopseEccEncryptedPrivateKey format and EccPrivateKeyEncrypt()
-// or TXPrivateKey.Save and TCryptCertX509.Save
+// or TCryptPrivateKey.Save and TCryptCertX509.Save
 function PrivateKeyEncrypt(const Input, Salt: RawByteString;
   const PrivatePassword: SpiUtf8; AfSplitRounds: integer = 31;
   Pbkdf2Rounds: integer = 1000): RawByteString;
@@ -3221,7 +3260,7 @@ function PrivateKeyEncrypt(const Input, Salt: RawByteString;
 /// uncipher some binary into a raw private key buffer
 // - encryption uses safe PBKDF2 HMAC-SHA256 AES-CTR-128 and AF-32 algorithms
 // - as used by pemSynopseEccEncryptedPrivateKey format and EccPrivateKeyDecrypt()
-// or TXPrivateKey.Load and TCryptCertX509.Load
+// or TCryptPrivateKey.Load and TCryptCertX509.Load
 function PrivateKeyDecrypt(const Input, Salt: RawByteString;
   const PrivatePassword: SpiUtf8; AfSplitRounds: integer = 31;
   Pbkdf2Rounds: integer = 1000): RawByteString;
@@ -3233,19 +3272,42 @@ function PrivateKeyDecrypt(const Input, Salt: RawByteString;
 // - e.g. 112 for RSA-2048, 128 for ECC-256
 function GetSignatureSecurityBits(a: TCryptAsymAlgo; len: integer): integer;
 
-/// extract the raw binary of a ASN.1/DER digital signature
+/// compute the base-64 encoding of the raw binary of a ASN.1/DER digital signature
 // - input comes e.g. from ICryptCert.Sign or ICryptPrivateKey.Sign content
-// - resulting raw binary can be used e.g. for JSON Web Signature (JWS) content
+// - base-64 encoded output can be used e.g. for JSON Web Token/Signature (JWT/JWS)
 // - RSA and EdDSA signatures are not encoded, so are returnde directly
 // - ECC are decoded from their ASN1_SEQ into their raw xy coordinates concatenation
 function GetSignatureSecurityRaw(algo: TCryptAsymAlgo;
   const signature: RawByteString): RawUtf8;
 
+/// encode a raw digital signature into ASN.1/DER
+// - incoming comes e.g. from base-64 decoded JSON Web Token/Signature (JWT/JWS)
+// - output is compatible e.g. with ICryptCert.Verify or ICryptPublicKey.Verify
+// - ECC are encoded from their raw xy coordinates concatenation into ASN1_SEQ
+function SetSignatureSecurityRaw(algo: TCryptAsymAlgo;
+  const rawsignature: RawUtf8): RawByteString;
+
 /// raw function to recognize the OID(s) of a public key ASN1_SEQ definition
 function OidToCka(const oid, oid2: RawUtf8): TCryptKeyAlgo;
 
-/// raw function to generation a public key ASN1_SEQ definition with its OID(s)
+/// raw function to generate a public key ASN1_SEQ definition with its OID(s)
 function CkaToSeq(cka: TCryptKeyAlgo): RawByteString;
+
+/// raw function to encode a PKCS#8 PrivateKeyInfo from its raw binary number
+// - e.g. as generated by OpenSSL
+function EccPrivKeyToSeq(cka: TCryptKeyAlgo; const rawecc: RawByteString): RawByteString;
+
+/// raw function to decode a PKCS#8 PrivateKeyInfo into its raw binary
+// - e.g. as generated by OpenSSL
+// - is also able to decode RFC 5915 Elliptic Curve key pair alternate format,
+// and its optional public key field
+function SeqToEccPrivKey(cka: TCryptKeyAlgo; const seq: RawByteString;
+  rfcpub: PRawByteString = nil): RawByteString;
+
+/// raw function to decode a specific PKCS#8 PublicKeyInfo into its raw binary
+// - e.g. as generated by OpenSSL or X509PubKeyToDer()
+// - behaves like X509PubKeyFromDer() but checking for one expected ECC algorithm
+function SeqToEccPubKey(cka: TCryptKeyAlgo; const seq: RawByteString): RawByteString;
 
 /// compute the public key ASN.1 from a raw binary as stored in X.509 certificate
 // - see e.g. "A.1.1. RSA Public Key Syntax" of RFC 8017
@@ -3254,6 +3316,8 @@ function X509PubKeyToDer(Algorithm: TCryptKeyAlgo;
 
 /// compute the raw binary as stored in X.509 certificate from a ASN.1 public key
 // - i.e. extract the ASN1_BITSTR raw section as encoded by X509PubKeyToDer()
+// - will return the raw public key with no algorithm check whatsoever - consider
+// calling SeqToEccPubKey() to parse for an expected ECC algorithm
 function X509PubKeyFromDer(const PkcsDer: RawByteString): RawByteString;
 
 /// return the number of bits of a X.509 certificate SubjectPublicKey ASN1_BITSTR
@@ -3390,7 +3454,10 @@ const
   ASN1_NULL_VALUE: TAsnObject = RawByteString(#$05#$00);
 
 /// encode a 64-bit signed integer value into ASN.1 binary
-function AsnEncInt(Value: Int64): TAsnObject;
+function AsnEncInt(Value: Int64): TAsnObject; overload;
+
+/// encode a raw binary-encoded integer value into ASN.1 binary
+function AsnEncInt(Value: pointer; ValueLen: PtrUInt): TAsnObject; overload;
 
 /// encode a 64-bit unsigned OID integer value into ASN.1 binary
 // - append the encoded value into the Result shortstring existing content
@@ -3477,6 +3544,10 @@ function AsnDecInt(var Start: integer; const Buffer: TAsnObject;
 /// decode an OID ASN.1 value into human-readable text
 function AsnDecOid(Pos, EndPos: integer; const Buffer: TAsnObject): RawUtf8;
 
+/// decode an OCTSTR ASN.1 value into its raw bynary buffer
+// - returns plain input value if was not a valid ASN1_OCTSTR
+function AsnDecOctStr(const input: RawByteString): RawByteString;
+
 /// decode an OID ASN.1 IP Address buffer into human-readable text
 function AsnDecIp(p: PAnsiChar; len: integer): RawUtf8;
 
@@ -3532,12 +3603,13 @@ var
     Marker: cardinal): RawByteString;
 
 /// create a NewFile executable from adding some text to MainFile digital signature
-// - the text will be stuffed within a dummy certificate inside the existing
-// digital signature, so you don't need to sign the executable again
-// - FileAppend() method of mormot.core.zip has been disallowed in latest Windows
-// versions, so this method is the right way for adding some information to
-// a Windows signed executable
-// - raise EStuffExe if MainFile has no supported signature, or is already stuffed
+// - up to 60KB of text will be stuffed within a dummy certificate inside the
+// existing digital signature, so you don't need to sign the executable again
+// - FileAppend() method of mormot.core.zip has been disallowed in latest
+// Windows versions, so this method is the right way for adding some custom
+// information at runtime to an already-signed Windows executable
+// - raise EStuffExe if MainFile has no supported signature, is already stuffed,
+// or the stuffed data is too big
 // - this function does not require mormot.crypt.openssl but may use it if
 // available to generate a genuine dummy certificate - if UseInternalCertificate
 // is true, or OpenSSL is not available, it will use a fixed constant certificate
@@ -3590,7 +3662,7 @@ begin
   end;
 end;
 
-procedure TSynHasher.Update(aBuffer: Pointer; aLen: integer);
+procedure TSynHasher.Update(aBuffer: pointer; aLen: integer);
 begin
   case fAlgo of
     hfMD5:
@@ -3661,7 +3733,7 @@ begin
   result := HASH_SIZE[fAlgo];
 end;
 
-function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUtf8;
+function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer): RawUtf8;
 begin
   result := '';
   if Init(aAlgo) then
@@ -3686,7 +3758,7 @@ begin
   Final(aResult);
 end;
 
-function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer;
+function TSynHasher.Full(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer;
   out aDigest: THash512Rec): integer;
 begin
   Init(aAlgo);
@@ -3808,7 +3880,10 @@ var
   md5: TMd5;
   dig: THash128Rec;
 begin
-  md5.Full(buffer, len, dig.b);
+  md5.Init;
+  md5.Update(crc, SizeOf(crc));
+  md5.Update(buffer^, len);
+  md5.Final(dig.b);
   result := dig.c0 xor dig.c1 xor dig.c2 xor dig.c3;
 end;
 
@@ -3817,7 +3892,10 @@ var
   sha: TSha1;
   dig: THash256Rec;
 begin
-  sha.Full(buffer, len, dig.sha1);
+  sha.Init;
+  sha.Update(@crc, SizeOf(crc));
+  sha.Update(buffer, len);
+  sha.Final(dig.sha1);
   result := dig.c[0] xor dig.c[1] xor dig.c[2] xor dig.c[3] xor dig.c[4];
 end;
 
@@ -3827,9 +3905,9 @@ begin
     caCrc32c:
       result := crc32c;
     caCrc32:
-      result := crc32;   // from mormot.lib.z - nil if unit was not included
+      result := crc32;
     caAdler32:
-      result := adler32; // also from mormot.lib.z
+      result := adler32; // from mormot.lib.z - nil if unit was not included
     caxxHash32:
       result := @xxHash32;
     caFnv32:
@@ -3846,7 +3924,7 @@ begin
 end;
 
 
-function HashFull(aAlgo: THashAlgo; aBuffer: Pointer; aLen: integer): RawUtf8;
+function HashFull(aAlgo: THashAlgo; aBuffer: pointer; aLen: integer): RawUtf8;
 var
   hasher: TSynHasher;
 begin
@@ -3890,7 +3968,7 @@ begin
         else
           exit;
     size := FileSize(F);
-    tempsize := 1 shl 20; // 1MB temporary buffer for reading
+    tempsize := 1 shl 20; // 1MB temporary buffer for reading seems good enough
     if tempsize > size then
       tempsize := size;
     SetLength(temp, tempsize);
@@ -4081,7 +4159,7 @@ begin
 end;
 
 function TSynSigner.Full(aAlgo: TSignAlgo; const aSecret: RawUtf8;
-  aBuffer: Pointer; aLen: integer): RawUtf8;
+  aBuffer: pointer; aLen: integer): RawUtf8;
 begin
   Init(aAlgo, aSecret);
   Update(aBuffer, aLen);
@@ -4089,7 +4167,7 @@ begin
 end;
 
 function TSynSigner.Full(aAlgo: TSignAlgo; const aSecret, aSalt: RawUtf8;
-  aSecretPbkdf2Round: integer; aBuffer: Pointer; aLen: integer): RawUtf8;
+  aSecretPbkdf2Round: integer; aBuffer: pointer; aLen: integer): RawUtf8;
 begin
   Init(aAlgo, aSecret, aSalt, aSecretPbkdf2Round);
   Update(aBuffer, aLen);
@@ -4566,7 +4644,7 @@ begin
   if Tix64 = 0 then
     Tix64 := GetTickCount64;
   created := created and pred(QWord(1) shl 48);
-  if Tix64 - created > NonceExpSec shl 10 then
+  if Tix64 - created > NonceExpSec shl MilliSecsPerSecShl then
     exit;
   // fast challenge against the 64-bit Opaque value (typically a connection ID)
   DefaultHasher128(@nonce128, @Opaque, SizeOf(Opaque)); // see DigestServerInit
@@ -4630,7 +4708,7 @@ end;
 constructor TBasicAuthServer.Create(const aRealm: RawUtf8);
 begin
   if aRealm = '' then
-    raise EDigest.CreateUtf8('%.Create: void Realm', [self]);
+    EDigest.RaiseUtf8('%.Create: void Realm', [self]);
   fRealm := aRealm;
   QuotedStr(fRealm, '"', fQuotedRealm);
   FormatUtf8('WWW-Authenticate: Basic realm="%"'#13#10, [fRealm], fBasicInit);
@@ -4681,12 +4759,12 @@ type
 constructor TDigestAuthServer.Create(const aRealm: RawUtf8; aAlgo: TDigestAlgo);
 begin
   if aAlgo = daUndefined then
-    raise EDigest.CreateUtf8('%.Create: undefined Algo', [self]);
+    EDigest.RaiseUtf8('%.Create: undefined Algo', [self]);
   inherited Create(aRealm);
   fAlgo := aAlgo;
   fAlgoSize := HASH_SIZE[DIGEST_ALGO[aAlgo]];
   if fAlgoSize > SizeOf(TDigestAuthHash) then // paranoid
-    raise EDigest.CreateUtf8('%.Create: % %-bit digest is too big',
+    EDigest.RaiseUtf8('%.Create: % %-bit digest is too big',
       [self, fAlgoSize shl 3, DIGEST_NAME[aAlgo]]);
   fRequestExpSec := 60;
   fOpaqueObfuscate := Random64; // changes at each server restart
@@ -4706,10 +4784,9 @@ procedure TDigestAuthServer.ComputeDigest(const aUser: RawUtf8;
   const aPassword: SpiUtf8; out Digest: THash512Rec);
 begin
   if PosExChar(':', aUser) <> 0 then
-    raise EDigest.CreateUtf8(
-      '%.ComputeDigest: unexpected '':'' in user=%', [self, aUser]);
+    EDigest.RaiseUtf8('%.ComputeDigest: unexpected '':'' in user=%', [self, aUser]);
   if DigestHA0(fAlgo, aUser, fRealm, aPassword, Digest) <> fAlgoSize then
-    raise EDigest.CreateUtf8('%.ComputeDigest: DigestHA0?', [self]);
+    EDigest.RaiseUtf8('%.ComputeDigest: DigestHA0?', [self]);
 end;
 
 function TDigestAuthServer.DigestInit(Opaque, Tix64: Int64;
@@ -4855,10 +4932,9 @@ constructor TDigestAuthServerFile.Create(const aRealm: RawUtf8;
 begin
   inherited Create(aRealm, aAlgo);
   if PosExChar(':', aRealm) <> 0 then
-    raise EDigest.CreateUtf8(
-      '%.Create: unexpected '':'' in realm=%', [self, aRealm]);
+    EDigest.RaiseUtf8('%.Create: unexpected '':'' in realm=%', [self, aRealm]);
   if aFileName = '' then
-    raise EDigest.CreateUtf8('%.Create: void filename', [self]);
+    EDigest.RaiseUtf8('%.Create: void filename', [self]);
   fFileName := ExpandFileName(aFileName);
   if aFilePassword <> '' then
     Pbkdf2HmacSha256(aFilePassword, aRealm, 1000, fAesKey);
@@ -5027,7 +5103,7 @@ begin
   d := @data[1];
   len := length(data);
   key := key xor cardinal(len);
-  tab := @crc32ctab;
+  tab := @crc32ctab; // use first 1KB of this 8KB table generated at startup
   for i := 0 to (len shr 2) - 1 do
   begin
     key := key xor tab[0, (cardinal(i) xor key) and 1023];
@@ -5134,7 +5210,7 @@ begin
   begin
     i := PosExChar(':', fPassword);
     if i > 0 then
-      raise ECrypt.CreateUtf8('%.GetPassWordPlain unable to retrieve the ' +
+      ECrypt.RaiseUtf8('%.GetPassWordPlain unable to retrieve the ' +
         'stored value: current user is [%], but password in % was encoded for [%]',
         [self, Executable.User, AppSecret, copy(fPassword, 1, i - 1)]);
   end;
@@ -5245,12 +5321,12 @@ end;
 
 procedure TSynAuthenticationAbstract.AuthenticateUser(const aName, aPassword: RawUtf8);
 begin
-  raise ECrypt.CreateUtf8('%.AuthenticateUser() is not implemented', [self]);
+  ECrypt.RaiseUtf8('%.AuthenticateUser() is not implemented', [self]);
 end;
 
 procedure TSynAuthenticationAbstract.DisauthenticateUser(const aName: RawUtf8);
 begin
-  raise ECrypt.CreateUtf8('%.DisauthenticateUser() is not implemented', [self]);
+  ECrypt.RaiseUtf8('%.DisauthenticateUser() is not implemented', [self]);
 end;
 
 function TSynAuthenticationAbstract.CheckCredentials(const UserName: RawUtf8;
@@ -5775,16 +5851,16 @@ begin
   if aClass = nil then
     aClass := TAesFast[mCtr]; // fastest on x86_64 or OpenSSL - server friendly
   fAes[false] := aClass.Create(aKey, aKeySize);
-  fAheadMode := fAes[false].AlgoMode in [mCfc, mOfc, mCtc, mGcm];
-  fAes[true] := fAes[false].CloneEncryptDecrypt;
+  fAes[true]  := fAes[false].CloneEncryptDecrypt;
+  fAheadMode  := fAes[false].AlgoMode in [mCfc, mOfc, mCtc, mGcm];
 end;
 
 constructor TProtocolAes.CreateFrom(aAnother: TProtocolAes);
 begin
   inherited Create;
   fAes[false] := aAnother.fAes[false].Clone;
-  fAheadMode := aAnother.fAheadMode;
-  fAes[true] := fAes[false].CloneEncryptDecrypt;
+  fAes[true]  := fAes[false].CloneEncryptDecrypt;
+  fAheadMode  := aAnother.fAheadMode;
 end;
 
 destructor TProtocolAes.Destroy;
@@ -5854,9 +5930,7 @@ begin
     dec(size, SizeOf(cardinal));
     data^ := data^ xor key256bytes[ctr and $3f] xor ctr;
     inc(data);
-    ctr := ((ctr xor (ctr shr 15)) * 2246822519); // xxHash32Mixup ctr diffusion
-    ctr := ((ctr xor (ctr shr 13)) * 3266489917);
-    ctr := ctr xor (ctr shr 16);
+    ctr := xxHash32Mixup(ctr); // simple ctr diffusion for the next 4 bytes
   end;
   while size <> 0 do
   begin
@@ -5876,20 +5950,19 @@ begin
   // initial random session ID, small enough to remain 31-bit > 0
   SessionSequence := Random32 and $07ffffff;
   SessionSequenceStart := SessionSequence;
-  // temporary secret for checksum
+  // temporary secret for checksum  (Lecuyer is good enough for 32-bit)
   Secret := Random32;
   // temporary secret for encryption
   CryptNonce := Random32;
-  // expiration
+  // custom expiration
   DefaultTimeOutMinutes := DefaultSessionTimeOutMinutes;
-  // default algorithm is 0, i.e. crc32c()
+  // default algorithm is caCrc32c
   if not Assigned(CryptCrc32(SignAlgo)) then
-    raise ECrypt.CreateUtf8(
-      'Unsupported TBinaryCookieGenerator.Init(%)', [ToText(SignAlgo)^]);
+    ECrypt.RaiseUtf8('Unsupported TBinaryCookieGenerator.Init(%)', [ToText(SignAlgo)^]);
   CrcAlgo := SignAlgo;
   Padding := 0;
   // 256 bytes of strong cryptographic randomness (public values use Lecuyer)
-  MainAesPrng.FillRandom(@Crypt, SizeOf(Crypt));
+  TAesPrng.Main.FillRandom(@Crypt, SizeOf(Crypt));
 end;
 
 type
@@ -5925,8 +5998,8 @@ begin
         raise ECrypt.Create('TBinaryCookieGenerator: Too Big Too Fat');
     end;
     cc.head.cryptnonce := Random32;
-    cc.head.session := result;
-    cc.head.issued := UnixTimeMinimalUtc;
+    cc.head.session    := result;
+    cc.head.issued     := UnixTimeMinimalUtc;
     if TimeOutMinutes = 0 then
       TimeOutMinutes := DefaultTimeOutMinutes;
     if TimeOutMinutes = 0 then
@@ -5973,9 +6046,9 @@ begin
        (crc(Secret, @cc.head.session, len - 8) = cc.head.crc) then
     begin
       if PExpires <> nil then
-        PExpires^ := cc.head.expires + UNIXTIME_MINIMAL;
+        PExpires^ := QWord(cc.head.expires) + UNIXTIME_MINIMAL;
       if PIssued <> nil then
-        PIssued^ := cc.head.issued + UNIXTIME_MINIMAL;
+        PIssued^ := QWord(cc.head.issued) + UNIXTIME_MINIMAL;
       now := UnixTimeMinimalUtc;
       if (cc.head.issued <= now) and
          (cc.head.expires >= now) then
@@ -6004,8 +6077,7 @@ begin
   result := RecordLoadBase64(pointer(Saved), length(Saved),
     self, TypeInfo(TBinaryCookieGenerator), {uri=}true);
   if not Assigned(CryptCrc32(CrcAlgo)) then
-    raise ECrypt.CreateUtf8(
-      'Unsupported TBinaryCookieGenerator.Load(%)', [ToText(CrcAlgo)^]);
+    ECrypt.RaiseUtf8('Unsupported TBinaryCookieGenerator.Load(%)', [ToText(CrcAlgo)^]);
 end;
 
 
@@ -6023,7 +6095,7 @@ procedure GlobalCryptAlgoInit; forward;
 constructor TCryptAlgo.Create(const name: RawUtf8);
 begin
   if name = '' then
-    raise ECrypt.CreateUtf8('Unexpected %.Create('''')', [self]);
+    ECrypt.RaiseUtf8('Unexpected %.Create('''')', [self]);
   fName := LowerCase(name);
   RegisterGlobalShutdownRelease(self);
   GlobalCryptAlgo.AddOrReplaceObject(fName, self);
@@ -6054,7 +6126,7 @@ class function TCryptAlgo.InternalResolve(
 begin
   result := FindCsvIndex(CSV, name, ',', {casesens=}false);
   if result < 0 then
-    raise ECrypt.CreateUtf8('%.Create(''%''): unknown algorithm - try %',
+    ECrypt.RaiseUtf8('%.Create(''%''): unknown algorithm - try %',
       [self, name, CSV]);
 end;
 
@@ -6136,7 +6208,7 @@ end;
 constructor TCryptInstance.Create(algo: TCryptAlgo);
 begin
   if algo = nil then
-    raise ECrypt.CreateUtf8('Unexpected %.Create(nil)', [self]);
+    ECrypt.RaiseUtf8('Unexpected %.Create(nil)', [self]);
   fCryptAlgo := algo;
 end;
 
@@ -6149,7 +6221,7 @@ var
 begin
   algo := TCryptAlgo.InternalFind(name, LastAlgoInstance);
   if algo = nil then
-    raise ECrypt.CreateUtf8('Unexpected %.Create(''%'')', [self, name]);
+    ECrypt.RaiseUtf8('Unexpected %.Create(''%'')', [self, name]);
   Create(algo);
 end;
 
@@ -6158,7 +6230,7 @@ end;
 
 function TCryptRandom.Get(len: PtrInt): RawByteString;
 begin
-  FastSetRawByteString(result, nil, len);
+  FastNewRawByteString(result, len);
   Get(pointer(result), len);
 end;
 
@@ -6235,7 +6307,7 @@ type
 
 procedure TCryptRandomAesPrng.Get(dst: pointer; dstlen: PtrInt);
 begin
-  MainAesPrng.FillRandom(dst, dstlen);
+  TAesPrng.Main.FillRandom(dst, dstlen);
 end;
 
 
@@ -6434,7 +6506,7 @@ begin
   // resolve fFunc in New/Create, since crc32/adler functions may be set later
   fFunc := CryptCrc32(algo.fAlgo);
   if not Assigned(fFunc) then
-    raise ECrypt.CreateUtf8('%.New: unavailable ''%'' function', [self, algo.fName]);
+    ECrypt.RaiseUtf8('%.New: unavailable ''%'' function', [self, algo.fName]);
   inherited Create(algo);
 end;
 
@@ -6647,7 +6719,7 @@ var
 begin
   s := Signer(hash);
   if s = nil then
-    raise ECrypt.CreateUtf8('%.New: unknown ''%'' hash', [self, hash]);
+    ECrypt.RaiseUtf8('%.New: unknown ''%'' hash', [self, hash]);
   FillZero(key.b); // s.Pbkdf2 may generate less bits than the cipher consumes
   s.Pbkdf2(secret, salt, rounds, key);
   result := New(@key, encrypt);
@@ -6759,8 +6831,8 @@ begin
   result := c;
 end;
 
-function TCryptAesCipher.Process(const src: RawByteString; out dst: RawByteString;
-  const aeadinfo: RawByteString): boolean;
+function TCryptAesCipher.Process(const src: RawByteString;
+  out dst: RawByteString; const aeadinfo: RawByteString): boolean;
 begin
   result := false;
   if src = '' then
@@ -6804,7 +6876,7 @@ begin
     exit;
   end
   else if fAesAead in fFlags then
-    raise ECrypt.CreateUtf8('%.Process(TBytes) is unsupported for %',
+    ECrypt.RaiseUtf8('%.Process(TBytes) is unsupported for %',
       [self, fCryptAlgo.AlgoName]) // MacAndCrypt() requires RawByteString
   // standard encryption with no AEAD/checksum
   else if fEncrypt in fFlags then
@@ -6938,8 +7010,8 @@ end;
 
 { TCryptPublicKey }
 
-function TCryptPublicKey.VerifyDigest(Sig: pointer; Dig: THash512Rec; SigLen,
-  DigLen: integer; Hash: THashAlgo): boolean;
+function TCryptPublicKey.VerifyDigest(Sig: pointer; Dig: THash512Rec;
+  SigLen, DigLen: integer; Hash: THashAlgo): boolean;
 begin
   result := false; // to be overriden if needed (not for OpenSSL)
 end;
@@ -6959,7 +7031,8 @@ end;
 function TCryptPublicKey.Verify(Algorithm: TCryptAsymAlgo;
   const Data, Sig: RawByteString): boolean;
 begin
-  result := Verify(Algorithm, pointer(Data), pointer(Sig), length(Data), length(Sig));
+  result := Verify(Algorithm,
+    pointer(Data), pointer(Sig), length(Data), length(Sig));
 end;
 
 
@@ -7115,9 +7188,8 @@ var
   csr: ICryptCert;
 begin
   if PrivateKeyPem <> '' then
-    raise ECryptCert.CreateUtf8(
-      '%.CreateSelfSignedCsr % does not support a custom private key',
-      [self, AlgoName]);
+    ECryptCert.RaiseUtf8('%.CreateSelfSignedCsr % does not support ' +
+      'a custom private key', [self, AlgoName]);
   // by default, just generate a self-signed certificate as CSR
   csr := New;
   csr.Generate(Usages, Subjects, nil, 365, -1, Fields);
@@ -7142,7 +7214,7 @@ end;
 
 procedure TCryptCert.RaiseError(const Msg: shortstring);
 begin
-  raise ECryptCert.CreateUtf8('%.%', [self, Msg]);
+  ECryptCert.RaiseUtf8('%.%', [self, Msg]);
 end;
 
 procedure TCryptCert.RaiseError(const Fmt: RawUtf8;
@@ -7228,7 +7300,8 @@ begin
   // by default, CreateSelfSignedCsr generates a self-signed certificate as CSR
   // - mormot.crypt.openssl and mormot.crypt.x509 will generate a proper CSR
   result := nil;
-  if Csr = '' then
+  if (Csr = '') or
+     (fCryptAlgo = nil) then
     exit;
   x := (fCryptAlgo as TCryptCertAlgo).Load(Csr);
   if (x <> nil) and
@@ -7316,10 +7389,14 @@ end;
 
 function TCryptCert.LoadFromFile(const Source: TFileName;
   Content: TCryptCertContent; const PrivatePassword: SpiUtf8): boolean;
+var
+  s: RawByteString;
 begin
   EnsureCanWrite('LoadFromFile');
   fLastLoadFromFileName := Source;
-  result := Load(StringFromFile(Source), Content, PrivatePassword);
+  s := StringFromFile(Source);
+  result := Load(s, Content, PrivatePassword);
+  FillZero(s); // may be a private key with no password :(
 end;
 
 function TCryptCert.GetFileName: TFileName;
@@ -7340,7 +7417,7 @@ begin
     ccfBase64Uri:
       result := BinToBase64uri(result);
   else
-    raise ECryptCert.CreateUtf8('Unexpected %.Save', [self]); // paranoid
+    ECryptCert.RaiseUtf8('Unexpected %.Save', [self]); // paranoid
   end;
 end;
 
@@ -7358,9 +7435,10 @@ begin
   FillZero(s); // may be a private key with no password :(
 end;
 
-function TCryptCert.Sign(const Data: RawByteString): RawByteString;
+function TCryptCert.Sign(const Data: RawByteString;
+  Usage: TCryptCertUsage): RawByteString;
 begin
-  result := Sign(pointer(Data), length(Data));
+  result := Sign(pointer(Data), length(Data), Usage);
 end;
 
 function TCryptCert.Verify(const Signature, Data: RawByteString;
@@ -7465,17 +7543,22 @@ function TCryptCert.JwkCompute: RawUtf8;
 var
   x, y: RawByteString;
   bx, by: RawUtf8;
+  caa: TCryptAsymAlgo;
 begin
+  // retrieve raw public key parameters
   result := '';
   if not GetKeyParams(x, y) then
     exit;
   bx := BinToBase64uri(x);
   by := BinToBase64uri(y);
   // parameters are ordered lexicographically, as expected for thumbprints
-  if AsymAlgo in CAA_ECC then
+  caa := AsymAlgo;
+  if caa in CAA_ECC then
+    // for ECC, GetKeyParams() returned the x,y coordinates
     FormatUtf8('{"crv":"%","kty":"EC","x":"%","y":"%"}',
-      [CAA_CRV[AsymAlgo], bx, by], result)
+                  [CAA_CRV[caa], bx, by], result)
   else
+    // for RSA, x was set to the Exponent (e), and y to the Modulus (n)
     FormatUtf8('{"e":"%","kty":"RSA","n":"%"}', [bx, by], result);
 end;
 
@@ -7491,7 +7574,10 @@ end;
 
 function TCryptCert.CertAlgo: TCryptCertAlgo;
 begin
-  result := fCryptAlgo as TCryptCertAlgo;
+  if fCryptAlgo = nil then
+    result := nil
+  else
+    result := fCryptAlgo as TCryptCertAlgo;
 end;
 
 function TCryptCert.Instance: TCryptCert;
@@ -7881,7 +7967,7 @@ begin
     if fCryptCertClass = nil then
       fCryptCertClass := PPointer(inst)^
     else
-      raise ECryptCert.CreateUtf8('%.Add(%) but we already store %',
+      ECryptCert.RaiseUtf8('%.Add(%) but we already store %',
         [self, inst, fCryptCertClass]);
   inst.fIndexer := self; // don't touch once indexed
   result := HumanHexToBin(inst.GetSubjectKey, bin) and
@@ -8169,10 +8255,25 @@ begin
   result := GetEnumName(TypeInfo(TCryptCertValidity), ord(v));
 end;
 
+function GetFirstUsage(u: TCryptCertUsages): TCryptCertUsage;
+begin
+  for result := low(result) to high(result) do
+    if result in u then
+      exit;
+  result := cuKeyCertSign;
+end;
+
 function IsCN(const Rdn: RawUtf8): boolean;
 begin
   result := (length(Rdn) = 2) and
             (PWord(Rdn)^ and $dfdf = ord('C') + ord('N') shl 8);
+end;
+
+function IsDer(const Rdn: RawUtf8): boolean;
+begin
+  result := (length(Rdn) = 3) and
+            (PCardinal(Rdn)^ and $dfdfdf =
+               ord('D') + ord('E') shl 8 + ord('R') shl 16);
 end;
 
 
@@ -8184,7 +8285,9 @@ var
   b, bits: integer;
   n: RawUtf8;
 begin
-  TAesPrng.Main; // initialize MainAesPrng
+  // don't call TAesPrng.Main to initialize MainAesPrng yet, because
+  // OpenSslRandBytes() may not be already set and gathering OS entropy
+  // may not be needed at all
   GlobalLock; // RegisterGlobalShutdownRelease() will use it anyway
   try
     if GlobalCryptAlgo <> nil then
@@ -8459,7 +8562,7 @@ begin
   result := d;
 end;
 
-function PemToDer(const pem: TCertPem; kind: PPemKind): TCertDer;
+function PemToDer(const pem: TCertPem; const kind: PPemKind): TCertDer;
 var
   P: PUtf8Char;
 begin
@@ -8525,20 +8628,20 @@ begin
             ({%H-}PrivKey <> '');
 end;
 
-const
-  DER_INTEGER  = #$02;
-
 function DerAppend(P: PAnsiChar; buf: PByteArray; buflen: PtrUInt): PAnsiChar;
 var
   pos, prefix: PtrUInt;
 begin
   pos := 0;
-  while buf[pos] = 0 do
-    // ignore leading zeros
+  while buf[pos] = 0 do // ignore leading zeros
+  begin
     inc(pos);
-  dec(buflen, pos);
+    dec(buflen);
+    if buflen = 0 then
+      break;
+  end;
   prefix := buf[pos] shr 7; // detect if need to avoid two's complement storage
-  P[0] := DER_INTEGER;
+  P[0] := AnsiChar(ASN1_INT);
   P[1] := AnsiChar(buflen + prefix);
   P[2] := #$00; // prepend 0 to prevent stored as negative number (if prefix=1)
   inc(P, 2 + prefix);
@@ -8553,7 +8656,7 @@ begin
   result := nil;
   FillZero(buf^, buflen);
   if (P = nil) or
-     (P[0] <> DER_INTEGER) then
+     (P[0] <> AnsiChar(ASN1_INT)) then
     exit;
   pos := buflen - ord(P[1]);
   inc(P, 2);
@@ -8578,7 +8681,7 @@ begin
     result := Input
   else
   begin
-    pks := MainAesPrng.AFSplit(Input, AfSplitRounds);
+    pks := TAesPrng.Main.AFSplit(Input, AfSplitRounds);
     result := AesPkcs7(pks, {encrypt=}true, PrivatePassword, Salt, Pbkdf2Rounds);
     FillZero(pks);
   end;
@@ -8625,7 +8728,7 @@ var
 begin
   result := '';
   firstbuf := true;
-  M := TFileStreamEx.Create(MainFile, fmOpenReadDenyNone);
+  M := TFileStreamEx.Create(MainFile, fmOpenReadShared);
   try
     repeat
       read := M.Read(buf{%H-}, SizeOf(buf));
@@ -8633,11 +8736,11 @@ begin
       begin
         // search for COFF/PE header in the first block
         if read < 1024 then
-          raise EStuffExe.CreateUtf8('% read error', [MainFile]);
+          EStuffExe.RaiseUtf8('% read error', [MainFile]);
         i := PCardinal(@buf[PE_ENTRY_OFFSET])^; // read DOS header offset
         if (i >= read) or
            (PCardinal(@buf[i])^ <> ord('P') + ord('E') shl 8) then
-          raise EStuffExe.CreateUtf8('% is not a PE executable', [MainFile]);
+          EStuffExe.RaiseUtf8('% is not a PE executable', [MainFile]);
         // parse PE header
         inc(i, CERTIFICATE_ENTRY_OFFSET);
         certoffs := PCardinal(@buf[i])^;
@@ -8645,22 +8748,21 @@ begin
         certlen := PCardinal(@buf[certlenoffs])^;
         if (certoffs = 0) or
            (certlen = 0) then
-           raise EStuffExe.CreateUtf8('% has no signature', [MainFile]);
+           EStuffExe.RaiseUtf8('% has no signature', [MainFile]);
         // parse certificate table
         if certoffs + certlen <> M.Size then
-          raise EStuffExe.CreateUtf8(
-            '% should end with a certificate', [MainFile]);
+          EStuffExe.RaiseUtf8('% should end with a certificate', [MainFile]);
         M.Seek(certoffs, soBeginning);
         if (M.Read(wc{%H-}, SizeOf(wc)) <> SizeOf(wc)) or
            (wc.dwLength <> certlen) or
            (wc.wRevision <> $200) or
            (wc.wCertType <> WIN_CERT_TYPE_PKCS_SIGNED_DATA) then
-          raise EStuffExe.CreateUtf8('% unsupported signature', [MainFile]);
+          EStuffExe.RaiseUtf8('% unsupported signature', [MainFile]);
         // read original signature
         dec(certlen, SizeOf(wc));
         SetLength(result, certlen);
         if cardinal(M.Read(pointer(result)^, certlen)) <> certlen then
-          raise EStuffExe.CreateUtf8('% certificate reading', [MainFile]);
+          EStuffExe.RaiseUtf8('% certificate reading', [MainFile]);
         // note: don't remove ending #0 padding because some may be needed
         if lenoffs <> nil then
           lenoffs^ := certlenoffs;
@@ -8693,7 +8795,7 @@ begin
     exit;
   end;
   if result <> 2 then
-    raise EStuffExe.CreateUtf8('Parsing error: Asn1Len=%', [result]);
+    EStuffExe.RaiseUtf8('Parsing error: Asn1Len=%', [result]);
   result := p^;
   inc(p);
   result := (result shl 8) + p^;
@@ -8704,7 +8806,7 @@ function Asn1Next(var p: PAnsiChar; expected: byte; moveafter: boolean;
   const Ctxt: shortstring): PtrInt;
 begin
   if p^ <> AnsiChar(expected) then
-    raise EStuffExe.CreateUtf8('Parsing %: % instead of %',
+    EStuffExe.RaiseUtf8('Parsing %: % instead of %',
       [Ctxt, byte(p^), expected]);
   inc(p);
   result := Asn1Len(PByte(p));
@@ -8720,7 +8822,7 @@ begin
   repeat
     one := fixme^;
     if one[1] <> #$82 then
-      raise EStuffExe.CreateUtf8('Wrong fixme in %', [MainFile])
+      EStuffExe.RaiseUtf8('Wrong fixme in %', [MainFile])
     else
       PWord(one + 2)^ := swap(word(PtrInt(swap(PWord(one + 2)^)) + added));
     inc(fixme);
@@ -8772,7 +8874,7 @@ var
 begin
   // limitation: CertName is ignored and 'Dummy Cert' is forced
   result := '';
-  FastSetRawByteString(dummy, nil, _DUMMYLEN);
+  FastNewRawByteString(dummy, _DUMMYLEN);
   if RleUnCompress(@_DUMMY, pointer(dummy), SizeOf(_DUMMY)) <> _DUMMYLEN then
     exit;
   p := pointer(dummy);
@@ -8811,11 +8913,14 @@ var
   fixme: array[0..3] of PAnsiChar;
 begin
   if NewFile = MainFile then
-    raise EStuffExe.CreateUtf8('MainFile=NewFile=%', [MainFile]);
-  if (Stuff = '') or
-     (length(Stuff) > 32000) or
-     (StrLen(pointer(Stuff)) <> length(Stuff)) then
-    raise EStuffExe.CreateUtf8('Stuff should be pure Text for %', [MainFile]);
+    EStuffExe.RaiseUtf8('MainFile=NewFile=%', [MainFile]);
+  if Stuff = '' then
+    EStuffExe.RaiseUtf8('Nothing to Stuff in %', [MainFile]);
+  if length(Stuff) > 60000 then // encoded as 16-bit hexa (and ASN1_SEQ)
+    EStuffExe.RaiseUtf8('Too much data (%) to Stuff within %',
+      [KB(Stuff), MainFile]);
+  if StrLen(pointer(Stuff)) <> length(Stuff) then
+    EStuffExe.RaiseUtf8('Stuff should be pure Text for %', [MainFile]);
   certoffs := 0;
   certlenoffs := 0;
   O := TFileStreamEx.Create(NewFile, fmCreate);
@@ -8824,36 +8929,39 @@ begin
       // copy MainFile source file, parsing the PE header and cert chain
       sig := FindExeCertificate(MainFile, O, wc, @certlenoffs, @certoffs);
       if length(sig) < 4000 then
-        raise EStuffExe.CreateUtf8('No signature found in %', [MainFile]);
+        EStuffExe.RaiseUtf8('No signature found in %', [MainFile]);
+      if length(Stuff) + length(sig) > 64000 then // avoid ASN.1 overflow
+        EStuffExe.RaiseUtf8('Too much data (%) to Stuff within %',
+          [KB(Stuff), MainFile]);
       if PosEx(_CERTNAME_, sig) <> 0 then
-        raise EStuffExe.CreateUtf8('% is already stuffed', [MainFile]);
+        EStuffExe.RaiseUtf8('% is already stuffed', [MainFile]);
       // parse the original PKCS#7 signed data
       p := pointer(sig);
       fixme[0] := p;
       if Asn1Next(p, ASN1_SEQ, {moveafter=}false, 'SEQ') + 4 > length(sig) then
-        raise EStuffExe.CreateUtf8('Truncated signature in %', [MainFile]);
-      Asn1Next(p, ASN1_OBJID, true,  'OID');
+        EStuffExe.RaiseUtf8('Truncated signature in %', [MainFile]);
+      Asn1Next(p, ASN1_OBJID, true, 'OID');
       fixme[1] := p;
       Asn1Next(p, ASN1_CTC0, false, 'ARR');
       fixme[2] := p;
-      Asn1Next(p, ASN1_SEQ, false, 'PKCS#7');
-      Asn1Next(p, ASN1_INT, true,  'Version');
-      Asn1Next(p, ASN1_SETOF, true,  'Digest');
-      Asn1Next(p, ASN1_SEQ, true,  'Context');
+      Asn1Next(p, ASN1_SEQ, false,  'PKCS#7');
+      Asn1Next(p, ASN1_INT, true,   'Version');
+      Asn1Next(p, ASN1_SETOF, true, 'Digest');
+      Asn1Next(p, ASN1_SEQ, true,   'Context');
       fixme[3] := p;
       certslen := Asn1Next(p, ASN1_CTC0, false, 'Certs');
       inc(p, certslen);
       certsend := p - pointer(sig);
       Asn1Next(p, ASN1_SETOF, true, 'SignerInfo');
       if p - pointer(sig) > length(sig) then
-        raise EStuffExe.CreateUtf8('Wrong cert ending in %', [MainFile]);
+        EStuffExe.RaiseUtf8('Wrong cert ending in %', [MainFile]);
       // append the stuffed data within a dummy certificate
       if UseInternalCertificate then
         newcert := _CreateDummyCertificate(Stuff, _CERTNAME_, _MARKER_)
       else // may come from OpenSSL
         newcert := CreateDummyCertificate(Stuff, _CERTNAME_, _MARKER_);
       if newcert = '' then
-        raise EStuffExe.CreateUtf8('CreateDummyCertificate for %', [MainFile]);
+        EStuffExe.RaiseUtf8('CreateDummyCertificate for %', [MainFile]);
       Asn1FixMe(@fixme, length(fixme), length(newcert), MainFile);
       insert(newcert, sig, certsend + 1);
       // write back the stuffed signature
@@ -8904,7 +9012,7 @@ begin
 end;
 
 const
-  CAA_SIZE: array[TCryptAsymAlgo] of Integer = (
+  CAA_SIZE: array[TCryptAsymAlgo] of integer = (
     32,  // caaES256
     48,  // caaES384
     66,  // caaES512
@@ -8948,10 +9056,10 @@ function GetSignatureSecurityRaw(algo: TCryptAsymAlgo;
 var
   derlen: cardinal;
   der: PByteArray;
-  eccbytes, len: integer;
+  eccbytes, len: PtrUInt;
   buf: array [0..131] of AnsiChar;
 begin
-  if algo in (CAA_RSA + [caaEdDSA]) then
+  if algo in CAA_RAWSIGNATURE then
   begin
     // no need to be decoded, since RSA and EdDSA have no SEQ
     result := BinToBase64uri(pointer(signature), length(signature));
@@ -8967,21 +9075,39 @@ begin
   eccbytes := CAA_SIZE[algo];
   if der[1] and $80 <> 0 then
   begin
-    // 2-byte length
-    assert((der[1] and $7f) = 1);
-    len := der[2];
+    if (der[1] and $7f) <> 1 then // 2-byte length (e.g. ES512)
+      exit;
+    len := der[2]; // length in 2nd byte
     if DerParse(DerParse(@der[3], @buf[0], eccbytes),
         @buf[eccbytes], eccbytes) <> PAnsiChar(@der[len + 3]) then
       exit;
   end
   else
   begin
-    len := der[1];
+    len := der[1]; // 1-byte length
     if DerParse(DerParse(@der[2], @buf[0], eccbytes),
         @buf[eccbytes], eccbytes) <> PAnsiChar(@der[len + 2]) then
       exit;
   end;
   result := BinToBase64uri(@buf[0], eccbytes * 2);
+end;
+
+function SetSignatureSecurityRaw(algo: TCryptAsymAlgo;
+  const rawsignature: RawUtf8): RawByteString;
+var
+  eccbytes: PtrInt;
+begin
+  result := rawsignature;
+  if (result = '') or
+     (algo in CAA_RAWSIGNATURE) then
+     // no need to be encoded, since RSA and EdDSA have no SEQ
+    exit;
+  eccbytes := CAA_SIZE[algo];
+  if length(result) = eccbytes * 2 then
+    result := Asn(ASN1_SEQ, [
+      AsnEncInt(@PByteArray(result)[0], eccbytes),
+      AsnEncInt(@PByteArray(result)[eccbytes], eccbytes)
+      ]);
 end;
 
 function OidToCka(const oid, oid2: RawUtf8): TCryptKeyAlgo;
@@ -9007,29 +9133,141 @@ function CkaToSeq(cka: TCryptKeyAlgo): RawByteString;
 begin
   case cka of
     ckaRsa:
-      result := AsnSeq([
+      result := Asn(ASN1_SEQ, [
                   AsnOid(pointer(CKA_OID[ckaRsa])),
                   ASN1_NULL_VALUE // optional
                 ]);
     ckaRsaPss,
     ckaEdDSA:
-      result := AsnSeq([
+      result := Asn(ASN1_SEQ, [
                   AsnOid(pointer(CKA_OID[cka]))
                 ]);
     ckaEcc256 .. ckaEcc256k:
-      result := AsnSeq([
+      result := Asn(ASN1_SEQ, [
                   AsnOid(ASN1_OID_X962_PUBLICKEY),
                   AsnOid(pointer(CKA_OID[cka]))
                 ]);
   else
-    raise ECrypt.CreateUtf8('Unexpected CkaToSeq(%)', [ToText(cka)^]);
+    begin
+      result := ''; // make compiler happy
+      ECrypt.RaiseUtf8('Unexpected CkaToSeq(%)', [ToText(cka)^]);
+    end;
   end;
+end;
+
+function EccPrivKeyToSeq(
+  cka: TCryptKeyAlgo; const rawecc: RawByteString): RawByteString;
+var
+  oct: RawByteString;
+begin
+  // see PemDerRawToEcc() secp256r1/prime256v1 PKCS#8 PrivateKeyInfo
+  oct := AsnSafeOct([Asn(1),
+                     Asn(ASN1_OCTSTR, [rawecc])]);
+  result := Asn(ASN1_SEQ, [
+              Asn(0), // version
+              CkaToSeq(cka),
+              oct
+            ]);
+  FillZero(oct);
+end;
+
+function SeqToEccPrivKey(cka: TCryptKeyAlgo; const seq: RawByteString;
+  rfcpub: PRawByteString): RawByteString;
+var
+  oid, oct, key: RawByteString;
+  pos, posoct, vt, vers: integer;
+begin
+  result := '';
+  if rfcpub <> nil then
+    rfcpub^ := '';
+  // initial sequence decoding
+  pos := 1;
+  if AsnNext(pos, seq) <> ASN1_SEQ then
+    exit;
+  vers := AsnNextInteger(pos, seq, vt);
+  if vt = ASN1_INT then
+    case vers of
+      0: // PKCS#8 format
+        if (AsnNext(pos, seq) = ASN1_SEQ) and // privateKeyAlgorithm
+           (AsnNext(pos, seq, @oid) = ASN1_OBJID) then
+        begin
+          // CkaToSeq() decoding
+          case cka of
+            ckaEcc256 .. ckaEcc256k:
+              if (oid <> ASN1_OID_X962_PUBLICKEY) or
+                 (AsnNext(pos, seq, @oid) <> ASN1_OBJID) then
+                exit;
+            ckaEdDSA:
+              ;
+          else
+            exit; // this function is dedicated to ECC
+          end;
+          if oid <> CKA_OID[cka] then
+            exit;
+          // private key raw binary extraction
+          posoct := 1;
+          if (AsnNextRaw(pos, seq, oct) = ASN1_OCTSTR) and // privateKey
+             (AsnNext(posoct, oct{%H-}) = ASN1_SEQ) and
+             (AsnNext(posoct, oct) = ASN1_INT) and
+             (AsnNextRaw(posoct, oct, key) = ASN1_OCTSTR) then
+            result := key;
+        end;
+      1: // https://www.rfc-editor.org/rfc/rfc5915 EC key pair alternate format
+       if (cka in CKA_ECC) and                           // Elliptic Curve only
+          (AsnNextRaw(pos, seq, key) = ASN1_OCTSTR) then // privateKey
+       begin
+         vt := AsnNext(pos, seq);
+         if vt = ASN1_NULL then
+           result := key // just privateKey, without optional constructed fields
+         else if (vt = ASN1_CTC0) and  // [0] ECparameters (optional)
+                 (AsnNext(pos, seq, @oid) = ASN1_OBJID) and
+                 (oid = CKA_OID[cka]) then
+         begin
+           result := key;
+           if (rfcpub <> nil) and       // [1] publicKey (optional)
+              (AsnNext(pos, seq) = ASN1_CTC1) and
+              (AsnNextRaw(pos, seq, key) = ASN1_BITSTR) then
+             rfcpub^ := key;
+        end;
+      end;
+    end;
+  FillZero(oct);
+  FillZero(key);
+end;
+
+function SeqToEccPubKey(cka: TCryptKeyAlgo; const seq: RawByteString): RawByteString;
+var
+  oid: RawByteString;
+  pos: integer;
+begin
+  result := '';
+  // PKCS#8 sequence decoding
+  pos := 1;
+  if (AsnNext(pos, seq) <> ASN1_SEQ) or
+     (AsnNext(pos, seq) <> ASN1_SEQ) or // algorithm
+     (AsnNext(pos, seq, @oid) <> ASN1_OBJID) then
+    exit;
+  // CkaToSeq() decoding and validating
+  case cka of
+    ckaEcc256 .. ckaEcc256k:
+      if (oid <> ASN1_OID_X962_PUBLICKEY) or
+         (AsnNext(pos, seq, @oid) <> ASN1_OBJID) then
+        exit;
+    ckaEdDSA:
+      ;
+  else
+    exit; // this function is dedicated to ECC: use X509PubKeyFromDer() instead
+  end;
+  if oid = CKA_OID[cka] then
+    // public key raw binary extraction
+    if AsnNextRaw(pos, seq, result) <> ASN1_BITSTR then
+      result := '';
 end;
 
 function X509PubKeyToDer(Algorithm: TCryptKeyAlgo;
   const SubjectPublicKey: RawByteString): RawByteString;
 begin
-  result := AsnSeq([
+  result := Asn(ASN1_SEQ, [
               CkaToSeq(Algorithm),
               Asn(ASN1_BITSTR, [
                 SubjectPublicKey
@@ -9093,9 +9331,9 @@ begin
   result := result shl 3; // from bytes to bits
   if PubText = nil then
     exit;
-  if bits = '' then
+  if {%H-}bits = '' then
     bits := BinToHumanHex(pub, publen, 16, 6);
-  FormatUtf8('    %Public Key: (% bit)'#13#10'%', [name, result, bits], PubText^);
+  FormatUtf8('    %Public Key: (% bit)'#13#10'%', [{%H-}name, result, bits], PubText^);
 end;
 
 function ParsedToText(const c: TX509Parsed): RawUtf8;
@@ -9125,7 +9363,7 @@ begin
   if (c.Usage <> []) or
      (c.SubjectID <> '') or
      (c.IssuerID <> '') then
-    version := 2
+    version := 2   // X.509 v3
   else
     version := 1;
   X509PubKeyBits(c.PubKey, @bits);
@@ -9143,47 +9381,46 @@ begin
             '  Subject Public Key Info:'#13#10 +
             '    Public Key Algorithm: ' + c.PubAlg + #13#10 +
             bits;
-  if version = 2 then // X.509 v3
-  begin
-    // append the X.509 v3 known extensions
-    result := result + '  X509v3 extensions:'#13#10;
-    KeyUsage(cuCrlSign, cuDigitalSignature, 'Key Usage: critical');
-    KeyUsage(cuTlsServer, cuTimestamp, 'Extended Key Usage:');
-    if cuCA in c.Usage then
-      bits := 'TRUE'
-    else
-      bits := 'FALSE';
-    result := result + '    X509v3 Basic Constraints: critical'#13#10 +
-                       '      CA:' + bits + #13#10;
-    if c.SubjectID <> '' then
-      result := result + '    X509v3 Subject Key Identifier:'#13#10 +
-                         '      ' + c.SubjectID + #13#10;
-    if c.IssuerID <> '' then
-      result := result + '    X509v3 Authority Key Identifier:'#13#10 +
-                         '      ' + c.IssuerID + #13#10;
-    if c.SubjectAltNames <> '' then
-      result := result + '    X509v3 Subject Alternative Name:'#13#10 +
-                         '      ' + c.SubjectAltNames + #13#10;
-  end;
+  if version = 1 then
+    exit;
+  // append the X.509 v3 known extensions
+  result := result + '  X509v3 extensions:'#13#10;
+  KeyUsage(cuCrlSign, cuDigitalSignature, 'Key Usage: critical');
+  KeyUsage(cuTlsServer, cuTimestamp, 'Extended Key Usage:');
+  if cuCA in c.Usage then
+    bits := 'TRUE'
+  else
+    bits := 'FALSE';
+  result := result + '    X509v3 Basic Constraints: critical'#13#10 +
+                     '      CA:' + bits + #13#10;
+  if c.SubjectID <> '' then
+    result := result + '    X509v3 Subject Key Identifier:'#13#10 +
+                       '      ' + c.SubjectID + #13#10;
+  if c.IssuerID <> '' then
+    result := result + '    X509v3 Authority Key Identifier:'#13#10 +
+                       '      ' + c.IssuerID + #13#10;
+  if c.SubjectAltNames <> '' then
+    result := result + '    X509v3 Subject Alternative Name:'#13#10 +
+                       '      ' + c.SubjectAltNames + #13#10;
 end;
 
 {$ifdef OSWINDOWS}
 
 procedure WinInfoToParse(const c: TWinCertInfo; out Info: TX509Parsed);
 begin
-  Info.Serial := c.Serial;
+  Info.Serial    := c.Serial;
   Info.SubjectDN := c.SubjectName;
-  Info.IssuerDN := c.IssuerName;
-  Info.SubjectAltNames := ''; // not yet part of TwinCertInfo
+  Info.IssuerDN  := c.IssuerName;
+  Info.SubjectAltNames := ''; // not yet part of TWinCertInfo
   Info.SubjectID := c.SubjectID;
-  Info.IssuerID := c.IssuerID;
-  Info.SigAlg := c.AlgorithmName;
-  Info.PubAlg := c.PublicKeyAlgorithmName;
-  Info.Usage := TCryptCertUsages(c.Usage); // match TWinCertUsages 16-bit
+  Info.IssuerID  := c.IssuerID;
+  Info.SigAlg    := c.AlgorithmName;
+  Info.PubAlg    := c.PublicKeyAlgorithmName;
+  Info.Usage     := TCryptCertUsages(c.Usage); // match TWinCertUsages 16-bit
   Info.NotBefore := c.NotBefore;
-  Info.NotAfter := c.NotAfter;
-  Info.PubKey := c.PublicKeyContent;
-  Info.PeerInfo := ParsedToText(Info); // should be the last
+  Info.NotAfter  := c.NotAfter;
+  Info.PubKey    := c.PublicKeyContent;
+  Info.PeerInfo  := ParsedToText(Info); // should be the last
 end;
 
 function WinX509Parse(const Cert: RawByteString; out Info: TX509Parsed): boolean;
@@ -9248,7 +9485,7 @@ begin
       AsnEncOidItem(x, tmp);
       x := 0;
     end;
-    if (y = 0) or
+    if (y = 0) or // y=0 is not a valid last item
        (tmp[0] < #3) then
       tmp[0] := #0; // clearly invalid input
   end;
@@ -9306,6 +9543,8 @@ begin
   result := 0;
   repeat
     result := (result shl 8) + cardinal(Buffer[Start]);
+    if integer(result) < 0 then
+      exit; // 31-bit overflow: clearly invalid input
     inc(Start);
     dec(n);
   until n = 0;
@@ -9346,13 +9585,28 @@ begin
     tmp[n] := 0; // positive numbers start with a 0 or 0x..7x
     inc(n);
   end;
-  FastSetRawByteString(result, nil, n);
+  FastNewRawByteString(result, n);
   p := pointer(result);
   repeat
     dec(n);
     p^ := tmp[n]; // stored as big endian
     inc(p);
   until n = 0;
+end;
+
+function AsnEncInt(Value: pointer; ValueLen: PtrUInt): TAsnObject;
+begin // same logic as DerAppend() but for any value size
+  while (ValueLen > 0) and
+        (PByte(Value)^ = 0) do
+  begin
+    inc(PByte(Value)); // ignore leading zeros
+    dec(ValueLen);
+  end;
+  FastSetRawByteString(result, Value, ValueLen);
+  if (result <> '') and
+     (PByte(result)^ and $80 <> 0) then
+    Prepend(result, #0); // prevent storage as negative number (not)
+  result := Asn(ASN1_INT, [result]);
 end;
 
 function AsnDecInt(var Start: integer; const Buffer: TAsnObject;
@@ -9504,23 +9758,25 @@ begin
   if t.Year > 1900 then
     if (t.Year <= 2000) or
        (t.Year >= 2050) then
-      result := Asn(ASN1_GENTIME, [FormatUtf8('%%%%%%Z', [
+       result := Asn(ASN1_GENTIME, [Make([
         UInt4DigitsToShort(t.Year),
         UInt2DigitsToShortFast(t.Month),
         UInt2DigitsToShortFast(t.Day),
         UInt2DigitsToShortFast(t.Hour),
         UInt2DigitsToShortFast(t.Minute),
-        UInt2DigitsToShortFast(t.Second)])])
+        UInt2DigitsToShortFast(t.Second),
+        'Z'])])
     else
-      result := Asn(ASN1_UTCTIME, [FormatUtf8('%%%%%%Z', [
+      result := Asn(ASN1_UTCTIME, [Make([
         UInt2DigitsToShortFast(t.Year - 2000),
         UInt2DigitsToShortFast(t.Month),
         UInt2DigitsToShortFast(t.Day),
         UInt2DigitsToShortFast(t.Hour),
         UInt2DigitsToShortFast(t.Minute),
-        UInt2DigitsToShortFast(t.Second)])])
+        UInt2DigitsToShortFast(t.Second),
+        'Z'])])
   else
-    raise ECrypt.CreateUtf8('Invalid AsnTime(%)', [dt]);
+    ECrypt.RaiseUtf8('Invalid AsnTime(%)', [dt]);
 end;
 
 function AsnSafeOct(const Content: array of TAsnObject): TAsnObject;
@@ -9528,7 +9784,7 @@ var
   i: PtrInt;
   seq: RawByteString;
 begin
-  seq := AsnSeq(Content);
+  seq := Asn(ASN1_SEQ, Content);
   result := Asn(ASN1_OCTSTR, [seq]);
   FillZero(seq);
   for i := 0 to high(Content) do // wipe temporary "const" memory buffers
@@ -9557,11 +9813,20 @@ begin
     if y = 0 then
     begin
       y := x div 40; // first byte = two first numbers modulo 40
-      x := x mod 40;
+      dec(x, y * 40);
       UInt32ToUtf8(y, result);
     end;
     Append(result, ['.', x]);
   end;
+end;
+
+function AsnDecOctStr(const input: RawByteString): RawByteString;
+var
+  pos: integer;
+begin
+  pos := 1;
+  if AsnNextRaw(pos, input, result) <> ASN1_OCTSTR then
+    result := input;
 end;
 
 function AsnDecIp(p: PAnsiChar; len: integer): RawUtf8;
@@ -9570,7 +9835,9 @@ begin
     4:
       with PDWordRec(p)^ do
         FormatUtf8('%.%.%.%', [B[0], B[1], B[2], B[3]], result);
-   {16: // not true IPv6 content (no mormot.net.sock dependency) }
+   16:
+     // expanded IPv6 xx:xx:xx:...:xx content (no mormot.net.sock dependency)
+     ToHumanHex(result, pointer(p), len);
   else
     BinToHexLower(p, len, result);
   end;
