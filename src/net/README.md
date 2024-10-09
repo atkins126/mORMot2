@@ -147,10 +147,13 @@ Automatic Certificate Management Environment (ACME v2) Client
 ### mormot.net.ldap
 
 Simple LDAP Protocol Client
-- LDAP Protocol Definitions
-- LDAP Response Storage
 - CLDAP Client Functions
-- LDAP Client Class
+- LDIF Data Interchange Format
+- LDAP Protocol Definitions
+- LDAP Attributes Definitions
+- LDAP Response Storage
+- Main `TLdapClient` Class
+- Dedicated `TLdapCheckMember` Class
 - HTTP BASIC Authentication via LDAP or Kerberos
 
 ### mormot.net.dns
@@ -158,3 +161,11 @@ Simple LDAP Protocol Client
 Simple DNS Protocol Client
 - Low-Level DNS Protocol Definitions
 - High-Level DNS Query
+
+### mormot.net.openapi
+
+OpenAPI Language-agnostic Interface to HTTP APIs
+- OpenAPI Document Wrappers
+- FPC/Delphi Pascal Client Code Generation
+
+See https://blog.synopse.info/?post/2024/09/06/Swagger/OpenAPI-Client-Generator-for-Delphi-and-FPC

@@ -117,6 +117,12 @@ function PurgeHeaders(const headers: RawUtf8; trim: boolean = false;
 procedure ExtractHeader(var headers: RawUtf8; const upname: RawUtf8;
   out res: RawUtf8);
 
+/// retrieve a HTTP header text value from its case-insensitive name
+function GetHeader(const Headers, Name: RawUtf8; out Value: RawUtf8): boolean; overload;
+
+/// retrieve a HTTP header 64-bit integer value from its case-insensitive name
+function GetHeader(const Headers, Name: RawUtf8; out Value: Int64): boolean; overload;
+
 /// 'HEAD' and 'OPTIONS' methods would be detected and return true
 // - will check only the first four chars for efficiency
 function HttpMethodWithNoBody(const method: RawUtf8): boolean;
@@ -156,8 +162,11 @@ function IsOptions(const method: RawUtf8): boolean;
 function IsUrlFavIcon(P: PUtf8Char): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
-/// check if the supplied text start with http:// or https://
+/// check if the supplied text start with 'http://' or 'https://'
 function IsHttp(const text: RawUtf8): boolean;
+
+/// true if the supplied text is case-insensitive 'none'
+function IsNone(const text: RawUtf8): boolean;
 
 /// naive detection of most used bots from a HTTP User-Agent string
 // - meant to be fast, with potentially a lot of false negatives: please do not
@@ -187,7 +196,7 @@ function UrlDecodeParam(P: PUtf8Char; const UpperName: RawUtf8;
 /// convert a file URL to a local file path using our TUri parser
 // - mormot.core.os.pas implements this on Windows via PathCreateFromUrl() API
 // - used e.g. by TNetClientProtocolFile to implement the 'file://' protocol
-function GetFileNameFromUrl(const Uri: string): TFileName;
+function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 
 {$endif OSPOSIX}
 
@@ -935,9 +944,8 @@ type
   // - used e.g. to implement hsoBan40xIP or THttpPeerCache instable
   // peers list (with a per-minute resolution)
   // - the DoRotate method should be called every second
-  THttpAcceptBan = class(TSynPersistent)
+  THttpAcceptBan = class(TObjectOSLightLock)
   protected
-    fSafe: TOSLightLock; // almost never on contention, no R/W needed
     fCount, fLastSec: integer;
     fIP: array of TCardinalDynArray; // one [0..fMax] IP array per second
     fSeconds, fMax, fWhiteIP: cardinal;
@@ -953,8 +961,6 @@ type
     // - maxpersecond is the maximum number of banned IPs remembered per second
     constructor Create(banseconds: cardinal = 4; maxpersecond: cardinal = 1024;
       banwhiteip: cardinal = cLocalhost32); reintroduce;
-    /// finalize this storage
-    destructor Destroy; override;
     /// register an IP4 to be rejected
     function BanIP(ip4: cardinal): boolean; overload;
     /// register an IP4 to be rejected
@@ -1538,15 +1544,10 @@ type
   // - can merge several THttpAfterResponse instances via the OnContinue property
   // - OnIdle() should be called every few seconds for background process
   // - Append() match TOnHttpServerAfterResponse as real-time source of data
-  THttpAfterResponse = class(TSynPersistent)
+  THttpAfterResponse = class(TObjectOSLightLock)
   protected
-    fSafe: TOSLightLock;
     fOnContinue: THttpAfterResponse;
   public
-    /// initialize this instance
-    constructor Create; override;
-    /// finalize this instance
-    destructor Destroy; override;
     /// to be overriden e.g. to flush the logs to disk or consolidate counters
     // - likely to be executed every few seconds from a THttpServerGeneric
     procedure OnIdle(tix64: Int64); virtual; abstract;
@@ -2153,9 +2154,8 @@ type
 
   /// abstract parent class used to persist THttpAnalyzer information into files
   // - with optional output file rotation/compression (disabled by default)
-  THttpAnalyzerPersistAbstract = class(TSynPersistent)
+  THttpAnalyzerPersistAbstract = class(TObjectOSLightLock)
   protected
-    fSafe: TOSLightLock;
     fRotate: THttpRotater;
     fOnContinue: TOnHttpAnalyzerSave;
     fOwner: THttpAnalyzer;
@@ -2168,8 +2168,6 @@ type
     constructor Create(const aFileName: TFileName); reintroduce; virtual;
     /// initialize this persistence for a given THttpAnalyzer
     constructor CreateOwned(aOwner: THttpAnalyzer);
-    /// finalize this persistence instance
-    destructor Destroy; override;
     /// this is the main callback of persistence, matching THttpAnalyser.OnSave
     procedure OnSave(const State: THttpAnalyzerToSaveDynArray);
     /// enable/disable optional output file rotation and compression
@@ -2584,6 +2582,30 @@ begin
   until false;
 end;
 
+function GetHeader(const Headers, Name: RawUtf8; out Value: RawUtf8): boolean;
+var
+  up: array[byte] of AnsiChar;
+begin
+  result := false;
+  if (Name = '') or
+     (Headers = '') then
+    exit;
+  PWord(UpperCopy255Buf(@up, pointer(Name), length(Name)))^ := ord(':');
+  result := FindNameValue(Headers, @up, Value);
+end;
+
+function GetHeader(const Headers, Name: RawUtf8; out Value: Int64): boolean;
+var
+  v: RawUtf8;
+  err: integer;
+begin
+  result := GetHeader(Headers, Name, v);
+  if not result then
+    exit;
+  Value := GetInt64(pointer(v), err);
+  result := err = 0;
+end;
+
 function MimeHeaderEncode(const header: RawUtf8): RawUtf8;
 begin
   if IsAnsiCompatible(header) then
@@ -2659,6 +2681,13 @@ begin
             ((text[5] = ':') or
              ((text[5] in ['s', 'S']) and
               (text[6] = ':')));
+end;
+
+function IsNone(const text: RawUtf8): boolean;
+begin
+  result := (length(text) = 4) and
+            (PCardinal(text)^ and $dfdfdfdf =
+              ord('N') + ord('O') shl 8 + ord('N') shl 16 + ord('E') shl 24);
 end;
 
 function IsHttpUserAgentBot(const UserAgent: RawUtf8): boolean;
@@ -2826,10 +2855,10 @@ begin
     while p^ = ' ' do
       inc(p); // trim left
     repeat
-      v0 := ConvertHexToBin[ord(p[0])];
+      v0 := ConvertHexToBin[p[0]];
       if v0 = 255 then
         break; // not in '0'..'9','a'..'f' -> trim right
-      v1 := ConvertHexToBin[ord(p[1])];
+      v1 := ConvertHexToBin[p[1]];
       inc(p);
       if v1 = 255 then
       begin
@@ -2889,12 +2918,12 @@ end;
 
 {$ifdef OSPOSIX}
 
-function GetFileNameFromUrl(const Uri: string): TFileName;
+function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 var
   u: TUri;
 begin
   result := '';
-  u.From(RawUtf8(Uri));
+  u.From(Uri);
   if (u.Server = '') or
      PropNameEquals(u.Server, 'localhost') or
      IsLocalHost(pointer(u.Server)) then // supports only local files
@@ -4689,16 +4718,10 @@ end;
 constructor THttpAcceptBan.Create(
   banseconds, maxpersecond, banwhiteip: cardinal);
 begin
+  inherited Create; // fSafe.Init
   fMax := maxpersecond;
   SetSeconds(banseconds);
   fWhiteIP := banwhiteip;
-  fSafe.Init;
-end;
-
-destructor THttpAcceptBan.Destroy;
-begin
-  inherited Destroy;
-  fSafe.Done;
 end;
 
 procedure THttpAcceptBan.SetMax(Value: cardinal);
@@ -4940,20 +4963,6 @@ end;
 
 
 { ******************** HTTP Server Logging/Monitoring Processors }
-
-{ THttpAfterResponse }
-
-constructor THttpAfterResponse.Create;
-begin
-  fSafe.Init;
-end;
-
-destructor THttpAfterResponse.Destroy;
-begin
-  inherited Destroy;
-  fSafe.Done;
-end;
-
 
 { THttpRotater }
 
@@ -5403,7 +5412,7 @@ begin
   end;
   if fSettings.Format <> prev then
     err := Parse(fSettings.Format);
-  if err <> '' then
+  if {%H-}err <> '' then
     EHttpLogger.RaiseUtf8('%.SetSettings Format: % in [%]',
       [self, err, fSettings.Format]);
 end;
@@ -5803,7 +5812,7 @@ begin
           fSafe.Lock;
           try
             fUniqueIPDepth := value;
-            fUniqueIPSeed := Random32; // avoid hash flooding
+            fUniqueIPSeed := Random32Not0; // avoid hash flooding
             Finalize(fUniqueIP);  // release up to 128KB with max value=65536
             value := value shr 3; // from bits to bytes
             if value <> 0 then
@@ -6340,8 +6349,7 @@ end;
 
 constructor THttpAnalyzerPersistAbstract.Create(const aFileName: TFileName);
 begin
-  fSafe.Init;
-  inherited Create;
+  inherited Create; // fSafe.Init
   if aFileName <> '' then
     fRotate.FileName := ExpandFileName(aFileName);
   fRotate.OnRotate := OnRotate;
@@ -6356,12 +6364,6 @@ begin
   fOnContinue := aOwner.fOnSave;
   aOwner.fOnSave := OnSave;
   fOwner := aOwner;
-end;
-
-destructor THttpAnalyzerPersistAbstract.Destroy;
-begin
-  inherited Destroy;
-  fSafe.Done;
 end;
 
 procedure THttpAnalyzerPersistAbstract.OnSave(
@@ -6954,7 +6956,7 @@ var
   tmp: array[0..4095] of AnsiChar; // first 4KB should be enough (with metadata)
   unc: array[0..6143] of AnsiChar; // partially decompressed content
 begin
-  FastRecordClear(@Info, TypeInfo(THttpMetricsHeader));
+  RecordZero(@Info, TypeInfo(THttpMetricsHeader));
   result := false;
   // read (and decompress if needed) the first file chunk
   f := FileOpen(FileName, fmOpenReadShared);

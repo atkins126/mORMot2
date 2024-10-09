@@ -168,7 +168,7 @@ function FromVarString(var Source: PByte; SourceMax: PByte;
 
 /// retrieve a variable-length UTF-8 encoded text buffer in a temporary buffer
 // - caller should call Value.Done after use of the Value.buf memory
-// - this overloaded function would include a trailing #0, so Value.buf could
+// - this overloaded function would include a #0 terminator, so Value.buf could
 // be parsed as a valid PUtf8Char buffer (e.g. containing JSON)
 procedure FromVarString(var Source: PByte; var Value: TSynTempBuffer); overload;
 
@@ -1563,15 +1563,38 @@ procedure UrlEncodeName(W: TTextWriter; Text: PUtf8Char; TextLen: PtrInt); overl
 // - only parameters - i.e. after '?' - should replace spaces by '+'
 procedure UrlEncodeName(W: TTextWriter; const Text: RawUtf8); overload;
 
+type
+  /// some options for UrlEncode()
+  TUrlEncoder = set of (
+    ueTrimLeadingQuestionMark,
+    ueEncodeNames,
+    ueStarNameIsCsv,
+    ueSkipVoidString,
+    ueSkipVoidValue);
+
 /// encode supplied parameters to be compatible with URI encoding
 // - parameters must be supplied two by two, as Name,Value pairs, e.g.
 // ! url := UrlEncode(['select','*','where','ID=12','offset',23,'object',aObject]);
 // - parameters names should be plain ASCII-7 RFC compatible identifiers
-// (0..9a..zA..Z_.~), otherwise their values are skipped
+// (0..9a..zA..Z_.~), otherwise they are skipped unless ueEncodeNames is set
 // - parameters values can be either textual, integer or extended, or any TObject
 // - TObject serialization into UTF-8 will be processed with ObjectToJson()
 function UrlEncode(const NameValuePairs: array of const;
-  TrimLeadingQuestionMark: boolean = false): RawUtf8; overload;
+  Options: TUrlEncoder = []): RawUtf8; overload;
+
+/// encode supplied parameters to be compatible with URI encoding
+// - consider using UrlAppend() if you just need to append some parameters
+function UrlEncode(const NameValuePairs: array of const;
+  TrimLeadingQuestionMark: boolean): RawUtf8; overload;
+
+/// append some encoded Name,Value pairs parameters to an existing URI
+// - will check if Uri does already end with '?' or '&'
+function UrlAppend(const Uri: RawUtf8; const NameValuePairs: array of const;
+  Options: TUrlEncoder = []): RawUtf8;
+
+/// encode a full URI with prefix and parameters
+function UrlEncodeFull(const PrefixFmt: RawUtf8; const PrefixArgs,
+  NameValuePairs: array of const; Options: TUrlEncoder): RawUtf8;
 
 /// decode a UrlEncode() URI encoded parameter into its original value
 function UrlDecode(U: PUtf8Char): RawUtf8; overload;
@@ -1833,6 +1856,9 @@ function IsContentTypeCompressible(ContentType: PUtf8Char): boolean;
 function IsContentTypeCompressibleU(const ContentType: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
+/// recognize e.g. 'application/json' or 'application/vnd.api+json'
+function IsContentTypeJson(ContentType: PUtf8Char): boolean;
+
 /// fast guess of the size, in pixels, of a JPEG memory buffer
 // - will only scan for basic JPEG structure, up to the StartOfFrame (SOF) chunk
 // - returns TRUE if the buffer is likely to be a JPEG picture, and set the
@@ -1846,12 +1872,11 @@ function GetJpegSize(jpeg: PAnsiChar; len: PtrInt;
 { ************* Text Memory Buffers and Files }
 
 type
-  {$M+}
   /// able to read a UTF-8 text file using memory map
   // - much faster than TStringList.LoadFromFile()
   // - will ignore any trailing UTF-8 BOM in the file content, but will not
   // expect one either
-  TMemoryMapText = class
+  TMemoryMapText = class(TSynPersistent)
   protected
     fLines: PPointerArray;
     fLinesMax: integer;
@@ -1873,10 +1898,6 @@ type
     // avoid reading the entire file more than once
     procedure ProcessOneLine(LineBeg, LineEnd: PUtf8Char); virtual;
   public
-    /// initialize the memory mapped text file
-    // - this default implementation just do nothing but is called by overloaded
-    // constructors so may be overriden to initialize an inherited class
-    constructor Create; overload; virtual;
     /// read an UTF-8 encoded text file
     // - every line beginning is stored into LinePointers[]
     constructor Create(const aFileName: TFileName); overload;
@@ -1937,7 +1958,6 @@ type
     property Count: integer
       read fCount;
   end;
-  {$M-}
 
 {$ifndef PUREMORMOT2} // just redirect to mormot.core.text Append(...) overloads
 procedure AppendBufferToRawByteString(var Content: RawByteString;
@@ -1982,7 +2002,7 @@ function AppendUInt32ToBuffer(Buffer: PUtf8Char; Value: PtrUInt): PUtf8Char;
 
 /// fast add text conversion of 0-999 integer value into a given buffer
 // - warning: it won't check that Value is in 0-999 range
-// - up to 4 bytes may be written to the buffer (including trailing #0)
+// - up to 4 bytes may be written to the buffer (including #0 terminator)
 function Append999ToBuffer(Buffer: PUtf8Char; Value: PtrUInt): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -2034,6 +2054,8 @@ function EscapeToShort(source: PAnsiChar; sourcelen: integer): ShortString; over
 /// fill a ShortString with the (hexadecimal) chars of the input text/binary
 function EscapeToShort(const source: RawByteString): ShortString; overload;
 
+/// if source is not UTF-8 calls EscapeToShort, otherwise return it directly
+function ContentToShort(const source: RawByteString): ShortString;
 
 /// generate some pascal source code holding some data binary as constant
 // - can store sensitive information (e.g. certificates) within the executable
@@ -2186,6 +2208,7 @@ type
     function GetProgress: RawUtf8;
     procedure DoReport(ReComputeElapsed: boolean);
     procedure DoHash(data: pointer; len: integer); virtual; // do nothing
+    procedure ResetHash; virtual; // called e.g. from Seek(0, soBeginning)
     procedure SetExpectedSize(Value: Int64);
     procedure ReadWriteHash(const Buffer; Count: integer); virtual;
     procedure ReadWriteReport(const Caller: ShortString); virtual;
@@ -2214,6 +2237,9 @@ type
     // - also trigger OnProgress at least every second
     // - will raise an error if Read() has been called before
     function Write(const Buffer; Count: Longint): Longint; override;
+    /// overriden to support Seek(0, soBeginning) and reset the Redirected stream
+    // - mandatory for proper THttpClientSocket.SockSendStream rewind
+    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
     /// update the hash of the existing Redirected stream content
     // - ready to Write() some new data after the existing
     procedure Append;
@@ -2299,15 +2325,16 @@ type
   TStreamRedirectClass = class of TStreamRedirect;
 
   /// TStreamRedirect with 32-bit THasher checksum
-  TStreamRedirectHasher = class(TStreamRedirect)
+  TStreamRedirectHash32 = class(TStreamRedirect)
   protected
     fHash: cardinal;
+    procedure ResetHash; override;
   public
     function GetHash: RawUtf8; override;
   end;
 
   /// TStreamRedirect with crc32c 32-bit checksum
-  TStreamRedirectCrc32c = class(TStreamRedirectHasher)
+  TStreamRedirectCrc32c = class(TStreamRedirectHash32)
   protected
     procedure DoHash(data: pointer; len: integer); override;
   public
@@ -3422,7 +3449,7 @@ var
 begin
   len := FromVarUInt32(Source);
   Value.Init(Source, len);
-  PByteArray(Value.buf)[len] := 0; // include trailing #0
+  PByteArray(Value.buf)[len] := 0; // include #0 terminator
   inc(Source, len);
 end;
 
@@ -3444,7 +3471,7 @@ begin
     end;
   end;
   Value.Init(Source, len);
-  PByteArray(Value.buf)[len] := 0; // include trailing #0
+  PByteArray(Value.buf)[len] := 0; // include #0 terminator
   inc(Source, len);
   result := true;
 end;
@@ -4469,7 +4496,7 @@ procedure TBufferWriter.CancelAll;
 begin
   fTotalFlushed := 0;
   fPos := 0;
-  if fStream.ClassType = TRawByteStringStream then
+  if PClass(fStream)^ = TRawByteStringStream then
     TRawByteStringStream(fStream).Size := 0
   else
     fStream.Seek(0, soBeginning);
@@ -8025,11 +8052,12 @@ end;
 
 // some local sub-functions for better code generation of UrlEncode()
 
-procedure _UrlEncode_Write(s, d: PByte; tab: PTextByteSet; space2plus: cardinal);
+function _UrlEncode_Write(s, d: PByte; tab: PTextByteSet; space2plus: cardinal): PtrUInt;
 var
   c: cardinal;
   hex: PByteToWord;
 begin
+  result := PtrUInt(d);
   if d = nil then
     exit;
   hex := @TwoDigitsHexWB;
@@ -8043,7 +8071,7 @@ begin
       inc(d);
     end
     else if c = 0 then
-      exit
+      break
     else if c = space2plus then // space2plus=32 for parameter, =48 for URI
     begin
       d^ := ord('+');
@@ -8057,6 +8085,7 @@ begin
       inc(d, 2);
     end;
   until false;
+  result := PtrUInt(d) - result; // return the number of written bytes
 end;
 
 function _UrlEncode_ComputeLen(s: PByte; tab: PTextByteSet; space2plus: byte): PtrInt;
@@ -8091,9 +8120,13 @@ end;
 
 procedure _UrlEncodeW(W: TTextWriter; Text: pointer; TextLen: PtrInt; space2plus: cardinal);
 begin
-  if Text <> nil then
-    _UrlEncode_Write(Text, W.AddPrepare(_UrlEncode_ComputeLen(
-      Text, @TEXT_BYTES, space2plus)), @TEXT_BYTES, space2plus);
+  if (Text = nil) or
+     (W = nil) then
+    exit;
+  TextLen := TextLen * 3; // worse case
+  if TextLen > W.BEnd - W.B then // need to compute exact length (very unlikely)
+    TextLen := _UrlEncode_ComputeLen(Text, @TEXT_BYTES, space2plus);
+  inc(W.B, _UrlEncode_Write(Text, W.AddPrepare(TextLen), @TEXT_BYTES, space2plus));
 end;
 
 function UrlEncode(const Text: RawUtf8): RawUtf8;
@@ -8136,35 +8169,120 @@ begin
   _UrlEncodeW(W, pointer(Text), length(Text), 48);
 end;
 
+function UrlEncode(const NameValuePairs: array of const; Options: TUrlEncoder): RawUtf8;
+begin
+  result := UrlEncodeFull('', [], NameValuePairs, Options);
+end;
+
+const
+  _UE_OPT: array[boolean] of TUrlEncoder = ([], [ueTrimLeadingQuestionMark]);
+
 function UrlEncode(const NameValuePairs: array of const;
   TrimLeadingQuestionMark: boolean): RawUtf8;
-// (['select','*','where','ID=12','offset',23,'object',aObject]);
+begin
+  result := UrlEncodeFull('', [], NameValuePairs, _UE_OPT[TrimLeadingQuestionMark]);
+end;
+
+function UrlAppend(const Uri: RawUtf8; const NameValuePairs: array of const;
+  Options: TUrlEncoder): RawUtf8;
+begin
+  if (Uri <> '') and (Uri[length(Uri)] in ['?', '&']) then
+    include(Options, ueTrimLeadingQuestionMark);
+  result := UrlEncodeFull(Uri, [], NameValuePairs, Options);
+end;
+
+function UrlEncodeFull(const PrefixFmt: RawUtf8; const PrefixArgs,
+  NameValuePairs: array of const; Options: TUrlEncoder): RawUtf8;
 var
   a, n: PtrInt;
-  name, value: RawUtf8;
+  name, value, one: RawUtf8;
   p: PVarRec;
+  w: TTextWriter;
+  csv: PUtf8Char;
+  flags: set of (possibleDirect, valueDirect, valueIsCsv, hasContent);
+  tmp: TTextWriterStackBuffer;
 begin
-  result := '';
-  n := high(NameValuePairs);
-  if (n < 0) or
-     (n and 1 <> 1) then // n should be = 1,3,5,7,..
-    exit;
-  for a := 0 to n shr 1 do
-  begin
-    VarRecToUtf8(NameValuePairs[a * 2], name);
-    if not IsUrlValid(pointer(name)) then
-      continue; // just skip invalid names
-    p := @NameValuePairs[a * 2 + 1];
-    if p^.VType = vtObject then
-      value := ObjectToJson(p^.VObject, []) // VarRecToUtf8(vtObject)=ClassName
-    else
-      VarRecToUtf8(p^, value);
-    result := result + '&' + name + '=' + UrlEncode(value);
+  flags := [];
+  if DefaultJsonWriter <> TTextWriter then
+    include(flags, possibleDirect);
+  w := DefaultJsonWriter.CreateOwnedStream(tmp);
+  try
+    if PrefixFmt <> '' then
+      w.Add(PrefixFmt, PrefixArgs);
+    n := high(NameValuePairs);
+    if (n > 0) and
+       (n and 1 = 1) then // n should be = 1,3,5,7,..
+      for a := 0 to n shr 1 do
+      begin
+        p := @NameValuePairs[a * 2];
+        VarRecToUtf8(p^, name);
+        if name = '' then
+          continue;
+        flags := flags - [valueDirect, valueIsCsv];
+        if (ueStarNameIsCsv in Options) and
+           (name[1] = '*') then
+        begin
+          include(flags, valueIsCsv);
+          delete(name, 1, 1);
+        end;
+        if not IsUrlValid(pointer(name)) then
+          if ueEncodeNames in Options then
+            name := UrlEncodeName(name)
+          else
+            continue; // just skip invalid names
+        inc(p);
+        if (possibleDirect in flags) and
+           (not (valueIsCsv in flags)) and
+           (byte(p^.VType) in vtNotString) then
+          include(flags, valuedirect);
+        if (ueSkipVoidValue in Options) and
+           VarRecIsVoid(p^) then
+          continue // skip e.g. '' or 0
+        else if p^.VType = vtObject then // no VarRecToUtf8(vtObject)=ClassName
+          value := ObjectToJson(p^.VObject, [])
+        else if not (valueDirect in flags) then
+        begin
+          VarRecToUtf8(p^, value);
+          if (ueSkipVoidString in Options) and
+             (value = '') then
+            continue; // skip ''
+        end;
+        if hasContent in flags then
+          w.AddDirect('&')
+        else
+        begin
+          include(flags, hasContent);
+          if not (ueTrimLeadingQuestionMark in Options) then
+            w.AddDirect('?');
+        end;
+        if valueIsCsv in flags then
+        begin
+          csv := pointer(value); // '*tag', 't1,"t2",t3'
+          repeat
+            GetNextItem(csv, ',', '"', one);
+            if (ueSkipVoidString in Options) and
+               (one = '') then
+              continue;
+            if not (valueIsCsv in flags) then
+              w.AddDirect('&'); // ? or & has been written before the first item
+            exclude(flags, valueIsCsv);
+            w.AddString(name); // 'tag=t1&tag=t2&tag=t3'
+            w.AddDirect('=');
+            _UrlEncodeW(w, pointer(one), length(one), 32);
+          until csv = nil;
+          continue;
+        end;
+        w.AddString(name);
+        w.AddDirect('=');
+        if valueDirect in flags then
+          w.Add(p^) // requires TJsonWriter
+        else
+          _UrlEncodeW(w, pointer(value), length(value), 32); // = UrlEncode(W)
+      end;
+    w.SetText(result);
+  finally
+    w.Free;
   end;
-  if TrimLeadingQuestionMark then
-    delete(result, 1, 1)
-  else
-    result[1] := '?';
 end;
 
 function IsUrlValid(P: PUtf8Char): boolean;
@@ -8178,9 +8296,11 @@ begin
   repeat
     if tcUriUnreserved in tab[P^] then
       inc(P) // was  ['_', '-', '.', '~', '0'..'9', 'a'..'z', 'A'..'Z']
+    else if P^ = #0 then
+      break
     else
       exit;
-  until P^ = #0;
+  until false;
   result := true;
 end;
 
@@ -8917,9 +9037,9 @@ const
     nil);
   _CONTENT_APP: array[0..4] of PUtf8Char = (
     'JSON',
-    'XML',
     'JAVASCRIPT',
     'VND.API+JSON',
+    'XML',
     nil);
 
 function IsContentTypeCompressible(ContentType: PUtf8Char): boolean;
@@ -8939,6 +9059,12 @@ end;
 function IsContentTypeCompressibleU(const ContentType: RawUtf8): boolean;
 begin
   result := IsContentTypeCompressible(pointer(ContentType));
+end;
+
+function IsContentTypeJson(ContentType: PUtf8Char): boolean;
+begin
+  result := IdemPChar(ContentType, pointer(_CONTENT[2])) and
+            (PtrUInt(IdemPPChar(ContentType + 12, @_CONTENT_APP)) <= 2);
 end;
 
 function GetJpegSize(jpeg: PAnsiChar; len: PtrInt;
@@ -8987,10 +9113,6 @@ end;
 { ************* Text Memory Buffers and Files }
 
 { TMemoryMapText }
-
-constructor TMemoryMapText.Create;
-begin
-end;
 
 constructor TMemoryMapText.Create(aFileContent: PUtf8Char; aFileSize: integer);
 begin
@@ -9367,6 +9489,19 @@ begin
     EscapeBuffer(pointer(source), length(source), @result[1], 255) - @result[1]);
 end;
 
+function ContentToShort(const source: RawByteString): ShortString;
+var
+  l: PtrInt;
+begin
+  l := length(source);
+  if (l = 0) or
+     IsValidUtf8(source) then
+    SetString(result, PAnsiChar(pointer(source)), l)
+  else
+    result[0] := AnsiChar(
+      EscapeBuffer(pointer(source), l, @result[1], 255) - @result[1]);
+end;
+
 function BinToSource(const ConstName, Comment: RawUtf8;
   Data: pointer; Len, PerLine: integer; const Suffix: RawUtf8): RawUtf8;
 var
@@ -9711,6 +9846,10 @@ procedure TStreamRedirect.DoHash(data: pointer; len: integer);
 begin // no associated hasher on this parent class
 end;
 
+procedure TStreamRedirect.ResetHash;
+begin // no associated hasher on this parent class
+end;
+
 procedure TStreamRedirect.SetExpectedSize(Value: Int64);
 begin
   fInfo.SetExpectedSize(Value, fPosition);
@@ -9894,10 +10033,27 @@ begin
   ReadWriteReport('Write');
 end;
 
+function TStreamRedirect.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+var
+  prev: Int64;
+begin
+  prev := fPosition;
+  result := inherited Seek(Offset, Origin);
+  if result = prev then
+    exit; // nothing changed
+  ResetHash;
+  fRedirected.Seek(result, soBeginning);
+end;
 
-{ TStreamRedirectHasher }
 
-function TStreamRedirectHasher.GetHash: RawUtf8;
+{ TStreamRedirectHash32 }
+
+procedure TStreamRedirectHash32.ResetHash;
+begin
+  fHash := 0;
+end;
+
+function TStreamRedirectHash32.GetHash: RawUtf8;
 begin
   result := CardinalToHexLower(fHash);
 end;
@@ -10116,11 +10272,10 @@ var
 begin
   prev := fPosition;
   result := inherited Seek(Offset, Origin);
-  if prev <> result then
-  begin
-    fSource.Seek(result, soBeginning);
-    fBufferLeft := 0; // deprecate buffer content
-  end;
+  if result = prev then
+    exit; // nothing changed
+  fSource.Seek(result, soBeginning);
+  fBufferLeft := 0; // deprecate buffer content
 end;
 
 function TBufferedStreamReader.Read(var Buffer; Count: Longint): Longint;

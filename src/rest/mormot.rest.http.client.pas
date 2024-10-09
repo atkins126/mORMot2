@@ -226,6 +226,7 @@ type
 
   TRestHttpClientGenericClass = class of TRestHttpClientGeneric;
 
+  {$ifdef USEHTTPREQUEST}
 
   /// HTTP/1.1 RESTful JSON mORMot Client abstract class using either WinINet,
   // WinHttp or libcurl API
@@ -254,17 +255,19 @@ type
       read fExtendedOptions.Auth.Scheme
       write fExtendedOptions.Auth.Scheme;
     /// optional User Name for Authentication
-    property AuthUserName: SynUnicode
+    property AuthUserName: RawUtf8
       read fExtendedOptions.Auth.UserName
       write fExtendedOptions.Auth.UserName;
     /// optional Password for Authentication
-    property AuthPassword: SynUnicode
+    property AuthPassword: SpiUtf8
       read fExtendedOptions.Auth.Password
       write fExtendedOptions.Auth.Password;
   end;
 
   /// meta-class of TRestHttpClientRequest types
   TRestHttpClientRequestClass = class of TRestHttpClientRequest;
+
+  {$endif USEHTTPREQUEST}
 
 
 { ************ TRestHttpClientSocket REST Client Class over Sockets }
@@ -584,7 +587,7 @@ begin
     Call.OutBody := Content;
   end
   else
-    Call.OutStatus := HTTP_NOTIMPLEMENTED; // 501 indicates not socket closed
+    Call.OutStatus := HTTP_CLIENTERROR; // indicates no socket
   if log <> nil then
     with Call do
       log.Log(sllClient, '% % status=% len=% state=%',
@@ -660,10 +663,10 @@ begin
   Definition.DatabaseName := UrlEncode([
     'IgnoreTlsCertificateErrors', ord(fExtendedOptions.TLS.IgnoreCertificateErrors),
     'ConnectTimeout', fConnectTimeout,
-    'SendTimeout', fSendTimeout,
+    'SendTimeout',    fSendTimeout,
     'ReceiveTimeout', fReceiveTimeout,
-    'ProxyName', fProxyName,
-    'ProxyByPass', fProxyByPass], {TrimLeadingQuestionMark=}true);
+    'ProxyName',   fProxyName,
+    'ProxyByPass', fProxyByPass], [ueTrimLeadingQuestionMark]);
 end;
 
 constructor TRestHttpClientGeneric.RegisteredClassCreateFrom(aModel: TOrmModel;
@@ -773,7 +776,7 @@ function TRestHttpClientSocket.InternalRequest(const url, method: RawUtf8;
   var Header, Data, DataType: RawUtf8): Int64Rec;
 begin
   fLogFamily.Add.Log(sllTrace, 'InternalRequest % calling %(%).Request',
-    [method, fSocket.ClassType, pointer(fSocket)], self);
+    [method, PClass(fSocket)^, pointer(fSocket)], self);
   result.Lo := fSocket.Request(
     url, method, KeepAliveMS, Header, RawByteString(Data), DataType, false);
   result.Hi := fSocket.Http.ServerInternalState;
@@ -783,7 +786,7 @@ begin
 end;
 
 
-
+{$ifdef USEHTTPREQUEST}
 
 { TRestHttpClientRequest }
 
@@ -831,7 +834,7 @@ var
   OutData: RawByteString;
 begin
   if fRequest = nil then
-    result.Lo := HTTP_NOTIMPLEMENTED
+    result.Lo := HTTP_CLIENTERROR // better than 501 NOT IMPLEMENTED
   else
   begin
     result.Lo := fRequest.Request(url, method, KeepAliveMS, Header,
@@ -843,6 +846,7 @@ begin
   end;
 end;
 
+{$endif USEHTTPREQUEST}
 
 
 { ************ TRestHttpClientWebsockets REST Client Class over WebSockets }

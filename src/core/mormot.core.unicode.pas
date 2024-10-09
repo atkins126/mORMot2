@@ -8,6 +8,7 @@ unit mormot.core.unicode;
 
    Efficient Unicode Conversion Classes shared by all framework units
    - UTF-8 Efficient Encoding / Decoding
+   - Cross-Platform Charset and CodePage Support
    - UTF-8 / UTF-16 / Ansi Conversion Classes
    - Text File Loading with BOM/Unicode Support
    - Low-Level String Conversion Functions
@@ -152,7 +153,7 @@ function RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
 /// convert a UTF-16 PWideChar buffer into a UTF-8 buffer
 // - replace system.UnicodeToUtf8 implementation, which is rather slow
 // since Delphi 2009+
-// - append a trailing #0 to the ending PUtf8Char, unless ccfNoTrailingZero is set
+// - append a #0 terminator to the ending PUtf8Char, unless ccfNoTrailingZero is set
 // - if ccfReplacementCharacterForUnmatchedSurrogate is set, this function will identify
 // unmatched surrogate pairs and replace them with UNICODE_REPLACEMENT_CHARACTER -
 // see https://en.wikipedia.org/wiki/Specials_(Unicode_block)
@@ -268,6 +269,41 @@ function Utf8TruncatedLength(text: PAnsiChar;
 function Utf8FirstLineToUtf16Length(source: PUtf8Char): PtrInt;
 
 
+{ ************** Cross-Platform Charset and CodePage Support }
+
+const
+  ANSI_CHARSET        = 0;
+  DEFAULT_CHARSET     = 1;
+  SYMBOL_CHARSET      = 2;
+  SHIFTJIS_CHARSET    = 128;
+  HANGEUL_CHARSET     = 129;
+  JOHAB_CHARSET       = 130;
+  GB2312_CHARSET      = 134;
+  CHINESEBIG5_CHARSET = 136;
+  GREEK_CHARSET       = 161;
+  TURKISH_CHARSET     = 162;
+  VIETNAMESE_CHARSET  = 163;
+  HEBREW_CHARSET      = 177;
+  ARABIC_CHARSET      = 178;
+  BALTIC_CHARSET      = 186;
+  RUSSIAN_CHARSET     = 204;
+  THAI_CHARSET        = 222;
+  EASTEUROPE_CHARSET  = 238;
+  OEM_CHARSET         = 255;
+
+/// convert a char set to a code page
+function CharSetToCodePage(CharSet: integer): cardinal;
+
+/// convert a code page to a char set
+function CodePageToCharSet(CodePage: cardinal): integer;
+
+/// return a code page number into human-friendly text
+function CodePageToText(aCodePage: cardinal): TShort16;
+
+/// check if a code page is known to be of fixed width, i.e. not MBCS
+// - i.e. will be implemented as a TSynAnsiFixedWidth
+function IsFixedWidthCodePage(aCodePage: cardinal): boolean;
+
 
 { **************** UTF-8 / UTF-16 / Ansi Conversion Classes }
 
@@ -297,13 +333,13 @@ type
     /// direct conversion of a PAnsiChar buffer into an Unicode buffer
     // - Dest^ buffer must be reserved with at least SourceChars*2 bytes
     // - this default implementation will use the Operating System APIs
-    // - will append a trailing #0 to the returned PWideChar, unless
+    // - will append a #0 terminator to the returned PWideChar, unless
     // NoTrailingZero is set
     function AnsiBufferToUnicode(Dest: PWideChar; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PWideChar; overload; virtual;
     /// direct conversion of a PAnsiChar buffer into a UTF-8 encoded buffer
     // - Dest^ buffer must be reserved with at least SourceChars*3 bytes
-    // - will append a trailing #0 to the returned PUtf8Char, unless
+    // - will append a #0 terminator to the returned PUtf8Char, unless
     // NoTrailingZero is set
     // - this default implementation will use the Operating System APIs
     function AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
@@ -352,7 +388,7 @@ type
     {$endif PUREMORMOT2}
     /// direct conversion of an UTF-8 encoded buffer into a PAnsiChar buffer
     // - Dest^ buffer must be reserved with at least SourceChars bytes
-    // - no trailing #0 is appended to the buffer
+    // - no #0 terminator is appended to the buffer
     function Utf8BufferToAnsi(Dest: PAnsiChar; Source: PUtf8Char;
       SourceChars: cardinal): PAnsiChar; overload; virtual;
     /// convert any UTF-8 encoded buffer into Ansi Text
@@ -369,7 +405,7 @@ type
     function Utf8ToAnsi(const u: RawUtf8): RawByteString; virtual;
     /// direct conversion of a UTF-8 encoded string into a WinAnsi <2KB buffer
     // - will truncate the destination string to DestSize bytes (including the
-    // trailing #0), with a maximum handled size of 2048 bytes
+    // #0 terminator), with a maximum handled size of 2048 bytes
     // - returns the number of bytes stored in Dest^ (i.e. the position of #0)
     function Utf8ToAnsiBuffer2K(const S: RawUtf8;
       Dest: PAnsiChar; DestSize: integer): integer;
@@ -408,13 +444,13 @@ type
     constructor Create(aCodePage: cardinal); override;
     /// direct conversion of a PAnsiChar buffer into an Unicode buffer
     // - Dest^ buffer must be reserved with at least SourceChars*2 bytes
-    // - will append a trailing #0 to the returned PWideChar, unless
+    // - will append a #0 terminator to the returned PWideChar, unless
     // NoTrailingZero is set
     function AnsiBufferToUnicode(Dest: PWideChar; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PWideChar; override;
     /// direct conversion of a PAnsiChar buffer into a UTF-8 encoded buffer
     // - Dest^ buffer must be reserved with at least SourceChars*3 bytes
-    // - will append a trailing #0 to the returned PUtf8Char, unless
+    // - will append a #0 terminator to the returned PUtf8Char, unless
     // NoTrailingZero is set
     function AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PUtf8Char; override;
@@ -432,7 +468,7 @@ type
       Source: PWideChar; SourceChars: cardinal): PAnsiChar; override;
     /// direct conversion of an UTF-8 encoded buffer into a PAnsiChar buffer
     // - Dest^ buffer must be reserved with at least SourceChars bytes
-    // - no trailing #0 is appended to the buffer
+    // - no #0 terminator is appended to the buffer
     // - non Ansi compatible characters are replaced as '?'
     function Utf8BufferToAnsi(Dest: PAnsiChar; Source: PUtf8Char;
       SourceChars: cardinal): PAnsiChar; override;
@@ -476,13 +512,13 @@ type
     constructor Create(aCodePage: cardinal); override;
     /// direct conversion of a PAnsiChar UTF-8 buffer into an Unicode buffer
     // - Dest^ buffer must be reserved with at least SourceChars*2 bytes
-    // - will append a trailing #0 to the returned PWideChar, unless
+    // - will append a #0 terminator to the returned PWideChar, unless
     // NoTrailingZero is set
     function AnsiBufferToUnicode(Dest: PWideChar; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PWideChar; override;
     /// direct conversion of a PAnsiChar UTF-8 buffer into a UTF-8 encoded buffer
     // - Dest^ buffer must be reserved with at least SourceChars*3 bytes
-    // - will append a trailing #0 to the returned PUtf8Char, unless
+    // - will append a #0 terminator to the returned PUtf8Char, unless
     // NoTrailingZero is set
     function AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PUtf8Char; override;
@@ -502,7 +538,7 @@ type
       SourceChars: cardinal): RawByteString; override;
     /// direct conversion of an UTF-8 encoded buffer into a PAnsiChar UTF-8 buffer
     // - Dest^ buffer must be reserved with at least SourceChars bytes
-    // - no trailing #0 is appended to the buffer
+    // - no #0 terminator is appended to the buffer
     function Utf8BufferToAnsi(Dest: PAnsiChar; Source: PUtf8Char;
       SourceChars: cardinal): PAnsiChar; override;
     /// convert any UTF-8 encoded buffer into Ansi Text
@@ -530,13 +566,13 @@ type
     constructor Create(aCodePage: cardinal); override;
     /// direct conversion of a PAnsiChar UTF-16 buffer into an Unicode buffer
     // - Dest^ buffer must be reserved with at least SourceChars*2 bytes
-    // - will append a trailing #0 to the returned PWideChar, unless
+    // - will append a #0 terminator to the returned PWideChar, unless
     // NoTrailingZero is set
     function AnsiBufferToUnicode(Dest: PWideChar; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PWideChar; override;
     /// direct conversion of a PAnsiChar UTF-16 buffer into a UTF-8 encoded buffer
     // - Dest^ buffer must be reserved with at least SourceChars*3 bytes
-    // - will append a trailing #0 to the returned PUtf8Char, unless
+    // - will append a #0 terminator to the returned PUtf8Char, unless
     // NoTrailingZero is set
     function AnsiBufferToUtf8(Dest: PUtf8Char; Source: PAnsiChar;
       SourceChars: cardinal; NoTrailingZero: boolean = false): PUtf8Char; override;
@@ -552,11 +588,10 @@ type
       SourceChars: cardinal): PAnsiChar; override;
     /// direct conversion of an UTF-8 encoded buffer into a PAnsiChar UTF-16 buffer
     // - Dest^ buffer must be reserved with at least SourceChars bytes
-    // - no trailing #0 is appended to the buffer
+    // - no #0 terminator is appended to the buffer
     function Utf8BufferToAnsi(Dest: PAnsiChar; Source: PUtf8Char;
       SourceChars: cardinal): PAnsiChar; override;
   end;
-
 
 var
   /// global TSynAnsiConvert instance to handle WinAnsi encoding (code page 1252)
@@ -578,13 +613,6 @@ var
 
   /// global TSynAnsiConvert instance with no encoding (RawByteString/RawBlob)
   RawByteStringConvert: TSynAnsiFixedWidth;
-
-/// check if a code page is known to be of fixed width, i.e. not MBCS
-// - i.e. will be implemented as a TSynAnsiFixedWidth
-function IsFixedWidthCodePage(aCodePage: cardinal): boolean;
-
-/// return a code page number into human-friendly text
-function CodePageToText(aCodePage: cardinal): TShort16;
 
 
 { *************** Text File Loading with BOM/Unicode Support }
@@ -1400,7 +1428,7 @@ function StrCompL(P1, P2: pointer; L: PtrInt; Default: PtrInt = 0): PtrInt;
 function StrCompIL(P1, P2: pointer; L: PtrInt; Default: PtrInt = 0): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// our fast version of StrIComp(), to be used with PUtf8Char/PAnsiChar
+/// our fast version of StrIComp(), to be used with PUtf8Char/PAnsiChar as TUtf8Compare
 function StrIComp(Str1, Str2: pointer): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1425,6 +1453,10 @@ type
 var
   /// a quick wrapper to StrComp or StrIComp comparison functions
   StrCompByCase: array[{CaseInsensitive=}boolean] of TUtf8Compare;
+
+/// comparison function first by Int64 value, then by text, for TUtf8Compare
+// - so plain numbers will appear first, then case-sensitive text values
+function StrCompByNumber(Str1, Str2: pointer): PtrInt;
 
 /// retrieve the next UCS4 CodePoint stored in U, then update the U pointer
 // - this function will decode the UTF-8 content before using NormToUpper[]
@@ -1787,6 +1819,11 @@ function Split(const Str, SepStr: RawUtf8; var LeftStr: RawUtf8;
 function Split(const Str: RawUtf8; const SepStr: array of RawUtf8;
   const DestPtr: array of PRawUtf8): PtrInt; overload;
 
+/// try to split a RawUtf8 into its two trimmed parts
+// - return true and extract trimmed Left / Right values separated by Sep character
+// - return false and keep Left / Right untouched if Sep if not found
+function TrimSplit(const Str: RawUtf8; var Left, Right: RawUtf8; Sep: AnsiChar): boolean;
+
 /// returns the last occurrence of the given SepChar separated context
 // - e.g. SplitRight('01/2/34','/')='34'
 // - if SepChar doesn't appear, will return Str, e.g. SplitRight('123','/')='123'
@@ -1863,17 +1900,17 @@ function StringReplaceTabs(const Source, TabText: RawUtf8): RawUtf8;
 /// UTF-8 dedicated (and faster) alternative to StringOfChar((Ch,Count))
 function RawUtf8OfChar(Ch: AnsiChar; Count: integer): RawUtf8;
 
-/// format a text content with SQL-like quotes
+/// format a text content with SQL/pascal-like quotes
 // - this function implements what is specified in the official SQLite3
 // documentation: "A string constant is formed by enclosing the string in single
 // quotes ('). A single quote within the string can be encoded by putting two
 // single quotes in a row - as in Pascal."
 function QuotedStr(const S: RawUtf8; Quote: AnsiChar = ''''): RawUtf8; overload;
 
-/// format a text content with SQL-like quotes
+/// format a text content with SQL/pascal-like quotes
 procedure QuotedStr(const S: RawUtf8; Quote: AnsiChar; var result: RawUtf8); overload;
 
-/// format a text buffer with SQL-like quotes
+/// format a text buffer with SQL/pascal-like quotes
 procedure QuotedStr(P: PUtf8Char; PLen: PtrInt; Quote: AnsiChar;
   var result: RawUtf8); overload;
 
@@ -1985,7 +2022,11 @@ function TrimLeftLowerCase(const V: RawUtf8): PUtf8Char;
 /// trim first lowercase chars ('otDone' will return 'Done' e.g.)
 // - return an RawUtf8 string: enumeration names are pure 7-bit ANSI with Delphi 7
 // to 2007, and UTF-8 encoded with Delphi 2009+
-function TrimLeftLowerCaseShort(V: PShortString): RawUtf8;
+function TrimLeftLowerCaseShort(V: PShortString): RawUtf8; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// trim first lowercase chars ('otDone' will return 'Done' e.g.)
+procedure TrimLeftLowerCaseShort(V: PShortString; var U: RawUtf8); overload;
 
 /// trim first lowercase chars ('otDone' will return 'Done' e.g.)
 // - return a ShortString: enumeration names are pure 7-bit ANSI with Delphi 7
@@ -2056,6 +2097,30 @@ procedure CamelCase(const text: RawUtf8; var s: RawUtf8;
   const isWord: TSynByteSet = [ord('0')..ord('9'), ord('a')..ord('z'), ord('A')..ord('Z')]); overload;
   {$ifdef HASINLINE}inline;{$endif}
 
+const
+  // published for unit testing (e.g. if properly sorted)
+  RESERVED_KEYWORDS: array[0..91] of RawUtf8 = (
+    'ABSOLUTE', 'ABSTRACT', 'ALIAS', 'AND', 'ARRAY', 'AS', 'ASM', 'ASSEMBLER',
+    'BEGIN', 'CASE', 'CLASS', 'CONST', 'CONSTREF', 'CONSTRUCTOR', 'DESTRUCTOR',
+    'DIV', 'DO', 'DOWNTO', 'ELSE', 'END', 'EXCEPT', 'EXPORT', 'EXTERNAL',
+    'FALSE', 'FAR', 'FILE', 'FINALIZATION', 'FINALLY', 'FOR', 'FORWARD',
+    'FUNCTION', 'GENERIC', 'GOTO', 'IF', 'IMPLEMENTATION', 'IN', 'INHERITED',
+    'INITIALIZATION', 'INLINE', 'INTERFACE', 'IS', 'LABEL', 'LIBRARY', 'MOD',
+    'NEAR', 'NEW', 'NIL', 'NOT', 'OBJECT', 'OF', 'ON', 'OPERATOR', 'OR', 'OUT',
+    'OVERRIDE', 'PACKED', 'PRIVATE', 'PROCEDURE', 'PROGRAM', 'PROPERTY',
+    'PROTECTED', 'PUBLIC', 'PUBLISHED', 'RAISE', 'READ', 'RECORD',
+    'REINTRODUCE', 'REPEAT', 'RESOURCESTRING', 'SELF', 'SET', 'SHL', 'SHR',
+    'STATIC', 'STRING', 'THEN', 'THREADVAR', 'TO', 'TRUE', 'TRY', 'TYPE',
+    'UNIT', 'UNTIL', 'USES', 'VAR', 'VARIANT', 'VIRTUAL', 'WHILE', 'WITH',
+    'WRITE', 'WRITELN', 'XOR');
+
+/// quickly check if a text is a case-insensitive pascal code keyword
+function IsReservedKeyWord(const aName: RawUtf8): boolean;
+
+/// wrap CamelCase() and IsReservedKeyWord() to generate a valid pascal identifier
+// - if aName is void after camel-casing, will raise an ESynUnicode
+function SanitizePascalName(const aName: RawUtf8; KeyWordCheck: boolean): RawUtf8;
+
 var
   /// these procedure type must be defined if a default system.pas is used
   // - expect generic "string" type, i.e. UnicodeString for Delphi 2009+
@@ -2095,7 +2160,10 @@ function FindRawUtf8(const Values: array of RawUtf8; const Value: RawUtf8;
 
 /// true if Value was added successfully in Values[]
 function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
-  NoDuplicates: boolean = false; CaseSensitive: boolean = true): boolean; overload;
+  NoDuplicates: boolean; CaseSensitive: boolean = true): boolean; overload;
+
+/// return the newly added Value index at the end of Values[]
+function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8): PtrInt; overload;
 
 /// add the Value to Values[], with an external count variable, for performance
 function AddRawUtf8(var Values: TRawUtf8DynArray; var ValuesCount: integer;
@@ -2122,8 +2190,12 @@ function RawUtf8DynArrayEquals(const A, B: TRawUtf8DynArray;
 function AddString(var Values: TStringDynArray; const Value: string): PtrInt;
 
 /// convert the string dynamic array into a dynamic array of UTF-8 strings
-procedure StringDynArrayToRawUtf8DynArray(const Source: TStringDynArray;
-  var result: TRawUtf8DynArray);
+procedure StringDynArrayToRawUtf8DynArray(const Source: array of string;
+  var result: TRawUtf8DynArray); overload;
+
+/// convert the string dynamic array into a dynamic array of UTF-8 strings
+function StringDynArrayToRawUtf8DynArray(
+  const Source: array of string): TRawUtf8DynArray; overload;
 
 /// convert the string list into a dynamic array of UTF-8 strings
 procedure StringListToRawUtf8DynArray(Source: TStringList;
@@ -2218,6 +2290,9 @@ procedure QuickSortRawUtf8(var Values: TRawUtf8DynArray; ValuesCount: integer;
 procedure QuickSortRawUtf8(Values: PRawUtf8Array; L, R: PtrInt;
   caseInsensitive: boolean = false); overload;
 
+/// sort and remove any duplicated RawUtf8 from Values[]
+procedure DeduplicateRawUtf8(var Values: TRawUtf8DynArray);
+
 {$ifdef OSPOSIX}
 type
   /// monitor a POSIX folder for all its file names, and allow efficient
@@ -2243,7 +2318,8 @@ type
     /// case-insensitive search for a given TFileName in the folder
     // - returns '' if not found, or the exact file name in the POSIX folder
     // - is thread-safe and non blocking during its lookup
-    // - can optionally return MicroSec spent for actual filenames read on disk
+    // - can optionally return micro seconds spent for actual filenames read on disk
+    // - warning: aReadMs^ should be a 32-bit "integer" variable, not a PtrInt
     function Find(const aSearched: TFileName; aReadMs: PInteger = nil): TFileName;
     /// how many file entries are currently in the internal list
     function Count: PtrInt;
@@ -2306,6 +2382,25 @@ function Utf8ICompReference(u1, u2: PUtf8Char): PtrInt;
 // don't require any temporary UTF-16 decoding
 // - has a branchless optimized process of 7-bit ASCII charset [a..z] -> [A..Z]
 function Utf8ILCompReference(u1, u2: PUtf8Char; L1, L2: integer): PtrInt;
+
+/// compare two UCS4 strings
+function Ucs4Compare(const a, b: RawUcs4): integer;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// compare two UCS4 buffers
+function Ucs4Comp(a, b: PUcs4CodePoint): integer;
+
+/// convert some UTF-8 buffer content into UCS4
+procedure Utf8ToRawUcs4(u: PUtf8Char; L: PtrInt; out ucs4: RawUcs4); overload;
+
+/// convert some UTF-8 string content into UCS4
+function Utf8ToRawUcs4(const S: RawUtf8): RawUcs4; overload;
+
+/// convert some UCS4 buffer into UTF-8 string
+procedure RawUcs4ToUtf8(u4: PUcs4CodePoint; L: PtrInt; out u: RawUtf8); overload;
+
+/// convert some UCS4 into UTF-8 string
+function RawUcs4ToUtf8(const ucs4: RawUcs4): RawUtf8; overload;
 
 /// UpperCase conversion of UTF-8 into UCS4 using our Unicode 10.0 tables
 // - won't call the Operating System, so is consistent on all platforms,
@@ -3240,6 +3335,95 @@ begin
     until false;
 end;
 
+
+{ ************** Cross-Platform Charset and CodePage Support }
+
+function CharSetToCodePage(CharSet: integer): cardinal;
+begin
+  case CharSet of
+    SHIFTJIS_CHARSET:
+      result := 932;
+    HANGEUL_CHARSET:
+      result := 949;
+    GB2312_CHARSET:
+      result := 936;
+    HEBREW_CHARSET:
+      result := 1255;
+    ARABIC_CHARSET:
+      result := 1256;
+    GREEK_CHARSET:
+      result := 1253;
+    TURKISH_CHARSET:
+      result := 1254;
+    VIETNAMESE_CHARSET:
+      result := 1258;
+    THAI_CHARSET:
+      result := 874;
+    EASTEUROPE_CHARSET:
+      result := 1250;
+    RUSSIAN_CHARSET:
+      result := 1251;
+    BALTIC_CHARSET:
+      result := 1257;
+  else
+    result := CP_WINANSI; // default ANSI_CHARSET = iso-8859-1 = windows-1252
+  end;
+end;
+
+function CodePageToCharSet(CodePage: cardinal): integer;
+begin
+  case CodePage of
+    932:
+      result := SHIFTJIS_CHARSET;
+    949:
+      result := HANGEUL_CHARSET;
+    936:
+      result := GB2312_CHARSET;
+    1255:
+      result := HEBREW_CHARSET;
+    1256:
+      result := ARABIC_CHARSET;
+    1253:
+      result := GREEK_CHARSET;
+    1254:
+      result := TURKISH_CHARSET;
+    1258:
+      result := VIETNAMESE_CHARSET;
+    874:
+      result := THAI_CHARSET;
+    1250:
+      result := EASTEUROPE_CHARSET;
+    1251:
+      result := RUSSIAN_CHARSET;
+    1257:
+      result := BALTIC_CHARSET;
+  else
+    result := ANSI_CHARSET; // default is iso-8859-1 = windows-1252
+  end;
+end;
+
+function IsFixedWidthCodePage(aCodePage: cardinal): boolean;
+begin
+  result := ((aCodePage >= 1250) and
+             (aCodePage <= 1258)) or
+            (aCodePage = CP_LATIN1) or
+            (aCodePage >= CP_RAWBLOB);
+end;
+
+function CodePageToText(aCodePage: cardinal): TShort16;
+begin
+  case aCodePage of
+    CP_UTF8:
+      result := 'utf8';
+    CODEPAGE_US:
+      result := 'WinAnsi';
+  else
+    begin
+      PCardinal(@result)^ := 2 + ord('c') shl 8 + ord('p') shl 16;
+      AppendShortCardinal(aCodePage, result);
+    end;
+  end;
+end;
 
 
 { **************** UTF-8 / Unicode / Ansi Conversion Classes }
@@ -4308,30 +4492,6 @@ function TSynAnsiUtf16.Utf8BufferToAnsi(Dest: PAnsiChar;
   Source: PUtf8Char; SourceChars: cardinal): PAnsiChar;
 begin
   result := Dest + Utf8ToWideChar(PWideChar(Dest), Source, SourceChars, true);
-end;
-
-
-function IsFixedWidthCodePage(aCodePage: cardinal): boolean;
-begin
-  result := ((aCodePage >= 1250) and
-             (aCodePage <= 1258)) or
-            (aCodePage = CP_LATIN1) or
-            (aCodePage >= CP_RAWBLOB);
-end;
-
-function CodePageToText(aCodePage: cardinal): TShort16;
-begin
-  case aCodePage of
-    CP_UTF8:
-      result := 'utf8';
-    CODEPAGE_US:
-      result := 'WinAnsi';
-  else
-    begin
-      PCardinal(@result)^ := 2 + ord('c') shl 8 + ord('p') shl 16;
-      AppendShortCardinal(aCodePage, result);
-    end;
-  end;
 end;
 
 
@@ -6054,7 +6214,6 @@ begin
   until result = L;
 end;
 
-
 function StrIComp(Str1, Str2: pointer): PtrInt;
 var
   c1, c2: byte; // integer/PtrInt are actually slower on FPC
@@ -6086,6 +6245,22 @@ begin
     else
       // Str1=''
       result := -1;
+end;
+
+function StrCompByNumber(Str1, Str2: pointer): PtrInt;
+var
+  v1, v2: Int64;
+  err: integer;
+begin
+  v1 := GetInt64(Str1, err);
+  if err = 0 then
+    v2 := GetInt64(Str2, err)
+  else
+    v2 := 0; // to please the Delphi compiler
+  if err = 0 then
+    result := CompareInt64(v1, v2)
+  else
+    result := StrComp(Str1, Str2);
 end;
 
 function GetLineContains(p, pEnd, up: PUtf8Char): boolean;
@@ -7608,6 +7783,19 @@ begin
       FastAssignNew(DestPtr[i]^);
 end;
 
+function TrimSplit(const Str: RawUtf8; var Left, Right: RawUtf8; Sep: AnsiChar): boolean;
+var
+  i: PtrInt;
+begin
+  result := false;
+  i := PosExChar(Sep, Str);
+  if i = 0 then
+    exit;
+  TrimCopy(Str, i + 1, maxInt, Right);
+  TrimCopy(Str, 1, i - 1, Left); // Left is likely to be Str
+  result := true;
+end;
+
 function IsVoid(const text: RawUtf8): boolean;
 var
   i: PtrInt;
@@ -7772,7 +7960,7 @@ begin
       break;
     AddInteger(pos, posCount, found);
   until false;
-  FastSetString(result, Length(S) + (newlen - oldlen) * posCount);
+  FastSetString(result, Length(S) + (newlen - oldlen) * posCount); // alloc once
   last := 1;
   src := pointer(S);
   dst := pointer(result);
@@ -7795,7 +7983,7 @@ end;
 function StringReplaceAll(const S, OldPattern, NewPattern: RawUtf8;
   Lookup: PNormTable): RawUtf8;
 var
-  found: PtrInt;
+  first: PtrInt;
 begin
   if (S = '') or
      (OldPattern = '') or
@@ -7805,14 +7993,14 @@ begin
   begin
     if (Lookup = nil) and
        (length(OldPattern) = 1) then
-      found := ByteScanIndex(pointer(S), {%H-}PStrLen(PtrUInt(S) - _STRLEN)^,
+      first := ByteScanIndex(pointer(S), {%H-}PStrLen(PtrUInt(S) - _STRLEN)^,
         byte(OldPattern[1])) + 1
     else
-      found := PosExI(OldPattern, S, 1, Lookup); // handle Lookup=nil
-    if found = 0 then
+      first := PosExI(OldPattern, S, 1, Lookup); // handle Lookup=nil
+    if first = 0 then
       result := S
     else
-      result := StringReplaceAllProcess(S, OldPattern, NewPattern, found, Lookup);
+      result := StringReplaceAllProcess(S, OldPattern, NewPattern, first, Lookup);
   end;
 end;
 
@@ -8283,17 +8471,15 @@ begin
   begin
     FastSetString(Value, p, len);
     result := true;
-  end
-  else
-  begin
-    if not KeepNotFoundValue then
-      {$ifdef FPC}
-      FastAssignNew(Value);
-      {$else}
-      Value := '';
-      {$endif FPC}
-    result := false;
+    exit;
   end;
+  if not KeepNotFoundValue then
+    {$ifdef FPC}
+    FastAssignNew(Value);
+    {$else}
+    Value := '';
+    {$endif FPC}
+  result := false;
 end;
 
 function GetLineSize(P, PEnd: PUtf8Char): PtrUInt;
@@ -8413,22 +8599,30 @@ begin
 end;
 
 function TrimLeftLowerCaseShort(V: PShortString): RawUtf8;
+begin
+  TrimLeftLowerCaseShort(V, result);
+end;
+
+procedure TrimLeftLowerCaseShort(V: PShortString; var U: RawUtf8);
 var
   p: PAnsiChar;
   len: PtrInt;
 begin
   len := length(V^);
   p := @V^[1];
-  while (len > 0) and
-        (p^ in ['a'..'z']) do
-  begin
-    inc(p);
-    dec(len);
-  end;
-  if len = 0 then
-    FastSetString(result, @V^[1], length(V^))
-  else
-    FastSetString(result, p, len);
+  if len > 0 then
+    while p^ in ['a'..'z'] do
+    begin
+      inc(p);
+      dec(len);
+      if len = 0 then
+      begin
+        p := @V^[1]; // nothing to trim
+        len := length(V^);
+        break;
+      end;
+    end;
+  FastSetString(U, p, len);
 end;
 
 procedure AppendShortComma(text: PAnsiChar; len: PtrInt; var result: ShortString;
@@ -8677,6 +8871,26 @@ begin
   CamelCase(pointer(text), length(text), s, isWord);
 end;
 
+function IsReservedKeyWord(const aName: RawUtf8): boolean;
+var
+  up: array[byte] of AnsiChar;
+begin
+  UpperCopy255Buf(@up, pointer(aName), length(aName))^ := #0;
+  result := FastFindPUtf8CharSorted(
+    @RESERVED_KEYWORDS, high(RESERVED_KEYWORDS), @up) >= 0; // O(log(n)) search
+end;
+
+function SanitizePascalName(const aName: RawUtf8; KeyWordCheck: boolean): RawUtf8;
+begin
+  CamelCase(aName, result);
+  if result = '' then
+    raise ESynUnicode.CreateFmt('Unexpected SanitizePascalName(%s)', [aName]);
+  result[1] := UpCase(result[1]);
+  if KeyWordCheck and
+     IsReservedKeyWord(result) then
+    result := '_' + result; // avoid identifier name collision
+end;
+
 procedure GetCaptionFromPCharLen(P: PUtf8Char; out result: string);
 var
   tmp: array[byte] of AnsiChar;
@@ -8762,23 +8976,21 @@ begin
     result := FindRawUtf8(@Values[0], Value, result + 1, CaseSensitive);
 end;
 
+function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8): PtrInt;
+begin
+  result := length(Values);
+  SetLength(Values, result + 1);
+  Values[result] := Value;
+end;
+
 function AddRawUtf8(var Values: TRawUtf8DynArray; const Value: RawUtf8;
   NoDuplicates, CaseSensitive: boolean): boolean;
-var
-  i: PtrInt;
 begin
+  result := false;
   if NoDuplicates then
-  begin
-    i := FindRawUtf8(Values, Value, CaseSensitive);
-    if i >= 0 then
-    begin
-      result := false;
+    if FindRawUtf8(Values, Value, CaseSensitive) >= 0 then
       exit;
-    end;
-  end;
-  i := length(Values);
-  SetLength(Values, i + 1);
-  Values[i] := Value;
+  AddRawUtf8(Values, Value);
   result := true;
 end;
 
@@ -8851,7 +9063,7 @@ begin
   Values[result] := Value;
 end;
 
-procedure StringDynArrayToRawUtf8DynArray(const Source: TStringDynArray;
+procedure StringDynArrayToRawUtf8DynArray(const Source: array of string;
   var Result: TRawUtf8DynArray);
 var
   i: PtrInt;
@@ -8860,6 +9072,12 @@ begin
   SetLength(Result, length(Source));
   for i := 0 to length(Source) - 1 do
     StringToUtf8(Source[i], Result[i]);
+end;
+
+function StringDynArrayToRawUtf8DynArray(
+  const Source: array of string): TRawUtf8DynArray;
+begin
+  StringDynArrayToRawUtf8DynArray(Source, result);
 end;
 
 procedure StringListToRawUtf8DynArray(Source: TStringList; var Result: TRawUtf8DynArray);
@@ -9238,6 +9456,51 @@ begin
   qs.Compare := StrCompByCase[caseInsensitive];
   qs.CoValues := nil;
   qs.Sort(pointer(Values), L, R);
+end;
+
+function DeduplicateRawUtf8Sorted(val: PPointerArray; last: PtrInt): PtrInt;
+var
+  i: PtrInt;
+begin
+  // sub-function for better code generation
+  i := 0;
+  repeat // here last>0 so i<last
+    if RawUtf8(val[i]) = RawUtf8(val[i + 1]) then
+      break;
+    inc(i);
+    if i <> last then
+      continue;
+    result := i;
+    exit;
+  until false;
+  result := i;
+  inc(i);
+  if i = last then
+    exit;
+  repeat
+    if RawUtf8(val[i]) <> RawUtf8(val[i + 1]) then
+    begin
+      FastAssignNew(val[result], val[i]);
+      val[i] := nil;
+      inc(result);
+    end;
+    inc(i);
+  until i = last;
+  FastAssignNew(val[result], val[i]);
+  val[i] := nil;
+end;
+
+procedure DeduplicateRawUtf8(var Values: TRawUtf8DynArray);
+var
+  c, n: PtrInt;
+begin
+  c := length(Values);
+  if c = 0 then
+    exit;
+  QuickSortRawUtf8(Values, c);
+  n := DeduplicateRawUtf8Sorted(pointer(Values), c - 1) + 1;
+  if n <> c then
+    SetLength(Values, n);
 end;
 
 procedure MakeUniqueArray(var Values: TRawUtf8DynArray);
@@ -9911,16 +10174,90 @@ begin
   tmp.Done(Utf8UpperReference(pointer(S), tmp.buf, len), result);
 end;
 
+function Ucs4Comp(a, b: PUcs4CodePoint): integer;
+var
+  c: Ucs4CodePoint;
+begin
+  result := 0;
+  if a <> b then
+    if a <> nil then
+      if b <> nil then
+      begin
+        repeat
+          c := a^;
+          if c <> b^ then
+            break
+          else if c = 0 then
+            exit; // a = b
+          inc(a);
+          inc(b);
+        until false;
+        result := CompareCardinal(c, b^);
+      end
+      else
+        inc(result) // b = ''
+    else
+      dec(result);  // a = ''
+end;
+
+function Ucs4Compare(const a, b: RawUcs4): integer;
+begin
+  result := Ucs4Comp(pointer(a), pointer(b));
+end;
+
+procedure Utf8ToRawUcs4(u: PUtf8Char; L: PtrInt; out ucs4: RawUcs4);
+var
+  p: PUcs4CodePoint;
+begin
+  if (u = nil) or
+     (L <= 0) then
+    exit;
+  SetLength(ucs4, L + 1); // + 1 for an ending 0
+  inc(L, PtrUInt(u));
+  p := pointer(ucs4);
+  repeat
+    p^ := NextUtf8Ucs4(u); // allow conversion of #0 within the input
+    inc(p);
+  until PtrUInt(u) >= PtrUInt(L);
+  p^ := 0; // always end with a 0
+  DynArrayFakeLength(ucs4, (PAnsiChar(p) - pointer(ucs4)) shr 2); // no realloc
+end;
+
+function Utf8ToRawUcs4(const S: RawUtf8): RawUcs4;
+begin
+  Utf8ToRawUcs4(pointer(S), length(S), result);
+end;
+
+procedure RawUcs4ToUtf8(u4: PUcs4CodePoint; L: PtrInt; out u: RawUtf8);
+var
+  p: PUtf8Char;
+begin
+  if (u4 = nil) or
+     (L <= 0) then
+    exit;
+  FastSetString(u, L * 6); // prepare for the worse (paranoid)
+  p := pointer(u);
+  repeat
+    inc(p, Ucs4ToUtf8(u4^, p));
+    inc(u4);
+    dec(L);
+  until L = 0;
+  FakeLength(u, p - pointer(u)); // no realloc
+end;
+
+function RawUcs4ToUtf8(const ucs4: RawUcs4): RawUtf8;
+begin
+  RawUcs4ToUtf8(pointer(ucs4), length(ucs4), result);
+end;
+
 function UpperCaseUcs4Reference(const S: RawUtf8): RawUcs4;
 var
   c, n: PtrUInt;
   p: PUtf8Char;
 begin
+  result := nil;
   if S = '' then
-  begin
-    result := nil;
     exit;
-  end;
   SetLength(result, length(S) + 1);
   p := pointer(S);
   n := 0;
@@ -10024,7 +10361,7 @@ end;
 
 function Utf8ILCompReference(u1, u2: PUtf8Char; L1, L2: integer): PtrInt;
 var
-  c2: PtrInt;
+  c2: PtrUInt;
   extra, i: integer;
   {$ifdef CPUX86NOTPIC}
   tab: TUnicodeUpperTable absolute UU;
@@ -10126,9 +10463,9 @@ begin
             until i = extra;
             inc(u2, extra);
             dec(c2, utf8.Extra[extra].offset);
-            if PtrUInt(c2) <= UU_MAX then
+            if c2 <= UU_MAX then
               c2 := tab.Ucs4Upper(c2);
-            dec(result, c2);
+            dec(result, PtrInt(c2));
             if result <> 0 then
               // found unmatching codepoint
               exit;
@@ -10160,9 +10497,9 @@ end;
 
 function StrPosIReference(U: PUtf8Char; const Up: RawUcs4): PUtf8Char;
 var
-  c, extra, i: PtrInt;
+  c, extra, i: PtrUInt;
   u0, u2: PUtf8Char;
-  up2: PInteger;
+  up2: PUcs4CodePoint;
   {$ifdef CPUX86NOTPIC}
   tab: TUnicodeUpperTable absolute UU;
   utf8: TUtf8Table absolute UTF8_TABLE;
@@ -10207,7 +10544,7 @@ nxt:u0 := U;
       until i = extra;
       inc(U, extra);
       dec(c, utf8.Extra[extra].offset);
-      if PtrUInt(c) <= UU_MAX then
+      if c <= UU_MAX then
         c := tab.Ucs4Upper(c);
       if c <> Up[0] then
         continue;
@@ -10245,7 +10582,7 @@ nxt:u0 := U;
         until i = extra;
         inc(u2, extra);
         dec(c, utf8.Extra[extra].offset);
-        if PtrUInt(c) <= UU_MAX then
+        if c <= UU_MAX then
           c := tab.Ucs4Upper(c);
         if c <> up2^ then
           goto nxt;
@@ -10254,8 +10591,6 @@ nxt:u0 := U;
     until false;
   until false;
 end;
-
-
 
 
 const

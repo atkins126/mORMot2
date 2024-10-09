@@ -473,8 +473,8 @@ begin
       break;
     if Pos + len > max then
       exit;
-    AppendShortBuffer(pointer(@p[Pos]), len, tmp);
-    AppendShortChar('.', tmp);
+    AppendShortBuffer(pointer(@p[Pos]), len, @tmp);
+    AppendShortChar('.', @tmp);
     inc(Pos, len);
   until false;
   if tmp[ord(tmp[0])] = '.' then
@@ -552,7 +552,9 @@ begin
   w := TBufferWriter.Create(tmp{%H-});
   try
     FillCharFast(h, SizeOf(h), 0);
-    h.Xid := Random32; // truncated to 16-bit
+    repeat
+      h.Xid := Random32; // truncated to 16-bit
+    until h.XId <> 0;
     h.RecursionDesired := true;
     h.QuestionCount := 1 shl 8;
     w.Write(@h, SizeOf(h));

@@ -25,6 +25,8 @@ uses
   mormot.core.unicode,
   mormot.core.text,
   mormot.core.buffers,
+  mormot.core.datetime,
+  mormot.core.rtti,
   mormot.core.perf,
   mormot.core.log;
 
@@ -529,10 +531,6 @@ var
 
 
 implementation
-
-uses
-  mormot.core.rtti,
-  mormot.core.datetime;
 
 
 { ************ Unit-Testing classes and functions }
@@ -1526,8 +1524,7 @@ begin
   {$ifndef OSPOSIX}
   Executable.Command.Option('noenter', 'do not wait for ENTER key on exit');
   {$endif OSPOSIX}
-  if Executable.Command.Arg(0, '#filename to redirect the console output') then
-    Utf8ToFileName(Executable.Command.Args[0], redirect);
+  redirect := Executable.Command.ArgFile(0, '#filename to redirect the console output');
   Executable.Command.Get(['test'], restrict,
     'the #class.method name(s) to restrict the tests');
   DescribeCommandLine; // may be overriden to define additional parameters

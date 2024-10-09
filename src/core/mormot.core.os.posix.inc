@@ -473,7 +473,12 @@ var
   err: SizeInt;
 begin
   if CodePage = CP_UTF8 then
-    exit(Utf8ToUnicode(W, A, LA));
+  begin
+    result := Utf8ToUnicode(W, LW, A, LA); // FPC RTL is safe and fast enough
+    if result > 0 then
+      dec(result); // Utf8ToUnicode() returned length includes #0 terminator
+    exit;
+  end;
   cnv := icu.ucnv(CodePage);
   if cnv = nil then
     exit(AnsiToWideRTL(CodePage, A, W, LA, LW)); // fallback to cwstring/iconv
@@ -504,12 +509,17 @@ var
   err: SizeInt;
 begin
   if CodePage = CP_UTF8 then
-    exit(UnicodeToUtf8(A, W, LW));
+  begin
+    result := UnicodeToUtf8(A, LA, W, LW); // FPC RTL is fast enough for UTF-8
+    if result > 0 then
+      dec(result); // UnicodeToUtf8() result includes the #0 terminator
+    exit;
+  end;
   cnv := icu.ucnv(CodePage);
   if cnv = nil then
     exit(WideToAnsiRTL(CodePage, W, A, LW, LA)); // fallback to cwstring/iconv
   err := 0;
-  result := icu.ucnv_fromUChars(cnv, A, LA, W, LW, err);
+  result := icu.ucnv_fromUChars(cnv, A, LA, W, LW, err); // more accurate ICU
   if result < 0 then
     result := 0;
   icu.ucnv_close(cnv);
@@ -521,7 +531,7 @@ var
 begin
   if icu.IsAvailable then
   begin
-    // call the accurate ICU library
+    // call the more accurate ICU library
     err := 0;
     result := icu.u_strToUpper(W, WLen, W, WLen, nil, err);
   end
@@ -603,7 +613,7 @@ begin
   YYear := XYear div D0;
   Temp := (((XYear - (YYear * D0) + 4) shr 2) * 5) - 3;
   TempMonth := Temp div 153;
-  result.Day := ((Temp - (TempMonth * 153)) + 5) div 5;
+  result.Day := PtrUInt((Temp - (TempMonth * 153)) + 5) div 5;
   if TempMonth >= 10 then
   begin
     inc(YYear);
@@ -1127,11 +1137,6 @@ var
 
 {$endif NOEXCEPTIONINTERCEPT}
 
-function GetFileNameFromUrl(const Uri: string): TFileName;
-begin
-  result := ''; // no such native API on POSIX
-end;
-
 const
   faInvalidFile   = faDirectory;
   faDirectoryMask = faDirectory;
@@ -1209,17 +1214,17 @@ end;
 
 function SearchRecToWindowsTime(const F: TSearchRec): integer;
 begin
-  result := DateTimeToWindowsFileTime(FileDateToDateTime(F.Time));
+  result := DateTimeToWindowsFileTime(FileDateToDateTime(F.{%H-}Time));
 end;
 
 function SearchRecToDateTime(const F: TSearchRec): TDateTime;
 begin
-  result := FileDateToDateTime(F.Time);
+  result := FileDateToDateTime(F.{%H-}Time);
 end;
 
 function SearchRecToUnixTimeUtc(const F: TSearchRec): TUnixTime;
 begin
-  result := F.Time; // raw POSIX FileDate is already in UTC seconds
+  result := F.{%H-}Time; // raw POSIX FileDate is already in UTC seconds
 end;
 
 function FileAgeToWindowsTime(const FileName: TFileName): integer;
@@ -2501,7 +2506,7 @@ begin
   result := '';
   if kenv(KENV_GET, 'hint.smbios.0.mem', @tmp, SizeOf(tmp)) < 0 then
     exit;
-  xaddr := PosixParseHex32(@tmp); // typical value is '0xf05b0'
+  xaddr := ParseHex0x(@tmp); // typical value is '0xf05b0'
   if xaddr <> 0 then
     result := ReadSystemMemory(xaddr, 1024); // 32 bytes is enough
 end;
@@ -3755,7 +3760,7 @@ begin
   if efi = '' then
     exit;
   FindNameValue(efi, 'SMBIOS', addr);
-  xaddr := PosixParseHex32(pointer(addr));
+  xaddr := ParseHex0x(pointer(addr));
   if xaddr <> 0 then
     result := ReadSystemMemory(xaddr, 32); // 32 bytes is enough
 end;
@@ -3778,7 +3783,7 @@ begin
       fn := '/sys/class/net/' + SR.Name;
       f := StringFromFile(fn + '/flags', {nosize=}true);
       if (length(f) > 2) and // e.g. '0x40' or '0x1043'
-         (PosixParseHex32(pointer(f)) and {IFF_LOOPBACK:}8 = 0) then
+         (ParseHex0x(pointer(f)) and {IFF_LOOPBACK:}8 = 0) then
       begin
         f := TrimU(StringFromFile(fn + '/address', {nosize=}true));
         if f <> '' then
@@ -3851,70 +3856,11 @@ end;
 
 {$endif CPUARM3264}
 
-function Hex2Dec(c: AnsiChar): integer; inline;
-begin
-  result := ord(c);
-  case c of
-    '0'..'9':
-      dec(result, ord('0'));
-    'A'..'Z':
-      dec(result, ord('A') - 10);
-    'a'..'z':
-      dec(result, ord('a') - 10);
-  else
-    result := -1;
-  end;
-end;
-
-// this function is published in interface section for mormot.net.sock.posix.inc
-function PosixParseHex32(p: PAnsiChar): integer;
-var
-  v0, v1: integer;
-begin
-  result := 0;
-  p := StrScan(p, 'x');
-  if p = nil then
-    exit;
-  repeat
-    inc(p); // points to trailing 'x' at start
-    v0 := Hex2Dec(p^);
-    if v0 < 0 then
-      break; // not in '0'..'9','a'..'f'
-    inc(p);
-    v1 := Hex2Dec(p^);
-    if v1 < 0 then
-    begin
-      result := (result shl 4) or v0; // only one char left
-      break;
-    end;
-    result := (result shl 8) or (v0 shl 4) or v1;
-  until false;
-end;
-
-procedure ParseHex(p: PAnsiChar; b: PByte; n: integer);
-var
-  v0, v1: integer;
-begin
-  repeat // caller ensured p<>nil and b<>nil and n>0
-    v0 := Hex2Dec(p^);
-    if v0 < 0 then
-      break; // not in '0'..'9','a'..'f'
-    inc(p);
-    v1 := Hex2Dec(p^);
-    if v1 < 0 then
-      break;
-    inc(p);
-    b^ := (v0 shl 4) or v1;
-    inc(b);
-    dec(n);
-  until n = 0;
-end;
-
 procedure ParseHex32Add(p: PAnsiChar; var result: TIntegerDynArray);
 var
   v: integer;
 begin
-  v := PosixParseHex32(p);
+  v := ParseHex0x(p);
   if v <> 0 then
     AddInteger(result, v, {nodup=}true);
 end;

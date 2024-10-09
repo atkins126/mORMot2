@@ -2,7 +2,8 @@
   This file is a part of the Open Source Synopse mORMot framework 2,
   licensed under a MPL/GPL/LGPL three license - see LICENSE.md
 
-  POSIX Sockets API calls via the libc, as used by mormot.net.sock.pas
+  The POSIX Sockets API is called via the libc, since SOCKDIRECTSYSCALL does not
+  make any difference in terms of stability or performance.
 }
 
 uses
@@ -12,7 +13,7 @@ uses
   {$ifdef OSLINUXANDROID}
   linux,   // for epoll
   {$endif OSLINUXANDROID}
-  initc; // link clib='c' for our socket purpose
+  initc;  // link clib='c' for our socket purpose
 
 {$ifdef OSLINUX}
   {$define HASACCEPT4} // use Linux-specific accept4() enhanced API call
@@ -175,13 +176,13 @@ type
   {$undef HASACCEPT4}
 {$endif OLDLIBC}
 
-{.$define DIRECTSYSCALL} // no noticeable performance or stability change
+{.$define SOCKDIRECTSYSCALL} // no noticeable performance or stability change
 
 {$ifdef SOCKDIRECTSYSCALL}
 
 function gethostbyname(name: PAnsiChar): PHostEnt; cdecl;
   external clib name 'gethostbyname' + LIBC_SUFFIX;
-  // no syscall available from FPC -> use libc wrapper
+  // no syscall available from FPC -> use libc wrapper anyway
 
 function socket(af, struct, protocol: integer): integer; inline;
 begin
@@ -584,7 +585,7 @@ end;
 
 function TNetSocketWrap.HasLowPriority: boolean;
 begin
-  result := false;
+  result := false; // not applicable on POSIX
 end;
 
 function TNetSocketWrap.WaitFor(ms: integer; scope: TNetEvents;
@@ -852,6 +853,7 @@ begin
           with result[n] do
           begin
             Name := info^.ifa_name; // e.g. 'eth0' on Linux
+            AdapterName := Name;
             Address := mac;
             if info^.ifa_addr <> nil then
             begin
@@ -976,7 +978,7 @@ begin
         fn := '/sys/class/net/' + SR.Name;
         f := StringFromFile(fn + '/flags', {nosize=}true);
         if (length(f) > 2) and // e.g. '0x40' or '0x1043'
-           (PosixParseHex32(pointer(f)) and (IFF_UP or IFF_LOOPBACK) = IFF_UP) then
+           (ParseHex0x(pointer(f)) and (IFF_UP or IFF_LOOPBACK) = IFF_UP) then
         begin
           f := TrimU(StringFromFile(fn + '/address', {nosize=}true));
           if f <> '' then

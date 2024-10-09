@@ -5,6 +5,7 @@
   Implements WinSock2 API calls, as used by mormot.net.sock.pas on Windows.
   Using our own unit makes code easier to maintain between Delphi/FPC versions,
   and allow to increase FD_SETSIZE for better TPollSocketSelect performance.
+  Oldest Delphis didn't even include WinSock2.pas, so we redefined everything.
 }
 
 uses
@@ -1044,6 +1045,7 @@ begin
       begin
         Win32PWideCharToUtf8(p^.Description, Name);
         Win32PWideCharToUtf8(p^.FriendlyName, FriendlyName);
+        FastSetString(AdapterName, p^.AdapterName, StrLen(p^.AdapterName));
         Win32PWideCharToUtf8(p^.DnsSuffix, DnsSuffix);
         Address := MacToText(@p^.PhysicalAddress);
         Mtu := p^.Mtu;
@@ -2494,7 +2496,6 @@ begin
   end;
   result := nrOK;
 end;
-
 
 
 function GetExtensionFunc(sock: TSocket; const id: TGuid): pointer;

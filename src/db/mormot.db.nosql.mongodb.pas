@@ -739,8 +739,6 @@ type
   TOnMongoConnectionReply = procedure(Request: TMongoRequest;
     const Reply: TMongoReplyCursor; var Opaque) of object;
 
-{$M+}
-
   TMongoClient = class;
   TMongoDatabase = class;
   TMongoCollection = class;
@@ -749,7 +747,7 @@ type
   // - all access will be protected by a mutex (critical section): it is thread
   // safe but you may use one TMongoClient per thread or a connection pool, for
   // better performance
-  TMongoConnection = class
+  TMongoConnection = class(TSynPersistent)
   protected
     fSafe: TOSLock;
     fLocked: cardinal;
@@ -1021,7 +1019,7 @@ type
   /// remote access to a MongoDB server
   // - a single server can have several active connections, if some secondary
   // hosts were defined
-  TMongoClient = class
+  TMongoClient = class(TSynPersistent)
   protected
     fConnectionString: RawUtf8;
     fDatabases: TRawUtf8List;
@@ -1250,7 +1248,7 @@ type
   end;
 
   /// remote access to a MongoDB database
-  TMongoDatabase = class
+  TMongoDatabase = class(TSynPersistent)
   protected
     fClient: TMongoClient;
     fName: RawUtf8;
@@ -1339,7 +1337,7 @@ type
   end;
 
   /// remote access to a MongoDB collection
-  TMongoCollection = class
+  TMongoCollection = class(TSynPersistent)
   protected
     fDatabase: TMongoDatabase;
     fName: RawUtf8;
@@ -1884,7 +1882,6 @@ type
       read fSystemLastError;
   end;
 
-{$M-}
 
 
 /// ready-to-be displayed text of a TMongoClientWriteConcern item
@@ -3396,9 +3393,6 @@ end;
 
 constructor TMongoClient.Create(const Host: RawUtf8; Port: integer;
   aOptions: TMongoClientOptions; const SecondaryHostCsv, SecondaryPortCsv: RawUtf8);
-const
-  PROT: array[boolean] of string[1] = (
-    '', 's');
 var
   secHost: TRawUtf8DynArray;
   secPort: TIntegerDynArray;
@@ -3417,7 +3411,7 @@ begin
   fServerMaxWriteBatchSize := 100000;
   fLogReplyEventMaxSize := 1024;
   fGracefulReconnect.Enabled := true;
-  FormatUtf8('mongodb%://%:%', [PROT[mcoTls in Options], Host, Port],
+  FormatUtf8('mongodb%://%:%', [TLS_TEXT[mcoTls in Options], Host, Port],
     fConnectionString);
   CsvToRawUtf8DynArray(pointer(SecondaryHostCsv), secHost);
   nHost := length(secHost);
@@ -3758,7 +3752,7 @@ end;
 
 procedure TMongoClient.AfterOpen;
 var
-  w: integer;
+  mw: integer;
   c: TDocVariantData;
   compression: PDocVariantData;
 begin
@@ -3805,8 +3799,8 @@ begin
         GetAsInteger('maxBsonObjectSize', fServerMaxBsonObjectSize);
         GetAsInteger('maxMessageSizeBytes', fServerMaxMessageSizeBytes);
         GetAsInteger('maxWriteBatchSize', fServerMaxWriteBatchSize);
-        GetAsInteger('maxWireVersion', w);
-        byte(fServerMaxWireVersion) := w;
+        GetAsInteger('maxWireVersion', mw);
+        byte(fServerMaxWireVersion) := mw;
         GetAsBoolean('readOnly', fServerReadOnly);
         if mcoZlibCompressor in fOptions then
           if (not GetAsArray('compression', compression)) or

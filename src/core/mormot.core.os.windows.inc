@@ -8,20 +8,6 @@
 
 { ****************** Unicode, Time, File process }
 
-const
-  /// Windows file APIs have hardcoded MAX_PATH = 260 :(
-  // - but more than 260 chars are possible with the \\?\..... prefix
-  // or by disabling the limitation in registry since Windows 10, version 1607
-  // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
-  // - extended-length path allows up to 32,767 widechars
-  // - but 2047 chars seems big enough in practice e.g. with NTFS - POSIX uses 4096
-  W32_MAX = 2047;
-
-type
-  /// 4KB stack buffer for no heap allocation during UTF-16 encoding or
-  // switch to extended-length path
-  TW32Temp = array[0..W32_MAX] of WideChar;
-
 // W32() gets a PWideChar buffer from a TFileName using TW32Temp static buffer
 // W32Copy() forces a temporary copy - as used by GetFileVersionInfo()
 
@@ -97,7 +83,7 @@ begin
     if (len < MAX_PATH) and
        IsAnsiCompatible(pointer(FileName), len) then
       // most common cases do not need any Unicode conversion
-      for i := 0 to len do // include trailing #0
+      for i := 0 to len do // include #0 terminator
         PWordArray(@Temp)[i] := PByteArray(FileName)[i]
     else
       // use a temporary SynUnicode variable for complex UTF-16 conversion
@@ -130,11 +116,16 @@ var
   tmp: TSynTempBuffer;
 begin
   tmp.Init(Len * 3);
-  Len := UnicodeToUtf8(tmp.Buf, Len * 3, P, Len); // use RTL if complex
+  Len := UnicodeToUtf8(tmp.Buf, Len * 3 + 16, P, Len); // use RTL if complex
   if Len > 0 then
     dec(Len); // UnicodeToUtf8() result includes the null terminator
   FastSetString(res, tmp.buf, Len);
   tmp.Done;
+end;
+
+procedure DoWin32PWideCharToFileName(P: PWideChar; var fn: TFileName);
+begin
+  fn := TFileName(SynUnicode(P)); // let the RTL do the conversion (if needed)
 end;
 
 // local RTL wrapper functions to avoid linking mormot.core.unicode.pas
@@ -159,34 +150,9 @@ begin
     Win32PWideCharToUtf8(P, StrLenW(P), res);
 end;
 
-function Utf8ToWin32PWideChar(const Text: RawUtf8;
-  var dest: TSynTempBuffer): PWideChar;
-var
-  TextLen, i: PtrInt;
+function Utf8ToWin32PWideChar(const u: RawUtf8; var d: TSynTempBuffer): PWideChar;
 begin
-  result := nil;
-  TextLen := length(Text);
-  dest.Init(TextLen * 2);
-  if dest.len = 0 then
-    exit;
-  result := dest.buf;
-  if IsAnsiCompatible(PAnsiChar(pointer(Text)), TextLen) then
-  begin
-    dest.len := TextLen;
-    for i := 0 to TextLen do // include trailing #0
-      PWordArray(result)[i] := PByteArray(Text)[i];
-  end
-  else
-  begin
-    dest.len := Utf8ToUnicode(result, dest.Len + 16, pointer(Text), TextLen);
-    if dest.len <= 0 then
-      dest.len := 0
-    else
-    begin
-      dec(dest.len); // Utf8ToUnicode() returned length includes trailing #0
-      result[dest.len] := #0; // missing on FPC
-    end;
-  end;
+  result := Unicode_ToUtf8(pointer(u), length(u), d); // call the RTL
 end;
 
 const
@@ -554,12 +520,14 @@ begin
         result := 'MORE_DATA';
       ERROR_NO_SYSTEM_RESOURCES:
         result := 'NO_SYSTEM_RESOURCES';
+      // most common WinHttp API errors
       ERROR_WINHTTP_CANNOT_CONNECT:
         result := 'WINHTTP_CANNOT_CONNECT';
       ERROR_WINHTTP_TIMEOUT:
         result := 'WINHTTP_TIMEOUT';
       ERROR_WINHTTP_INVALID_SERVER_RESPONSE:
         result := 'WINHTTP_INVALID_SERVER_RESPONSE';
+      // main Windows Socket API (WSA) errors
       10014:
         result := 'WSAEFAULT';
       10022:
@@ -582,6 +550,23 @@ begin
         result := 'WSAECONNREFUSED';
       11003:
         result := 'WSATRY_AGAIN';
+      // some security-related HRESULT errors
+      $80092010:
+        result := 'CRYPT_E_REVOKED';
+      $80092012:
+        result := 'CRYPT_E_NO_REVOCATION_CHECK';
+      $80092013:
+        result := 'CRYPT_E_REVOCATION_OFFLINE';
+      $80096010:
+        result := 'TRUST_E_BAD_DIGEST';
+      $800b0100:
+        result := 'TRUST_E_NOSIGNATURE';
+      $800b0101:
+        result := 'CERT_E_EXPIRED';
+      $800b010a:
+        result := 'CERT_E_CHAINING';
+      $800b010c:
+        result := 'CERT_E_REVOKED';
       else
         result := nil;
     end;
@@ -618,10 +603,10 @@ begin
   end;
   // first try if there is an English message version of this error code
   len := FormatMessageW(flags, src, Code, ENGLISH_LANGID, @tmp, SizeOf(tmp), nil);
-  if len = 0 then
+  if len <= 0 then
     // typically ERROR_RESOURCE_LANG_NOT_FOUND or ERROR_MUI_FILE_NOT_FOUND
     len := FormatMessageW(flags, src, Code, 0, @tmp, SizeOf(tmp), nil);
-  if (len = 0) and
+  if (len <= 0) and
      (src <> nil) then
   begin
     // fallback to the system error message if this module as no such code
@@ -650,15 +635,27 @@ begin
     [ModuleName, code, string(WinErrorText(code, ModuleName))]);
 end;
 
-procedure RaiseLastError(const Context: shortstring;
-  RaisedException: ExceptClass; Code: integer);
+function WinLastError(const Context: shortstring; Code: integer): string;
 begin
   if Code = 0 then
     Code := GetLastError;
+  result := Format('%s error %x (%s)',
+    [Context, Code, string(WinErrorText(Code, nil))]);
+end;
+
+procedure RaiseLastError(const Context: shortstring;
+  RaisedException: ExceptClass; Code: integer);
+begin
   if RaisedException = nil then
     RaisedException := EOSException;
-  raise RaisedException.CreateFmt('%s error %x (%s)',
-    [Context, Code, string(WinErrorText(Code, nil))])
+  raise RaisedException.Create(WinLastError(Context, Code))
+end;
+
+procedure WinCheck(const Context: shortstring; Code: integer;
+  RaisedException: ExceptClass);
+begin
+  if Code <> NO_ERROR then
+    RaiseLastError(Context, RaisedException, Code);
 end;
 
 function PostMessage(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): BOOL;
@@ -707,20 +704,23 @@ end;
 
 var
   shlwapiDll: THandle; // lazy loading (only by TNetClientProtocolFile)
-  PathCreateFromUrl: function(pszUrl, pszPath: PChar; var pcchPath: cardinal;
-    dwFlags: cardinal): HRESULT; stdcall;
+  PathCreateFromUrlW: function(pszUrl, pszPath: PWideChar;
+    var pcchPath: cardinal; dwFlags: cardinal): HRESULT; stdcall;
 
-function GetFileNameFromUrl(const Uri: string): TFileName;
+function GetFileNameFromUrl(const Uri: RawUtf8): TFileName;
 var
   len: DWORD;
-  tmp: array[0..MAX_PATH] of char;
+  u: TSynTempBuffer;
+  fn: array[0..MAX_PATH] of WideChar;
 begin
   result := '';
+  Utf8ToWin32PWideChar(Uri, u);
   len := MAX_PATH;
-  if DelayedProc(PathCreateFromUrl, shlwapiDll, 'shlwapi.dll',
-       'PathCreateFromUrl' + _AW) and
-     (PathCreateFromUrl(pointer(Uri), @tmp, len, 0) = S_OK) then
-    result := tmp;
+  if DelayedProc(PathCreateFromUrlW, shlwapiDll, 'shlwapi.dll',
+       'PathCreateFromUrlW') and
+     (PathCreateFromUrlW(u.buf, @fn, len, 0) = S_OK) then
+    DoWin32PWideCharToFileName(fn, result);
+  u.Done;
 end;
 
 const
@@ -982,7 +982,7 @@ begin
            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, aAddress, hm) then
     exit;
   GetModuleFileNameW(hm, tmp, SizeOf(tmp));
-  result := string(SynUnicode(tmp));
+  DoWin32PWideCharToFileName(tmp, result);
 end;
 
 function FileIsWritable(const FileName: TFileName): boolean;
@@ -2805,7 +2805,7 @@ var
   // avoid unneeded reference to ShlObj.pas
   // - late binding is mandatory to be used on WinPE which does NOT have this dll
   // - late binding also ensure that we load libraries only when needed
-  SHGetFolderPath: function(hwnd: hwnd; csidl: integer; hToken: THandle;
+  SHGetFolderPathW: function(hwnd: hwnd; csidl: integer; hToken: THandle;
     dwFlags: DWord; pszPath: PChar): HRESULT; stdcall;
 
 const
@@ -2838,7 +2838,7 @@ const
     'TEMP',            // spTemp
     '');               // spLog
 var
-  tmp: array[0..MAX_PATH] of char;
+  tmp: array[0..MAX_PATH] of WideChar;
 begin
   result := '';
   case kind of
@@ -2860,18 +2860,18 @@ begin
     spTemp:
       begin
         // typically 'C:\Users\<user>\AppData\Local\Temp'
-        if GetTempPath(MAX_PATH, @tmp) <> 0 then
-          result := tmp; // retrieve from dedicated standard API
+        if GetTempPathW(MAX_PATH, @tmp) <> 0 then // first try Windows API
+          DoWin32PWideCharToFileName(tmp, result);
         if result = '' then
           result := GetEnvironmentVariable(_ENV[spTemp]); // fallback
       end;
   else
     if (CSIDL[kind] <> 0) and
-       DelayedProc(SHGetFolderPath, SHFolderDll, 'SHFolder.dll',
-         'SHGetFolderPath' + _AW) and
-       (SHGetFolderPath(0, CSIDL[kind], 0, 0, @tmp) = S_OK) then
+       DelayedProc(SHGetFolderPathW, SHFolderDll, 'SHFolder.dll',
+         'SHGetFolderPathW') and
+       (SHGetFolderPathW(0, CSIDL[kind], 0, 0, @tmp) = S_OK) then
       // retrieved from official CSIDL
-      result := tmp
+      DoWin32PWideCharToFileName(tmp, result)
     else
     begin
       // fallback to environment variables (very unlikely)
@@ -2930,7 +2930,7 @@ begin
     Close;
   key := 0;
   result := RegOpenKeyExW(
-    _HKEY[root], Utf8ToWin32PWideChar(keyname, tmp), 0, KEY_READ, key) = 0;
+    _HKEY[root], Utf8ToWin32PWideChar(keyname, tmp), 0, KEY_READ, key) = NO_ERROR;
   tmp.Done;
 end;
 
@@ -2948,15 +2948,12 @@ begin
   result := '';
   rsize := {%H-}tmp.Init; // most of the time, a single call is enough
   res := RegQueryValueExW(key, pointer(entry), nil, @rtype, tmp.buf, @rsize);
-  if res <> 0 then
-    if res = ERROR_MORE_DATA then
-    begin
-      tmp.Init(rsize); // more than 4KB of data (unlikely)
-      res := RegQueryValueExW(key, pointer(entry), nil, nil, tmp.buf, @rsize);
-    end
+  if res <> NO_ERROR then
+    if res = ERROR_MORE_DATA then // more than 4KB of data (unlikely)
+      res := RegQueryValueExW(key, pointer(entry), nil, nil, tmp.Init(rsize), @rsize)
     else
       exit;
-  if res = 0 then
+  if res = NO_ERROR then
   begin
     case rtype of
       REG_SZ,
@@ -2975,10 +2972,10 @@ var
   rsize: DWord;
 begin
   result := '';
-  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @rsize) <> 0 then
+  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @rsize) <> NO_ERROR then
     exit;
   SetLength(result, rsize);
-  if RegQueryValueExW(key, pointer(entry), nil, nil, pointer(result), @rsize) <> 0 then
+  if RegQueryValueExW(key, pointer(entry), nil, nil, pointer(result), @rsize) <> NO_ERROR then
     result := '';
 end;
 
@@ -2997,7 +2994,7 @@ end;
 function TWinRegistry.ReadBuffer(const entry: SynUnicode;
   data: pointer; datalen: DWord): boolean;
 begin
-  result := RegQueryValueExW(key, pointer(entry), nil, nil, data, @datalen) = 0;
+  result := RegQueryValueExW(key, pointer(entry), nil, nil, data, @datalen) = NO_ERROR;
 end;
 
 function TWinRegistry.ReadMax(const entry: SynUnicode;
@@ -3016,7 +3013,7 @@ end;
 
 function TWinRegistry.ReadSize(const entry: SynUnicode): integer;
 begin
-  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @result) <> 0 then
+  if RegQueryValueExW(key, pointer(entry), nil, nil, nil, @result) <> NO_ERROR then
     result := -1;
 end;
 
@@ -3028,7 +3025,7 @@ begin
   result := nil;
   count := 0;
   if (RegQueryInfoKeyW(key, nil, nil, nil, @count, @maxlen,
-       nil, nil, nil, nil, nil, nil) <> 0) or
+       nil, nil, nil, nil, nil, nil) <> NO_ERROR) or
      (count = 0) then
     exit;
   SetLength(result, count);
@@ -3037,7 +3034,7 @@ begin
   for i := 0 to count - 1 do
   begin
     len := maxlen;
-    if RegEnumKeyExW(key, i, tmp.buf, len, nil, nil, nil, nil) = 0 then
+    if RegEnumKeyExW(key, i, tmp.buf, len, nil, nil, nil, nil) = NO_ERROR then
       Win32PWideCharToUtf8(tmp.buf, len, result[i]);
   end;
   tmp.Done;
@@ -3046,7 +3043,7 @@ end;
 
 const
   _WSP: array[TWinSystemPrivilege] of string[32] = (
-    // note: string[32] to ensure there is a trailing #0 for all items
+    // note: string[32] to ensure there is a #0 terminator for all items
     'SeCreateTokenPrivilege',          // wspCreateToken
     'SeAssignPrimaryTokenPrivilege',   // wspAssignPrimaryToken
     'SeLockMemoryPrivilege',           // wspLockMemory
@@ -3092,11 +3089,6 @@ type
   end;
   PTOKEN_PRIVILEGES = ^TOKEN_PRIVILEGES;
 
-  TOKEN_USER = record
-    User: SID_AND_ATTRIBUTES;
-  end;
-  PTOKEN_USER = ^TOKEN_USER;
-
   TOKEN_GROUPS = record
     GroupCount: DWord;
     Groups: array [0..0] of SID_AND_ATTRIBUTES;
@@ -3115,15 +3107,11 @@ function LookupPrivilegeNameA(lpSystemName: PAnsiChar; var lpLuid: TLargeInteger
   lpName: PAnsiChar; var cbName: DWord): BOOL;
     stdcall; external advapi32;
 
-function LookupAccountSidW(lpSystemName: PWideChar; Sid: PSID; Name: PWideChar;
-  var cchName: DWord; ReferencedDomainName: PAnsiChar;
-  var cchReferencedDomainName: DWord; var peUse: DWord): BOOL;
-    stdcall; external advapi32;
-
 function AdjustTokenPrivileges(TokenHandle: THandle; DisableAllPrivileges: BOOL;
   const NewState: TOKEN_PRIVILEGES; BufferLength: DWord;
   PreviousState: PTokenPrivileges; ReturnLength: PDWord): BOOL;
     stdcall; external advapi32;
+
 
 function IsSystemFolder(const Folder: TFileName): boolean;
 begin
@@ -3226,243 +3214,13 @@ begin
     result := 0;
 end;
 
-function RawTokenSid(tok: THandle; var buf: TSynTempBuffer): PSid;
-begin
-  if RawTokenGetInfo(tok, TokenUser, buf) >= SizeOf(TOKEN_USER) then
-    result := PSid(PTOKEN_USER(buf.buf)^.User.Sid) // within buf.buf/len
-  else
-    result := nil;
-end;
 
-function CurrentSid(wtt: TWinTokenType; name, domain: PRawUtf8): RawUtf8;
-var
-  sid: RawSid;
-begin
-  CurrentRawSid(sid, wtt, name, domain);
-  result := RawSidToText(sid);
-end;
-
-procedure CurrentRawSid(out sid: RawSid; wtt: TWinTokenType;
-  name, domain: PRawUtf8);
-var
-  h: THandle;
-  p: PSid;
-  n, d: RawUtf8;
-  tmp: TSynTempBuffer;
-begin
-  h := RawTokenOpen(wtt, TOKEN_QUERY);
-  p := RawTokenSid(h, tmp);
-  if p <> nil then
-  begin
-    ToRawSid(p, sid);
-    if (name <> nil) or
-       (domain <> nil) then
-    begin
-      LookupSid(p, n, d);
-      if name <> nil then
-        name^ := n;
-      if domain <> nil then
-        domain^ := d;
-    end;
-  end;
-  tmp.Done;
-  CloseHandle(h);
-end;
+{ TSynWindowsPrivileges }
 
 function ToText(p: TWinSystemPrivilege): PShortString;
 begin
   result := @_WSP[p];
 end;
-
-function RawTokenGroups(tok: THandle; var buf: TSynTempBuffer): PSids;
-var
-  nfo: PTokenGroups;
-  i: PtrInt;
-begin
-  result := nil;
-  if RawTokenGetInfo(tok, TokenGroups, buf) < SizeOf({%H-}nfo^) then
-    exit;
-  nfo := buf.buf;
-  if nfo.GroupCount = 0 then
-    exit;
-  SetLength(result, nfo.GroupCount);
-  for i := 0 to nfo.GroupCount - 1 do
-    result[i] := pointer(nfo.Groups[i].Sid); // within buf.buf/len
-end;
-
-function TokenGroupsText(tok: THandle): TRawUtf8DynArray;
-var
-  tmp: TSynTempBuffer;
-begin
-  result := SidsToText(RawTokenGroups(tok, tmp));
-  tmp.Done;
-end;
-
-function TokenHasGroup(tok: THandle; sid: PSid): boolean;
-var
-  tmp: TSynTempBuffer;
-  i: PtrInt;
-begin
-  result := false;
-  if (sid <> nil) and
-     (RawTokenGetInfo(tok, TokenGroups, tmp) <> 0) then
-    with PTokenGroups(tmp.buf)^ do
-      for i := 0 to GroupCount - 1 do
-        if SidCompare(pointer(Groups[i].Sid), sid) = 0 then
-        begin
-          result := true;
-          break;
-        end;
-  tmp.Done;
-end;
-
-function TokenHasAnyGroup(tok: THandle; const sid: RawSidDynArray): boolean;
-var
-  tmp: TSynTempBuffer;
-begin
-  result := HasAnySid(RawTokenGroups(tok, tmp), sid);
-  tmp.Done;
-end;
-
-function CurrentGroups(wtt: TWinTokenType; var tmp: TSynTempBuffer): PSids;
-var
-  h: THandle;
-begin
-  h := RawTokenOpen(wtt, TOKEN_QUERY);
-  result := RawTokenGroups(h, tmp);
-  CloseHandle(h);
-end;
-
-function CurrentGroupsSid(wtt: TWinTokenType): TRawUtf8DynArray;
-var
-  tmp: TSynTempBuffer;
-begin
-  result := SidsToText(CurrentGroups(wtt, tmp));
-  tmp.Done;
-end;
-
-function CurrentKnownGroups(wtt: TWinTokenType): TWellKnownSids;
-var
-  tmp: TSynTempBuffer;
-begin
-  result := SidToKnownGroups(CurrentGroups(wtt, tmp));
-  tmp.Done;
-end;
-
-function CurrentUserHasGroup(sid: PSid; wtt: TWinTokenType): boolean;
-var
-  h: THandle;
-begin
-  h := RawTokenOpen(wtt, TOKEN_QUERY);
-  result := TokenHasGroup(h, sid);
-  CloseHandle(h);
-end;
-
-function CurrentUserHasGroup(wks: TWellKnownSid; wtt: TWinTokenType): boolean;
-begin
-  result := (wks <> wksNull) and
-            CurrentUserHasGroup(pointer(KnownRawSid(wks)), wtt);
-end;
-
-function CurrentUserHasGroup(const sid: RawUtf8; wtt: TWinTokenType): boolean;
-var
-  s: TSid;
-begin
-  result := TextToSid(pointer(sid), s) and
-            CurrentUserHasGroup(@s, wtt);
-end;
-
-function CurrentUserHasAnyGroup(const sid: RawSidDynArray; wtt: TWinTokenType): boolean;
-var
-  tmp: TSynTempBuffer;
-begin
-  result := HasAnySid(CurrentGroups(wtt, tmp), sid);
-  tmp.Done;
-end;
-
-function CurrentUserHasGroup(const name, domain, server: RawUtf8;
-  wtt: TWinTokenType): boolean;
-var
-  i: PtrInt;
-  sids: PSids;
-  n, d: RawUtf8;
-  tmp: TSynTempBuffer;
-begin
-  result := false;
-  sids := CurrentGroups(wtt, tmp);
-  for i := 0 to length(sids) - 1 do
-    if (SidToKnown(sids[i]) = wksNull) and
-       (LookupSid(sids[i], n, d, server) = stTypeGroup) then
-      if PropNameEquals(n, name) and
-         ((domain = '') or
-          PropNameEquals(d, domain)) then
-      begin
-        result := true;
-        break;
-      end;
-  tmp.Done;
-end;
-
-function CurrentUserIsAdmin: boolean;
-begin
-  result := CurrentUserHasGroup(wksBuiltinAdministrators);
-end;
-
-function LookupSid(sid: PSid; out name, domain: RawUtf8;
-  const server: RawUtf8): TSidType;
-var
-  n, d: array[byte] of WideChar;
-  s: TSynTempBuffer;
-  nl, dl, use: cardinal;
-begin
-  result := stUndefined;
-  if sid = nil then
-    exit;
-  nl := SizeOf(n);
-  dl := SizeOf(d);
-  if LookupAccountSidW(
-       Utf8ToWin32PWideChar(server, s), sid, @n, nl, @d, dl, use) then
-  begin
-    Win32PWideCharToUtf8(@n, name);
-    Win32PWideCharToUtf8(@d, domain);
-    if use <= byte(high(TSidType)) then
-      result := TSidType(use);
-  end;
-  s.Done;
-end;
-
-function LookupSid(const sid: RawUtf8; out name, domain: RawUtf8;
-  const server: RawUtf8): TSidType;
-var
-  s: TSid;
-begin
-  if TextToSid(pointer(sid), s) then
-    result := LookupSid(@s, name, domain, server)
-  else
-    result := stUndefined;
-end;
-
-function LookupToken(tok: THandle; out name, domain: RawUtf8;
-  const server: RawUtf8): boolean;
-var
-  tmp: TSynTempBuffer;
-begin
-  result := LookupSid(RawTokenSid(tok, tmp) ,name, domain, server) <> stUndefined;
-  tmp.Done;
-end;
-
-function LookupToken(tok: THandle; const server: RawUtf8): RawUtf8;
-var
-  name, domain: RawUtf8;
-begin
-  if LookupToken(tok, name, domain, server) then
-    result := domain + '\' + name
-  else
-    result := '';
-end;
-
-
-{ TSynWindowsPrivileges }
 
 procedure TSynWindowsPrivileges.Init(aTokenPrivilege: TWinTokenType;
   aLoadPrivileges: boolean);
@@ -3500,6 +3258,17 @@ begin
     exit;
   Include(fEnabled, aPrivilege);
   result := true;
+end;
+
+function TSynWindowsPrivileges.Enable(aPrivilege: TWinSystemPrivileges): boolean;
+var
+  p: TWinSystemPrivilege;
+begin
+  result := true;
+  for p := low(p) to high(p) do
+    if p in aPrivilege then
+      if not Enable(p) then
+        result := false; // notify an error at some point
 end;
 
 function TSynWindowsPrivileges.Disable(
@@ -3869,7 +3638,7 @@ end;
 
 procedure TWinCryptoApi.Resolve;
 const
-  NAMES: array[0..7] of PAnsiChar = (
+  NAMES: array[0..8] of PAnsiChar = (
     'CryptAcquireContextA',
     'CryptReleaseContext',
     'CryptImportKey',
@@ -3877,7 +3646,8 @@ const
     'CryptDestroyKey',
     'CryptEncrypt',
     'CryptDecrypt',
-    'CryptGenRandom');
+    'CryptGenRandom',
+    'ConvertSecurityDescriptorToStringSecurityDescriptorA');
 var
   p: PPointer;
   i: PtrInt;
@@ -3898,7 +3668,27 @@ begin
       inc(p);
     end;
   end;
-  // note: CryptSignMessage and CryptVerifyMessageSignature are in crypt32.dll
+end;
+
+const
+  SDDL_REVISION_1 = 1;
+  ALL_INFO = OWNER_SECURITY_INFORMATION or GROUP_SECURITY_INFORMATION or
+             DACL_SECURITY_INFORMATION  or SACL_SECURITY_INFORMATION;
+
+function TWinCryptoApi.SecurityDescriptorToText(sd: pointer; out text: RawUtf8): boolean;
+var
+  txt: PAnsiChar;
+begin
+  result := false;
+  txt := nil;
+  if (sd = nil) or
+     not Available or
+     not ConvertSecurityDescriptorToStringSecurityDescriptorA(
+       sd, SDDL_REVISION_1, ALL_INFO, txt, nil) then
+    exit;
+  FastSetString(text, txt, StrLen(txt));
+  LocalFree(HLOCAL(txt));
+  result := true;
 end;
 
 type
@@ -5583,9 +5373,13 @@ begin
       inc(Vers, 2); // e.g. wEight -> wServer2012
       if Vers = wServer2016 then
         // we identify only LTSC server versions
-        if OSVersionInfo.dwBuildNumber >= 17763 then
-          if OSVersionInfo.dwBuildNumber >= 20285 then // released as 20348
-            Vers := wServer2022_64
+        // see e.g. https://betawiki.net/wiki/Windows_Server_2025
+        if OSVersionInfo.dwBuildNumber >= 177609 then    // up to 17763 RTM
+          if OSVersionInfo.dwBuildNumber >= 19504 then   // up to 20348 Preview
+            if OSVersionInfo.dwBuildNumber >= 25871 then // up to 26100 Preview
+              Vers := wServer2025_64
+            else
+              Vers := wServer2022_64
           else
             Vers := wServer2019_64;
     end

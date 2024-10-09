@@ -597,6 +597,7 @@ type
     fConnectionHigh: integer;
     fThreadPoolCount: integer;
     fLastConnectionFind: integer;
+    fThreadPollingWakeupSafe: TLightLock; // topmost to ensure aarch64 alignment
     fLastHandle: integer;
     fOptions: TAsyncConnectionsOptions;
     fLog: TSynLogClass;
@@ -611,7 +612,6 @@ type
     fIocpAccept: PWinIocpSubscription;
     {$else}
     fThreadReadPoll: TAsyncConnectionsThread;
-    fThreadPollingWakeupSafe: TLightLock;
     fThreadPollingWakeupLoad: integer;
     fThreadPollingLastWakeUpTix: integer;
     fThreadPollingAwakeCount: integer;
@@ -1032,7 +1032,6 @@ type
   /// implement HTTP async client requests
   // - reusing the threads pool and sockets polling of an associated
   // TAsyncConnections instance (typically a THttpAsyncServer)
-  // - the connections are maintained for a
   THttpAsyncClientConnections = class(TSynPersistent)
   protected
     fLock: TLightLock;
@@ -2638,7 +2637,7 @@ begin
     on E: Exception do
       if fOwner <> nil then
         fOwner.DoLog(sllWarning, 'Execute raised a % -> terminate % thread %',
-          [E.ClassType, fOwner.fConnectionClass, fName], self);
+          [PClass(E)^, fOwner.fConnectionClass, fName], self);
   end;
   fExecuteState := esFinished;
 end;
@@ -2821,7 +2820,7 @@ begin
       begin
         if Assigned(fLog) then
           fLog.Add.Log(sllWarning, 'DoGC: %.Free failed as %',
-            [pointer(c), E.ClassType], self);
+            [pointer(c), PClass(E)^], self);
         dec(i); // just ignore this entry
       end;
     end;
@@ -3957,7 +3956,7 @@ begin
       // exception in mORMot code should be considered as fatal
       FormatUtf8('% [%]', [E, E.Message], fExecuteMessage);
       DoLog(sllWarning, 'Execute raised uncatched % -> terminate %',
-        [E.ClassType, fProcessName], self);
+        [PClass(E)^, fProcessName], self);
     end;
   end;
   DoLog(sllInfo, 'Execute: done AW %', [fProcessName], self);
@@ -4017,7 +4016,7 @@ begin
   except
     on E: Exception do
       DoLog(sllWarning, 'Execute raised % -> terminate %',
-        [E.ClassType, fProcessName], self);
+        [PClass(E)^, fProcessName], self);
   end;
 end;
 
@@ -4384,7 +4383,7 @@ end;
 function THttpAsyncServerConnection.FlushPipelinedWrite: TPollAsyncSocketOnReadWrite;
 var
   P: PByte;
-  PLen: integer;
+  PLen: integer; // should be exact integer, not PtrInt
 begin
   result := soContinue;
   fPipelinedWrite := false;
@@ -5157,7 +5156,7 @@ begin
         // callback exceptions should all be catched: so we assume that any
         // exception in mORMot code should be considered as fatal
         fAsync.DoLog(sllWarning, 'Execute raised uncatched % -> terminate %',
-          [E.ClassType, fAsync.fProcessName], self);
+          [PClass(E)^, fAsync.fProcessName], self);
     end;
   fAsync.DoLog(sllInfo, 'Execute: done W %', [fAsync.fProcessName], self);
 end;
@@ -5555,7 +5554,7 @@ begin
                   end;
               end;
             HTTP_NOTFOUND:
-              if (siz < 0) and
+              if (siz < 0) and // siz=-1 if the requested resource was a folder
                  not (psoNoFolderHtmlIndex in fSettings.Server.Options) then
               begin
                 // return the folder files info as cached HTML

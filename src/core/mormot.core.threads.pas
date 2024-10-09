@@ -71,9 +71,9 @@ type
   /// thread-safe FIFO (First-In-First-Out) in-order queue of records
   // - uses internally a TDynArray storage, with a sliding algorithm, more
   // efficient than the FPC or Delphi TQueue, or a naive TDynArray.Add/Delete
-  // - supports TSynPersistentStore binary persistence, if needed
+  // - supports TObjectStore binary persistence, if needed
   // - this structure is also thread-safe by design
-  TSynQueue = class(TSynPersistentStore)
+  TSynQueue = class(TObjectStore)
   protected
     fValues: TDynArray;
     fValueVar: pointer;
@@ -85,7 +85,7 @@ type
     procedure InternalGrow;
     function InternalDestroying(incPopCounter: integer): boolean;
     function InternalWaitDone(starttix, endtix: Int64; const idle: TThreadMethod): boolean;
-    /// low-level TSynPersistentStore methods implementing the persistence
+    /// low-level TObjectStore methods implementing the persistence
     procedure LoadFromReader; override;
     procedure SaveToWriter(aWriter: TBufferWriter); override;
   public
@@ -318,11 +318,11 @@ type
   end;
 
   /// allows thread-safe access to a TDocVariant document
-  // - this class inherits from TInterfacedObjectWithCustomCreate so you
+  // - this class inherits from TInterfacedPersistent so you
   // could define one published property of a mormot.core.interfaces.pas
   // TInjectableObject as ILockedDocVariant so that this class may be
   // automatically injected
-  TLockedDocVariant = class(TInterfacedObjectWithCustomCreate, ILockedDocVariant)
+  TLockedDocVariant = class(TInterfacedPersistent, ILockedDocVariant)
   protected
     fValue: TDocVariantData;
     fLock: TAutoLocker;
@@ -331,7 +331,7 @@ type
   public
     /// initialize the thread-safe document with a fast TDocVariant
     // - i.e. call Create(true) aka Create(JSON_FAST)
-    // - will be the TInterfacedObjectWithCustomCreate default constructor,
+    // - will be the TInterfacedPersistent default constructor,
     // called e.g. during IoC/DI resolution
     constructor Create; overload; override;
     /// initialize the thread-safe document storage from a given template
@@ -709,11 +709,11 @@ type
 
   /// used by TSynBackgroundTimer internal registration list
   TSynBackgroundTimerTask = record
+    MsgSafe: TLightLock; // protect Msg[] list - topmost to ensure aarch64 align
     OnProcess: TOnSynBackgroundTimerProcess;
     Secs: cardinal;
     NextTix: Int64;
     Msg: TRawUtf8DynArray;
-    MsgSafe: TLightLock; // protect Msg[] list
   end;
 
   /// stores TSynBackgroundTimer internal registration list
@@ -813,7 +813,6 @@ type
     evTimeOut,
     evRaised);
 
-  {$M+}
   /// a semaphore used to wait for some process to be finished
   // - used e.g. by TBlockingCallback in mormot.rest.server.pas
   // - once created, process would block via a WaitFor call, which would be
@@ -871,7 +870,6 @@ type
     property TimeOutMs: integer
       read fTimeOutMS;
   end;
-  {$M-}
 
   /// used to identify each TBlockingProcessPool call
   // - allow to match a given TBlockingProcessPoolItem semaphore
@@ -950,7 +948,7 @@ type
   /// allow parallel execution of an index-based process in a thread pool
   // - will create its own thread pool, then execute any method by spliting the
   // work over each thread, so Method execution time is expected to be fair
-  TSynParallelProcess = class(TSynPersistentLock)
+  TSynParallelProcess = class(TSynLocked)
   protected
     fThreadName: RawUtf8;
     fPool: array of TSynParallelProcessThread;

@@ -94,13 +94,13 @@ type
   /// implements TRest.ORM process for abstract REST client/server
   TRestOrm = class(TRestOrmParent, IRestOrm)
   protected
+    fTempJsonWriterLock: TLightLock; // topmost to ensure proper aarch64 align
     fRest: TRest;
     fModel: TOrmModel; // owned by the TRest associated instance
     fCache: TOrmCache;
     fTransactionActiveSession: cardinal;
     fTransactionTable: TOrmClass;
     fTempJsonWriter: TJsonWriter;
-    fTempJsonWriterLock: TLightLock;
     /// compute SELECT ... FROM TABLE WHERE ...
     function SqlComputeForSelect(TableModelIndex: integer; Table: TOrmClass;
       const FieldNames, WhereClause: RawUtf8): RawUtf8;
@@ -363,7 +363,6 @@ type
     procedure RetrieveAsyncListObjArray(Context: TObject; Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
       const OnResult: TOnRestOrmRetrieveArray; const FieldsCsv: RawUtf8 = '');
-
     function RetrieveList(Table: TOrmClass;
       const FormatSqlWhere: RawUtf8; const BoundsSqlWhere: array of const;
       const FieldsCsv: RawUtf8 = ''): TObjectList; overload;
@@ -1244,7 +1243,7 @@ begin
   json := EngineList(t, sql, false, nil);
   if json <> '' then
     result := TOrmTableJson.CreateFromTables([Table], sql, json,
-      {ownjson=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1)
+      {ownjson=}(GetRefCount(json) = 1))
 end;
 
 function TRestOrm.MultiFieldValues(Table: TOrmClass;
@@ -1795,7 +1794,7 @@ begin
   json := ExecuteJson(Tables, SQL, false, nil);
   if json <> '' then
     result := TOrmTableJson.CreateFromTables(Tables, SQL, json,
-      {ownjson=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1)
+      {ownjson=}(GetRefCount(json) = 1))
   else
     result := nil;
 end;
@@ -2460,7 +2459,7 @@ begin
     except
       on Exception do
         // e.g. error during TRestServer.BatchSend()
-        result := HTTP_SERVERERROR;
+        result := HTTP_CLIENTERROR;
     end;
 end;
 
@@ -2609,7 +2608,7 @@ begin
       else
       try
         t := TOrmTableJson.CreateFromTables([Table], Sql, Json,
-          {ownjson=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1);
+          {ownjson=}(GetRefCount(Json) = 1));
         try
           t.ToObjArray(t, Table);
         finally

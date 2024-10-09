@@ -569,7 +569,7 @@ type
     procedure(Protocol: TWebSocketProtocol) of object;
 
   /// used to maintain a list of websocket protocols (for the server side)
-  TWebSocketProtocolList = class(TSynPersistentRWLightLock)
+  TWebSocketProtocolList = class(TObjectRWLightLock)
   protected
     fProtocols: array of TWebSocketProtocol;
     fOnUpgraded: TOnWebSocketProtocolUpgraded;
@@ -968,8 +968,7 @@ type
   // - then any incoming focText/focBinary events will trigger this callback
   // - eventually, a focConnectionClose will notify the connection ending
   TOnWebSocketProtocolChatIncomingFrame = procedure(
-    Sender: TWebSocketProcess;
-    const Frame: TWebSocketFrame) of object;
+    Sender: TWebSocketProcess; const Frame: TWebSocketFrame) of object;
 
   /// simple chatting protocol, allowing to receive and send WebSocket frames
   // - you can use this protocol to implement simple asynchronous communication
@@ -1232,9 +1231,7 @@ begin
   begin
     // https://tools.ietf.org/html/rfc6455#section-10.3
     // client-to-server masking is mandatory (but not from server to client)
-    repeat
-      hdr.mask := Random32;
-    until hdr.mask <> 0;
+    hdr.mask := Random32Not0;
     inc(hdrlen, 4);
   end
   else
@@ -1556,11 +1553,10 @@ begin
   // slightly faster than a TDynArray which would release the memory
   List[i].payload := '';
   dec(Count);
-  if i < Count then
-  begin
-    MoveFast(List[i + 1], List[i], (Count - i) * SizeOf(List[i]));
-    pointer(List[Count].payload) := nil;
-  end;
+  if i >= Count then
+    exit;
+  MoveFast(List[i + 1], List[i], (Count - i) * SizeOf(List[i]));
+  pointer(List[Count].payload) := nil;
 end;
 
 
@@ -2981,7 +2977,7 @@ begin
             continue;
           self.Log(request, 'NotifyCallback AnswerToIgnore TIMEOUT -> ' +
             'abort connection', sllInfo);
-          result := HTTP_NOTIMPLEMENTED; // 501 will force recreate connection
+          result := HTTP_CLIENTERROR; // to force recreate connection
           exit;
         until false;
       end;
@@ -3436,12 +3432,12 @@ begin
     if r[length(r)] <> '/' then
       Append(r, '/');
   end;
-  // EIO        4          Mandatory, the version of the protocol.
-  // transport  websocket  Mandatory, the name of the transport.
-  // sid        <sid>      None here - direct websockets, not from HTTP polling.
-  // t          <random>   Ensure that the request is not cached by the browser.
+  // EIO        4          Mandatory, the version of the protocol
+  // transport  websocket  Mandatory, the name of the transport
+  // sid        <sid>      None here - direct websockets, not from HTTP polling
+  // t          <random>   Ensure that the request is not cached by the browser
   FormatUtf8('%?EIO=4&transport=websocket&t=%',
-    [r, CardinalToHexShort(Random32)], result);
+    [r, CardinalToHexShort(Random32Not0)], result);
   if PollingUpgradeSid <> '' then
     Append(result, '&sid=', PollingUpgradeSid);
 end;

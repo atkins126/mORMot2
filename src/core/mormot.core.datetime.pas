@@ -447,7 +447,8 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// fill fields from the given value - but not DayOfWeek
     procedure FromDateTime(const dt: TDateTime);
-    /// fill Year/Month/Day fields from the given value - but not DayOfWeek
+    /// fill Year/Month/Day fields from the given value
+    // - but do not compute DayOfWeek, nor touch the time fields
     // - faster than the RTL DecodeDate() function
     procedure FromDate(const dt: TDateTime);
     /// fill fields from the given value - but not DayOfWeek
@@ -585,7 +586,7 @@ function NowUtcToString(Expanded: boolean = true; FirstTimeChar: AnsiChar = ' ')
   {$ifdef HASINLINE} inline; {$endif}
 
 /// retrieve the current local date into '19 Sep 2023' English-readable text
-function NowTextDateShort(UtcDate: boolean): TShort15;
+function NowTextDateShort(UtcDate: boolean = false): TShort15;
 
 /// convert a TUnixTime date into '19 Sep 2023' English-readable text
 function UnixTimeToTextDateShort(Date: TUnixTime): TShort15;
@@ -692,7 +693,7 @@ const
   /// a contemporary, but elapsed, TUnixTime second-based value
   // - corresponds to Thu, 08 Dec 2016 08:50:20 GMT
   // - may be used to check for a valid just-generated Unix timestamp value
-  // - or used to store a timestamp without any 32-bit "Year 2038" overflow
+  // - or to store a timestamp without any 32-bit "Year 2038" overflow issue
   UNIXTIME_MINIMAL = 1481187020;
 
 /// returns UnixTimeUtc - UNIXTIME_MINIMAL so has no "Year 2038" overflow issue
@@ -772,14 +773,13 @@ function UnixMSTimePeriodToString(const UnixMSTime: TUnixMSTime;
   FirstTimeChar: AnsiChar = 'T'): RawUtf8;
 
 
-
 { ************ TTimeLog efficient 64-bit custom date/time encoding }
 
 type
   /// pointer to a memory structure for direct access to a TTimeLog type value
   PTimeLogBits = ^TTimeLogBits;
 
-  /// internal memory structure for direct access to a TTimeLog type value
+  /// internal memory structure for direct access to a 64-bit TTimeLog type value
   // - most of the time, you should not use this object, but higher level
   // TimeLogFromDateTime/TimeLogToDateTime/TimeLogNow/Iso8601ToTimeLog functions
   // - since TTimeLogBits.Value is bit-oriented, you can't just add or substract
@@ -805,10 +805,13 @@ type
     /// extract the date and time content in Value into individual values
     procedure Expand(out Date: TSynSystemTime);
     /// convert to Iso-8601 encoded text, truncated to date/time only if needed
-    function Text(Expanded: boolean; FirstTimeChar: AnsiChar = 'T'): RawUtf8; overload;
+    function Text(Expanded: boolean; FirstTimeChar: AnsiChar = 'T'): RawUtf8;
+      {$ifdef HASINLINE}inline;{$endif}
     /// convert to Iso-8601 encoded text, truncated to date/time only if needed
-    function Text(Dest: PUtf8Char; Expanded: boolean;
-      FirstTimeChar: AnsiChar = 'T'; QuoteChar: AnsiChar = #0): PUtf8Char; overload;
+    procedure SetText(var Dest: RawUtf8; Expanded: boolean; FirstTimeChar: AnsiChar = 'T');
+    /// convert to Iso-8601 encoded text, truncated to date/time only if needed
+    function FillText(Dest: PUtf8Char; Expanded: boolean;
+      FirstTimeChar: AnsiChar = 'T'; QuoteChar: AnsiChar = #0): PUtf8Char;
     /// convert to Iso-8601 encoded text with date and time part
     // - never truncate to date/time nor return '' as Text() does
     function FullText(Expanded: boolean; FirstTimeChar: AnsiChar = 'T';
@@ -2100,7 +2103,7 @@ end;
 function TSynSystemTime.IsDateEqual(const date: TSynDate): boolean;
 begin
   result := (PCardinal(@Year)^ = PCardinal(@TSynDate(date).Year)^) and // +Month
-            (Day = TSynDate(date).Day);
+            (Day = TSynDate(date).Day); // just ignore DayOfWeek
 end;
 
 procedure TSynSystemTime.FromNowUtc;
@@ -2138,29 +2141,26 @@ procedure TSynSystemTime.FromDate(const dt: TDateTime);
 var
   t, t2, t3: PtrUInt;
 begin
+  PInt64(@Year)^ := 0; // quickly reset all Date fields
   t := Trunc(dt);
   t := (t + 693900) * 4 - 1;
-  if PtrInt(t) >= 0 then
-  begin
-    t3 := t div 146097;
-    t2 := (t - t3 * 146097) and not 3;
-    t := PtrUInt(t2 + 3) div 1461; // PtrUInt() needed for FPC i386
-    Year := t3 * 100 + t;
-    t2 := ((t2 + 7 - t * 1461) shr 2) * 5;
-    t3 := PtrUInt(t2 - 3) div 153;
-    Day := PtrUInt(t2 + 2 - t3 * 153) div 5;
-    if t3 < 10 then
-      inc(t3, 3)
-    else
-    begin
-      dec(t3, 9);
-      inc(Year);
-    end;
-    Month := t3;
-    DayOfWeek := 0; // not set by default
-  end
+  if PtrInt(t) < 0 then
+    exit;
+  t3 := t div 146097;
+  t2 := (t - t3 * 146097) and not 3;
+  t := PtrUInt(t2 + 3) div 1461; // PtrUInt() needed for FPC i386
+  Year := t3 * 100 + t;
+  t2 := ((t2 + 7 - t * 1461) shr 2) * 5;
+  t3 := PtrUInt(t2 - 3) div 153;
+  Day := PtrUInt(t2 + 2 - t3 * 153) div 5;
+  if t3 < 10 then
+    inc(t3, 3)
   else
-    PInt64(@Year)^ := 0;
+  begin
+    dec(t3, 9);
+    inc(Year);
+  end;
+  Month := t3;
 end;
 
 procedure TSynSystemTime.FromTime(const dt: TDateTime);
@@ -3250,7 +3250,7 @@ begin
   result := ToUnixTime * MilliSecsPerSec;
 end;
 
-function TTimeLogBits.Text(Dest: PUtf8Char; Expanded: boolean;
+function TTimeLogBits.FillText(Dest: PUtf8Char; Expanded: boolean;
   FirstTimeChar, QuoteChar: AnsiChar): PUtf8Char;
 var
   lo: PtrUInt;
@@ -3306,14 +3306,19 @@ begin
 end;
 
 function TTimeLogBits.Text(Expanded: boolean; FirstTimeChar: AnsiChar): RawUtf8;
+begin
+  SetText(result, Expanded, FirstTimeChar);
+end;
+
+procedure TTimeLogBits.SetText(var Dest: RawUtf8; Expanded: boolean; FirstTimeChar: AnsiChar);
 var
   tmp: array[0..31] of AnsiChar;
 begin
   if Value = 0 then
-    result := ''
+    FastAssignNew(Dest)
   else
-    FastSetString(result, @tmp,
-      Text(@tmp, Expanded, FirstTimeChar) - PUtf8Char(@tmp));
+    FastSetString(Dest, @tmp,
+      FillText(@tmp, Expanded, FirstTimeChar) - PUtf8Char(@tmp));
 end;
 
 function TTimeLogBits.FullText(Dest: PUtf8Char; Expanded: boolean;
@@ -3530,7 +3535,7 @@ procedure TTextDateWriter.AddTimeLog(Value: PInt64; QuoteChar: AnsiChar);
 begin
   if BEnd - B <= 31 then
     FlushToStream;
-  B := PTimeLogBits(Value)^.Text(B + 1, true, 'T', QuoteChar) - 1;
+  B := PTimeLogBits(Value)^.FillText(B + 1, true, 'T', QuoteChar) - 1;
 end;
 
 procedure TTextDateWriter.AddUnixTime(Value: PInt64; QuoteChar: AnsiChar);

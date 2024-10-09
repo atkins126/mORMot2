@@ -763,6 +763,7 @@ type
     /// the Column type of the current Row
     // - FieldSize can be set to store the size in chars of a ftUtf8 column
     // (0 means BLOB kind of TEXT column)
+    // - warning: FieldSize^ should be a 32-bit "integer" variable, not a PtrInt
     function ColumnType(Col: integer; FieldSize: PInteger = nil): TSqlDBFieldType;
     /// returns TRUE if the column contains NULL, first Col is 0
     function ColumnNull(Col: integer): boolean;
@@ -1256,6 +1257,7 @@ type
     fUserID: RawUtf8;
     fForcedSchemaName: RawUtf8;
     fMainConnection: TSqlDBConnection;
+    fSharedTransactionsSafe: TLightLock; // topmost to ensure aarch64 alignment
     fBatchMaxSentAtOnce: integer;
     fLoggedSqlMaxSize: integer;
     fConnectionTimeOutTicks: Int64;
@@ -1278,7 +1280,6 @@ type
     fStatementCacheReplicates: integer;
     fSqlCreateFieldMax: cardinal;
     fSqlCreateField: TSqlDBFieldTypeDefinition;
-    fSharedTransactionsSafe: TLightLock;
     fSharedTransactions: array of TSqlDBConnectionTransaction;
     fExecuteWhenConnected: TRawUtf8DynArray;
     fForeignKeys: TSynNameValue;
@@ -2458,6 +2459,7 @@ type
     /// the Column type of the current Row
     // - FieldSize can be set to store the size in chars of a ftUtf8 column
     // (0 means BLOB kind of TEXT column)
+    // - warning: FieldSize^ should be a 32-bit "integer" variable, not a PtrInt
     function ColumnType(Col: integer;
       FieldSize: PInteger = nil): TSqlDBFieldType; virtual; abstract;
     /// returns TRUE if the column contains NULL, first Col is 0
@@ -3024,6 +3026,7 @@ type
     // - FieldSize can be set to store the size in chars of a ftUtf8 column
     // (0 means BLOB kind of TEXT column) - this implementation will store
     // fColumns[Col].ColumnValueDBSize if ColumnValueInlined=true
+    // - warning: FieldSize^ should be a 32-bit "integer" variable, not a PtrInt
     function ColumnType(Col: integer;
       FieldSize: PInteger = nil): TSqlDBFieldType; override;
     /// direct access to the columns description
@@ -3715,8 +3718,10 @@ begin
             if t^.RefCount <> 0 then
               exit; // nested transaction
             dec(n);
-            MoveFast(fSharedTransactions[i + 1], t^, (n - i) * SizeOf(t^));
-            SetLength(fSharedTransactions, n);
+            if n = 0 then
+              fSharedTransactions := nil
+            else
+              DynArrayFakeDelete(fSharedTransactions, i, n, SizeOf(t^));
             found := true;
           end;
           break;

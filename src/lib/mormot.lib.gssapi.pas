@@ -484,7 +484,7 @@ function ClientSspiAuth(var aSecContext: TSecContext;
 // 'username@MYDOMAIN.TLD' if aSecKerberosSpn is not set or if
 // ClientForceSpn() has not been called ahead
 // - aPassword is the user clear text password - you may set '' if you have a
-// previous kinit for aUserName on the system
+// previous kinit for aUserName on the system, and want to recover this token
 // - aOutData contains data that must be sent to server
 // - you can specify an optional Mechanism OID - default is SPNEGO
 // - if function returns True, client must send aOutData to server
@@ -531,6 +531,9 @@ procedure ClientForceSpn(const aSecKerberosSpn: RawUtf8);
 procedure ServerForceKeytab(const aKeytab: RawUtf8);
 
 const
+  /// the API available on this system to implement Kerberos
+  SECPKGNAMEAPI = 'GSSAPI';
+
   /// HTTP Challenge name
   // - GSS API only supports Negotiate/Kerberos - NTLM is unsafe and deprecated
   SECPKGNAMEHTTP: RawUtf8 = 'Negotiate';
@@ -975,11 +978,15 @@ begin
       MinStatus, @InBuf, GSS_KRB5_NT_PRINCIPAL_NAME, UserName);
     GccCheck(MajStatus, MinStatus, 'Failed to import UserName');
     if aPassword = '' then
-      // force the UserName
+      // recover an existing session with the supplied UserName
       MajStatus := GssApi.gss_acquire_cred(MinStatus, UserName,
         GSS_C_INDEFINITE, m, GSS_C_INITIATE, aSecContext.CredHandle, nil, nil)
     else
     begin
+      // create a new transient in-memory token with the supplied credentials
+      // WARNING: on MacOS, the default system GSSAPI stack seems to create a
+      //  session-wide token (like kinit), not a transient token in memory - you
+      //  may prefer to load a proper libgssapi_krb5.dylib instead
       InBuf.length := Length(aPassword);
       InBuf.value := pointer(aPassword);
       MajStatus := GssApi.gss_acquire_cred_with_password(

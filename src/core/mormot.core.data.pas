@@ -7,9 +7,10 @@ unit mormot.core.data;
   *****************************************************************************
 
    Low-Level Data Processing Functions shared by all framework units
-    - RTL TPersistent / TInterfacedObject with Custom Constructor
-    - TSynPersistent* TSyn*List TSynLocker classes
-    - TSynPersistentStore with proper Binary Serialization
+    - RTL TPersistent or Root Classes with Custom Constructor
+    - IAutoFree and IAutoLocker Reference-Counted Process
+    - TSynList TSynObjectList TSynLocker classes
+    - TObjectStore with proper Binary Serialization
     - INI Files and In-memory Access
     - Efficient RTTI Values Binary Serialization and Comparison
     - TDynArray and TDynArrayHashed Wrappers
@@ -41,7 +42,7 @@ uses
   mormot.core.buffers;
 
 
-{ ************ RTL TPersistent / TInterfacedObject with Custom Constructor }
+{ ************ RTL TPersistent or Root Classes with Custom Constructor }
 
 type
     /// abstract parent class with a virtual constructor, ready to be overridden
@@ -57,30 +58,11 @@ type
     constructor Create; virtual;
   end;
 
-  {$M+}
-  /// abstract parent class with threadsafe implementation of IInterface and
-  // a virtual constructor
-  // - you can specify e.g. such a class to TRestServer.ServiceRegister() if
-  // you need an interfaced object with a virtual constructor, ready to be
-  // overridden to initialize the instance
-  TInterfacedObjectWithCustomCreate = class(TInterfacedObject)
-  public
-    /// this virtual constructor will be called at instance creation
-    // - this constructor does nothing, but is declared as virtual so that
-    // inherited classes may safely override this default void implementation
-    constructor Create; virtual;
-    /// used to mimic TInterfacedObject reference counting
-    // - Release=true will call TInterfacedObject._Release
-    // - Release=false will call TInterfacedObject._AddRef
-    // - could be used to emulate proper reference counting of the instance
-    // via interfaces variables, but still storing plain class instances
-    // (e.g. in a global list of instances) - warning: use with extreme caution!
-    procedure RefCountUpdate(Release: boolean); virtual;
-  end;
-  {$M-}
+  /// legacy type defined for compatibility with existing user code
+  // - TInterfacedPersistent seems a better name, consistent with TSynPersistent
+  TInterfacedObjectWithCustomCreate = TInterfacedPersistent;
 
-
-  /// an abstract ancestor, for implementing a custom TInterfacedObject like class
+  /// an abstract ancestor, for implementing an abstract TInterfacedObject class
   // - by default, will do nothing: no instance would be retrieved by
   // QueryInterface unless the VirtualQueryInterface protected method is
   // overriden, and _AddRef/_Release methods would call VirtualAddRef and
@@ -88,23 +70,20 @@ type
   // - using this class will leverage the signature difference between Delphi
   // and FPC, among all supported platforms
   // - the class includes a RefCount integer field
-  TSynInterfacedObject = class(TObject, IUnknown)
+  TSynInterfacedObject = class(TSynPersistent, IUnknown)
   protected
     fRefCount: integer;
     // returns E_NOINTERFACE by default
     function VirtualQueryInterface(IID: PGuid; out Obj): TIntQry; virtual;
-    // always return 1 for a "non allocated" instance (0 triggers release)
+    // to be overriden -  return 1 for a "non allocated" instance (0 means release)
     function VirtualAddRef: integer;  virtual; abstract;
     function VirtualRelease: integer; virtual; abstract;
+    // IUnknown methods
     function QueryInterface({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
       IID: TGuid; out Obj): TIntQry; {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
     function _AddRef: TIntCnt;       {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
     function _Release: TIntCnt;      {$ifdef OSWINDOWS}stdcall{$else}cdecl{$endif};
   public
-    /// this virtual constructor will be called at instance creation
-    // - this constructor does nothing, but is declared as virtual so that
-    // inherited classes may safely override this default void implementation
-    constructor Create; virtual;
     /// the associated reference count
     property RefCount: integer
       read fRefCount write fRefCount;
@@ -123,10 +102,6 @@ type
     constructor Create; reintroduce; virtual;
   end;
 
-  /// used to determine the exact class type of a TInterfacedObjectWithCustomCreate
-  // - could be used to create instances using its virtual constructor
-  TInterfacedObjectWithCustomCreateClass = class of TInterfacedObjectWithCustomCreate;
-
   /// used to determine the exact class type of a TPersistentWithCustomCreateClass
   // - could be used to create instances using its virtual constructor
   TPersistentWithCustomCreateClass = class of TPersistentWithCustomCreate;
@@ -135,6 +110,15 @@ type
   TInterfacedCollectionClass = class of TInterfacedCollection;
 
 
+{ ************ IAutoFree and IAutoLocker Reference-Counted Process }
+
+{ WARNING:
+    FPC and Delphi 10.4+ do require an explicit local variable or "with"
+    clause to keep the reference locked - previous behavior was to keep the
+    variable up to the end of the method, which is not the case any more.
+}
+
+type
   /// interface for TAutoFree to register another TObject instance
   // to an existing IAutoFree local variable
   // - WARNING: both FPC and Delphi 10.4+ don't keep the IAutoFree instance
@@ -150,7 +134,8 @@ type
   // up to the end-of-method -> you should not use TAutoFree for new projects :(
   // - be aware that it won't implement a full ARC memory model, but may be
   // just used to avoid writing some try ... finally blocks on local variables
-  // - use with caution, only on well defined local scope
+  // - use with caution, only on well defined local scope, via a "with" clause
+  // or a local variable
   TAutoFree = class(TInterfacedObject, IAutoFree)
   protected
     fObject: TObject;
@@ -285,13 +270,14 @@ type
   // - you can use one instance of this to protect multi-threaded execution
   // - the main class may initialize a IAutoLocker property in Create, then call
   // IAutoLocker.ProtectMethod in any method to make its execution thread safe
-  // - this class inherits from TInterfacedObjectWithCustomCreate so you
-  // could define one published property of a mormot.core.interface.pas
-  // TInjectableObject as IAutoLocker so that this class may be automatically
-  // injected
-  // - consider inherit from high-level TSynPersistentLock or call low-level
+  // - this class inherits from TInterfacedPersistent so you could define
+  // one published property of a mormot.core.interface.pas TInjectableObject as
+  // IAutoLocker so that this class may be automatically injected
+  // - consider inherit from high-level TSynLocked or call low-level
   // fSafe := NewSynLocker / fSafe^.DoneAndFreemem instead
-  TAutoLocker = class(TInterfacedObjectWithCustomCreate, IAutoLocker)
+  // - use with caution, only on well defined local scope, via a "with" clause
+  // or a local variable, especially on FPC or Delphi 10.4+
+  TAutoLocker = class(TInterfacedPersistent, IAutoLocker)
   protected
     fSafe: TSynLocker;
   public
@@ -353,33 +339,9 @@ type
 
 
 
-{ ************ TSynPersistent* TSyn*List TSynLocker classes }
+{ ************ TSynList TSynObjectList TSynLocker classes }
 
 type
-  /// our own empowered TPersistent-like parent class
-  // - TPersistent has an unexpected speed overhead due a giant lock introduced
-  // to manage property name fixup resolution (which we won't use outside the UI)
-  // - this class has a virtual constructor, so is a preferred alternative
-  // to both TPersistent and TPersistentWithCustomCreate classes
-  // - features some protected methods to customize its JSON serialization
-  // - for best performance, any type inheriting from this class will bypass
-  // some regular steps: do not implement interfaces or use TMonitor with them!
-  TSynPersistent = class(TObjectWithCustomCreate)
-  protected
-    // this default implementation will call AssignError()
-    procedure AssignTo(Dest: TSynPersistent); virtual;
-    procedure AssignError(Source: TSynPersistent);
-  public
-    /// allows to implement a TPersistent-like assignement mechanism
-    // - inherited class should override AssignTo() protected method
-    // to implement the proper assignment
-    procedure Assign(Source: TSynPersistent); virtual;
-  end;
-
-  /// used to determine the exact class type of a TSynPersistent
-  TSynPersistentClass = class of TSynPersistent;
-
-
   {$ifdef HASITERATORS}
   /// abstract pointer Enumerator
   TPointerEnumerator = record
@@ -396,21 +358,18 @@ type
   end;
   {$endif HASITERATORS}
 
-  {$M+}
   /// simple and efficient TList, without any notification
   // - regular TList has an internal notification mechanism which slows down
   // basic process, and can't be easily inherited
   // - stateless methods (like Add/Clear/Exists/Remove) are defined as virtual
   // since can be overriden e.g. by TSynObjectListLocked to add a TSynLocker
-  TSynList = class(TObject)
+  TSynList = class(TObjectWithProps)
   protected
     fCount: integer;
     fList: TPointerDynArray;
     function Get(index: integer): pointer;
       {$ifdef HASINLINE}inline;{$endif}
   public
-    /// virtual constructor called at instance creation
-    constructor Create; virtual;
     /// add one item to the list
     function Add(item: pointer): PtrInt; virtual;
     /// insert one item to the list at a given position
@@ -441,8 +400,10 @@ type
     property Items[index: integer]: pointer
       read Get; default;
   end;
-  {$M-}
   PSynList = ^TSynList;
+
+  /// meta-class of TSynList type
+  TSynListClass = class of TSynList;
 
   /// simple and efficient TObjectList, without any notification
   TSynObjectList = class(TSynList)
@@ -481,73 +442,8 @@ type
   /// meta-class of TSynObjectList type
   TSynObjectListClass = class of TSynObjectList;
 
-  /// adding locking methods to a TSynPersistent with virtual constructor
-  // - you may use this class instead of the RTL TCriticalSection, since it
-  // would use a TSynLocker which does not suffer from CPU cache line conflit,
-  // and is cross-compiler whereas TMonitor is Delphi-specific and buggy (at
-  // least before XE5)
-  // - if you don't need TSynPersistent overhead, consider plain TSynLocked class
-  TSynPersistentLock = class(TSynPersistent)
-  protected
-    // TSynLocker would increase inherited fields offset -> managed PSynLocker
-    fSafe: PSynLocker;
-    // will lock/unlock the instance during JSON serialization of its properties
-    function RttiBeforeWriteObject(W: TTextWriter;
-      var Options: TTextWriterWriteObjectOptions): boolean; override;
-    procedure RttiAfterWriteObject(W: TTextWriter;
-      Options: TTextWriterWriteObjectOptions); override;
-    // set the rcfHookWrite flag to call RttiBeforeWriteObject
-    class procedure RttiCustomSetParser(Rtti: TRttiCustom); override;
-  public
-    /// initialize the instance, and its associated lock
-    constructor Create; override;
-    /// finalize the instance, and its associated lock
-    destructor Destroy; override;
-    /// access to the associated instance critical section
-    // - call Safe.Lock/UnLock to protect multi-thread access on this storage
-    property Safe: PSynLocker
-      read fSafe;
-    /// could be used as a short-cut to Safe.Lock
-    procedure Lock;
-      {$ifdef HASINLINE}inline;{$endif}
-    /// could be used as a short-cut to Safe.UnLock
-    procedure Unlock;
-      {$ifdef HASINLINE}inline;{$endif}
-  end;
-
-  /// adding light non-upgradable multiple Read / exclusive Write locking
-  // methods to a TSynPersistent with virtual constructor
-  TSynPersistentRWLightLock = class(TSynPersistent)
-  protected
-    fSafe: TRWLightLock;
-  public
-    /// access to the associated non-upgradable TRWLightLock instance
-    // - call Safe methods to protect multi-thread access on this storage
-    property Safe: TRWLightLock
-      read fSafe;
-  end;
-
-  /// adding light upgradable multiple Read / exclusive Write locking methods
-  // to a TSynPersistent with virtual constructor
-  TSynPersistentRWLock = class(TSynPersistent)
-  protected
-    fSafe: TRWLock;
-  public
-    /// access to the associated upgradable TRWLock instance
-    // - call Safe methods to protect multi-thread access on this storage
-    property Safe: TRWLock
-      read fSafe;
-  end;
-
-  {$ifndef PUREMORMOT2}
-
-  /// used for backward compatibility only with existing code
-  TSynPersistentLocked = class(TSynPersistentLock);
-
-  {$endif PUREMORMOT2}
-
   /// adding locking methods to a TInterfacedObject with virtual constructor
-  TInterfacedObjectLocked = class(TInterfacedObjectWithCustomCreate)
+  TInterfacedObjectLocked = class(TInterfacedPersistent)
   protected
     fSafe: PSynLocker; // TSynLocker would increase inherited fields offset
   public
@@ -562,7 +458,7 @@ type
   end;
 
   /// adding light locking methods to a TInterfacedObject with virtual constructor
-  TInterfacedObjectRWLocked = class(TInterfacedObjectWithCustomCreate)
+  TInterfacedObjectRWLocked = class(TInterfacedPersistent)
   protected
     fSafe: TRWLock;
   public
@@ -650,13 +546,13 @@ type
   end;
 
 
-{ ************ TSynPersistentStore with proper Binary Serialization }
+{ ************ TObjectStore with proper Binary Serialization }
 
 type
   /// abstract high-level handling of (SynLZ-)compressed persisted storage
   // - LoadFromReader/SaveToWriter abstract methods should be overriden
   // with proper binary persistence implementation
-  TSynPersistentStore = class(TSynPersistentRWLock)
+  TObjectStore = class(TObjectRWLock)
   protected
     fName: RawUtf8;
     fReader: TFastReader;
@@ -727,6 +623,10 @@ type
     property SaveToLastUncompressed: integer
       read fSaveToLastUncompressed;
   end;
+
+  {$ifndef PUREMORMOT2}
+  TSynPersistentStore = TObjectStore;
+  {$endif PUREMORMOT2}
 
 
 
@@ -2621,9 +2521,10 @@ type
   public
     /// initialize the RawUtf8 slot (and its Safe mutex)
     procedure Init;
-    /// returns the interned RawUtf8 value
-    procedure Unique(var aResult: RawUtf8; const aText: RawUtf8;
-      aTextHash: cardinal);
+    /// computes one interned RawUtf8 value
+    // - returns true if aText was added to the list, or false if was existing
+    function Unique(var aResult: RawUtf8; const aText: RawUtf8;
+      aTextHash: cardinal): boolean;
     /// returns the interned RawUtf8 value
     // - only allocates new aResult string if needed
     procedure UniqueFromBuffer(var aResult: RawUtf8;
@@ -2667,7 +2568,7 @@ type
     /// check if a RawUtf8 value is already stored within this class
     // - if not existing, returns nil and don't add it to the pool
     // - if existing, returns pointer(fValue[i]) of the unique stored RawUtf8
-    // - use e.g. for very fast per-pointer lookup of interned property names
+    // - used e.g. for very fast per-pointer lookup of interned property names
     function Existing(const aText: RawUtf8): pointer;
     /// return a RawUtf8 variable stored within this class from a text buffer
     // - if aText occurs for the first time, add it to the internal string pool
@@ -2679,7 +2580,8 @@ type
     // - if aText occurs for the first time, add it to the internal string pool
     // - if aText does exist in the internal string pool, return the shared
     // instance (with its reference counter increased), to reduce memory usage
-    procedure Unique(var aResult: RawUtf8; const aText: RawUtf8); overload;
+    // - returns true if aText was added to the list, or false if was existing
+    function Unique(var aResult: RawUtf8; const aText: RawUtf8): boolean; overload;
     /// return a RawUtf8 variable stored within this class from a text buffer
     // - if aText occurs for the first time, add it to the internal string pool
     // - if aText does exist in the internal string pool, return the shared
@@ -2735,7 +2637,7 @@ type
   // - if fNoDuplicate flag is defined, an internal hash table will be
   // maintained to perform IndexOf() lookups in O(1) linear way
   // - not thread-safe by default, unless fThreadSafe is set to use the TRWLock
-  TRawUtf8List = class(TSynPersistentRWLock)
+  TRawUtf8List = class(TObjectRWLock)
   protected
     fCount: PtrInt;
     fValue: TRawUtf8DynArray;
@@ -3040,6 +2942,9 @@ type
 
 {$endif PUREMORMOT2}
 
+/// copy two TRawUtf8List instances
+procedure CopyRawUtf8List(Dest, Source: TRawUtf8List);
+
 /// sort a dynamic array of PUtf8Char items, via an external array of indexes
 // - you can use FastFindIndexedPUtf8Char() for fast O(log(n)) binary search
 procedure QuickSortIndexedPUtf8Char(Values: PPUtf8CharArray; Count: integer;
@@ -3193,29 +3098,13 @@ type
 implementation
 
 
-{ ************ RTL TPersistent / TInterfacedObject with Custom Constructor }
+{ ************ RTL TPersistent or Root Classes with Custom Constructor }
 
 { TPersistentWithCustomCreate }
 
 constructor TPersistentWithCustomCreate.Create;
 begin
   // nothing to do by default - overridden constructor may add custom code
-end;
-
-
-{ TInterfacedObjectWithCustomCreate }
-
-constructor TInterfacedObjectWithCustomCreate.Create;
-begin
-  // nothing to do by default - overridden constructor may add custom code
-end;
-
-procedure TInterfacedObjectWithCustomCreate.RefCountUpdate(Release: boolean);
-begin
-  if Release then
-    _Release
-  else
-    _AddRef;
 end;
 
 
@@ -3228,11 +3117,6 @@ end;
 
 
 { TSynInterfacedObject }
-
-constructor TSynInterfacedObject.Create;
-begin
-  // do-nothing virtual constructor
-end;
 
 function TSynInterfacedObject._AddRef: TIntCnt;
 begin
@@ -3256,6 +3140,8 @@ begin
   result := E_NOINTERFACE;
 end;
 
+
+{ ************ IAutoFree and IAutoLocker Reference-Counted Process }
 
 { TAutoFree }
 
@@ -3365,28 +3251,7 @@ begin
 end;
 
 
-{ ************ TSynPersistent* / TSyn*List / TSynLocker classes }
-
-{ TSynPersistent }
-
-procedure TSynPersistent.AssignError(Source: TSynPersistent);
-begin
-  raise EConvertError.CreateFmt('Cannot assign a %s to a %s',
-    [ClassNameShort(Source)^, ClassNameShort(self)^]);
-end;
-
-procedure TSynPersistent.AssignTo(Dest: TSynPersistent);
-begin
-  Dest.AssignError(Self);
-end;
-
-procedure TSynPersistent.Assign(Source: TSynPersistent);
-begin
-  if Source <> nil then
-    Source.AssignTo(Self)
-  else
-    AssignError(nil);
-end;
+{ ************ TSyn*List / TSynLocker classes }
 
 {$ifdef HASITERATORS}
 
@@ -3425,12 +3290,8 @@ end;
 
 {$endif HASITERATORS}
 
-{ TSynList }
 
-constructor TSynList.Create;
-begin
-  // nothing to do
-end;
+{ TSynList }
 
 function TSynList.Add(item: pointer): PtrInt;
 begin
@@ -3547,53 +3408,6 @@ begin
   Add(result);
 end;
 
-
-{ TSynPersistentLock }
-
-constructor TSynPersistentLock.Create;
-begin
-  inherited Create; // may have been overriden
-  fSafe := NewSynLocker;
-end;
-
-destructor TSynPersistentLock.Destroy;
-begin
-  inherited Destroy;
-  fSafe^.DoneAndFreeMem;
-end;
-
-procedure TSynPersistentLock.Lock;
-begin
-  if self <> nil then
-    fSafe^.Lock;
-end;
-
-procedure TSynPersistentLock.Unlock;
-begin
-  if self <> nil then
-    fSafe^.UnLock;
-end;
-
-class procedure TSynPersistentLock.RttiCustomSetParser(Rtti: TRttiCustom);
-begin
-  // let's call our overriden RttiBeforeWriteObject and RttiAfterWriteObject
-  Rtti.Flags := Rtti.Flags + [rcfHookWrite];
-end;
-
-function TSynPersistentLock.RttiBeforeWriteObject(W: TTextWriter;
-  var Options: TTextWriterWriteObjectOptions): boolean;
-begin
-  if woPersistentLock in Options then
-    fSafe.Lock;
-  result := false; // continue with default JSON serialization
-end;
-
-procedure TSynPersistentLock.RttiAfterWriteObject(W: TTextWriter;
-  Options: TTextWriterWriteObjectOptions);
-begin
-  if woPersistentLock in Options then
-    fSafe.UnLock;
-end;
 
 { TInterfacedObjectLocked }
 
@@ -3749,54 +3563,54 @@ begin
 end;
 
 
-{ ************ TSynPersistentStore with proper Binary Serialization }
+{ ************ TObjectStore with proper Binary Serialization }
 
-{ TSynPersistentStore }
+{ TObjectStore }
 
-constructor TSynPersistentStore.Create(const aName: RawUtf8);
+constructor TObjectStore.Create(const aName: RawUtf8);
 begin
   inherited Create; // may have been overriden
   fName := aName;
 end;
 
-constructor TSynPersistentStore.CreateFrom(const aBuffer: RawByteString;
+constructor TObjectStore.CreateFrom(const aBuffer: RawByteString;
   aLoad: TAlgoCompressLoad);
 begin
   CreateFromBuffer(pointer(aBuffer), length(aBuffer), aLoad);
 end;
 
-constructor TSynPersistentStore.CreateFromBuffer(
+constructor TObjectStore.CreateFromBuffer(
   aBuffer: pointer; aBufferLen: integer; aLoad: TAlgoCompressLoad);
 begin
   inherited Create; // may have been overriden
   LoadFrom(aBuffer, aBufferLen, aLoad);
 end;
 
-constructor TSynPersistentStore.CreateFromFile(const aFileName: TFileName;
+constructor TObjectStore.CreateFromFile(const aFileName: TFileName;
   aLoad: TAlgoCompressLoad);
 begin
   inherited Create; // may have been overriden
   LoadFromFile(aFileName, aLoad);
 end;
 
-procedure TSynPersistentStore.LoadFromReader;
+procedure TObjectStore.LoadFromReader;
 begin
   fReader.VarUtf8(fName);
 end;
 
-procedure TSynPersistentStore.SaveToWriter(aWriter: TBufferWriter);
+procedure TObjectStore.SaveToWriter(aWriter: TBufferWriter);
 begin
   aWriter.Write(fName);
 end;
 
-procedure TSynPersistentStore.LoadFrom(const aBuffer: RawByteString;
+procedure TObjectStore.LoadFrom(const aBuffer: RawByteString;
   aLoad: TAlgoCompressLoad);
 begin
   if aBuffer <> '' then
     LoadFrom(pointer(aBuffer), length(aBuffer), aLoad);
 end;
 
-procedure TSynPersistentStore.LoadFrom(aBuffer: pointer; aBufferLen: integer;
+procedure TObjectStore.LoadFrom(aBuffer: pointer; aBufferLen: integer;
   aLoad: TAlgoCompressLoad);
 var
   localtemp: RawByteString;
@@ -3822,7 +3636,7 @@ begin
   LoadFromReader;
 end;
 
-function TSynPersistentStore.LoadFromFile(const aFileName: TFileName;
+function TObjectStore.LoadFromFile(const aFileName: TFileName;
   aLoad: TAlgoCompressLoad): boolean;
 var
   temp: RawByteString;
@@ -3833,7 +3647,7 @@ begin
     LoadFrom(temp, aLoad);
 end;
 
-procedure TSynPersistentStore.SaveTo(out aBuffer: RawByteString;
+procedure TObjectStore.SaveTo(out aBuffer: RawByteString;
   nocompression: boolean; BufLen: integer; ForcedAlgo: TAlgoCompress;
   BufferOffset: integer);
 var
@@ -3853,13 +3667,13 @@ begin
   end;
 end;
 
-function TSynPersistentStore.SaveTo(nocompression: boolean; BufLen: integer;
+function TObjectStore.SaveTo(nocompression: boolean; BufLen: integer;
   ForcedAlgo: TAlgoCompress; BufferOffset: integer): RawByteString;
 begin
   SaveTo(result, nocompression, BufLen, ForcedAlgo, BufferOffset);
 end;
 
-function TSynPersistentStore.SaveToFile(const aFileName: TFileName;
+function TObjectStore.SaveToFile(const aFileName: TFileName;
   nocompression: boolean; BufLen: integer; ForcedAlgo: TAlgoCompress): PtrUInt;
 var
   temp: RawByteString;
@@ -4628,30 +4442,26 @@ begin
   fHash.Init;
 end;
 
-procedure TRawUtf8InterningSlot.Unique(var aResult: RawUtf8;
-  const aText: RawUtf8; aTextHash: cardinal);
+function TRawUtf8InterningSlot.Unique(var aResult: RawUtf8;
+  const aText: RawUtf8; aTextHash: cardinal): boolean;
 var
   i: PtrInt;
-  added: boolean;
 begin
   fSafe.ReadLock; // a TRWLightLock is faster here than an upgradable TRWLock
   i := fHash.Values.Hasher.FindOrNewComp(aTextHash, @aText);
   if i >= 0 then
   begin
-    aResult := fHash.Value[i]; // return unified string instance
+    aResult := fHash.Value[i]; // return the interned value
     fSafe.ReadUnLock;
+    result := false;
     exit;
   end;
   fSafe.ReadUnLock;
   fSafe.WriteLock; // need to be added within the write lock
-  i := fHash.Values.FindHashedForAdding(aText, added, aTextHash);
-  if added then
-  begin
+  i := fHash.Values.FindHashedForAdding(aText, {added=}result, aTextHash);
+  if result then // was not added in a background thread
     fHash.Value[i] := aText; // copy new value to the pool
-    aResult := aText;
-  end
-  else
-    aResult := fHash.Value[i]; // was added in a background thread
+  aResult := fHash.Value[i]; // return the interned value
   fSafe.WriteUnLock;
 end;
 
@@ -4669,13 +4479,15 @@ begin
     exit;
   end;
   c := aText[aTextLen];
-  aText[aTextLen] := #0; // input buffer may not be #0 terminated
+  if c <> #0 then // write only if needed - avoid GPF from constant string
+    aText[aTextLen] := #0; // input buffer may not be #0 terminated
   i := fHash.Values.Hasher.FindOrNewComp(aTextHash, @aText, @SortDynArrayPUtf8Char);
   if i >= 0 then
   begin
-    aResult := fHash.Value[i]; // return unified string instance
+    aResult := fHash.Value[i]; // return the interned value
     fSafe.ReadUnLock;
-    aText[aTextLen] := c;
+    if c <> #0 then
+      aText[aTextLen] := c;
     exit;
   end;
   fSafe.ReadUnLock;
@@ -4686,9 +4498,10 @@ begin
   PDynArrayHasher(@fHash.Values.Hasher)^.fCompare := bak;
   if added then
     FastSetString(fHash.Value[i], aText, aTextLen); // new value to the pool
-  aResult := fHash.Value[i];
+  aResult := fHash.Value[i]; // return the interned value
   fSafe.WriteUnLock;
-  aText[aTextLen] := c;
+  if c <> #0 then
+    aText[aTextLen] := c;
 end;
 
 procedure TRawUtf8InterningSlot.UniqueFromBuffer(var aResult: RawUtf8;
@@ -4841,10 +4654,11 @@ begin
       inc(result, fPool[i].Count);
 end;
 
-procedure TRawUtf8Interning.Unique(var aResult: RawUtf8; const aText: RawUtf8);
+function TRawUtf8Interning.Unique(var aResult: RawUtf8; const aText: RawUtf8): boolean;
 var
   hash: cardinal;
 begin
+  result := false; // not added
   if aText = '' then
     aResult := ''
   else if self = nil then
@@ -4853,7 +4667,7 @@ begin
   begin
     // inlined fPool[].Values.HashElement
     hash := InterningHasher(HashSeed, pointer(aText), length(aText));
-    fPool[hash and fPoolLast].Unique(aResult, aText, hash);
+    result := fPool[hash and fPoolLast].Unique(aResult, aText, hash); // maybe added
   end;
 end;
 
@@ -5804,6 +5618,12 @@ begin
     if fThreadSafe in fFlags then
       fSafe.WriteUnLock;
   end;
+end;
+
+procedure CopyRawUtf8List(Dest, Source: TRawUtf8List);
+begin
+  Dest.Clear;
+  Dest.AddRawUtf8List(Source);
 end;
 
 
@@ -7248,8 +7068,8 @@ var
 begin
   nfo := fInfo.ArrayRtti;
   if (nfo <> nil) and // inlined nfo.ValueCopy() to avoid MoveFast() twice
-     Assigned(nfo.Copy) then
-    nfo.Copy(Dest, Source, nfo.Info) // also for T*ObjArray
+     Assigned(nfo.Copy) then // managed or 2/4/8..32 bytes move (also T*ObjArray)
+    nfo.Copy(Dest, Source, nfo.Info)
   else
     MoveFast(Source^, Dest^, fInfo.Cache.ItemSize);
 end;
@@ -7408,7 +7228,7 @@ end;
 function TDynArray.Delete(aIndex: PtrInt): boolean;
 var
   n: PtrInt;
-  s, len: PtrUInt;
+  siz, tomove: PtrUInt;
   P: PAnsiChar;
   wassorted: boolean;
 begin
@@ -7421,19 +7241,19 @@ begin
   if PDACnt(PAnsiChar(fValue^) - _DACNT)^ > 1 then
     InternalSetLength(n, n); // unique
   dec(n);
-  s := fInfo.Cache.ItemSize;
-  P := PAnsiChar(fValue^) + PtrUInt(aIndex) * s;
+  siz := fInfo.Cache.ItemSize;
+  P := PAnsiChar(fValue^) + PtrUInt(aIndex) * siz;
   if (fInfo.ArrayRtti <> nil) and
      not fNoFinalize then
     fInfo.ArrayRtti.ValueFinalize(P); // also for T*ObjArray
-  len := n - aIndex;
-  if len <> 0 then
+  tomove := n - aIndex;
+  if tomove <> 0 then
   begin
-    len := len * s;
-    MoveFast(P[s], P[0], len);
-    inc(P, len);
+    tomove := tomove * siz;
+    MoveFast(P[siz], P[0], tomove);
+    inc(P, tomove);
   end;
-  FillCharFast(P^, s, 0);
+  FillCharFast(P^, siz, 0);
   wassorted := fSorted;
   SetCount(n); // won't reallocate
   fSorted := wassorted; // deletion won't change the order
@@ -11446,7 +11266,7 @@ procedure InitializeUnit;
 var
   k: TRttiKind;
 begin
-  HashSeed := Random32; // to avoid hash flooding
+  HashSeed := Random32Not0; // to avoid hash flooding
   // initialize RTTI low-level comparison functions
   RTTI_ORD_COMPARE[roSByte]  := @_BC_SByte;
   RTTI_ORD_COMPARE[roUByte]  := @_BC_UByte;

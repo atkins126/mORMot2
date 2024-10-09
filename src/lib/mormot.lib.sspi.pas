@@ -12,6 +12,7 @@ unit mormot.lib.sspi;
    - Middle-Level SSPI Wrappers
    - High-Level Client and Server Authentication using SSPI
    - Lan Manager Access Functions
+   - Windows Application Installation and Servicing (msi)
 
   *****************************************************************************
 
@@ -33,7 +34,8 @@ uses
   sysutils,
   classes,
   mormot.core.base,
-  mormot.core.os;
+  mormot.core.os,
+  mormot.core.os.security;
   // since we use it from mormot.net.sock, we avoid mormot.core.unicode
 
 
@@ -568,7 +570,7 @@ type
   /// exception class raised during SSPI process
   ESynSspi = class(ExceptionWithProps)
   public
-    constructor CreateLastOSError(const aContext: TSecContext);
+    class procedure RaiseLastOSError(const aContext: TSecContext);
   end;
 
 
@@ -687,6 +689,7 @@ type
     /// the X509 extensions of this certificate
     Extension: array of TWinCertExtension;
   end;
+  PWinCertInfo = ^TWinCertInfo;
 
 const
   WIN_CERT_USAGE: array[wkuCrlSign .. wkuDigitalSignature] of byte = (
@@ -802,6 +805,9 @@ function InitializeDomainAuth: boolean;
 
 
 const
+  /// the API available on this system to implement Kerberos/NTLM
+  SECPKGNAMEAPI = 'SSPI';
+
   /// character used as marker in user name to indicates the associated domain
   SSPI_USER_CHAR = '\';
 
@@ -1014,6 +1020,73 @@ function GetLocalGroups(const server: RawUtf8 = ''): TRawUtf8DynArray;
 function GetLocalGroupMembers(const server, group: RawUtf8): TRawUtf8DynArray;
 
 
+{ ****************** Windows Application Installation and Servicing (msi) }
+
+{ some low-level msi.dll API definitions }
+
+type
+  TMsiHandle = type cardinal; // 32-bit on all platforms
+
+  /// exception class raised during MSI process
+  EMsiDll = class(ExceptionWithProps);
+
+function MsiOpenProductW(szProduct: PWideChar; out hProduct: TMsiHandle): cardinal; stdcall;
+function MsiGetProductPropertyW(hProduct: TMsiHandle; szProperty, lpValueBuf: PWideChar;
+  pcchValueBuf: PCardinal): cardinal; stdcall;
+function MsiSetInternalUI(dwUILevel: cardinal; var phWnd: HWND): cardinal; stdcall;
+function MsiEnumProductA(iProductIndex: cardinal; lpProductBuf: PAnsiChar): cardinal; stdcall;
+function MsiOpenDatabaseW(DatabasePath, Persist: PWideChar;
+  out hDb: TMsiHandle): cardinal; stdcall;
+function MsiDatabaseOpenViewW(hdb: TMsiHandle; query: PWideChar;
+  out hView: TMsiHandle): cardinal; stdcall;
+function MsiViewExecute(hView, hRecord: TMsiHandle): cardinal; stdcall;
+function MsiViewFetch(hView: TMsiHandle; out hRecord: TMsiHandle): cardinal; stdcall;
+function MsiViewClose(hView: TMsiHandle): cardinal; stdcall;
+function MsiRecordGetFieldCount(hRecord: TMsiHandle): cardinal; stdcall;
+function MsiRecordGetStringW(hRecord: TMsiHandle; iField: cardinal;
+  szValueBuf: PWideChar; var pcchValueBuf: cardinal): cardinal; stdcall;
+function MsiCloseHandle(hAny: TMsiHandle): cardinal; stdcall;
+function MsiGetFileSignatureInformationW(szSignedObjectPath: PWideChar;
+  dwFlags: cardinal; var ppcCertContext: PCCERT_CONTEXT; pbHashData: PByte;
+  pcbHashData: PCardinal): HRESULT; stdcall;
+
+const
+  /// read-only MsiOpenDatabaseW(), no persistent changes
+  MSIDBOPEN_READONLY     = PWideChar(0);
+  /// read/write MsiOpenDatabaseW() in transaction mode
+  MSIDBOPEN_TRANSACT     = PWideChar(1);
+  /// direct read/write MsiOpenDatabaseW() without transaction
+  MSIDBOPEN_DIRECT       = PWideChar(2);
+  /// MsiOpenDatabaseW() creates new database, transact mode read/write
+  MSIDBOPEN_CREATE       = PWideChar(3);
+  /// MsiOpenDatabaseW() creates new database, direct mode read/write
+  MSIDBOPEN_CREATEDIRECT = PWideChar(4);
+
+  /// flag set for MsiGetFileSignatureInformationW() to return a fatal error
+  // for an invalid hash
+  MSI_INVALID_HASH_IS_FATAL = 1;
+
+/// low-level return a .msi record field value as UTF-8 text
+function MsiGetString(hRecord: TMsiHandle; index: integer; var str: RawUtf8): boolean;
+
+/// execute a query on a given .msi file
+// - return '' and the resultset as one array of record text fields on success
+// - or return a text error message
+// - default 'SELECT * FROM Property' query could be converted directly via
+// TDocVariantData.InitObjectFromDual(Record) into an object document of all
+// file properties
+function MsiExecuteQuery(const MsiFile: TFileName;
+  out Records: TRawUtf8DynArrayDynArray;
+  const Query: SynUnicode = 'SELECT * FROM Property'): string;
+
+/// verify a signed .msi or .exe file digital signature
+// - returns '' on success (valid signature), or an error message
+// - can optionally return the associated certificate decoded information
+// - warning: this complex API function may be slow (up to a few seconds)
+function MsiVerify(const MsiExeFile: TFileName;
+  Certificate: PWinCertInfo = nil; HashIgnore: boolean = false): string;
+
+
 implementation
 
 
@@ -1099,8 +1172,7 @@ function CryptFindOIDInfo;                  external crypt32;
 
 { TSecBuffer }
 
-procedure TSecBuffer.Init(aType: cardinal; aData: pointer;
-  aSize: cardinal);
+procedure TSecBuffer.Init(aType: cardinal; aData: pointer; aSize: cardinal);
 begin
   BufferType := aType;
   pvBuffer := aData;
@@ -1197,13 +1269,13 @@ end;
 
 { ESynSspi }
 
-constructor ESynSspi.CreateLastOSError(const aContext: TSecContext);
+class procedure ESynSspi.RaiseLastOSError(const aContext: TSecContext);
 var
   error: integer;
 begin
   error := GetLastError;
-  CreateFmt('SSPI API Error %x [%s] for ConnectionID=%d',
-    [error, string(GetErrorText(error)), aContext.ID]);
+  raise CreateFmt('SSPI API Error %x [%s] for ConnectionID=%d',
+    [error, string(WinErrorText(error, nil)), aContext.ID]);
 end;
 
 
@@ -1261,7 +1333,7 @@ begin
   // Sizes.cbSecurityTrailer is size of the trailer (signature + padding) block
   if QueryContextAttributesW(
        @aSecContext.CtxHandle, SECPKG_ATTR_SIZES, @Sizes) <> 0 then
-    raise ESynSspi.CreateLastOSError(aSecContext);
+    ESynSspi.RaiseLastOSError(aSecContext);
   if (Sizes.cbSecurityTrailer > SizeOf(Token)) or
      (Sizes.cbBlockSize > SizeOf(Padding)) then
     raise ESynSspi.Create('SecEncrypt: invalid ATTR_SIZES');
@@ -1288,7 +1360,7 @@ begin
   {%H-}InDesc.Init(SECBUFFER_VERSION, @InBuf, 3);
   Status := EncryptMessage(@aSecContext.CtxHandle, 0, @InDesc, 0);
   if Status < 0 then
-    raise ESynSspi.CreateLastOSError(aSecContext);
+    ESynSspi.RaiseLastOSError(aSecContext);
   EncLen := InBuf[0].cbBuffer + InBuf[1].cbBuffer + InBuf[2].cbBuffer;
   SetLength(result, EncLen);
   BufPtr := pointer(result);
@@ -1314,7 +1386,7 @@ begin
   if EncLen < SizeOf(cardinal) then
   begin
     SetLastError(ERROR_INVALID_PARAMETER);
-    raise ESynSspi.CreateLastOSError(aSecContext);
+    ESynSspi.RaiseLastOSError(aSecContext);
   end;
   // Hack for compatibility with previous versions.
   // Should be removed in future.
@@ -1332,7 +1404,7 @@ begin
   {%H-}InDesc.Init(SECBUFFER_VERSION, @InBuf, 2);
   Status := DecryptMessage(@aSecContext.CtxHandle, @InDesc, 0, QOP);
   if Status < 0 then
-    raise ESynSspi.CreateLastOSError(aSecContext);
+    ESynSspi.RaiseLastOSError(aSecContext);
   FastSetRawByteString(result, InBuf[1].pvBuffer, InBuf[1].cbBuffer);
 end;
 
@@ -1507,7 +1579,7 @@ begin
   FillcharFast(Cert, SizeOf(Cert), 0);
   nfo := Ctxt^.pCertInfo;
   with nfo^.SerialNumber do
-    ToHumanHexReverse(Cert.Serial, pbData, cbData);
+    ToHumanHex(Cert.Serial, pointer(pbData), cbData, {reverse=}true);
   ku := 0;
   if CertGetIntendedKeyUsage(X509_ASN_ENCODING, nfo, @ku, SizeOf(ku)) then
     for u := low(WIN_CERT_USAGE) to high(WIN_CERT_USAGE) do
@@ -1543,9 +1615,9 @@ begin
       Win32PWideCharToUtf8(tmp.buf, Cert.Name);
   end;
   with nfo^.IssuerUniqueId do
-    ToHumanHex(Cert.IssuerID, pbData, cbData);
+    ToHumanHex(Cert.IssuerID, pointer(pbData), cbData);
   with nfo^.SubjectUniqueId do
-    ToHumanHex(Cert.SubjectID, pbData, cbData);
+    ToHumanHex(Cert.SubjectID, pointer(pbData), cbData);
   Cert.NotBefore := FileTimeToDateTime(nfo^.NotBefore);
   Cert.NotAfter  := FileTimeToDateTime(nfo^.NotAfter);
   Cert.Algorithm := nfo^.SignatureAlgorithm.pszObjId;
@@ -1573,7 +1645,7 @@ begin
     begin
       OID := pszObjId;
       Critical := fCritical;
-      ToHumanHex(Value, Blob.pbData, Blob.cbData);
+      ToHumanHex(Value, pointer(Blob.pbData), Blob.cbData);
       if (OID = '2.5.29.19') and
          (PosEx('01:ff', Value) <> 0) then
         include(Cert.Usage, wkuCA) // X509v3 Basic Constraints: CA:TRUE
@@ -1644,7 +1716,7 @@ begin
     aSecContext.CreatedTick64 := mormot.core.os.GetTickCount64;
     if AcquireCredentialsHandleW(nil, pointer(NegotiateName), SECPKG_CRED_OUTBOUND,
         nil, pAuthData, nil, nil, @aSecContext.CredHandle, nil) <> 0 then
-      raise ESynSspi.CreateLastOSError(aSecContext);
+      ESynSspi.RaiseLastOSError(aSecContext);
     InDesc.cBuffers := 0;
     LInCtxPtr := nil;
   end
@@ -1673,7 +1745,7 @@ begin
      (Status = SEC_I_COMPLETE_AND_CONTINUE) then
     Status := CompleteAuthToken(@aSecContext.CtxHandle, @OutDesc);
   if Status < 0 then
-    raise ESynSspi.CreateLastOSError(aSecContext);
+    ESynSspi.RaiseLastOSError(aSecContext);
   FastSetRawByteString(aOutData, OutBuf.pvBuffer, OutBuf.cbBuffer);
   FreeContextBuffer(OutBuf.pvBuffer);
 end;
@@ -1771,7 +1843,7 @@ begin
       PkgName := pointer(NegotiateName);
     if AcquireCredentialsHandleW(nil, PkgName, SECPKG_CRED_INBOUND,
         nil, nil, nil, nil, @aSecContext.CredHandle, nil) <> 0 then
-      raise ESynSspi.CreateLastOSError(aSecContext);
+      ESynSspi.RaiseLastOSError(aSecContext);
     LInCtxPtr := nil;
   end
   else
@@ -1791,7 +1863,7 @@ begin
      (Status = SEC_I_COMPLETE_AND_CONTINUE) then
     Status := CompleteAuthToken(@aSecContext.CtxHandle, @OutDesc);
   if Status < 0 then
-      raise ESynSspi.CreateLastOSError(aSecContext);
+      ESynSspi.RaiseLastOSError(aSecContext);
   FastSetRawByteString(aOutData, OutBuf.pvBuffer, OutBuf.cbBuffer);
   FreeContextBuffer(OutBuf.pvBuffer);
 end;
@@ -1803,7 +1875,7 @@ var
 begin
   if QueryContextAttributesW(@aSecContext.CtxHandle,
        SECPKG_ATTR_NAMES, @Names) <> 0 then
-    raise ESynSspi.CreateLastOSError(aSecContext);
+    ESynSspi.RaiseLastOSError(aSecContext);
   Win32PWideCharToUtf8(Names.sUserName, aUserName);
   FreeContextBuffer(Names.sUserName);
 end;
@@ -1832,7 +1904,7 @@ var
 begin
   if QueryContextAttributesW(@aSecContext.CtxHandle,
        SECPKG_ATTR_NEGOTIATION_INFO, @NegotiationInfo) <> 0 then
-    raise ESynSspi.CreateLastOSError(aSecContext);
+    ESynSspi.RaiseLastOSError(aSecContext);
   Win32PWideCharToUtf8(NegotiationInfo.PackageInfo^.Name, result);
   FreeContextBuffer(NegotiationInfo.PackageInfo);
 end;
@@ -2091,6 +2163,112 @@ begin
   srv.Done;
   grp.Done;
 end;
+
+
+{ ****************** Windows Application Installation and Servicing (msi) }
+
+const
+  msidll = 'msi.dll';
+
+function MsiOpenProductW;        external msidll;
+function MsiGetProductPropertyW; external msidll;
+function MsiSetInternalUI;       external msidll;
+function MsiEnumProductA;        external msidll;
+function MsiOpenDatabaseW;       external msidll;
+function MsiDatabaseOpenViewW;   external msidll;
+function MsiViewExecute;         external msidll;
+function MsiViewFetch;           external msidll;
+function MsiViewClose;           external msidll;
+function MsiRecordGetFieldCount; external msidll;
+function MsiRecordGetStringW;    external msidll;
+function MsiCloseHandle;         external msidll;
+function MsiGetFileSignatureInformationW; external msidll;
+
+function MsiGetString(hRecord: TMsiHandle; index: integer; var str: RawUtf8): boolean;
+var
+  tmp: TSynTempBuffer;
+  sz, res: cardinal;
+begin
+  result := false;
+  sz := tmp.Init;
+  res := MsiRecordGetStringW(hRecord, index, tmp.buf, sz);
+  if res = ERROR_MORE_DATA then // unlikely > 4KB: requires temp allocation
+    res := MsiRecordGetStringW(hRecord, index, tmp.Init(sz), sz);
+  if res = NO_ERROR then
+  begin
+    Win32PWideCharToUtf8(tmp.buf, sz, str);
+    result := true;
+  end;
+  tmp.Done;
+end;
+
+function MsiExecuteQuery(const MsiFile: TFileName;
+  out Records: TRawUtf8DynArrayDynArray; const Query: SynUnicode): string;
+var
+  h, v, r: TMsiHandle;
+  res: integer;
+  nr, nf: PtrInt;
+begin
+  res := MsiOpenDatabaseW(pointer(SynUnicode(MsiFile)), MSIDBOPEN_READONLY, h);
+  if res = NO_ERROR then
+  try
+    try
+      WinCheck('MsiExecuteQuery: unable to open view',
+        MsiDatabaseOpenViewW(h, pointer(Query), v), EMsiDll);
+      try
+        nr := 0;
+        if MsiViewExecute(v, 0) = NO_ERROR then
+          while MsiViewFetch(v, r) = NO_ERROR do
+          begin
+            res := MsiRecordGetFieldCount(r); // may be 0xFFFFFFFF
+            if res > 0 then
+            begin
+              SetLength(Records, nr + 1);
+              SetLength(Records[nr], res);
+              for nf := 0 to res - 1 do
+                MsiGetString(r, nf + 1, Records[nr][nf]);
+              inc(nr);
+            end;
+            MsiCloseHandle(r);
+          end;
+      finally
+        MsiCloseHandle(v); // MsiViewClose() needed only to call again OpenView
+      end;
+    finally
+      MsiCloseHandle(h);
+    end;
+    result := ''; // success
+  except
+    on E: Exception do
+      result := E.Message;
+  end
+  else
+    result := WinLastError('MsiExecuteQuery: unable to open file', res);
+end;
+
+function MsiVerify(const MsiExeFile: TFileName; Certificate: PWinCertInfo;
+  HashIgnore: boolean): string;
+var
+  cc: PCCERT_CONTEXT;
+  res, flags: integer;
+begin
+  flags := 0;
+  if not HashIgnore then
+    flags := MSI_INVALID_HASH_IS_FATAL;
+  cc := nil;
+  res := MsiGetFileSignatureInformationW(
+    pointer(SynUnicode(MsiExeFile)), flags, cc, nil, nil);
+  if res <> NO_ERROR then
+  begin
+    result := WinLastError('MsiVerify:', res);
+    exit;
+  end;
+  if Certificate <> nil then
+    WinCertCtxtDecode(cc, Certificate^);
+  CertFreeCertificateContext(cc);
+  result := ''; // success
+end;
+
 
 
 initialization

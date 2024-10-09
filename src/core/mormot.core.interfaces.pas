@@ -1025,7 +1025,7 @@ type
   // - any interface published property will also be automatically injected
   // - if you implement a SOA service with this class, TRestServer.Services
   // will be auto-injected via TServiceFactoryServer.CreateInstance()
-  TInjectableObject = class(TInterfacedObjectWithCustomCreate)
+  TInjectableObject = class(TInterfacedPersistent)
   protected
     fResolver: TInterfaceResolver;
     fResolverOwned: boolean;
@@ -2235,11 +2235,11 @@ type
   // - as used e.g. by TInterfaceFactoryClient.CreateFakeInstance
   TInterfacedObjectFake = class(TInterfacedObjectFakeRaw)
   protected
+    fParamsSafe: TLightLock;  // thread-safe fParams - topmost for aarch64 align
     fFakeID: TInterfacedObjectFakeID;
     fOptions: TInterfacedObjectFakeOptions;
     fInvoke: TOnFakeInstanceInvoke;
     fServiceFactory: TObject; // holds a TServiceFactory instance
-    fParamsSafe: TLightLock;  // thread-safe acquisition of fParams
     fParams: TJsonWriter;     // reused if possible between calls
     fNotifyDestroy: TOnFakeInstanceDestroy;
     // the JITed asm stubs will redirect to these JSON-oriented process
@@ -3384,7 +3384,7 @@ begin
   except
     on E: Exception do
     begin
-      C := E.ClassType;
+      C := PClass(E)^;
       if C.InheritsFrom(EInterfaceFactory) or
          (C = EAccessViolation) or
          (C = EInvalidPointer) then
@@ -5144,7 +5144,7 @@ var
   en: PInterfaceResolverListEntry;
   n: PtrInt;
 begin
-  e := PrepareAddAndWriteLock(aInterface, aImplementation.ClassType);
+  e := PrepareAddAndWriteLock(aInterface, PClass(aImplementation)^);
   try
     // here we are protected within a fSafe.WriteLock
     n := length(fEntry);
@@ -5173,9 +5173,8 @@ begin
   fSafe.WriteLock;
   try
     last := length(fEntry) - 1;
+    e := pointer(fEntry);
     for i := 0 to last do
-    begin
-      e := @fEntry[i];
       if e^.TypeInfo = aInterface then
       begin
         if e^.Instance = nil then
@@ -5183,12 +5182,14 @@ begin
             '%.Delete(%) does not match an instance, but a class',
             [self, aInterface^.RawName]);
         e^.Instance := nil; // avoid GPF
-        if last > i then
-          MoveFast(fEntry[i + 1], fEntry[i], (last - i) * SizeOf(fEntry[i]));
-        SetLength(fEntry, last);
+        if last = 0 then
+          fEntry := nil
+        else
+          DynArrayFakeDelete(fEntry, i, last, SizeOf(e^));
         exit;
-      end;
-    end;
+      end
+      else
+        inc(e);
   finally
     fSafe.WriteUnLock;
   end;

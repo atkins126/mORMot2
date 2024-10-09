@@ -2313,7 +2313,7 @@ type
     // (BLOB e.g.)
     // - format is 'VALUES ('VAL1', 'VAL2')' if all columns values are available
     // - is not used by the ORM (do not use prepared statements) - only here
-    // for conveniency
+    // for convenience
     function GetSqlValues: RawUtf8;
     /// return the UTF-8 encoded SQL source to UPDATE the values contained
     // in the current published fields of a TOrm child
@@ -2321,7 +2321,7 @@ type
     // BLOB fields are ignored (use direct access via dedicated methods instead)
     // - format is 'COL1='VAL1', COL2='VAL2''
     // - is not used by the ORM (do not use prepared statements) - only here
-    // for conveniency
+    // for convenience
     function GetSqlSet: RawUtf8;
     /// return the UTF-8 encoded JSON objects for the values of this TOrm
     // - layout and fields should have been set at TOrmWriter construction:
@@ -2603,10 +2603,10 @@ type
     // - is called by FillPrepareMany() to retrieve the JSON of the corresponding
     // request: so you could use this method to retrieve directly the same
     // information, ready to be transmitted (e.g. as RawJson) to a client
-    function EnginePrepareMany(const aClient: IRestOrm;
+    procedure EnginePrepareMany(const aClient: IRestOrm;
       const aFormatSQLJoin: RawUtf8;
       const aParamsSQLJoin, aBoundsSQLJoin: array of const;
-      out ObjectsClass: TOrmClassDynArray; out SQL: RawUtf8): RawUtf8;
+      out ObjectsClass: TOrmClassDynArray; out SQL, Json: RawUtf8);
     /// fill all published properties of an object from a TOrmTable prepared row
     // - FillPrepare() must have been called before
     // - if Dest is nil, this object values are filled
@@ -5639,8 +5639,8 @@ begin
     P := PRttiEnumType(info.ContentTypeInfo)^.NameList;
     for i := 0 to PRttiEnumType(info.ContentTypeInfo)^.MaxValue do
     begin
-      EnumValue := TrimLeftLowerCaseShort(P);
-      GetCaptionFromPCharLen(pointer(EnumValue), s);
+      TrimLeftLowerCaseShort(P, EnumValue);
+      GetCaptionFromPCharLen(pointer(EnumValue), s); // translate
       StringToUtf8(s, EnumValue);
       if ((Lang <> sndxNone) and Soundex.Utf8(pointer(EnumValue))) or
          ((Lang = sndxNone) and FindUtf8(pointer(EnumValue), Search)) then
@@ -5675,7 +5675,7 @@ begin
           oftUnixMSTime: // seconds resolution is enough for value search
             ValTimeLog.FromUnixMSTime(Val64);
         end;
-        ValTimeLog.Text(tmp{%H-}, true, ' ')^ := #0;
+        ValTimeLog.FillText(tmp{%H-}, true, ' ')^ := #0;
         if FindAnsi(tmp, Search) then
           exit;
       end;
@@ -7811,9 +7811,9 @@ end;
   {$warnings off} // avoid paranoid Delphi 2007 warning
 {$endif ISDELPHI20062007}
 
-function TOrm.EnginePrepareMany(const aClient: IRestOrm;
+procedure TOrm.EnginePrepareMany(const aClient: IRestOrm;
   const aFormatSQLJoin: RawUtf8; const aParamsSQLJoin, aBoundsSQLJoin: array of const;
-  out ObjectsClass: TOrmClassDynArray; out SQL: RawUtf8): RawUtf8;
+  out ObjectsClass: TOrmClassDynArray; out SQL, Json: RawUtf8);
 var
   aSqlFields, aSqlFrom, aSqlWhere, aSqlJoin: RawUtf8;
   aField: string[3];
@@ -7919,7 +7919,6 @@ var
   end;
 
 begin
-  result := '';
   FillClose; // so that no further FillOne will work
   if (self = nil) or
      (aClient = nil) then
@@ -8051,8 +8050,8 @@ begin
     SQL := SQL + ' and (' + FormatSql(aSqlWhere, [], aBoundsSQLJoin) + ')';
   end;
   // execute SQL statement and retrieve the matching data
-  result := aClient.ExecuteJson([], SQL);
-  if result <> '' then // prepare Fill mapping on success - see FillPrepareMany()
+  Json := aClient.ExecuteJson([], SQL);
+  if Json <> '' then // prepare Fill mapping on success - see FillPrepareMany()
     for i := 0 to SqlFieldsCount - 1 do
       with SqlFields[i] do
         fFill.AddMap(Instance, prop, i);
@@ -8071,12 +8070,12 @@ var
   T: TOrmTable;
 begin
   result := false;
-  json := EnginePrepareMany(aClient, aFormatSQLJoin, aParamsSQLJoin,
-    aBoundsSQLJoin, ObjectsClass, sql);
+  EnginePrepareMany(aClient, aFormatSQLJoin, aParamsSQLJoin,
+    aBoundsSQLJoin, ObjectsClass, sql, json);
   if json = '' then
     exit;
   T := TOrmTableJson.CreateFromTables(ObjectsClass, sql, json,
-    {ownJSON=}PStrCnt(PAnsiChar(pointer(json)) - _STRCNT)^ = 1);
+    {ownJSON=}(GetRefCount(json) = 1));
   if (T = nil) or
      (T.fData = nil) then
   begin
@@ -8114,7 +8113,7 @@ begin
   Rtti.JsonReader := TMethod(read);
   write := RttiJsonWrite;
   Rtti.JsonWriter := TMethod(write);
-  Rtti.CopyObject := OrmCopyObject;
+  Rtti.CopyObject := @OrmCopyObject;
 end;
 
 function TOrm.IsPropClassInstance(Prop: PRttiCustomProp): boolean;
@@ -8600,7 +8599,7 @@ begin
                 if result = '' then
                    // no custom message -> show a default message
                   result := format(sValidationFailed,
-                    [GetCaptionFromClass(Validate.ClassType)]);
+                    [GetCaptionFromClass(PClass(Validate)^)]);
                 exit;
               end;
             end;
@@ -10356,23 +10355,24 @@ var
   i, j: PtrInt;
 begin
   for i := 0 to fTablesMax do
-    with TableProps[i].Props do
-    begin
-      fSafe.Lock; // may be called from several threads at once
-      try
-        for j := 0 to fModelMax do
-          if fModel[j].Model = self then
-          begin
-            // un-associate this TOrm with this model
-            MoveFast(fModel[j + 1], fModel[j], (fModelMax - j) * SizeOf(fModel[j]));
-            dec(fModelMax);
-            break;
-          end;
-        TableProps[i].Free;
-      finally
-        fSafe.UnLock;
+    if TableProps[i] <> nil then // may be nil if constructor raise an exception
+      with TableProps[i].Props do
+      begin
+        fSafe.Lock; // may be called from several threads at once
+        try
+          for j := 0 to fModelMax do
+            if fModel[j].Model = self then
+            begin
+              // un-associate this TOrm with this model
+              MoveFast(fModel[j + 1], fModel[j], (fModelMax - j) * SizeOf(fModel[j]));
+              dec(fModelMax);
+              break;
+            end;
+          TableProps[i].Free;
+        finally
+          fSafe.UnLock;
+        end;
       end;
-    end;
   ObjArrayClear(fIDGenerator);
   inherited;
 end;

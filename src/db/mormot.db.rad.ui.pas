@@ -348,7 +348,7 @@ begin
         begin
           CurrentAnsiConvert.Utf8BufferToAnsi(data, len, tmp);
           len := length(tmp);
-          maxlen := Field.DataSize - 1; // without trailing #0
+          maxlen := Field.DataSize - 1; // without #0 terminator
           if len > maxlen then
             len := maxlen;
           MoveFast(pointer(tmp)^, dest^, len);
@@ -357,11 +357,12 @@ begin
       end;
     ftWideString:
       begin
-        {$ifdef ISDELPHI2007ANDUP} // here dest = PWideChar[] of DataSize bytes
+        {$ifdef ISDELPHI2007ANDUP}
+        // here dest = PWideChar[] of DataSize bytes
         if len = 0 then
           PWideChar(dest)^ := #0
         else
-          Utf8ToWideChar(dest, data, (Field.DataSize - 2) shr 1, len);
+          Utf8ToWideChar(dest, data, Field.DataSize shr 1, len);
         {$else}
         // here dest is PWideString
         Utf8ToWideString(data, len, WideString(dest^));

@@ -1905,8 +1905,7 @@ type
   POrmPropInfoRttiMany = ^TOrmPropInfoRttiMany;
 
   /// handle a read-only list of fields information for published properties
-  // - high-level cache generated from RTTI, tuned for TOrm RTTI, but may be
-  // used for any TPersistent/TSynPersistent
+  // - high-level cache generated from RTTI, especially tuned for TOrm RTTI
   TOrmPropInfoList = class
   protected
     fList: TOrmPropInfoObjArray;
@@ -2903,22 +2902,22 @@ type
   TOrmPropertiesAbstract = class
   protected
     fTableRtti: TRttiJson;
-    fHasNotSimpleFields: boolean;
-    fDynArrayFieldsHasObjArray: boolean;
-    fHasTypeFields: TOrmFieldTypes;
     fFields: TOrmPropInfoList;
     fSimpleFields: TOrmPropInfoObjArray;
-    fSqlTableName: RawUtf8;
     fCopiableFields: TOrmPropInfoObjArray;
     fDynArrayFields: TOrmPropInfoRttiDynArrayObjArray;
     fBlobCustomFields: TOrmPropInfoCustomDynArray;
     fBlobFields: TOrmPropInfoRttiRawBlobDynArray;
-    fManyFields: TOrmPropInfoRttiManyObjArray;
+    fSqlTableName: RawUtf8;
+    fLastFieldsSafe: TLightLock; // topmost to ensure proper aarch64 alignment
     fSafe: TOSLightLock;
+    fHasNotSimpleFields: boolean;
+    fDynArrayFieldsHasObjArray: boolean;
+    fHasTypeFields: TOrmFieldTypes;
+    fManyFields: TOrmPropInfoRttiManyObjArray;
     fRecordManySourceProp: TOrmPropInfoRttiInstance;
     fRecordManyDestProp: TOrmPropInfoRttiInstance;
     fSqlTableNameUpperWithDot: RawUtf8;
-    fLastFieldsSafe: TLightLock;
     fLastFieldsCsv: RawUtf8;
     fLastFieldsCsvBits: TFieldBits;
     fSqlFillPrepareMany: RawUtf8;
@@ -4302,7 +4301,7 @@ begin
   begin
     Source := Flattened(Source);
     Dest := DestInfo.Flattened(Dest);
-    if DestInfo.ClassType = ClassType then
+    if PClass(DestInfo)^ = PClass(self)^ then
       CopySameClassProp(Source, DestInfo, Dest) // fast overriden method
     else
       GenericCopy(Source, Dest, self, DestInfo);
@@ -5456,16 +5455,12 @@ begin
   // generic case: copy also class content (create instances)
   S := GetInstance(Source);
   D := TOrmPropInfoRttiObject(DestInfo).GetInstance(Dest);
-  case fPropRtti.ValueRtlClass of
-    vcCollection:
-      CopyCollection(TCollection(S), TCollection(D));
-    vcStrings:
-      CopyStrings(TStrings(S), TStrings(D));
-    else
-      begin
-        D.Free; // release previous instance
-        TOrmPropInfoRttiObject(DestInfo).SetInstance(Dest, CopyObject(S));
-      end;
+  if Assigned(fPropRtti.CopyObject) then
+    fPropRtti.CopyObject(D, S) // work directly on instances (e.g. TStrings)
+  else
+  begin
+    D.Free; // release previous instance and assign a copy
+    TOrmPropInfoRttiObject(DestInfo).SetInstance(Dest, CopyObject(S));
   end;
 end;
 
@@ -7683,7 +7678,8 @@ begin
     rkFloat:
       if Info.IsCurrency then
         result := oftCurrency
-      else if Info = TypeInfo(TDateTime) then
+      else if (Info = TypeInfo(TDateTime)) or
+              (Info = TypeInfo(TDate)) then
         result := oftDateTime
       else if Info = TypeInfo(TDateTimeMS) then
         result := oftDateTimeMS
@@ -7955,7 +7951,7 @@ begin
   f := fFieldIndexID;
   if f < 0 then // no ID column available
     exit;
-  n := GetBitsCount(Bits, fRowCount);
+  n := GetBitsCount(Bits, {bits=}fRowCount);
   if n = 0 then
     exit;
   SetLength(IDs, n);
@@ -11514,7 +11510,7 @@ procedure InitializeUnit;
 var
   ptc: TRttiParserComplexType;
 begin
-  OrmHashSeed := Random32; // avoid hash flooding
+  OrmHashSeed := Random32Not0; // avoid hash flooding
   // manual set of OrmFieldTypeComp[] which are not exact TUtf8Compare match
   pointer(@OrmFieldTypeComp[oftAnsiText])   := @AnsiIComp;
   pointer(@OrmFieldTypeComp[oftUtf8Custom]) := @AnsiIComp;

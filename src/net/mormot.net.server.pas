@@ -28,6 +28,7 @@ uses
   classes,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.data,
   mormot.core.threads,
   mormot.core.unicode,
@@ -168,7 +169,7 @@ type
   // $ 1000 URI parametrized rewrites in 117us i.e. 8.1M/s, aver. 117ns
   // $ 1000 URI static execute in 91us i.e. 10.4M/s, aver. 91ns
   // $ 1000 URI parametrized execute in 162us i.e. 5.8M/s, aver. 162ns
-  TUriRouter = class(TSynPersistentRWLightLock)
+  TUriRouter = class(TObjectRWLightLock)
   protected
     fTree: TUriRouterTree;
     fTreeOptions: TRadixTreeOptions;
@@ -772,7 +773,8 @@ function PrivKeyCertPfx: RawByteString;
 // - if OpenSSL is available and UsePreComputed is false, will
 // generate a temporary pair of key files via
 // Generate(CU_TLS_SERVER, '127.0.0.1', nil, 3650) with a random password
-// - if UsePreComputed=true or on pure SChannel, will use the PrivKeyCertPfx pre-computed constant
+// - if UsePreComputed=true or on pure SChannel, will use the PrivKeyCertPfx
+// pre-computed constant
 // - you should eventually call DeleteFile(Utf8ToString(TLS.CertificateFile))
 // and DeleteFile(Utf8ToString(TLS.PrivateKeyFile)) to delete the two temp files
 procedure InitNetTlsContextSelfSignedServer(var TLS: TNetTlsContext;
@@ -996,13 +998,13 @@ type
   /// abstract parent class for both THttpServer and THttpAsyncServer
   THttpServerSocketGeneric = class(THttpServerGeneric)
   protected
+    fSafe: TLightLock; // topmost to ensure proper aarch64 alignment
     fServerKeepAliveTimeOut: cardinal;
     fServerKeepAliveTimeOutSec: cardinal;
     fHeaderRetrieveAbortDelay: cardinal;
     fCompressGz: integer; // >=0 if GZ is activated
     fSockPort: RawUtf8;
     fSock: TCrtSocket;
-    fSafe: TLightLock;
     fExecuteMessage: RawUtf8;
     fNginxSendFileFrom: array of TFileName;
     fAuthorize: THttpServerRequestAuthentication;
@@ -1557,17 +1559,17 @@ type
   end;
 
   /// abstract parent to THttpPeerCache for its cryptographic core
-  THttpPeerCrypt = class(TInterfacedObjectWithCustomCreate)
+  THttpPeerCrypt = class(TInterfacedPersistent)
   protected
+    fAesSafe: TLightLock; // topmost to ensure proper aarch64 alignment
+    fClientSafe: TLightLock;
     fSettings: THttpPeerCacheSettings;
     fSharedMagic, fFrameSeqLow: cardinal;
     fFrameSeq: integer;
     fIP4, fMaskIP4, fBroadcastIP4, fClientIP4: cardinal;
-    fAesSafe: TLightLock;
     fAesEnc, fAesDec: TAesGcmAbstract;
     fLog: TSynLogClass;
     fPort, fIpPort: RawUtf8;
-    fClientSafe: TLightLock;
     fClient: THttpClientSocket;
     fInstable: THttpAcceptBan; // from Settings.RejectInstablePeersMin
     fMac: TMacAddress;
@@ -3611,7 +3613,7 @@ begin
   else
   begin
     keyfile := TemporaryFileName;
-    keypass := CardinalToHexLower(Random32);
+    keypass := CardinalToHexLower(Random32Not0);
     cert := CryptCertOpenSsl[Algo].
               Generate(CU_TLS_SERVER, '127.0.0.1', nil, 3650);
     cert.SaveToFile(certfile, cccCertOnly, '', ccfPem);
@@ -3968,7 +3970,7 @@ begin
   except
     on E: Exception do
       begin
-        // intercept and return Internal Server Error 500
+        // intercept and return Internal Server Error 500 on any fatal exception
         Ctxt.RespStatus := HTTP_SERVERERROR;
         Ctxt.SetErrorMessage('%: %', [E, E.Message]);
         IncStat(grException);
@@ -5271,7 +5273,7 @@ begin
       SendRespToClientFailed(nil); // error downloading from local peer
   except
     on E: Exception do
-      SendRespToClientFailed(E.ClassType);
+      SendRespToClientFailed(PClass(E)^);
   end;
 end;
 
@@ -5282,7 +5284,7 @@ begin
   // setup internal processing status
   if IsNullGuid(fUuid) then
     GetComputerUuid(fUuid);
-  fFrameSeqLow := Random32 shr 1; // 31-bit random start value set at startup
+  fFrameSeqLow := Random31Not0; // 31-bit random start value set at startup
   fFrameSeq := fFrameSeqLow;
   // setup internal cryptography
   if aSharedSecret = '' then
@@ -5889,13 +5891,15 @@ begin
      (fSettings = nil) or
      (Sender = nil) or
      (Params.Hash = '') or
-     not Params.Hasher.InheritsFrom(TStreamRedirectSynHasher) or
      (Url = '') or
      (OutStream = nil) then
     exit;
+  if not Params.Hasher.InheritsFrom(TStreamRedirectSynHasher) then
+    EHttpPeerCache.RaiseUtf8('%.OnDownload: unexpected %', [Params.Hasher]);
   // prepare a request frame
   l := nil;
-  log := fLog.Enter('OnDownload % %', [KBNoSpace(ExpectedFullSize), Url], self);
+  log := fLog.Enter('OnDownload % % % %', [KBNoSpace(ExpectedFullSize),
+    Params.Hasher.GetHashName, Params.Hash, Url], self);
   if Assigned(log) then
     l := log.Instance;
   MessageInit(pcfRequest, 0, req);
@@ -6442,7 +6446,7 @@ begin
     ChildThreadCount := 256; // not worth adding
   SetLength(fClones, ChildThreadCount);
   for i := 0 to ChildThreadCount - 1 do
-    fClones[i] := THttpApiServerClass(Self.ClassType).CreateClone(self);
+    fClones[i] := THttpApiServerClass(PClass(self)^).CreateClone(self);
 end;
 
 function THttpApiServer.GetApiVersion: RawUtf8;

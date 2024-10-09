@@ -732,10 +732,10 @@ type
     // - our TAesC64, TAesCfc, TAesOfc, TAesCtc custom algorithms
     // use non-standard trailing 'c64', 'cfc', 'ofc' and 'ctc' mode names e.g.
     // as 'aes-256-cfc'
-    function AlgoName: TShort16; overload;
+    function AlgoName: TShort15; overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// OpenSSL-like Cipher name encoding of this AES engine
-    procedure AlgoName(out Result: TShort16); overload;
+    procedure AlgoName(out Result: TShort15); overload;
     /// the chaining mode of this AES engine
     property AlgoMode: TAesMode
       read fAlgoMode;
@@ -1472,9 +1472,9 @@ function ToText(algo: TAesMode): PShortString; overload;
 function AesAlgoNameEncode(Mode: TAesMode; KeyBits: integer): RawUtf8; overload;
 
 /// OpenSSL-like Cipher name encoding of mormot.crypt.core AES engines
-// - returned TShort16 is #0 ended so @Result[1] can be transtyped to a PUtf8Char
+// - returned TShort15 is #0 ended so @Result[1] can be transtyped to a PUtf8Char
 procedure AesAlgoNameEncode(Mode: TAesMode; KeyBits: integer;
-  out Result: TShort16); overload;
+  out Result: TShort15); overload;
 
 /// OpenSSL-like Cipher name decoding into mormot.crypt.core AES engines
 // - input AesAlgoName length should be already checked as 11
@@ -1540,25 +1540,14 @@ function CompressShaAes(var Data: RawByteString; Compress: boolean): RawUtf8;
 { ************* AES-256 Cryptographic Pseudorandom Number Generator (CSPRNG) }
 
 type
-  {$M+}
   /// thread-safe class containing a TAes encryption/decryption engine
-  TAesLocked = class
+  TAesLocked = class(TObjectOSLightLock)
   protected
-    fSafe: TOSLightLock; // TAes is enough for cache line padding of this lock
-    fAes: TAes;
+    fAes: TAes; // TAes is enough for cache line padding of this lock
   public
-    /// initialize the instance
-    constructor Create; virtual;
-    /// finalize all used memory and resources
+    /// finalize all used memory and the TAes instance
     destructor Destroy; override;
-    /// enter the associated non-reentrant TOSLightLock
-    procedure Lock;
-      {$ifdef HASINLINE} inline; {$endif}
-    /// leave the associated non-reentrant TOSLightLock
-    procedure UnLock;
-      {$ifdef HASINLINE} inline; {$endif}
   end;
-  {$M-}
 
   /// abstract parent for TAesPrng* classes
   // - you should never use this class, but TAesPrng, TSystemPrng or
@@ -5293,12 +5282,12 @@ begin
   result := true;
 end;
 
-function TAesAbstract.AlgoName: TShort16;
+function TAesAbstract.AlgoName: TShort15;
 begin
   AlgoName(Result);
 end;
 
-procedure TAesAbstract.AlgoName(out Result: TShort16);
+procedure TAesAbstract.AlgoName(out Result: TShort15);
 begin
   if self = nil then
     PCardinal(@Result)^ := 0
@@ -6810,7 +6799,7 @@ begin
         if (HRESULT(GetLastError) <> NTE_BAD_KEYSET) or
            not CryptoApi.AcquireContextA(CryptoApiAesProvider, nil, nil,
              PROV_RSA_AES, CRYPT_NEWKEYSET) then
-          raise ESynCrypto.CreateLastOSError('in AcquireContext', []);
+          ESynCrypto.RaiseLastOSError('in AcquireContext', []);
     end;
   end;
 end;
@@ -6858,11 +6847,11 @@ begin
   end;
   if not CryptoApi.ImportKey(CryptoApiAesProvider, @fKeyHeader,
      SizeOf(fKeyHeader) + fKeySizeBytes, nil, 0, fKeyCryptoApi) then
-    raise ESynCrypto.CreateLastOSError('in CryptImportKey for %', [self]);
+    ESynCrypto.RaiseLastOSError('in CryptImportKey for %', [self]);
   if not CryptoApi.SetKeyParam(fKeyCryptoApi, KP_IV, @fIV, 0) then
-    raise ESynCrypto.CreateLastOSError('in CryptSetKeyParam(KP_IV) for %', [self]);
+    ESynCrypto.RaiseLastOSError('in CryptSetKeyParam(KP_IV) for %', [self]);
   if not CryptoApi.SetKeyParam(fKeyCryptoApi, KP_MODE, @fInternalMode, 0) then
-    raise ESynCrypto.CreateLastOSError('in CryptSetKeyParam(KP_MODE,%) for %',
+    ESynCrypto.RaiseLastOSError('in CryptSetKeyParam(KP_MODE,%) for %',
        [fInternalMode, self]);
   if BufOut <> BufIn then
     MoveFast(BufIn^, BufOut^, Count);
@@ -6870,10 +6859,10 @@ begin
   if DoEncrypt then
   begin
     if not CryptoApi.Encrypt(fKeyCryptoApi, nil, false, 0, BufOut, n, Count) then
-      raise ESynCrypto.CreateLastOSError('in Encrypt() for %', [self]);
+      ESynCrypto.RaiseLastOSError('in Encrypt() for %', [self]);
   end
   else if not CryptoApi.Decrypt(fKeyCryptoApi, nil, false, 0, BufOut, n) then
-    raise ESynCrypto.CreateLastOSError('in Decrypt() for %', [self]);
+    ESynCrypto.RaiseLastOSError('in Decrypt() for %', [self]);
   dec(Count, n);
   if Count > 0 then // remaining bytes will be XORed with the supplied IV
     XorMemory(@PByteArray(BufOut)[n], @PByteArray(BufIn)[n], @fIV, Count);
@@ -7271,7 +7260,7 @@ const
     'ecb'#0'cbc'#0'cfb'#0'ofb'#0'c64'#0'ctr'#0'cfc'#0'ofc'#0'ctc'#0'gcm'#0;
 
 procedure AesAlgoNameEncode(Mode: TAesMode; KeyBits: integer;
-  out Result: TShort16);
+  out Result: TShort15);
 begin
   case KeyBits of
     128,
@@ -7292,7 +7281,7 @@ end;
 
 function AesAlgoNameEncode(Mode: TAesMode; KeyBits: integer): RawUtf8;
 var
-  tmp: TShort16;
+  tmp: TShort15;
 begin
   AesAlgoNameEncode(Mode, KeyBits, tmp);
   FastSetString(result, @tmp[1], ord(tmp[0]));
@@ -7432,26 +7421,10 @@ end;
 
 { TAesLocked }
 
-constructor TAesLocked.Create;
-begin
-  fSafe.Init; // mandatory for TOSLightLock
-end;
-
 destructor TAesLocked.Destroy;
 begin
   inherited Destroy;
   fAes.Done; // fill AES buffer with 0 for safety
-  fSafe.Done;
-end;
-
-procedure TAesLocked.Lock;
-begin
-  fSafe.Lock;
-end;
-
-procedure TAesLocked.UnLock;
-begin
-  fSafe.UnLock;
 end;
 
 
@@ -7566,7 +7539,7 @@ function TAesPrngAbstract.RandomPassword(Len: integer): SpiUtf8;
 const
   CHARS: array[0..127] of AnsiChar =
     'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' +
-    ':bcd.fgh(jklmn)pqrst?vwxyz+BCD%FGH!JKLMN/PQRST@VWX#Z$.:()?%!-+*/@#';
+    ':bcd.fgh(jklmn)pqrst?vwx-z+BCD%FGH!JKLMN/PQRST@VWX#Z$.:()?%!-+*/@#';
 var
   i: integer;
   haspunct: boolean;
@@ -11354,7 +11327,7 @@ begin
           SetOutLen(inLen + SizeOf(TAesBlock))
         else
           SetOutLen((nBlock + 2) shl AesBlockShift);
-        Head.SomeSalt := Random32;
+        Head.SomeSalt := Random32Not0;
         Head.HeaderCheck := Head.Calc(Key, KeySize);
         Crypt.Encrypt(TAesBlock(Head));
         Write(@Head, SizeOf(Head));

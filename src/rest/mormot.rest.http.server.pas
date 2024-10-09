@@ -538,7 +538,6 @@ type
   /// callback expected by TRestHttpRemoteLogServer to notify about a received log
   TRemoteLogReceivedOne = procedure(const Text: RawUtf8) of object;
 
-  {$M+}
   /// limited HTTP server which is will receive remote log notifications
   // - this will create a simple in-memory mORMot server, which will trigger
   // a supplied callback when a remote log is received
@@ -564,7 +563,6 @@ type
     // - expecting PUT with text as body, at http://server/root/RemoteLog
     procedure RemoteLog(Ctxt: TRestServerUriContext);
   end;
-  {$M-}
 
 
 // backward compatibility types redirections
@@ -1023,17 +1021,13 @@ begin
     fSingleRestServer := nil;
 end;
 
-const
-  HTTPS_TEXT: array[boolean] of string[1] = (
-    '', 's');
-
 procedure TRestHttpServer.RootRedirectToUri(const aRedirectedUri: RawUtf8;
   aRegisterUri: boolean; aHttps: boolean);
 begin
   if fRootRedirectToUri[aHttps] = aRedirectedUri then
     exit;
   fLog.Add.Log(sllHttp, 'Redirect http%://localhost:% to http%://localhost:%/%',
-    [HTTPS_TEXT[aHttps], fPublicPort, HTTPS_TEXT[aHttps], fPublicPort,
+    [TLS_TEXT[aHttps], fPublicPort, TLS_TEXT[aHttps], fPublicPort,
      aRedirectedUri], self);
   fRootRedirectToUri[aHttps] := aRedirectedUri;
   if aRedirectedUri <> '' then
@@ -1062,14 +1056,14 @@ begin
     exit;
   https := aSecurity in SEC_TLS;
   fLog.Add.Log(sllHttp, 'http.sys registration of http%://%:%/%',
-    [HTTPS_TEXT[https], aDomainName, fPublicPort, aRoot], self);
+    [TLS_TEXT[https], aDomainName, fPublicPort, aRoot], self);
   // try to register the URL to http.sys
   err := THttpApiServer(fHttpServer).AddUrl(aRoot, fPublicPort, https,
     aDomainName, aRegisterUri);
   if err = NO_ERROR then
     exit;
   FormatUtf8('http.sys URI registration error #% for http%://%:%/%',
-    [err, HTTPS_TEXT[https], aDomainName, fPublicPort, aRoot], result);
+    [err, TLS_TEXT[https], aDomainName, fPublicPort, aRoot], result);
   if err = ERROR_ACCESS_DENIED then
     if aRegisterUri then
       result := result +
