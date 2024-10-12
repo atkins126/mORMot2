@@ -1265,7 +1265,8 @@ type
   public
     /// initialize the dictionary storage, specifying dynamic array keys/values
     // - aKeyTypeInfo should be a dynamic array TypeInfo() RTTI pointer, which
-    // would store the keys within this TSynDictionary instance
+    // would store the keys within this TSynDictionary instance using aHasher
+    // and optional aKeySpecific first field definition
     // - aValueTypeInfo should be a dynamic array TypeInfo() RTTI pointer, which
     // would store the values within this TSynDictionary instance
     // - by default, string keys would be searched following exact case, unless
@@ -1274,7 +1275,8 @@ type
     // DeleteDeprecated periodically to search for deprecated items
     constructor Create(aKeyTypeInfo, aValueTypeInfo: PRttiInfo;
       aKeyCaseInsensitive: boolean = false; aTimeoutSeconds: cardinal = 0;
-      aCompressAlgo: TAlgoCompress = nil; aHasher: THasher = nil); reintroduce; virtual;
+      aCompressAlgo: TAlgoCompress = nil; aHasher: THasher = nil;
+      aKeySpecific: TRttiParserType = ptNone); reintroduce; virtual;
     {$ifdef HASGENERICS}
     /// initialize the dictionary storage, specifying keys/values as generic types
     // - just a convenient wrapper around TSynDictionary.Create()
@@ -1282,7 +1284,7 @@ type
     // generics-based code where TKey/TValue are propagated to all methods
     class function New<TKey, TValue>(aKeyCaseInsensitive: boolean = false;
       aTimeoutSeconds: cardinal = 0; aCompressAlgo: TAlgoCompress = nil;
-      aHasher: THasher = nil): TSynDictionary;
+      aHasher: THasher = nil; aKeySpecific: TRttiParserType = ptNone): TSynDictionary;
         static; {$ifdef FPC} inline; {$endif}
     {$endif HASGENERICS}
     /// finalize the storage
@@ -1948,13 +1950,14 @@ type
     class function RegisterCustomSerializer(Info: PRttiInfo;
       const Reader: TOnRttiJsonRead; const Writer: TOnRttiJsonWrite): TRttiJson;
     /// register some custom functions for JSON serialization of a given type
-    // - more simple than TOnRttiJsonRead and TOnRttiJsonWrite event callbacks
-    class function RegisterCustomSerializers(Info: PRttiInfo;
-      Reader: TRttiJsonLoad; Writer: TRttiJsonSave): TRttiJson; overload;
+    // - TRttiJsonLoad / TRttiJsonSave functions may be more simple than
+    // TOnRttiJsonRead and TOnRttiJsonWrite event callbacks
+    class function RegisterCustomSerializerFunction(Info: PRttiInfo;
+      Reader: TRttiJsonLoad; Writer: TRttiJsonSave): TRttiJson;
     /// register some custom functions for JSON serialization of several types
     // - expects the parameters as PRttiInfo / TRttiJsonLoad / TRttiJsonSave trios
-    class procedure RegisterCustomSerializers(
-      const InfoReaderWriterTrios: array of pointer); overload;
+    class procedure RegisterCustomSerializerFunctions(
+      const InfoReaderWriterTrios: array of pointer);
     /// unregister any custom callback for JSON serialization of a given TypeInfo()
     // - will also work after RegisterFromText() or RegisterCustomEnumValues()
     class function UnRegisterCustomSerializer(Info: PRttiInfo): TRttiJson;
@@ -9510,7 +9513,7 @@ end;
 
 constructor TSynDictionary.Create(aKeyTypeInfo, aValueTypeInfo: PRttiInfo;
   aKeyCaseInsensitive: boolean; aTimeoutSeconds: cardinal;
-  aCompressAlgo: TAlgoCompress; aHasher: THasher);
+  aCompressAlgo: TAlgoCompress; aHasher: THasher; aKeySpecific: TRttiParserType);
 begin
   inherited Create;
   fSafe.Padding[DIC_KEYCOUNT].VType   := varInteger;  // Keys.Count
@@ -9521,8 +9524,8 @@ begin
   fSafe.Padding[DIC_TIMESEC].VType    := varInteger;  // Timeouts Seconds
   fSafe.Padding[DIC_TIMETIX].VType    := varInteger;  // GetTickCount64 shr 10
   fSafe.PaddingUsedCount := DIC_TIMETIX + 1;          // manual registration
-  fKeys.Init(aKeyTypeInfo, fSafe.Padding[DIC_KEY].VAny, nil, nil, aHasher,
-    @fSafe.Padding[DIC_KEYCOUNT].VInteger, aKeyCaseInsensitive);
+  fKeys.InitSpecific(aKeyTypeInfo, fSafe.Padding[DIC_KEY].VAny, aKeySpecific,
+    @fSafe.Padding[DIC_KEYCOUNT].VInteger, aKeyCaseInsensitive, aHasher);
   fValues.Init(aValueTypeInfo, fSafe.Padding[DIC_VALUE].VAny,
     @fSafe.Padding[DIC_VALUECOUNT].VInteger);
   fValues.Compare := DynArraySortOne(fValues.Info.ArrayFirstField, aKeyCaseInsensitive);
@@ -9537,10 +9540,10 @@ end;
 {$ifdef HASGENERICS}
 class function TSynDictionary.New<TKey, TValue>(aKeyCaseInsensitive: boolean;
   aTimeoutSeconds: cardinal; aCompressAlgo: TAlgoCompress;
-  aHasher: THasher): TSynDictionary;
+  aHasher: THasher; aKeySpecific: TRttiParserType): TSynDictionary;
 begin
   result := TSynDictionary.Create(TypeInfo(TArray<TKey>), TypeInfo(TArray<TValue>),
-    aKeyCaseInsensitive, aTimeoutSeconds, aCompressAlgo, aHasher);
+    aKeyCaseInsensitive, aTimeoutSeconds, aCompressAlgo, aHasher, aKeySpecific);
 end;
 {$endif HASGENERICS}
 
@@ -11078,7 +11081,7 @@ begin
     result.SetParserType(result.Parser, result.ParserComplex);
 end;
 
-class function TRttiJson.RegisterCustomSerializers(Info: PRttiInfo;
+class function TRttiJson.RegisterCustomSerializerFunction(Info: PRttiInfo;
   Reader: TRttiJsonLoad; Writer: TRttiJsonSave): TRttiJson;
 begin
   result := Rtti.RegisterType(Info) as TRttiJson;
@@ -11086,7 +11089,7 @@ begin
   result.fJsonSave := @Writer;
 end;
 
-class procedure TRttiJson.RegisterCustomSerializers(
+class procedure TRttiJson.RegisterCustomSerializerFunctions(
   const InfoReaderWriterTrios: array of pointer);
 var
   i, n: PtrUInt;
@@ -11095,7 +11098,7 @@ begin
   if (n <> 0) and
      (n mod 3 = 0) then
     for i := 0 to (n div 3) - 1 do
-      RegisterCustomSerializers(InfoReaderWriterTrios[i * 3],
+      RegisterCustomSerializerFunction(InfoReaderWriterTrios[i * 3],
         InfoReaderWriterTrios[i * 3 + 1], InfoReaderWriterTrios[i * 3 + 2]);
 end;
 

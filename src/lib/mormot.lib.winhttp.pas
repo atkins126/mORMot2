@@ -27,8 +27,8 @@ interface
 uses
   sysutils,
   classes,
-  Windows,
-  WinINet,
+  windows,
+  wininet,
   mormot.core.base,
   mormot.core.os,
   mormot.core.unicode,
@@ -1389,8 +1389,6 @@ const
   WINHTTP_OPTION_DISABLE_FEATURE     = 63;
   WINHTTP_OPTION_CLIENT_CERT_CONTEXT = $0000002F;
   WINHTTP_NO_CLIENT_CERT_CONTEXT     = $00000000;
-
-  ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED = $00002F0C;
 
   SECURITY_FLAG_IGNORE_UNKNOWN_CA          = $00000100;
   SECURITY_FLAG_IGNORE_CERT_DATE_INVALID   = $00002000; // expired X509 Cert.

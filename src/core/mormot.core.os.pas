@@ -202,6 +202,7 @@ const
   HTTP_HTTPVERSIONNONSUPPORTED = 505;
 
   /// a fake response code, generated for client side panic failure/exception
+  // - for it is the number of a man
   HTTP_CLIENTERROR = 666;
   /// a fake response code, used by THttpServerRequest.SetAsyncResponse
   // - for internal THttpAsyncServer asynchronous process
@@ -2232,7 +2233,9 @@ const
 
   // see http://msdn.microsoft.com/en-us/library/windows/desktop/aa383770
   ERROR_WINHTTP_TIMEOUT                 = 12002;
+  ERROR_WINHTTP_OPERATION_CANCELLED     = 12017;
   ERROR_WINHTTP_CANNOT_CONNECT          = 12029;
+  ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED = 12044;
   ERROR_WINHTTP_INVALID_SERVER_RESPONSE = 12152;
   ERROR_MUI_FILE_NOT_FOUND              = 15100;
 
@@ -2886,8 +2889,11 @@ function WinErrorText(Code: cardinal; ModuleName: PChar): RawUtf8;
 
 /// return the best known ERROR_* system error message constant texts
 // - without the 'ERROR_' prefix
-// - as used by WinErrorText()
-function WinErrorConstant(Code: cardinal): PUtf8Char;
+// - as used by WinErrorText() and some low-level Windows API wrappers
+function WinErrorConstant(Code: cardinal): PShortString;
+
+/// minimal GetEnumName() for Delphi + FPC on base enum type with no Min/Max
+function WinGetEnumName(Info: PAnsiChar; Value: integer): PShortString;
 
 /// raise an EOSException from the last system error using WinErrorText()
 // - if Code is kept to its default 0, GetLastError is called
@@ -2928,7 +2934,8 @@ function Unicode_CodePage: integer;
 // - on POSIX, use the ICU library, or fallback to FPC RTL widestringmanager
 // with a temporary variable - you would need to include cwstring unit
 // - in practice, is seldom called, unless our proprietary WIN32CASE collation
-// is used in mormot.db.raw.sqlite3
+// is used in mormot.db.raw.sqlite3, or via Utf8CompareOS() or Utf8CompareIOS()
+// functions from mormot.core.unicode
 // - consider Utf8ILCompReference() from mormot.core.unicode.pas for an
 // operating-system-independent Unicode 10.0 comparison function
 function Unicode_CompareString(
@@ -3151,7 +3158,7 @@ function FileAgeToUnixTimeUtc(const FileName: TFileName;
 /// get the date and time of one file into a Windows File 32-bit TimeStamp
 // - this cross-system function is used e.g. by mormot.core.zip which expects
 // Windows TimeStamps in its headers
-function FileAgeToWindowsTime(const FileName: TFileName): integer;
+function FileAgeToWindowsTime(F: THandle): integer;
 
 /// copy the date of one file to another
 // - FileSetDate(THandle, Age) is not implemented on POSIX: filename is needed
@@ -3429,7 +3436,11 @@ function FileFromString(const Content: RawByteString; const FileName: TFileName;
   FlushOnDisk: boolean = false): boolean;
 
 /// create a File from a memory buffer content
-function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName): boolean;
+function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName;
+  FlushOnDisk: boolean = false): boolean;
+
+/// fill a memory buffer from a file content
+function BufferFromFile(const FileName: TFileName; Buf: pointer; Len: PtrInt): boolean;
 
 /// create or append a string content to a File
 // - can optionally rotate the file to a FileName+'.bak'  over a specific size
@@ -5826,7 +5837,7 @@ const
    'Gateway Timeout',                   // HTTP_GATEWAYTIMEOUT
    'HTTP Version Not Supported',        // HTTP_HTTPVERSIONNONSUPPORTED
    'Network Authentication Required',   // 511
-   'Client side Exception',             // HTTP_CLIENTERROR = 666
+   'Client Side Connection Error',      // HTTP_CLIENTERROR = 666
    'Invalid Request');                  // 513 - should be last as fallback
 
 
@@ -5875,14 +5886,14 @@ const
     HTTP_HTTPVERSIONNONSUPPORTED,
     511,
     HTTP_CLIENTERROR,
-    513);
+    513); // 'Invalid Request' - should be last as fallback
 
 function StatusCodeToText(Code: cardinal): PRawUtf8;
 var
   i: PtrInt;
 begin
   if Code <> 200 then // optimistic approach :)
-    if (Code < 513) and
+    if (Code <= HTTP_CLIENTERROR) and  // 100..666
        (Code >= 100) then
     begin
       i := WordScanIndex(@HTTP_CODE, length(HTTP_CODE), Code); // may use SSE2
@@ -5903,11 +5914,14 @@ end;
 
 function StatusCodeToShort(Code: cardinal): TShort47;
 begin
-  if Code > 599 then
-    Code := 999; // ensure stay in TShort47
   result[0] := #0;
-  AppendShortCardinal(Code, result);
-  AppendShortChar(' ', @result);
+  if Code <> HTTP_CLIENTERROR then // hide the number of the beast
+  begin
+    if Code > 999 then
+      Code := 999; // ensure stay in TShort47 within standard HTTP 3-digits range
+    AppendShortCardinal(Code, result);
+    AppendShortChar(' ', @result);
+  end;
   AppendShortAnsi7String(StatusCodeToText(Code)^, result);
 end;
 
@@ -6361,12 +6375,13 @@ function DateTimeToWindowsFileTime(DateTime: TDateTime): integer;
 var
   yy, mm, dd, h, m, s, ms: word;
 begin
+  result := 0;
+  if DateTime = 0 then
+    exit;
   DecodeDate(DateTime, yy, mm, dd);
   DecodeTime(DateTime, h, m, s, ms);
-  if (yy < 1980) or
-     (yy > 2099) then // hard limit is 2108, but WinAPI up to 2099/12/31
-    result := 0
-  else
+  if (yy >= 1980) and
+     (yy <= 2099) then // hard limit is 2108, but WinAPI up to 2099/12/31
     result := (s shr 1) or (m shl 5) or (h shl 11) or
       cardinal((dd shl 16) or (mm shl 21) or (cardinal(yy - 1980) shl 25));
 end;
@@ -6696,19 +6711,19 @@ var
   chunk, read: PtrInt;
 begin
   result := false;
-  if Size > 0 then
-    repeat
-      chunk := Size;
-      {$ifdef OSWINDOWS}
-      if chunk > 16 shl 20 then
-        chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
-      {$endif OSWINDOWS}
-      read := FileRead(F, Buffer^, chunk);
-      if read <= 0 then
-        exit; // error reading Size bytes
-      inc(PByte(Buffer), read);
-      dec(Size, read);
-    until Size = 0;
+  while Size > 0 do
+  begin
+    chunk := Size;
+    {$ifdef OSWINDOWS}
+    if chunk > 16 shl 20 then
+      chunk := 16 shl 20; // to avoid ERROR_NO_SYSTEM_RESOURCES errors
+    {$endif OSWINDOWS}
+    read := FileRead(F, Buffer^, chunk);
+    if read <= 0 then
+      exit; // error reading Size bytes
+    inc(PByte(Buffer), read);
+    dec(Size, read);
+  end;
   result := true;
 end;
 
@@ -6840,25 +6855,12 @@ end;
 
 function FileFromString(const Content: RawByteString;
   const FileName: TFileName; FlushOnDisk: boolean): boolean;
-var
-  h: THandle;
 begin
-  result := false;
-  h := FileCreate(FileName);
-  if not ValidHandle(h) then
-    exit;
-  if not FileWriteAll(h, pointer(Content), length(Content)) then
-  begin
-    FileClose(h); // abort on write error
-    exit;
-  end;
-  if FlushOnDisk then
-    FlushFileBuffers(h);
-  FileClose(h);
-  result := true;
+  result := FileFromBuffer(pointer(Content), length(Content), FileName, FlushOnDisk);
 end;
 
-function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName): boolean;
+function FileFromBuffer(Buf: pointer; Len: PtrInt; const FileName: TFileName;
+  FlushOnDisk: boolean): boolean;
 var
   h: THandle;
 begin
@@ -6867,6 +6869,21 @@ begin
   if not ValidHandle(h) then
     exit;
   result := FileWriteAll(h, Buf, Len);
+  if result and
+     FlushOnDisk then
+    FlushFileBuffers(h);
+  FileClose(h);
+end;
+
+function BufferFromFile(const FileName: TFileName; Buf: pointer; Len: PtrInt): boolean;
+var
+  h: THandle;
+begin
+  result := false;
+  h := FileOpen(FileName, fmOpenReadShared);
+  if not ValidHandle(h) then
+    exit;
+  result := FileReadAll(h, Buf, Len);
   FileClose(h);
 end;
 
