@@ -645,7 +645,7 @@ type
   // any previous value for the name "AB"
   // - dvoReturnNullForUnknownProperty will be used when retrieving any value
   // from its name (for dvObject kind of instance), or index (for dvArray or
-  // dvObject kind of instance)
+  // dvObject kind of instance), when the value is not found
   // - by default, internal values will be copied by-value from one variant
   // instance to another, to ensure proper safety - but it may be too slow:
   // if you set dvoValueCopiedByReference, the internal
@@ -653,6 +653,8 @@ type
   // to avoid memory allocations, BUT it may break internal process if you change
   // some values in place (since VValue/VName and VCount won't match) - as such,
   // if you set this option, ensure that you use the content as read-only
+  // - by default, any string value will be stored as RawUtf8 varString, with
+  // conversion if needed, unless dvoValueDoNotNormalizeAsRawUtf8 is defined
   // - any registered custom types may have an extended JSON syntax (e.g.
   // TBsonVariant does for MongoDB types), and will be searched during JSON
   // parsing, unless dvoJsonParseDoNotTryCustomVariants is set (slightly faster)
@@ -687,6 +689,7 @@ type
     dvoCheckForDuplicatedNames,
     dvoReturnNullForUnknownProperty,
     dvoValueCopiedByReference,
+    dvoValueDoNotNormalizeAsRawUtf8,
     dvoJsonParseDoNotTryCustomVariants,
     dvoJsonParseDoNotGuessCount,
     dvoJsonObjectParseWithinString,
@@ -5693,14 +5696,14 @@ end;
 
 function _BS_UString(Data: PUnicodeString; Dest: TBufferWriter; Info: PRttiInfo): PtrInt;
 begin
-  Dest.WriteVar(pointer(Data^), length(Data^) * 2);
+  Dest.WriteVar(pointer(Data^), length(Data^) * 2); // length is stored in bytes
   result := SizeOf(pointer);
 end;
 
 function _BL_UString(Data: PUnicodeString; var Source: TFastReader; Info: PRttiInfo): PtrInt;
 begin
   with Source.VarBlob do
-    SetString(Data^, PWideChar(Ptr), Len shr 1); // length in bytes was stored
+    FastSynUnicode(Data^, Ptr, Len shr 1); // length was stored in bytes
   result := SizeOf(pointer);
 end;
 
@@ -6329,7 +6332,7 @@ begin
     vt := VARIANT_SIZE[vt];
     if vt <> 0 then
       if vt = 255 then
-        with Source.VarBlob do // valOleStr
+        with Source.VarBlob do // varOleStr (=8)
           SetString(WideString(Data^.vAny), PWideChar(Ptr), Len shr 1)
       else
         Source.Copy(@Data^.VInt64, vt); // simple types
@@ -6340,7 +6343,7 @@ begin
   {$ifdef HASVARUSTRING}
   else if vt = varUString then
     with Source.VarBlob do
-      SetString(UnicodeString(Data^.vAny), PWideChar(Ptr), Len shr 1)
+      FastSynUnicode(UnicodeString(Data^.vAny), Ptr, Len shr 1)
   {$endif HASVARUSTRING}
   else if Assigned(BinaryVariantLoadAsJson) then
     _BL_VariantComplex(pointer(Data), Source)

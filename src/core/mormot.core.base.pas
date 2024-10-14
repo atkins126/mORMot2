@@ -800,6 +800,10 @@ procedure FastSetString(var s: RawUtf8; len: PtrInt); overload;
 procedure FastSetRawByteString(var s: RawByteString; p: pointer; len: PtrInt);
   {$ifndef HASCODEPAGE} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
+/// equivalence to SetString(s,pwidechar,len) function but from a raw pointer
+procedure FastSynUnicode(var s: SynUnicode; p: pointer; len: PtrInt);
+  {$ifndef HASVARUSTRING} {$ifdef HASINLINE}inline;{$endif} {$endif}
+
 /// equivalence to SetString(s,nil,len) function to allocate a new RawByteString
 // - faster especially under FPC
 procedure FastNewRawByteString(var s: RawByteString; len: PtrInt);
@@ -810,7 +814,7 @@ procedure FastNewRawByteString(var s: RawByteString; len: PtrInt);
 procedure FastSetStringCP(var s; p: pointer; len, codepage: PtrInt);
   {$ifndef HASCODEPAGE} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
-/// assign any constant or already ref-counted AnsiString/RawUtf8
+/// assign any constant or already ref-counted AnsiString/RawUtf8 (or UnicodeString)
 // - by default, called with s = nil, is an equivalence to Finalize(d) or d := ''
 // - is also called by FastSetString/FastSetStringCP to setup its allocated value
 // - faster especially under FPC
@@ -2096,7 +2100,7 @@ procedure FreeAndNilSafe(var aObj);
 /// same as aInterface := nil but ignoring any exception
 procedure InterfaceNilSafe(var aInterface);
 
-/// same as aInterface := nil but ignoring any exception
+/// same as several aInterface := nil but ignoring any exception
 procedure InterfacesNilSafe(const aInterfaces: array of pointer);
 
 /// wrapper to add an item to a T*InterfaceArray dynamic array storage
@@ -4901,6 +4905,35 @@ begin
   else
     FastAssignNewNotVoid(s, r);
 end;
+
+{$ifdef HASVARUSTRING}
+procedure FastSynUnicode(var s: SynUnicode; p: pointer; len: PtrInt);
+var
+  rec: PStrRec; // same header than AnsiString, but with elemSize=2
+begin
+  if pointer(s) <> nil then
+    FastAssignNew(s); // works also for UnicodeString
+  if len <= 0 then
+    exit;
+  len := len * 2; // from WideChar count to bytes
+  GetMem(pointer(s), len + (_STRRECSIZE + 4));
+  rec := pointer(s);
+  rec^.codePage := CP_UTF16;
+  rec^.elemSize := SizeOf(WideChar);
+  rec^.refCnt := 1;
+  rec^.length := len shr 1; // length as WideChar count
+  inc(rec);
+  pointer(s) := rec;
+  PCardinal(PAnsiChar(rec) + len)^ := 0; // ends with two WideChar #0
+  if p <> nil then
+    MoveFast(p^, pointer(s)^, len);
+end;
+{$else}
+procedure FastSynUnicode(var s: SynUnicode; p: pointer; len: PtrInt);
+begin
+  SetString(s, PWideChar(p), len); // use RTL for slow WideString
+end;
+{$endif HASVARUSTRING}
 
 procedure GetMemAligned(var holder: RawByteString; fillwith: pointer;
   len: PtrUInt; out aligned: pointer; alignment: PtrUInt);
@@ -12309,8 +12342,7 @@ begin
 end;
 
 function SortDynArrayUnicodeString(const A, B): integer;
-begin
-  // works for both tkWString and tkUString
+begin // works for both tkWString and tkUString
   result := StrCompW(PWideChar(A), PWideChar(B));
 end;
 
