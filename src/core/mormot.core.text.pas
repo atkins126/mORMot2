@@ -2067,9 +2067,6 @@ function StatusCodeToErrorMsg(Code: integer): RawUtf8;
 { **************** Hexadecimal Text And Binary Conversion }
 
 type
-  /// type of a lookup table used for fast XML/HTML conversion
-  TAnsiCharToByte = array[AnsiChar] of byte;
-  PAnsiCharToByte = ^TAnsiCharToByte;
   /// type of a lookup table used for fast two-digit chars conversion
   TAnsiCharToWord = array[AnsiChar] of word;
   PAnsiCharToWord = ^TAnsiCharToWord;
@@ -2364,6 +2361,9 @@ function GuidToRawUtf8(const guid: TGuid): RawUtf8;
 // - if you need the embracing { }, use GuidToRawUtf8() function instead
 function ToUtf8(const guid: TGuid): RawUtf8; overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// convert a TGuid into 36 chars encoded text as RawUtf8, unless it is GUID_NULL
+function NotNullGuidToUtf8(const guid: TGuid): RawUtf8;
 
 /// convert a TGuid into 36 chars encoded text as RawUtf8
 // - will return e.g. '3F2504E0-4F89-11D3-9A0C-0305E82C3301' (without the {})
@@ -10291,6 +10291,13 @@ end;
 function ToUtf8(const guid: TGuid): RawUtf8;
 begin
   ToUtf8(guid, result);
+end;
+
+function NotNullGuidToUtf8(const guid: TGuid): RawUtf8;
+begin
+  result := '';
+  if not IsNullGuid(guid) then
+    ToUtf8(guid, result);
 end;
 
 procedure ToUtf8(const guid: TGuid; var text: RawUtf8; tab: PWordArray);
