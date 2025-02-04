@@ -401,12 +401,13 @@
   {$ifend}
 
   // note: you may remove all unexpexted hints by setting in your project options
-  // -vm11047,6058,5092,5091,5060,5058,5057,5028,5024,5023,4081,4079,4055,3187,3124,3123
+  // -vm11047,3187,3123,3124,4055,4079,4081,5023,5024,5027,5028,5036,5037,5058,5059,5060,5089,5090,5091,5092,5093,5094,6018,6058
 
   // disable some no-brainer warnings - let FPC align with Delphi in that matter
   {$WARN 5027 off} // local assigned variable never used
   {$WARN 5036 off} // uninitialized local variable 1
   {$WARN 5037 off} // uninitialized local variable 2
+  {$WARN 5059 off} // function result variable does not seem to be initialized
   {$WARN 5089 off} // uninitialized managed variables 1
   {$WARN 5090 off} // uninitialized managed variables 2
   {$WARN 5091 off} // uninitialized managed variables 3
@@ -658,6 +659,7 @@
 
 {$ifdef CPUINTEL}
   {$ifdef OSWINDOWS}
+    {$define OSWINTEL}
     {$ifdef CPUX64}
       {$define WIN64ABI}    // for asm on x86_64
       {$define OSWINDOWS64} // Win64
@@ -675,6 +677,12 @@
   {$endif OSPOSIX}
   {$define CPUINTELARM}
 {$else}
+  {$ifdef OSWINDOWS}
+    {$ifdef CPUAARCH64}
+      {$define OSWINARM}    // Windows for ARM 64
+    {$endif CPUAARCH64}
+    {$define THREADID32}    // TThreadID = 32-bit DWORD on win64-aarch64
+  {$endif OSWINDOWS}
   {$undef HASAESNI}         // AES-NI is an Intel-specific feature
   {$ifdef CPUARM3264}
     {$define CPUINTELARM}
@@ -719,15 +727,22 @@
     {$endif CPUAARCH64}
   {$endif OSLINUX}
   {$ifdef OSWINDOWS}
-    {$undef LIZARD_EXTERNALONLY}    // static liblizard.a
-    {$ifdef CPUX86}
-      {$define LIBDEFLATESTATIC}
-      {$define LIBQUICKJSSTATIC}
-    {$endif CPUX86}
-    {$ifdef CPUX64}
-      {.$define LIBDEFLATESTATIC}   // Win64 + FPC 3.2 = internal error 200603061
-      {$define LIBQUICKJSSTATIC}
-    {$endif CPUX64}
+    {$ifdef CPUINTEL}
+      {$undef LIZARD_EXTERNALONLY}    // static liblizard.a
+      {$ifdef CPUX86}
+        {$define LIBDEFLATESTATIC}
+        {$define LIBQUICKJSSTATIC}
+      {$endif CPUX86}
+      {$ifdef CPUX64}
+        {.$define LIBDEFLATESTATIC}   // Win64 + FPC 3.2 = internal error 200603061
+        {$define LIBQUICKJSSTATIC}
+      {$endif CPUX64}
+    {$else}
+      {$define NOSQLITE3STATIC} // no static SQLite3 yet on aarch64-win64
+      {$undef LIBDEFLATESTATIC}
+      {$define NOLIBDEFLATESTATIC}
+      {$undef LIBQUICKJSSTATIC}
+    {$endif CPUINTEL}
   {$endif OSWINDOWS}
   {$ifdef CPUARM3264}
     {$ifdef OSDARWIN}               // unsupported arch (e.g. Aarch64-Darwin)

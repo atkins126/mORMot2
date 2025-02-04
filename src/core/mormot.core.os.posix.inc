@@ -141,17 +141,6 @@ begin
   FastSetString(result, S, P - S);
 end;
 
-procedure RawUtf8Append(var s: RawUtf8; p: PUtf8Char; l: PtrInt);
-var
-  n: PtrInt;
-begin
-  if l = 0 then
-    exit;
-  n := length(s);
-  SetLength(s, n + l);
-  MoveFast(p^, PByteArray(s)[n], l);
-end;
-
 function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
 begin
   result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
@@ -190,7 +179,15 @@ end;
 { TIcuLibrary }
 
 procedure TIcuLibrary.Done;
+var
+  i: PtrInt;
 begin
+  if fLoaded then
+  begin
+    for i := 0 to fSharedCount - 1 do
+      ucnv_close(fSharedCnv[i]);
+    fSharedCount := 0;
+  end;
   if icui18n <> nil then
     dlclose(icui18n);
   if icu <> nil then
@@ -205,7 +202,7 @@ end;
 
 function TIcuLibrary.IsAvailable: boolean;
 begin
-  if not Loaded then
+  if not fLoaded then
     DoLoad;
   result := Assigned(ucnv_open);
 end;
@@ -228,9 +225,10 @@ end;
 
 procedure TIcuLibrary.DoLoad(const LibName: TFileName; Version: string);
 const
-  NAMES: array[0..12] of string = (
+  NAMES: array[0..13] of string = (
     'ucnv_open',
     'ucnv_close',
+    'ucnv_reset',
     'ucnv_setSubstChars',
     'ucnv_setFallback',
     'ucnv_fromUChars',
@@ -267,9 +265,10 @@ var
 begin
   GlobalLock;
   try
-    if Loaded then
+    if fLoaded then
       exit;
-    Loaded := true;
+    fLoaded := true;
+    fSharedCount := 0;
     if LibName <> '' then
     begin
       icu := dlopen(pointer(LibName), RTLD_LAZY);
@@ -377,14 +376,14 @@ end;
 function TIcuLibrary.ForceLoad(const LibName: TFileName; const Version: string): boolean;
 begin
   Done;
-  Loaded := false;
+  fLoaded := false;
   DoLoad(LibName, Version);
   result := Assigned(ucnv_open);
 end;
 
 function TIcuLibrary.ucnv(codepage: cardinal): pointer;
 var
-  s: ShortString;
+  cp: ShortString;
   err: SizeInt;
   {$ifdef CPUINTEL}
   mask: cardinal;
@@ -392,17 +391,13 @@ var
 begin
   if not IsAvailable then
     exit(nil);
-  str(codepage, s);
-  MoveFast(s[1], s[3], ord(s[0]));
-  PWord(@s[1])^ := ord('c') + ord('p') shl 8;
-  inc(s[0], 3);
-  s[ord(s[0])] := #0;
+  Unicode_CodePageName(codepage, cp);
   {$ifdef CPUINTEL}
   mask := GetMXCSR;
   SetMXCSR(mask or $0080 {MM_MaskInvalidOp} or $1000 {MM_MaskPrecision});
   {$endif CPUINTEL}
   err := 0;
-  result := ucnv_open(@s[1], err);
+  result := ucnv_open(@cp[1], err);
   if result <> nil then
   begin
     err := 0;
@@ -414,6 +409,56 @@ begin
   {$endif CPUINTEL}
 end;
 
+function TIcuLibrary.SharedUcnv(codepage: cardinal; out ndx: PtrInt): pointer;
+var
+  i, n: PtrInt;
+begin
+  result := nil;
+  if (codepage < CP_MIN) or
+     (codepage >= CP_RAWBLOB) or
+     not IsAvailable then
+    exit;
+  // quickly check if this codepage is part of cached converters
+  n := fSharedCount;
+  i := fSharedLast;
+  if (PtrUInt(i) >= PtrUInt(n)) or
+     (fSharedCP[i] <> codepage) then
+    i := WordScanIndex(@fSharedCP, n, codepage); // SSE2 brute force search
+  if i >= 0 then
+  begin
+    ndx := i; // for eventual SharedUcnvUnLock()
+    fSharedLast := i; // optimistic usage
+    if PLightLock(@fSharedLock[i])^.TryLock then
+      result := fSharedCnv[i]; // this thread acquired this converter
+    exit;
+  end;
+  // first time we see this codepage: try to add in our internal cache
+  PLightLock(@fSharedMainLock)^.Lock; // main write lock
+  try
+    n := fSharedCount;
+    if (n <> length(fSharedCP)) and // cache up to 32 instances
+       (WordScanIndex(@fSharedCP, n, codepage) < 0) then // paranoid
+    begin
+      result := ucnv(codepage);
+      if result = nil then
+        exit;
+      ndx := n;
+      fSharedLast := n;
+      fSharedCP[n] := CodePage;
+      fSharedLock[n] := 1; // = Init + Lock
+      fSharedCnv[n] := result;
+      inc(fSharedCount); // should be set last
+    end;
+  finally
+    PLightLock(@fSharedMainLock)^.UnLock;
+  end;
+end;
+
+procedure TIcuLibrary.SharedUcnvUnLock(ndx: PtrInt);
+begin
+  ucnv_reset(fSharedCnv[ndx]); // clean-up from this thread (before unlock)
+  PLightLock(@fSharedLock[ndx])^.UnLock;
+end;
 
 const
   // for CompareStringW()
@@ -471,6 +516,7 @@ function Unicode_AnsiToWide(A: PAnsiChar; W: PWideChar;
 var
   cnv: pointer;
   err: SizeInt;
+  ndx: PtrInt;
 begin
   if CodePage = CP_UTF8 then
   begin
@@ -478,15 +524,30 @@ begin
     if result > 0 then
       dec(result); // Utf8ToUnicode() returned length includes #0 terminator
     exit;
-  end;
-  cnv := icu.ucnv(CodePage);
-  if cnv = nil then
-    exit(AnsiToWideRTL(CodePage, A, W, LA, LW)); // fallback to cwstring/iconv
+  end
+  else if (CodePage < CP_MIN) or
+          (LA <= 0) then
+    exit(0); // clearly invalid/unsupported CodePage or void input
   err := 0;
-  result := icu.ucnv_toUChars(cnv, W, LW, A, LA, err);
+  cnv := icu.SharedUcnv(CodePage, ndx); // try from our thread-safe cache
+  if cnv <> nil then
+  begin
+    result := icu.ucnv_toUChars(cnv, W, LW, A, LA, err);
+    icu.SharedUcnvUnLock(ndx);
+  end
+  else
+  begin
+    cnv := icu.ucnv(CodePage); // use a transient converter if locked
+    if cnv <> nil then
+    begin
+      result := icu.ucnv_toUChars(cnv, W, LW, A, LA, err);
+      icu.ucnv_close(cnv);
+    end
+    else // fallback to cwstring/iconv
+      result := AnsiToWideRTL(CodePage, A, W, LA, LW);
+  end;
   if result < 0 then
     result := 0;
-  icu.ucnv_close(cnv);
 end;
 
 function WideToAnsiRTL(CodePage: cardinal; W: PWideChar; A: PAnsiChar;
@@ -507,6 +568,7 @@ function Unicode_WideToAnsi(W: PWideChar; A: PAnsiChar;
 var
   cnv: pointer;
   err: SizeInt;
+  ndx: PtrInt;
 begin
   if CodePage = CP_UTF8 then
   begin
@@ -514,15 +576,39 @@ begin
     if result > 0 then
       dec(result); // UnicodeToUtf8() result includes the #0 terminator
     exit;
-  end;
-  cnv := icu.ucnv(CodePage);
-  if cnv = nil then
-    exit(WideToAnsiRTL(CodePage, W, A, LW, LA)); // fallback to cwstring/iconv
+  end
+  else if (CodePage < CP_MIN) or
+          (LW <= 0) then
+    exit(0); // clearly invalid/unsupported CodePage or void input
   err := 0;
-  result := icu.ucnv_fromUChars(cnv, A, LA, W, LW, err); // more accurate ICU
-  if result < 0 then
-    result := 0;
-  icu.ucnv_close(cnv);
+  cnv := icu.SharedUcnv(CodePage, ndx); // try from our thread-safe cache
+  if cnv <> nil then
+  begin
+    result := icu.ucnv_fromUChars(cnv, A, LA, W, LW, err);
+    icu.SharedUcnvUnLock(ndx);
+  end
+  else
+  begin
+    cnv := icu.ucnv(CodePage); // use a transient converter if locked
+    if cnv <> nil then
+    begin
+      result := icu.ucnv_fromUChars(cnv, A, LA, W, LW, err);
+      icu.ucnv_close(cnv);
+    end
+    else // fallback to cwstring/iconv (less complete than ICU)
+      result := WideToAnsiRTL(CodePage, W, A, LW, LA);
+  end;
+  if result <= 0 then
+    result := 0
+  else
+    case CodePage of
+      CP_HZ: // HZ-GB2312
+        if PWord(A)^ = ord('~') + ord('}') shl 8 then // to mimic Windows API
+        begin
+          dec(result, 2); // trim RFC 1842 escape from HZ mode to ASCII mode
+          MoveFast(A[2], A[0], result);
+        end;
+    end;
 end;
 
 function Unicode_InPlaceUpper(W: PWideChar; WLen: integer): integer;
@@ -1123,7 +1209,7 @@ end;
 {$ifndef NOEXCEPTIONINTERCEPT}
 
 function TSynLogExceptionContext.AdditionalInfo(
-  out ExceptionNames: TPUtf8CharDynArray): cardinal;
+  out ExceptionNames: TPShortStringDynArray): cardinal;
 begin
   result := 0; // Windows/CLR specific by now
 end;
@@ -1136,10 +1222,6 @@ var
 // RaiseProc redirection is implemented in main mormot.core.os.pas
 
 {$endif NOEXCEPTIONINTERCEPT}
-
-const
-  faInvalidFile   = faDirectory;
-  faDirectoryMask = faDirectory;
 
 function FileDateToDateTime(const FileDate: TFileAge): TDateTime;
 begin
@@ -1533,6 +1615,7 @@ begin
     fpmunmap(fBuf, fBufSize);
 end;
 
+
 procedure SleepHiRes(ms: cardinal);
 var
   timeout: TTimespec;
@@ -1847,7 +1930,6 @@ end;
 
 procedure AllocConsole;
 begin
-  StdOut := StdOutputHandle;
 end;
 
 function HasConsole: boolean;
@@ -1856,7 +1938,8 @@ begin
 end;
 
 var
-  TextAttr: integer = 255; // always change the color at startup
+  ConsoleCriticalSection: TOSLock; // too early to use TOSLightLock
+  TextAttr: integer = -1; // always change the color at startup
 
 procedure TextColorCmd(Color: TConsoleColor; var s: TShort8);
 const
@@ -1878,7 +1961,7 @@ var
   c: TShort8;
 begin
   TextColorCmd(Color, c);
-  RawUtf8Append(s, @c[1], ord(c[0]));
+  AppendShortToUtf8(c, s);
 end;
 
 procedure TextColor(Color: TConsoleColor);
@@ -1886,8 +1969,11 @@ var
   c: TShort8;
 begin
   TextColorCmd(Color, c);
-  if c[0] <> #0 then
-    fpwrite(StdOut, @c[1], ord(c[0])); // single syscall
+  if c[0] = #0 then
+    exit;
+  ConsoleCriticalSection.Lock;
+  fpwrite(StdOut, @c[1], ord(c[0])); // single syscall
+  ConsoleCriticalSection.UnLock;
 end;
 
 procedure TextBackground(Color: TConsoleColor);
@@ -1895,17 +1981,13 @@ begin
   // not implemented yet - but not much needed either
 end;
 
-var
-  ConsoleCriticalSection: TOSLock;
-const
-  PosixLineFeed: AnsiChar = #10;
-
 procedure ConsoleWrite(const Text: RawUtf8; Color: TConsoleColor;
   NoLineFeed, NoColor: boolean);
 var
   s: RawUtf8;
 begin
   // pre-compute the whole chars to be sent to the console
+  NoColor := NoColor or (not StdOutIsTTY);
   if NoColor and
      NoLineFeed then
     s := Text // no memory allocation needed
@@ -1913,9 +1995,9 @@ begin
   begin
     if not NoColor then
       TextColorAppend(Color, s);
-    RawUtf8Append(s, pointer(Text), length(Text));
+    AppendBufferToUtf8(pointer(Text), length(Text), s);
     if not NoLineFeed then
-      RawUtf8Append(s, @PosixLineFeed, 1);
+      AppendShortToUtf8(#10, s);
     if not NoColor then
       TextColorAppend(ccLightGray, s);
   end;
@@ -2327,7 +2409,7 @@ var
     fn: RawUtf8;
     withsub: boolean;
   begin
-    dir := FpOpendir(root + subpath); // much faster alternative to FindFirst()
+    dir := FpOpendir(root + subpath); // faster alternative to FindFirst()
     if dir = nil then
       exit;
     sublen := length(subpath);
@@ -3093,15 +3175,13 @@ begin
     end;
 end;
 
-const
-  STUB_SIZE = 65536; // 16*4 KB (4 KB = memory granularity)
-  // on most platforms, Compute_FAKEVMT is run once with all JITted stubs
-  // on i386, it needs ArgsSizeInStack adjustement, but only 24 bytes per method
-
+// on most platforms, Compute_FAKEVMT is run once with all JITted stubs
+// on i386, it needs ArgsSizeInStack adjustement, but only 24 bytes per method
 {$ifdef CPUARM}
 
 var
   StubCallAllocMemLastStart: PtrUInt; // avoid unneeded fpmmap() calls
+  StubCallFakeStubAddr: pointer;      // = ArmFakeStubAddr parameter
 
 function StubCallAllocMem(const Size, flProtect: DWORD): pointer;
 const
@@ -3111,7 +3191,7 @@ const
 var
   start, stop, stub, dist: PtrUInt;
 begin
-  stub := PtrUInt(ArmFakeStubAddr); // = @TInterfacedObjectFake.ArmFakeStub
+  stub := PtrUInt(StubCallFakeStubAddr); // = @TInterfacedObjectFake.ArmFakeStub
   if StubCallAllocMemLastStart <> 0 then
     start := StubCallAllocMemLastStart
   else
@@ -3157,6 +3237,49 @@ begin
 end;
 
 {$endif CPUARM}
+
+var
+  StubMemoryExecXorWrite: boolean = false; // W and X are exclusive on some OS
+
+function StubMemoryAlloc: pointer;
+begin
+  result := MAP_FAILED;
+  if not StubMemoryExecXorWrite then
+    result := StubCallAllocMem(STUB_SIZE, PROT_READ or PROT_WRITE or PROT_EXEC);
+  if result = MAP_FAILED then
+  begin
+    // i.e. on OpenBSD or OSX aarch64, we can not have W and X protection
+    result := StubCallAllocMem(STUB_SIZE, PROT_READ OR PROT_WRITE);
+    if result <> MAP_FAILED then
+      StubMemoryExecXorWrite := true;
+  end;
+  if result = MAP_FAILED then
+    result := nil;
+end;
+
+procedure StubMemoryFree(stub: pointer);
+begin
+  fpmunmap(stub, STUB_SIZE);
+end;
+
+procedure ReserveExecutableMemoryPageAccess(Reserved: pointer; Exec: boolean);
+var
+  aligned: pointer;
+  flags: cardinal;
+begin
+  if not StubMemoryExecXorWrite then
+    // nothing to be done on this platform
+    exit;
+  // toggle execution permission of memory to be able to write into memory
+  aligned := pointer(
+    (PtrUInt(Reserved) div SystemInfo.dwPageSize) * SystemInfo.dwPageSize);
+  if Exec then
+    flags := PROT_READ OR PROT_EXEC
+  else
+    flags := PROT_READ or PROT_WRITE;
+  if SynMProtect(aligned, SystemInfo.dwPageSize shl 1, flags) < 0 then
+     raise EOSException.Create('ReserveExecutableMemoryPageAccess: mprotect fail');
+end;
 
 
 { ****************** Unix Daemon and Windows Service Support }
@@ -3950,8 +4073,9 @@ var
   {$endif OSBSDDARWIN}
 begin
   // retrieve Kernel and Hardware information
+  StdOut := StdOutputHandle;
   StdOutIsTTY := not IsDebuggerPresent and
-                 (IsATTY(StdOutputHandle) = 1) and
+                 (IsATTY(StdOut) = 1) and
                  IdemPChars(RawUtf8(GetEnvironmentVariable('TERM')), [
                    'XTERM', 'SCREEN', 'TMUX', 'RXVT', 'LINUX', 'CYGWIN']);
   modname := nil;
@@ -4260,12 +4384,12 @@ begin
          (crc32carm64(0, @SystemInfo, SizeOf(SystemInfo)) =
            crc32cfast(0, @SystemInfo, SizeOf(SystemInfo))) then
       begin
-        crc32c := @crc32carm64;
-        DefaultHasher := @crc32carm64;
+        crc32c          := @crc32carm64;
+        DefaultHasher   := @crc32carm64;
         InterningHasher := @crc32carm64;
-        crc32cby4 := @crc32cby4arm64;
-        crcblock := @crc32blockarm64;
-        crcblocks := @crc32blocksarm64;
+        crc32cby4       := @crc32cby4arm64;
+        crcblock        := @crc32blockarm64;
+        crcblocks       := @crc32blocksarm64;
       end;
       if crc32arm64(0, @SystemInfo, SizeOf(SystemInfo)) =
           crc32fast(0, @SystemInfo, SizeOf(SystemInfo)) then

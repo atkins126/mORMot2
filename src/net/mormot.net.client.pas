@@ -131,13 +131,17 @@ type
 
 type
   /// the supported authentication schemes which may be used by HTTP clients
-  // - supported only by TWinHttp class yet, and TCurlHttp
+  // - not supported by all classes (e.g. TWinINet won't support all schemes)
   THttpRequestAuthentication = (
     wraNone,
     wraBasic,
     wraDigest,
     wraNegotiate,
+    wraNegotiateChannelBinding,
     wraBearer);
+
+  /// pointer to some extended options for HTTP clients
+  PHttpRequestExtendedOptions = ^THttpRequestExtendedOptions;
 
   /// a record to set some extended options for HTTP clients
   // - allow easy propagation e.g. from a TRestHttpClient* wrapper class to
@@ -160,7 +164,7 @@ type
     // - otherwise, will use this value as explicit proxy server name
     // - used only during initial connection
     Proxy: RawUtf8;
-    /// the timeout to be used for the whole connection, as set in Create()
+    /// the timeout to be used for the whole connection, as supplied to Create()
     CreateTimeoutMS: integer;
     /// allow HTTP/HTTPS authentication to take place at server request
     Auth: record
@@ -188,9 +192,9 @@ type
     procedure AuthorizeSspiUser(const UserName: RawUtf8; const Password: SpiUtf8);
     /// setup web authentication using a given Bearer in the request headers
     procedure AuthorizeBearer(const Value: SpiUtf8);
+    /// compare the Auth fields, depending on their scheme
+    function SameAuth(Another: PHttpRequestExtendedOptions): boolean;
   end;
-  /// pointer to some extended options for HTTP clients
-  PHttpRequestExtendedOptions = ^THttpRequestExtendedOptions;
 
 function ToText(wra: THttpRequestAuthentication): PShortString; overload;
 
@@ -302,8 +306,9 @@ type
     /// optional callback if TFileStreamEx.Create(FileName, Mode) is not good enough
     OnStreamCreate: TOnStreamCreate;
     /// optional callback event raised during WGet() process
+    // - if OutSteps: TWGetSteps field is not enough
     // - alternative for business logic tracking: the OnProgress callback is
-    // more about human interaction in GUI or console
+    // more about periodic human interaction in GUI or console
     OnStep: TOnWGetStep;
     /// optional callback to allow an alternate download method
     // - can be used for a local peer-to-peer download cache via THttpPeerCache
@@ -348,9 +353,10 @@ type
     // each packet, whereas this property is about the global time elapsed
     // during the whole download process
     TimeOutSec: integer;
-    /// when WGet() has been called, contains all the steps involed during the
-    // process
+    /// when WGet() has been called, contains all the steps involved
     OutSteps: TWGetSteps;
+    /// to optionally log all SetStep() content during process
+    LogSteps: TSynLogProc;
     /// initialize the default parameters - reset all fields to 0 / nil / ''
     procedure Clear;
     /// method used internally during process to notify Steps and OnStep()
@@ -404,6 +410,9 @@ type
     /// notify the alternate download implementation that OnDownloading() failed
     // - e.g. THttpPeerCache will abort publishing this partial file
     procedure OnDownloadingFailed(OnDownloadingID: THttpPartialID);
+    /// check if the network interface defined in Settings did actually change
+    // - you may want to recreate the alternate downloading instance
+    function NetworkInterfaceChanged: boolean;
   end;
 
   /// internal low-level execution context for THttpClientSocket.Request
@@ -496,6 +505,11 @@ type
     // - as used e.g. by TSimpleHttpClient
     constructor OpenOptions(const aUri: TUri;
       var aOptions: THttpRequestExtendedOptions);
+    /// compare TUri and its options with the actual connection
+    // - returns true if no new instance - i.e. Free + OpenOptions() - is needed
+    // - only supports HTTP/HTTPS, not any custom RegisterNetClientProtocol()
+    function SameOpenOptions(const aUri: TUri;
+      const aOptions: THttpRequestExtendedOptions): boolean; virtual;
     /// low-level HTTP/1.1 request
     // - called by all Get/Head/Post/Put/Delete REST methods
     // - after an Open(server,port), return 200,202,204 if OK, or an http
@@ -610,6 +624,10 @@ type
     /// the effective 'Location:' URI after 3xx redirection(s) of Request()
     property Redirected: RawUtf8
       read fRedirected;
+    /// optional Authentication Scheme
+    // - may still be wraNone if OnAuthorize has been manually set
+    property AuthScheme: THttpRequestAuthentication
+      read fExtendedOptions.Auth.Scheme;
     /// optional Authorization: Bearer header value
     property AuthBearer: SpiUtf8
       read fExtendedOptions.Auth.Token write SetAuthBearer;
@@ -738,6 +756,12 @@ function GetProxyForUri(const uri: RawUtf8;
 // - optionally sanitize the output to be filename-compatible
 // - note that it returns an UTF-8 string as resource URI, not TFileName
 function ExtractResourceName(const uri: RawUtf8; sanitize: boolean = true): RawUtf8;
+
+{$ifdef DOMAINRESTAUTH}
+/// setup Kerberos tls-server-end-point channel binding on a given TLS connection
+procedure KerberosChannelBinding(const Tls: INetTls; var SecContext: TSecContext;
+  var Temp: THash512Rec);
+{$endif DOMAINRESTAUTH}
 
 
 { ******************** Additional Client Protocols Support }
@@ -1445,6 +1469,7 @@ type
     jcoResultNoClear,
     jcoHttpExceptionIntercept,
     jcoHttpErrorRaise,
+    jcoPayloadWithoutVoid,
     jcoParseTolerant,
     jcoParseErrorClear,
     jcoParseErrorRaise);
@@ -1494,6 +1519,9 @@ type
     /// check if the client is actually connected to the server
     // - return '' on success, or a text error (typically an Exception.Message)
     function Connected: string;
+    /// set Http.Options^.Auth.Token/Scheme with a given wraBearer token
+    // - will disable authentication if Token = ''
+    procedure SetBearer(const Token: SpiUtf8);
     /// Request execution, with no JSON parsing using RTTI
     procedure Request(const Method, Action: RawUtf8;
       const CustomError: TOnJsonClientError = nil); overload;
@@ -1559,7 +1587,7 @@ type
       read GetUrlEncoder write SetUrlEncoder;
   end;
 
-  /// abstract thread-safe generic JSON client class
+  /// abstract thread-safe generic JSON client class, implementing IJsonClient
   // - will implement all JSON and RTTI featured methods, without any actual
   // HTTP connection, which is abstracted to Connected and RawRequest() methods
   TJsonClientAbstract = class(TInterfacedObjectLocked, IJsonClient)
@@ -1589,6 +1617,7 @@ type
     function GetDefaultHeaders: RawUtf8; virtual; abstract;
     procedure SetDefaultHeaders(const Value: RawUtf8); virtual; abstract;
     function Http: IHttpClient; virtual; abstract;
+    procedure SetBearer(const Token: SpiUtf8); virtual;
     function Connected: string; virtual; abstract;
     procedure RawRequest(const Method, Action, InType, InBody, InHeaders: RawUtf8;
       var Response: TJsonResponse); virtual; abstract;
@@ -1636,7 +1665,7 @@ type
       read fOnLog write fOnLog;
   end;
 
-  /// thread-safe generic JSON client class over HTTP
+  /// thread-safe generic JSON client class over HTTP, implementing IJsonClient
   TJsonClient = class(TJsonClientAbstract)
   protected
     fHttp: IHttpClient;
@@ -1932,7 +1961,7 @@ var
 begin
   fs := TFileStreamEx.Create(filename, fmOpenReadShared);
   // an exception is raised in above line if filename is incorrect
-  fn := StringToUtf8(ExtractFileName(filename));
+  StringToUtf8(ExtractFileName(filename), fn);
   Add(name, '', contenttype, fn, 'binary')^.ContentFile := filename;
   NewStream(fs);
   Append(#13#10);
@@ -2041,10 +2070,19 @@ end;
 
 procedure THttpClientSocketWGet.SetStep(
   Step: TWGetStep; const Context: array of const);
+var
+  txt: RawUtf8;
 begin
   include(OutSteps, Step);
-  if Assigned(OnStep) then
-    OnStep(Step, Make(Context));
+  if Assigned(OnStep) or
+     Assigned(LogSteps) then
+  begin
+    txt := Make(Context);
+    if Assigned(OnStep) then
+      OnStep(Step, txt);
+    if Assigned(LogSteps) then
+      LogSteps(sllCustom1, 'WGet %: %', [ToText(Step)^, txt]);
+  end;
 end;
 
 
@@ -2206,7 +2244,8 @@ begin
         fOnAuthorize := OnAuthorizeDigest; // as AuthorizeDigest()
         fAuthDigestAlgo := daMD5_Sess;
       end;
-    wraNegotiate:
+    wraNegotiate,
+    wraNegotiateChannelBinding:
       {$ifdef DOMAINRESTAUTH}
       fOnAuthorize := OnAuthorizeSspi;     // as AuthorizeSspiUser()
       {$else}
@@ -2220,6 +2259,22 @@ begin
   // actually connect to the server (inlined TCrtSock.Open)
   OpenBind(aUri.Server, aUri.Port, {bind=}false, aUri.Https, aUri.Layer);
   aOptions.TLS := TLS; // copy back Peer information after connection
+end;
+
+function THttpClientSocket.SameOpenOptions(const aUri: TUri;
+  const aOptions: THttpRequestExtendedOptions): boolean;
+var
+  tun: TUri;
+begin
+  result := IdemPChar(pointer(aUri.Scheme), 'HTTP') and
+            aUri.Same(Server, Port, TLS.Enabled) and
+            SameNetTlsContext(TLS, aOptions.TLS) and
+            fExtendedOptions.SameAuth(@aOptions.Auth);
+  if result then
+    if tun.From(aOptions.Proxy) then
+      result := tun.Same(Tunnel.Server, Tunnel.Port, Tunnel.Https)
+    else
+      result := (Tunnel.Server = '');
 end;
 
 procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
@@ -2277,6 +2332,8 @@ begin
     DoRetry(HTTP_CLIENTERROR, 'connection closed (keepalive timeout or max)', [])
   else if not fSock.Available(@loerr) then
     DoRetry(HTTP_CLIENTERROR, 'connection broken (socketerror=%)', [loerr])
+  else if not SockConnected then
+    DoRetry(HTTP_CLIENTERROR, 'getpeername() failed', [])
   else
   try
     // send request - we use SockSend because writeln() is calling flush()
@@ -2322,6 +2379,7 @@ begin
         cspDataAvailableOnClosedSocket:
           include(Http.HeaderFlags, hfConnectionClose); // socket is closed
         cspNoData:
+          if SockConnected then // getpeername()=nrOK
           begin
             // timeout may happen not because the server took its time, but
             // because the network is down: sadly, the socket is still reported
@@ -2330,6 +2388,11 @@ begin
             ctxt.Status := HTTP_TIMEOUT;
             // -> close the socket, since this HTTP request is clearly aborted
             include(Http.HeaderFlags, hfConnectionClose);
+            exit;
+          end
+          else
+          begin
+            DoRetry(HTTP_CLIENTERROR, 'NoData waiting %ms for headers', [TimeOut]);
             exit;
           end;
       else // cspSocketError, cspSocketClosed
@@ -2366,10 +2429,11 @@ begin
         include(Http.HeaderFlags, hfConnectionClose);
       // retrieve Body content (if any)
       if (ctxt.Status >= HTTP_SUCCESS) and
-         (ctxt.Status <> HTTP_NOCONTENT) and
-         (ctxt.Status <> HTTP_NOTMODIFIED) and
-         not HttpMethodWithNoBody(ctxt.Method) then
-         // HEAD or status 100..109,204,304 -> no body (RFC 2616 section 4.3)
+         // HEAD/OPTIONS or status 100..109,204,304 -> no body (RFC 2616 #4.3)
+         ((Http.ContentLength <> 0) or // server bug of 204,304 with body
+          ((ctxt.Status <> HTTP_NOCONTENT) and
+           (ctxt.Status <> HTTP_NOTMODIFIED))) and
+         not HttpMethodWithNoBody(ctxt.Method) then // HEAD/OPTIONS
       begin
         // specific TStreamRedirect expectations
         bodystream := ctxt.OutStream;
@@ -2994,6 +3058,22 @@ end;
 
 {$ifdef DOMAINRESTAUTH}
 
+procedure KerberosChannelBinding(const Tls: INetTls; var SecContext: TSecContext;
+  var Temp: THash512Rec);
+var
+  hasher: RawUtf8;
+  cert: RawUtf8;
+begin
+  if not Assigned(Tls) then
+    exit;
+  cert := Tls.GetRawCert(@hasher);
+  if cert = '' then
+    exit;
+  SecContext.ChannelBindingsHashLen := HashForChannelBinding(cert, hasher, Temp);
+  if SecContext.ChannelBindingsHashLen <> 0 then
+      SecContext.ChannelBindingsHash := @Temp;
+end;
+
 // see https://developer.mozilla.org/en-US/docs/Web/HTTP/Authentication
 
 procedure DoSspi(Sender: THttpClientSocket; var Context: THttpClientRequest;
@@ -3003,14 +3083,20 @@ var
   bak: RawUtf8;
   unauthstatus: integer;
   datain, dataout: RawByteString;
+  channelbindingtemp: THash512Rec;
 begin
   if (Sender = nil) or
      not IdemPChar(pointer(Authenticate), pointer(SECPKGNAMEHTTP_UPPER)) then
     exit;
   unauthstatus := Context.status; // either 401 or 407
   bak := Context.header;
-  InvalidateSecContext(sc, 0);
+  InvalidateSecContext(sc);
   try
+    // Kerberos + TLS may require tls-server-end-point channel binding
+    if Assigned(Sender.Secure) and
+       (Sender.AuthScheme = wraNegotiateChannelBinding) then
+      KerberosChannelBinding(Sender.Secure, sc, channelbindingtemp);
+    // main Kerberos loop
     repeat
       FindNameValue(Sender.Http.Headers, pointer(InHeaderUp), RawUtf8(datain));
       datain := Base64ToBin(TrimU(datain));
@@ -3188,6 +3274,23 @@ begin
     Auth.Scheme := wraBearer;
 end;
 
+function THttpRequestExtendedOptions.SameAuth(
+  Another: PHttpRequestExtendedOptions): boolean;
+begin
+  result := (Another <> nil) and
+            (Auth.Scheme = Another^.Auth.Scheme);
+  if result then
+    case Auth.Scheme of
+      wraBasic,
+      wraDigest,
+      wraNegotiate,
+      wraNegotiateChannelBinding:
+        result := (Auth.UserName = Another^.Auth.UserName) and
+                  (Auth.Password = Another^.Auth.Password);
+      wraBearer:
+        result := (Auth.Token = Another^.Auth.Token);
+    end;
+end;
 
 function ToText(wra: THttpRequestAuthentication): PShortString;
 begin
@@ -3692,7 +3795,8 @@ begin
           winAuth := WINHTTP_AUTH_SCHEME_BASIC;
         wraDigest:
           winAuth := WINHTTP_AUTH_SCHEME_DIGEST;
-        wraNegotiate:
+        wraNegotiate,
+        wraNegotiateChannelBinding:
           winAuth := WINHTTP_AUTH_SCHEME_NEGOTIATE;
       else
         raise EWinHttp.CreateUtf8(
@@ -3742,11 +3846,22 @@ var
   tmp: TSynTempBuffer;
 begin
   result := '';
-  dwSize := SizeOf(tmp); // in bytes
   dwIndex := 0;
-  if WinHttpApi.QueryHeaders(fRequest, Info, nil, @tmp, dwSize, dwIndex) then
-    // ERROR_INSUFFICIENT_BUFFER should not happen with a 4KB buffer
-    Win32PWideCharToUtf8(@tmp, dwSize shr 1, result);
+  dwSize := tmp.Init; // first try with stack buffer (in bytes)
+  try
+    if not WinHttpApi.QueryHeaders(fRequest, Info, nil, tmp.buf, dwSize, dwIndex) then
+    begin
+      if GetLastError <> ERROR_INSUFFICIENT_BUFFER then
+        exit;
+      dwIndex := 0;
+      tmp.Init(dwSize); // need more space (seldom needed)
+      if not WinHttpApi.QueryHeaders(fRequest, Info, nil, tmp.buf, dwSize, dwIndex) then
+        exit;
+    end;
+    Win32PWideCharToUtf8(tmp.buf, dwSize shr 1, result);
+  finally
+    tmp.Done;
+  end;
 end;
 
 function TWinHttp.InternalGetInfo32(Info: cardinal): cardinal;
@@ -3922,11 +4037,22 @@ var
   tmp: TSynTempBuffer;
 begin
   result := '';
-  dwSize := SizeOf(tmp); // in bytes
   dwIndex := 0;
-  if HttpQueryInfoW(fRequest, Info, @tmp, dwSize, dwIndex) then
-    // ERROR_INSUFFICIENT_BUFFER should not happen with a 4KB buffer
-    Win32PWideCharToUtf8(@tmp, dwSize shr 1, result);
+  dwSize := tmp.Init; // first try with stack buffer (in bytes)
+  try
+    if not HttpQueryInfoW(fRequest, Info, tmp.buf, dwSize, dwIndex) then
+    begin
+      if GetLastError <> ERROR_INSUFFICIENT_BUFFER then
+        exit;
+      dwIndex := 0;
+      tmp.Init(dwSize); // need more space (seldom needed)
+      if not HttpQueryInfoW(fRequest, Info, tmp.buf, dwSize, dwIndex) then
+        exit;
+    end;
+    Win32PWideCharToUtf8(tmp.buf, dwSize shr 1, result);
+  finally
+    tmp.Done;
+  end;
 end;
 
 function TWinINet.InternalGetInfo32(Info: cardinal): cardinal;
@@ -4102,6 +4228,7 @@ const
     [cauBasic],     // wraBasic
     [cauDigest],    // wraDigest
     [cauNegotiate], // wraNegotiate
+    [cauNegotiate], // wraNegotiateChannelBinding
     [cauBearer]);   // wraBearer
 
 procedure TCurlHttp.InternalSendRequest(const aMethod: RawUtf8;
@@ -4529,6 +4656,23 @@ begin
   fUrlEncoder := Value;
 end;
 
+procedure TJsonClientAbstract.SetBearer(const Token: SpiUtf8);
+var
+  h: IHttpClient;
+  o: PHttpRequestExtendedOptions;
+begin
+  h := Http;
+  if not Assigned(h) then
+    exit;
+  o := h.Options;
+  if not Assigned(o) then
+    exit;
+  o^.Auth.Scheme := wraBearer;
+  if Token = '' then
+    o^.Auth.Scheme := wraNone; // disable any previous token
+  o^.Auth.Token := Token;
+end;
+
 const
   FMT_REQ: array[{full=}boolean] of RawUtf8 = (
     'Request % %', 'Request % % %');
@@ -4541,11 +4685,17 @@ var
   b: RawUtf8;
   j: TRttiJson;
   u: PUtf8Char;
+  two: TTextWriterOptions;
   err: ShortString;
 begin
   if (Payload <> nil) and
      (PayloadInfo <> nil) then
-    SaveJson(Payload^, PayloadInfo, [], b);
+  begin
+    two := [];
+    if jcoPayloadWithoutVoid in fOptions then
+      two := [twoIgnoreDefaultInRecord];
+    SaveJson(Payload^, PayloadInfo, two, b);
+  end;
   if Assigned(fOnLog) then
     fOnLog(sllServiceCall, FMT_REQ[((jcoLogFullRequest in fOptions) or
       (length(b) < 1024))], [Method, Action, b], self);
@@ -4556,7 +4706,7 @@ begin
     j := pointer(Rtti.RegisterType(ResInfo));
   if (j <> nil) and
      not (jcoResultNoClear in fOptions) then
-    j.ValueFinalizeAndClear(Res); // clear result before request or parsing
+    j.ValueFinalizeAndClear(Res); // void result before request or parsing
   try
     RawRequest(Method, Action, '', b, Headers, r); // blocking thread-safe request
   except
@@ -4573,7 +4723,7 @@ begin
   if Assigned(fOnAfter) then
     fOnAfter(self, r);
   if CheckRequestError(r, CustomError) or // HTTP status error
-     (j = nil) then          // no response JSON to parse
+     (j = nil) then                       // no JSON response to parse
     exit;
   u := pointer(r.Content); // parse in-place the returned body
   j.ValueLoadJson(Res, u, nil,

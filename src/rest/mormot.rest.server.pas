@@ -1270,7 +1270,8 @@ type
   TRestServerAuthenticationSspi = class(TRestServerAuthenticationSignedUri)
   protected
     /// Windows built-in authentication
-    // - holds information between calls to ServerSspiAuth()
+    // - holds information between calls to ServerSspiAuth() for NTLM
+    // - such an array seems not needed with Kerberos two-way handshake
     // - access to this array is made thread-safe thanks to Safe.Lock/Unlock
     fSspiAuthContext: TSecContextDynArray;
     fSspiAuthContexts: TDynArray;
@@ -1601,6 +1602,7 @@ type
   // this could be a good option if you don't trust your clients
   // - rsoSessionInConnectionOpaque uses LowLevelConnectionOpaque^.ValueInternal
   // to store the current TAuthSession - may be used with a lot of sessions
+  // - rsoCookieSecure will add the "Secure" directive in the cookie content
   TRestServerOption = (
     rsoNoAjaxJson,
     rsoGetAsJsonNotAsString,
@@ -1620,7 +1622,8 @@ type
     rsoNoTableURI,
     rsoMethodUnderscoreAsSlashUri,
     rsoValidateUtf8Input,
-    rsoSessionInConnectionOpaque);
+    rsoSessionInConnectionOpaque,
+    rsoCookieSecure);
 
   /// allow to customize the TRestServer process via its Options property
   TRestServerOptions = set of TRestServerOption;
@@ -2841,10 +2844,14 @@ const
   HTTPONLY: array[boolean] of string[15] = (
     '; HttpOnly', '');
 begin
+  // https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies
   inherited SetOutSetCookie(aOutSetCookie);
   if StrPosI('; PATH=', pointer(fOutSetCookie)) = nil then
     fOutSetCookie := FormatUtf8('%; Path=/%%', [fOutSetCookie, Server.fModel.Root,
       HTTPONLY[rsoCookieHttpOnlyFlagDisable in Server.fOptions]]);
+  if (rsoCookieSecure in Server.fOptions) and
+     (StrPosI('; SECURE', pointer(fOutSetCookie)) = nil) then
+    fOutSetCookie := FormatUtf8('__Secure-%; Secure', [fOutSetCookie]);
 end;
 
 procedure TRestServerUriContext.OutHeadFromCookie;
@@ -3088,7 +3095,7 @@ begin
       end;
   else
     raise EOrmException.CreateUtf8('Unexpected Command=% in %.Execute',
-      [ord(Command), self]);
+      [ord(Command), self]); // RaiseUtf8() makes a Delphi compiler warning
   end;
   if exec^.Mode = amBackgroundOrmSharedThread then
     if (Command = execOrmWrite) and
@@ -3184,7 +3191,7 @@ end;
 procedure TRestServerUriContext.ExecuteCallback(var Ctxt: TJsonParserContext;
   ParamInterfaceInfo: TRttiJson; out Obj);
 var
-  fakeid: PtrInt;
+  fakeid: PtrInt; // not integer: may be a pointer/IInvokable in disguise
 begin
   if not Assigned(Server.OnNotifyCallback) then
     EServiceException.RaiseUtf8('% does not implement callbacks for %',
@@ -3199,7 +3206,7 @@ begin
     pointer(Obj) := pointer(fakeid); // special call Obj = IInvokable(fakeid)
     exit;
   end;
-  // let TServiceContainerServer
+  // let TServiceContainerServer resolve this
   (Server.Services as TServiceContainerServer).GetFakeCallback(
     self, ParamInterfaceInfo.Info, fakeid, Obj);
 end;
@@ -5511,7 +5518,8 @@ const
 constructor TRestServerAuthenticationSspi.Create(aServer: TRestServer);
 begin
   // setup mormot.lib.sspi/gssapi unit depending on the OS
-  InitializeDomainAuth;
+  if not InitializeDomainAuth then
+    ESecurityException.RaiseUtf8('%.Create with no %', [self, SECPKGNAMEAPI]);
   // initialize this authentication scheme
   inherited Create(aServer);
   // TDynArray access to fSspiAuthContext[] by TRestConnectionID (ptInt64)
@@ -5531,6 +5539,10 @@ end;
 // about Browser support and SPNEGO handshake via HTTP headers, see e.g.
 // https://learn.microsoft.com/en-us/previous-versions/ms995330(v=msdn.10)
 
+// note that Negotiate/Kerberos is two-way, and NTLM three-way so we need to
+// maintain a list of pending contexts in fSspiAuthContext[] for NTLM only
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-sip/96a33a84-36cb-41dc-a630-f0c42820ec16
+
 function TRestServerAuthenticationSspi.Auth(Ctxt: TRestServerUriContext): boolean;
 var
   i, ndx: PtrInt;
@@ -5549,6 +5561,7 @@ begin
      not Ctxt.InputExists['Data'] then
     exit;
   // use connectionID to find authentication session
+  browserauth := false;
   connectionID := Ctxt.Call^.LowLevelConnectionID;
   indataenc := Ctxt.InputUtf8['Data'];
   if indataenc = '' then
@@ -5563,10 +5576,8 @@ begin
       StatusCodeToReason(HTTP_UNAUTHORIZED, Ctxt.Call.OutBody);
       exit;
     end;
-    browserauth := True;
-  end
-  else
-    browserauth := False;
+    browserauth := true;
+  end;
   // SSPI authentication
   fSafe.Lock;
   try
@@ -5591,7 +5602,7 @@ begin
         exit;
       end;
       ndx := fSspiAuthContexts.New; // add a new entry to fSspiAuthContext[]
-      InvalidateSecContext(fSspiAuthContext[ndx], connectionID);
+      InvalidateSecContext(fSspiAuthContext[ndx], connectionID, Ctxt.TickCount64);
     end;
     // call SSPI provider
     if ServerSspiAuth(fSspiAuthContext[ndx], Base64ToBin(indataenc), outdata) then
@@ -7468,8 +7479,7 @@ procedure TRestServer.SessionsLoadFromFile(const aFileName: TFileName;
 
   procedure ContentError;
   begin
-    raise ESecurityException.CreateUtf8('%.SessionsLoadFromFile("%")',
-      [self, aFileName]);
+    ESecurityException.RaiseUtf8('%.SessionsLoadFromFile("%")', [self, aFileName]);
   end;
 
 var

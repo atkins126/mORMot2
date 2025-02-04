@@ -111,7 +111,7 @@ type
     // maintain a thread-safe list to minimize ProcessIdleTix time
     fOutgoingSafe: TLightLock; // atomic fOutgoingHandle[] access
     fOutgoingCount: integer;
-    fOutgoingHandle: TPollAsyncConnectionHandleDynArray;
+    fOutgoingHandle: TConnectionAsyncHandleDynArray; // = array of integer
     procedure NotifyOutgoing(Connection: TWebSocketAsyncConnection);
     procedure ProcessIdleTixSendFrames;
     // overriden to send pending frames
@@ -282,7 +282,7 @@ begin
   // it is time to notify the other end that we are still alive
   fProcess.SendPing; // Write will change fWasActive, then fLastOperation
   // warning: Write calls ConnectionDelete() so fConnectionLock on socket error
-  result := true; // notify TAsyncConnections.IdleEverySecond
+  result := true; // notify TAsyncConnections.IdleEverySecond for logging
 end;
 
 function TWebSocketAsyncConnection.DecodeHeaders: integer;
@@ -302,7 +302,7 @@ function TWebSocketAsyncConnection.DecodeHeaders: integer;
     if result <> HTTP_SUCCESS then
       exit;
     fHttp.State := hrsUpgraded;
-    fLockMax := true; // WebSockets separate receiving and sending
+    include(fInternalFlags, ifSeparateWLock); // WebSockets separate receive/send
     // send back WS upgrade 101 response
     if fOwner.WriteString(self, resp, {timeout=}1000) then
     begin
@@ -389,7 +389,7 @@ constructor TWebSocketAsyncConnections.Create(const aPort: RawUtf8;
 begin
   inherited Create(aPort, OnStart, OnStop, aConnectionClass, ProcessName,
     aLog, aOptions, aThreadPoolCount);
-  fLastOperationIdleSeconds := 5; // 5 secs is good enough for ping/pong
+  fLastOperationIdleSeconds := 5;   // 5 secs is good enough for ping/pong
   fKeepConnectionInstanceMS := 500; // more conservative for blocking callbacks
 end;
 
@@ -405,7 +405,7 @@ end;
 procedure TWebSocketAsyncConnections.ProcessIdleTixSendFrames;
 var
   i, conn, valid, sent, invalid, unknown: PtrInt;
-  pending: TPollAsyncConnectionHandleDynArray; // keep fOutgoingSafe lock short
+  pending: TConnectionAsyncHandleDynArray; // keep fOutgoingSafe lock short
   c: TAsyncConnection;
   start, elapsed: Int64;
 begin
@@ -483,7 +483,7 @@ function TWebSocketAsyncProcess.ComputeContext(
   out RequestProcess: TOnHttpServerRequest): THttpServerRequestAbstract;
 begin
   result := THttpServerRequest.Create(
-    fConnection.fServer, fProtocol.ConnectionID, nil, 
+    fConnection.fServer, fProtocol.ConnectionID, nil,  {asynchandle=}0,
     fProtocol.ConnectionFlags + HTTP_TLS_FLAGS[Assigned(fConnection.fSecure)],
     fProtocol.ConnectionOpaque);
   RequestProcess :=  fConnection.fServer.Request;

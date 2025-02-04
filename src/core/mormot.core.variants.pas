@@ -516,12 +516,16 @@ var
   /// TDocVariant options to be used for case-sensitive TSynNameValue-like
   // storage, with optional extended JSON syntax serialization
   // - consider using JSON_FAST_EXTENDED for case-insensitive objects
+  // - JSON_NAMEVALUE[false] equals JSON_[mNameValue]
+  // - JSON_NAMEVALUE[true] equals JSON_[mNameValueExtended]
   JSON_NAMEVALUE: TDocVariantOptionsBool;
 
   /// TDocVariant options to be used for case-sensitive TSynNameValue-like
   // storage, RawUtf8 interning and optional extended JSON syntax serialization
   // - consider using JSON_FAST_EXTENDED for case-insensitive objects,
   // or JSON_NAMEVALUE[] if you don't expect names and values interning
+  // - JSON_NAMEVALUEINTERN[false] equals JSON_[mNameValueIntern]
+  // - JSON_NAMEVALUEINTERN[true] equals JSON_[mNameValueInternExtended]
   JSON_NAMEVALUEINTERN: TDocVariantOptionsBool;
 
   // - JSON_OPTIONS[false] is e.g. _Json() and _JsonFmt() functions default
@@ -555,7 +559,7 @@ type
   // be a good idea to use such a pointer via DocVariantData(aVariant)^ or
   // _Safe(aVariant)^ instead of TDocVariantData(aVariant),
   // if you are not sure how aVariant was allocated (may be not _Obj/_Json)
-  // - note: due to a local variable lifetime change in Delphi 11, don't use
+  // - note: due to a local variable lifetime change since Delphi 11, don't use
   // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
   // call _DV() and a local TDocVariantData instead of a PDocVariantData
   PDocVariantData = ^TDocVariantData;
@@ -1660,6 +1664,7 @@ type
     /// find an item in this document, and returns its value as floating point
     // - return false if aName is not found, or if the instance is not a TDocVariant
     // - return true if the name has been found, and aValue stores the value
+    // (trying _Iso8601ToDateTime() if needed)
     // - after a SortByName(aSortedCompare), could use faster binary search
     // - consider using D[] property if you want simple read/write typed access
     function GetAsDouble(const aName: RawUtf8; out aValue: double;
@@ -1763,6 +1768,10 @@ type
     function GetItemByProp(const aPropName, aPropValue: RawUtf8;
       aPropValueCaseSensitive: boolean; var Dest: variant;
       DestByRef: boolean = false): boolean;
+    /// return one dvArray value as RawUtf8, from its index
+    function GetItemAsText(aIndex: integer): RawUtf8;
+    /// return one dvArray value as 64-bit integer, from its index
+    function GetItemAsInt(aIndex: integer): Int64;
     /// retrieve a reference to a dvObject in the dvArray, from a property value
     // - {aPropName:aPropValue} will be searched within the stored array,
     // and the corresponding item will be copied into Dest, on match
@@ -1856,14 +1865,20 @@ type
     /// deprecated method which redirects to Update()
     procedure AddOrUpdateNameValuesToObject(const NameValuePairs: array of const);
     {$endif PUREMORMOT2}
-    /// merge some TDocVariantData dvObject properties to a TDocVariantData dvObject
-    // - data is supplied two by two, as Name,Value pairs
+    /// replace some TDocVariantData dvObject properties from another dvObject
     // - caller should ensure that both variants have Kind=dvObject, otherwise
     // it won't do anything
-    // - any existing Name would be updated with the new Value, unless
+    // - any existing name would be replaced with the new Value, unless
     // OnlyAddMissing is set to TRUE, in which case existing values would remain
+    // - will search also in any first nested object if RecursiveUpdate is TRUE
     procedure AddOrUpdateObject(const NewValues: variant;
       OnlyAddMissing: boolean = false; RecursiveUpdate: boolean = false);
+    /// merge some TDocVariantData dvObject properties from another dvObject
+    // - caller should ensure that both variants have Kind=dvObject, otherwise
+    // it won't do anything
+    // - any existing property name would be added or merged with the new value
+    // - AddOrUpdateObject() would replace existing properties values as a whole
+    procedure MergeObject(const NewValues: variant; aPathDelim: AnsiChar = #0);
     /// add a value to this document, handled as array
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     // - you can therefore write e.g.:
@@ -1883,8 +1898,7 @@ type
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     // - you can specify an optional index in the array where to insert
     // - returns the index of the corresponding newly added item
-    function AddItemFromText(const aValue: RawUtf8;
-      aIndex: integer = -1): integer;
+    function AddItemFromText(const aValue: RawUtf8; aIndex: integer = -1): integer;
     /// add a RawUtf8 value to this document, handled as array
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     // - you can specify an optional index in the array where to insert
@@ -1893,6 +1907,8 @@ type
     /// add one or several values to this document, handled as array
     // - if instance's Kind is dvObject, it will raise an EDocVariant exception
     procedure AddItems(const aValue: array of const);
+    /// low-level adding of one value to this document, handled as array
+    function NewItem: PVariant;
     /// add one object document to this document
     // - if the document is an array, keep aName=''
     // - if the document is an object, set the new object property as aName
@@ -2265,6 +2281,7 @@ type
     /// direct access to a dvObject floating-point stored property value from its name
     // - slightly faster than the variant-based Value[] default property
     // - follows dvoNameCaseSensitive and dvoReturnNullForUnknownProperty options
+    // - reading D['prop'] may try _Iso8601ToDateTime() and return a TDateTime
     // - use GetAsDouble if you want to check the availability of the field
     // - D['prop'] := 1.23 would add a new property, or overwrite an existing
     property D[const aName: RawUtf8]: Double
@@ -2333,12 +2350,13 @@ function ToText(kind: TDocVariantKind): PShortString; overload;
 /// direct access to a TDocVariantData from a given variant instance
 // - return a pointer to the TDocVariantData corresponding to the variant
 // instance, which may be of kind varByRef (e.g. when retrieved by late binding)
-// - raise an EDocVariant exception if the instance is not a TDocVariant
+// - raise an EDocVariant exception if the instance is not a TDocVariant - use
+// _Safe() or _SafeObject/_SafeArray() to avoid an exception
 // - the following direct trans-typing may fail, e.g. for varByRef value:
 // ! TDocVariantData(aVarDoc.ArrayProp).Add('new item');
 // - so you can write the following:
 // ! DocVariantData(aVarDoc.ArrayProp).AddItem('new item');
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function DocVariantData(const DocVariant: variant): PDocVariantData;
@@ -2371,7 +2389,7 @@ const
 // !   dv := _Safe(aDocVariant);
 // !   for ndx := 0 to dv.Count-1 do // here Count=0 for the "fake" result
 // !     writeln(dv.Names[ndx]);
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _Safe(const DocVariant: variant): PDocVariantData; overload;
@@ -2382,7 +2400,7 @@ function _Safe(const DocVariant: variant): PDocVariantData; overload;
 // instance, which may be of kind varByRef (e.g. when retrieved by late binding)
 // - will check the supplied document kind, i.e. either dvObject or dvArray and
 // raise a EDocVariant exception if it does not match
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _Safe(const DocVariant: variant;
@@ -2395,7 +2413,7 @@ function _Safe(const DocVariant: variant;
 // (e.g. when retrieved by late binding)
 // - return false if the supplied Value is not a TDocVariant, but e.g. a string,
 // a number or another type of custom variant
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _Safe(const DocVariant: variant; out DV: PDocVariantData): boolean; overload;
@@ -2405,7 +2423,7 @@ function _Safe(const DocVariant: variant; out DV: PDocVariantData): boolean; ove
 // - return true and set DV with a pointer to the TDocVariantData
 // corresponding to the variant instance, if it is a dvArray
 // - return false if the supplied Value is not an array TDocVariant
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _SafeArray(const Value: variant; out DV: PDocVariantData): boolean; overload;
@@ -2419,24 +2437,24 @@ function _SafeArray(const Value: variant; ExpectedCount: integer;
 // - return true and set DV with a pointer to the TDocVariantData
 // corresponding to the variant instance, if it is a dvObject
 // - return false if the supplied Value is not an object TDocVariant
-// - note: due to a local variable lifetime change in Delphi 11, don't use
+// - note: due to a local variable lifetime change since Delphi 11, don't use
 // this function with a temporary variant (e.g. from TList<variant>.GetItem) -
 // call _DV() and a local TDocVariantData instead of a PDocVariantData
 function _SafeObject(const Value: variant; out DV: PDocVariantData): boolean;
 
 /// direct copy of a TDocVariantData from a given variant instance
-// - slower, but maybe used instead of _Safe() e.g. on Delphi 11
+// - slower, but maybe used instead of _Safe() e.g. since Delphi 11
 function _DV(const DocVariant: variant): TDocVariantData; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// direct copy of a TDocVariantData from a given variant instance
-// - slower, but maybe used instead of _Safe() e.g. on Delphi 11
+// - slower, but maybe used instead of _Safe() e.g. since Delphi 11
 function _DV(const DocVariant: variant;
   ExpectedKind: TDocVariantKind): TDocVariantData; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// direct copy of a TDocVariantData from a given variant instance
-// - slower, but maybe used instead of _Safe() e.g. on Delphi 11
+// - slower, but maybe used instead of _Safe() e.g. since Delphi 11
 function _DV(const DocVariant: variant;
   var DV: TDocVariantData): boolean; overload;
   {$ifdef FPC}inline;{$endif} // Delphi has troubles inlining goto/label
@@ -2777,6 +2795,17 @@ procedure GetVariantFromJsonField(Json: PUtf8Char; wasString: boolean;
 function GetVariantFromNotStringJson(Json: PUtf8Char;
   var Value: TVarData; AllowDouble: boolean): boolean;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// initialize a variant instance from any kind of value, using mORMot RTTI
+// - classes, records, arrays will be instantiated as TDocVariant
+// - just a wrapper around Rtti.RegisterType(Info).ValueToVariant()
+function GetVarDataFromRtti(var Value; Info: PRttiInfo; var Dest: TVarData;
+  Options: PDocVariantOptions = nil): boolean;
+
+/// initialize a variant instance from any kind of value, using mORMot RTTI
+// - classes, records, arrays will be instantiated as TDocVariant
+function GetVariantFromRtti(var Value; Info: PRttiInfo;
+  Options: PDocVariantOptions = nil): variant;
 
 /// low-level function to parse a JSON buffer content into a variant
 // - warning: will decode in the Json buffer memory itself (no memory
@@ -3119,7 +3148,9 @@ type
   end;
 
   /// a dynamic array of IDocDict instances
-  IDocDictDynArray = array of IDocDict;
+  IDocDicts = array of IDocDict;
+  /// a dynamic array of IDocList instances
+  IDocLists = array of IDocList;
 
   /// a List, used to store multiple values
   // - implemented via an internal TDocVariantData dvArray
@@ -3214,7 +3245,7 @@ type
     /// returns all IDocDict kind of elements of this IDocList
     // - the list should consist e.g. of a JSON array of JSON objects
     // - will just ignore any element of the IDocList which is not a IDocDict
-    function ObjectsDictDynArray: IDocDictDynArray;
+    function ObjectsDicts: IDocDicts;
     /// removes the element at the specified position, and returns it
     // - raise an EDocList on invalid supplied position
     function Pop(position: integer = -1): variant;
@@ -3406,6 +3437,7 @@ type
     function Get(const key: RawUtf8; var value: Int64): boolean; overload;
     /// access one element in the dictionary, as floating-point double
     // - if the key does not exist or can not be converted, returns false
+    // - Get('prop', value) may try _Iso8601ToDateTime() and return a TDateTime
     function Get(const key: RawUtf8; var value: double): boolean; overload;
     /// access one element in the dictionary, fixed precision currency
     // - if the key does not exist or can not be converted, returns false
@@ -3449,6 +3481,13 @@ type
     procedure Update(const keyvalues: array of const); overload;
     /// updates (or inserts) the specified key/value pairs of another IDocDict
     procedure Update(const source: IDocDict; addonlymissing: boolean = false); overload;
+    /// merge the specified key/value pair into this IDocDict
+    // - Update() replaces the existing value at key, so a full object property
+    // - this method will complete any existing object property
+    procedure Merge(const key: RawUtf8; const value: variant); overload;
+    /// merge a specified IDocDict fields into this instance
+    // - this method will complete any existing object property
+    procedure Merge(const source: IDocDict); overload;
     /// low-level direct access to a stored element in TDocVariantData.Value[]
     function ValueAt(const key: RawUtf8): PVariant;
     {$ifdef HASIMPLICITOPERATOR}
@@ -3492,6 +3531,7 @@ type
     property I[const key: RawUtf8]: Int64
       read GetI write SetI;
     /// access one element in the dictionary from its key, as floating-point double
+    // - reading F['prop'] may try _Iso8601ToDateTime() and return a TDateTime
     property F[const key: RawUtf8]: double
       read GetF write SetF;
     /// access one element in the dictionary from its key, as fixed precision currency
@@ -3541,7 +3581,7 @@ function DocList(const values: array of const;
 function DocListFrom(const v: variant): IDocList; overload;
 
 /// create a self-owned IDocList from a dynamic array of IDocDict values
-function DocListFrom(const dictarray: IDocDictDynArray): IDocList; overload;
+function DocListFrom(const dictarray: IDocDicts): IDocList; overload;
 
 /// create a IDocList as weak reference to a TDocVariantData dvArray
 function DocList(const dv: TDocVariantData): IDocList; overload;
@@ -3570,7 +3610,7 @@ function DocDict(const json: RawUtf8;
 // - any element of the JSON array which is not a JSON object will be ignored
 function DocDictDynArray(const json: RawUtf8;
   model: TDocVariantModel = mFastFloat;
-  jsonfromresults: boolean = false): IDocDictDynArray;
+  jsonfromresults: boolean = false): IDocDicts;
 
 /// create a self-owned IDocDict from a set of key,value pairs
 function DocDict(const keyvalues: array of const;
@@ -4243,7 +4283,7 @@ end;
 
 const
   _CMP2SORT: array[0..18] of TDynArraySortCompare = (
-    nil,                         // 0
+    nil,                         // 0 would call VariantCompSimple()
     SortDynArrayEmptyNull,       // 1
     SortDynArraySmallInt,        // 2
     SortDynArrayInteger,         // 3
@@ -4333,7 +4373,7 @@ begin
           (at <> varOleStr) and
           (bt < varString) and
           (bt <> varOleStr) then
-    result := VariantCompSimple(PVariant(A)^, PVariant(B)^)
+    result := VariantCompSimple(PVariant(A)^, PVariant(B)^) // ordinal/float
   else if (at < varFirstCustom) and
           (bt < varFirstCustom) then
     result := VariantCompAsText(A, B, caseInsensitive) // RawUtf8 convert
@@ -5125,7 +5165,7 @@ procedure AddNameValueJson(w: TJsonWriter; nam: PPUtf8Char; val: PVariant;
 begin
   if checkExtendedPropName and
      JsonPropNameValid(nam^) then
-    w.AddShort(nam^, PStrLen(nam^ - _STRLEN)^)
+    w.AddNoJsonEscape(nam^, PStrLen(nam^ - _STRLEN)^)
   else
   begin
     w.AddDirect('"');
@@ -5641,6 +5681,19 @@ function DocVariantToObject(var doc: TDocVariantData; obj: TObject;
 var
   p: PtrInt;
   prop: PRttiCustomProp;
+  dv: PDocVariantData;
+
+  procedure DoComplex;
+  var
+    json: RawUtf8;
+    valid: boolean;
+  begin
+    json := dv^.ToJson;
+    if (json <> '') and
+       (json <> 'null')  then
+      PropertyFromJson(prop, obj, pointer(json), valid, JSONPARSER_TOLERANTOPTIONS);
+  end;
+
 begin
   if doc.IsObject and
      (doc.Count > 0) and
@@ -5652,7 +5705,10 @@ begin
     begin
       prop := objRtti.Props.Find(doc.Names[p]);
       if prop <> nil then
-        prop^.Prop.SetValue(obj, doc.Values[p]);
+        if not prop^.Prop.SetValue(obj, doc.Values[p]) then
+          if (prop^.Value.Kind = rkClass) and
+             _Safe(doc.Values[p], dv) then
+            DoComplex;
     end;
     result := true;
   end
@@ -5994,7 +6050,7 @@ begin
 end;
 
 procedure TDocVariantData.AddOrUpdateObject(const NewValues: variant;
-  OnlyAddMissing: boolean; RecursiveUpdate: boolean);
+  OnlyAddMissing, RecursiveUpdate: boolean);
 var
   n, idx: PtrInt;
   new: PDocVariantData;
@@ -6012,6 +6068,19 @@ begin
         TDocVariantData(Values[idx]).AddOrUpdateObject(
           new^.Values[n], OnlyAddMissing, true);
     end;
+end;
+
+procedure TDocVariantData.MergeObject(const NewValues: variant; aPathDelim: AnsiChar);
+var
+  n: PtrInt;
+  new: PDocVariantData;
+begin
+  new := _Safe(NewValues);
+  if not IsArray and
+     not new^.IsArray then
+    for n := 0 to new^.Count - 1 do
+      SetValueByPath(new^.names[n], new^.Values[n],
+        {create=}true, aPathDelim, {merge=}true);
 end;
 
 procedure TDocVariantData.InitArray(const aItems: array of const;
@@ -6156,12 +6225,6 @@ function _InitArray(out aDest: TDocVariantData; aOptions: TDocVariantOptions;
 begin
   if aCount < 0 then
     aCount := length(TByteDynArray(aItems));
-  if aCount = 0 then
-  begin
-    TSynVarData(aDest).VType := varNull;
-    result := nil;
-    exit;
-  end;
   {%H-}aDest.Init(aOptions, dvArray);
   aDest.VCount := aCount;
   SetLength(aDest.VValue, aCount);
@@ -7346,6 +7409,12 @@ begin
   end;
 end;
 
+function TDocVariantData.NewItem: PVariant;
+begin
+  result := pointer(PtrUInt(InternalAdd('')));
+  result := @VValue[PtrUInt(result)]; // in two steps for FPC
+end;
+
 procedure TDocVariantData.AddObject(const aNameValuePairs: array of const;
   const aName: RawUtf8);
 var
@@ -7516,9 +7585,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           SortByName(L, J);
         L := I;
@@ -7574,9 +7642,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           SortByValue(L, J);
         L := I;
@@ -7804,9 +7871,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           Sort(L, J);
         L := I;
@@ -8306,19 +8372,19 @@ begin
   if c <> nil then
     while true do
       if (c^ = #0) or
-         (c^ = aPathDelim) then
+         (c^ = aPathDelim) then // aPathDelim = #0 e.g. from Merge()
         break
       else
         inc(c);
   aLen := c - aCsv;
   if (aLen <> 0) and
      (VCount <> 0) then
-    if VName <> nil then
+    if VName <> nil then // search dvoObject property name
     begin
       result := FindNonVoid[IsCaseSensitive](pointer(VName), aCsv, aLen, VCount);
       exit;
     end
-    else if aCsv^ in ['0' .. '9'] then
+    else if aCsv^ in ['0' .. '9'] then // path is index for dvoArray
     begin
       result := GetCardinal(aCsv, c);
       if PtrUInt(result) < PtrUInt(VCount) then // array index integer as text
@@ -8348,7 +8414,7 @@ begin
   if Has(dvoReturnNullForUnknownProperty) then
     result := @DocVariantDataFake
   else
-    raise EDocVariant.CreateUtf8('[%] property not found', [aName])
+    raise EDocVariant.CreateUtf8('[%] property not found', [aName]); // no RaiseUtf8
 end;
 
 function TDocVariantData.InternalNotFound(aIndex: integer): PDocVariantData;
@@ -8563,7 +8629,7 @@ begin
   if found = nil then
     result := false
   else
-    result := VariantToDouble(PVariant(found)^, aValue);
+    result := AnyVariantToDouble(PVariant(found)^, aValue);
 end;
 
 function TDocVariantData.GetAsRawUtf8(const aName: RawUtf8; out aValue: RawUtf8;
@@ -8864,6 +8930,22 @@ begin
   result := true;
 end;
 
+function TDocVariantData.GetItemAsText(aIndex: integer): RawUtf8;
+begin
+  result := '';
+  if cardinal(aIndex) < cardinal(VCount) then
+    VariantToUtf8(VValue[aIndex], result)
+  else
+    InternalNotFound(aIndex);
+end;
+
+function TDocVariantData.GetItemAsInt(aIndex: integer): Int64;
+begin
+  if (cardinal(aIndex) >= cardinal(VCount)) or
+     not VariantToInt64(VValue[aIndex], result) then
+    result := PtrInt(InternalNotFound(aIndex));
+end;
+
 function TDocVariantData.GetDocVariantByProp(
   const aPropName, aPropValue: RawUtf8; aPropValueCaseSensitive: boolean;
   out Dest: PDocVariantData): boolean;
@@ -8968,10 +9050,11 @@ begin
     exit;
   csv := pointer(aPath);
   v := @self;
+  // work with aPathDelim = #0 e.g. from Merge()
   repeat
     ndx := v^.InternalNextPath(csv, aPathDelim, namelen);
     if csv[namelen] = #0 then
-      break; // we reached the last item of the path, which is the value to set
+      break; // reached the last item of the path, which is the value to set
     if ndx < 0 then
       if aCreateIfNotExisting then
       begin
@@ -9391,7 +9474,7 @@ end;
 
 function TDocVariantData.GetDoubleByName(const aName: RawUtf8): Double;
 begin
-  if not VariantToDouble(GetPVariantByName(aName)^, result) then
+  if not AnyVariantToDouble(GetPVariantByName(aName)^, result) then
     result := 0;
 end;
 
@@ -9653,6 +9736,26 @@ end;
 
 
 { ************** JSON Parsing into Variant }
+
+function GetVarDataFromRtti(var Value; Info: PRttiInfo; var Dest: TVarData;
+  Options: PDocVariantOptions): boolean;
+var
+  r: TRttiCustom;
+begin
+  if Options = nil then
+    Options := @JSON_[mFastFloat];
+  r := Rtti.RegisterType(Info);
+  result := (r <> nil) and
+            (r.ValueToVariant(@Value, Dest, Options) <> 0);
+end;
+
+function GetVariantFromRtti(var Value; Info: PRttiInfo;
+  Options: PDocVariantOptions): variant;
+begin
+  VarClear(result);
+  if @Value <> nil then
+    GetVarDataFromRtti(Value, Info, PVarData(@result)^, Options);
+end;
 
 function GetVariantFromNotStringJson(Json: PUtf8Char; var Value: TVarData;
   AllowDouble: boolean): boolean;
@@ -10267,7 +10370,7 @@ begin
   end;
 end;
 
-procedure _BinaryVariantLoadAsJson(var Value: variant; Json: PUtf8Char;
+procedure __VariantLoadJson(var Value: variant; Json: PUtf8Char;
   TryCustomVariant: pointer);
 var
   info: TGetJsonField;
@@ -10520,7 +10623,7 @@ type
     function Exists(const value: RawUtf8; caseinsensitive: boolean): boolean; overload;
     function Insert(position: integer; const value: variant): integer; overload;
     function Insert(position: integer; const value: RawUtf8): integer; overload;
-    function ObjectsDictDynArray: IDocDictDynArray;
+    function ObjectsDicts: IDocDicts;
     function Pop(position: integer): variant;
     function PopItem(out value: variant; position: integer): boolean; overload;
     function PopItem(out value: IDocDict; position: integer): boolean; overload;
@@ -10611,6 +10714,8 @@ type
     procedure Update(const key: RawUtf8; const value: variant); overload;
     procedure Update(const keyvalues: array of const); overload;
     procedure Update(const source: IDocDict; addonlymissing: boolean); overload;
+    procedure Merge(const key: RawUtf8; const value: variant); overload;
+    procedure Merge(const source: IDocDict); overload;
     function ValueAt(const key: RawUtf8): PVariant;
     {$ifdef HASIMPLICITOPERATOR}
     function GetV(const key: RawUtf8): TDocValue;
@@ -10626,7 +10731,7 @@ type
 
 function TDocValue.IsString: boolean;
 begin
-  result := VarIsStr(V^);
+  result := VarIsString(V^);
 end;
 
 function TDocValue.Kind: TDocVariantKind;
@@ -10902,7 +11007,7 @@ begin
   result := d;
 end;
 
-function DocListFrom(const dictarray: IDocDictDynArray): IDocList;
+function DocListFrom(const dictarray: IDocDicts): IDocList;
 var
   i: PtrInt;
 begin
@@ -10929,7 +11034,7 @@ begin
 end;
 
 function DocDictDynArray(const json: RawUtf8;
-  model: TDocVariantModel; jsonfromresults: boolean): IDocDictDynArray;
+  model: TDocVariantModel; jsonfromresults: boolean): IDocDicts;
 var
   main: TDocVariantData;
   n, i: PtrInt;
@@ -11435,7 +11540,7 @@ begin
   result := fValue^.AddItemText(value, position);
 end;
 
-function TDocList.ObjectsDictDynArray: IDocDictDynArray;
+function TDocList.ObjectsDicts: IDocDicts;
 var
   n, i: PtrInt;
   p: PVariant;
@@ -11769,7 +11874,7 @@ var
   v: PVariant;
 begin
   v := GetExistingValueAt(key, 'F');
-  if not VariantToDouble(v^, result) then
+  if not AnyVariantToDouble(v^, result) then
     EDocDict.Error('F', key, v^);
 end;
 
@@ -11790,7 +11895,7 @@ end;
 function TDocDict.GetL(const key: RawUtf8): IDocList;
 begin
   result := TDocList.CreateByRef(
-    _Safe(GetExistingValueAt(key, 'B')^, dvArray));
+    _Safe(GetExistingValueAt(key, 'L')^, dvArray));
 end;
 
 function TDocDict.GetS(const key: RawUtf8): string;
@@ -11944,7 +12049,7 @@ var
   v: PVariant;
 begin
   result := GetValueAt(key, v) and
-            VariantToDouble(v^, value);
+            AnyVariantToDouble(v^, value);
 end;
 
 function TDocDict.Get(const key: RawUtf8; var value: currency): boolean;
@@ -12071,6 +12176,18 @@ procedure TDocDict.Update(const source: IDocDict; addonlymissing: boolean);
 begin
   if source <> nil then
     fValue^.AddOrUpdateFrom(PVariant(source.Value)^, addonlymissing);
+end;
+
+procedure TDocDict.Merge(const key: RawUtf8; const value: variant);
+begin // SetValueByPath() work with fPathDelim=#0
+  if fValue^.SetValueByPath(key, value, {create=}true, fPathDelim, {merge=}true) <> nil then
+    fSorted := nil;
+end;
+
+procedure TDocDict.Merge(const source: IDocDict);
+begin // MergeObject() work with fPathDelim=#0
+  if source <> nil then
+    fValue^.MergeObject(PVariant(source.Value)^, fPathDelim);
 end;
 
 {$ifdef HASIMPLICITOPERATOR}
@@ -12250,9 +12367,9 @@ begin
   JSON_NAMEVALUEINTERN := PDocVariantOptionsBool(@JSON_[mNameValueIntern])^;
   JSON_OPTIONS := PDocVariantOptionsBool(@JSON_[mDefault])^;
   // redirect to the feature complete variant wrapper functions
-  BinaryVariantLoadAsJson := _BinaryVariantLoadAsJson;
   VariantClearSeveral := _VariantClearSeveral;
   _VariantSaveJson := @__VariantSaveJson;
+  _VariantLoadJson := @__VariantLoadJson;
   SortDynArrayVariantComp := pointer(@FastVarDataComp);
   // setup FastVarDataComp() efficient lookup comparison functions
   for ins := false to true do

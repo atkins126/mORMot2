@@ -191,7 +191,7 @@ type
     // - condition must equals TRUE to pass the test
     // - function return TRUE if the condition failed, in order to allow the
     // caller to stop testing with such code:
-    // ! if CheckFailed(A=10) then exit;
+    // ! if CheckFailed(A = 10) then exit;
     function CheckFailed(condition: boolean; const msg: string = ''): boolean;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// used by the published methods to run a test assertion
@@ -205,12 +205,13 @@ type
     // - if a<>b, will fail and include '#<>#' text before the supplied msg
     function CheckEqual(a, b: Int64; const msg: RawUtf8 = ''): boolean; overload;
       {$ifdef HASSAFEINLINE}inline;{$endif}
-    /// used by the published methods to run test assertion against UTF-8 strings
+    /// used by the published methods to run test assertion against UTF-8/Ansi strings
+    // - will ignore the a+b string codepages, and call SortDynArrayRawByteString()
     // - if a<>b, will fail and include '#<>#' text before the supplied msg
-    function CheckEqual(const a, b: RawUtf8; const msg: RawUtf8 = ''): boolean; overload;
-    /// used by the published methods to run test assertion against UTF-8 strings
+    function CheckEqual(const a, b: RawByteString; const msg: RawUtf8 = ''): boolean; overload;
+    /// used by the published methods to run test assertion against UTF-8/Ansi strings
     // - if Trim(a)<>Trim(b), will fail and include '#<>#' text before the supplied msg
-    function CheckEqualTrim(const a, b: RawUtf8; const msg: RawUtf8 = ''): boolean;
+    function CheckEqualTrim(const a, b: RawByteString; const msg: RawUtf8 = ''): boolean;
     /// used by the published methods to run test assertion against pointers/classes
     // - if a<>b, will fail and include '#<>#' text before the supplied msg
     function CheckEqual(a, b: pointer; const msg: RawUtf8 = ''): boolean; overload;
@@ -289,7 +290,9 @@ type
       LastPunctuation: AnsiChar = '.'; const RandomInclude: RawUtf8 = '';
       NoLineFeed: boolean = false);
     /// this method is triggered internally - e.g. by Check() - when a test failed
-    procedure TestFailed(const msg: string);
+    procedure TestFailed(const msg: string); overload;
+    /// this method can be triggered directly - e.g. after CheckFailed() = true
+    procedure TestFailed(const msg: RawUtf8; const args: array of const); overload;
     /// will add to the console a message with a speed estimation
     // - speed is computed from the method start or supplied local Timer
     // - returns the number of microsec of the (may be specified) timer
@@ -356,13 +359,13 @@ type
   /// a class used to run a suit of test cases
   TSynTests = class(TSynTest)
   protected
-    /// any number not null assigned to this field will display a "../sec" stat
     fTestCaseClass: array of TSynTestCaseClass;
     fAssertions: integer;
     fAssertionsFailed: integer;
+    fSafe: TSynLocker;
+    /// any number not null assigned to this field will display a "../sec" stat
     fRunConsoleOccurrenceNumber: cardinal;
     fCurrentMethodInfo: PSynTestMethodInfo;
-    fSafe: TSynLocker;
     fFailed: TSynTestFaileds;
     fFailedCount: integer;
     fNotifyProgressLineLen: integer;
@@ -760,7 +763,7 @@ begin
     DoCheckUtf8(result, EQUAL_MSG, [a, b, msg]);
 end;
 
-function TSynTestCase.CheckEqual(const a, b, msg: RawUtf8): boolean;
+function TSynTestCase.CheckEqual(const a, b: RawByteString; const msg: RawUtf8): boolean;
 begin
   inc(fAssertions);
   result := SortDynArrayRawByteString(a, b) = 0;
@@ -769,7 +772,7 @@ begin
     DoCheckUtf8(result, EQUAL_MSG, [a, b, msg]);
 end;
 
-function TSynTestCase.CheckEqualTrim(const a, b, msg: RawUtf8): boolean;
+function TSynTestCase.CheckEqualTrim(const a, b: RawByteString; const msg: RawUtf8): boolean;
 begin
   result := CheckEqual(TrimU(a), TrimU(b), msg);
 end;
@@ -1059,6 +1062,11 @@ begin
   finally
     fOwner.fSafe.UnLock;
   end;
+end;
+
+procedure TSynTestCase.TestFailed(const msg: RawUtf8; const args: array of const);
+begin
+  fOwner.DoLog(sllFail, msg, Args);
 end;
 
 procedure TSynTestCase.AddConsole(const msg: string; OnlyLog: boolean);

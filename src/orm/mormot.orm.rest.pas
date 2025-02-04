@@ -1521,7 +1521,7 @@ var
   T: TOrmTable;
   v: variant;
 begin
-  TVarData(v).VType := varNull;
+  TSynVarData(v).VType := varNull;
   if (self <> nil) and
      (Table <> nil) then
   begin
@@ -2250,10 +2250,9 @@ begin
      (aID <= 0) then
     exit;
   blob := Table.OrmProps.BlobFieldPropFromRawUtf8(BlobFieldName);
-  if blob = nil then
-    exit;
-  result := EngineRetrieveBlob(
-    fModel.GetTableIndexExisting(Table), aID, blob, BlobData);
+  if blob <> nil then
+    result := EngineRetrieveBlob(
+      fModel.GetTableIndexExisting(Table), aID, blob, BlobData);
 end;
 
 function TRestOrm.RetrieveBlob(Table: TOrmClass; aID: TID;
@@ -2652,7 +2651,7 @@ begin
   fJsonData := nil;
   {$ifndef NOTORMTABLELEN}
   prevlen := fLen;
-  fLen := nil; // SetResultsSafe() won't try to set fLen[]
+  fLen := nil; // now to ensure SetResultsSafe() won't try to set fLen[]
   {$endif NOTORMTABLELEN}
   n := (fRowCount + 1) * fFieldCount;
   // adjust data rows

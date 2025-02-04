@@ -472,7 +472,7 @@ const
 type
   // VirtualQuery() API result structure
   TMemInfo = record
-    BaseAddress, AllocationBase: pointer;
+    BaseAddress, AllocationBase: PtrUInt;
     AllocationProtect: cardinal;
     PartitionId: word;
     RegionSize: PtrUInt;
@@ -527,7 +527,8 @@ begin
     next := addr + old_len;
     if (VirtualQuery(next, @meminfo, SizeOf(meminfo)) = SizeOf(meminfo)) and
        (meminfo.State = MEM_FREE) and
-       (meminfo.RegionSize >= nextsize) and // enough space?
+       (meminfo.BaseAddress <= PtrUInt(next)) and // enough space?
+       (meminfo.BaseAddress + meminfo.RegionSize >= PtrUInt(next) + nextsize) and
        // set the address space in two reserve + commit steps for thread safety
        (VirtualAlloc(next, nextsize, MEM_RESERVE, PAGE_READWRITE) <> nil) and
        (VirtualAlloc(next, nextsize, MEM_COMMIT, PAGE_READWRITE) <> nil) then
@@ -1394,7 +1395,7 @@ begin
     LargeBlocksCircularList.NextLargeBlockHeader := new;
     new.NextLargeBlockHeader := old;
     old.PreviousLargeBlockHeader := new;
-    LargeBlocksLocked := False;
+    LargeBlocksLocked := false;
     inc(new);
   end;
   result := new;
@@ -1427,7 +1428,7 @@ begin
   next := header.NextLargeBlockHeader;
   next.PreviousLargeBlockHeader := prev;
   prev.NextLargeBlockHeader := next;
-  LargeBlocksLocked := False;
+  LargeBlocksLocked := false;
   result := DropMediumAndLargeFlagsMask and header.BlockSizeAndFlags;
   FreeLarge(header, result);
 end;
@@ -1485,7 +1486,7 @@ begin
       next := header^.NextLargeBlockHeader;
       next.PreviousLargeBlockHeader := prev;
       prev.NextLargeBlockHeader := next;
-      LargeBlocksLocked := False;
+      LargeBlocksLocked := false;
       // on Linux, call Kernel mremap() and its TLB magic
       // on Windows, try to reserve the memory block just after the existing
       // otherwise, use Alloc/Move/Free pattern, with asm/AVX move
@@ -1816,7 +1817,7 @@ asm
         bsf     ecx, ecx
         lea     rcx, [rcx + r9 * 8]
         // Set rdi = @bin, rsi = free block
-        lea     rsi, [rcx * 8] // SizeOf(TMediumBlockBin) = 16
+        lea     rsi, [rcx * 8] // SizeOf(TMediumBlockInfo.Bins[]) = 16
         lea     rdi, [r10 + TMediumBlockInfo.Bins + rsi * 2]
         mov     rsi, TMediumFreeBlock[rdi].NextFreeBlock
         // Remove the first block from the linked list (LIFO)
@@ -1830,12 +1831,10 @@ asm
         // r9 = bin group number * 4, rcx = bin number, rdi = @bin, rsi = free block
         // Flag this bin (and the group if needed) as empty
         mov     edx,  - 2
-        mov     r11d, [r10 + TMediumBlockInfo.BinGroupBitmap]
         rol     edx, cl
-        btr     r11d, eax // btr reg,reg is faster than btr [mem],reg
         and     [r10 + TMediumBlockInfo.BinBitmaps + r9], edx
         jnz     @MediumBinNotEmpty
-        mov     [r10 + TMediumBlockInfo.BinGroupBitmap], r11d
+        btr     [r10 + TMediumBlockInfo.BinGroupBitmap], eax
 @MediumBinNotEmpty:
         // rsi = free block, rbx = block type
         // Get the size of the available medium block in edi
@@ -2041,14 +2040,12 @@ asm
         cmp     rdi, rax
         jne     @MediumBinNotEmptyForMedium
         // edx=bingroupnumber, ecx=binnumber, rdi=@bin, rsi=freeblock, ebx=blocksize
-        // Flag this bin and group as empty
+        // Flag this bin (and the group if needed) as empty
         mov     eax,  - 2
-        mov     r11d, [r10 + TMediumBlockInfo.BinGroupBitmap]
         rol     eax, cl
-        btr     r11d, edx // btr reg,reg is faster than btr [mem],reg
         and     [r10 + TMediumBlockInfo.BinBitmaps + rdx * 4], eax
         jnz     @MediumBinNotEmptyForMedium
-        mov     [r10 + TMediumBlockInfo.BinGroupBitmap], r11d
+        btr     [r10 + TMediumBlockInfo.BinGroupBitmap], edx
 @MediumBinNotEmptyForMedium:
         // rsi = free block, ebx = block size
         // Get rdi = size of the available medium block, rdx = second split size
@@ -3341,32 +3338,44 @@ end;
 
 {$ifdef FPCMM_REPORTMEMORYLEAKS_EXPERIMENTAL}
 var
-  ObjectLeaksCount: integer;
+  ObjectLeaksCount, ObjectLeaksRaiseCount: integer;
+{$ifdef MSWINDOWS}
+  LastMemInfo: TMemInfo; // simple cache
 
 function SeemsRealPointer(p: pointer): boolean;
-{$ifdef MSWINDOWS}
 var
   meminfo: TMemInfo;
-{$endif MSWINDOWS}
 begin
   result := false;
   if PtrUInt(p) <= 65535 then
-    exit;
-  {$ifdef MSWINDOWS}
-  // VirtualQuery API is slow but better than raising an exception
-  // see https://stackoverflow.com/a/37547837/458259
-  FillChar(meminfo, SizeOf(meminfo), 0);
-  result := (VirtualQuery(p, @meminfo, SizeOf(meminfo)) = SizeOf(meminfo)) and
-            (meminfo.RegionSize >= SizeOf(pointer)) and
-            (meminfo.State = MEM_COMMIT) and
-            (meminfo.Protect and PAGE_VALID <> 0) and
-            (meminfo.Protect and PAGE_GUARD = 0);
-  {$else}
-  // let the GPF happen silently in the kernel
-  result := (fpaccess(p, F_OK) <> 0) and
-            (fpgeterrno <> ESysEFAULT);
-  {$endif MSWINDOWS}
+    exit; // first 64KB is not a valid pointer by definition
+  if (LastMemInfo.State <> 0) and
+     (PtrUInt(p) - LastMemInfo.BaseAddress < LastMemInfo.RegionSize) then
+    result := true // quick check against last valid memory region
+  else
+  begin
+    // VirtualQuery API is slow but better than raising an exception
+    // see https://stackoverflow.com/a/37547837/458259
+    FillChar(meminfo, SizeOf(meminfo), 0);
+    result := (VirtualQuery(p, @meminfo, SizeOf(meminfo)) = SizeOf(meminfo)) and
+              (meminfo.State = MEM_COMMIT) and
+              (PtrUInt(p) - meminfo.BaseAddress < meminfo.RegionSize) and
+              (meminfo.Protect and PAGE_VALID <> 0) and
+              (meminfo.Protect and PAGE_GUARD = 0);
+    if result then
+      LastMemInfo := meminfo;
+  end;
 end;
+{$else}
+function SeemsRealPointer(p: pointer): boolean;
+begin
+  // let the GPF happen silently in the kernel
+  result := (PtrUInt(p) > 65535) and
+            (fpaccess(p, F_OK) <> 0) and
+            (fpgeterrno <> ESysEFAULT);
+end;
+{$endif MSWINDOWS}
+
 {$endif FPCMM_REPORTMEMORYLEAKS_EXPERIMENTAL}
 
 procedure MediumMemoryLeakReport(
@@ -3377,7 +3386,8 @@ var
   {$ifdef FPCMM_REPORTMEMORYLEAKS_EXPERIMENTAL}
   first, last: PByte;
   vmt: PAnsiChar;
-  exceptcount: integer;
+  instancesize, blocksize: PtrInt;
+  classname: PShortString;
   {$endif FPCMM_REPORTMEMORYLEAKS_EXPERIMENTAL}
 begin
   if (Info.SequentialFeedBytesLeft = 0) or
@@ -3389,9 +3399,6 @@ begin
       block := Info.LastSequentiallyFed
     else
       exit;
-  {$ifdef FPCMM_REPORTMEMORYLEAKS_EXPERIMENTAL}
-  exceptcount := 0;
-  {$endif FPCMM_REPORTMEMORYLEAKS_EXPERIMENTAL}
   repeat
     header := PPtrUInt(block - BlockHeaderSize)^;
     size := header and DropMediumAndLargeFlagsMask;
@@ -3401,8 +3408,9 @@ begin
       if header and IsSmallBlockPoolInUseFlag <> 0 then
       begin
         {$ifdef FPCMM_REPORTMEMORYLEAKS_EXPERIMENTAL}
-        if PSmallBlockPoolHeader(block).BlocksInUse > 0 then
+        if PSmallBlockPoolHeader(block).BlocksInUse > 0 then // some leaks
         begin
+          blocksize := PSmallBlockPoolHeader(block).BlockType.BlockSize;
           first := PByte(block) + SmallBlockPoolHeaderSize;
           with PSmallBlockPoolHeader(block).BlockType^ do
             if (CurrentSequentialFeedPool <> pointer(block)) or
@@ -3413,7 +3421,7 @@ begin
             else
               last := Pointer(PByte(NextSequentialFeedBlockAddress) - 1);
           while (first <= last) and
-                (exceptcount < 64) do
+                (ObjectLeaksRaiseCount < 64) do
           begin
             if ((PPtrUInt(first - BlockHeaderSize)^ and IsFreeBlockFlag) = 0) then
             begin
@@ -3421,29 +3429,35 @@ begin
               if (vmt <> nil) and
                  {$ifdef FPCMM_REPORTMEMORYLEAKS}
                  (PtrUInt(vmt) <> REPORTMEMORYLEAK_FREEDHEXSPEAK) and
-                 // FreeMem marked freed blocks with 00000000 BLOODLESS marker
+                 // FreeMem marked freed blocks with BLOODLESS hexspeak magic
                  {$endif FPCMM_REPORTMEMORYLEAKS}
                  SeemsRealPointer(vmt) then
               try
                 // try to access the TObject VMT
-                if (PPtrInt(vmt + vmtInstanceSize)^ >= sizeof(vmt)) and
-                   (PPtrInt(vmt + vmtInstanceSize)^ <=
-                    PSmallBlockPoolHeader(block).BlockType.BlockSize) and
-                   SeemsRealPointer(PPointer(vmt + vmtClassName)^) then
+                instancesize := PPtrInt(vmt + vmtInstanceSize)^;
+                if (instancesize >= sizeof(vmt)) and
+                   (instancesize <= blocksize) then
                 begin
-                   StartReport;
-                   writeln(' probable ', PShortString(PPointer(vmt + vmtClassName)^)^,
-                     ' leak (', PPtrInt(vmt + vmtInstanceSize)^, '/',
-                     PSmallBlockPoolHeader(block).BlockType.BlockSize,
-                     ' bytes) at $', HexStr(first));
-                   inc(ObjectLeaksCount);
+                  classname := PPointer(vmt + vmtClassName)^;
+                  if SeemsRealPointer(classname) and
+                     (classname^[0] <> #0) and
+                     (classname^[1] in ['A' .. 'z']) then
+                  begin
+                     StartReport;
+                     writeln(' probable ', classname^, ' leak (', instancesize,
+                       '/', blocksize, ' bytes) at $', HexStr(first));
+                     inc(ObjectLeaksCount);
+                  end;
                 end;
               except
-                // intercept and ignore any GPF - SeemsRealPointer() not enough?
-                inc(exceptcount);
+                // intercept and ignore any GPF - SeemsRealPointer() not enough
+                inc(ObjectLeaksRaiseCount);
+                {$ifdef MSWINDOWS}
+                LastMemInfo.State := 0; // reset VirtualQuery() cache
+                {$endif MSWINDOWS}
               end;
             end;
-            inc(first, PSmallBlockPoolHeader(block).BlockType.BlockSize);
+            inc(first, blocksize);
           end;
         end;
         {$endif FPCMM_REPORTMEMORYLEAKS_EXPERIMENTAL}

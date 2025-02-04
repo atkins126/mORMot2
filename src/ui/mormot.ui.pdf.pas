@@ -2463,7 +2463,7 @@ type
   protected
     // we use TWordDynArray for auto garbage collection and generic handling
     // - since the Ttf file is big endian, we swap all words at loading, to
-    // be used directly by the Intel x86 code; integer (longint) values
+    // be used directly by the Intel x86 code; integer (32-bit) values
     // must take care of this byte swapping
     fcmap, fhead, fhhea, fhmtx: TWordDynArray;
   public
@@ -3393,7 +3393,7 @@ var
   i: PtrInt;
 begin
   for i := 0 to PLen - 1 do
-    P^[i] := swap(P^[i]);
+    P^[i] := bswap16(P^[i]);
 end;
 
 function GetTtfData(aDC: HDC; aTableName: PAnsiChar; var Ref: TWordDynArray): pointer;
@@ -4871,14 +4871,14 @@ end;
 
 function TPdfWrite.AddHex(const Bin: PdfString): TPdfWrite;
 var
-  L, len: integer;
+  L, len: PtrInt;
   PW: pointer;
 begin
   len := length(Bin);
   PW := pointer(Bin);
   repeat
     L := len;
-    if BEnd - B <= L * 2 then
+    if PtrInt(BEnd - B) <= L * 2 then // note: PtrInt(BEnd - B) could be < 0
     begin
       Save;
       if L > high(fTmp) shr 1 then
@@ -5039,7 +5039,7 @@ function TPdfWrite.AddUnicodeHex(PW: PWideChar; WideCharCount: integer): TPdfWri
   end;
 
 var
-  L: integer;
+  L: PtrInt;
   {$ifdef USE_PDFSECURITY}
   sectmp: TSynTempBuffer;
   {$endif USE_PDFSECURITY}
@@ -6207,7 +6207,7 @@ begin
   inc(PTtfTableDirectory(e));
   n := 0;
   if SubSetSize > SizeOf(PTtfTableDirectory) then
-    for i := 1 to swap(PTtfTableDirectory(SubSetData)^.numTables) do
+    for i := 1 to bswap16(PTtfTableDirectory(SubSetData)^.numTables) do
     begin
       if IntegerScanIndex(@TTF_SUBSET, length(TTF_SUBSET), e^.tag) >= 0 then
       begin
@@ -6225,11 +6225,11 @@ begin
   // update the main directory
   dir := pointer(ttf);
   dir^.sfntVersion := PTtfTableDirectory(SubSetData)^.sfntVersion;
-  dir^.numTables := swap(word(n));
+  dir^.numTables := bswap16(n);
   //len := HighBit(n); // always 8 when n in 8..15
-  //dir^.searchRange := swap(len * 16);
-  //dir^.entrySelector := swap(Floor(log2(len))); // requires the Math unit
-  //dir^.rangeShift := swap((integer(n) - len) * 16);
+  //dir^.searchRange := bswap16(len * 16);
+  //dir^.entrySelector := bswap16(Floor(log2(len))); // requires the Math unit
+  //dir^.rangeShift := bswap16((integer(n) - len) * 16);
   dir^.searchRange := 32768; // pre-computed values for n in 8..15
   dir^.entrySelector := 768;
   dir^.rangeShift := 8192;
@@ -11942,7 +11942,7 @@ begin
   begin
     Canvas.GSave;
     Canvas.NewPath;
-    DC[nDC].ClipRgnNull := False;
+    DC[nDC].ClipRgnNull := false;
     d := @Data^.RgnData;
     pr := @d^.Buffer;
     for i := 1 to d^.rdh.nCount do

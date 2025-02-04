@@ -50,7 +50,8 @@ end;
 {$endif FPC_REQUIRES_PROPER_ALIGNMENT}
 
 type
-  PRecordInfo = PTypeData; // oldest Delphi PTypeData doesn't have RecordSize
+  PRecordInfo = PTypeData;
+  PArrayInfo = ^TArrayTypeData;
 
 function TRttiInfo.RttiClass: PRttiClass; // for proper inlining below
 begin
@@ -173,6 +174,7 @@ function TRttiInfo.EnumBaseType: PRttiEnumType; // moved here for proper inlinin
 begin
   result := pointer(GetTypeData(@self));
   if Kind <> rkBool then
+    // rkBool is an ordinal with Min/Max but without BaseType/NameList
     result := result^.EnumBaseType;
 end;
 
@@ -353,12 +355,12 @@ end;
 
 
 const
+  // RawUtf8 is defined as weak system.UTF8String type in mormot.core.base
+  UTF8_NAME: string[7] = 'RawUtf8';
   // FPC RTTI names integer type as "longint"
   INTEGER_NAME:  string[7] = 'Integer';
   // FPC RTTI names cardinal type as "longword"
   CARDINAL_NAME: string[8] = 'Cardinal';
-  // RawUtf8 is defined as weak system.UTF8String type in mormot.core.base
-  UTF8_NAME: string[7] = 'RawUtf8';
 
 function TRttiInfo.Name: PShortString;
 begin
@@ -376,7 +378,7 @@ begin
     else
       result := @INTEGER_NAME    // instead of 'longint'
   else
-    result := @NULCHAR;
+    result := @NULCHAR;          // instead of a GPF
 end;
 
 function TRttiInfo.RecordSize: PtrInt;
@@ -496,6 +498,7 @@ end;
 function TRttiInfo.IsBoolean: boolean;
 begin
   result := (Kind = rkBool);
+  // boolean is not a rkEnumeration on FPC, and has no BaseType/NameList items
 end;
 
 function TRttiInfo.DynArrayItemType(out aDataSize: PtrInt): PRttiInfo;
@@ -544,33 +547,33 @@ function GetPublishedMethods(Instance: TObject;
   out Methods: TPublishedMethodInfoDynArray; aClass: TClass): integer;
 
   procedure AddParentsFirst(C: TClass);
-  type
-    TMethodInfo = packed record
-      Name: PShortString;
-      Addr: pointer;
-    end;
   var
-    Table: PIntegerArray;
-    M: ^TMethodInfo;
-    i: integer;
+    info: PIntegerArray; // PVmtMethodTable is wrong (GPF on aarch64-linux) :(
+    m: PVmtMethodEntry;
+    r: ^TPublishedMethodInfo;
+    n: integer;
   begin
     if C = nil then
       exit;
     AddParentsFirst(GetClassParent(C)); // put children methods afterwards
-    Table := PPointer(PtrUInt(C) + PtrUInt(vmtMethodTable))^;
-    if Table = nil then
-      exit;
-    SetLength(Methods, result + Table^[0]);
-    M := @Table^[1];
-    for i := 1 to Table^[0] do  // Table^[0] = methods count
-      with Methods[result] do
-      begin
-        ShortStringToAnsi7String(M^.Name^, Name);
-        Method.Data := Instance;
-        Method.Code := M^.Addr;
-        inc(M);
-        inc(result);
-      end;
+    info := PPointer(PtrUInt(C) + PtrUInt(vmtMethodTable))^;
+    if info = nil then
+      exit; // no published method for this class level
+    n := info[0];
+    if n = 0 then
+      exit; // paranoid
+    SetLength(Methods, result + n);
+    r := @Methods[result];
+    inc(result, n);
+    m := @info[1];
+    repeat
+      ShortStringToAnsi7String(m^.Name^, r^.Name);
+      r^.Method.Data := Instance;
+      r^.Method.Code := m^.CodeAddress;
+      inc(r);
+      inc(m);
+      dec(n);
+    until n = 0;
   end;
 
 begin
@@ -950,7 +953,7 @@ var
   new: pointer;
 begin
   if cp <= CP_OEMCP then // TranslatePlaceholderCP logic
-    cp := DefaultSystemCodePage;
+    cp := Unicode_CodePage;
   new := FastNewString(len, cp);
   if buf <> nil then
     MoveFast(buf^, new^, len);
@@ -1080,7 +1083,7 @@ begin
       p := pointer(s[i]);
       if p <> nil then
         // use mormot.core.unicode efficient conversion
-        t.AddNoJsonEscape(p, _lstrlen(RawByteString(p)), _lstrcp(RawByteString(p), cp));
+        t.AddNoJsonEscapeCP(p, _lstrlen(RawByteString(p)), _lstrcp(RawByteString(p), cp));
     end;
     t.SetText(u);
   finally
@@ -1212,7 +1215,7 @@ begin
   {$ifdef FPC_HAS_CPSTRING}
   RedirectCode(@fpc_setstring_ansistr, @_setstring_ansistr_pansichar);
   // Delphi/Windows is never natively UTF-8, but FPC+Lazarus is very likely :)
-  if DefaultSystemCodePage = CP_UTF8 then
+  if Unicode_CodePage = CP_UTF8 then
   begin
     // dedicated UTF-8 concatenation RTL function replacements
     RedirectCode(@fpc_ansistr_concat, @_ansistr_concat_utf8);

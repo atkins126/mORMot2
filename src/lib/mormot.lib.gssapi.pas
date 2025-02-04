@@ -78,12 +78,22 @@ type
   end;
   gss_buffer_t = ^gss_buffer_desc;
 
+  gss_channel_bindings_struct = record
+    initiator_addrtype: cardinal;
+    initiator_address: gss_buffer_desc;
+    acceptor_addrtype: cardinal;
+    acceptor_address: gss_buffer_desc;
+    application_data: gss_buffer_desc;
+  end;
+  gss_channel_bindings_t = ^gss_channel_bindings_struct;
+
   {$A+} // back to usual class/record alignment
 
 
 const
   GSS_C_NO_NAME = nil;
   GSS_C_NO_OID  = nil;
+  GSS_C_NO_CHANNEL_BINDINGS = nil;
 
   GSS_C_GSS_CODE  = 1;
   GSS_C_MECH_CODE = 2;
@@ -249,7 +259,7 @@ type
       mech_type: gss_OID;
       req_flags: cardinal;
       time_req: cardinal;
-      input_chan_bindings: pointer;
+      input_chan_bindings: gss_channel_bindings_t;
       input_token: gss_buffer_t;
       actual_mech_type: gss_OID_ptr;
       output_token: gss_buffer_t;
@@ -260,7 +270,7 @@ type
       var context_handle: pointer;
       acceptor_cred_handle: pointer;
       input_token_buffer: gss_buffer_t;
-      input_chan_bindings: pointer;
+      input_chan_bindings: gss_channel_bindings_t;
       src_name: gss_name_t;
       mech_type: gss_OID_ptr;
       output_token: gss_buffer_t;
@@ -329,8 +339,7 @@ type
     fMinorStatus: cardinal;
   public
     /// initialize an gssapi library exception with the proper error message
-    constructor Create(aMajorStatus, aMinorStatus: cardinal;
-      const aPrefix: RawUtf8);
+    constructor Create(aMajor, aMinor: cardinal; const aPrefix: RawUtf8);
   published
     /// associated GSS_C_GSS_CODE state value
     property MajorStatus: cardinal
@@ -415,6 +424,8 @@ type
     CredHandle: pointer;
     CtxHandle: pointer;
     CreatedTick64: Int64;
+    ChannelBindingsHash: pointer;
+    ChannelBindingsHashLen: cardinal;
   end;
   PSecContext = ^TSecContext;
 
@@ -425,7 +436,7 @@ type
 
 /// Sets aSecHandle fields to empty state for a given connection ID
 procedure InvalidateSecContext(var aSecContext: TSecContext;
-  aConnectionID: Int64);
+  aConnectionID: Int64 = 0; aTick64: Int64 = 0);
 
 /// Free aSecContext on client or server side
 procedure FreeSecContext(var aSecContext: TSecContext);
@@ -509,7 +520,9 @@ function ServerSspiAuth(var aSecContext: TSecContext;
 
 /// Server-side function that returns authenticated user name
 // - aSecContext must be received from previous successful call to ServerSspiAuth
-// - aUserName contains authenticated user name
+// - aUserName contains authenticated user name, as 'NETBIOSNAME\username' pattern,
+// following ServerDomainMapRegister() mapping, or 'REALM.TLD\username` if
+// global ServerDomainMapUseRealm was forced to true
 procedure ServerSspiAuthUser(var aSecContext: TSecContext;
   out aUserName: RawUtf8);
 
@@ -551,6 +564,15 @@ const
   /// character used as marker in user name to indicates the associated domain
   SSPI_USER_CHAR = '@';
 
+var
+  /// ServerSspiAuthUser() won't return NT4-style NetBIOS name but the realm
+  // - the GSS API only returns the realm (mydomain.tld) whereas Windows SSPI
+  // returns the NetBIOS name (e.g. MYDOMAIN)
+  // - default false will try to guess the NetBIOS name, or use
+  // ServerDomainRegister()
+  // - forcing this flag to true will let ServerSspiAuthUser() return the realm,
+  // i.e. 'MYDOMAIN.TLD\username'
+  ServerDomainMapUseRealm: boolean = false;
 
 /// help converting fully qualified domain names to NT4-style NetBIOS names
 // - to use the same value for TAuthUser.LogonName on all platforms, user name
@@ -561,7 +583,8 @@ const
 // - you can change domain name conversion by registering names at server startup,
 // e.g. ServerDomainMapRegister('CORP.ABC.COM', 'ABCCORP') change conversion for
 // previous example to 'ABCCORP\user1'
-// - used only if automatic conversion (truncate on first dot) does it wrong
+// - used only if automatic conversion (truncate on first dot) does it wrong,
+// and if ServerDomainMapUseRealm flag has not been forced to true
 // - this method is thread-safe
 procedure ServerDomainMapRegister(const aOld, aNew: RawUtf8);
 
@@ -575,6 +598,7 @@ procedure ServerDomainMapUnRegisterAll;
 /// high-level cross-platform initialization function
 // - as called e.g. by mormot.rest.client/server.pas
 // - in this unit, will just call LoadGssApi('')
+// - you can set GssLib_Custom global variable to load a specific .so library
 function InitializeDomainAuth: boolean;
 
 
@@ -741,32 +765,32 @@ begin
         (MsgCtx = 0);
 end;
 
-constructor EGssApi.Create(aMajorStatus, aMinorStatus: cardinal;
-  const aPrefix: RawUtf8);
+constructor EGssApi.Create(aMajor, aMinor: cardinal; const aPrefix: RawUtf8);
 var
   Msg: RawUtf8;
 begin
   Msg := aPrefix;
-  GetDisplayStatus(Msg, aMajorStatus, GSS_C_GSS_CODE);
-  if (aMinorStatus <> 0) and
-     (aMinorStatus <> 100001) then
-    GetDisplayStatus(Msg, aMinorStatus, GSS_C_MECH_CODE);
-//writeln('ERROR: ', Msg);
+  GetDisplayStatus(Msg, aMajor, GSS_C_GSS_CODE);
+  if (aMinor <> 0) and
+     (aMinor <> 100001) then
+    GetDisplayStatus(Msg, aMinor, GSS_C_MECH_CODE);
   inherited Create(Utf8ToString(Msg));
-  fMajorStatus := AMajorStatus;
-  fMinorStatus := AMinorStatus;
+  fMajorStatus := aMajor;
+  fMinorStatus := aMinor;
 end;
 
 
 { ****************** Middle-Level GSSAPI Wrappers }
 
 procedure InvalidateSecContext(var aSecContext: TSecContext;
-  aConnectionID: Int64);
+  aConnectionID, aTick64: Int64);
 begin
   aSecContext.ID := aConnectionID;
   aSecContext.CredHandle := nil;
   aSecContext.CtxHandle := nil;
-  aSecContext.CreatedTick64 := 0;
+  aSecContext.CreatedTick64 := aTick64;
+  aSecContext.ChannelBindingsHash := nil;
+  aSecContext.ChannelBindingsHashLen := 0;
 end;
 
 procedure FreeSecContext(var aSecContext: TSecContext);
@@ -857,6 +881,33 @@ end;
 var
   ForceSecKerberosSpn: RawUtf8;
 
+type
+  TGssBindIdent = array[0..20] of AnsiChar;
+  TGssBind = packed record
+    head: gss_channel_bindings_struct;
+    ident: TGssBindIdent;
+    hash: THash512;
+  end;
+
+const
+  GSS_SERVERENDPOINT: TGssBindIdent = 'tls-server-end-point:';
+
+function SetBind(const SC: TSecContext; var Bind: TGssBind): gss_channel_bindings_t;
+begin
+  result := nil;
+  if SC.ChannelBindingsHash = nil then
+    exit;
+  if SC.ChannelBindingsHashLen > SizeOf(Bind.hash) then
+    raise EGssApi.CreateFmt('ClientSspi: ChannelBindingsHashLen=%d>%d',
+      [SC.ChannelBindingsHashLen, SizeOf(Bind.hash)]);
+  FillCharFast(Bind.head, SizeOf(Bind.head), 0);
+  Bind.ident := GSS_SERVERENDPOINT;
+  MoveFast(SC.ChannelBindingsHash^, Bind.hash, SC.ChannelBindingsHashLen);
+  Bind.head.application_data.value := @Bind.ident;
+  Bind.head.application_data.length := SC.ChannelBindingsHashLen + SizeOf(Bind.ident);
+  result := @Bind;
+end;
+
 function ClientSspiAuthWorker(var aSecContext: TSecContext;
   const aInData: RawByteString; const aSecKerberosSpn: RawUtf8;
   out aOutData: RawByteString; aMech: gss_OID): boolean;
@@ -867,6 +918,7 @@ var
   OutBuf: gss_buffer_desc;
   CtxReqAttr: cardinal;
   CtxAttr: cardinal;
+  Bind: TGssBind;
 begin
   TargetName := nil;
   if aSecKerberosSpn <> '' then
@@ -887,8 +939,8 @@ begin
     OutBuf.length := 0;
     OutBuf.value := nil;
     MajStatus := GssApi.gss_init_sec_context(MinStatus, aSecContext.CredHandle,
-      aSecContext.CtxHandle, TargetName, aMech,
-      CtxReqAttr, GSS_C_INDEFINITE, nil, @InBuf, nil, @OutBuf, @CtxAttr, nil);
+      aSecContext.CtxHandle, TargetName, aMech, CtxReqAttr, GSS_C_INDEFINITE,
+        SetBind(aSecContext, Bind), @InBuf, nil, @OutBuf, @CtxAttr, nil);
     GccCheck(MajStatus, MinStatus,
       'ClientSspiAuthWorker: Failed to initialize security context');
     result := (MajStatus and GSS_S_CONTINUE_NEEDED) <> 0;
@@ -930,7 +982,6 @@ begin
   if aSecContext.CredHandle = nil then
   begin
     // first call: create the needed context for the current user
-    aSecContext.CreatedTick64 := GetTickCount64();
     MajStatus := GssApi.gss_acquire_cred(MinStatus, nil, GSS_C_INDEFINITE,
       m, GSS_C_INITIATE, aSecContext.CredHandle, nil, nil);
     GccCheck(MajStatus, MinStatus,
@@ -965,7 +1016,6 @@ begin
   begin
     // first call: create the needed context for those credentials
     UserName := nil;
-    aSecContext.CreatedTick64 := GetTickCount64;
     u := aUserName;
     Split(u, '@', n, p);
     if p = '' then
@@ -1009,14 +1059,14 @@ var
   InBuf: gss_buffer_desc;
   OutBuf: gss_buffer_desc;
   CtxAttr: cardinal;
+  Bind: TGssBind;
 begin
   RequireGssApi;
-  if aSecContext.CredHandle = nil then
+  if aSecContext.CredHandle = nil then // initial call
   begin
-    aSecContext.CreatedTick64 := GetTickCount64;
-    if IdemPChar(pointer(aInData), 'NTLMSSP') then
-      raise EGssApi.CreateFmt(
-        'NTLM authentication not supported by GSSAPI library', []);
+    if IdemPChar(pointer(aInData), 'NTLM') then
+      raise ENotSupportedException.Create(
+        'NTLM authentication not supported by the GSSAPI library');
     MajStatus := GssApi.gss_acquire_cred(
       MinStatus, nil, GSS_C_INDEFINITE, nil, GSS_C_ACCEPT,
       aSecContext.CredHandle, nil, nil);
@@ -1027,7 +1077,8 @@ begin
   OutBuf.length := 0;
   OutBuf.value := nil;
   MajStatus := GssApi.gss_accept_sec_context(MinStatus, aSecContext.CtxHandle,
-    aSecContext.CredHandle, @InBuf, nil, nil, nil, @OutBuf, @CtxAttr, nil, nil);
+    aSecContext.CredHandle, @InBuf, SetBind(aSecContext, Bind), nil, nil,
+    @OutBuf, @CtxAttr, nil, nil);
   GccCheck(MajStatus, MinStatus, 'Failed to accept client credentials');
   result := (MajStatus and GSS_S_CONTINUE_NEEDED) <> 0;
   FastSetRawByteString(aOutData, OutBuf.value, OutBuf.length);
@@ -1108,7 +1159,7 @@ begin
   if DomainStart <> nil then
   begin
     DomainStart^ := #0;
-    Inc(DomainStart);
+    inc(DomainStart);
     if ServerDomainMap <> nil then
     begin
       DomainLen := StrLen(DomainStart);
@@ -1118,7 +1169,7 @@ begin
           with ServerDomainMap[i] do
             if IdemPropNameU(Old, DomainStart, DomainLen) then
             begin
-              Domain := New;
+              Domain := New; // = '' after ServerDomainMapUnRegister()
               break;
             end;
       finally
@@ -1127,20 +1178,23 @@ begin
     end;
     if {%H-}Domain = '' then
     begin
-      DomainEnd := PosChar(DomainStart, '.');
-      if DomainEnd <> nil then
-        repeat // e.g. 'user@AD.MYCOMP.TLD' -> 'MYCOMP'
-          DomainNext := PosChar(DomainEnd + 1, '.');
-          if DomainNext = nil then
-            break; // we found the last '.TLD'
-          DomainStart := DomainEnd + 1;
-          DomainEnd := DomainNext;
-        until false;
-      if DomainEnd <> nil then
-        DomainEnd^ := #0;
-      Domain := DomainStart;
+      if not ServerDomainMapUseRealm then // keep 'AD.MYDOMAIN.TLD' if true
+      begin
+        DomainEnd := PosChar(DomainStart, '.');
+        if DomainEnd <> nil then
+          repeat // e.g. 'user@AD.MYDOMAIN.TLD' -> 'MYDOMAIN'
+            DomainNext := PosChar(DomainEnd + 1, '.');
+            if DomainNext = nil then
+              break; // we found the last '.TLD'
+            DomainStart := DomainEnd + 1;
+            DomainEnd := DomainNext;
+          until false;
+        if DomainEnd <> nil then
+          DomainEnd^ := #0; // truncate to 'MYDOMAIN'
+      end;
+      Domain := DomainStart; // 'MYDOMAIN' or 'AD.MYDOMAIN.TLD'
     end;
-    User := P;
+    User := P; // 'username'
     aUserName := Domain + '\' + User;
   end
   else

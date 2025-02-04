@@ -29,6 +29,8 @@ uses
   mormot.core.os,
   mormot.core.unicode,
   mormot.core.text,
+  mormot.core.variants,
+  mormot.core.datetime,
   mormot.core.data,
   mormot.core.log,
   mormot.core.threads,
@@ -82,7 +84,7 @@ type
   /// stores a WebSockets frame
   // - see @http://tools.ietf.org/html/rfc6455 for reference
   TWebSocketFrame = record
-    /// the interpretation of the frame data
+    /// the content of the frame data, typically focText or focBinary
     opcode: TWebSocketFrameOpCode;
     /// what is stored in the frame data, i.e. in payload field
     content: TWebSocketFramePayloads;
@@ -295,9 +297,10 @@ type
     fUri: RawUtf8;
     fLastError: string;
     fEncryption: IProtocol;
+    procedure AfterUpgrade(aProcess: TWebSocketProcess); virtual;
     // focText/focBinary or focContinuation/focConnectionClose from ProcessStart/Stop
     procedure ProcessIncomingFrame(Sender: TWebSocketProcess;
-      var request: TWebSocketFrame; const info: RawUtf8); virtual; abstract;
+      var Request: TWebSocketFrame; const Info: RawUtf8); virtual; abstract;
     function SendFrames(Owner: TWebSocketProcess;
       var Frames: TWebSocketFrameDynArray; var FramesCount: integer): boolean; virtual;
     procedure AfterGetFrame(var frame: TWebSocketFrame); virtual;
@@ -316,10 +319,19 @@ type
     // specify an URI to limit the protocol upgrade to a single resource
     constructor Create(const aName, aUri: RawUtf8); reintroduce;
     /// compute a new instance of the WebSockets protocol, with same parameters
-    function Clone(const aClientUri: RawUtf8): TWebSocketProtocol; virtual; abstract;
-    /// returns Name by default, but could be e.g. 'synopsebin, synopsebinary'
+    // - by default, will return nil, as expected for Client-side only
+    function Clone(const aClientUri: RawUtf8): TWebSocketProtocol; virtual;
+    /// reuse an existing protocol instance on a new connection
+    // - called e.g. by THttpClientWebSockets.WebSocketsUpgrade(aReconnect=true)
+    procedure Reset; virtual;
+    /// the sub-protocols supported by this client (not used on server side)
+    // - as transmitted in the 'Sec-WebSocket-Protocol:' header during upgrade
+    // - returns Name by default, but could be e.g. 'synopsebin, synopsebinary'
+    // - some protocols have no sub-protocol, so would return '' here
     function GetSubprotocols: RawUtf8; virtual;
-    /// specify the recognized sub-protocols, e.g. 'synopsebin, synopsebinary'
+    /// recognize a supported sub-protocol (on both client and server sides)
+    // - should return true on success, i.e. if aProtocolName has been recognized
+    // - check against Name by default, but could be e.g. 'synopsebin, synopsebinary'
     function SetSubprotocol(const aProtocolName: RawUtf8): boolean; virtual;
     /// create the internal Encryption: IProtocol according to the supplied key
     // - any asymmetric algorithm needs to know its side, i.e. client or server
@@ -384,7 +396,7 @@ type
       read fUpgradeUri write fUpgradeUri;
     /// the "Bearer" HTTP header value on which this protocol has been upgraded
     property UpgradeBearerToken: RawUtf8
-      read fUpgradeBearerToken;
+      read fUpgradeBearerToken write fUpgradeBearerToken;
     /// the last error message, during frame processing
     property LastError: string
       read fLastError;
@@ -419,7 +431,7 @@ type
     fSequencing: boolean;
     fSequence: integer;
     procedure ProcessIncomingFrame(Sender: TWebSocketProcess;
-       var request: TWebSocketFrame; const info: RawUtf8); override;
+       var Request: TWebSocketFrame; const Info: RawUtf8); override;
     procedure FrameCompress(const Head: RawUtf8; const Values: array of const;
       const Content, ContentType: RawByteString; var frame: TWebSocketFrame);
         virtual; abstract;
@@ -500,7 +512,7 @@ type
       var FramesCount: integer): boolean; override;
     procedure ProcessIncomingFrames(Sender: TWebSocketProcess; P, PMax: PByte);
     procedure ProcessIncomingFrame(Sender: TWebSocketProcess;
-      var request: TWebSocketFrame; const info: RawUtf8); override;
+      var Request: TWebSocketFrame; const Info: RawUtf8); override;
     function GetFramesInCompression: integer;
     function GetFramesOutCompression: integer;
   public
@@ -534,9 +546,9 @@ type
         reintroduce; overload;
     /// compute a new instance of the WebSockets protocol, with same parameters
     function Clone(const aClientUri: RawUtf8): TWebSocketProtocol; override;
-    /// returns Name by default, but could be e.g. 'synopsebin, synopsebinary'
+    /// overriden to return 'synopsebin, synopsebinary' sub-protocols
     function GetSubprotocols: RawUtf8; override;
-    /// specify the recognized sub-protocols, e.g. 'synopsebin, synopsebinary'
+    /// recognize our 'synopsebin, synopsebinary' sub-protocols
     function SetSubprotocol(const aProtocolName: RawUtf8): boolean; override;
   published
     /// how compression / encryption is implemented during the transmission
@@ -773,6 +785,7 @@ type
     procedure Log(const frame: TWebSocketFrame; const aMethodName: ShortString;
       aEvent: TSynLogLevel = sllTrace; DisableRemoteLog: boolean = false); virtual;
     function SendPendingOutgoingFrames: integer;
+    procedure WaitThreadStarted;
     function HiResDelay(var start: Int64): Int64;
   public
     /// initialize the WebSockets process on a given connection
@@ -785,6 +798,9 @@ type
     // - if needed, will notify the other end with a focConnectionClose frame
     // - will release the TWebSocketProtocol associated instance
     destructor Destroy; override;
+    /// reuse an existing process instance on a new connection
+    // - called e.g. by THttpClientWebSockets.WebSocketsUpgrade(aReconnect=true)
+    procedure Reset(aConnectionID: THttpServerConnectionID); virtual;
     /// abstract low-level method to retrieve pending input data
     // - should return the number of bytes (<=count) received and written to P
     // - is defined separated to allow multi-thread pooling
@@ -980,12 +996,13 @@ type
   protected
     fOnIncomingFrame: TOnWebSocketProtocolChatIncomingFrame;
     procedure ProcessIncomingFrame(Sender: TWebSocketProcess;
-      var request: TWebSocketFrame; const info: RawUtf8); override;
+      var Request: TWebSocketFrame; const Info: RawUtf8); override;
   public
     /// initialize the chat protocol with an incoming frame callback
+    // - if you need no "Sec-WebSocket-Protocol:" header, specify aName = ''
     constructor Create(const aName, aUri: RawUtf8;
        const aOnIncomingFrame: TOnWebSocketProtocolChatIncomingFrame); overload;
-    /// compute a new instance of the WebSockets protocol, with same parameters
+    /// compute a new instance of this WebSockets protocol, with same parameters
     function Clone(const aClientUri: RawUtf8): TWebSocketProtocol; override;
     /// allows to send a message over the wire to a specified connection
     // - a temporary copy of the Frame content will be made for safety
@@ -1000,7 +1017,6 @@ type
     property OnIncomingFrame: TOnWebSocketProtocolChatIncomingFrame
       read fOnIncomingFrame write fOnIncomingFrame;
   end;
-
 
 var
   /// if set, will log all WebSockets raw information
@@ -1024,6 +1040,11 @@ var
 type
   /// define the Engine.IO available packet types
   // - defined in their numeric order, so ord() would give the proper ID number
+  // - eioOpen (0) is used during the handshake
+  // - eioClose (1) indicates that a transport can be closed
+  // - eioPing (2) and eioPong (3) implement a heartbeat mechanism
+  // - eioMessage (4) sends a payload to the other side
+  // - eioUpgrade (5) and eioNoop (6) are used during the upgrade process
   TEngineIOPacket = (
    eioOpen,
    eioClose,
@@ -1032,99 +1053,362 @@ type
    eioMessage,
    eioUpgrade,
    eioNoop);
+  PEngineIOPacket = ^TEngineIOPacket;
 
   /// define the Socket.IO available packet types
   // - defined in their numeric order, so ord() would give the proper ID number
   // - such packets are likely to be nested in a eioMessage frame
+  // - sioConnect (0) and sioConnectError (4) are used during connection to a namespace
+  // - sioDisconnect (1) is used when disconnecting from a namespace
+  // - sioEvent (2) is used to send data to the other side
+  // - sioAck (3) is used to acknowledge an event
+  // - sioBinaryEvent (5) is used to send binary data to the other side
+  // - sioBinaryAck (6) is used to acknowledge an event with a binary response
   TSocketIOPacket = (
-    sioOpen,
+    sioConnect,
     sioDisconnect,
     sioEvent,
     sioAck,
     sioConnectError,
     sioBinaryEvent,
     sioBinaryAck);
+  PSocketIOPacket = ^TSocketIOPacket;
 
+  /// Socket.IO sequence used for event acknowledgment
+  TSocketIOAckID = integer;
 
-/// compute the URI for a WebSocket-only Engine.IO upgrade
-// - server should respond with a HTTP_SWITCHINGPROTOCOLS = 101 response,
-// followed with a eioOpen response frame
-// - PollingUpgradeSid can be used from an upgrade on a long-polling connection
-function SocketIOHandshakeUri(const Root: RawUtf8 = '/socket.io/';
-  const PollingUpgradeSid: RawUtf8 = ''): RawUtf8;
+  /// define a raw decoded Socket.IO message content
+  {$ifdef USERECORDWITHMETHODS}
+  TSocketIOMessage = record
+  {$else}
+  TSocketIOMessage = object
+  {$endif USERECORDWITHMETHODS}
+  private
+    fSender: TWebSocketProcess;
+    fNameSpace: pointer;
+    fNameSpaceLen: PtrInt;
+    fData: PUtf8Char;
+    fDataLen: PtrInt;
+    fPacketType: TSocketIOPacket;
+    fDataBinary: boolean;
+    fID: TSocketIOAckID;
+    fBinaryAttachment: cardinal;
+  public
+    /// decode a Socket.IO raw text packet into its message fields
+    // - mainly used for testing purposes
+    function Init(const PayLoad: RawUtf8): boolean;
+    /// decode a Socket.IO raw packet into its message fields
+    // - returns true on success, false if the input PayLoad is incorrect
+    function InitBuffer(PayLoad: PUtf8Char; PayLoadLen: PtrInt;
+      PayLoadBinary: boolean; Process: TWebSocketProcess): boolean;
+    /// quickly check if the NameSpace value does match (case sensitive)
+    function NameSpaceIs(const Name: RawUtf8): boolean;
+    /// retrieve the NameSpace value as a new RawUtf8
+    procedure NameSpaceGet(out Dest: RawUtf8);
+    /// retrieve the NameSpace value as a shortstring (used e.g. for RaiseESockIO)
+    function NameSpaceShort: shortstring;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// quickly check if the Data content does match (mainly used for testing)
+    function DataIs(const Content: RawUtf8): boolean;
+    /// decode the Data content JSON payload into a TDocVariant
+    // - can optionally override the default JSON_SOCKETIO options
+    // - warning: the Data/DataLen buffer will be decoded in-place, so modified
+    function DataGet(out Dest: TDocVariantData;
+      Options: PDocVariantOptions = nil): boolean;
+    /// raise a ESockIO exception with the specified text context
+    procedure RaiseESockIO(const ctx: RawUtf8);
+    /// low-level kind of Socket.IO packet of this message
+    property PacketType: TSocketIOPacket
+      read fPacketType;
+    /// optional low-level Socket.IO acknowledge ID of this message
+    property ID: TSocketIOAckID
+      read fID;
+    /// optional low-level Socket.IO binary attachement ID of this message
+    property BinaryAttachment: cardinal
+      read fBinaryAttachment;
+    /// access to the internal NameSpace text buffer - for internal use
+    // - call NameSpaceIs() and NameSpaceGet() functions instead
+    // - warning: this buffer is NOT #0 ended but follows NameSpaceLen
+    property NameSpace: pointer
+      read fNameSpace;
+    /// access to the internal NameSpace text buffer length - for internal use
+    property NameSpaceLen: PtrInt
+      read fNameSpaceLen;
+    /// low-level access to the WebSockets instance specified to InitBuffer
+    property Sender: TWebSocketProcess
+      read fSender;
+  end;
 
-/// event names 'connect', 'message' and 'disconnect' are reserved
-function SocketIOReserved(const event: RawUtf8): boolean;
+const
+  /// constant used if no TSocketIOAckID is necessary
+  SIO_NO_ACK = 0;
 
+function ToText(p: TEngineIOPacket): PShortString; overload;
+function ToText(p: TSocketIOPacket): PShortString; overload;
+
+var
+  /// define how TSocketIOMessage.DataGet() returns its TDocVariant value
+  // - equals JSON_[mNameValue] by default to include dvoNameCaseSensitive
+  JSON_SOCKETIO: TDocVariantOptions =
+    [dvoReturnNullForUnknownProperty,
+     dvoValueCopiedByReference,
+     dvoNameCaseSensitive];
 
 type
+  TSocketIOLocalNamespace = class;
+
+  /// exception class raised during Engine.IO process
+  EEngineIO = class(ESynException);
   /// exception class raised during Socket.IO process
   ESocketIO = class(ESynException);
 
+  /// Socket.IO process Acknowledgment callback
+  TOnSocketIOAck = procedure(const Message: TSocketIOMessage) of object;
+
+  /// internal slot for one Socket.IO process Acknowledgment callback
+  TSocketIOCallback = record
+    Ack: TSocketIOAckID;
+    OnAck: TOnSocketIOAck;
+  end;
+  PSocketIOCallback = ^TSocketIOCallback;
+
+  /// Socket.IO process Event handler callback signature
+  // - the associated JSON data is decoded and supplied as a TDocVariant dvArray
+  // - if the result is not '', it is expected to be JSON array acknowledgment
+  // payload, e.g. from JsonEncodeArray([])
+  TOnSocketIOEvent = function(Sender: TSocketIOLocalNamespace;
+    const EventName: RawUtf8; const Data: TDocVariantData): RawJson of object;
+  /// Socket.IO process published methods handler signature
+  // - the associated JSON data is decoded and supplied as a TDocVariant dvArray
+  // - required signature of TSocketIOLocalNamespace.RegisterPublishedMethods()
+  // - if the result is not '', it is expected to be JSON array acknowledgment
+  // payload, e.g. from JsonEncodeArray([])
+  TOnSocketIOMethod = function(const Data: TDocVariantData): RawJson of object;
+
   /// abstract parent for client side and server side Engine.IO sessions support
   // - several Socket.IO namespaces are maintained over this main Engine.IO session
+  // - properties do contain the values of a typical connection response like
+  // ${"sid":"dwy_mNoFzsrMlhINAAAA","upgrades":[],"pingTimeout":20000,"pingInterval":25000}
+  // - since we only implement WebSocket, "upgrades" is expected to be always void
   TEngineIOAbstract = class(TSynPersistent)
   protected
-    fSafe: TLightLock;
-    fVersion: integer;
+    fWebSockets: TWebCrtSocketProcess;
     fEngineSid: RawUtf8;
-    fPingInterval, fPingTimeout, fMaxPayload: integer;
-    fNameSpaces: TRawUtf8DynArray;
+    fPingInterval, fPingTimeout, fMaxPayload, fVersion: integer;
   public
-    /// initialize this class instance with some default values
+    /// initialize this instance with its default values
     constructor Create; override;
-  published
     /// the associated Engine.IO Session ID
-    // - as computed on the server side, and received on client side
+    // - as computed on the server side, and received on client side as "sid"
+    // - is typically a base-64 encoded binary like 'dwy_mNoFzsrMlhINAAAA'
     property EngineSid: RawUtf8
       read fEngineSid;
-    /// the protocol version used by this class, as used for EIO=? parmeter
+    /// the protocol version used by this class, as used for EIO=? parameter
     // - is currently fixed to 4
     property Version: integer
       read fVersion;
-    /// the ping interval, used in Engine.IO heartbeat mechanism (in milliseconds)
-    // - ping packets are now sent by the server, since protocol v4
-    // - default value is 20000, i.e. 20 seconds
-    property PingInterval: integer
-      read fPingInterval write fPingInterval;
     /// the ping timeout, used in Engine.IO heartbeat mechanism (in milliseconds)
-    // - default value is 25000, i.e. 25 seconds
+    // - ping packets are now sent by the server, since protocol v4
+    // - as computed on the server side, and received on client side as "pingTimeout"
+    // - default value is 20000, i.e. 20 seconds
     property PingTimeout: integer
       read fPingTimeout write fPingTimeout;
+    /// the ping interval, used in Engine.IO heartbeat mechanism (in milliseconds)
+    // - ping packets are now sent by the server, since protocol v4
+    // - as computed on the server side, and received on client side as "pingInterval"
+    // - default value is 25000, i.e. 25 seconds
+    property PingInterval: integer
+      read fPingInterval write fPingInterval;
     /// optional number of bytes per chunk, used in Engine.IO payloads mechanism
-    // - default value is 0, meaning no
+    // - as computed on the server side, and received on client side as "maxPayload"
+    // - default value is 0, meaning no limitation is requested
     property MaxPayload: integer
       read fMaxPayload write fMaxPayload;
   end;
 
-  /// abstract parent for one client side and server side Socket.IO session
-  // - each session has its own namespace
+  /// abstract parent for local and remote socketio namespaces
+  // - each session (sid) has its own namespace
   TSocketIONamespace = class(TSynPersistent)
   protected
     fOwner: TEngineIOAbstract;
-    fSid, fNameSpace: RawUtf8;
+    fNameSpace: RawUtf8;
   public
     /// access to the associates Engine.IO main connection
     property Owner: TEngineIOAbstract
       read fOwner;
   published
-    /// the associated Socket.IO Session ID, as computed on the server side
+    /// the associated namespace, as established between client and server
     // - default namespace is '/'
-    property Sid: RawUtf8
-      read fSid;
-    /// the associated Socket.IO Session ID, as computed on the server side
     property NameSpace: RawUtf8
       read fNameSpace;
   end;
   PSocketIONamespace = ^TSocketIONamespace;
 
+  /// abstract parent class for remote namespace object
+  // - emit events to remote namespace (ie client->server or server->client)
+  // - dispatch received sioAck to effective handler
+  TSocketIORemoteNamespace = class(TSocketIONamespace)
+  protected
+    fSid, fHandshakeData: RawUtf8;
+    fAckIdCursor: TSocketIOAckID;
+    fCallbacks: array of TSocketIOCallback;
+    /// Generate a new event acknowledgment ID, incrementing the internal cursor
+    function GenerateAckId(const aOnAck: TOnSocketIOAck): TSocketIOAckID;
+  public
+    /// initialize this instance
+    constructor Create(aOwner: TEngineIOAbstract;
+      const aNameSpace, aSid, aHandshakeData: RawUtf8); reintroduce; virtual;
+    /// initialize a new instance from an incoming connection message
+    constructor CreateFromConnectMessage(const aMessage: TSocketIOMessage;
+      const aHandshakeData: RawUtf8; aOwner: TEngineIOAbstract);
+    /// emit an event to Self.NameSpace, with an optional callback
+    // - returns the packet ID if aCallback is assigned, SIO_NO_ACK otherwise
+    // - aDataArray is an optional JSON array of values, without any [ ] chars
+    function SendEvent(const aEventName: RawUtf8; const aDataArray: RawUtf8 = '';
+      const aOnAck: TOnSocketIOAck = nil): TSocketIOAckID;
+    /// handle an acknowledge message and call the associated callback
+    // - will raise an ESocketIO if the packet is invalid or ID was not found
+    procedure Acknowledge(const aMessage: TSocketIOMessage);
+    /// low-level associated JSON array data supplied to Connect()
+    property HandshakeData: RawUtf8
+      read fHandshakeData write fHandshakeData;
+  published
+    /// the associated Socket.IO Session ID, as computed on the server side
+    property Sid: RawUtf8
+      read fSid;
+  end;
+  PSocketIORemoteNamespace = ^TSocketIORemoteNamespace;
+  TSocketIORemoteNamespaces = array of TSocketIORemoteNamespace;
 
-/// case insensitive search within an array of TSocketIONamespace
+  /// a local Socket.IO namespace definition
+  TEventHandler = record
+    /// the event name (should be the first field for TDynArrayHashed)
+    Name: RawUtf8;
+    /// the event callback which will be executed for this event name
+    OnEvent: TOnSocketIOEvent;
+    /// the published method which will be executed for this event name
+    OnMethod: TOnSocketIOMethod;
+  end;
+  PEventHandler = ^TEventHandler;
+  TLocalNamespaceEventHandlers = array of TEventHandler;
+
+  /// options to tune globally TSocketIOLocalNamespace behavior
+  // - snoIgnoreUnknownEvent will let HandleEvent() raise no exception and
+  // ignore if the received event name is unknown
+  // - snoIgnoreIncorrectData will let HandleEvent raise no exception and
+  // ignore if the received message has unexpected/incorrect associated JSON
+  TSocketIOLocalNamespaceOption = (
+    snoIgnoreUnknownEvent,
+    snoIgnoreIncorrectData);
+  TSocketIOLocalNamespaceOptions = set of TSocketIOLocalNamespaceOption;
+
+  /// abstract parent class for local namespace object
+  // - map namespace event to their handlers
+  // - dispatch received sioEvent to effective handler
+  TSocketIOLocalNamespace = class(TSocketIONamespace)
+  protected
+    fHandler: TLocalNamespaceEventHandlers;
+    fHandlers: TDynArrayHashed;
+    fOptions: TSocketIOLocalNamespaceOptions;
+    // called by Create: can override this method to register some events
+    procedure RegisterHandlers; virtual;
+  public
+    /// global callback triggerred when any event message is received and
+    // decoded for this name space
+    OnEventReceived: procedure(Sender: TSocketIOLocalNamespace;
+      const EventName: RawUtf8; var Data: TDocVariantData) of object;
+    /// initialize this instance
+    constructor Create(aOwner: TEngineIOAbstract;
+      const aNamespace: RawUtf8 = '/'); reintroduce;
+    /// register an event with an associated callback
+    // - returns self to be used as a fluid interface, e.g.
+    // from TSocketsIOClient.Local()
+    function RegisterEvent(const aEventName: RawUtf8;
+      const aCallback: TOnSocketIOEvent): TSocketIOLocalNamespace;
+    /// register all published methods of a class as event handlers
+    // - published method names are case-sensitive Socket.IO event names
+    // - the methods should follow the TOnSocketIOMethod exact signature, e.g.
+    // ! function eventname(const Data: TDocVariantData): RawJson;
+    procedure RegisterPublishedMethods(aInstance: TObject);
+    /// register all handlers of another local namespace
+    // - as used by TSocketsIOClient.OnReconnect()
+    procedure RegisterFrom(aAnother: TSocketIOLocalNamespace);
+    /// dispatch an event message to the appropriate handler
+    procedure HandleEvent(const aMessage: TSocketIOMessage;
+      aIgnoreUnknownEvent: boolean); virtual;
+    /// raw access to the internal events list
+    property Handler: TLocalNamespaceEventHandlers
+      read fHandler;
+    /// customize the process on this local namespace
+    property Options: TSocketIOLocalNamespaceOptions
+      read fOptions write fOptions;
+  end;
+  PSocketIOLocalNamespace = ^TSocketIOLocalNamespace;
+  TSocketIOLocalNamespaces = array of TSocketIOLocalNamespace;
+
+  /// meta-class of the TSocketIOLocalNamespace hierarchy
+  TSocketIOLocalNamespaceClass = class of TSocketIOLocalNamespace;
+
+  /// abstract parent for client or server Engine.IO protocol over WebSockets frames
+  // - Engine.IO is the low-level connection/heartbeat protocol on which the
+  // Socket.IO bidirectional multiplexed communication protocol is built
+  // - this abstract class will redirect all incoming frames to FrameReceived(),
+  // send an eioPong when an eioPing is received
+  TWebSocketEngineIOProtocol = class(TWebSocketProtocol)
+  protected
+    fOpened: boolean;
+    procedure ProcessIncomingFrame(Sender: TWebSocketProcess;
+      var Request: TWebSocketFrame; const Info: RawUtf8); override;
+    procedure EnginePacketReceived(Sender: TWebSocketProcess; PacketType: TEngineIOPacket;
+      PayLoad: PUtf8Char; PayLoadLen: PtrInt; PayLoadBinary: boolean); virtual; abstract;
+  public
+    // overriden to return '' i.e. recognize by URI, not "Sec-WebSocket-Protocol:"
+    function GetSubprotocols: RawUtf8; override;
+    function SetSubprotocol(const aProtocolName: RawUtf8): boolean; override;
+    /// true when Engine.IO messages can be processed
+    // - i.e. after OPEN (eioOpen) and before CLOSE (eioClose)
+    property Opened: boolean
+      read fOpened;
+  end;
+
+  /// abstract parent for client or server Socket.IO protocol over WebSockets frames
+  TWebSocketSocketIOProtocol = class(TWebSocketEngineIOProtocol)
+  protected
+    // this is the (abstract) main entry point for incoming Socket.IO messages
+    procedure SocketPacketReceived(const Message: TSocketIOMessage); virtual; abstract;
+  end;
+
+/// compute the URI for a WebSocket-only Engine.IO upgrade
+// - server should respond with a HTTP_SWITCHINGPROTOCOLS = 101 response,
+// followed with a eioOpen response frame
+// - PollingUpgradeSid can be used from an upgrade on a long-polling connection
+function EngineIOHandshakeUri(const Root: RawUtf8 = '/socket.io/';
+  const PollingUpgradeSid: RawUtf8 = ''): RawUtf8;
+
+/// encode and send an Engine.IO message over the wire to a specified connection
+// - Sender identifies the connection, typically from FrameReceived() method
+function EngineIOSendPacket(Sender: TWebSocketProcess;
+  Payload: pointer; PayloadLen: PtrInt; PayLoadBinary: boolean;
+  PacketType: TEngineIOPacket = eioMessage): boolean;
+
+
+/// Socket.IO event names 'connect', 'message' and 'disconnect' are reserved
+function SocketIOReserved(const event: RawUtf8): boolean;
+
+/// encode and send a Socket.IO packet to a given WebSockets connection
+procedure SocketIOSendPacket(aWebSockets: TWebCrtSocketProcess;
+  aOperation: TSocketIOPacket; const aNamespace: RawUtf8;
+  aPayload: pointer = nil; aPayloadLen: PtrInt = 0;
+  ackId: TSocketIOAckID = SIO_NO_ACK);
+
+/// efficient case-sensitive search within an array of TSocketIONamespace
+// - if name = '' (i.e. namelen is 0), will search for '/'
 function SocketIOGetNameSpace(one: PSocketIONamespace; count: integer;
-  const name: RawUtf8): pointer;
+  name: PUtf8Char; namelen: TStrLen): TSocketIONamespace;
 
 /// retrieve the NameSpace properties of an array of TSocketIONamespace
-function SocketIOGetNameSpaces(one: PSocketIONamespace; count: integer): TRawUtf8DynArray;
+procedure SocketIOGetNameSpaces(one: PSocketIONamespace; count: integer;
+  out Dest: TRawUtf8DynArray);
 
 
 implementation
@@ -1203,7 +1487,6 @@ begin
     frame.content := [];
 end;
 
-
 { TWebSocketFrameEncoder }
 
 function TWebSocketFrameEncoder.Prepare(const Frame: TWebSocketFrame;
@@ -1219,7 +1502,7 @@ begin
   else if len < 65536 then
   begin
     hdr.len8 := FRAME_LEN_2BYTES or MaskSentFrames;
-    hdr.len32 := swap(word(len)); // FPC requires explicit word() cast
+    hdr.len32 := bswap16(len);
     hdrlen := 4; // opcode+len8+len32.low
   end
   else
@@ -1278,6 +1561,20 @@ begin
   fConnectionFlags := [hsrWebsockets];
 end;
 
+procedure TWebSocketProtocol.Reset;
+begin
+end;
+
+function TWebSocketProtocol.Clone(const aClientUri: RawUtf8): TWebSocketProtocol;
+begin
+  result := nil; // no clone needed for a client-side protocol
+end;
+
+procedure TWebSocketProtocol.AfterUpgrade(aProcess: TWebSocketProcess);
+begin
+  // see e.g. TWebSocketSocketIOClientProtocol.AfterUpgrade override
+end;
+
 procedure TWebSocketProtocol.SetEncryptKey(aServer: boolean; const aKey: RawUtf8;
   aSettings: PWebSocketProcessSettings);
 var
@@ -1302,14 +1599,14 @@ begin
   else
   begin
     // 2. aKey no 'a=...'/'pw#xx.private' layout -> use symmetric TProtocolAes
-    if aSettings.AesRounds = 0 then
+    if aSettings^.AesRounds = 0 then
       // mORMot 1.18 deprecated password derivation
       Sha256Weak(aKey, key.b)
     else
       // new safer password derivation algorithm (rounds=1000 -> 1ms)
-      Pbkdf2Sha3(SHA3_256, aKey, aSettings.AesSalt, aSettings.AesRounds,
+      Pbkdf2Sha3(SHA3_256, aKey, aSettings^.AesSalt, aSettings^.AesRounds,
         @key, SizeOf(key));
-    SetEncryptKeyAes(aSettings.AesCipher, key, aSettings.AesBits);
+    SetEncryptKeyAes(aSettings^.AesCipher, key, aSettings^.AesBits);
   end;
 end;
 
@@ -1566,7 +1863,7 @@ end;
 { TWebSocketProtocolRest }
 
 procedure TWebSocketProtocolRest.ProcessIncomingFrame(Sender: TWebSocketProcess;
-  var request: TWebSocketFrame; const info: RawUtf8);
+  var Request: TWebSocketFrame; const Info: RawUtf8);
 var
   Ctxt: THttpServerRequestAbstract;
   onRequest: TOnHttpServerRequest;
@@ -1575,25 +1872,25 @@ var
   answer: TWebSocketFrame;
   head: RawUtf8;
 begin
-  if not (request.opcode in [focText, focBinary]) then
+  if not (Request.opcode in [focText, focBinary]) then
     exit; // ignore e.g. from ProcessStart/ProcessStop
-  if FrameData(request, 'r', @head) <> nil then
+  if FrameData(Request, 'r', @head) <> nil then
   try
-    // regular HTTP-like request from client
+    // regular HTTP-like Request from client
     Ctxt := Sender.ComputeContext(onRequest);
     try
-      // prepare the HTTP request from input frame
+      // prepare the HTTP Request from input frame
       if (Ctxt = nil) or
          (not Assigned(onRequest)) then
         EWebSockets.RaiseUtf8('%.ProcessOne: onRequest=nil', [self]);
       if (head = '') or
-         not FrameToInput(request, noAnswer, Ctxt) then
+         not FrameToInput(Request, noAnswer, Ctxt) then
         EWebSockets.RaiseUtf8('%.ProcessOne: invalid frame', [self]);
-      request.payload := ''; // release memory ASAP
+      Request.payload := ''; // release memory ASAP
       if fUpgradeBearerToken <> '' then
         Ctxt.AuthBearer := fUpgradeBearerToken; // re-pass the HTTP bearer
-      if info <> '' then
-        Ctxt.AddInHeader(info);  // include JUMBO_INFO[] custom header
+      if Info <> '' then
+        Ctxt.AddInHeader(Info);  // include JUMBO_INFO[] custom header
       // compute the HTTP answer from the main HTTP server
       status := onRequest(Ctxt);
       if noAnswer or
@@ -1611,14 +1908,14 @@ begin
       FormatString('% [%]', [E, E.Message], fLastError);
   end
   else if (Sender.fIncoming.AnswerToIgnore > 0) and
-          (FrameData(request, 'answer') <> nil) then
+          (FrameData(Request, 'answer') <> nil) then
   begin
     Sender.fIncoming.AnswerToIgnore(-1);
-    Sender.Log(request, 'Ignored answer after NotifyCallback TIMEOUT', sllWarning);
+    Sender.Log(Request, 'Ignored answer after NotifyCallback TIMEOUT', sllWarning);
   end
   else
     // e.g. async 'answer' to store in the internal incoming frames list
-    Sender.fIncoming.Push(request, 0);
+    Sender.fIncoming.Push(Request, 0);
 end;
 
 procedure TWebSocketProtocolRest.InputToFrame(Ctxt: THttpServerRequestAbstract;
@@ -1876,7 +2173,7 @@ var
   enc: array of TWebSocketFrameEncoder;
   i, len: PtrInt;
   P: PAnsiChar;
-  tmp: TSynTempBuffer; // to avoid most memory allocation
+  tmp: TSynTempBuffer; // to avoid most memory allocations
 begin
   if (FramesCount = 0) or
      (Owner = nil) then
@@ -2190,15 +2487,15 @@ begin
 end;
 
 procedure TWebSocketProtocolBinary.ProcessIncomingFrame(
-  Sender: TWebSocketProcess; var request: TWebSocketFrame; const info: RawUtf8);
+  Sender: TWebSocketProcess; var Request: TWebSocketFrame; const Info: RawUtf8);
 var
   P, PMax: PByte;
 begin
-  P := FrameData(request, 'frames', nil, @PMax);
+  P := FrameData(Request, 'frames', nil, @PMax);
   if P <> nil then
     ProcessIncomingFrames(Sender, P, PMax)
   else
-    inherited ProcessIncomingFrame(Sender, request, info);
+    inherited ProcessIncomingFrame(Sender, Request, Info);
 end;
 
 function TWebSocketProtocolBinary.GetFramesInCompression: integer;
@@ -2232,16 +2529,14 @@ end;
 
 function TWebSocketProtocolBinary.SetSubprotocol(const aProtocolName: RawUtf8): boolean;
 begin
+  result := false;
   case FindPropName(['synopsebin', 'synopsebinary'], aProtocolName) of
     0:
       fSequencing := true;
     1:
       fSequencing := false;
   else
-    begin
-      result := false;
-      exit;
-    end;
+    exit;
   end;
   result := true;
 end;
@@ -2474,6 +2769,7 @@ var
   Digest: TSha1Digest;
 begin
   // validate WebSockets protocol upgrade request
+  Protocol := nil;
   result := HTTP_BADREQUEST;
   if not IsGet(Http.CommandMethod) or
      not PropNameEquals(Http.Upgrade, 'websocket') then
@@ -2620,6 +2916,7 @@ begin
   fOutgoing := TWebSocketFrameList.Create(0);
   InitializeCriticalSection(fSafeIn);
   InitializeCriticalSection(fSafeOut);
+  fProtocol.AfterUpgrade(self); // e.g. for TWebSocketSocketIOClientProtocol
 end;
 
 procedure TWebSocketProcess.Shutdown(waitForPong: boolean);
@@ -2699,6 +2996,14 @@ begin
   DeleteCriticalSection(fSafeIn); // to be done lately to avoid GPF
   DeleteCriticalSection(fSafeOut);
   inherited Destroy;
+end;
+
+procedure TWebSocketProcess.Reset(aConnectionID: THttpServerConnectionID);
+begin
+  fConnectionID := 0;
+  fState := wpsCreate;
+  fProcessEnded := false;
+  fProtocol.Reset;
 end;
 
 procedure TWebSocketProcess.ProcessStart;
@@ -2899,6 +3204,18 @@ begin
   except // don't be optimistic: abort and close connection
     fState := wpsClose;
   end;
+end;
+
+procedure TWebSocketProcess.WaitThreadStarted;
+var
+  endtix: Int64;
+begin
+  endtix := GetTickCount64 + 5000;
+  repeat
+    SleepHiRes(0);
+  until fProcessEnded or
+        (fState <> wpsCreate) or
+        (GetTickCount64 > endtix);
 end;
 
 function TWebSocketProcess.HiResDelay(var start: Int64): Int64;
@@ -3230,7 +3547,7 @@ begin
   begin
     if not HasBytes(@hdr, 4) then // first+len8+len32.low
       exit;
-    hdr.len32 := swap(word(hdr.len32)); // FPC expects explicit word() cast
+    hdr.len32 := bswap16(hdr.len32);
   end
   else if hdr.len8 = FRAME_LEN_8BYTES then
   begin
@@ -3370,11 +3687,11 @@ begin
 end;
 
 procedure TWebSocketProtocolChat.ProcessIncomingFrame(Sender: TWebSocketProcess;
-  var request: TWebSocketFrame; const info: RawUtf8);
+  var Request: TWebSocketFrame; const Info: RawUtf8);
 begin
   if Assigned(OnInComingFrame) then
   try
-    OnIncomingFrame(Sender, request);
+    OnIncomingFrame(Sender, Request);
   except
     // ignore any exception in the callback
   end;
@@ -3419,7 +3736,424 @@ end;
 
 // reference: https://sockjs.com/docs/v4/socket-io-protocol/
 
-function SocketIOHandshakeUri(const Root, PollingUpgradeSid: RawUtf8): RawUtf8;
+const
+  /// the default Socket.IO remote name space if none ('') is supplied
+  DefaultSocketIONameSpace: RawUtf8 = '/';
+
+function ToText(p: TEngineIOPacket): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TEngineIOPacket), ord(p));
+end;
+
+function ToText(p: TSocketIOPacket): PShortString;
+begin
+  result := GetEnumName(TypeInfo(TSocketIOPacket), ord(p));
+end;
+
+
+
+{ TSocketIOMessage }
+
+function TSocketIOMessage.InitBuffer(PayLoad: PUtf8Char; PayLoadLen: PtrInt;
+  PayLoadBinary: boolean; Process: TWebSocketProcess): boolean;
+var
+  v: PtrUInt;
+begin
+  result := false;
+  if (PayLoad = nil) or
+     (PayLoadLen = 0) then
+    exit;
+  fPacketType := TSocketIOPacket(PByte(PayLoad)^ - ord('0'));
+  if byte(fPacketType) > byte(high(fPacketType)) then
+    exit;
+  fSender := Process;
+  fNameSpaceLen := 1; // '/' by default (if not specified)
+  fNameSpace := pointer(DefaultSocketIONameSpace);
+  fID := 0;
+  fBinaryAttachment := 0;
+  inc(PayLoad);
+  dec(PayLoadLen);
+  if PayLoadLen <> 0 then
+  begin
+    if PayLoad^ in ['1' ..'9'] then
+    begin
+      v := 0;
+      repeat
+        v := (v * 10) + PtrUInt(ord(PayLoad^) - ord('0'));
+        inc(PayLoad);
+        dec(PayLoadLen);
+      until (PayLoadLen = 0) or
+            not (PayLoad^ in ['0'..'9']);
+      if PayLoad^ = '-' then
+      begin
+        fBinaryAttachment := v;
+        inc(PayLoad);
+        dec(PayLoadLen);
+      end
+      else
+        fID := v;
+    end;
+    if (PayLoadLen <> 0) and
+       (PayLoad^ = '/') then
+    begin
+      fNameSpace := PayLoad;
+      repeat
+        inc(PayLoad);
+        dec(PayLoadLen);
+      until (PayLoadLen = 0) or
+            (PayLoad^ = ',');
+      fNameSpacelen := PayLoad - fNameSpace;
+      if (PayLoadLen <> 0) and
+         (PayLoad^ = ',') then
+      begin
+        inc(PayLoad);
+        dec(PayLoadLen);
+      end;
+    end;
+    if fID = 0 then
+      while (PayLoadLen <> 0) and
+            (PayLoad^ in ['0'..'9']) do
+      begin
+        fID := (fID * 10) + (ord(PayLoad^) - ord('0'));
+        inc(PayLoad);
+        dec(PayLoadLen);
+      end;
+  end;
+  if PayLoadLen = 0 then
+    PayLoad := nil;
+  fData := PayLoad;
+  fDataLen := PayLoadLen;
+  fDataBinary := PayLoadBinary;
+  result := true;
+end;
+
+function TSocketIOMessage.Init(const PayLoad: RawUtf8): boolean;
+begin
+  result := InitBuffer(pointer(PayLoad), length(PayLoad), {binary=}false, nil);
+end;
+
+function TSocketIOMessage.NameSpaceIs(const Name: RawUtf8): boolean;
+begin
+  result := (length(Name) = fNameSpaceLen) and
+            ((fNameSpaceLen = 0) or
+             CompareMemFast(pointer(Name), fNameSpace, fNameSpaceLen));
+end;
+
+procedure TSocketIOMessage.NameSpaceGet(out Dest: RawUtf8);
+begin
+  FastSetString(Dest, fNameSpace, fNameSpaceLen);
+end;
+
+function TSocketIOMessage.NameSpaceShort: shortstring;
+begin
+  SetString(result, PAnsiChar(fNameSpace), fNameSpaceLen);
+end;
+
+function TSocketIOMessage.DataIs(const Content: RawUtf8): boolean;
+begin
+  result := (length(Content) = fDataLen) and
+            ((fDataLen = 0) or
+             CompareMemFast(pointer(Content), fData, fDataLen));
+end;
+
+function TSocketIOMessage.DataGet(out Dest: TDocVariantData;
+  Options: PDocVariantOptions): boolean;
+begin
+  if Options = nil then
+    Options := @JSON_SOCKETIO;
+  result := Dest.InitJsonInPlace(fData, Options^) <> nil;
+end;
+
+procedure TSocketIOMessage.RaiseESockIO(const ctx: RawUtf8);
+begin
+  ESocketIO.RaiseUtf8('% NameSpace=% Data=%', [ctx, NameSpaceShort, fData]);
+end;
+
+
+{ TSocketIOLocalNamespace }
+
+constructor TSocketIOLocalNamespace.Create(aOwner: TEngineIOAbstract;
+  const aNamespace: RawUtf8);
+begin
+  inherited Create;
+  fOwner := aOwner;
+  fNameSpace := aNamespace;
+  fHandlers.InitSpecific(
+    TypeInfo(TLocalNamespaceEventHandlers), fHandler, ptRawUtf8, nil, false);
+  RegisterHandlers;
+end;
+
+procedure TSocketIOLocalNamespace.RegisterHandlers;
+begin
+  // nothing to register by default
+end;
+
+function TSocketIOLocalNamespace.RegisterEvent(const aEventName: RawUtf8;
+  const aCallback: TOnSocketIOEvent): TSocketIOLocalNamespace;
+begin
+  PEventHandler(fHandlers.AddUniqueName(aEventName,
+     'Duplicated event name %', [aEventName]))^.OnEvent := aCallback;
+  result := self;
+end;
+
+procedure TSocketIOLocalNamespace.RegisterPublishedMethods(aInstance: TObject);
+var
+  met: TPublishedMethodInfoDynArray;
+  m: PtrInt;
+begin
+  for m := 0 to GetPublishedMethods(aInstance, met) - 1 do
+    PEventHandler(fHandlers.AddUniqueName(met[m].Name,
+       'Duplicated event name % on %', [met[m].Name, aInstance]))^.
+      OnMethod := TOnSocketIOMethod(met[m].Method);
+end;
+
+procedure TSocketIOLocalNamespace.RegisterFrom(aAnother: TSocketIOLocalNamespace);
+var
+  i: integer;
+  s: PEventHandler;
+begin
+  if aAnother = nil then
+    exit;
+  s := pointer(aAnother.fHandler);
+  for i := 1 to length(aAnother.fHandler) do
+  begin
+    PEventHandler(fHandlers.AddUniqueName(s^.Name))^ := s^;
+    inc(s);
+  end;
+end;
+
+procedure TSocketIOLocalNamespace.HandleEvent(const aMessage: TSocketIOMessage;
+  aIgnoreUnknownEvent: boolean);
+var
+  ndx: PtrInt;
+  event, ack: RawUtf8;
+  data: TDocVariantData;
+  d: PDocVariantData;
+begin
+  // validate input context (paranoid checks)
+  if (fNameSpace <> '*') and
+     not aMessage.NameSpaceIs(fNameSpace) then
+    ESocketIO.RaiseUtf8('%.HandleEvent: unexpected namespace ([%]<>[%])',
+      [self, aMessage.NameSpaceShort, fNameSpace]);
+  if aMessage.PacketType <> sioEvent then
+    ESocketIO.RaiseUtf8('%.HandleEvent: unexpected % message for namespace %',
+      [self, ToText(aMessage.PacketType)^, fNameSpace]);
+  // decode the input JSON array
+  if not aMessage.DataGet(data) or
+     not data.IsArray or
+     (data.Count = 0) then
+    if snoIgnoreIncorrectData in fOptions then
+      exit // ignore in silence
+    else
+      ESocketIO.RaiseUtf8('%.HandleEvent: message is not a JSON array', [self]);
+  VariantToUtf8(data.Values[0], event);
+  data.Delete(0); // trim the event name from the data array
+  d := @data;
+  if (d^.Count = 1) and
+     _Safe(d^.Values[0])^.IsObject then
+    d := _Safe(d^.Values[0]); // return a single object as root (common case)
+  // optional callback
+  if Assigned(OnEventReceived) then
+    OnEventReceived(self, event, d^);
+  // retrieve event name and search for associated handler
+  ndx := fHandlers.FindHashed(event);
+  if ndx < 0 then
+    if aIgnoreUnknownEvent or
+       (snoIgnoreUnknownEvent in fOptions) then
+      exit // ignore in silence
+    else
+      ESocketIO.RaiseUtf8('%.HandleEvent: unknown event % for namespace %',
+        [event, fNameSpace]);
+  // call the handler
+  with fHandler[ndx] do
+    if Assigned(OnEvent) then
+      ack := OnEvent(self, event, d^)
+    else if Assigned(OnMethod) then
+      ack := OnMethod(d^);
+  // optionally call back the server with an ACK payload
+  if (ack <> '') and
+     (aMessage.ID <> SIO_NO_ACK) then
+    SocketIOSendPacket(fOwner.fWebSockets, sioAck, fNameSpace,
+      pointer(ack), length(ack), aMessage.ID);
+end;
+
+
+{ TSocketIORemoteNamespace }
+
+constructor TSocketIORemoteNamespace.Create(aOwner: TEngineIOAbstract;
+  const aNameSpace, aSid, aHandshakeData: RawUtf8);
+begin
+  inherited Create;
+  fOwner := aOwner;
+  if aNameSpace = '' then
+    fNameSpace := DefaultSocketIONameSpace
+  else
+    fNameSpace := aNameSpace;
+  fSid := aSid;
+  fHandshakeData := aHandshakeData;
+end;
+
+constructor TSocketIORemoteNamespace.CreateFromConnectMessage(
+  const aMessage: TSocketIOMessage; const aHandshakeData: RawUtf8; aOwner: TEngineIOAbstract);
+var
+  data: TDocVariantData;
+  sid, namespace: RawUtf8;
+begin
+  if not aMessage.DataGet(data) or
+     not data.GetAsRawUtf8('sid', sid) then
+    EEngineIO.RaiseUtf8('%.Create: missing "sid" in message', [aOwner]);
+  aMessage.NameSpaceGet(namespace);
+  Create(aOwner, namespace, sid, aHandshakeData);
+end;
+
+function SocketIOCallbackSearch(cb: PSocketIOCallback; n: integer;
+  id: TSocketIOAckID): PSocketIOCallback;
+begin // fast O(n) CPU cache brute force search - only a few pending ACK anyway
+  result := cb;
+  if result <> nil then
+    repeat
+      if result^.Ack = id then
+        exit;
+      inc(result);
+      dec(n);
+    until n = 0;
+  result := nil;
+end;
+
+function TSocketIORemoteNamespace.GenerateAckId(
+  const aOnAck: TOnSocketIOAck): TSocketIOAckID;
+var
+  cb: PSocketIOCallback;
+  n: PtrInt;
+begin
+  result := InterlockedIncrement(fAckIdCursor);
+  n := Length(fCallbacks);
+  cb := SocketIOCallbackSearch(pointer(fCallbacks), n, SIO_NO_ACK); // search any void
+  if cb = nil then
+  begin
+    SetLength(fCallbacks, NextGrow(n)); // no void slot: allocate some new ones
+    cb := @fCallbacks[n];
+  end;
+  cb^.Ack := result;
+  cb^.OnAck := aOnAck;
+  result := result;
+end;
+
+function TSocketIORemoteNamespace.SendEvent(const aEventName, aDataArray: RawUtf8;
+  const aOnAck: TOnSocketIOAck): TSocketIOAckID;
+var
+  tmp: TSynTempBuffer;
+begin
+  result := SIO_NO_ACK;
+  if Assigned(aOnack) then
+    result := GenerateAckId(aOnAck);
+  tmp.Init(length(aEventName) + length(aDataArray) + 8); // pre-allocate
+  try
+    tmp.AddDirect('[', '"');
+    tmp.Add(aEventName);
+    tmp.AddDirect('"');
+    if aDataArray <> '' then
+    begin
+      tmp.AddDirect(',');
+      tmp.Add(aDataArray);
+    end;
+    tmp.AddDirect(']');
+    SocketIOSendPacket(fOwner.fWebSockets,
+      sioEvent, fNameSpace, tmp.buf, tmp.added, result);
+  finally
+    tmp.Done;
+  end;
+end;
+
+procedure TSocketIORemoteNamespace.Acknowledge(const aMessage: TSocketIOMessage);
+var
+  cb: PSocketIOCallback;
+begin
+  // validate message
+  if not aMessage.NameSpaceIs(fNameSpace) then
+    ESocketIO.RaiseUtf8('%.Acknowledge: unexpected namespace ([%]<>[%])',
+      [self, aMessage.NameSpaceShort, fNameSpace]);
+  if (aMessage.PacketType <> sioAck) or
+     (aMessage.ID = SIO_NO_ACK) then
+    ESocketIO.RaiseUtf8('%.Acknowledge: message %#% is not a valid ' +
+      'acknowledgment message for namespace %',
+      [self, ToText(aMessage.PacketType)^, aMessage.ID, fNameSpace]);
+  // search for the registered callback
+  cb := SocketIOCallbackSearch(pointer(fCallbacks), length(fCallbacks), aMessage.ID);
+  if cb = nil then
+    ESocketIO.RaiseUtf8('%.Acknowledge: callback for message ID % not found ' +
+      '(may already have been consumed) for namespace %',
+        [self, aMessage.ID, fNameSpace]);
+  // call the registered callback and remove it from the callback list
+  cb^.OnAck(aMessage);
+  cb^.Ack := SIO_NO_ACK; // O(1) void the slot - to be reused for the next ack
+end;
+
+
+{ TEngineIOSessionsAbstract }
+
+constructor TEngineIOAbstract.Create;
+begin
+  // server-side initialization with default values
+  inherited Create;
+  fVersion := 4;
+  fPingTimeout := 20000;
+  fPingInterval := 25000;
+end;
+
+
+{ TWebSocketEngineIOProtocol }
+
+function TWebSocketEngineIOProtocol.GetSubprotocols: RawUtf8;
+begin
+  result := ''; // no "Sec-WebSocket-Protocol:" header
+end;
+
+function TWebSocketEngineIOProtocol.SetSubprotocol(const aProtocolName: RawUtf8): boolean;
+begin
+  result := false; // should never be called
+end;
+
+procedure TWebSocketEngineIOProtocol.ProcessIncomingFrame(
+  Sender: TWebSocketProcess; var Request: TWebSocketFrame; const Info: RawUtf8);
+var
+  p: TEngineIOPacket;
+begin
+  // focText/focBinary or focContinuation/focConnectionClose
+  if not (Request.opcode in [focText, focBinary]) then
+    exit;
+  if Request.payload = '' then
+    EEngineIO.RaiseUtf8('%.ProcessIncomingFrame with no Payload', [self]);
+  p := TEngineIOPacket(PByte(Request.payload)^ - ord('0'));
+  case p of
+    eioOpen:
+      if fOpened then
+        EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: OPEN twice', [self])
+      else
+        fOpened := true;
+    eioClose:
+      if fOpened then
+        fOpened := false
+      else
+        EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: unexpected CLOSE', [self]);
+    eioPing:
+      EngineIOSendPacket(Sender, nil, 0, {binary=}false, eioPong);
+    eioPong:
+      ; // process depends on the client or server side (mostly do nothing)
+    eioMessage:
+      if not fOpened then
+        EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: missing OPEN', [self]);
+  else // eioUpgrade, eioNoop
+    EEngineIO.RaiseUtf8('%.ProcessIncomingFrame: unexpected % (%)',
+      [self, ToText(p)^, Request.payload[1]])
+  end;
+  // call virtual method for proper process of this incoming Engine.IO packet
+  EnginePacketReceived(Sender, p, @PByteArray(Request.payload)[1],
+    length(Request.payload) - 1, (Request.opcode = focBinary));
+end;
+
+
+function EngineIOHandshakeUri(const Root, PollingUpgradeSid: RawUtf8): RawUtf8;
 var
   r: RawUtf8;
 begin
@@ -3444,6 +4178,30 @@ begin
     Append(result, '&sid=', PollingUpgradeSid);
 end;
 
+function EngineIOSendPacket(Sender: TWebSocketProcess;
+  Payload: pointer; PayloadLen: PtrInt; PayLoadBinary: boolean;
+  PacketType: TEngineIOPacket): boolean;
+var
+  tmp: TWebSocketFrame; // SendFrame() may change frame content (e.g. mask)
+begin
+  result := false;
+  if (Sender = nil) or
+     (Sender.State <> wpsRun)  then
+    exit;
+  // create Engine.IO packet within this WebSocket frame
+  tmp.opcode := focText;
+  if PayLoadBinary then
+    tmp.opcode := focBinary;
+  tmp.content := [];
+  tmp.tix := 0;
+  FastSetRawByteString(tmp.payload, nil, PayloadLen + 1);
+  PByteArray(tmp.payload)[0] := ord(PacketType) + ord('0');
+  if PayloadLen <> 0 then
+    MoveFast(PayLoad^, PByteArray(tmp.payload)[1], PayloadLen);
+  result := Sender.SendFrame(tmp);
+end;
+
+
 function SocketIOReserved(const event: RawUtf8): boolean;
 begin
   result := (event = 'connect') or
@@ -3451,41 +4209,35 @@ begin
             (event = 'disconnect'); // case sensitive
 end;
 
-
-{ TEngineIOSessionsAbstract }
-
-constructor TEngineIOAbstract.Create;
-begin
-  inherited Create;
-  fVersion := 4;
-  fPingTimeout := 20000;
-  fPingInterval := 25000;
-end;
-
-
 function SocketIOGetNameSpace(one: PSocketIONamespace; count: integer;
-  const name: RawUtf8): pointer;
+  name: PUtf8Char; namelen: TStrLen): TSocketIONamespace;
 begin
+  if namelen = 0 then // name = '' will search for '/' = DefaultSocketIONameSpace
+  begin
+    name := pointer(DefaultSocketIONameSpace);
+    namelen := length(DefaultSocketIONameSpace);
+  end;
   if one <> nil then
-    repeat
+    repeat // O(n) brute force search is fast enough
       result := one^;
-      if TSocketIONamespace(result).NameSpace = name then
-        exit; // O(n) brute force search is fast enough
+      if (PStrLen(PAnsiChar(pointer(result.NameSpace)) - _STRLEN)^ = namelen) and
+         CompareMemFast(name, pointer(result.NameSpace), namelen) then
+        exit;
       inc(one);
       dec(count);
     until count = 0;
   result := nil;
 end;
 
-function SocketIOGetNameSpaces(one: PSocketIONamespace; count: integer): TRawUtf8DynArray;
+procedure SocketIOGetNameSpaces(one: PSocketIONamespace; count: integer;
+  out Dest: TRawUtf8DynArray);
 var
   p: PRawUtf8;
 begin
-  result := nil;
   if one = nil then
     exit;
-  SetLength(result, count);
-  p := pointer(result);
+  SetLength(Dest , count);
+  p := pointer(Dest);
   repeat
     p^ := one^.NameSpace;
     inc(one);
@@ -3493,6 +4245,35 @@ begin
     dec(count);
   until count = 0;
 end;
+
+procedure SocketIOSendPacket(aWebSockets: TWebCrtSocketProcess;
+  aOperation: TSocketIOPacket; const aNamespace: RawUtf8;
+  aPayload: pointer; aPayloadLen: PtrInt; ackId: TSocketIOAckID);
+var
+  tmp: TSynTempBuffer;
+begin
+  if (aWebSockets = nil) or
+     not aWebSockets.Protocol.InheritsFrom(TWebSocketEngineIOProtocol) then
+    ESocketIO.RaiseUtf8('Unexpected SendSocketPacket(%)', [aWebSockets]);
+  tmp.Init(length(aNameSpace) + aPayloadLen + 32); // pre-allocate (unlikely)
+  try
+    tmp.AddDirect(AnsiChar(ord(aOperation) + ord('0')));
+    if (aNameSpace <> '') and
+       (aNameSpace <> '/') then
+    begin
+      tmp.Add(aNameSpace);
+      tmp.AddDirect(',');
+    end;
+    if ackId <> SIO_NO_ACK then
+      tmp.AddU(ackID);
+    if aPayloadLen <> 0 then
+      tmp.Add(aPayload, aPayloadLen);
+    EngineIOSendPacket(aWebSockets, tmp.buf, tmp.added, {binary=}false);
+  finally
+    tmp.Done;
+  end;
+end;
+
 
 
 initialization

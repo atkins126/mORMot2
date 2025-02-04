@@ -902,6 +902,7 @@ type
   TOrmPropInfoAttributes = set of TOrmPropInfoAttribute;
 
   /// allow a quick detection of some particular TOrmPropInfo classes
+  // - typically used for efficient search of some kind of integer values
   // - picInt32 match TOrmPropInfoRttiInt32
   // - picInt64 match TOrmPropInfoRttiInt64
   TOrmPropInfoClassType = (
@@ -1788,10 +1789,10 @@ type
     // field within a nil object, e.g for
     // !  class TMainObject = class(TOrm)
     // !    (...)
-    // !    fGUID: TGuid;
+    // !    fGuid: TGuid;
     // !  public
     // !    (...)
-    // !    property GUID: TGuid read fGUID write fGUID;
+    // !    property Guid: TGuid read fGuid write fGuid;
     // !  end;
     // you will have to register it via a call to
     // TOrmProperties.RegisterCustomPropertyFromTypeName()
@@ -1976,6 +1977,38 @@ type
     // - won't identify 'ID' / 'RowID' field names, just List[].
     // - raise an EOrmException if not found in the internal list
     function IndexByNameUnflattenedOrExcept(const aName: RawUtf8): PtrInt;
+    /// set all bits corresponding to the supplied field names
+    // - won't identify 'ID' / 'RowID' field names, just List[].
+    // - returns true if all aNames[] have been found and set into aBits
+    function ByNames(const aNames: array of PUtf8Char; out aBits: TFieldBits): boolean;
+    /// set all bits corresponding to the supplied class types
+    // - returns the number of bits set, i.e. the number of matching classes
+    function ByClass(const aClasses: array of TClass;
+      out aBits: TFieldBits; aInherit: boolean = false): integer;
+    /// set all bits corresponding to the supplied RTTI types
+    // - returns the number of bits set, i.e. the number of matching types
+    function ByTypes(const aTypes: array of PRttiInfo; out aBits: TFieldBits): integer;
+    /// set all field indexes corresponding to the supplied field names
+    // - returns true on success, false if any field name is not existing
+    function FieldIndexByNames(const aFields: array of RawUtf8;
+      var Indexes: TFieldIndexDynArray): boolean; overload;
+    /// set all field indexes corresponding to the supplied field names
+    // - returns the matching fields set
+    function FieldIndexByNames(const aFields: array of RawUtf8): TFieldIndexDynArray; overload;
+    /// set all field indexes corresponding to the supplied CSV field names
+    // - returns true on success, false if any field name is not existing
+    function FieldIndexFromCsv(const aFieldsCsv: RawUtf8;
+      var Indexes: TFieldIndexDynArray): boolean; overload;
+    /// set all field indexes corresponding to the supplied CSV field names
+    // - returns the matching fields set
+    function FieldIndexFromCsv(const aFieldsCsv: RawUtf8): TFieldIndexDynArray; overload;
+      {$ifdef HASINLINE} inline; {$endif}
+    /// compute the CSV field names text from a set of bits
+    function ToCsv(const Bits: TFieldBits): RawUtf8;
+    /// compute the CSV field names text from a set of bits with optional prefix/suffix
+    procedure ToCsvText(const Prefix: array of const;
+      const Bits: TFieldBits; const BitsSuffix: ShortString;
+      const Suffix: array of const; out Result: RawUtf8);
     /// fill a TRawUtf8DynArray instance from the field names
     // - excluding ID
     procedure NamesToRawUtf8DynArray(var Names: TRawUtf8DynArray);
@@ -2052,7 +2085,6 @@ type
     /// the corresponding index in fQueryTables[]
     TableIndex: integer;
   end;
-
   POrmTableFieldType = ^TOrmTableFieldType;
 
   {$ifdef NOPOINTEROFFSET}
@@ -2136,13 +2168,12 @@ type
     function GetID(Row: PtrInt): TID;
     /// read-only access to a particular field value, as UTF-8 encoded buffer
     // - if Row and Fields are correct, returns a pointer to the UTF-8 buffer,
-    // or nil if the corresponding JSON was null or ""
+    // nil if the corresponding JSON was null, or result^=#0 from JSON ""
     // - if Row and Fields are not correct, returns nil
     function Get(Row, Field: PtrInt): PUtf8Char; overload;
       {$ifdef HASINLINE}inline;{$endif}
     /// read-only access to a particular field UTF-8 value and length
-    function Get(Row, Field: PtrInt; out Len: integer): PUtf8Char; overload;
-      {$ifdef HASINLINE}inline;{$endif}
+    function GetWithLen(Row, Field: PtrInt; out Len: integer): PUtf8Char;
     /// read-only access to a particular field value, as RawUtf8 text
     function GetU(Row, Field: PtrInt): RawUtf8; overload;
     /// read-only access to a particular field value, as UTF-8 encoded buffer
@@ -2319,7 +2350,6 @@ type
     // may be slightly slower to access than readonly=FALSE, if all values are
     // likely be accessed later in the process
     procedure ToDocVariant(out docarray: variant; readonly: boolean); overload;
-    // {$ifdef HASINLINE}inline;{$endif} won't reset docarray as required
 
     /// save the table values in JSON format
     // - JSON data is added to TResultsWriter, with UTF-8 encoding, and not flushed
@@ -2414,7 +2444,8 @@ type
     function FieldNames: TRawUtf8DynArray;
       {$ifdef HASINLINE}inline;{$endif}
     /// get the Field content (encoded as UTF-8 text) from a property name
-    // - return nil if not found
+    // - return nil if not found, or for a JSON null value
+    // - may return result^ = #0 for JSON ""
     function FieldValue(const FieldName: RawUtf8; Row: PtrInt): PUtf8Char;
       {$ifdef HASINLINE}inline;{$endif}
     /// sort result Rows, according to a specific field
@@ -2654,6 +2685,7 @@ type
       read fFieldCount;
     /// raw access to the data values memory pointers
     // - you should rather use the Get*() methods which can use the length
+    // - returns the text value, nil for JSON null, or #0 for JSON ""
     property Results[Offset: PtrInt]: PUtf8Char
       read GetResults write SetResultsSafe;
     /// raw access to the data values UTF-8 length
@@ -2950,6 +2982,18 @@ type
     function FieldBitsFromRawUtf8(const aFields: array of RawUtf8): TFieldBits; overload;
     function FieldBitsFromRawUtf8(const aFields: array of RawUtf8;
       var Bits: TFieldBits): boolean; overload;
+    function CsvTextFromFieldBits(const Bits: TFieldBits): RawUtf8;
+    procedure CsvFromFieldBits(const Prefix: array of const;
+      const Bits: TFieldBits; const BitsSuffix: ShortString;
+      const Suffix: array of const; out Result: RawUtf8);
+    function FieldIndexDynArrayFromRawUtf8(const aFields: array of RawUtf8;
+      var Indexes: TFieldIndexDynArray): boolean; overload;
+    function FieldIndexDynArrayFromRawUtf8(
+      const aFields: array of RawUtf8): TFieldIndexDynArray; overload;
+    function FieldIndexDynArrayFromCsv(const aFieldsCsv: RawUtf8;
+      var Indexes: TFieldIndexDynArray): boolean; overload;
+    function FieldIndexDynArrayFromCsv(
+      const aFieldsCsv: RawUtf8): TFieldIndexDynArray; overload;
     {$endif PUREMORMOT2}
     /// set all bits corresponding to the supplied CSV field names
     // - returns TRUE on success, FALSE if any field name is not existing
@@ -2966,37 +3010,27 @@ type
     // - returns the matching fields set
     function FieldBitsFromCsv(const aFieldsCsv: RawUtf8): TFieldBits; overload;
     /// set all simple bits corresponding to the simple fields, excluding some
+    // fields specified as their CSV name
     // - could be a convenient alternative to FieldBitsFromCsv() if only some
     // fields are to be excluded
     // - returns the matching fields set
     function FieldBitsFromExcludingCsv(const aFieldsCsv: RawUtf8;
       aOccasion: TOrmOccasion = ooSelect): TFieldBits;
+    /// set all simple bits corresponding to the simple fields, excluding some
+    // fields of the specified class types
+    // - will exclude by default exact class types, unless aInherit is defined
+    // - returns the matching fields set
+    function FieldBitsFromExcludingClass(const aClasses: array of TClass;
+      aOccasion: TOrmOccasion = ooSelect; aInherit: boolean = false): TFieldBits;
+    /// set all simple bits corresponding to the simple fields, excluding some
+    // fields of the specified RTTI types
+    // - returns the matching fields set
+    function FieldBitsFromExcludingTypes(const aTypes: array of PRttiInfo;
+      aOccasion: TOrmOccasion = ooSelect): TFieldBits;
     /// set all bits corresponding to the supplied BLOB field type information
     // - returns TRUE on success, FALSE if blob field is not recognized
     function FieldBitsFromBlobField(aBlobField: PRttiProp;
       var Bits: TFieldBits): boolean;
-    /// compute the CSV field names text from a set of bits
-    function CsvTextFromFieldBits(const Bits: TFieldBits): RawUtf8;
-    /// compute the CSV field names text from a set of bits with optional prefix/suffix
-    procedure CsvFromFieldBits(const Prefix: array of const;
-      const Bits: TFieldBits; const BitsSuffix: ShortString;
-      const Suffix: array of const; out Result: RawUtf8);
-    /// set all field indexes corresponding to the supplied field names
-    // - returns TRUE on success, FALSE if any field name is not existing
-    function FieldIndexDynArrayFromRawUtf8(const aFields: array of RawUtf8;
-      var Indexes: TFieldIndexDynArray): boolean; overload;
-    /// set all field indexes corresponding to the supplied field names
-    // - returns the matching fields set
-    function FieldIndexDynArrayFromRawUtf8(
-      const aFields: array of RawUtf8): TFieldIndexDynArray; overload;
-    /// set all field indexes corresponding to the supplied CSV field names
-    // - returns TRUE on success, FALSE if any field name is not existing
-    function FieldIndexDynArrayFromCsv(const aFieldsCsv: RawUtf8;
-      var Indexes: TFieldIndexDynArray): boolean; overload;
-    /// set all field indexes corresponding to the supplied CSV field names
-    // - returns the matching fields set
-    function FieldIndexDynArrayFromCsv(
-      const aFieldsCsv: RawUtf8): TFieldIndexDynArray; overload;
     /// set all field indexes corresponding to the supplied BLOB field type information
     // - returns TRUE on success, FALSE if blob field is not recognized
     function FieldIndexDynArrayFromBlobField(aBlobField: PRttiProp;
@@ -3165,7 +3199,7 @@ type
     // !  Props: TOrmProperties);
     // !begin
     // !  Props.RegisterCustomPropertyFromTypeName(self, 'TGUID', 'GUID',
-    // !    @TOrmMyRecord(nil).fGUID, [aIsUnique], 38);
+    // !    @TOrmMyRecord(nil).fGuid, [aIsUnique], 38);
     // !end;
     procedure RegisterCustomPropertyFromTypeName(aTable: TClass;
       const aTypeName, aName: RawUtf8; aPropertyPointer: pointer;
@@ -3400,14 +3434,8 @@ begin
   result := GetEnumName(TypeInfo(TOrmVirtualKind), ord(vk));
 end;
 
-
-
-{$ifdef ISDELPHI20062007}
-  {$WARNINGS OFF} // circumvent Delphi 2007 false positive warning
-{$endif ISDELPHI20062007}
-
 const
-  PG_FT: array[TSqlDBFieldType] of string[9] = (
+  PG_FT: array[TSqlDBFieldType] of string[9] = ( // UNNEST(?::###[]) field type
     'int4', 'text', 'int8', 'float8', 'numeric', 'timestamp', 'text', 'bytea');
 
 function EncodeAsSqlPrepared(const Decoder: TJsonObjectDecoder;
@@ -3519,18 +3547,13 @@ begin
           end;
         end;
     else
-      EJsonObjectDecoder.RaiseUtf8('Unexpected EncodeAsSqlPrepared(%)',
-        [ord(Occasion)]);
+      EJsonObjectDecoder.RaiseUtf8('EncodeAsSqlPrepared(%)', [ToText(Occasion)^]);
     end;
     W.SetText(result);
   finally
     W.Free;
   end;
 end;
-
-{$ifdef ISDELPHI20062007}
-  {$WARNINGS ON}
-{$endif ISDELPHI20062007}
 
 const
   /// map our available types for any SQL field property into variant values
@@ -3613,6 +3636,11 @@ procedure ValueVarToVariant(Value: PUtf8Char; ValueLen: integer;
 var
   err: integer;
 begin
+  if Value = nil then
+  begin
+    TSynVarData(result).VType := varNull;
+    exit;
+  end;
   VarClearAndSetType(variant(result), SQL_ELEMENTTYPES[fieldType]);
   result.VAny := nil; // avoid GPF
   case fieldType of
@@ -6757,38 +6785,50 @@ procedure TOrmPropInfoRttiVariant.SetValuePtr(Instance: TObject;
   Value: PUtf8Char; ValueLen: integer; wasString: boolean);
 var
   tmp: TSynTempBuffer;
-  V: Variant;
+  vd: TSynVarData;
+  v: PSynVarData;
 begin
-  if ValueLen > 0 then
+  if fSetterIsFieldPropOffset <> 0 then
+  begin // direct assignment
+    v := pointer(PtrUInt(Instance) + fSetterIsFieldPropOffset);
+    VarClear(PVariant(v)^);
+  end
+  else
+  begin
+    v := @vd; // use temp variant to call a setter method
+    vd.VType := varEmpty;
+  end;
+  if Value <> nil then // Value=nil means null
   begin
     tmp.Init(Value, ValueLen);
     try
       if fOrmFieldType = oftNullable then
-        if fSqlDBFieldType = ftDate then
+        if fSqlDBFieldType = ftDate then // decode as date/time variant
         begin
-          // decode as date/time variant
-          TVarData(V).VType := varDate;
-          TVarData(V).VDate := Iso8601ToDateTimePUtf8Char(Value, ValueLen);
+          v^.VType := varDate;
+          v^.VDate := Iso8601ToDateTimePUtf8Char(Value, ValueLen);
         end
         else
-          GetVariantFromJsonField(tmp.buf, wasString, V, nil, false, ValueLen)
+          GetVariantFromJsonField(
+            tmp.buf, wasString, PVariant(v)^, nil, false, ValueLen)
       else
       begin
         if wasString and
            (GotoNextNotSpace(Value)^ in ['{', '[']) then
           wasString := false; // allow to create a TDocVariant stored as DB text
-        GetVariantFromJsonField(tmp.buf, wasString, V, @DocVariantOptions,false, ValueLen);
+        GetVariantFromJsonField(tmp.buf, wasString, PVariant(v)^,
+          @DocVariantOptions, false, ValueLen);
       end;
     finally
       tmp.Done;
     end;
   end
   else
-    TVarData(V).VType := varNull; // TEXT or NULL: see GetValueVar()
+    v^.VType := varNull; // TEXT or NULL: see GetValueVar()
   if fSetterIsFieldPropOffset <> 0 then
-    PVariant(PtrUInt(Instance) + fSetterIsFieldPropOffset)^ := V
-  else
-    fPropInfo.SetVariantProp(Instance, V);
+    exit;
+  fPropInfo.SetVariantProp(Instance, PVariant(v)^); // call the setter
+  VarClearProc(vd.Data);
 end;
 
 procedure TOrmPropInfoRttiVariant.SetVariant(Instance: TObject; const Source: Variant);
@@ -7375,9 +7415,8 @@ begin
           dec(J);
         end;
       until I > J;
-      if J - L < R - I then
+      if J - L < R - I then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < J then
           QuickSortByName(L, J);
         L := I;
@@ -7591,6 +7630,178 @@ begin
     '%.IndexByNameUnflattenedOrExcept(%): unkwnown field in %', [self, aName, fTable]);
 end;
 
+function TOrmPropInfoList.ByNames(const aNames: array of PUtf8Char;
+  out aBits: TFieldBits): boolean;
+var
+  f, ndx: PtrInt;
+begin
+  FillZero(aBits);
+  result := false;
+  for f := 0 to high(aNames) do
+  begin
+    ndx := IndexByNameU(aNames[f]); // O(log(n)) fast binary search
+    if ndx < 0 then
+      exit; // invalid field name
+    FieldBitSet(aBits, ndx);
+  end;
+  result := true; // all aFields[] were found and set in aBits
+end;
+
+function TOrmPropInfoList.ByClass(const aClasses: array of TClass;
+  out aBits: TFieldBits; aInherit: boolean): integer;
+var
+  f, c: PtrInt;
+  o: TClass;
+begin
+  result := 0;
+  FillZero(aBits);
+  for f := 0 to Count - 1 do
+    if List[f].OrmFieldType = oftObject then
+    begin
+      o := TOrmPropInfoRttiObject(List[f]).ObjectClass;
+      for c := 0 to high(aClasses) do
+        if (aInherit and o.InheritsFrom(aClasses[c])) or
+           ((not aInherit) and (o = aClasses[c])) then
+        begin
+          FieldBitSet(aBits, f);
+          inc(result);
+          break;
+        end;
+    end;
+end;
+
+function TOrmPropInfoList.ByTypes(const aTypes: array of PRttiInfo;
+  out aBits: TFieldBits): integer;
+var
+  f, t: PtrInt;
+  r: PRttiInfo;
+begin
+  result := 0;
+  FillZero(aBits);
+  for f := 0 to Count - 1 do
+    if List[f].InheritsFrom(TOrmPropInfoRtti) then
+    begin
+      r := TOrmPropInfoRtti(List[f]).PropType;
+      for t := 0 to high(aTypes) do
+        if aTypes[t] = r then
+        begin
+          FieldBitSet(aBits, f);
+          inc(result);
+          break;
+        end;
+    end;
+end;
+
+function TOrmPropInfoList.FieldIndexByNames(const aFields: array of RawUtf8;
+  var Indexes: TFieldIndexDynArray): boolean;
+var
+  f, ndx: PtrInt;
+begin
+  result := false;
+  if self = nil then
+    exit;
+  for f := 0 to high(aFields) do
+  begin
+    ndx := IndexByNameU(pointer(aFields[f]));
+    if ndx < 0 then
+      exit; // invalid field name
+    AddFieldIndex(Indexes, ndx);
+  end;
+  result := true;
+end;
+
+function TOrmPropInfoList.FieldIndexByNames(const aFields: array of RawUtf8): TFieldIndexDynArray;
+begin
+  if not FieldIndexByNames(aFields, result) then
+    result := nil;
+end;
+
+function TOrmPropInfoList.FieldIndexFromCsv(const aFieldsCsv: RawUtf8;
+  var Indexes: TFieldIndexDynArray): boolean;
+var
+  ndx: integer;
+  P: PUtf8Char;
+  n: ShortString;
+begin
+  result := false;
+  if self = nil then
+    exit;
+  P := pointer(aFieldsCsv);
+  while P <> nil do
+  begin
+    GetNextItemShortString(P, @n); // n ends with #0
+    if n[0] = #0 then
+      exit;
+    ndx := IndexByNameU(@n[1]);
+    if ndx < 0 then
+      exit; // invalid field name
+    AddFieldIndex(Indexes, ndx);
+  end;
+  result := true;
+end;
+
+function TOrmPropInfoList.FieldIndexFromCsv(const aFieldsCsv: RawUtf8): TFieldIndexDynArray;
+begin
+  if not FieldIndexFromCsv(aFieldsCsv, result) then
+    result := nil;
+end;
+
+function TOrmPropInfoList.ToCsv(const Bits: TFieldBits): RawUtf8;
+var
+  len, l, f: PtrInt;
+  p: PUtf8Char;
+begin
+  len := 0; // pre-compute length
+  for f := 0 to Count - 1 do
+    if FieldBitGet(Bits, f) then
+      inc(len, length(List[f].Name) + 1);
+  if len = 0 then
+  begin
+    result := '';
+    exit;
+  end;
+  FastSetString(result, len - 1); // allocate once for all
+  p := pointer(result);
+  for f := 0 to Count - 1 do
+    if FieldBitGet(Bits, f) then
+    begin
+      l := length(List[f].Name);
+      MoveFast(pointer(List[f].Name)^, p^, l);
+      dec(len, l);
+      if len = 0 then
+        break;
+      inc(p, l);
+      p^ := ',';
+      inc(p);
+    end;
+end;
+
+procedure TOrmPropInfoList.ToCsvText(const Prefix: array of const;
+  const Bits: TFieldBits; const BitsSuffix: ShortString;
+  const Suffix: array of const; out Result: RawUtf8);
+var
+  f: PtrInt;
+  W: TJsonWriter; // TJsonWriter.Add(Prefix) so TTextWriter is not enough
+  temp: TTextWriterStackBuffer;
+begin
+  W := TJsonWriter.CreateOwnedStream(temp);
+  try
+    W.Add(Prefix, twNone);
+    for f := 0 to Count - 1 do
+      if FieldBitGet(Bits, f) then
+      begin
+        W.AddString(List[f].Name);
+        if BitsSuffix <> '' then
+          W.AddShort(BitsSuffix);
+        W.AddComma;
+      end;
+    W.CancelLastComma;
+    W.Add(Suffix, twNone);
+    W.SetText(Result);
+  finally
+    W.Free;
+  end;
+end;
 
 function ClassOrmFieldType(info: PRttiInfo): TOrmFieldType;
 var
@@ -8071,6 +8282,7 @@ var
   t: TTimeLogBits;
   id: TSynUniqueIdentifierBits;
   V: PUtf8Char;
+  ft: POrmTableFieldType;
   enum, err: integer;
   time: RawUtf8;
 begin
@@ -8081,9 +8293,12 @@ begin
     exit; // out of range
   if fFieldType = nil then
     InitFieldTypes;
+  ft := @fFieldType[field];
   row := row * fFieldCount + field;
   V := GetResults(row);
-  with fFieldType[field] do
+  if V = nil then
+    TSynVarData(value).VType := varNull
+  else
     if expandHugeIDAsUniqueIdentifier and
        (field = fFieldIndexID) then
     begin
@@ -8096,18 +8311,18 @@ begin
     else
     begin
       if expandEnumsAsText and
-         (ContentType = oftEnumerate) then
+         (ft^.ContentType = oftEnumerate) then
       begin
         enum := GetInteger(V, err);
         if (err = 0) and
-           (ContentTypeInfo <> nil) then
+           (ft^.ContentTypeInfo <> nil) then
         begin
-          value := PRttiEnumType(ContentTypeInfo)^.GetEnumNameOrd(enum)^;
+          value := PRttiEnumType(ft^.ContentTypeInfo)^.GetEnumNameOrd(enum)^;
           exit;
         end;
       end
       else if expandTimeLogAsText then
-        case ContentType of
+        case ft^.ContentType of
           oftTimeLog,
           oftModTime,
           oftCreateTime,
@@ -8119,9 +8334,9 @@ begin
                 value := 0
               else
               begin
-                if ContentType = oftUnixTime then
+                if ft^.ContentType = oftUnixTime then
                   t.FromUnixTime(t.Value);
-                if ContentType <> oftUnixMSTime then
+                if ft^.ContentType <> oftUnixMSTime then
                   time := t.Text(true)
                 else
                   // no TTimeLog use for milliseconds resolution
@@ -8133,8 +8348,8 @@ begin
               exit;
             end;
         end;
-      ValueVarToVariant(V, GetResultsLen(row, V), ContentType, TVarData(value),
-        {createTempCopy=}true, ContentTypeInfo, options);
+      ValueVarToVariant(V, GetResultsLen(row, V), ft^.ContentType, TVarData(value),
+        {createTempCopy=}true, ft^.ContentTypeInfo, options);
     end;
 end;
 
@@ -8191,7 +8406,7 @@ end;
 procedure TOrmTableAbstract.ToDocVariant(out docarray: variant; readonly: boolean);
 var
   Values: TVariantDynArray;
-begin
+begin // warning: do not inline this method
   ToDocVariant(Values, readonly);
   TDocVariantData(docarray).InitArrayFromVariants(Values, JSON_FAST);
 end;
@@ -8341,7 +8556,8 @@ begin
           for r := 1 to fRowCount do
           begin
             U := GetResults(f);
-            if U = nil then  // search for a non void column
+            if (U = nil) or
+               (U^ = #0) then  // search for a non void column
               inc(f, fFieldCount)
             else
             begin
@@ -8433,25 +8649,19 @@ begin
      (PtrUInt(Field) >= PtrUInt(fFieldCount)) then
     result := nil
   else
-  begin
-    inc(Field, Row * fFieldCount);
-    {$ifdef NOPOINTEROFFSET} // inlined GetResults() for Delphi 7
-    result := fData[Field];
-    {$else}
-    result := PUtf8Char(PtrInt(fData[Field]));
-    if result <> nil then
-      inc(result, PtrUInt(fDataStart));
-    {$endif NOPOINTEROFFSET}
-  end;
+    result := GetResults(Field + Row * fFieldCount);
 end;
 
-function TOrmTableAbstract.Get(Row, Field: PtrInt; out Len: integer): PUtf8Char;
+function TOrmTableAbstract.GetWithLen(Row, Field: PtrInt; out Len: integer): PUtf8Char;
 begin
   if (self = nil) or
-     (fData = nil) or
      (PtrUInt(Row) > PtrUInt(fRowCount)) or
-     (PtrUInt(Field) >= PtrUInt(fFieldCount)) then
-    result := nil
+     (PtrUInt(Field) >= PtrUInt(fFieldCount)) or
+     (fData = nil) then
+  begin
+    Len := 0;
+    result := nil;
+  end
   else
   begin
     inc(Field, Row * fFieldCount);
@@ -8459,8 +8669,10 @@ begin
     result := fData[Field];
     {$else}
     result := PUtf8Char(PtrInt(fData[Field]));
-    if result <> nil then
-      inc(result, PtrUInt(fDataStart));
+    Row := PtrUInt(fDataStart); // in two steps for better code generation
+    if result = nil then
+      Row := PtrInt(result); // compile as branchless cmove on FPC
+    inc(result, Row);
     {$endif NOPOINTEROFFSET}
     {$ifdef NOTORMTABLELEN}
     Len := StrLen(result);
@@ -8475,8 +8687,9 @@ var
   P: PUtf8Char;
   PLen: integer;
 begin
-  P := Get(Row, Field, PLen);
-  if P = nil then
+  P := GetWithLen(Row, Field, PLen);
+  if (P = nil) or
+     (PLen = 0) then
     FastAssignNew(result)
   else
     FastSetString(result, P, PLen);
@@ -8545,24 +8758,24 @@ begin
   if Row = 0 then
     exit; // header
   P := Get(Row, Field);
-  if P = nil then
-    exit;
-  case FieldType(Field) of
-    oftCurrency,
-    oftFloat:
-      result := GetExtended(P);
-    oftInteger, // TOrmTableAbstract.InitFieldTypes may have recognized an integer
-    oftTimeLog,
-    oftModTime,
-    oftCreateTime:
-      result := TimeLogToDateTime(GetInt64(P));
-    oftUnixTime:
-      result := UnixTimeToDateTime(GetInt64(P));
-    oftUnixMSTime:
-      result := UnixMSTimeToDateTime(GetInt64(P));
-  else // oftDateTime and any other kind will try from ISO-8601 text
-    result := Iso8601ToDateTimePUtf8Char(P);
-  end;
+  if (P <> nil) and
+     (P^ <> #0) then
+    case FieldType(Field) of
+      oftCurrency,
+      oftFloat:
+        result := GetExtended(P);
+      oftInteger, // TOrmTableAbstract.InitFieldTypes may have recognized an integer
+      oftTimeLog,
+      oftModTime,
+      oftCreateTime:
+        result := TimeLogToDateTime(GetInt64(P));
+      oftUnixTime:
+        result := UnixTimeToDateTime(GetInt64(P));
+      oftUnixMSTime:
+        result := UnixMSTimeToDateTime(GetInt64(P));
+    else // oftDateTime and any other kind will try from ISO-8601 text
+      result := Iso8601ToDateTimePUtf8Char(P);
+    end;
 end;
 
 function TOrmTableAbstract.GetAsDateTime(Row: PtrInt; const FieldName: RawUtf8): TDateTime;
@@ -8585,8 +8798,9 @@ var
   U: PUtf8Char;
   ULen: integer;
 begin
-  U := Get(Row, Field, ULen);
-  if U = nil then
+  U := GetWithLen(Row, Field, ULen);
+  if (U = nil) or
+     (ULen = 0) then
     result := ''
   else
     {$ifdef UNICODE}
@@ -8602,8 +8816,9 @@ var
   ULen: integer;
 begin
   result := '';
-  U := Get(Row, Field, ULen);
-  if U <> nil then
+  U := GetWithLen(Row, Field, ULen);
+  if (U <> nil) and
+     (ULen <> 0) then
     Utf8ToSynUnicode(U, ULen, result);
 end;
 
@@ -8648,7 +8863,8 @@ begin
   begin
     inc(Field, fFieldCount); // next row - ignore first row = field names
     U := GetResults(Field);
-    FastSetString(Values[i], U, GetResultsLen(Field, U));
+    if U <> nil then
+      FastSetString(Values[i], U, GetResultsLen(Field, U));
   end;
   result := fRowCount;
 end;
@@ -8740,13 +8956,16 @@ begin
   repeat
     inc(Field, fFieldCount); // next row - ignore first row = field names
     U := GetResults(Field);
-    {$ifdef NOTORMTABLELEN}
-    i := StrLen(U);
-    {$else}
-    i := fLen[Field];
-    {$endif NOTORMTABLELEN}
-    MoveFast(U^, P^, i);
-    inc(P, i);
+    if U <> nil then
+    begin
+      {$ifdef NOTORMTABLELEN}
+      i := StrLen(U);
+      {$else}
+      i := fLen[Field];
+      {$endif NOTORMTABLELEN}
+      MoveFast(U^, P^, i);
+      inc(P, i);
+    end;
     dec(n);
     if n = 0 then
       break;
@@ -8815,7 +9034,7 @@ begin
         W.AddBinToHexDisplayQuoted(@i64, IDBinarySize);
       end
       else if U = nil then
-        W.AddNull
+        W.AddNull // from JSON null (a JSON "" has U^=#0)
       else
         case fFieldType[f].ContentDB of
           ftInt64,
@@ -8824,7 +9043,7 @@ begin
             W.AddShort(U, {$ifdef NOTORMTABLELEN}StrLen(U){$else}fLen[o]{$endif});
           ftDate,
           ftUtf8,
-          ftBlob:
+          ftBlob: // ftBlob is already stored with base-64 encoding
             begin
 str:          W.AddDirect('"');
               W.AddJsonEscape(U, 0); // Len=0 is slightly faster
@@ -8920,11 +9139,14 @@ begin
         for F := 0 to FMax do
         begin
           U := GetResults(o);
-          len := GetResultsLen(o, U);
-          if Tab or not IsStringJson(U) then
-            W.AddNoJsonEscape(U, len)
-          else
-            W.AddQuotedStr(U, len, '"');
+          if U <> nil then
+          begin
+            len := GetResultsLen(o, U);
+            if Tab or not IsStringJson(U) then
+              W.AddNoJsonEscape(U, len)
+            else
+              W.AddQuotedStr(U, len, '"');
+          end;
           if F = FMax then
             W.AddCR
           else
@@ -9077,6 +9299,7 @@ var
   Zip: TZipWrite;
   Dest: TRawByteStringStream;
   content: RawUtf8;
+  U: PUtf8Char;
   W: TJsonWriter;
   r, f, o: PtrInt;
 begin
@@ -9113,26 +9336,27 @@ begin
               for f := 0 to FieldCount - 1 do
               begin
                 W.AddShort('<table:table-cell office:value-type="');
+                U := GetResults(o);
                 case fFieldType[f].ContentDB of
                   ftInt64,
                   ftDouble,
                   ftCurrency:
                     begin
                       W.AddShort('float" office:value="');
-                      W.AddXmlEscape(GetResults(o));
+                      W.AddXmlEscape(U);
                       W.AddShorter('" />');
                     end;
                   ftDate:
                     begin
                       W.AddShort('date" office:date-value="');
-                      W.AddXmlEscape(GetResults(o));
+                      W.AddXmlEscape(U);
                       W.AddShorter('" />');
                     end;
                 else
                   begin
                     //ftUnknown,ftNull,ftUtf8,ftBlob:
                     W.AddShort('string"><text:p>');
-                    W.AddXmlEscape(GetResults(o));
+                    W.AddXmlEscape(U);
                     W.AddShort('</text:p></table:table-cell>');
                   end;
                 end;
@@ -9276,8 +9500,10 @@ begin
   result := Data[Offset];
   {$else}
   result := PUtf8Char(PtrInt(Data[Offset]));
-  if result <> nil then
-    inc(result, PtrUInt(DataStart));
+  Offset := PtrUInt(DataStart); // in two steps for better code generation
+  if result = nil then
+    Offset := PtrInt(result);   // compile as branchless cmove on FPC
+  inc(result, Offset);
   {$endif NOPOINTEROFFSET}
 end;
 
@@ -9434,9 +9660,8 @@ begin
         else
           break;
       until i > j;
-      if j - L < R - i then
+      if j - L < R - i then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         P := i; // i,j will be overriden during Sort() call -> protect
         if L < j then
           Sort(L, j);
@@ -9636,9 +9861,8 @@ begin
           dec(j);
         end;
       until i > j;
-      if j - L < R - i then
+      if j - L < R - i then // use recursion only for smaller range
       begin
-        // use recursion only for smaller range
         if L < j then
           Sort(L, j);
         L := i;
@@ -10110,24 +10334,31 @@ function TOrmTableAbstract.SearchFieldEquals(Value: PUtf8Char;
   FieldIndex, StartRow: PtrInt; CaseSensitive: boolean): PtrInt;
 var
   o: PtrInt;
+  u: PUtf8Char;
+  cmp: TUtf8Compare;
 begin
   if (self <> nil) and
-     (Value <> nil) and
      (PtrUInt(FieldIndex) < PtrUInt(fFieldCount)) then
   begin
     o := fFieldCount * StartRow + FieldIndex;
     if CaseSensitive then
-      for result := StartRow to fRowCount do
-        if StrComp(GetResults(o), Value) = 0 then
-          exit
-        else
-          inc(o, fFieldCount)
+      cmp := @StrComp
     else
-      for result := StartRow to fRowCount do
-        if Utf8IComp(GetResults(o), Value) = 0 then
-          exit
-        else
-          inc(o, fFieldCount);
+      cmp := @Utf8IComp;
+    for result := StartRow to fRowCount do
+    begin
+      u := GetResults(o);
+      if u <> nil then
+        if u^ = #0 then
+        begin
+          if Value = nil then
+            exit;
+        end
+        else if (Value <> nil) and
+                (cmp(u, Value) = 0) then
+          exit;
+      inc(o, fFieldCount);
+    end;
   end;
   result := 0;
 end;
@@ -10170,7 +10401,7 @@ begin
   else
   begin
     aType := FieldType(Field, info);
-    U := Get(Row, Field, ULen);
+    U := GetWithLen(Row, Field, ULen);
     ValueVarToVariant(U, ULen, aType, TVarData(result),
       {createTempCopy=}true, info.ContentTypeInfo);
   end;
@@ -11274,23 +11505,31 @@ begin
     result := result - excluded;
 end;
 
+function TOrmPropertiesAbstract.FieldBitsFromExcludingClass(
+  const aClasses: array of TClass; aOccasion: TOrmOccasion; aInherit: boolean): TFieldBits;
+var
+  excluded: TFieldBits;
+begin
+  result := SimpleFieldsBits[aOccasion];
+  if Fields.ByClass(aClasses, excluded, aInherit) <> 0 then
+    result := result - excluded;
+end;
+
+function TOrmPropertiesAbstract.FieldBitsFromExcludingTypes(
+  const aTypes: array of PRttiInfo; aOccasion: TOrmOccasion): TFieldBits;
+var
+  excluded: TFieldBits;
+begin
+  result := SimpleFieldsBits[aOccasion];
+  if Fields.ByTypes(aTypes, excluded) <> 0 then
+    result := result - excluded;
+end;
+
 function TOrmPropertiesAbstract.FieldBitsFrom(
   const aFields: array of PUtf8Char; var Bits: TFieldBits): boolean;
-var
-  f, ndx: PtrInt;
 begin
-  FillZero(Bits);
-  result := false;
-  if self = nil then
-    exit;
-  for f := 0 to high(aFields) do
-  begin
-    ndx := Fields.IndexByNameU(aFields[f]);
-    if ndx < 0 then
-      exit; // invalid field name
-    FieldBitSet(Bits, ndx);
-  end;
-  result := true;
+  result := (self <> nil) and
+            Fields.ByNames(aFields, Bits);
 end;
 
 function TOrmPropertiesAbstract.FieldBitsFrom(
@@ -11326,118 +11565,49 @@ begin
   end;
   result := true;
 end;
-{$endif PUREMORMOT2}
 
 function TOrmPropertiesAbstract.CsvTextFromFieldBits(const Bits: TFieldBits): RawUtf8;
-var
-  l, f: PtrInt;
-  p: PUtf8Char;
 begin
-  l := 0;
-  for f := 0 to Fields.Count - 1 do
-    if FieldBitGet(Bits, f) then
-      inc(l, length(Fields.List[f].Name) + 1);
-  if l = 0 then
-  begin
-    result := '';
-    exit;
-  end;
-  FastSetString(result, l - 1); // allocate once for all
-  p := pointer(result);
-  for f := 0 to Fields.Count - 1 do
-    if FieldBitGet(Bits, f) then
-    begin
-      l := length(Fields.List[f].Name);
-      MoveFast(pointer(Fields.List[f].Name)^, p^, l);
-      inc(p, l);
-      p^ := ',';
-      inc(p);
-    end;
-  p[-1] := #0; // overwrite last ','
+  result := Fields.ToCsv(Bits);
 end;
 
 procedure TOrmPropertiesAbstract.CsvFromFieldBits(const Prefix: array of const;
   const Bits: TFieldBits; const BitsSuffix: ShortString;
   const Suffix: array of const; out Result: RawUtf8);
-var
-  f: PtrInt;
-  W: TJsonWriter; // TJsonWriter.Add(Prefix) so TTextWriter is not enough
-  temp: TTextWriterStackBuffer;
 begin
-  W := TJsonWriter.CreateOwnedStream(temp);
-  try
-    W.Add(Prefix, twNone);
-    for f := 0 to Fields.Count - 1 do
-      if FieldBitGet(Bits, f) then
-      begin
-        W.AddString(Fields.List[f].Name);
-        if BitsSuffix <> '' then
-          W.AddShort(BitsSuffix);
-        W.AddComma;
-      end;
-    W.CancelLastComma;
-    W.Add(Suffix, twNone);
-    W.SetText(Result);
-  finally
-    W.Free;
-  end;
+  Fields.ToCsvText(Prefix, Bits, BitsSuffix, Suffix, Result);
 end;
 
 function TOrmPropertiesAbstract.FieldIndexDynArrayFromRawUtf8(
   const aFields: array of RawUtf8; var Indexes: TFieldIndexDynArray): boolean;
-var
-  f, ndx: PtrInt;
 begin
-  result := false;
-  if self = nil then
-    exit;
-  for f := 0 to high(aFields) do
-  begin
-    ndx := Fields.IndexByNameU(pointer(aFields[f]));
-    if ndx < 0 then
-      exit; // invalid field name
-    AddFieldIndex(Indexes, ndx);
-  end;
-  result := true;
+  result := (self <> nil) and
+            Fields.FieldIndexByNames(aFields, Indexes);
 end;
 
 function TOrmPropertiesAbstract.FieldIndexDynArrayFromRawUtf8(
   const aFields: array of RawUtf8): TFieldIndexDynArray;
 begin
-  if not FieldIndexDynArrayFromRawUtf8(aFields, result) then
+  if (self = nil) or
+     not Fields.FieldIndexByNames(aFields, result) then
     result := nil;
 end;
 
 function TOrmPropertiesAbstract.FieldIndexDynArrayFromCsv(
   const aFieldsCsv: RawUtf8; var Indexes: TFieldIndexDynArray): boolean;
-var
-  ndx: integer;
-  P: PUtf8Char;
-  n: ShortString;
 begin
-  result := false;
-  if self = nil then
-    exit;
-  P := pointer(aFieldsCsv);
-  while P <> nil do
-  begin
-    GetNextItemShortString(P, @n); // n ends with #0
-    if n[0] = #0 then
-      exit;
-    ndx := Fields.IndexByNameU(@n[1]);
-    if ndx < 0 then
-      exit; // invalid field name
-    AddFieldIndex(Indexes, ndx);
-  end;
-  result := true;
+  result := (self <> nil) and
+            Fields.FieldIndexFromCsv(aFieldsCsv, Indexes);
 end;
 
 function TOrmPropertiesAbstract.FieldIndexDynArrayFromCsv(
   const aFieldsCsv: RawUtf8): TFieldIndexDynArray;
 begin
-  if not FieldIndexDynArrayFromCsv(aFieldsCsv, result) then
+  if (self = nil) or
+     not Fields.FieldIndexFromCsv(aFieldsCsv, result) then
     result := nil;
 end;
+{$endif PUREMORMOT2}
 
 function TOrmPropertiesAbstract.FieldIndexDynArrayFromBlobField(
   aBlobField: PRttiProp; var Indexes: TFieldIndexDynArray): boolean;
@@ -11460,15 +11630,12 @@ function TOrmPropertiesAbstract.AppendFieldName(FieldIndex: integer;
 begin
   result := false; // success
   if FieldIndex = VIRTUAL_TABLE_ROWID_COLUMN then
-    if ForceNoRowID then
-      Text := Text + ID_TXT
-    else
-      Text := Text + ROWID_TXT
+    AppendStr(Text, ID_SHORT[ForceNoRowID])
   else if (self = nil) or
           (cardinal(FieldIndex) >= cardinal(Fields.Count)) then
     result := true
   else
-    Text := Text + Fields.List[FieldIndex].Name;
+    Append(Text, Fields.List[FieldIndex].Name);
 end;
 
 function TOrmPropertiesAbstract.MainFieldName(ReturnFirstIfNoUnique: boolean): RawUtf8;

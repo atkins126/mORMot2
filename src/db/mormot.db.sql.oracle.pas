@@ -309,8 +309,10 @@ type
     // - a ftUtf8 content will be mapped into a generic WideString variant
     // for pre-Unicode version of Delphi, and a generic UnicodeString (=string)
     // since Delphi 2009: you may not loose any data during charset conversion
-    // - a ftBlob content will be mapped into a TBlobData AnsiString variant
-    function ColumnToVariant(Col: integer; var Value: Variant): TSqlDBFieldType; override;
+    // set ForceUtf8 = true to generate a RawUtf8 as varString
+    // - a ftBlob BLOB content will be mapped into a TBlobData AnsiString variant
+    function ColumnToVariant(Col: integer; var Value: Variant;
+      ForceUtf8: boolean = false): TSqlDBFieldType; override;
     /// return a Column as a TSqlVar value, first Col is 0
     // - the specified Temp variable will be used for temporary storage of
     // ftUtf8/ftBlob values
@@ -1064,7 +1066,7 @@ begin
 end;
 
 function TSqlDBOracleStatement.ColumnToVariant(Col: integer;
-  var Value: Variant): TSqlDBFieldType;
+  var Value: Variant; ForceUtf8: boolean): TSqlDBFieldType;
 var
   C: PSqlDBColumnProperty;
   V: pointer;
@@ -1105,14 +1107,15 @@ begin
           VDate := POracleDate(V)^.ToDateTime
         else // direct retrieval
           IntervalTextToDateTimeVar(V, VDate); // from SQLT_INTERVAL_* text
-      ftUtf8: // VType is varSynUnicode
+      ftUtf8: // VType is varSynUnicode unless ForceUtf8 is true
         begin
           // see TSqlDBStatement.ColumnToVariant() for reference
           VAny := nil;
           with TSqlDBOracleConnection(Connection) do
             if C^.ColumnValueInlined then
               {$ifndef UNICODE}
-              if not Connection.Properties.VariantStringAsWideString then
+              if (not ForceUtf8) and
+                 (not Connection.Properties.VariantStringAsWideString) then
               begin
                 VType := varString;
                 OCISTRToAnsiString(V, AnsiString(VAny),
@@ -1125,14 +1128,21 @@ begin
             else
               OCI.ClobFromDescriptor(self, fContext, fError,
                 PPOCIDescriptor(V)^, C^.ColumnValueDBForm, tmp);
-        {$ifndef UNICODE}
+          // here tmp contains the UTF-8 encoded text
+          if ForceUtf8 then
+          begin
+            VType := varString;
+            RawUtf8(VAny) := tmp;
+          end
+          else
+          {$ifndef UNICODE}
           if not Connection.Properties.VariantStringAsWideString then
           begin
             VType := varString;
             AnsiString(VAny) := CurrentAnsiConvert.Utf8ToAnsi(tmp);
           end
           else
-        {$endif UNICODE}
+          {$endif UNICODE}
             Utf8ToSynUnicode(tmp, SynUnicode(VAny));
         end;
       ftBlob: // as varString
@@ -1268,7 +1278,7 @@ begin
       on E: Exception do
       begin
         fStatement := nil; // do not release the statement in constructor
-        FreeHandles(True);
+        FreeHandles(true);
         raise;
       end;
     end;
@@ -1523,7 +1533,7 @@ begin
               ociArrays[ociArraysCount] := nil;
               OCI.Check(nil, self,
                 OCI.ObjectNew(Env, fError, Context, OCI_TYPECODE_VARRAY,
-                  Type_List, nil, OCI_DURATION_SESSION, True,
+                  Type_List, nil, OCI_DURATION_SESSION, true,
                   ociArrays[ociArraysCount]),
                 fError);
               inc(ociArraysCount);
@@ -1675,7 +1685,7 @@ txt:                    VDBType := SQLT_STR; // use STR external data type (SQLT
                           {$ifdef FPC_64}
                           // in case of FPC+CPU64 TSqlDBParam.VData is a RawByteString and
                           // length is stored as SizeInt = Int64 (not int32) -> patch
-                          // (no patch needed for Delphi, in which len is always longint)
+                          // (no patch needed for Delphi, in which len is always 32-bit)
                           if Length(VData) > MaxInt then
                             ESqlDBOracle.RaiseUtf8('%.ExecutePrepared: % ' +
                               'blob length exceeds max size for parameter #%',
@@ -2348,7 +2358,7 @@ begin
     except
       on E: Exception do
       begin
-        FreeHandles(True);
+        FreeHandles(true);
         raise;
       end;
     end;

@@ -358,8 +358,7 @@ type
   private
     fContentLeft: Int64;
     fContentPos: PByte;
-    fContentEncoding, fCommandUriInstance, fLastHost: RawUtf8;
-    fCommandUriInstanceLen: PtrInt;
+    fContentEncoding, fLastHost: RawUtf8;
     fProgressiveTix: cardinal;
     fProgressiveID: THttpPartialID;
     fProgressiveNewStreamFileName: TFileName;
@@ -416,6 +415,10 @@ type
     // - if hsrAuthorized is set, THttpServerSocketGeneric.Authorization() will
     // put the authenticated User name in this field
     BearerToken: RawUtf8;
+    /// custom server-generated headers, to be added to the request headers
+    // - set e.g. with hsrAuthorized and hraNegotiate authentication scheme as
+    // already formatted 'WWW-Authenticate: xxxxxxxxx'#13#10 header
+    ResponseHeaders: RawUtf8;
     /// decoded 'Range: bytes=..' start value - default is 0
     // - e.g. 1024 for 'Range: bytes=1024-1025'
     // - equals -1 in case on unsupported multipart range requests
@@ -428,6 +431,7 @@ type
     /// will contain the data retrieved from the server, after all ParseHeader
     Content: RawByteString;
     /// same as HeaderGetValue('CONTENT-LENGTH'), but retrieved during ParseHeader
+    // - equals -1 if there is no such header during ParseHeader
     // - is overridden with real Content length during HTTP body retrieval
     ContentLength: Int64;
     /// known GMT timestamp of output content, may be reported as 'Last-Modified:'
@@ -778,7 +782,7 @@ type
     fRouteNode: TRadixTreeNodeParams; // is a TUriTreeNode
     fRouteName: pointer; // TRawUtf8DynArray set by TUriTreeNode.LookupParam
     fRouteValuePosLen: TIntegerDynArray; // [pos1,len1,...] pairs in fUri
-    fHttp: PHttpRequestContext; // as supplied to Prepare()
+    fHttp: PHttpRequestContext; // as supplied to Prepare() - seldom used
     function GetRouteValuePosLen(const Name: RawUtf8;
       var Value: TValuePUtf8Char): boolean;
     function GetRouteValue(const Name: RawUtf8): RawUtf8;
@@ -790,7 +794,7 @@ type
     // - will set input parameters URL/Method/InHeaders/InContent/InContentType
     // - won't reset other parameters: should come after a plain Create or
     // an explicit THttpServerRequest.Recycle()
-    procedure Prepare(const aHttp: THttpRequestContext; const aRemoteIP: RawUtf8;
+    procedure Prepare(var aHttp: THttpRequestContext; const aRemoteIP: RawUtf8;
       aAuthorize: THttpServerRequestAuthentication);
     /// prepare an incoming request from explicit values
     // - could be used for non-HTTP execution, e.g. from a WebSockets link
@@ -851,13 +855,15 @@ type
     // - UpperName should follow the UrlDecodeInt64() format, e.g. 'ID='
     function UrlParam(const UpperName: RawUtf8; out Value: Int64): boolean; overload;
     /// set the OutContent and OutContentType fields with the supplied JSON
-    procedure SetOutJson(const Json: RawUtf8); overload;
+    function SetOutJson(const Json: RawUtf8): cardinal; overload;
       {$ifdef HASINLINE} inline; {$endif}
     /// set the OutContent and OutContentType fields with the supplied JSON
-    procedure SetOutJson(const Fmt: RawUtf8; const Args: array of const); overload;
+    // - this function returns HTTP_SUCCESS
+    function SetOutJson(const Fmt: RawUtf8; const Args: array of const): cardinal; overload;
     /// set the OutContent and OutContentType fields with the supplied text
-    procedure SetOutText(const Fmt: RawUtf8; const Args: array of const;
-      const ContentType: RawUtf8 = TEXT_CONTENT_TYPE);
+    // - this function returns HTTP_SUCCESS
+    function SetOutText(const Fmt: RawUtf8; const Args: array of const;
+      const ContentType: RawUtf8 = TEXT_CONTENT_TYPE): cardinal;
     /// set the OutContent and OutContentType fields to return a specific file
     // - returning status 200 with the STATICFILE_CONTENT_TYPE constant marker
     // - Handle304NotModified = TRUE will check the file age and size and return
@@ -866,13 +872,13 @@ type
     // - can optionally return FileSize^ (0 if not found, -1 if is a folder)
     function SetOutFile(const FileName: TFileName; Handle304NotModified: boolean;
       const ContentType: RawUtf8 = ''; CacheControlMaxAgeSec: integer = 0;
-      FileSize: PInt64 = nil): integer;
+      FileSize: PInt64 = nil): cardinal;
     /// set the OutContent and OutContentType fields to return a specific file
     // - returning status 200 with the supplied Content (and optional ContentType)
     // - Handle304NotModified = TRUE will check the supplied content and return
     // status HTTP_NOTMODIFIED (304) if it did not change
     function SetOutContent(const Content: RawByteString; Handle304NotModified: boolean;
-      const ContentType: RawUtf8 = ''; CacheControlMaxAgeSec: integer = 0): integer;
+      const ContentType: RawUtf8 = ''; CacheControlMaxAgeSec: integer = 0): cardinal;
   published
     /// input parameter containing the caller URI
     property Url: RawUtf8
@@ -2658,7 +2664,7 @@ end;
 function IsHead(const method: RawUtf8): boolean;
 begin
   result := PCardinal(method)^ =
-    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24;
+              ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24;
 end;
 
 function IsUrlFavIcon(P: PUtf8Char): boolean;
@@ -2928,7 +2934,7 @@ begin
      PropNameEquals(u.Server, 'localhost') or
      IsLocalHost(pointer(u.Server)) then // supports only local files
   begin
-    result := string(UrlDecodeName(u.Address));
+    Utf8ToFileName(UrlDecodeName(u.Address), result);
     if (result <> '') and
        (result[1] <> '/') then
       insert('/', result, 1);
@@ -3146,12 +3152,14 @@ begin
     ContentStream.Free; // ensure no leak on (reused) broken connection
   ResponseFlags := [];
   Options := [];
-  FastAssignNew(Headers);
+  FastAssignNew(Headers); // note: too soon for CommandUri
   FastAssignNew(ContentType);
   if Upgrade <> '' then
     FastAssignNew(Upgrade);
   if BearerToken <> '' then
     FastAssignNew(BearerToken);
+  if ResponseHeaders <> '' then
+    FastAssignNew(ResponseHeaders);
   if UserAgent <> '' then
     FastAssignNew(UserAgent);
   if Referer <> '' then
@@ -3159,11 +3167,13 @@ begin
   RangeOffset := 0;
   RangeLength := -1;
   FastAssignNew(Content);
-  ContentLength := -1;
+  ContentLength := -1; // -1 = no Content-Length: header
   ContentLastModified := 0;
   ContentStream := nil;
   ServerInternalState := 0;
   CompressContentEncoding := -1;
+  if fContentEncoding <> '' then
+    FastAssignNew(fContentEncoding);
   integer(CompressAcceptHeader) := 0;
   fProgressiveID := 0;
   fProgressiveTix := 0;
@@ -3573,6 +3583,8 @@ end;
 
 var
   _GETVAR, _POSTVAR, _HEADVAR: RawUtf8;
+const
+  _HEAD32 = ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24;
 
 function THttpRequestContext.ParseCommand: boolean;
 var
@@ -3597,9 +3609,9 @@ begin
         CommandMethod := _POSTVAR;
         inc(P, 5);
       end;
-    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24:
+    _HEAD32:
       begin
-        CommandMethod := _HEADVAR; // allow quick 'HEAD' search per pointer
+        CommandMethod := _HEADVAR;
         inc(P, 5);
       end;
   else
@@ -3628,9 +3640,12 @@ begin
     else
       inc(P);
   L := P - B;
-  MoveFast(B^, pointer(CommandUri)^, L); // in-place extract URI from Command
-  FakeLength(CommandUri, L);
   result := ParseHttp(P + 1); // parse HTTP/1.x just after P^ = ' '
+  MoveFast(B^, pointer(CommandUri)^, L); // in-place extract URI from Command
+  if L = 0 then
+    FastAssignNew(CommandUri) // paranoid (malformatted content)
+  else
+    FakeLength(CommandUri, L);
 end;
 
 function THttpRequestContext.ParseResponse(out RespStatus: integer): boolean;
@@ -3667,7 +3682,7 @@ end;
 procedure THttpRequestContext.ProcessInit;
 begin
   RangeLength := -1;
-  ContentLength := -1;
+  ContentLength := -1; // not yet parsed
   CompressContentEncoding := -1;
   State := hrsGetCommand;
 end;
@@ -3719,20 +3734,7 @@ begin
       hrsGetCommand:
         if ProcessParseLine(st) then
         begin
-          if Interning = nil then
-            FastSetString(CommandUri, st.Line, st.LineLen)
-          else
-          begin
-            // no real interning, but CommandUriInstance buffer reuse
-            if st.LineLen > fCommandUriInstanceLen then
-            begin
-              fCommandUriInstanceLen := st.LineLen + 256;
-              FastSetString(fCommandUriInstance, nil, fCommandUriInstanceLen);
-            end;
-            CommandUri := fCommandUriInstance; // COW memory buffer reuse
-            MoveFast(st.Line^, pointer(CommandUri)^, st.LineLen);
-            FakeLength(CommandUri, st.LineLen);
-          end;
+          FastSetString(CommandUri, st.Line, st.LineLen); // never interned
           State := hrsGetHeaders;
         end
         else
@@ -3747,7 +3749,7 @@ begin
             if hfTransferChunked in HeaderFlags then
               // process chunked body
               State := hrsGetBodyChunkedHexFirst
-            else if ContentLength > 0 then
+            else if ContentLength > 0 then // -1 = no Content-Length: header
               // regular process with explicit content-length
               State := hrsGetBodyContentLength
               // note: old HTTP/1.0 format with no Content-Length is unsupported
@@ -3865,7 +3867,7 @@ begin
     aStatus := HTTP_NOCONTENT;
   result := aStatus;
   // compute response headers
-  AppendLine(Headers, ['Content-Length: ', ContentLength]);
+  AppendLine(Headers, ['Content-Length: ', ContentLength]); // should always be
   if ContentLastModified <> 0 then
     AppendLine(Headers, ['Last-Modified: ',
       UnixMSTimeUtcToHttpDate(ContentLastModified)]);
@@ -3877,7 +3879,7 @@ begin
   if fContentEncoding <> '' then
     AppendLine(Headers, ['Content-Encoding: ', fContentEncoding]);
   // compute response body
-  if (pointer(CommandMethod) = pointer(_HEADVAR)) or
+  if (PCardinal(CommandMethod)^ = _HEAD32) or
      (ContentLength = 0) then
     exit;
   if aOutStream <> nil then
@@ -3969,7 +3971,7 @@ begin
   end;
   // try to send both headers and body in a single socket syscall
   Process.Reset;
-  if pointer(CommandMethod) = pointer(_HEADVAR) then
+  if PCardinal(CommandMethod)^ = _HEAD32 then
     // return only the headers
     State := hrsResponseDone
   else
@@ -4048,7 +4050,7 @@ begin
   if not (rfContentStreamNeedFree in ResponseFlags) then
     exit;
   FreeAndNilSafe(ContentStream);
-  Exclude(ResponseFlags, rfContentStreamNeedFree);
+  exclude(ResponseFlags, rfContentStreamNeedFree);
 end;
 
 function THttpRequestContext.ContentFromFile(
@@ -4064,14 +4066,14 @@ begin
   // try if there is an already-compressed .gz file to send away
   if (CompressGz >= 0) and
      (CompressGz in CompressAcceptHeader) and
-     (pointer(CommandMethod) <> pointer(_HEADVAR)) and
+     (PCardinal(CommandMethod)^ <> _HEAD32) and
      not (rfWantRange in ResponseFlags) then
   begin
     gz := FileName + '.gz';
     h := FileOpen(gz, fmOpenRead or fmShareRead);
     if ValidHandle(h) then
     begin
-      ContentStream := TFileStreamEx.CreateFromHandle(gz, h);
+      ContentStream := TFileStreamEx.CreateFromHandle(h, gz);
       include(ResponseFlags, rfContentStreamNeedFree);
       ContentLength := FileSize(h);
       fContentEncoding := 'gzip';
@@ -4097,7 +4099,7 @@ begin
   result := HTTP_SUCCESS;
   include(ResponseFlags, rfAcceptRange);
   if (ContentLength < HttpContentFromFileSizeInMemory) and
-     (pointer(CommandMethod) <> pointer(_HEADVAR)) then
+     (PCardinal(CommandMethod)^ <> _HEAD32) then
   begin
     // smallest files (up to few MB) are sent from temp memory (maybe compressed)
     FastSetString(RawUtf8(Content), ContentLength); // assume CP_UTF8 for FPC
@@ -4111,7 +4113,7 @@ begin
     exit;
   end;
   // stream existing big file by chunks (also used for HEAD or Range)
-  ContentStream := TFileStreamEx.CreateFromHandle(FileName, h);
+  ContentStream := TFileStreamEx.CreateFromHandle(h, FileName);
   include(ResponseFlags, rfContentStreamNeedFree);
 end;
 
@@ -4474,25 +4476,25 @@ end;
 
 { THttpServerRequestAbstract }
 
-procedure THttpServerRequestAbstract.Prepare(const aHttp: THttpRequestContext;
+procedure THttpServerRequestAbstract.Prepare(var aHttp: THttpRequestContext;
   const aRemoteIP: RawUtf8; aAuthorize: THttpServerRequestAuthentication);
 begin
   fRemoteIP := aRemoteIP;
   fHttp := @aHttp;
-  fUrl := aHttp.CommandUri;
+  FastAssign(fUrl, aHttp.CommandUri);
   fMethod := aHttp.CommandMethod;
-  fInHeaders := aHttp.Headers;
-  fInContentType := aHttp.ContentType;
-  fHost := aHttp.Host;
+  FastAssign(fInHeaders, aHttp.Headers);
+  FastAssign(fInContentType, aHttp.ContentType);
+  FastAssign(fHost, aHttp.Host);
   if hsrAuthorized in fConnectionFlags then
   begin
-    // reflect the current valid "authorization:" header
+    // reflect the current valid "www-authenticate:" header
     fAuthenticationStatus := aAuthorize;
-    fAuthenticatedUser := aHttp.BearerToken; // set by fServer.Authorization()
+    FastAssign(fAuthenticatedUser, aHttp.BearerToken); // set by fServer.Authorization()
   end
   else
-    fAuthBearer := aHttp.BearerToken;
-  fUserAgent := aHttp.UserAgent;
+    FastAssign(fAuthBearer, aHttp.BearerToken);
+  FastAssign(fUserAgent, aHttp.UserAgent);
   fInContent := aHttp.Content;
 end;
 
@@ -4642,29 +4644,32 @@ begin
   result := UrlDecodeParam(EnsureUrlParamPosExists, UpperName, Value);
 end;
 
-procedure THttpServerRequestAbstract.SetOutJson(const Json: RawUtf8);
+function THttpServerRequestAbstract.SetOutJson(const Json: RawUtf8): cardinal;
 begin
   fOutContent := Json;
   fOutContentType := JSON_CONTENT_TYPE_VAR;
+  result := HTTP_SUCCESS;
 end;
 
-procedure THttpServerRequestAbstract.SetOutJson(const Fmt: RawUtf8;
-  const Args: array of const);
+function THttpServerRequestAbstract.SetOutJson(const Fmt: RawUtf8;
+  const Args: array of const): cardinal;
 begin
   FormatUtf8(Fmt, Args, RawUtf8(fOutContent));
   fOutContentType := JSON_CONTENT_TYPE_VAR;
+  result := HTTP_SUCCESS;
 end;
 
-procedure THttpServerRequestAbstract.SetOutText(
-  const Fmt: RawUtf8; const Args: array of const; const ContentType: RawUtf8);
+function THttpServerRequestAbstract.SetOutText(
+  const Fmt: RawUtf8; const Args: array of const; const ContentType: RawUtf8): cardinal;
 begin
   FormatUtf8(Fmt, Args, RawUtf8(fOutContent));
   fOutContentType := ContentType;
+  result := HTTP_SUCCESS;
 end;
 
 function THttpServerRequestAbstract.SetOutFile(const FileName: TFileName;
   Handle304NotModified: boolean; const ContentType: RawUtf8;
-  CacheControlMaxAgeSec: integer; FileSize: PInt64): integer;
+  CacheControlMaxAgeSec: integer; FileSize: PInt64): cardinal;
 var
   fs: Int64;
   ts: TUnixMSTime;
@@ -4697,7 +4702,7 @@ end;
 
 function THttpServerRequestAbstract.SetOutContent(const Content: RawByteString;
   Handle304NotModified: boolean; const ContentType: RawUtf8;
-  CacheControlMaxAgeSec: integer): integer;
+  CacheControlMaxAgeSec: integer): cardinal;
 begin
   if CacheControlMaxAgeSec <> 0 then
     AppendLine(fOutCustomHeaders, ['Cache-Control: max-age=', CacheControlMaxAgeSec]);
@@ -6037,7 +6042,7 @@ begin
       Scope := hasPost;
     ord('P') + ord('U') shl 8 + ord('T') shl 16:
       Scope := hasPut;
-    ord('H') + ord('E') shl 8 + ord('A') shl 16 + ord('D') shl 24:
+    _HEAD32:
       Scope := hasHead;
     ord('D') + ord('E') shl 8 + ord('L') shl 16 + ord('E') shl 24:
       Scope := hasDelete;
@@ -7270,12 +7275,12 @@ end;
 
 initialization
   assert(SizeOf(THttpAnalyzerToSave) = 40);
-  GetEnumTrimmedNames(TypeInfo(THttpAnalyzerScope),  @HTTP_SCOPE);
-  GetEnumTrimmedNames(TypeInfo(THttpAnalyzerPeriod), @HTTP_PERIOD);
-  GetEnumTrimmedNames(TypeInfo(THttpRequestState),   @HTTP_STATE);
   _GETVAR :=  'GET';
   _POSTVAR := 'POST';
   _HEADVAR := 'HEAD';
+  GetEnumTrimmedNames(TypeInfo(THttpAnalyzerScope),  @HTTP_SCOPE);
+  GetEnumTrimmedNames(TypeInfo(THttpAnalyzerPeriod), @HTTP_PERIOD);
+  GetEnumTrimmedNames(TypeInfo(THttpRequestState),   @HTTP_STATE);
 
 finalization
 

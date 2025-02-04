@@ -1152,8 +1152,8 @@ type
     fContentionAbortCount: cardinal;
     fContentionCount: cardinal;
     fName: RawUtf8;
-    fTerminated: boolean;
     fPendingContextCount: integer;
+    fTerminated: boolean;
     {$ifdef USE_WINIOCP}
     fRequestQueue: THandle; // IOCP has its own internal queue
     {$else}
@@ -2007,7 +2007,7 @@ end;
 
 procedure TThreadAbstract.Terminate;
 begin
-  inherited Terminate; // FTerminated := True
+  inherited Terminate; // FTerminated := true
   TerminatedSet;
 end;
 
@@ -3178,12 +3178,14 @@ procedure TLoggedThread.Execute;
 var
   ilog: ISynLog;
 begin
+  fLog := nil;
   try
     SetCurrentThreadName(fProcessName);
     if fLogClass <> nil then
     begin
       ilog := fLogClass.Enter('Execute %', [fProcessName], self);
-      fLog := ilog.Instance;
+      if Assigned(ilog) then
+        fLog := ilog.Instance;
     end;
     fProcessing := true;
     DoExecute;
