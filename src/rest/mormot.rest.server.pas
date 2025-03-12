@@ -409,6 +409,9 @@ type
     // use the InputAsMultiPart() method instead when working with binary
     function GetInputAsTDocVariant(const Options: TDocVariantOptions;
       InterfaceMethod: PInterfaceMethod): variant;
+    /// could be used to trim a sensitive parameter from Call^.Uri buffer itself
+    // - typical UpperParamName is e.g. 'PASSWORD='
+    procedure InputRemoveFromUri(const UpperParamName: RawUtf8);
     /// low-level access to the input parameters, stored as pairs of UTF-8
     // - even items are parameter names, odd are values
     // - Input*[] properties should have been called previously to fill the
@@ -509,11 +512,6 @@ type
     /// same as Call^.Uri, after the 'root/' prefix, including '?' params
     // - will compute it from Call^.Url and Server.Model.RootLen
     function UriWithoutRoot: RawUtf8;
-    /// same as Call^.Uri, but without the ?... ending
-    // - will compute it from Call^.Url and fParameters
-    // - since used for logging, return a shortstring and not a RawUtf8 to
-    // avoid memory allocation
-    function UriWithoutInlinedParams: shortstring;
     /// the URI after the method service name, excluding the '?' parameters
     // - as set by TRestTreeNode.LookupParam from <path:fulluri> place holder
     property UriMethodPath: RawUtf8
@@ -1198,6 +1196,9 @@ type
   // - do not use this abstract class, but e.g. TRestServerAuthenticationHttpBasic
   // - this class will transmit the session_signature as HTTP cookie, not at
   // URI level, so is expected to be used only from browsers or old clients
+  // - security level is very low for this kind of authentication: consider
+  // the other more secure algorithms
+  // - note that such sessions can not be persisted on disk
   TRestServerAuthenticationHttpAbstract = class(TRestServerAuthentication)
   protected
     /// should be overriden according to the HTTP authentication scheme
@@ -2844,7 +2845,7 @@ const
   HTTPONLY: array[boolean] of string[15] = (
     '; HttpOnly', '');
 begin
-  // https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies
+// https://developer.mozilla.org/en-US/docs/Web/Security/Practical_implementation_guides/Cookies
   inherited SetOutSetCookie(aOutSetCookie);
   if StrPosI('; PATH=', pointer(fOutSetCookie)) = nil then
     fOutSetCookie := FormatUtf8('%; Path=/%%', [fOutSetCookie, Server.fModel.Root,
@@ -2892,21 +2893,6 @@ begin
   if Call^.Url[1] = '/' then
     inc(pos); // trim leading '/' in '/root' (may happen when called in-process)
   result := copy(Call^.Url, pos, maxInt);
-end;
-
-function TRestServerUriContext.UriWithoutInlinedParams: shortstring;
-var
-  urllen, len: PtrUInt;
-begin
-  urllen := length(Call^.Url);
-  len := urllen;
-  if fParameters <> nil then
-  begin
-    len := fParameters - pointer(Call^.Url) - 1;
-    if len > urllen then // from InBody CONTENT_TYPE_WEBFORM, not from Url
-      len := urllen;
-  end;
-  SetString(result, PAnsiChar(pointer(Call^.Url)), len);
 end;
 
 procedure TRestServerUriContext.SessionAssign(AuthSession: TAuthSession);
@@ -3178,13 +3164,13 @@ begin
   if sllServer in fServer.LogLevel then
     fLog.Log(sllServer, '% % % % %=% out=% in %', [SessionUserName,
       RemoteIPNotLocal, COMMANDTEXT[fCommand], fCall.Method,
-      UriWithoutInlinedParams, fCall.OutStatus, KB(fCall.OutBody),
+      fCall.Url, fCall.OutStatus, KB(fCall.OutBody),
       MicroSecToString(fMicroSecondsElapsed)]);
-  if (fCall.OutBody <> '') and
+  if (sllServiceReturn in fServer.LogLevel) and
+     (fCall.OutBody <> '') and
      not (optNoLogOutput in fServiceExecutionOptions) and
-     (sllServiceReturn in fServer.LogLevel) and
-     (fCall.OutHead = '') or
-      IsHtmlContentTypeTextual(pointer(fCall.OutHead)) then
+     ((fCall.OutHead = '') or
+      IsHtmlContentTypeTextual(pointer(fCall.OutHead))) then
     fLog.Log(sllServiceReturn, fCall.OutBody, self, MAX_SIZE_RESPONSE_LOG);
 end;
 
@@ -4111,6 +4097,21 @@ const
   // MAX_METHOD_ARGS=128 may not be enough for CONTENT_TYPE_WEBFORM POST
   MAX_INPUT = 512;
 
+function IsSessionSignature(P: PUtf8Char): boolean;
+  {$ifdef HASINLINE} inline; {$endif}
+begin // = IdemPChar(P, 'SESSION_SIGNATURE=')
+  result := (PCardinal(P)^ or $20202020 =
+             ord('s') + ord('e') shl 8 + ord('s') shl 16 + ord('s') shl 24) and
+            (PCardinal(P + 4)^ or $00202020 =
+             ord('i') + ord('o') shl 8 + ord('n') shl 16 + ord('_') shl 24) and
+            (PCardinal(P + 8)^ or $20202020 =
+             ord('s') + ord('i') shl 8 + ord('g') shl 16 + ord('n') shl 24) and
+            (PCardinal(P + 12)^ or $20202020 =
+             ord('a') + ord('t') shl 8 + ord('u') shl 16 + ord('r') shl 24) and
+            (PCardinal(P + 16)^ or $ffff2020 =
+             ord('e') + ord('=') shl 8 + $ffff0000);
+end;
+
 procedure TRestServerUriContext.FillInput(const LogInputIdent: RawUtf8);
 var
   n, max: PtrInt;
@@ -4129,11 +4130,11 @@ begin
       if n >= MAX_INPUT * 2 then
         EParsingException.RaiseUtf8(
           'Security Policy: Accept up to % parameters for %.FillInput',
-          [MAX_INPUT * 2, self]);
+          [MAX_INPUT, self]);
       inc(max, NextGrow(max));
       SetLength(fInput, max);
     end;
-    if IdemPChar(P, 'SESSION_SIGNATURE=') then
+    if IsSessionSignature(P) then // = IdemPChar(P, 'SESSION_SIGNATURE=')
     begin
       // don't include the TAuthSession signature into Input[]
       P := PosChar(P + 18, '&');
@@ -4399,6 +4400,22 @@ begin
   end
   else if InputAsMultiPart(multipart) then
     MultiPartToDocVariant(multipart, res, @Options);
+end;
+
+procedure TRestServerUriContext.InputRemoveFromUri(const UpperParamName: RawUtf8);
+var
+  p: PUtf8Char;
+begin
+  p := StrPosI(pointer(UpperParamName), pointer(fCall^.Url));
+  if (p = nil) or
+     not (p[-1] in ['?', '&']) then
+    exit;
+  inc(p, length(UpperParamName));
+  while not (p^ in [#0, '&']) do
+  begin
+    p^ := 'x'; // in-place obfuscate
+    inc(p);
+  end;
 end;
 
 function TRestServerUriContext.IsRemoteIPBanned: boolean;
@@ -5316,9 +5333,12 @@ begin
       // check if match TRestClientUri.SetUser() algorithm
       pwd := Ctxt.InputUtf8OrVoid['Password'];
       if CheckPassword(Ctxt, usr, nonce, pwd) then
+      begin
+        Ctxt.InputRemoveFromUri('PASSWORD='); // anti-forensic
         // setup a new TAuthSession
         // SessionCreate would call Ctxt.AuthenticationFailed on error
-        SessionCreate(Ctxt, usr)
+        SessionCreate(Ctxt, usr);
+      end
       else
         Ctxt.AuthenticationFailed(afInvalidPassword);
     finally
@@ -5439,7 +5459,7 @@ end;
 class function TRestServerAuthenticationHttpBasic.ComputeAuthenticateHeader(
   const aUserName, aPasswordClear: RawUtf8): RawUtf8;
 begin
-  result := 'Authorization: Basic ' + BinToBase64(aUserName + ':' + aPasswordClear);
+  BasicClient(aUserName, aPasswordClear, SpiUtf8(result));
 end;
 
 function TRestServerAuthenticationHttpBasic.CheckPassword(
@@ -6052,7 +6072,7 @@ begin
     exit;
   p := pointer(Ctxt.Call^.Url);
   if p^ = '/' then
-    inc(p);
+    inc(p); // normalize
   result := pointer(TRestTreeNode(fTree[Ctxt.Method].Root).Lookup(p, Ctxt));
   if result = nil then
     exit;
@@ -6117,11 +6137,11 @@ begin
   end;
   // retrieve UriSessionSignaturePos as needed by Ctxt.Authenticate
   p := Ctxt.fParameters;
-  if p <> nil then
+  if p <> nil then // pre-located just after '?par=val&par=val&...'
   begin
     if fOwner.fHandleAuthentication then
     begin
-      if IdemPChar(p, 'SESSION_SIGNATURE=') then
+      if IsSessionSignature(p) then // = IdemPChar(p, 'SESSION_SIGNATURE=')
         dec(p)
       else
         p := StrPosI('&SESSION_SIGNATURE=', p);
@@ -6638,34 +6658,28 @@ end;
 procedure TRestServer.InternalInfo(Ctxt: TRestServerUriContext;
   var Info: TDocVariantData);
 var
-  cpu, mem, free: RawUtf8;
   now: TTimeLogBits;
-  m: TSynMonitorMemory;
+  {$ifdef OSWINDOWS}
+  mem: RawUtf8;
+  {$endif OSWINDOWS}
 begin
   // called by root/Timestamp/Info REST method
   now.Value := GetServerTimestamp(Ctxt.TickCount64);
-  cpu := TSystemUse.Current(false).HistoryText(0, 15, @mem);
-  m := TSynMonitorMemory.Create({nospace=}true);
-  try
-    FormatUtf8('%/%', [m.PhysicalMemoryFree.Text, m.PhysicalMemoryTotal.Text], free);
-    Info.AddNameValuesToObject([
-      'nowutc',    now.Text(true, ' '),
-      'timestamp', now.Value,
-      'exe',       Executable.ProgramName,
-      'version',   Executable.Version.DetailedOrVoid,
-      'host',      Executable.Host,
-      'cpu',       cpu,
-      {$ifdef OSWINDOWS}
-      'mem',       mem,
-      {$endif OSWINDOWS}
-      'memused',   KB(m.AllocatedUsed.Bytes),
-      'memfree',   free,
-      'diskfree',  GetDiskPartitionsText(
-        {nocache=}false, {withfree=}true, {nospace=}true, {nomount=}true),
-      'exception', GetLastExceptions(10)]);
-  finally
-    m.Free;
-  end;
+  Info.AddNameValuesToObject([
+    'nowutc',    now.Text(true, ' '),
+    'timestamp', now.Value,
+    'exe',       Executable.ProgramName,
+    'version',   Executable.Version.DetailedOrVoid,
+    'host',      Executable.Host,
+    {$ifdef OSWINDOWS}
+    'cpuhist',   TSystemUse.CurrentHistoryText(0, 15, @mem),
+    'memhist',   mem,
+    {$else}
+    'load',      RetrieveLoadAvg,
+    {$endif OSWINDOWS}
+    'memused',   GetMemoryInfoText,
+    'diskfree',  GetDiskPartitionsVariant,
+    'exception', GetLastExceptions(10)]);
   Stats.Lock;
   try
     Info.AddNameValuesToObject([
@@ -7137,7 +7151,7 @@ begin
         if result = 0 then
         begin
           log := fLogClass.Enter(self, 'SessionDeleteDeprecated');
-          fSessions.Safe.WriteLock; // upgrade the lock (seldom)
+          fSessions.Safe.WriteLock; // upgrade the lock (hardly)
         end;
         LockedSessionDelete(i, nil);
         inc(result);
@@ -7686,6 +7700,8 @@ begin
     // 7. return expected result to the client
     if StatusCodeIsSuccess(Call.OutStatus) then
     begin
+      if ctxt.fUriSessionSignaturePos > 0 then // remove session_signature=...
+        FakeLength(Call.Url, ctxt.fUriSessionSignaturePos - 1);
       outcomingfile := false;
       if Call.OutBody <> '' then
         // detect 'Content-type: !STATICFILE' as first header

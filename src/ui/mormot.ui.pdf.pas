@@ -878,8 +878,8 @@ type
   /// a PDF object, storing a textual value
   // - the value is specified as a PdfString
   // - this object is stored as '(escapedValue)'
-  // - in case of MBCS, conversion is made into Unicode before writing, and
-  // stored as '<FEFFHexUnicodeEncodedValue>'
+  // - in case of MBCS, conversion is made into UTF-16 before writing, and
+  // stored as '<FEFFHexUnicodeEncodedValue>' with an initial BOM_UTF16LE
   TPdfText = class(TPdfObject)
   private
     fValue: RawByteString;
@@ -896,7 +896,8 @@ type
   // - the value is specified as an UTF-8 encoded string
   // - this object is stored as '(escapedValue)'
   // - in case characters with ANSI code higher than 8 Bits, conversion is made
-  // into Unicode before writing, and '<FEFFHexUnicodeEncodedValue>'
+  // into UTF-16 before writing, and '<FEFFHexUnicodeEncodedValue>'  with an
+  // initial BOM_UTF16LE
   TPdfTextUtf8 = class(TPdfObject)
   private
     fValue: RawUtf8;
@@ -7157,7 +7158,7 @@ begin
   end;
   if needFileID then
   begin
-    RandomBytes(@fFileID, SizeOf(fFileID));
+    SharedRandom.Fill(@fFileID, SizeOf(fFileID));
     SetLength(hexFileID, SizeOf(fFileID) * 2 + 2);
     P := pointer(hexFileID);
     P[0] := '<';
@@ -7870,7 +7871,7 @@ begin
   str.Attributes.AddItem('Type', 'EmbeddedFile');
   if MimeType <> '' then
     StringToUtf8(MimeType, mime)
-  else if Pos('.', Description) <> 0 then      
+  else if Pos('.', Description) <> 0 then
     mime := GetMimeContentType(pointer(Buffer), length(Buffer), Description)
   else
     mime := GetMimeContentType(pointer(Buffer), length(Buffer));
@@ -7895,20 +7896,29 @@ begin
   ef.AddItem('F', str);
   ef.AddItem('UF', str);
   fs.AddItem('EF', ef);
-  // set title and Filespec as Names array 
-  arr := TPdfArray.Create(fXref);
+  // ensure we have the needed Names and EmbeddedFiles dictionaries
+  ndic := Root.Data.PdfDictionaryByName('Names');
+  if ndic = nil then
+  begin
+    ndic := TPdfDictionary.Create(fXref);
+    root.Data.AddItem('Names', ndic);
+  end;
+  efdic := ndic.PdfDictionaryByName('EmbeddedFiles');
+  if efdic = nil then
+  begin
+    efdic := TPdfDictionary.Create(fXref);
+    ndic.AddItem('EmbeddedFiles', efdic);
+    arr := TPdfArray.Create(fXref);
+    efdic.AddItem('Names', arr);
+  end
+  else
+    arr := efdic.PdfArrayByName('Names');
+  // add title and Filespec in Names array
   txt := TPdfTextString.Create(Title);
   arr.AddItem(txt);
   arr.AddItem(fs);
-  // create EmbeddedFiles with Names 
-  ndic := TPdfDictionary.Create(fXref);
-  ndic.AddItem('Names', arr);
-  // create the main returned dictionary
-  efdic := TPdfDictionary.Create(fXref);
-  efdic.AddItem('EmbeddedFiles', ndic);
-  result := efdic;
-  // register to the main catalog
-  Root.Data.AddItem('Names', efdic);
+  // return the newly created Filespec dictionary
+  result := fs;
 end;
 
 procedure TPdfDocument.SetUseOptionalContent(Value: boolean);
@@ -9018,7 +9028,7 @@ begin
   if PW <> nil then
     if fPage.fFont.FTrueTypeFontsIndex = 0 then
     begin
-      s := fDoc.Engine.UnicodeBufferToAnsi(PW, StrLenW(PW));
+      fDoc.Engine.UnicodeBufferToAnsiVar(PW, StrLenW(PW), s);
       i := 1;
       while i <= length(s) do
       begin // loop is MBCS ready

@@ -132,7 +132,7 @@ type
     /// some low-level RTTI access
     // - especially the field type retrieval from published properties
     procedure _RTTI;
-    /// validate some internal data structures
+    /// validate some internal data structures like TLockedList
     procedure DataStructures;
     /// some low-level Url encoding from parameters
     procedure UrlEncoding;
@@ -162,6 +162,8 @@ type
     procedure _TSelectStatement;
     /// test advanced statistics monitoring
     procedure _TSynMonitorUsage;
+    /// validate some folder-level functions
+    procedure Folders;
   end;
 
   /// this test case will test most functions, classes and types defined and
@@ -2438,6 +2440,9 @@ begin
   Check(uct('123.1a') = oftUtf8Text);
   Check(uct('123.1234a') = oftUtf8Text);
   Check(uct('123-2') = oftUtf8Text);
+  J := JsonEncode([]);
+  CheckEqual(J, '{}');
+  check(IsValidJson(J));
   J := JsonEncode(['name', 'john', 'year', 1982, 'pi', 3.14159]);
   CheckEqual(J, '{"name":"john","year":1982,"pi":3.14159}');
   check(IsValidJson(J));
@@ -5685,6 +5690,7 @@ var
   i, ndx: PtrInt;
   V, V1, V2: variant;
   s, j: RawUtf8;
+  p: PUtf8Char;
   d, a: TDocVariantData;
   vd: double;
   vs: single;
@@ -6035,21 +6041,22 @@ begin
   _Safe(V1)^.AddItem(vd);
   CheckEqual(VariantSaveJson(V1), '[1.5,1.7]');
   V2 := _obj(['id', 0]);
-  Check(VariantSaveJson(V2) = '{"id":0}');
+  CheckEqual(VariantSaveJson(V2), '{"id":0}');
   Check(_Safe(V2)^.SetValueByPath('id', 1) <> nil);
-  Check(VariantSaveJson(V2) = '{"id":1}');
+  CheckEqual(VariantSaveJson(V2), '{"id":1}');
   Check(_Safe(V2)^.SetValueByPath('id.name', 'toto') = nil);
   V1.Add(V2);
-  Check(VariantSaveJson(V1) = '[1.5,1.7,{"id":1}]');
+  CheckEqual(VariantSaveJson(V1), '[1.5,1.7,{"id":1}]');
   s := 'abc';
   V1.Add(s);
-  Check(VariantSaveJson(V1) = '[1.5,1.7,{"id":1},"abc"]');
+  CheckEqual(VariantSaveJson(V1), '[1.5,1.7,{"id":1},"abc"]');
   RawUtf8ToVariant('def', V2);
   _Safe(V1)^.AddItem(V2);
-  Check(VariantSaveJson(V1) = '[1.5,1.7,{"id":1},"abc","def"]');
+  CheckEqual(VariantSaveJson(V1), '[1.5,1.7,{"id":1},"abc","def"]');
   Doc.Clear;
   Doc.InitObjectFromPath('name', 'toto');
   CheckEqual(Doc.ToJson, '{"name":"toto"}');
+  CheckEqual(Doc.ToUrlEncode('/root'), '/root?name=toto');
   Doc.Clear;
   Doc.InitObjectFromPath('people.age', 30);
   CheckEqual(Doc.ToJson, '{"people":{"age":30}}');
@@ -6118,6 +6125,15 @@ begin
   Doc.Clear;
   Doc.InitJson('{a:{b:1,b:10},d:3}');
   Check(Doc.FlattenFromNestedObjects(#0));
+  CheckEqual(Doc.ToJson, '{"ab":1,"ab2":10,"d":3}');
+  s := Doc.ToUrlEncode('/root');
+  CheckEqual(s, '/root?ab=1&ab2=10&d=3');
+  Doc.Clear;
+  CheckEqual(Doc.Count, 0);
+  p := PosChar(pointer(s), '?');
+  if not CheckFailed(p <> nil) then
+    Doc.InitFromUrl(p + 1, JSON_FAST);
+  CheckEqual(Doc.Count, 3);
   CheckEqual(Doc.ToJson, '{"ab":1,"ab2":10,"d":3}');
   s := '[{"Val1":"blabla","Val2":"bleble"},{"Val1":"blibli","Val2":"bloblo"}]';
   V := _Json(s);
@@ -6373,6 +6389,9 @@ begin
   Check(RecordLoadJson(d, u, TypeInfo(TTest)));
   check(d.d <> 0);
   {$endif HASEXTRECORDRTTI}
+  CheckEqual(SizeOf(TRttiVarData), SizeOf(TVarData));
+  CheckEqual(SizeOf(TSynVarData), SizeOf(TVarData));
+  Check(@PRttiVarData(nil)^.PropValue = @PVarData(nil)^.VAny);
   // CSV to set
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), ''), 0, 'TSetMyEnum0');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'none'), 0, 'TSetMyEnum?');
@@ -6728,7 +6747,6 @@ var
   str: string;
   P: PUtf8Char;
   Guid2: TGuid;
-  U: TUri;
 const
   guid: TGuid = '{c9a646d3-9c61-4cb7-bfcd-ee2522c8f633}';
 
@@ -6742,41 +6760,43 @@ const
     CheckEqual(res, expected);
   end;
 
-  procedure Test(const decoded, encoded: RawUtf8);
+  procedure Test(decoded, encoded: RawUtf8);
   begin
     CheckEqual(UrlEncode(decoded), encoded);
     Check(UrlDecode(encoded) = decoded);
     Check(UrlDecode(PUtf8Char(encoded)) = decoded);
+    if decoded[1] <> '/' then
+      insert('/', decoded, 1); // as AddUrlNameNormalize() does
     DoOne(StringReplaceChars(encoded, '+', ' '), decoded); // + only after ?
   end;
 
 begin
   w := TTextWriter.CreateOwnedStream(tmp);
   try
-    DoOne('', '');
-    DoOne('a', 'a');
-    DoOne('ab', 'ab');
-    DoOne('a%20b', 'a b');
-    DoOne('a% b', 'a% b');
+    DoOne('', '/');
+    DoOne('a', '/a');
+    DoOne('ab', '/ab');
+    DoOne('a%20b', '/a b');
+    DoOne('a% b', '/a% b');
     DoOne('/', '/');
     DoOne('//', '/');
-    DoOne('a/b', 'a/b');
-    DoOne('a//b', 'a/b');
-    DoOne('a///b', 'a/b');
+    DoOne('a/b', '/a/b');
+    DoOne('a//b', '/a/b');
+    DoOne('a///b', '/a/b');
     DoOne('/ab', '/ab');
     DoOne('//ab', '/ab');
     DoOne('///ab', '/ab');
-    DoOne('ab/', 'ab/');
-    DoOne('ab//', 'ab/');
-    DoOne('ab///', 'ab/');
-    DoOne('a/b/', 'a/b/');
+    DoOne('ab/', '/ab/');
+    DoOne('ab//', '/ab/');
+    DoOne('ab///', '/ab/');
+    DoOne('a/b/', '/a/b/');
     DoOne('/ab//', '/ab/');
     DoOne('//ab///', '/ab/');
-    DoOne('ab'#0, 'ab');
-    DoOne('ab'#0'c', 'ab');
+    DoOne('ab'#0, '/ab');
+    DoOne('ab'#0'c', '/ab');
     DoOne('/ab'#0'c', '/ab');
     DoOne('/ab//'#0'c', '/ab/');
-    DoOne(#0'c', '');
+    DoOne(#0'c', '/');
     Test('abcdef', 'abcdef');
     Test('where=name like :(''Arnaud%'')', 'where%3Dname+like+%3A%28%27Arnaud%25%27%29');
     Test('"Aardvarks lurk, OK?"', '%22Aardvarks+lurk%2C+OK%3F%22');
@@ -6827,42 +6847,6 @@ begin
   Check(Base64uriToBin(utf, @Guid2, SizeOf(Guid2)));
   Check(IsEqualGuid(Guid2, Guid));
   Check(IsEqualGuid(@Guid2, @Guid));
-  Check(U.From('toto.com'));
-  CheckEqual(U.Uri, 'http://toto.com/');
-  Check(not U.Https);
-  Check(U.From('toto.com:123'));
-  CheckEqual(U.Uri, 'http://toto.com:123/');
-  Check(not U.Https);
-  Check(U.From('https://toto.com:123/tata/titi'));
-  CheckEqual(U.Uri, 'https://toto.com:123/tata/titi');
-  Check(U.Https);
-  CheckEqual(u.Address, 'tata/titi');
-  Check(U.From('https://toto.com:123/tata/tutu:tete'));
-  CheckEqual(u.Address, 'tata/tutu:tete');
-  CheckEqual(U.Uri, 'https://toto.com:123/tata/tutu:tete');
-  Check(U.From('http://user:password@server:port/address'));
-  Check(not U.Https);
-  CheckEqual(U.Uri, 'http://server:port/address');
-  CheckEqual(U.User, 'user');
-  CheckEqual(U.Password, 'password');
-  CheckEqual(u.Address, 'address');
-  Check(U.From('https://user@server:port/address'));
-  Check(U.Https);
-  CheckEqual(U.Uri, 'https://server:port/address');
-  CheckEqual(U.User, 'user');
-  CheckEqual(U.Password, '');
-  Check(U.From('toto.com/tata/tutu:tete'));
-  CheckEqual(U.Uri, 'http://toto.com/tata/tutu:tete');
-  CheckEqual(U.User, '');
-  CheckEqual(U.Password, '');
-  Check(U.From('file://server/path/to%20image.jpg'));
-  CheckEqual(U.Scheme, 'file');
-  CheckEqual(U.Server, 'server');
-  CheckEqual(u.Address, 'path/to%20image.jpg');
-  Check(not U.From('file:///path/to%20image.jpg'), 'false if valid');
-  CheckEqual(U.Scheme, 'file');
-  CheckEqual(U.Server, '');
-  CheckEqual(u.Address, 'path/to%20image.jpg');
   CheckEqual(UrlEncode(''), '');
   CheckEqual(UrlDecode(''), '');
   CheckEqual(UrlEncodeName(''), '');
@@ -7297,6 +7281,97 @@ begin
     id.From(n.Year);
     Check(id.Granularity = mugYear);
   end;
+end;
+
+procedure TTestCoreProcess.Folders;
+var
+  folder, subfolder: TFileName;
+
+  procedure DoOne(opt: TFindFilesOptions; const mask: TFileName);
+  var
+    f1: TFindFilesDynArray;
+    {$ifdef OSPOSIX}
+    f2: TFindFilesDynArray;
+    p1, p2: PFindFiles;
+    siz: Int64;
+    {$endif}
+    n1, n2: TFileNameDynArray;
+    i: PtrInt;
+  begin
+    f1 := FindFiles(folder, mask, '', opt);
+    {$ifdef OSPOSIX} // not needed on Windows where FindFiles=FindFilesRtl
+    siz := FindFilesSize(f1);
+    FindFilesRtl(folder, mask, '', opt, f2); // use TSearchRec on POSIX
+    CheckEqual(length(f1), length(f2));
+    CheckEqual(FindFilesSize(f2), siz);
+    p1 := pointer(f1);
+    p2 := pointer(f2);
+    for i := 1 to length(f1) do
+    begin
+      Check(p1 <> p2);
+      if not (ffoSortByDate in opt) then // only dates are identical after sort
+      begin
+        Check(p1^.Name = p2^.Name);
+        CheckEqual(p1^.Size, p2^.Size);
+        CheckEqual(p1^.Attr, p2^.Attr);
+      end;
+      CheckSameTime(p1^.Timestamp, p2^.Timestamp);
+      if p1^.Size > 0 then
+        dec(siz, p1^.Size);
+      inc(p1);
+      inc(p2);
+    end;
+    CheckEqual(siz, 0);
+    {$endif OSPOSIX}
+    if ffoSortByDate in opt then
+      exit; // FileNames() knows no date
+    n1 := FileNames(folder, mask, opt);
+    CheckEqual(length(f1), length(n1));
+    for i := 0 to high(f1) do
+      Check(f1[i].Name = n1[i]);
+    n2 := FindFilesDynArrayToFileNames(f1);
+    CheckEqual(length(n1), length(n2));
+    for i := 0 to high(n1) do
+      Check(n1[i] = n2[i]);
+  end;
+
+  procedure DoOptions(opt: TFindFilesOptions);
+  begin
+    DoOne(opt + [ffoExcludesDir], FILES_ALL);
+    DoOne(opt, FILES_ALL);
+    DoOne(opt + [ffoExcludesDir], '*.txt');
+    DoOne(opt, '*.txt');
+  end;
+
+  procedure DoFolder(const one: TFileName);
+  begin
+    folder := one;
+    DoOptions([]);
+    DoOptions([ffoIncludeHiddenFiles]);
+    DoOptions([ffoSortByName]); // "human" sort by extension then name
+    DoOptions([ffoSortByFullName]); // name-only sort
+    DoOptions([ffoSortByDate]);
+    DoOptions([ffoIncludeFolder]);
+    DoOptions([ffoIncludeFolder, ffoSortByName]);
+    DoOptions([ffoIncludeFolder, ffoSortByFullName]);
+    DoOptions([ffoSubFolder]);
+    DoOptions([ffoSubFolder, ffoSortByName]);
+    DoOptions([ffoSubFolder, ffoSortByFullName]);
+    DoOne([ffoSubFolder, ffoSortByName], '*.txt;*.json');
+    DoOne([ffoSubFolder, ffoSortByName, ffoExcludesDir], '*.txt;*.json');
+    DoOne([ffoSubFolder, ffoSortByFullName], '*.txt;*.json');
+    DoOne([ffoSubFolder, ffoSortByDate], '*.txt;*.json');
+  end;
+
+begin
+  // create at least two sub-folder levels to validate proper recursive process
+  subfolder := EnsureDirectoryExists([
+    Executable.ProgramFilePath, 'data', 'synecc', 'level2']);
+  Check(FileFromString('non void folder', subfolder + 'test.txt'));
+  // we can't use Executable.ProgramFilePath because of its live mormot*.log
+  DoFolder(Executable.ProgramFilePath + 'data');
+  DoFolder(Executable.ProgramFilePath + 'log');
+  Check(DirectoryDelete(subfolder), subfolder);
 end;
 
 

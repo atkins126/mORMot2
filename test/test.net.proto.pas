@@ -53,6 +53,8 @@ type
     options: TTunnelOptions;
     tunnelexecutedone: boolean;
     tunnelexecuteremote, tunnelexecutelocal: TNetPort;
+    function OnPeerCacheDirect(var aUri: TUri; var aHeader: RawUtf8;
+      var aOptions: THttpRequestExtendedOptions): integer;
     procedure TunnelExecute(Sender: TObject);
     procedure TunnelExecuted(Sender: TObject);
     procedure TunnelTest(const clientcert, servercert: ICryptCert);
@@ -70,6 +72,8 @@ type
     procedure _SocketIO;
     /// validate mormot.net.openapi unit
     procedure OpenAPI;
+    /// some HTTP shared/low-level process
+    procedure HTTP;
     /// validate THttpProxyCache process
     procedure _THttpProxyCache;
     /// validate TUriTree high-level structure
@@ -796,12 +800,13 @@ var
   ntp, usr, pwd, ku, main, txt: RawUtf8;
   dn: TNameValueDNs;
   hasinternet: boolean;
+  endtix: Int64;
 begin
   // validate NTP/SNTP client using NTP_DEFAULT_SERVER = time.google.com
   if not Executable.Command.Get('ntp', ntp) then
     ntp := NTP_DEFAULT_SERVER;
   withntp := not Executable.Command.Option('nontp');
-  hasinternet := DnsLookups('yahoo.com') <> nil; // avoid waiting for nothing
+  hasinternet := DnsLookups('yahoo.com', '', 500) <> nil; // avoid abusive wait
   if hasinternet then
   begin
     utc1 := GetSntpTime(ntp);
@@ -845,24 +850,32 @@ begin
   CheckEqual(DnsLookup('1.2.3.4'), '1.2.3.4');
   if hasinternet then
   begin
-    ip := DnsLookup('synopse.info');
-    if ip = '' then
-    begin
-      Sleep(200); // some DNS servers may fail at first: wait a little
+    endtix := GetTickCount64 + 2000; // never wait forever
+    repeat
+      inc(fAssertions);
       ip := DnsLookup('synopse.info');
-    end;
+      if ip <> '' then
+        break;
+      Sleep(100); // some DNS servers may fail at first: wait a little
+    until GetTickCount64 > endtix;
     rev := '62.210.254.173';
     CheckEqual(ip, rev, 'dns1');
-    ip := DnsLookup('blog.synopse.info');
-    CheckEqual(ip, rev, 'dns2');
-    rev := '62-210-254-173.rev.poneytelecom.eu';
-    if DnsReverseLookup(ip) <> rev then
-    begin
-      Sleep(200); // wait a little
-      CheckEqual(DnsReverseLookup(ip), rev, 'rev');
-    end
-    else
+    repeat
       inc(fAssertions);
+      ip := DnsLookup('blog.synopse.info');
+      if ip <> '' then
+        break;
+      Sleep(100); // some DNS servers may fail at first: wait a little
+    until GetTickCount64 > endtix;
+    CheckEqual(ip, rev, 'dns2');
+    repeat
+      inc(fAssertions);
+      rev := DnsReverseLookup(ip);
+      if rev <> '' then
+        break; // success
+      Sleep(100); // wait a little and retry up to 2 seconds
+    until GetTickCount64 > endtix;
+    CheckEqual(rev, '62-210-254-173.rev.poneytelecom.eu');
   end;
   // validate LDAP distinguished name conversion (no client)
   CheckEqual(DNToCN('CN=User1,OU=Users,OU=London,DC=xyz,DC=local'),
@@ -1412,8 +1425,8 @@ begin
     CheckEqual(serverinstance.Thread.Sent, 0);
     for i := 1 to 100 do
     begin
-      sent := RandomString(Random32(200) + 1);
-      sent2 := RandomString(Random32(200) + 1);
+      sent := RandomWinAnsi(Random32(200) + 1);
+      sent2 := RandomWinAnsi(Random32(200) + 1);
       Check(clientsock.SendAll(pointer(sent), length(sent)) = nrOk);
       Check(serversock.RecvWait(1000, received) = nrOk);
       CheckEqual(sent, received);
@@ -1554,6 +1567,15 @@ type
   THttpPeerCacheHook = class(THttpPeerCache); // to test protected methods
   THttpPeerCryptHook = class(THttpPeerCrypt);
 
+const
+  HTTP_LINK: array[0 .. 1] of RawUtf8 = ( // some constant images on our website
+    'http://bouchez.info/_wp_generated/wpacaa94d5.gif', // plain HTTP is easier
+    'http://bouchez.info/_wp_generated/wp5e714672.jpg');
+  HTTP_HASH: array[0 .. high(HTTP_LINK)] of RawUtf8 = (
+    'af33fb8c84461b3e0893b88ef6a2fdecc79fe7de4170f13566edaf4d190d8a9d',
+    '4d950e49fe18379a2b81fc531794ecedfa0f10fa21a2fc5fe2ba2e33ac660c99');
+  HTTP_TIMEOUT = 30000;
+
 procedure TNetworkProtocols._THttpPeerCache;
 var
   hpc: THttpPeerCacheHook;
@@ -1562,19 +1584,71 @@ var
   msg, msg2: THttpPeerCacheMessage;
   m, m2: RawUtf8;
   res: THttpPeerCryptMessageDecode;
-  i, n, alter: integer;
-  tmp: RawByteString;
+  i, n, alter, status, len: integer;
+  tmp: THttpPeerCacheMessageEncoded;
+  cache: TFileName;
+  dUri, dBearer, dTok, dAddr, ctyp, params: RawUtf8;
+  hcs: THttpClientSocket;
+  decoded: TUri;
+  tls: TNetTlsContext;
   timer: TPrecisionTimer;
+  opt: THttpRequestExtendedOptions;
+  popt: PHttpRequestExtendedOptions;
 begin
+  CheckEqual(SizeOf(msg), 192);
+  CheckEqual(PEER_CACHE_MESSAGELEN, SizeOf(msg) + 4 + SizeOf(TAesBlock) * 3);
+  CheckEqual(Base64uriToBinLength(PEER_CACHE_BEARERLEN), PEER_CACHE_MESSAGELEN);
+  // validate THttpRequestExtendedOptions serialization
+  opt.Init;
+  Check(not opt.TLS.IgnoreCertificateErrors);
+  Check(VarIsEmptyOrNull(opt.ToDocVariant));
+  CheckEqual(opt.ToUrlEncode('/root'), '/root');
+  opt.TLS.IgnoreCertificateErrors := true;
+  CheckEqual(VariantSaveJson(opt.ToDocVariant), '{"ti":true}');
+  CheckEqual(opt.ToUrlEncode('/root'), '/root?ti=1');
+  opt.Auth.Scheme := wraNegotiate;
+  CheckEqual(VariantSaveJson(opt.ToDocVariant), '{"ti":true,"as":3}');
+  CheckEqual(opt.ToUrlEncode('/root'), '/root?ti=1&as=3');
+  opt.Init;
+  Check(not opt.TLS.IgnoreCertificateErrors);
+  Check(VarIsEmptyOrNull(opt.ToDocVariant));
+  CheckEqual(VariantSaveJson(opt.ToDocVariant), 'null');
+  Check(opt.InitFromUrl('ti=1&as=3'));
+  Check(opt.TLS.IgnoreCertificateErrors);
+  CheckEqual(VariantSaveJson(opt.ToDocVariant), '{"ti":true,"as":3}');
+  Check(opt.InitFromUrl('ti=1'));
+  CheckEqual(VariantSaveJson(opt.ToDocVariant), '{"ti":true}');
+  Check(opt.TLS.IgnoreCertificateErrors);
+  opt.TLS.PrivatePassword := 'password';
+  CheckEqual(VariantSaveJson(opt.ToDocVariant), '{"ti":true}');
+  Check(opt.InitFromUrl('pp=RGUUac6iP4Y&ti=1'));
+  Check(opt.TLS.IgnoreCertificateErrors);
+  CheckEqual(opt.TLS.PrivatePassword, '', 'missing pf');
+  CheckEqual(VariantSaveJson(opt.ToDocVariant), '{"ti":true}');
+  opt.TLS.PrivateKeyFile := '/p/f';
+  opt.TLS.PrivatePassword := 'password'; // also for OnPeerCacheDirect() below
+  CheckEqual(VariantSaveJson(opt.ToDocVariant),
+    '{"ti":true,"pf":"/p/f","pp":"Y7rINao7mcc"}');
+  params := opt.ToUrlEncode('/root');
+  CheckEqual(params, '/root?ti=1&pf=%2Fp%2Ff&pp=Y7rINao7mcc');
+  opt.Init;
+  CheckEqual(opt.TLS.PrivatePassword, '');
+  Check(opt.InitFromUrl(params));
+  CheckEqual(opt.TLS.PrivatePassword, 'password');
+  opt.TLS.IgnoreCertificateErrors := true;
+  params := '';
   // for further tests, use the dedicated "mORMot GET" (mget) sample
   hps := THttpPeerCacheSettings.Create;
   try
     hps.CacheTempPath := Executable.ProgramFilePath + 'peercachetemp';
     hps.CachePermPath := Executable.ProgramFilePath + 'peercacheperm';
+    hps.CacheTempMinBytes := 100;
+    hps.BroadCastDirectMinBytes := 10000; // broadcast for HTTP_LINK[1] only
     hps.Port := 8008; // don't use default 8099
-    hps.Options := [pcoVerboseLog {,pcoSelfSignedHttps}];
+    hps.Options := [pcoHttpDirect, pcoCacheTempNoCheckSize,
+      pcoVerboseLog, pcoHttpReprDigest {}, pcoSelfSignedHttps{}];
     try
-      hpc := THttpPeerCacheHook.Create(hps, 'secret');
+      hpc := THttpPeerCacheHook.Create(hps, 'secret'{,THttpAsyncServer});
       try
         hpc2 := THttpPeerCryptHook.Create('secret', nil, nil);
         try
@@ -1582,15 +1656,16 @@ begin
           hpc2.AfterSettings;
           hpc.MessageInit(pcfBearer, 0, msg);
           msg.Hash.Algo := hfSHA256;
+          RandomBytes(@msg.Hash.Bin, HASH_SIZE[msg.Hash.Algo]);
+          // validate UDP messages encoding/decoding
           timer.Start;
           n := 1000;
           for i := 1 to n do
           begin
             msg.Size := i;
-            msg.Hash.Hash.i0 := i;
-            tmp := hpc.MessageEncode(msg);
-            Check(tmp <> '');
-            res := hpc2.MessageDecode(pointer(tmp), length(tmp), msg2);
+            msg.Hash.Bin.i0 := i;
+            hpc.MessageEncode(msg, tmp);
+            res := hpc2.MessageDecode(@tmp, SizeOf(tmp), msg2);
             Check(res = mdOk, 'hpc2');
             CheckEqual(msg2.Size, i);
             Check(CompareMem(@msg, @msg2, SizeOf(msg)));
@@ -1599,35 +1674,283 @@ begin
           m := RawUtf8(ToText(msg));
           m2 := RawUtf8(ToText(msg2));
           CheckEqual(m, m2);
+          // validate UDP messages alteration (quick CRC identification)
           timer.Start;
           n := 10000;
           for i := 1 to n do
           begin
-            alter := Random32(length(tmp));
-            inc(PByteArray(tmp)[alter]); // should be detected at crc level
-            res := hpc2.MessageDecode(pointer(tmp), length(tmp), msg2);
+            alter := Random32(SizeOf(tmp));
+            inc(PByteArray(@tmp)[alter]); // should be detected at crc level
+            res := hpc2.MessageDecode(@tmp, SizeOf(tmp), msg2);
             if CheckFailed(res = mdCrc, 'alt') then
               TestFailed('alt=%', [ToText(res)^]);
-            dec(PByteArray(tmp)[alter]); // restore
+            dec(PByteArray(@tmp)[alter]); // restore
           end;
           NotifyTestSpeed('altered', n, n * SizeOf(msg), @timer);
-          res := hpc.MessageDecode(pointer(tmp), length(tmp), msg2);
+          res := hpc.MessageDecode(@tmp, SizeOf(tmp), msg2);
           Check(res = mdOk, 'hpc');
           Check(CompareMem(@msg, @msg2, SizeOf(msg)));
-          for i := 1 to 10 do
-            Check(hpc.Ping = nil);
+          // validate the UDP client/server stack is running
+          Check(hpc.Ping = nil);
+          // validate THttpPeerCrypt.HttpDirectUri request encoding/decoding
+          Check(THttpPeerCrypt.HttpDirectUri('secret',
+            'https://synopse.info/forum', ToText(msg.Hash), dUri, dBearer));
+          CheckEqual(dUri, '/https/synopse.info/forum');
+          Check(THttpPeerCrypt.HttpDirectUriReconstruct(pointer(dUri), decoded), 'reconst');
+          CheckEqual(decoded.URI, 'https://synopse.info/forum');
+          Check(dBearer <> '', 'dBearer');
+          FillCharFast(msg2, SizeOf(msg2), 0);
+          Check(msg2.Hash.Algo <> hfSHA256);
+          Check(not CompareMem(@msg.Hash.Bin, @msg2.Hash.Bin, HASH_SIZE[hfSHA256]));
+          Check(not HashDigestEqual(msg.Hash, msg2.Hash), 'hde0');
+          res := hpc2.BearerDecode(dBearer, pcfBearerDirect, msg2);
+          Check(res = mdBParam, 'directB64');
+          dTok := '';
+          Check(FindNameValue(PAnsiChar(pointer(dBearer)), HEADER_BEARER_UPPER, dTok));
+          FillCharFast(msg2, SizeOf(msg2), 0);
+          res := hpc2.BearerDecode(dTok, pcfBearer, msg2);
+          Check(res = mdBearer, 'directKo');
+          FillCharFast(msg2, SizeOf(msg2), 0);
+          res := hpc2.BearerDecode(dTok, pcfBearerDirect, msg2);
+          Check(res = mdOk, 'directOk');
+          Check(not CompareMem(@msg, @msg2, SizeOf(msg)), 'cm');
+          Check(CompareMem(@msg.Hash.Bin, @msg2.Hash.Bin, HASH_SIZE[hfSHA256]));
+          Check(HashDigestEqual(msg.Hash, msg2.Hash), 'hde1');
+          Check(msg2.Kind = pcfBearerDirect);
+          CheckEqual(msg2.Opaque, 7142701337754149600, 'Opaque');
+          Check(msg2.Hash.Algo = hfSHA256);
+          Check(CompareMem(@msg.Hash.Bin, @msg2.Hash.Bin, HASH_SIZE[hfSHA256]));
+          Check(HashDigestEqual(msg.Hash, msg2.Hash), 'hde2');
+          FillCharFast(msg2, SizeOf(msg2), 0);
+          inc(dTok[10]);
+          res := hpc2.BearerDecode(dTok, pcfBearer, msg2);
+          Check(res in [mdCrc, mdB64], 'altered');
+          Check(THttpPeerCrypt.HttpDirectUri('secret',
+            'https://synopse.info:123/forum', ToText(msg.Hash), dUri, dBearer,
+            {permanent=}true, @opt));
+          CheckEqual(dUri, '/https/synopse.info_123/forum');
+          Check(THttpPeerCrypt.HttpDirectUriReconstruct(pointer(dUri), decoded), 'reconst');
+          CheckEqual(decoded.URI, 'https://synopse.info:123/forum');
+          dTok := '';
+          Check(FindNameValue(PAnsiChar(pointer(dBearer)), HEADER_BEARER_UPPER, dTok));
+          FillCharFast(msg2, SizeOf(msg2), 0);
+          Check(msg2.Kind = pcfPing);
+          CheckEqual(params, '');
+          res := hpc2.BearerDecode(dTok, pcfBearerDirectPermanent, msg2, @params);
+          CheckEqual(params, 'ti=1&pf=%2Fp%2Ff&pp=NCpB3InJzms');
+          Check(res = mdOk, 'directOkParams');
+          Check(msg2.Kind = pcfBearerDirectPermanent);
         finally
           hpc2.Free;
+        end;
+        // validate pcoHttpDirect proxy mode with some constant web resources
+        // (will also validate rfProgressiveStatic process of our web server)
+        hcs := nil;
+        hpc.OnDirectOptions := OnPeerCacheDirect;
+        // ensure we can access the reference resources over Internet
+        status := 0;
+        CheckEqual(Sha256(HttpGet(HTTP_LINK[0], '', nil, false, @status,
+          1000, true, true)), HTTP_HASH[0], HTTP_LINK[0]);
+        if status = HTTP_SUCCESS then
+        try
+          // validate all resources
+          popt := @opt;
+          for i := 0 to high(HTTP_LINK) do
+          begin
+            // test according to local cache status
+            cache := MakeString([hpc.TempFilesPath, '02', HTTP_HASH[i], '.cache']);
+            DeleteFile(cache);
+            // compute the direct proxy URI and bearer
+            Check(hps.HttpDirectUri('secret', HTTP_LINK[i], HTTP_HASH[i],
+              dUri, dBearer, false, false, popt));
+            popt := nil; // ext parameters only for the first
+            Check(PosEx(':8008', dUri) <> 0);
+            Check(dBearer <> '');
+            Check(IdemPChar(pointer(dBearer), HEADER_BEARER_UPPER));
+            Check(decoded.From(dUri));
+            // first GET request to download from reference website
+            if hcs = nil then
+            begin
+              InitNetTlsContext(tls);
+              tls.IgnoreCertificateErrors := true;
+              hcs := THttpClientSocket.OpenUri(dUri, dAddr, '', 10000, @tls);
+              hcs.OnLog := TSynLog.DoLog;
+              CheckEqual(dAddr, decoded.Address);
+            end;
+            status := hcs.Get(decoded.Address, HTTP_TIMEOUT, dBearer);
+            CheckEqual(status, HTTP_SUCCESS);
+            CheckEqual(Sha256(hcs.Content), HTTP_HASH[i]);
+            CheckEqual(HashFileSha256(cache), HTTP_HASH[i]);
+            ctyp := hcs.ContentType;
+            CheckUtf8(IdemPChar(pointer(ctyp), 'IMAGE/'), ctyp);
+            len := hcs.ContentLength;
+            CheckUtf8(PosEx('Repr-Digest: sha-256=:', hcs.Headers) <> 0, hcs.Headers);
+            // GET twice to retrieve from cache
+            status := hcs.Get(decoded.Address, HTTP_TIMEOUT, dBearer);
+            CheckEqual(status, HTTP_SUCCESS);
+            CheckEqual(hcs.ContentLength, len);
+            CheckEqual(hcs.ContentType, ctyp);
+            CheckEqual(Sha256(hcs.Content), HTTP_HASH[i]);
+            // HEAD should work with cache
+            status := hcs.Head(decoded.Address, HTTP_TIMEOUT, dBearer);
+            CheckEqual(status, HTTP_SUCCESS);
+            CheckEqual(hcs.ContentLength, len);
+            CheckEqual(hcs.ContentType, ctyp);
+            Check(DeleteFile(cache));
+            CheckUtf8(PosEx('Repr-Digest: sha-256=:', hcs.Headers) <> 0, hcs.Headers);
+            // HEAD should work without cache
+            status := hcs.Head(decoded.Address, HTTP_TIMEOUT, dBearer);
+            CheckEqual(status, HTTP_SUCCESS);
+            CheckEqual(hcs.ContentLength, len);
+            CheckEqual(hcs.ContentType, ctyp);
+          end;
+        finally
+          hcs.Free;
         end;
       finally
         hpc.Free;
       end;
     except
-      // exception here is likely to be port 8099 already used -> continue
+      // exception here is likely to be port 8008 already used -> continue
     end;
   finally
     hps.Free;
   end;
+end;
+
+function TNetworkProtocols.OnPeerCacheDirect(var aUri: TUri;
+  var aHeader: RawUtf8; var aOptions: THttpRequestExtendedOptions): integer;
+begin
+  // ext parameters only for the first resource
+  CheckUtf8((aUri.Address = '_wp_generated/wpacaa94d5.gif') =
+            aOptions.TLS.IgnoreCertificateErrors, aUri.Address);
+  if aOptions.TLS.IgnoreCertificateErrors then
+    CheckEqual(aOptions.TLS.PrivatePassword, 'password')
+  else
+    CheckEqual(aOptions.TLS.PrivatePassword, '');
+  // it is time to setup our custom parameters, needed e.g. with https
+  aOptions.TLS.IgnoreCertificateErrors := true;
+  // continue
+  result := HTTP_SUCCESS;
+end;
+
+procedure TNetworkProtocols.HTTP;
+var
+  met: TUriMethod;
+  s: RawUtf8;
+  hc: THttpCookies;
+  U: TUri;
+
+  procedure Check4;
+  begin
+    CheckEqual(hc.Cookies[0].Name, 'name');
+    CheckEqual(hc.Cookies[0].Value, 'value');
+    CheckEqual(hc.Cookies[1].Name, 'name 1');
+    CheckEqual(hc.Cookies[1].Value, 'value1');
+    CheckEqual(hc.Cookies[2].Name, 'name 2');
+    CheckEqual(hc.Cookies[2].Value, 'value 2');
+    CheckEqual(hc.Cookies[3].Name, 'name3');
+    CheckEqual(hc.Cookies[3].Value, 'value3');
+  end;
+
+begin
+  // validate method names and HTTP status codes or schemes
+  Check(ToMethod('') = mNone);
+  Check(ToMethod('toto') = mNone);
+  Check(ToMethod('get') = mGET);
+  Check(ToMethod('Patch') = mPATCH);
+  Check(ToMethod('OPTIONS') = mOPTIONS);
+  Check(not IsGet('get'));
+  Check(IsGet('GET'));
+  Check(not IsPost('Post'));
+  Check(IsPost('POST'));
+  for met := low(met) to high(met) do
+  begin
+    s := RawUtf8(ToText(met));
+    Check(ToMethod(s) = met);
+    LowerCaseSelf(s);
+    Check(ToMethod(s) = met);
+  end;
+  Check(IsOptions('OPTIONS'));
+  Check(not IsOptions('opTIONS'));
+  Check(IsUrlFavIcon('/favicon.ico'));
+  Check(not IsUrlFavIcon('/favicon.ice'));
+  Check(not IsHttp('http:'));
+  Check(IsHttp('https:'));
+  Check(IsHttp('http://toto'));
+  Check(IsHttp('https://titi'));
+  Check(not IsHttp('c:\'));
+  Check(not IsHttp('c:\toto'));
+  Check(not IsHttp('file://toto'));
+  CheckEqual(StatusCodeToText(100)^, 'Continue');
+  CheckEqual(StatusCodeToText(200)^, 'OK');
+  CheckEqual(StatusCodeToText(206)^, 'Partial Content');
+  CheckEqual(StatusCodeToText(300)^, 'Multiple Choices');
+  CheckEqual(StatusCodeToText(503)^, 'Service Unavailable');
+  CheckEqual(StatusCodeToText(513)^, 'Invalid Request');
+  CheckEqual(StatusCodeToText(514)^, 'Invalid Request');
+  CheckEqual(StatusCodeToText(499)^, 'Invalid Request');
+  CheckEqual(StatusCodeToText(666)^, 'Client Side Connection Error');
+  // validate TUri data structure
+  Check(U.From('toto.com'));
+  CheckEqual(U.Uri, 'http://toto.com/');
+  Check(not U.Https);
+  Check(U.From('toto.com:123'));
+  CheckEqual(U.Uri, 'http://toto.com:123/');
+  Check(not U.Https);
+  Check(U.From('https://toto.com:123/tata/titi'));
+  CheckEqual(U.Uri, 'https://toto.com:123/tata/titi');
+  Check(U.Https);
+  CheckEqual(U.Address, 'tata/titi');
+  Check(U.From('https://toto.com:123/tata/tutu:tete'));
+  CheckEqual(U.Address, 'tata/tutu:tete');
+  CheckEqual(U.Uri, 'https://toto.com:123/tata/tutu:tete');
+  Check(U.From('http://user:password@server:port/address'));
+  Check(not U.Https);
+  CheckEqual(U.Uri, 'http://server:port/address');
+  CheckEqual(U.User, 'user');
+  CheckEqual(U.Password, 'password');
+  CheckEqual(U.Address, 'address');
+  Check(U.From('https://user@server:port/address'));
+  Check(U.Https);
+  CheckEqual(U.Uri, 'https://server:port/address');
+  CheckEqual(U.User, 'user');
+  CheckEqual(U.Password, '');
+  Check(U.From('toto.com/tata/tutu:tete'));
+  CheckEqual(U.Uri, 'http://toto.com/tata/tutu:tete');
+  CheckEqual(U.User, '');
+  CheckEqual(U.Password, '');
+  Check(U.From('file://server/path/to%20image.jpg'));
+  CheckEqual(U.Scheme, 'file');
+  CheckEqual(U.Server, 'server');
+  CheckEqual(U.Address, 'path/to%20image.jpg');
+  Check(not U.From('file:///path/to%20image.jpg'), 'false if valid');
+  CheckEqual(U.Scheme, 'file');
+  CheckEqual(U.Server, '');
+  CheckEqual(U.Address, 'path/to%20image.jpg');
+  // validate THttpCookies
+  hc.ParseServer('');
+  CheckEqual(length(hc.Cookies), 0);
+  hc.ParseServer('one: value'#13#10'cookie: name=value');
+  CheckEqual(length(hc.Cookies), 1);
+  CheckEqual(hc.Cookies[0].Name, 'name');
+  CheckEqual(hc.Cookies[0].Value, 'value');
+  hc.Clear;
+  CheckEqual(length(hc.Cookies), 0);
+  hc.ParseServer('one: value'#13#10'cookie: name = value ');
+  CheckEqual(length(hc.Cookies), 1);
+  CheckEqual(hc.Cookies[0].Name, 'name');
+  CheckEqual(hc.Cookies[0].Value, 'value');
+  hc.ParseServer('cookie: name=value'#13#10 +
+    'Cookie: name 1=value1; name 2 = value 2; name3=value3'#13#10 +
+    'cookone: value'#13#10);
+  CheckEqual(length(hc.Cookies), 4);
+  Check4;
+  hc.ParseServer('cookie: name=value'#10'toto: titi'#10#10 +
+    'Cookie: name 1=value1; name 2 = value 2; name3=value3'#13#10 +
+    'cookone: value'#13#10#13#10);
+  CheckEqual(length(hc.Cookies), 4, 'malformatted CRLF');
+  Check4;
 end;
 
 procedure TNetworkProtocols._THttpProxyCache;

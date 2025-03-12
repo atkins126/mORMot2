@@ -429,10 +429,12 @@ begin
               end;
             end;
           oftUtf8Text:
+            {$ifndef HASVARUSTRING} // Value is WideString on Delphi 7/2007
             if aField.DataType = ftWideString then
-              TWideStringField(aField).Value :=
-                aTable.GetSynUnicode(aRow, SqlIndex)
+              TWideStringField(aField).Value := aTable.GetSynUnicode(aRow, SqlIndex)
             else
+            {$endif HASVARUSTRING}
+              // AsString is UnicodeString on Delphi 2009+, and CP_UTF8 on Lazarus
               aField.AsString := aTable.GetString(aRow, SqlIndex);
         else
           aField.AsVariant := aTable.GetVariant(aRow, SqlIndex);

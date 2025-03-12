@@ -19,6 +19,7 @@ interface
 
 uses
   sysutils,
+  classes,
   mormot.core.base,
   mormot.core.data,
   mormot.core.os,
@@ -28,7 +29,8 @@ uses
   mormot.core.datetime,
   mormot.core.rtti,
   mormot.core.perf,
-  mormot.core.log;
+  mormot.core.log,
+  mormot.core.threads;
 
 
 { ************ Unit-Testing classes and functions }
@@ -152,6 +154,7 @@ type
     fAssertionsFailed: integer;
     fAssertionsBeforeRun: integer;
     fAssertionsFailedBeforeRun: integer;
+    fBackgroundRun: TLoggedWorker;
     /// any number not null assigned to this field will display a "../s" stat
     fRunConsoleOccurrenceNumber: cardinal;
     /// any number not null assigned to this field will display a "using .. MB" stat
@@ -269,9 +272,15 @@ type
     procedure CheckHash(const data: RawByteString; expectedhash32: cardinal;
       const msg: RawUtf8 = '');
     /// create a temporary string random content, WinAnsi (code page 1252) content
+    class function RandomWinAnsi(CharCount: integer): WinAnsiString;
+    {$ifndef PUREMORMOT2}
     class function RandomString(CharCount: integer): WinAnsiString;
+      {$ifdef HASINLINE}inline;{$endif}
+    {$endif PUREMORMOT2}
     /// create a temporary UTF-8 string random content, using WinAnsi
     // (code page 1252) content
+    // - CharCount is the number of random WinAnsi chars, so it is possible that
+    // length(result) > CharCount once encoded into UTF-8
     class function RandomUtf8(CharCount: integer): RawUtf8;
     /// create a temporary UTF-16 string random content, using WinAnsi
     // (code page 1252) content
@@ -289,6 +298,18 @@ type
     class procedure AddRandomTextParagraph(WR: TTextWriter; WordCount: integer;
       LastPunctuation: AnsiChar = '.'; const RandomInclude: RawUtf8 = '';
       NoLineFeed: boolean = false);
+    /// execute a method possibly in a dedicated TLoggedWorkThread
+    // - OnTask() should take some time running, to be worth a thread execution
+    // - won't create more background threads than currently available CPU cores,
+    // to avoid resource exhaustion and unexpected timeouts on smaller computers,
+    // unless ForcedThreaded is used and then an internal queue is used to
+    // force all taks to be executed in their own thread
+    procedure Run(const OnTask: TNotifyEvent; Sender: TObject;
+      const TaskName: RawUtf8; Threaded: boolean = true; NotifyTask: boolean = true;
+      ForcedThreaded: boolean = false);
+    /// wait for background thread started by Run() to finish
+    procedure RunWait(NotifyThreadCount: boolean = true; TimeoutSec: integer = 60;
+      CallSynchronize: boolean = false);
     /// this method is triggered internally - e.g. by Check() - when a test failed
     procedure TestFailed(const msg: string); overload;
     /// this method can be triggered directly - e.g. after CheckFailed() = true
@@ -654,6 +675,7 @@ end;
 destructor TSynTestCase.Destroy;
 begin
   CleanUp;
+  fBackgroundRun.Free;
   inherited;
 end;
 
@@ -888,7 +910,7 @@ begin
     [CardinalToHexShort(crc), CardinalToHexShort(expectedhash32), msg]);
 end;
 
-class function TSynTestCase.RandomString(CharCount: integer): WinAnsiString;
+class function TSynTestCase.RandomWinAnsi(CharCount: integer): WinAnsiString;
 var
   i: PtrInt;
   R: PByteArray;
@@ -900,6 +922,13 @@ begin
     PByteArray(result)[i] := 32 + R[i] and 127;
   tmp.Done;
 end;
+
+{$ifndef PUREMORMOT2}
+class function TSynTestCase.RandomString(CharCount: integer): WinAnsiString;
+begin
+  result := RandomWinAnsi(CharCount);
+end;
+{$endif PUREMORMOT2}
 
 class function TSynTestCase.RandomAnsi7(CharCount: integer): RawByteString;
 var
@@ -945,12 +974,12 @@ end;
 
 class function TSynTestCase.RandomUtf8(CharCount: integer): RawUtf8;
 begin
-  result := WinAnsiToUtf8(RandomString(CharCount));
+  result := WinAnsiToUtf8(RandomWinAnsi(CharCount));
 end;
 
 class function TSynTestCase.RandomUnicode(CharCount: integer): SynUnicode;
 begin
-  result := WinAnsiConvert.AnsiToUnicodeString(RandomString(CharCount));
+  result := WinAnsiConvert.AnsiToUnicodeString(RandomWinAnsi(CharCount));
 end;
 
 class function TSynTestCase.RandomTextParagraph(WordCount: integer;
@@ -1049,6 +1078,33 @@ begin
     WR.AddShorter('bla');
     WR.Add(LastPunctuation);
   end;
+end;
+
+procedure TSynTestCase.Run(const OnTask: TNotifyEvent; Sender: TObject;
+  const TaskName: RawUtf8; Threaded, NotifyTask, ForcedThreaded: boolean);
+begin
+  if NotifyTask then
+    NotifyProgress([TaskName]);
+  if Assigned(OnTask) then
+    if not Threaded then
+      OnTask(Sender) // run in main thread
+    else
+    begin
+      if fBackgroundRun = nil then
+        fBackgroundRun := TLoggedWorker.Create(TSynLogTestLog);
+      fBackgroundRun.Run(Ontask, Sender, TaskName, ForcedThreaded);
+    end;
+end;
+
+procedure TSynTestCase.RunWait(NotifyThreadCount: boolean; TimeoutSec: integer;
+  CallSynchronize: boolean);
+begin
+  if not fBackgroundRun.Waiting then
+    exit;
+  if NotifyThreadCount then
+    NotifyProgress(['(waiting for ', Plural('thread', fBackgroundRun.Running), ')']);
+  if not fBackgroundRun.RunWait(TimeoutSec, CallSynchronize) then
+    TestFailed('RunWait timeout after % sec', [TimeoutSec]);
 end;
 
 procedure TSynTestCase.TestFailed(const msg: string);
@@ -1167,7 +1223,7 @@ end;
 constructor TSynTests.Create(const Ident: string);
 begin
   inherited Create(Ident);
-  fSafe.Init;
+  fSafe.InitFromClass;
 end;
 
 procedure TSynTests.EndSaveToFileExternal;
@@ -1296,7 +1352,6 @@ begin
   DoTextLn([CRLF + '   ', Ident,
             CRLF + '  ', RawUtf8OfChar('-', length(Ident) + 2)]);
   RunTimer.Start;
-  Randomize;
   fFailed := nil;
   fAssertions := 0;
   fAssertionsFailed := 0;
@@ -1367,6 +1422,8 @@ begin
           end;
           if not started then
             continue;
+          if C.fBackgroundRun.Waiting then
+            C.fBackgroundRun.Terminate({andwait=}true); // paranoid
           C.CleanUp; // should be done before Destroy call
           if C.AssertionsFailed = 0 then
             DoColor(ccLightGreen)

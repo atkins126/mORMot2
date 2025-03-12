@@ -1381,7 +1381,7 @@ end;
 function TMvcViewsMustache.FindTemplates(
   const Mask: TFileName): TFileNameDynArray;
 begin
-  result := FileNames(ViewTemplateFolder, Mask, [ffoExcludesDir]);
+  result := FileNames(ViewTemplateFolder, Mask, [ffoExcludesDir, ffoSortByName]);
 end;
 
 function TMvcViewsMustache.GetTemplate(const aFileName: TFileName): RawUtf8;
@@ -1569,7 +1569,7 @@ var
 begin
   ctxt := ServiceRunningContext.Request;
   ctxt.OutSetCookie := fContext.CookieName + '=' + cookie;
-  ctxt.InCookie[CookieName] := cookie;
+  ctxt.InCookie[fContext.CookieName] := cookie;
 end;
 
 

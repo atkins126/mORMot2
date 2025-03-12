@@ -209,26 +209,40 @@ type
     lfCustom,
     lfDDD);
 
+  /// global increasing log levels as expected by most applications
+  TAppLogLevel = (
+    aplNone,
+    aplCritical,
+    aplError,
+    aplWarning,
+    aplInfo,
+    aplDebug);
+
 const
   /// up to 16 TSynLogFamily, i.e. TSynLog children classes can be defined
   MAX_SYNLOGFAMILY = 15;
 
+  /// constant with all TSynLogFamily.Level items, as set by LOG_VERBOSE
+  LOG_ALL = [succ(sllNone) .. high(TSynLogLevel)];
+  /// constant matching TSynLogFamily.Level items for regular aplCritical level
+  LOG_CRI = [sllException, sllExceptionOS];
+  /// constant matching TSynLogFamily.Level items for regular aplError level
+  LOG_ERR = LOG_CRI + [sllLastError, sllError, sllDDDError];
+  /// constant matching TSynLogFamily.Level items for regular aplWarning level
+  LOG_WNG = LOG_ERR + [sllWarning, sllFail, sllStackTrace];
+  /// constant matching TSynLogFamily.Level items for regular aplInfo level
+  LOG_NFO = LOG_WNG + [sllInfo, sllDDDInfo, sllMonitoring, sllClient, sllServer, sllServiceCall];
+
   /// can be set to TSynLogFamily.Level in order to log all available events
-  LOG_VERBOSE: TSynLogLevels =
-    [succ(sllNone)..high(TSynLogLevel)];
+  LOG_VERBOSE: TSynLogLevels = LOG_ALL;
 
   /// contains the logging levels for which stack trace should be dumped
   // - which are mainly exceptions or application errors
-  LOG_STACKTRACE: TSynLogLevels =
-    [sllException,
-     sllExceptionOS,
-     sllLastError,
-     sllError,
-     sllDDDError];
+  LOG_STACKTRACE: TSynLogLevels = LOG_ERR;
 
   /// the text equivalency of each logging level, as written in the log file
   // - PCardinal(@LOG_LEVEL_TEXT[L][3])^ will be used for fast level matching
-  // so text must be unique for characters [3..6] -> e.g. 'UST4'
+  // so text must be unique for characters [3..6] -> e.g. 'ust4'
   LOG_LEVEL_TEXT: array[TSynLogLevel] of string[7] = (
     '       ',  // sllNone
     ' info  ',  // sllInfo
@@ -372,11 +386,10 @@ var
     ccWhite,        // sllDDDInfo
     ccLightBlue);   // sllMonitoring
 
-const
   /// how TLogFilter map TSynLogLevel events
   LOG_FILTER: array[TSynLogFilter] of TSynLogLevels = (
     [],                                                       // lfNone
-    [succ(sllNone) .. high(TSynLogLevel)],                    // lfAll
+    LOG_ALL,                                                  // lfAll
     [sllError, sllLastError, sllException, sllExceptionOS],   // lfErrors
     [sllException, sllExceptionOS],                           // lfExceptions
     [sllEnter, sllLeave],                                     // lfProfile
@@ -401,6 +414,16 @@ const
     sllInfo,
     sllWarning);
 
+  /// may be used to log as regular application-like levels
+  LOG_APP: array[TAppLogLevel] of TSynLogLevels = (
+    [],        // aplNone
+    LOG_CRI,   // aplCritical (1)
+    LOG_ERR,   // aplError    (2)
+    LOG_WNG,   // aplWarning  (3)
+    LOG_NFO,   // aplInfo     (4)
+    LOG_ALL);  // aplDebug    (5)
+
+
 /// returns the trimmed text value of a logging level
 // - i.e. 'Warning' for sllWarning
 function ToText(event: TSynLogLevel): RawUtf8; overload;
@@ -416,6 +439,18 @@ function ToCaption(filter: TSynLogFilter): string; overload;
 
 /// returns a method event as text, using the .map/.dbg/.mab information if available
 function ToText(const Event: TMethod): RawUtf8; overload;
+
+/// returns the trimmed text value of an application-like logging level
+// - i.e. 'Critical' for aplCritical
+function ToText(apl: TAppLogLevel): RawUtf8; overload;
+
+/// recognize TAppLogLevel common text like 'WARNING'
+// - ignoring case and only checking the first 4 chars
+// - would also recognize '1' .. '5' numbers as increasing aplCritical .. aplDebug
+function ToAppLogLevel(const Text: RawUtf8): TAppLogLevel;
+
+/// could be used to set TSynLogFamily.Levels e.g. from 'DEBUG' or 'CRITICAL' text
+function FromAppLogLevel(const Text: RawUtf8): TSynLogLevels;
 
 /// retrieve a one-line of text including detailed heap information
 // - will use the RTL status entrypoint, or detect mormot.core.fpcx64mm
@@ -1573,7 +1608,7 @@ type
     fLogProcMerged: TSynLogFileProcDynArray;
     fLogProcMergedCount: integer;
     fLogProcIsMerged: boolean;
-    fLogProcStack: array of array of cardinal;
+    fLogProcStack: array of TIntegerDynArray;
     fLogProcStackCount: array of integer;
     fLogProcSortInternalOrder: TLogProcSortOrder;
     fLogProcSortInternalComp: function(A, B: PtrInt): PtrInt of object;
@@ -1585,6 +1620,7 @@ type
     procedure SetLogProcMerged(const Value: boolean);
     function GetEventText(index: integer): RawUtf8;
     function GetLogLevelFromText(LineBeg: PUtf8Char): TSynLogLevel;
+      {$ifdef HASINLINE} inline; {$endif}
     /// retrieve headers + fLevels[] + fLogProcNatural[], and delete invalid fLines[]
     procedure LoadFromMap(AverageLineLength: integer = 32); override;
     procedure CleanLevels;
@@ -3604,6 +3640,7 @@ end;
 var
   _LogInfoText: array[TSynLogLevel] of RawUtf8;
   _LogInfoCaption: array[TSynLogLevel] of string;
+  _LogAppText: array[TAppLogLevel] of RawUtf8;
 
 function ToText(event: TSynLogLevel): RawUtf8;
 begin
@@ -3632,9 +3669,42 @@ begin
     TObject(Event.Data), Event.Data], result);
 end;
 
+function ToText(apl: TAppLogLevel): RawUtf8;
+begin
+  result := _LogAppText[apl];
+end;
+
+function ToAppLogLevel(const Text: RawUtf8): TAppLogLevel;
+begin
+  if Text <> '' then
+    case PCardinal(Text)^ and $dfdfdfdf of
+      ord('C') + ord('R') shl 8 + ord('I') shl 16 + ord('T') shl 24:
+        result := aplCritical;
+      ord('E') + ord('R') shl 8 + ord('R') shl 16 + ord('O') shl 24:
+        result := aplError;
+      ord('W') + ord('A') shl 8 + ord('R') shl 16 + ord('N') shl 24:
+        result := aplWarning;
+      ord('I') + ord('N') shl 8 + ord('F') shl 16 + ord('O') shl 24:
+        result := aplInfo;
+      ord('D') + ord('E') shl 8 + ord('B') shl 16 + ord('U') shl 24:
+        result := aplDebug;
+    else if PWord(Text)^ in [ord('1') .. ord('5')] then
+      result := TAppLogLevel(PByte(Text)^ - ord('0'))
+    else
+      result := aplNone;
+    end
+  else
+    result := aplNone;
+end;
+
+function FromAppLogLevel(const Text: RawUtf8): TSynLogLevels;
+begin
+  result := LOG_APP[ToAppLogLevel(Text)];
+end;
+
 {$ifdef FPC}
 type
-  THeapInfo = function: string;
+  THeapInfo = function: RawUtf8;
 
 function RetrieveMemoryManagerInfo: RawUtf8;
 begin
@@ -3935,7 +4005,7 @@ begin
   fSynLogClass := aSynLog;
   fIdent := ObjArrayAdd(SynLogFamily, self);
   fDestinationPath := Executable.ProgramFilePath;
-  // use .exe path by default - without [idwExcludeWinSys] (writable is enough)
+  // use .exe path by default - no [idwExcludeWinSys] needed here
   if not IsDirectoryWritable(fDestinationPath) then
     // fallback to a writable folder
     fDestinationPath := GetSystemPath(spLog);
@@ -5086,12 +5156,7 @@ begin
   log := Add;
   if (log <> nil) and
      (Level in log.fFamily.fLevel) then
-  begin
     log.LogInternalFmt(Level, Fmt, Args, Instance);
-    if Level = sllExceptionOS then
-      // ensure all log is safely written
-      log.Flush({diskwrite=}true);
-  end;
 end;
 
 class procedure TSynLog.ProgressInfo(Sender: TObject; Info: PProgressInfo);
@@ -6301,38 +6366,46 @@ var
 begin
   if SynLogFileFreeing then
     exit;
-  FormatUtf8(Format, Args, name);
-  for i := 1 to length(name) do
-    if name[i] < ' ' then
-      name[i] := ' '; // ensure on same line
-  name := TrimU(StringReplaceAll(name, [
-    'TSqlRest',        '',
-    'TRest',           '',
-    'TSql',            '',
-    'TSQLRest',        '',
-    'TSQL',            '',
-    'TOrmRest',        '',
-    'TOrm',            '',
-    'TWebSocket',      'WS',
-    'TServiceFactory', 'SF',
-    'TSyn',            '',
-    'Thread',          '',
-    'Process',         '',
-    'Background',      'Bgd',
-    'WebSocket',       'WS',
-    'Asynch',          'A',
-    'Async',           'A',
-    'Parallel',        'Prl',
-    'Timer',           'Tmr',
-    'Thread',          'Thd',
-    'Database',        'DB',
-    'Backup',          'Bak',
-    'Server',          'Srv',
-    'Client',          'Cli',
-    'synopse',         'syn',
-    'memory',          'mem',
-    '  ',              ' '
-    ]));
+  if Format <> '' then
+  begin
+    FormatUtf8(Format, Args, name);
+    if Format[1] = '=' then
+      delete(name, 1, 1) // no need to clean this thread identifier
+    else
+    begin
+      for i := 1 to length(name) do
+        if name[i] < ' ' then
+          name[i] := ' '; // ensure on same line
+      name := TrimU(StringReplaceAll(name, [
+        'TSqlRest',        '',
+        'TRest',           '',
+        'TSql',            '',
+        'TSQLRest',        '',
+        'TSQL',            '',
+        'TOrmRest',        '',
+        'TOrm',            '',
+        'TWebSocket',      'WS',
+        'TServiceFactory', 'SF',
+        'TSyn',            '',
+        'Thread',          '',
+        'Process',         '',
+        'Background',      'Bgd',
+        'WebSocket',       'WS',
+        'Asynch',          'A',
+        'Async',           'A',
+        'Parallel',        'Prl',
+        'Timer',           'Tmr',
+        'Thread',          'Thd',
+        'Database',        'DB',
+        'Backup',          'Bak',
+        'Server',          'Srv',
+        'Client',          'Cli',
+        'synopse',         'syn',
+        'memory',          'mem',
+        '  ',              ' '
+        ]));
+    end;
+  end;
   n[0] := #0;
   for i := 1 to length(name) do
     if name[i] in ['a'..'z', 'A'..'Z', '0'..'9', '.', ':'
@@ -6562,21 +6635,14 @@ var
   L: TSynLogLevel;
 begin
   for L := low(TSynLogLevel) to high(TSynLogLevel) do
-    // LOG_LEVEL_TEXT[L][3] -> test e.g. 'UST4' chars
+    // LOG_LEVEL_TEXT[L][3] -> case-sensitive lookup e.g. 'ust4' chars
     fLogLevelsTextMap[L] := PCardinal(@LOG_LEVEL_TEXT[L][3])^;
 end;
 
 function TSynLogFile.GetLogLevelFromText(LineBeg: PUtf8Char): TSynLogLevel;
-var
-  P: PtrInt;
-begin
-  P := PtrInt(IntegerScan(@fLogLevelsTextMap[succ(sllNone)],
-    ord(high(TSynLogLevel)), PCardinal(LineBeg + fLineLevelOffset)^));
-  if P <> 0 then
-    result := TSynLogLevel(
-      (P - PtrInt(PtrUInt(@fLogLevelsTextMap[succ(sllNone)]))) shr 2 + 1)
-  else
-    result := sllNone;
+begin // very fast lookup, using SSE2 on Intel/AMD
+  result := TSynLogLevel(IntegerScanIndex(@fLogLevelsTextMap[succ(sllNone)],
+         ord(high(TSynLogLevel)), PCardinal(LineBeg + fLineLevelOffset)^) + 1);
 end;
 
 function TSynLogFile.EventCount(const aSet: TSynLogLevels): integer;
@@ -6857,7 +6923,7 @@ begin
     if fHeaderLinesCount <> 4 then
       FastSetString(fHeaders, fLines[2],
         PtrUInt(fLines[fHeaderLinesCount - 2]) - PtrUInt(fLines[2]));
-    if PWord(fLines[fHeaderLinesCount])^ <> ord('0') + ord('0') shl 8 then
+    if PWord(fLines[fHeaderLinesCount])^ <> $3030 then
       // YYYYMMDD -> 20101225 e.g. fFreq=0 if date time,
       fFreq := 0
     else
@@ -6891,7 +6957,7 @@ begin
       end;
     end;
     // 4. compute customer-side profiling
-    SetLength(fLogProcNatural, fLogProcNaturalCount);
+    SetLength(fLogProcNatural, fLogProcNaturalCount); // exact resize
     fp := pointer(fLogProcNatural);
     fpe := @fLogProcNatural[fLogProcNaturalCount];
     while PAnsiChar(fp) < PAnsiChar(fpe) do
@@ -7164,9 +7230,10 @@ end;
 
 procedure TSynLogFile.ProcessOneLine(LineBeg, LineEnd: PUtf8Char);
 var
-  thread, n, i: PtrUInt;
+  thread: PtrUInt;
   MS: integer;
   L: TSynLogLevel;
+  p: PCardinalArray;
 begin
   inherited ProcessOneLine(LineBeg, LineEnd);
   if length(fLevels) < fLinesMax then
@@ -7191,7 +7258,7 @@ begin
     else
       fLineLevelOffset := 18;
     if (LineBeg[fLineLevelOffset] = '!') or // ! = thread 1
-      (GetLogLevelFromText(LineBeg) = sllNone) then
+       (GetLogLevelFromText(LineBeg) = sllNone) then
     begin
       inc(fLineLevelOffset, 3);
       fThreadsCount := fLinesMax;
@@ -7229,15 +7296,15 @@ begin
       end;
     end;
     inc(fThreadInfo[thread].Rows);
-    if (L = sllInfo) and
-       IdemPChar(LineBeg + fLineLevelOffset + 5, 'SETTHREADNAME ') then
-      with fThreadInfo[thread] do
-      begin
-        // see TSynLog.LogThreadName
-        n := length(SetThreadName);
-        SetLength(SetThreadName, n + 1);
-        SetThreadName[n] := LineBeg;
-      end;
+    if L = sllInfo then
+    begin // fast detect case-insensitive ' info  SetThreadName ' pattern
+      p := pointer(LineBeg + fLineLevelOffset + 5);
+      if (p^[0] = ord('S') + ord('e') shl 8 + ord('t') shl 16 + ord('T') shl 24) and
+         (p^[1] = ord('h') + ord('r') shl 8 + ord('e') shl 16 + ord('a') shl 24) and
+         (p^[2] = ord('d') + ord('N') shl 8 + ord('a') shl 16 + ord('m') shl 24) and
+         (PWord(@p[3])^ = ord('e') + ord(' ') shl 8) then
+        PtrArrayAdd(fThreadInfo[thread].SetThreadName, LineBeg); // from now on
+    end;
   end
   else
     thread := 0;
@@ -7246,16 +7313,10 @@ begin
   case L of
     sllEnter:
       begin
-        n := length(fLogProcStack[thread]);
-        i := fLogProcStackCount[thread];
-        if i >= n then
-          SetLength(fLogProcStack[thread], i + 256);
-        fLogProcStack[thread][i] := fLogProcNaturalCount;
-        inc(fLogProcStackCount[thread]);
-        n := length(fLogProcNatural);
-        if PtrUInt(fLogProcNaturalCount) >= n then
+        AddInteger(fLogProcStack[thread], fLogProcStackCount[thread], fLogProcNaturalCount);
+        if length(fLogProcNatural) <= fLogProcNaturalCount then
           SetLength(fLogProcNatural, NextGrow(fLogProcNaturalCount));
-        // fLogProcNatural[].Index will be set in TSynLogFile.LoadFromMap
+        // fLogProcNatural[].### fields will be set later during parsing
         inc(fLogProcNaturalCount);
       end;
     sllLeave:
@@ -7297,7 +7358,7 @@ begin
     result := '';
     if cardinal(ThreadID) <= fThreadMax then
       with fThreadInfo[ThreadID] do
-        if SetThreadName <> nil then
+        if SetThreadName <> nil then // search the thread name at this position
         begin
           found := SetThreadName[0];
           if cardinal(CurrentLogIndex) < cardinal(fCount) then
@@ -7377,11 +7438,11 @@ begin
     Utf8TruncateToLength(tmp, maxutf8len);
   if replaceTabs <> '' then
     tmp := StringReplaceAll(tmp, #9, replaceTabs);
-  if IsValidUtf8(pointer(tmp)) then
+  if IsValidUtf8(tmp) then
     Utf8ToStringVar(tmp, result)
   else
     {$ifdef UNICODE}
-    result := CurrentAnsiConvert.AnsiToUnicodeString(pointer(tmp), length(tmp));
+    CurrentAnsiConvert.AnsiToUnicodeStringVar(pointer(tmp), length(tmp), result);
     {$else}
     result := tmp;
     {$endif UNICODE}
@@ -7936,7 +7997,7 @@ begin
   len := Utf8TruncatedLength(P, len, destsize - (destbuffer - start) - 3);
   if not IsAnsiCompatible(P, len) then
   begin
-    PInteger(destbuffer)^ := $bfbbef; // UTF-8 BOM
+    PInteger(destbuffer)^ := BOM_UTF8;
     inc(destbuffer, 3);
   end;
   MoveFast(P^, destbuffer^, len);
@@ -7950,6 +8011,7 @@ begin
   GetEnumTrimmedNames(TypeInfo(TSynLogLevel), @_LogInfoText);
   GetEnumCaptions(TypeInfo(TSynLogLevel), @_LogInfoCaption);
   _LogInfoCaption[sllNone] := '';
+  GetEnumTrimmedNames(TypeInfo(TAppLogLevel), @_LogAppText);
   SetThreadName := _SetThreadName;
   SetCurrentThreadName('MainThread');
   GetExecutableLocation := _GetExecutableLocation; // use FindLocationShort()

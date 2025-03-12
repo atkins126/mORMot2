@@ -943,6 +943,10 @@ type
     /// access to a global instance, corresponding to the current process
     // - its HistoryDepth will be of 60 items
     class function Current(aCreateIfNone: boolean = true): TSystemUse;
+    /// returns detailed CPU and RAM usage history as text of the supplied process
+    // - fallback to RetrieveLoadAvg if the ProcessID was not registered
+    class function CurrentHistoryText(aProcessID: integer = 0; aDepth: integer = 0;
+      aDestMemoryMB: PRawUtf8 = nil): RawUtf8;
     /// returns detailed CPU and RAM usage history of the supplied process
     // - aProcessID=0 will return information from the current process
     // - returns nil if the Process ID was not registered via Create/Subscribe
@@ -1107,18 +1111,43 @@ function ToText(const aArm64CPUFeatures: TArm64HwCaps;
 var
   CpuFeaturesText: RawUtf8;
 
-/// retrieve low-level information about all mounted disk partitions as text
+/// retrieve information about all mounted disk partitions as single line of text
 // - returns e.g. under Linux
 // '/ /dev/sda3 (19 GB), /boot /dev/sda2 (486.8 MB), /home /dev/sda4 (0.9 TB)'
 // or under Windows 'C:\ System (115 GB), D:\ Data (99.3 GB)'
 // - uses internally a cache unless nocache is true
 // - includes the free space if withfreespace is true - e.g. '(80 GB / 115 GB)'
 function GetDiskPartitionsText(nocache: boolean = false;
-  withfreespace: boolean = false; nospace: boolean = false;
+  withfreespace: boolean = false; nospace: boolean = true;
   nomount: boolean = false): RawUtf8;
 
+/// retrieve low-level information about all mounted disk partitions as text array
+// - on POSIX, returned partitions array is sorted by "mounted" ascending order
+function GetDiskPartitionsArray(nocache: boolean = false): TDiskPartitions;
+
+/// retrieve low-level information about all mounted disk partitions as text array
+// - on POSIX, returned partitions array is sorted by "mounted" ascending order
+function GetDiskPartitionsTexts(nocache: boolean = false;
+  withfreespace: boolean = false; nospace: boolean = false;
+  nomount: boolean = false): TRawUtf8DynArray;
+
+/// retrieve low-level information about all mounted disk partitions as TDocVariant
+// - the returned object has mounted points as names, and (free) size as values, e.g.
+// $ {"/":"0.9TB/1.7TB","/boot/efi": 505.1MB/510.9MB"}
+// - on POSIX, returned partitions array is sorted by "mounted" ascending order
+function GetDiskPartitionsVariant(nocache: boolean = false;
+  withfreespace: boolean = true; nospace: boolean = true): variant;
+
+/// convert TDiskPartition info to text as used by GetDiskPartitionsTexts()
+procedure GetDiskPartitionText(var one: TDiskPartition;
+  withfreespace, nospace, nomount: boolean; var result: RawUtf8);
+
+/// convert TDiskPartition info as used for GetDiskPartitionsVariant() values
+function GetDiskPartitionSize(var one: TDiskPartition;
+  withfreespace, nospace: boolean): RawUtf8;
+
 /// returns a JSON object containing basic information about the computer
-// - including Host, User, CPU, OS, freemem, freedisk...
+// - including Host, User, CPU, OS, memused, diskfree...
 function SystemInfoJson: RawUtf8;
 
 /// returns a TDocVariant array of the latest intercepted exception texts
@@ -3579,29 +3608,21 @@ begin
     TypeInfo(TArm64HwCap), aArm64CPUFeatures, Sep, 6);
 end;
 
-
 function SystemInfoJson: RawUtf8;
-var
-  cpu, mem, free: RawUtf8;
 begin
-  cpu := TSystemUse.Current(false).HistoryText(0, 15, @mem);
-  if mem = '' then
-    free := TSynMonitorMemory.FreeAsText(false, @mem)
-  else
-    free := TSynMonitorMemory.FreeAsText;
-  with SystemInfo do
-    result := JsonEncode([
-      'host',        Executable.Host,
-      'user',        Executable.User,
-      'os',          OSVersionText,
-      'cpu',         CpuInfoText,
-      'bios',        BiosInfoText,
-      {$ifdef OSWINDOWS}{$ifdef CPU32}'wow64', IsWow64, {$endif}{$endif OSWINDOWS}
-      'cpufeatures', CpuFeaturesText,
-      'processcpu',  cpu,
-      'processmem',  mem,
-      'freemem',     free,
-      'disk',        GetDiskPartitionsText({nocache=}false, {withfree=}true)]);
+  result := JsonEncode([
+    'host',        Executable.Host,
+    'user',        Executable.User,
+    'os',          OSVersionText,
+    'cpu',         CpuInfoText,
+    'bios',        BiosInfoText,
+    {$ifdef OSWINDOWS}
+      {$ifdef CPU32}'wow64', IsWow64, {$endif}
+    {$endif OSWINDOWS}
+    'cpufeatures', CpuFeaturesText,
+    'load',        RetrieveLoadAvg, // POSIX loadavg or Windows 'U:xx K:xx'
+    'memused',     GetMemoryInfoText,
+    'diskfree',    GetDiskPartitionsVariant]);
 end;
 
 {$ifdef NOEXCEPTIONINTERCEPT}
@@ -3878,31 +3899,42 @@ begin
   result := ProcessSystemUse;
 end;
 
+class function TSystemUse.CurrentHistoryText(aProcessID, aDepth: integer;
+  aDestMemoryMB: PRawUtf8): RawUtf8;
+begin
+  if ProcessSystemUse <> nil then
+    result := ProcessSystemUse.HistoryText(aProcessID, aDepth, aDestMemoryMB)
+  else // fallback to POSIX loadavg or Windows 'U:xx K:xx'
+    ShortStringToAnsi7String(RetrieveLoadAvg, result);
+end;
+
 function TSystemUse.HistoryText(aProcessID, aDepth: integer;
   aDestMemoryMB: PRawUtf8): RawUtf8;
 var
   data: TSystemUseDataDynArray;
+  d: ^TSystemUseData;
   mem: RawUtf8;
-  i: PtrInt;
+  i: integer;
 begin
   result := '';
-  mem := '';
-  data := HistoryData(aProcessID, aDepth);
-  {$ifndef OSWINDOWS}
-  if data = nil then
-    result := RetrieveLoadAvg // from '/proc/loadavg' or libc getloadavg()
+  if self <> nil then
+    data := HistoryData(aProcessID, aDepth);
+  d := pointer(data);
+  if d = nil then // POSIX loadavg or Windows 'U:xx K:xx'
+    ShortStringToAnsi7String(RetrieveLoadAvg, result)
   else
-  {$endif OSWINDOWS}
-    for i := 0 to high(data) do
-      with data[i] do
-      begin
-        result := FormatUtf8('%% ', [result, TwoDigits(Kernel + User)]);
-        if aDestMemoryMB <> nil then
-          mem := FormatUtf8('%% ', [mem, TwoDigits(WorkKB / 1024)]);
-      end;
+    for i := 1 to length(data) do
+    begin
+      Append(result, [TwoDigits(d^.Kernel + d^.User), ' ']);
+      if aDestMemoryMB <> nil then
+        Append(mem, [TwoDigits(d^.WorkKB / 1024), ' ']);
+      inc(d);
+    end;
   TrimSelf(result);
-  if aDestMemoryMB <> nil then
-    aDestMemoryMB^ := TrimU(mem);
+  if aDestMemoryMB = nil then
+    exit;
+  TrimSelf(mem);
+  aDestMemoryMB^ := mem;
 end;
 
 function TSystemUse.HistoryVariant(aProcessID, aDepth: integer): variant;
@@ -3915,59 +3947,114 @@ begin
   data := HistoryData(aProcessID, aDepth);
   res.InitFast(length(data), dvArray);
   for i := 0 to high(data) do
-    res.AddItem(TwoDigits(data[i].Kernel + data[i].User));
+    with data[i] do
+      res.AddItem(SimpleRoundTo2Digits(DoubleToCurrency(Kernel + User)));
 end;
 
 function SortDynArrayDiskPartitions(const A, B): integer;
 begin
   result := SortDynArrayString(TDiskPartition(A).mounted, TDiskPartition(B).mounted);
+  if result = 0 then
+    result := SortDynArrayString(TDiskPartition(A).name, TDiskPartition(B).name);
 end;
 
+procedure GetDiskPartitionText(var one: TDiskPartition;
+  withfreespace, nospace, nomount: boolean; var result: RawUtf8);
+const
+  __F: array[boolean] of RawUtf8 = ('% % (% / %)', '% % (%/%)');
+  __N: array[boolean] of RawUtf8 = ('% % / %', '% %/%');
 var
-  _DiskPartitions: TDiskPartitions;
+  av, fr, tot: QWord;
+begin
+  if not withfreespace or
+     not GetDiskInfo(one.mounted, av, fr, tot) then
+    FormatUtf8('% % (%)',
+      [one.mounted, one.name, KB(one.size, nospace)], result)
+  else if nomount then
+    FormatUtf8(__N[nospace],
+      [one.mounted, KB(fr, nospace), KB(tot, nospace)], result)
+  else
+    FormatUtf8(__F[nospace],
+      [one.mounted, one.name, KB(fr, nospace), KB(tot, nospace)], result);
+end;
 
-function GetDiskPartitionsText(
-  nocache, withfreespace, nospace, nomount: boolean): RawUtf8;
+function GetDiskPartitionSize(var one: TDiskPartition;
+  withfreespace, nospace: boolean): RawUtf8;
+const
+  __N: array[boolean] of RawUtf8 = ('% / %', '%/%');
+var
+  av, fr, tot: QWord;
+begin
+  if not withfreespace or
+     not GetDiskInfo(one.mounted, av, fr, tot) then
+    ShortStringToAnsi7String(KB(one.size, nospace), result)
+  else
+    FormatUtf8(__N[nospace], [KB(fr, nospace), KB(tot, nospace)], result);
+end;
+
+function GetDiskPartitionsTexts(
+  nocache, withfreespace, nospace, nomount: boolean): TRawUtf8DynArray;
 var
   i: PtrInt;
   parts: TDiskPartitions;
-
-  function GetInfo(var p: TDiskPartition): ShortString;
-  const
-    F: array[boolean] of RawUtf8 = ('% % (% / %)', '% % (%/%)');
-    N: array[boolean] of RawUtf8 = ('% % / %', '% %/%');
-  var
-    av, fr, tot: QWord;
-  begin
-    if not withfreespace or
-       not GetDiskInfo(p.mounted, av, fr, tot) then
-      FormatShort('% % (%)',
-        [p.mounted, p.name, KB(p.size, nospace)], result)
-    else if nomount then
-      FormatShort(N[nospace],
-        [p.mounted, KB(fr, nospace), KB(tot, nospace)], result)
-    else
-      FormatShort(F[nospace],
-        [p.mounted, p.name, KB(fr, nospace), KB(tot, nospace)], result);
-  end;
-
 begin
-  if (_DiskPartitions = nil) or
+  parts := GetDiskPartitionsArray(nocache);
+  SetLength(result, length(parts));
+  for i := 0 to high(parts) do
+    GetDiskPartitionText(parts[i], withfreespace, nospace, nomount, result[i]);
+end;
+
+var
+  _DiskPartitionsSafe: TLightLock;
+  _DiskPartitionsCache: TDiskPartitions;
+
+function GetDiskPartitionsArray(nocache: boolean): TDiskPartitions;
+begin
+  if (_DiskPartitionsCache = nil) or
      nocache then
   begin
-    _DiskPartitions := GetDiskPartitions;
-    {$ifdef OSPOSIX}
-    DynArray(TypeInfo(TDiskPartitions), _DiskPartitions).
-      Sort(SortDynArrayDiskPartitions);
+    result := GetDiskPartitions; // from mormot.core.os
+    {$ifdef OSPOSIX} // makes sense to order
+    DynArray(TypeInfo(TDiskPartitions), result).Sort(SortDynArrayDiskPartitions);
     {$endif OSPOSIX}
   end;
-  parts := _DiskPartitions;
+  _DiskPartitionsSafe.Lock;
+  try
+    if result = nil then
+      result := _DiskPartitionsCache
+    else
+      _DiskPartitionsCache := result;
+  finally
+    _DiskPartitionsSafe.UnLock;
+  end;
+end;
+
+function GetDiskPartitionsVariant(nocache, withfreespace, nospace: boolean): variant;
+var
+  parts: TDiskPartitions;
+  p: ^TDiskPartition;
+  n: PtrInt;
+begin
+  VarClear(result);
+  parts := GetDiskPartitionsArray(nocache);
   if parts = nil then
-    result := ''
-  else
-    ShortStringToAnsi7String(GetInfo(parts[0]), result);
-  for i := 1 to high(parts) do
-    result := FormatUtf8('%, %', [result, GetInfo(parts[i])]);
+    exit;
+  n := length(parts);
+  TDocVariantData(result).InitFast(n, dvObject);
+  p := pointer(parts);
+  repeat
+    TDocVariantData(result).AddNameValuesToObject([
+      p^.mounted, GetDiskPartitionSize(p^, withfreespace, nospace)]);
+    inc(p);
+    dec(n);
+  until n = 0;
+end;
+
+function GetDiskPartitionsText(
+  nocache, withfreespace, nospace, nomount: boolean): RawUtf8;
+begin
+  result := RawUtf8ArrayToCsv(GetDiskPartitionsTexts(
+    nocache, withfreespace, nospace, nomount), ', ');
 end;
 
 
@@ -4860,35 +4947,50 @@ begin
     {$endif OSLINUXANDROID}
   end;
   Rtti.RegisterTypes([
-    TypeInfo(TSmbiosBiosFlags),            TypeInfo(TSmbiosSystemWakeup),
-    TypeInfo(TSmbiosBoardFeatures),        TypeInfo(TSmbiosBoardType),
-    TypeInfo(TSmbiosChassisType),          TypeInfo(TSmbiosChassisState),
-    TypeInfo(TSmbiosChassisSecurityState), TypeInfo(TSmbiosCacheLocation),
-    TypeInfo(TSmbiosCacheMode),            TypeInfo(TSmbiosCacheSramType),
-    TypeInfo(TSmbiosCacheEcc),             TypeInfo(TSmbiosCacheType),
-    TypeInfo(TSmbiosCacheAssociativity),   TypeInfo(TSmbiosProcessorType),
-    TypeInfo(TSmbiosProcessorStatus),      TypeInfo(TSmbiosProcessorUpgrade),
-    TypeInfo(TSmbiosProcessorFlags),       TypeInfo(TSmbiosConnectorType),
-    TypeInfo(TSmbiosConnectorPort),        TypeInfo(TSmbiosSlotType),
-    TypeInfo(TSmbiosSlotWidth),            TypeInfo(TSmbiosMemoryFormFactor),
-    TypeInfo(TSmbiosMemoryType),           TypeInfo(TSmbiosMemoryDetails),
-    TypeInfo(TSmbiosMemoryArrayLocation),  TypeInfo(TSmbiosMemoryArrayUse),
-    TypeInfo(TSmbiosMemoryArrayEcc),       TypeInfo(TSmbiosSecurityStatus),
-    TypeInfo(TSmbiosPointingType),         TypeInfo(TSmbiosPointingInterface)
+    TypeInfo(TSmbiosBiosFlags),
+    TypeInfo(TSmbiosSystemWakeup),
+    TypeInfo(TSmbiosBoardFeatures),
+    TypeInfo(TSmbiosBoardType),
+    TypeInfo(TSmbiosChassisType),
+    TypeInfo(TSmbiosChassisState),
+    TypeInfo(TSmbiosChassisSecurityState),
+    TypeInfo(TSmbiosCacheLocation),
+    TypeInfo(TSmbiosCacheMode),
+    TypeInfo(TSmbiosCacheSramType),
+    TypeInfo(TSmbiosCacheEcc),
+    TypeInfo(TSmbiosCacheType),
+    TypeInfo(TSmbiosCacheAssociativity),
+    TypeInfo(TSmbiosProcessorType),
+    TypeInfo(TSmbiosProcessorStatus),
+    TypeInfo(TSmbiosProcessorUpgrade),
+    TypeInfo(TSmbiosProcessorFlags),
+    TypeInfo(TSmbiosConnectorType),
+    TypeInfo(TSmbiosConnectorPort),
+    TypeInfo(TSmbiosSlotType),
+    TypeInfo(TSmbiosSlotWidth),
+    TypeInfo(TSmbiosMemoryFormFactor),
+    TypeInfo(TSmbiosMemoryType),
+    TypeInfo(TSmbiosMemoryDetails),
+    TypeInfo(TSmbiosMemoryArrayLocation),
+    TypeInfo(TSmbiosMemoryArrayUse),
+    TypeInfo(TSmbiosMemoryArrayEcc),
+    TypeInfo(TSmbiosSecurityStatus),
+    TypeInfo(TSmbiosPointingType),
+    TypeInfo(TSmbiosPointingInterface)
   ]);
   Rtti.RegisterFromText([
-    TypeInfo(TSmbiosBios),            _TSmbiosBios,
-    TypeInfo(TSmbiosSystem),          _TSmbiosSystem,
-    TypeInfo(TSmbiosBoard),           _TSmbiosBoard,
-    TypeInfo(TSmbiosChassis),         _TSmbiosChassis,
-    TypeInfo(TSmbiosCache),           _TSmbiosCache,
-    TypeInfo(TSmbiosProcessor),       _TSmbiosProcessor,
-    TypeInfo(TSmbiosConnector),       _TSmbiosConnector,
-    TypeInfo(TSmbiosSlot),            _TSmbiosSlot,
-    TypeInfo(TSmbiosMemory),          _TSmbiosMemory,
-    TypeInfo(TSmbiosMemoryArray),     _TSmbiosMemoryArray,
-    TypeInfo(TSmbiosBattery),         _TSmbiosBattery,
-    TypeInfo(TSmbiosInfo),            _TSmbiosInfo
+    TypeInfo(TSmbiosBios),        _TSmbiosBios,
+    TypeInfo(TSmbiosSystem),      _TSmbiosSystem,
+    TypeInfo(TSmbiosBoard),       _TSmbiosBoard,
+    TypeInfo(TSmbiosChassis),     _TSmbiosChassis,
+    TypeInfo(TSmbiosCache),       _TSmbiosCache,
+    TypeInfo(TSmbiosProcessor),   _TSmbiosProcessor,
+    TypeInfo(TSmbiosConnector),   _TSmbiosConnector,
+    TypeInfo(TSmbiosSlot),        _TSmbiosSlot,
+    TypeInfo(TSmbiosMemory),      _TSmbiosMemory,
+    TypeInfo(TSmbiosMemoryArray), _TSmbiosMemoryArray,
+    TypeInfo(TSmbiosBattery),     _TSmbiosBattery,
+    TypeInfo(TSmbiosInfo),        _TSmbiosInfo
   ]);
 end;
 

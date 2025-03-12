@@ -951,7 +951,7 @@ type
     // the internal asynchronous notification system, to run the callback
     // in the main UI thread
     // - WM_* message identifier should have been set e.g. via the associated
-    // $ ServiceNotificationMethodViaMessages(Form.Handle, WM_USER)
+    // ! ServiceNotificationMethodViaMessages(Form.Handle, WM_USER);
     // - message will be sent for any interface-based service method callback
     // which expects no result (i.e. no out parameter nor function result),
     // so is safely handled as asynchronous notification
@@ -1017,7 +1017,7 @@ type
       read fOnSetUser write fOnSetUser;
   published
     /// low-level error code, as returned by server
-    // - check this value about HTTP_* constants
+    // - check this value about HTTP_* constants, e.g. 404 for HTTP_NOTFOUND
     // - HTTP_SUCCESS or HTTP_CREATED mean no error
     // - otherwise, check LastErrorMessage property for additional information
     // - this property value will record status codes returned by Uri() method
@@ -1026,6 +1026,7 @@ type
     /// low-level error message, as returned by server
     // - this property value will record content returned by Uri() method in
     // case of an error, or '' if LastErrorCode is HTTP_SUCCESS or HTTP_CREATED
+    // - fallback to LastErrorCode corresponding text, e.g. 'Not Found' for 404
     property LastErrorMessage: RawUtf8
       read fLastErrorMessage;
     /// low-level exception class, if any
@@ -1321,7 +1322,7 @@ begin
   aServerNonce := Sender.CallBackGetResult('auth', ['username', User.LogonName]);
   if aServerNonce = '' then
     exit;
-  RandomBytes(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
+  SharedRandom.Fill(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
   aClientNonce := CardinalToHexLower(OSVersionInt32) + '_' +
                   BinToHexLower(@rnd, SizeOf(rnd)); // 160-bit nonce
   result := ClientGetSessionKey(Sender, User, [
@@ -1597,8 +1598,7 @@ end;
 class function TRestClientAuthenticationHttpBasic.ComputeAuthenticateHeader(
   const aUserName, aPasswordClear: RawUtf8): RawUtf8;
 begin
-  result := 'Authorization: Basic ' +
-    BinToBase64(aUserName + ':' + aPasswordClear);
+  BasicClient(aUserName, aPasswordClear, SpiUtf8(result));
 end;
 
 

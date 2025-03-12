@@ -189,7 +189,7 @@ function ToText(op: TMongoOperation): PShortString; overload;
   // this is the standard command request and reply body
   // - mmkSequence is used when there are several sections, encoded as the
   // 32-bit size, then the ASCIIZ document identifier, then zero or more
-  // BSON objects, ending one the declared size has been reached
+  // BSON objects, ending once the declared size has been reached
   // - mmkInternal is used for internal purposes and rejected by the server
   TMongoMsgKind = (
     mmkBody,
@@ -3604,7 +3604,7 @@ begin
           Auth(DatabaseName, UserName, digest, ForceMongoDBCR, i);
           with fGracefulReconnect do
             if Enabled and
-               (EncryptedDigest='') then
+               (EncryptedDigest = '') then
             begin
               ForcedDBCR := ForceMongoDBCR;
               User := UserName;
@@ -3684,7 +3684,7 @@ begin
     // SCRAM-SHA-1
     // https://tools.ietf.org/html/rfc5802#section-5
     user := StringReplaceAll(UserName, ['=', '=3D', ',', '=2C']);
-    RandomBytes(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
+    SharedRandom.Fill(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
     nonce := BinToBase64(@rnd, SizeOf(rnd));
     FormatUtf8('n=%,r=%', [user, nonce], first);
     BsonVariantType.FromBinary('n,,' + first, bbtGeneric, bson);
@@ -3695,6 +3695,7 @@ begin
         'payload', bson,
         'autoAuthorize', 1
         ]), res);
+    resp.Init;
     CheckPayload;
     if err = '' then
     begin
@@ -3703,8 +3704,9 @@ begin
         err := 'returned invalid nonce';
     end;
     if err <> '' then
-      EMongoException.RaiseUtf8('%.OpenAuthSCRAM("%") step1: % - res=%',
-        [self, DatabaseName, err, res]);
+      EMongoException.RaiseUtf8(
+        '%.OpenAuthSCRAM("%") step1: % - res=% payload=%',
+        [self, DatabaseName, err, res, PVariant(@resp)^]);
     key := 'c=biws,r=' {%H-}+ rnonce;
     Pbkdf2HmacSha1(Digest, Base64ToBin(resp.U['s']),
       Utf8ToInteger(resp.U['i']), salted);
@@ -3729,8 +3731,9 @@ begin
        (resp.U['v'] <> BinToBase64(@server, SizeOf(server))) then
       err := 'Server returned an invalid signature';
     if err <> '' then
-      EMongoException.RaiseUtf8('%.OpenAuthSCRAM("%") step2: % - res=%',
-        [self, DatabaseName, err, res]);
+      EMongoException.RaiseUtf8(
+        '%.OpenAuthSCRAM("%") step2: % - res=% payload=%',
+        [self, DatabaseName, err, res, PVariant(@resp)^]);
     if not res.done then
     begin
       // third empty challenge may be required

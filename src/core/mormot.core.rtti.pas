@@ -317,6 +317,9 @@ const
   /// types which are considerated as non-simple values
   rkComplexTypes = [rkClass, rkDynArray, rkInterface];
 
+  /// types which may nest other values, as record/array/class/variant
+  rkCompositeTypes = rkComplexTypes + rkRecordTypes + [rkVariant];
+
   /// types which are stored as pointers so are always accessed by reference
   rkPerReference = rkStringTypes + rkComplexTypes;
 
@@ -325,7 +328,7 @@ const
     rkHasRttiOrdTypes + [ {$ifdef FPC} rkQWord, {$endif} rkInt64 ];
 
   /// maps integer and floating point types in TRttiKind RTTI enumerates
-  rkNumberTypes = rkOrdinalTypes + [ rkFloat ];
+  rkNumberTypes = rkOrdinalTypes + [rkFloat];
 
   /// maps values which expect TRttiProp.GetOrdProp/SetOrdProp
   // - includes ordinals and class pointers, but no managed types
@@ -829,13 +832,13 @@ type
     /// efficiently finalize any (managed) type value
     // - do nothing for unmanaged types (e.g. integer)
     // - if you are sure that your type is managed, you may call directly
-    // $ RTTI_FINALIZE[Info^.Kind](Data, Info);
+    // ! RTTI_FINALIZE[Info^.Kind](Data, Info);
     procedure Clear(Data: pointer);
       {$ifdef HASINLINE}inline;{$endif}
     /// efficiently copy any (managed) type value
     // - do nothing for unmanaged types (e.g. integer)
     // - if you are sure that your type is managed, you may call directly
-    // $ RTTI_MANAGEDCOPY[Info^.Kind](Dest, Source, Info);
+    // ! RTTI_MANAGEDCOPY[Info^.Kind](Dest, Source, Info);
     procedure Copy(Dest, Source: pointer);
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// compute extended information about this RTTI type
@@ -1329,7 +1332,7 @@ type
     ElCount: integer;
     ArrayType: PPRttiInfo;
     DimCount: byte;
-    Dims: array[0..255 {DimCount-1}] of PPRttiInfo;
+    Dims: array[0 .. 255 {DimCount-1}] of PPRttiInfo;
   end;
   /// rkArray RTTI fields  published here for proper Delphi inlining
   PArrayInfo = ^TArrayInfo;
@@ -1607,12 +1610,12 @@ function SetObjectFromExecutableCommandLine(Value: TObject;
 
 /// helper to retrieve low-level RTTI information of an enumeration type
 // - just a wrapper around
-// $ aTypeInfo^.EnumBaseType(List, result);
+// ! aTypeInfo^.EnumBaseType(List, result);
 function GetEnumType(aTypeInfo: PRttiInfo; out List: PShortString): integer;
 
 /// helper to retrieve the text of an enumerate item
 // - just a wrapper around
-// $ aTypeInfo^.EnumBaseType.GetEnumNameOrd(aIndex)
+// ! aTypeInfo^.EnumBaseType.GetEnumNameOrd(aIndex)
 function GetEnumName(aTypeInfo: PRttiInfo; aIndex: integer): PShortString;
 
 /// get the corresponding enumeration name, without the first lowercase chars
@@ -2847,11 +2850,11 @@ type
     /// thread-safe speedup search by PRttiInfo e.g. from a loop
     LastInfo: TRttiCustom;
     /// thread-safe speedup search by PRttiInfo e.g. from a loop
-    LastHash: array[0..RTTIHASH_MAX] of TRttiCustom;
+    LastHash: array[0 .. RTTIHASH_MAX] of TRttiCustom;
     /// CPU L1 cache efficient PRttiInfo/TRttiCustom pairs hashed by PRttiInfo
-    HashInfo: array[0..RTTIHASH_MAX] of TPointerDynArray;
+    HashInfo: array[0 .. RTTIHASH_MAX] of TPointerDynArray;
     /// CPU L1 cache efficient PRttiInfo/TRttiCustom pairs hashed by Name
-    HashName: array[0..RTTIHASH_MAX] of TPointerDynArray;
+    HashName: array[0 .. RTTIHASH_MAX] of TPointerDynArray;
   end;
   PRttiCustomListPairs = ^TRttiCustomListPairs;
 
@@ -4228,7 +4231,7 @@ begin
       begin
         include(Cache.Flags, rcfIsRawBlob);
         Cache.CodePage := CP_RAWBYTESTRING; // CP_RAWBLOB is internal
-        Cache.Engine := TSynAnsiConvert.Engine(CP_RAWBYTESTRING);
+        Cache.Engine := RawByteStringConvert;
       end
       else
       begin
@@ -6856,23 +6859,32 @@ begin
 end;
 
 procedure EnsureUnique(var Value: TIntegerDynArray);
+var
+  v: PAnsiChar; // for better inlining
 begin
-  if (Value <> nil) and
-     (PDACnt(PAnsiChar(Value) - _DACNT)^ > 1) then
+  v := pointer(Value);
+  if (v <> nil) and
+     (PDACnt(v - _DACNT)^ > 1) then
     DynArrayEnsureUnique(@Value, TypeInfo(TIntegerDynArray));
 end;
 
 procedure EnsureUnique(var Value: TRawUtf8DynArray);
+var
+  v: PAnsiChar;
 begin
-  if (Value <> nil) and
-     (PDACnt(PAnsiChar(Value) - _DACNT)^ > 1) then
+  v := pointer(Value);
+  if (v <> nil) and
+     (PDACnt(v - _DACNT)^ > 1) then
     DynArrayEnsureUnique(@Value, TypeInfo(TRawUtf8DynArray));
 end;
 
 procedure EnsureUnique(var Value: TVariantDynArray);
+var
+  v: PAnsiChar;
 begin
-  if (Value <> nil) and
-     (PDACnt(PAnsiChar(Value) - _DACNT)^ > 1) then
+  v := pointer(Value);
+  if (v <> nil) and
+     (PDACnt(v - _DACNT)^ > 1) then
     DynArrayEnsureUnique(@Value, TypeInfo(TVariantDynArray));
 end;
 
@@ -8755,7 +8767,7 @@ begin
   // set vmtAutoTable slot for efficient Find(TClass) - to be done asap
   vmt := pointer(PAnsiChar(aClass) + vmtAutoTable);
   if vmt^ = nil then
-    PatchCodePtrUInt(pointer(vmt), PtrUInt(self), {leaveunprotected=}true);
+    PatchCodePtrUInt(pointer(vmt), PtrUInt(self));
   if vmt^ <> self then
     ERttiException.RaiseUtf8(
       '%.SetValueClass(%): vmtAutoTable set to %', [self, aClass, vmt^]);
@@ -8944,18 +8956,18 @@ begin
     fCache.Info.RawName := PointerToHexShort(self)
   else
     fCache.Info.RawName := TypeName;
-  def := GetTypeData(fCache.Info);
-  case ParserType of // minimal RTTI field(s)
-    ptRecord:
+  def := GetTypeData(fCache.Info); // points after Info.Kind + Info.RawName
+  case fCache.Kind of // cross-platform minimal RTTI field(s)
+    rkRecord:
       PRecordInfo(def)^.RecSize := fCache.Size;
-    ptDynArray:
+    rkDynArray:
       def^.elSize := fCache.ItemSize;
-    ptArray:
+    rkArray:
       begin
         PArrayInfo(def)^.Size := fCache.Size;
         PArrayInfo(def)^.ElCount := fCache.ItemCount;
       end;
-    ptClass:
+    rkClass:
       def^.ClassType := fCache.ValueClass;
   end;
   // initialize process
@@ -9455,12 +9467,12 @@ begin
               // try T##DynArray/T##s patterns
               aname := pointer(typname);
               alen := length(typname);
-              if (alen > 10) and
+              if (alen > 10) and // e.g. TWordDynArray
                  (IdemPropName('DynArray', aname + alen - 8, 8) or
                   IdemPropName('ObjArray', aname + alen - 8, 8)) then
                 dec(alen, 8)
               else if (alen > 3) and
-                      (aname[aLen] in ['s', 'S']) then
+                      (aname[aLen] in ['s', 'S']) then // e.g. TBytes
                 dec(alen)
               else
                 alen := 0;
@@ -9663,10 +9675,10 @@ begin
   {$endif NOPATCHVMT}
     // our dedicated "hash table of the poor" (tm) lookup
     k := @fHashTable[RK_TOSLOT[Info^.Kind]];
-    // try latest found RTTI for this kind of type definition (naive but works)
+    // try latest found RTTI for this slot of type definition (very effective)
     result := k^.LastInfo;
     if (result <> nil) and
-       (result.Info = Info) then
+       (result.Info = Info) then // happens e.g. 12,612,097 times during tests
       exit;
     // O(1) hash of the PRttiInfo pointer using inlined xxHash32 shuffle stage
     h := xxHash32Mixup(PtrUInt(Info)) and RTTIHASH_MAX;
@@ -9676,7 +9688,7 @@ begin
     // try latest found RTTI for this hash slot
     result := k^.LastHash[h];
     if (result <> nil) and
-       (result.Info = Info) then
+       (result.Info = Info) then // happens e.g. 1280 times during tests
     begin
       k^.LastInfo := result; // for faster lookup next time
       exit; // avoid most ReadLock/ReadUnLock and LockedFind() search
@@ -9687,7 +9699,7 @@ begin
     if p <> nil then
       result := LockedFind(p, @p[PDALen(PAnsiChar(p) - _DALEN)^ + _DAOFF], Info);
     k^.Safe.ReadUnLock;
-    if result <> nil then
+    if result <> nil then // happens e.g. 864 times during tests
     begin
       k^.LastInfo := result;   // aligned pointers are atomically accessed
       k^.LastHash[h] := result;
@@ -9770,7 +9782,7 @@ function TRttiCustomList.FindName(Name: PUtf8Char; NameLen: PtrInt;
   Kind: TRttiKind): TRttiCustom;
 var
   k: PRttiCustomListPairs;
-  p: PPointer; // ^TPointerDynArray
+  p: pointer; // ^TPointerDynArray
 begin
   if (Kind <> rkUnknown) and
      (Name <> nil) and
@@ -9784,9 +9796,10 @@ begin
        IdemPropNameUSameLenNotNull(pointer(result.Name), Name, NameLen) then
       exit;
     // our dedicated "hash table of the poor" (tm) lookup
-    p := @k^.HashName[RttiHashName(pointer(Name), NameLen)];
+    p := Name; // for better code generation on FPC when inlining RttiHashName()
+    p := @k^.HashName[RttiHashName(p, NameLen)];
     k^.Safe.ReadLock;
-    result := p^; // read TPointerDynArray within the lock
+    result := PPointer(p)^; // read TPointerDynArray within the lock
     if result <> nil then
       result := LockedFindNameInPairs(@PPointerArray(result)[0],
         @PPointerArray(result)[PDALen(PAnsiChar(result) - _DALEN)^ + _DAOFF],
@@ -9986,6 +9999,7 @@ begin
     {$ifdef FPC} // FPC extended RTTI generates no name for nested plain records
     if Info.RawName[0] <> #0 then
     {$endif FPC}
+    if PosExChar('$', Instance.Name) = 0 then // e.g. 'TArray$1$crcA5831B1D'
       AddPair(k^.HashName[RttiHashName(@Info.RawName[1], ord(Info.RawName[0]))]);
     ObjArrayAddCount(fInstances, Instance, Count); // to release memory
     inc(Counts[Info^.Kind]); // Instance.Kind is not available from DoRegister
@@ -10474,13 +10488,11 @@ end;
 
 constructor TSynLockedWithRttiMethods.Create;
 begin
-  inherited Create; // may have been overriden
   fSafe := NewSynLocker;
 end;
 
 destructor TSynLockedWithRttiMethods.Destroy;
 begin
-  inherited Destroy;
   fSafe^.DoneAndFreeMem;
 end;
 
@@ -10838,7 +10850,7 @@ begin
   PTC_INFO[pctRecordVersion]   := TypeInfo(QWord);
   PTC_INFO[pctRecordReferenceToBeDeleted] := TypeInfo(QWord);
   PT_DYNARRAY[ptBoolean]       := TypeInfo(TBooleanDynArray);
-  PT_DYNARRAY[ptByte]          := TypeInfo(TByteDynArray);
+  PT_DYNARRAY[ptByte]          := TypeInfo(TByteDynArray); // = TBytes
   PT_DYNARRAY[ptCardinal]      := TypeInfo(TCardinalDynArray);
   PT_DYNARRAY[ptCurrency]      := TypeInfo(TCurrencyDynArray);
   PT_DYNARRAY[ptDouble]        := TypeInfo(TDoubleDynArray);

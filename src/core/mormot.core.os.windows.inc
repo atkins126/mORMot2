@@ -8,6 +8,12 @@
 
 { ****************** Unicode, Time, File process }
 
+function _fmt(const Fmt: string; const Args: array of const): RawUtf8;
+  overload; forward;
+procedure _fmt(const Fmt: string; const Args: array of const;
+  var result: RawUtf8); overload; forward;
+function PosExtString(Str: PChar): PChar; forward;
+
 procedure DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
 var
   tmp: TSynTempBuffer;
@@ -18,7 +24,7 @@ begin
     dec(Len); // UnicodeToUtf8() result includes the null terminator
   FastSetString(res, tmp.buf, Len);
   tmp.Done;
-end;
+end; // warning: Delphi 7/2007 UnicodeToUtf8() RTL doesn't handle surrogates
 
 function IsExtendedPathName(Name: PWideChar): boolean;
 begin
@@ -136,17 +142,6 @@ end;
 
 {$endif UNICODE}
 
-function _fmt(const Fmt: string; const Args: array of const): RawUtf8; overload;
-begin
-  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
-end;
-
-procedure _fmt(const Fmt: string; const Args: array of const;
-  var result: RawUtf8); overload;
-begin
-  result := RawUtf8(format(Fmt, Args)); // good enough (seldom called)
-end;
-
 // local RTL wrapper functions to avoid linking mormot.core.unicode.pas
 procedure Win32PWideCharToUtf8(P: PWideChar; Len: PtrInt; out res: RawUtf8);
 var
@@ -223,6 +218,45 @@ begin
     tmpA.Done;
   end;
   tmpW.Done;
+end;
+
+function StrICompPChar(Str1, Str2: PChar): PtrInt;
+var
+  c1, c2: PtrInt;
+begin // StrIComp() from Delphi does not support Str1/Str2 = nil
+  result := 0;
+  if Str1 <> Str2 then
+    if Str1 <> nil then
+      if Str2 <> nil then
+        repeat
+          c1 := ord(Str1^);
+          if (c1 >= ord('a')) and (c1 <= ord('z')) then
+            dec(c1, 32);
+          c2 := ord(Str2^);
+          if (c2 >= ord('a')) and (c2 <= ord('z')) then
+            dec(c2, 32);
+          result := c1 - c2;
+          if result <> 0 then
+            exit;
+          if c1 = 0 then
+            exit; // Str1 = Str2
+          inc(Str1);
+          inc(Str2);
+        until false
+      else
+        inc(result) // Str2=''
+    else
+      dec(result);  // Str1=''
+end;
+
+function SortDynArrayFileName(const A, B): integer;
+begin // case-insensitive extension, then filename using plain string/PChar
+  result := 0;
+  if @A = @B then
+    exit;
+  result := StrICompPChar(PosExtString(pointer(A)), PosExtString(pointer(B)));
+  if result = 0 then
+    result := AnsiCompareFileName(string(A), string(B)); // as user-expected
 end;
 
 function LibraryOpen(const LibraryName: TFileName): TLibHandle;
@@ -791,6 +825,13 @@ begin
   result := WindowsFileTimeToDateTime(FileDate);
 end;
 
+{$ifdef ISDELPHI20062007} // circumvent Delphi 2007 RTL inlining issue
+function AnsiCompareFileName(const S1, S2 : TFileName): integer;
+begin
+  result := SysUtils.AnsiCompareFileName(S1,S2);
+end;
+{$endif ISDELPHI20062007}
+
 // some definitions missing on oldest Delphi
 const
   FILE_ATTRIBUTE_REPARSE_POINT = $0000400; // = faSymLink
@@ -1084,7 +1125,7 @@ begin
 end;
 
 function FileInfoByName(const FileName: TFileName; out FileSize: Int64;
-  out FileTimestampUtc: TUnixMSTime): boolean;
+  out FileTimestampUtc: TUnixMSTime; FileAttr: PInteger): boolean;
 var
   fa: WIN32_FILE_ATTRIBUTE_DATA;
 begin
@@ -1099,7 +1140,9 @@ begin
   end
   else
     FileSize := -1; // FileName is a folder
-  FileTimestampUtc := FileTimeToUnixMSTime(fa.ftLastWriteTime) // no local time
+  FileTimestampUtc := FileTimeToUnixMSTime(fa.ftLastWriteTime); // no local time
+  if FileAttr <> nil then
+    FileAttr^ := fa.dwFileAttributes;
 end;
 
 function FileIsSymLink(const FileName: TFileName): boolean;
@@ -1148,11 +1191,14 @@ end;
 function FileShare(aMode: integer): DWord;
 begin
   case (aMode and $f0) of
-    fmShareRead:       // fmShareDenyWrite
+    fmShareRead:       // fmShareDenyWrite = $20
       result := FILE_SHARE_READ;
-    fmShareWrite:      // fmShareDenyRead
+    fmShareWrite:      // fmShareDenyRead = $30
       result := FILE_SHARE_WRITE;
-    fmShareReadWrite:  // fmShareDenyNone
+    {$ifndef HASSAFEINLINE}
+    $f0, // fmCreate=$ffff on oldest Delphi 7-2009 :( -> assume shared R+W
+    {$endif HASSAFEINLINE}
+    fmShareReadWrite:  // fmShareDenyNone = $40
       result := FILE_SHARE_READ or FILE_SHARE_WRITE;
   else
     result := 0;
@@ -1326,11 +1372,13 @@ function CopyFile(const Source, Target: TFileName; FailIfExists: boolean): boole
 var
   s, t: TW32Temp;
 begin
-  if (Source = '') or
-     (Target = '') then
-    result := false
-  else
-    result := Windows.CopyFileW(W32(Source, s), W32(Target, t), FailIfExists);
+  result := false;
+  if (Source <> '') and
+     (Target <> '') then
+    if Windows.CopyFileW(W32(Source, s), W32(Target, t), FailIfExists) then
+      result := true
+    else if not FailIfExists then
+      DeleteFile(Target); // remove any partial file
 end;
 
 const
@@ -1486,6 +1534,11 @@ end;
 procedure TSynEvent.WaitForEver;
 begin
   WaitForSingleObject(THandle(fHandle), INFINITE);
+end;
+
+function TSynEvent.IsEventFD: boolean;
+begin
+  result := false;
 end;
 
 
@@ -2024,23 +2077,6 @@ begin
   result := pointer(api) <> pointer(1);
 end;
 
-function GetNextItem(var P: PAnsiChar): RawUtf8;
-var
-  beg: PAnsiChar;
-begin
-  result := '';
-  while P^ <= ' ' do
-    if P^ = #0 then
-      exit
-    else
-      inc(P);
-  beg := P;
-  repeat
-    inc(P);
-  until P^ <= ' ';
-  FastSetString(result, beg, P - beg);
-end;
-
 const
   PAGE_GUARD = $0100;
   PAGE_VALID = $00e6; // PAGE_READONLY or PAGE_READWRITE or PAGE_EXECUTE or
@@ -2085,11 +2121,11 @@ var
   ok: BOOL;
   err: integer;
 begin
+  SetDynamicTimeZoneInformation := GetProcAddress(
+    GetModuleHandle(kernel32), 'SetDynamicTimeZoneInformation');
   privileges.Init;
   try
     privileges.Enable(wspTimeZone); // ensure has SE_TIME_ZONE_NAME
-    SetDynamicTimeZoneInformation := GetProcAddress(
-      GetModuleHandle(kernel32), 'SetDynamicTimeZoneInformation');
     if Assigned(SetDynamicTimeZoneInformation) then
       ok := SetDynamicTimeZoneInformation(info)    // Vista+
     else
@@ -2248,13 +2284,26 @@ begin
   if not result then
     exit;
   FileTimeToInt64(ftidl, IdleTime);
-  FileTimeToInt64(ftkrn, KernelTime);
+  FileTimeToInt64(ftkrn, KernelTime); // on Windows, ftkrn includes ftidl
   FileTimeToInt64(ftusr, UserTime);
 end;
 
-function RetrieveLoadAvg: RawUtf8;
-begin
-  result := ''; // call RetrieveSystemTimes() instead
+function RetrieveLoadAvg: TShort23;
+var
+  I, K, U, S: Int64;
+begin // return 'U:usr K:krn' percents on windows
+  result[0] := #0;
+  RetrieveSystemTimes(I, K, U);
+  dec(K, I); // raw KernelTime includes IdleTime with GetSystemTimes() WinAPI
+  S := I + K + U;
+  if S = 0 then
+    exit;
+  U := (U * 1000000) div S;
+  K := (K * 1000000) div S;
+  PCardinal(@result)^ := 2 + ord('U') shl 8 + ord(':') shl 16;
+  AppendShortCurr64(U, result, {fixeddecimals=}2);
+  AppendShort(' K:', result);
+  AppendShortCurr64(K, result, {fixeddecimals=}2);
 end;
 
 function DelayedGetProcessMemoryInfo: boolean;
@@ -2380,7 +2429,7 @@ begin
     end;
   if not result then
     // OS API call failed -> fallback to our Lecuyer's gsl_rng_taus2 generator
-    RandomBytes(pointer(Buffer), Len);
+    SharedRandom.Fill(pointer(Buffer), Len);
 end;
 
 function TProcessInfo.Init: boolean;
@@ -2634,7 +2683,7 @@ begin
   if not NoLineFeed then
   begin
     SetLength(txt, l + 2); // faster to reallocate than WriteFile() twice
-    PWord(@PByteArray(txt)[l])^ := $0a0d; // CRLF
+    PWord(@PByteArray(txt)[l])^ := CRLFW;
     inc(l, 2);
   end;
   ConsoleCriticalSection.Lock;
@@ -2704,7 +2753,7 @@ begin
         if IsMultiThread then
           CheckSynchronize{$ifndef DELPHI6OROLDER}(100){$endif}
         else
-          Sleep(100);
+          Windows.Sleep(100);
         while PeekMessage(msg, 0, 0, 0, PM_REMOVE) do
           if msg.Message = WM_QUIT then
             exit // stop waiting when the process is gracefully closing
@@ -2719,7 +2768,7 @@ begin
       while not ConsoleKeyPressed(VK_RETURN) and
             not ConsoleHandleCtrlCPressed do
       begin
-        Sleep(100);
+        Windows.Sleep(100);
         if PeekMessage(msg, 0, 0, 0, PM_REMOVE) then
           if msg.Message = WM_QUIT then
             exit; // nothing to dispatch with PostThreadMessage()
@@ -2930,15 +2979,14 @@ procedure PatchCode(Old, New: pointer; Size: PtrInt; Backup: pointer;
   LeaveUnprotected: boolean);
 var
   restore, ignore: DWord;
-  i: PtrInt;
 begin
+  if Size <= 0 then
+    exit;
   if VirtualProtect(Old, Size, PAGE_EXECUTE_READWRITE, restore) then
   begin
     if Backup <> nil then
-      for i := 0 to Size - 1 do  // do not use Move() here
-        PByteArray(Backup)^[i] := PByteArray(Old)^[i];
-    for i := 0 to Size - 1 do    // do not use Move() here
-      PByteArray(Old)^[i] := PByteArray(New)^[i];
+      MoveByOne(Old, Backup, Size); // do not use Move() here
+    MoveByOne(New, Old, Size);
     if not LeaveUnprotected then
       VirtualProtect(Old, Size, restore, ignore);
     FlushInstructionCache(GetCurrentProcess, Old, Size);
@@ -2947,6 +2995,9 @@ begin
   end;
 end;
 
+procedure PatchCodeProtectBack;
+begin // nothing to do on Windows - LeaveUnprotected=false by default
+end;
 
 function StubMemoryAlloc: pointer;
 begin
@@ -3880,7 +3931,7 @@ begin
     siz := get(_RSMB_, 0, nil, 0); // first call to retrieve the full size
     if siz > SizeOf(info) then
     begin
-      FastNewRawByteString(tmp, siz);
+      pointer(tmp) := FastNewString(siz);
       get(_RSMB_, 0, pointer(tmp), siz);
       PInt64(@info)^ := PInt64(tmp)^; // header fields = 64-bit
       FastSetRawByteString(info.data, @PInt64Array(tmp)[1], siz - SizeOf(Int64));
@@ -5597,7 +5648,6 @@ begin
     CpuSockets := 1; // e.g. on XP prior to SP3
   _fmt('%d x %s (' + CPU_ARCH_TEXT + ')',
     [SystemInfo.dwNumberOfProcessors, cpu], CpuInfoText);
-  // writeln(CpuInfoText); writeln(CpuCacheText);
 end;
 
 procedure FinalizeSpecificUnit;

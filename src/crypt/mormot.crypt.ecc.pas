@@ -1879,7 +1879,7 @@ begin
     if size < MaxInt then // FileReadAll() is limited to 2GB
     begin
       len := size - SizeOf(head);
-      FastNewRawByteString(tmp, len);
+      pointer(tmp) := FastNewString(len);
       result := FileReadAll(F, pointer(tmp), len) and
                 FileFromString(tmp, rawencryptedfile);
     end;
@@ -1947,7 +1947,7 @@ begin
   try
     a.IV := secret.h.Lo; // use 128-bit of secret.h
     o := a.EncryptPkcs7Length(l, {withiv=}false);
-    FastNewRawByteString(result, o + SizeOf(ephpub));
+    pointer(result) := FastNewString(o + SizeOf(ephpub));
     p := pointer(result);
     p^ := ephpub;
     inc(p);
@@ -1984,7 +1984,7 @@ begin
   a := aes.Create(secret.l, aesbits);
   try
     a.IV := secret.h.Lo;
-    result := a.DecryptPkcs7Buffer(p, l - SizeOf(p^), false, false);
+    a.DecryptPkcs7Var(p, l - SizeOf(p^), false, result);
   finally
     a.Free;
     FillZero(secret.b);
@@ -2550,7 +2550,7 @@ begin
       FillcharFast(head.sign, SizeOf(head.sign), 255); // Version=255=not signed
     if not Ecc256r1MakeKey(head.rndpub, rndpriv) then
       EEccException.RaiseUtf8('%.Encrypt: MakeKey?', [self]);
-    FastNewRawByteString(secret, SizeOf(TEccSecretKey));
+    pointer(secret) := FastNewString(SizeOf(TEccSecretKey));
     if not Ecc256r1SharedSecret(
         fContent.Head.Signed.PublicKey, rndpriv, PEccSecretKey(secret)^) then
       EEccException.RaiseUtf8('%.Encrypt: SharedSecret?', [self]);
@@ -2593,7 +2593,7 @@ begin
       HmacSha256(mackey.b, enc, head.hmac);
     end;
     head.crc := crc32c(PCardinal(@head.hmac)^, @head, SizeOf(head) - SizeOf(head.crc));
-    FastNewRawByteString(result, SizeOf(head) + length(enc));
+    pointer(result) := FastNewString(SizeOf(head) + length(enc));
     PEciesHeader(result)^ := head;
     MoveFast(pointer(enc)^, PByteArray(result)[SizeOf(head)], length(enc));
   finally
@@ -2861,7 +2861,7 @@ begin
             head := 0
           else
             head := SizeOf(PRIVKEY_MAGIC);
-          FastNewRawByteString(result, head + PRIVKEY_SALTSIZE + length(enc));
+          pointer(result) := FastNewString(head + PRIVKEY_SALTSIZE + length(enc));
           MoveFast(PRIVKEY_MAGIC, e[0], head);
           XorBlock16(pointer(salt), @e[head], @PRIVKEY_MAGIC);
           MoveFast(pointer(enc)^, e[head + PRIVKEY_SALTSIZE], length(enc));
@@ -2994,7 +2994,7 @@ begin
       Aes := TAesCfb;
     a := Aes.Create(aeskey);
     try
-      decrypted := a.DecryptPkcs7Buffer(Data, Len, true, false);
+      a.DecryptPkcs7Var(Data, Len, true, decrypted);
       if decrypted = '' then
         exit; // invalid content
     finally
@@ -3204,7 +3204,7 @@ begin
       result := ecdInvalidSerial;
       exit;
     end;
-    FastNewRawByteString(secret, SizeOf(TEccSecretKey));
+    pointer(secret) := FastNewString(SizeOf(TEccSecretKey));
     if not Ecc256r1SharedSecret(
         head.rndpub, fPrivateKey, PEccSecretKey(secret)^) then
       exit;
@@ -4847,7 +4847,7 @@ begin
   try
     SetIVAndMacNonce({encrypt=}true);
     len := fAes[true].EncryptPkcs7Length(length(aPlain), false);
-    FastNewRawByteString(aEncrypted, len + SizeOf(THash256)); // trailing MAC
+    pointer(aEncrypted) := FastNewString(len + SizeOf(THash256)); // + MAC
     // encrypt the input
     fAes[true].EncryptPkcs7Buffer(
       pointer(aPlain), pointer(aEncrypted), length(aPlain), len, false);
@@ -4874,7 +4874,7 @@ begin
   try
     SetIVAndMacNonce({encrypt=}false);
     // decrypt the input
-    aPlain := fAes[false].DecryptPkcs7Buffer(P, len, false, false);
+    fAes[false].DecryptPkcs7Var(P, len, false, aPlain);
     if aPlain = '' then
     begin
       IncKM(false); // no MAC, but increase sequence on void/invalid message
@@ -5032,7 +5032,7 @@ begin
   FillCharFast(aClient, SizeOf(aClient), 0);
   aClient.algo := fAlgo;
   // client-side randomness for ephemeral keys and signatures
-  RandomBytes(@fRndA, SizeOf(fRndA)); // Lecuyer is enough for public random
+  SharedRandom.Fill(@fRndA, SizeOf(fRndA)); // enough for public randomness
   aClient.RndA := fRndA;
   // generate the client ephemeral key
   if fAlgo.auth <> authClient then
@@ -5154,7 +5154,7 @@ begin
   FillCharFast(aServer, SizeOf(aServer), 0);
   aServer.algo := fAlgo;
   aServer.RndA := fRndA;
-  RandomBytes(@fRndB, SizeOf(fRndB)); // Lecuyer is enough for public random
+  SharedRandom.Fill(@fRndB, SizeOf(fRndB)); // enough for public randomness
   aServer.RndB := fRndB;
   if fAlgo.auth <> authServer then
     if not Ecc256r1MakeKey(aServer.QF, dF) then
@@ -5204,6 +5204,7 @@ type
     fDefaultHasher: TCryptHasher;
   public
     constructor Create(const name: RawUtf8); override;
+    function KeyAlgo: TCryptKeyAlgo; override;
     procedure GenerateDer(out pub, priv: RawByteString; const privpwd: RawUtf8); override;
     function Sign(hasher: TCryptHasher; msg: pointer; msglen: PtrInt;
       const priv: RawByteString; out sig: RawByteString;
@@ -5221,6 +5222,11 @@ begin
   fDefaultHasher := Hasher('sha256');
   fPemPrivate := ord(pemEcPrivateKey);
   fPemPublic := ord(pemEcPublicKey);
+end;
+
+function TCryptAsymInternal.KeyAlgo: TCryptKeyAlgo;
+begin
+  result := ckaEcc256;
 end;
 
 procedure TCryptAsymInternal.GenerateDer(out pub, priv: RawByteString;
@@ -5350,8 +5356,8 @@ begin
         // for ECC, returns the x,y uncompressed coordinates from stored ASN.1
         if Ecc256r1ExtractAsn1(fSubjectPublicKey, k) then
         begin
-          FastNewRawByteString(x, ECC_BYTES);;
-          FastNewRawByteString(y, ECC_BYTES);;
+          pointer(x) := FastNewString(ECC_BYTES);;
+          pointer(y) := FastNewString(ECC_BYTES);;
           bswap256(@PHash512Rec(@k)^.Lo, pointer(x));
           bswap256(@PHash512Rec(@k)^.Hi, pointer(y));
           result := true;
@@ -6139,6 +6145,7 @@ type
   TCryptStoreAlgoInternal = class(TCryptStoreAlgo)
   public
     function New: ICryptStore; override; // = TCryptStoreInternal.Create(self)
+    function DefaultCertAlgo: TCryptCertAlgo; override;
   end;
 
   /// class implementing ICryptStore using our ECC Public Key Cryptography
@@ -6165,7 +6172,6 @@ type
       IgnoreError: TCryptCertValidities; TimeUtc: TDateTime): TCryptCertValidity; override;
     function Count: integer; override;
     function CrlCount: integer; override;
-    function DefaultCertAlgo: TCryptCertAlgo; override;
   end;
 
   /// maintain a cache of ICryptCert instances, from their DER/binary
@@ -6296,11 +6302,6 @@ begin
   result := length(fEcc.fCrl);
 end;
 
-function TCryptStoreInternal.DefaultCertAlgo: TCryptCertAlgo;
-begin
-  result := CryptCertSyn;
-end;
-
 
 { TCryptStoreAlgoInternal }
 
@@ -6311,6 +6312,11 @@ begin
   a := TCryptStoreInternal.Create(self);
   a.fEcc.IsValidCached := AlgoName <> 'syn-store-nocache';
   result := a;
+end;
+
+function TCryptStoreAlgoInternal.DefaultCertAlgo: TCryptCertAlgo;
+begin
+  result := CryptCertSyn;
 end;
 
 

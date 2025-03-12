@@ -732,12 +732,12 @@ begin
       V1 := -V1;
     v := Curr64ToStr(PInt64(@V1)^);
     tmp[0] := AnsiChar(Curr64ToPChar(PInt64(@V1)^, @tmp[1]));
-    Check(RawUtf8(tmp) = v);
+    CheckEqual(RawUtf8(tmp), v);
     V2 := GetExtended(pointer(v), err);
     Check(err = 0);
     CheckSame(V1, V2, 1E-4);
     i64 := StrToCurr64(pointer(v));
-    Check(PInt64(@V1)^ = i64);
+    CheckEqual(PInt64(@V1)^, i64);
   end;
 end;
 
@@ -3388,8 +3388,11 @@ begin
   for i := 0 to high(c) do
     c[i] := Random32;
   QuickSortInteger(@c, 0, high(c));
+  n := 0;
   for i := 0 to high(c) - 1 do
-    Check(c[i + 1] <> c[i], 'unique Random32');
+    if c[i + 1] = c[i] then
+      inc(n);
+  Check(n < 2, 'unique Random32'); // n=1 have been seen once
   timer.Start;
   Check(Random32(0) = 0);
   for i := 1 to 100000 do
@@ -3821,7 +3824,7 @@ begin
     with {%H-}crc[i] do
     begin
       j := i shr 3 + 1; // circumvent weird FPC code generation bug in -O2 mode
-      S := RandomString(j);
+      S := RandomWinAnsi(j);
       crc := crc32creference(0, pointer(S), length(S));
       inc(totallen, length(S));
       c2 := HmacCrc32c(@c1, pointer(S), 4, length(S));
@@ -4264,6 +4267,29 @@ begin
   Check(_oskb(1 shl 30 - 1) = '1GB', 'oskb7');
   Check(_oskb(1 shl 30)     = '1GB', 'oskb8');
   Check(_oskb(1 shl 30 + 1) = '1GB', 'oskb9');
+  Check(TwoDigits(0) = '0');
+  Check(TwoDigits(1) = '1');
+  Check(TwoDigits(10) = '10');
+  Check(TwoDigits(100) = '100');
+  Check(TwoDigits(1000) = '1000');
+  Check(TwoDigits(0.1) = '0.10');
+  Check(TwoDigits(0.12) = '0.12');
+  Check(TwoDigits(0.123) = '0.12');
+  Check(TwoDigits(0.124) = '0.12');
+  Check(TwoDigits(0.125) = '0.12');
+  Check(TwoDigits(0.1251) = '0.13');
+  Check(TwoDigits(0.126) = '0.13');
+  Check(TwoDigits(0.129) = '0.13');
+  Check(TwoDigits(70.131) = '70.13');
+  Check(TwoDigits(70.135) = '70.13');
+  Check(TwoDigits(70.1351) = '70.14');
+  Check(TwoDigits(0.01) = '0.01');
+  Check(TwoDigits(0.05) = '0.05');
+  Check(TwoDigits(0.051) = '0.05');
+  Check(TwoDigits(0.055) = '0.05');
+  Check(TwoDigits(0.0551) = '0.06');
+  Check(TwoDigits(0.0015) = '0');
+  Check(TwoDigits(0.0055) = '0.01');
   n := 100000;
   Timer.Start;
   crc := 0;
@@ -5057,9 +5083,7 @@ procedure TTestCoreBase._UTF8;
     CheckEqual(CP, C.CodePage, 'cpb');
     CheckEqual(CP, GetCodePage(A), 'cpc');
     {$endif HASCODEPAGE}
-    if CP = CP_UTF16 then
-      exit;
-    Check(length(W) = length(A));
+    CheckEqual(length(W), length(A));
     CheckUtf8(EqualBuf(W, A), 'CP%', [CP]);
   end;
 
@@ -5549,30 +5573,42 @@ begin
   Check(MakePath([1], false, '/') = '1');
   Check(MakePath([1], true, '/') = '1/');
   Check(MakePath([1, 2, '3'], false, '/') = '1/2/3');
+  Check(MakePath([1, '2/', 3], false, '/') = '1/2/3');
+  Check(MakePath(['1/', 2, 3], false, '/') = '1/2/3');
+  Check(MakePath([1, 2, '3/'], false, '/') = '1/2/3/');
+  Check(MakePath([1, '', 2, '3/'], false, '/') = '1/2/3/');
   Check(MakePath([1, 2, 3], true, '/') = '1/2/3/');
+  Check(MakePath([1, 2, '3'], true, '/') = '1/2/3/');
+  Check(MakePath([1, '2/', 3], true, '/') = '1/2/3/');
+  Check(MakePath(['1/', 2, 3], true, '/') = '1/2/3/');
+  Check(MakePath([1, 2, '3/'], true, '/') = '1/2/3/');
+  Check(MakePath([1, '', 2, '3/'], true, '/') = '1/2/3/');
   Check(MakeFileName([]) = '');
   Check(MakeFileName(['toto', 'doc']) = 'toto.doc');
   {$ifdef OSWINDOWS}
   Check(MakeFileName([1, 2, 'doc'], false) = '1\2\doc');
   Check(MakeFileName([1, 2, 'doc'], true) = '1\2.doc');
-  Check(MakeFileName([1, 2, '.doc'], true) = '1\2.doc');
+  Check(MakeFileName([1, '', 2, '.doc'], true) = '1\2.doc');
   {$else}
   Check(MakeFileName([1, 2, 'doc'], false) = '1/2/doc');
   Check(MakeFileName([1, 2, 'doc'], true) = '1/2.doc');
-  Check(MakeFileName([1, 2, '.doc'], true) = '1/2.doc');
+  Check(MakeFileName([1, '', 2, '.doc'], true) = '1/2.doc');
   {$endif OSWINDOWS}
-  Check(MakeCsv([]) = '');
-  Check(MakeCsv([], true) = '');
-  Check(MakeCsv([1]) = '1');
-  Check(MakeCsv([1], true, '+') = '1+');
-  Check(MakeCsv([1, 2, 3]) = '1,2,3');
-  Check(MakeCsv([1, '2', 3], true) = '1,2,3,');
-  Check(MakeCsv([1, '2 ,', 3]) = '1,2 ,3');
-  Check(Make([]) = '');
-  Check(Make([1]) = '1');
-  Check(Make([1, 2, 3]) = '123');
-  Check(Make([1, '2', 3]) = '123');
-  Check(Make([1, '2 ,', 3]) = '12 ,3');
+  CheckEqual(MakeCsv([]), '');
+  CheckEqual(MakeCsv([], true), '');
+  CheckEqual(MakeCsv([1]), '1');
+  CheckEqual(MakeCsv([1], true, '+'), '1+');
+  CheckEqual(MakeCsv([1, 2, 3]), '1,2,3');
+  CheckEqual(MakeCsv([1, '2', 3], true), '1,2,3,');
+  CheckEqual(MakeCsv([1, '2,', 3]), '1,2,3');
+  CheckEqual(MakeCsv([1, '2,', 3], true), '1,2,3,');
+  CheckEqual(MakeCsv([1, '2 ,', 3]), '1,2 ,3');
+  CheckEqual(Make([]), '');
+  CheckEqual(Make([1]), '1');
+  CheckEqual(Make([1, 2, 3]), '123');
+  CheckEqual(Make([1, '', 2, 3]), '123');
+  CheckEqual(Make([1, '2', 3]), '123');
+  CheckEqual(Make([1, '2 ,', 3]), '12 ,3');
   Check(MakeString([]) = '');
   Check(MakeString([1]) = '1');
   Check(MakeString([1, 2, 3]) = '123');
@@ -5644,30 +5680,30 @@ begin
   begin
     len := i * 5;
     W := RandomAnsi7(len);
-    Check(length(W) = len);
+    CheckEqual(length(W), len);
     lenup100 := len;
     if lenup100 > 100 then
       lenup100 := 100;
     str := Ansi7ToString(W); // should be fine on any code page
     if len > 0 then
     begin
-      Check(length(str) = len);
-      check(PosExString(str[1], str) = 1);
+      CheckEqual(length(str), len);
+      CheckEqual(PosExString(str[1], str), 1);
       if str[1] <> str[2] then
       begin
-        check(PosExString(str[2], str) = 2);
+        CheckEqual(PosExString(str[2], str), 2);
         if (str[1] <> str[2]) and
            (str[2] <> str[3]) and
            (str[1] <> str[3]) then
-          check(PosExString(str[3], str) = 3);
+          CheckEqual(PosExString(str[3], str), 3);
       end;
       for j := 1 to lenup100 do
       begin
-        check(PosExString(#13, str, j) = 0);
-        check(PosExString(str[j], str, j) = j);
+        CheckEqual(PosExString(#13, str, j), 0);
+        CheckEqual(PosExString(str[j], str, j), j);
         if (j > 1) and
            (str[j - 1] <> str[j]) then
-          check(PosExString(str[j], str, j - 1) = j);
+          CheckEqual(PosExString(str[j], str, j - 1), j);
         k := PosExString(str[j], str);
         check((k > 0) and
              (str[k] = str[j]));
@@ -5680,12 +5716,11 @@ begin
     Test(932, W);
     Test(949, W);
     Test(874, W);
-    Test(CP_UTF8, W);
+    Test(CP_UTF8, W); // note: CP_UTF16 is not a true ANSI charset for Test()
     L := Length(W);
     if L and 1 <> 0 then
       SetLength(W, L - 1); // force exact UTF-16 buffer length
-    Test(CP_UTF16, W);
-    W := WinAnsiString(RandomString(len));
+    W := RandomWinAnsi(len);
     U := WinAnsiToUtf8(W);
     check(IsValidUtf8(U), 'IsValidUtf8U');
     P := UniqueRawUtf8(U);
@@ -5693,22 +5728,22 @@ begin
     check(PosChar(P, #10) = nil);
     if len > 0 then
     begin
-      check(PosEx(U[1], U) = 1);
-      check(PosExChar(U[1], U) = 1);
+      CheckEqual(PosEx(U[1], U), 1);
+      CheckEqual(PosExChar(U[1], U), 1);
       check(PosChar(P, P[0]) = @P[0], 'PosChar0');
       if (len > 1) and
          (U[1] <> U[2]) then
       begin
-        check(PosEx(U[2], U) = 2);
-        check(PosExChar(U[2], U) = 2);
+        CheckEqual(PosEx(U[2], U), 2);
+        CheckEqual(PosExChar(U[2], U), 2);
         check(PosChar(P, P[1]) = @P[1], 'PosChar1');
         if (len > 2) and
            (U[1] <> U[2]) and
            (U[2] <> U[3]) and
            (U[1] <> U[3]) then
         begin
-          check(PosEx(U[3], U) = 3);
-          check(PosExChar(U[3], U) = 3);
+          CheckEqual(PosEx(U[3], U), 3);
+          CheckEqual(PosExChar(U[3], U), 3);
           check(PosChar(P, P[2]) = @P[2], 'PosChar2');
         end;
       end;
@@ -5717,7 +5752,7 @@ begin
       len120 := Utf8TruncatedLength(P, 120)
     else
       len120 := 0;
-    Check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8Buffer');
+    Check(IsValidUtf8Buffer(P, len120), 'IsValidUtf8Buffer truncated');
     {$ifdef ASMX64AVXNOCONST}
     HasValidUtf8Avx2 := (cpuHaswell in X64CpuFeatures);
     if HasValidUtf8Avx2 then
@@ -5729,15 +5764,15 @@ begin
     begin
       check(PosChar(P, U[j])^ = U[j], 'PosCharj');
       // validates with offset parameter
-      check(PosEx(#13, U, j) = 0);
-      check(PosEx(U[j], U, j) = j);
+      CheckEqual(PosEx(#13, U, j), 0);
+      CheckEqual(PosEx(U[j], U, j), j);
       if (j > 1) and
          (U[j - 1] <> U[j]) then
-        check(PosEx(U[j], U, j - 1) = j);
+        CheckEqual(PosEx(U[j], U, j - 1), j);
       k := PosEx(U[j], U);
       check((k > 0) and
             (U[k] = U[j]));
-      check(PosExChar(U[j], U) = k);
+      CheckEqual(PosExChar(U[j], U), k);
       if len120 <> 0 then
       begin
         bak := P[len120];
@@ -5759,28 +5794,27 @@ begin
     Check(IsValidJson(json1, true));
     Check(IsAnsiCompatible(U) or (PosEx('\u', json1) > 0));
     json2 := JsonReformat(json1, jsonNoEscapeUnicode);
-    Check(json2 = json, 'jeu2');
+    CheckEqual(json2, json, 'jeu2');
     Unic := Utf8DecodeToUnicodeRawByteString(U);
-    {$ifndef FPC_HAS_CPSTRING} // buggy FPC
-    Check(Utf8ToWinAnsi(U) = W);
-    Check(WinAnsiConvert.Utf8ToAnsi(WinAnsiConvert.AnsiToUtf8(W)) = W);
-    Check(WinAnsiConvert.UnicodeStringToAnsi(WinAnsiConvert.AnsiToUnicodeString(W)) = W);
+    CheckEqual(Utf8ToWinAnsi(U), W);
+    CheckEqual(WinAnsiConvert.Utf8ToAnsi(WinAnsiConvert.AnsiToUtf8(W)), W);
+    CheckEqual(WinAnsiConvert.UnicodeStringToAnsi(WinAnsiConvert.AnsiToUnicodeString(W)), W);
     if CurrentAnsiConvert.InheritsFrom(TSynAnsiFixedWidth) then
     begin
-      Check(CurrentAnsiConvert.Utf8ToAnsi(CurrentAnsiConvert.AnsiToUtf8(W)) = W);
-      Check(CurrentAnsiConvert.UnicodeStringToAnsi(CurrentAnsiConvert.AnsiToUnicodeString(W)) = W);
+      CheckEqual(CurrentAnsiConvert.Utf8ToAnsi(CurrentAnsiConvert.AnsiToUtf8(W)), W);
+      CheckEqual(CurrentAnsiConvert.UnicodeStringToAnsi(CurrentAnsiConvert.AnsiToUnicodeString(W)), W);
     end;
     res := RawUnicodeToUtf8(pointer(Unic), length(Unic) shr 1);
-    Check(res = U);
-    Check(WinAnsiConvert.UnicodeBufferToAnsi(pointer(Unic), length(Unic) shr 1) = W);
-    {$endif FPC_HAS_CPSTRING}
+    CheckEqual(res, U);
+    WinAnsiConvert.UnicodeBufferToAnsiVar(pointer(Unic), length(Unic) shr 1, rb1);
+    CheckEqual(rb1, W);
     WS := Utf8ToWideString(U);
-    Check(length(WS) = length(Unic) shr 1);
+    CheckEqual(length(WS), length(Unic) shr 1);
     if WS <> '' then
       Check(CompareMem(pointer(WS), pointer(Unic), length(WS) * SizeOf(WideChar)));
-    Check(integer(Utf8ToUnicodeLength(Pointer(U))) = length(WS));
+    CheckEqual(integer(Utf8ToUnicodeLength(Pointer(U))), length(WS));
     SU := Utf8ToSynUnicode(U);
-    Check(length(SU) = length(Unic) shr 1);
+    CheckEqual(length(SU), length(Unic) shr 1);
     if SU <> '' then
       Check(CompareMem(pointer(SU), pointer(Unic), length(Unic)), 'Utf8ToSU');
     WA := IsWinAnsi(pointer(Unic));
@@ -5805,7 +5839,7 @@ begin
       CheckEqual(Utf8CompareIOS(pointer(U), pointer(Up)), 0);
     //for j := 1 to 5000 do
     try
-      //W := WinAnsiString(RandomString(len));
+      //W := RandomWinAnsi(len);
       //U := WinAnsiToUtf8(W);
       //check(IsValidUtf8(U), 'IsValidUtf8U');
       //Up := mormot.core.unicode.UpperCase(U);
@@ -5917,7 +5951,8 @@ begin
   U := SynUnicodeToUtf8(SU);
   if not CheckFailed(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
-  U := TSynAnsiConvert.Engine(CP_UTF8).UnicodeBufferToAnsi(pointer(SU), length(SU));
+  TSynAnsiConvert.Engine(CP_UTF8).UnicodeBufferToAnsiVar(
+    pointer(SU), length(SU), RawByteString(U));
   Check(length(U) = 4);
   if not CheckFailed(length(U) = 4) then
     Check(PCardinal(U)^ = $92b3a8f0);
@@ -6141,23 +6176,33 @@ procedure TTestCoreBase.Charsets;
     CheckEqual(length(w), length(su), 'rtl1');
     Check(CompareMem(pointer(w), pointer(su), length(w)), 'rtl2');
     {$endif HASCODEPAGE}
+    {$ifdef OSWINDOWS}
+    // skip old Windows (XP/Vista/Seven) which may miss some/most encodings
+    if OSVersion < wTen then
+      exit; // seems not available without a specific language pack
+    {$endif OSWINDOWS}
     // validate mORMot conversion
     eng := TSynAnsiConvert.Engine(cp);
+    Check(eng <> nil, 'eng1');
+    CheckEqual(eng.CodePage, cp, 'eng2');
     // with ASCII-7 chars
     su2 := eng.AnsiToUnicodeString('abcd efgh');
     Check(su2 = 'abcd efgh', msg);
     a := eng.UnicodeStringToAnsi(su2);
     {$ifdef OSPOSIX}
-    if cp = 50225 then
-      if not CheckFailed(a <> '') then
-        if not CheckFailed(PCardinal(a)^ = 1126769691) then
+    if cp = 50225 then // iso2022_kr
+      {$ifdef OSDARWIN}
+      exit;  // MacOS ICU seems to be not as expected with escape chars
+      {$else}
+      if not CheckFailed(a <> '', 'kr1') then
+        if not CheckFailed(PCardinal(a)^ = 1126769691, 'kr2') then
           delete(a, 1, 4); // delete IEC 2022 escape char
+      {$endif OSDARWIN}
     {$endif OSPOSIX}
     CheckEqual(a, 'abcd efgh');
     // don't even try on unsupported charsets
-    if name = 'big5hkscs' then
-      exit; // seems unstandardized on Windows: no matching code page
     case cp of
+      951, // big5hkscs seems unstandardized on Windows: no matching code page
       50220, 50222, 51949:
         // those codepages fail on both Windows and Debian ICU
         // -> some inacurracy in Unicode_CodePageName() ?
@@ -6168,14 +6213,11 @@ procedure TTestCoreBase.Charsets;
       // johab (cp=1361) shift_jis (cp=932)
       // -> we would need some input from native speakers of missing charsets
     end;
-    {$ifdef OSWINDOWS} // old Windows miss most encodings
-    if OSVersion < wTen then
-      exit; // seems not available without a specific language pack
-    {$else}
+    {$ifdef OSPOSIX}
     if (name = 'hz') and
        not icu.IsAvailable then // FPC RTL iconv is not enough about HZ-GB2312
       exit;
-    {$endif OSWINDOWS}
+    {$endif OSPOSIX}
     // validate Unicode RTL conversion
     {$ifdef HASCODEPAGE}
     {$ifdef OSPOSIX}
@@ -6197,6 +6239,9 @@ procedure TTestCoreBase.Charsets;
     {$endif OSWINDOWS}
     su2 := eng.AnsiToUnicodeString(ra);
     Check(su = su2, msg);
+    eng := TSynAnsiConvert.Engine(cp); // validate "last" cache
+    Check(eng <> nil, 'eng3');
+    CheckEqual(eng.CodePage, cp, 'eng4');
     u2 := eng.AnsiToUtf8(a);
     Check(u2 = ru, msg);
     a2 := eng.UnicodeStringToAnsi(su);
@@ -6832,7 +6877,7 @@ begin
   Check(b.Month = 5);
   Check(b.Day = 4);
   tmp := b.Text(false);
-  Check(tmp = '20150504');
+  CheckEqual(tmp, '20150504');
   IntervalTextToDateTimeVar('+0 06:03:20', D);
   CheckSame(D, 0.252314, 1e-5);
   D := IntervalTextToDateTime('+1 06:03:20');
@@ -6842,9 +6887,9 @@ begin
   CheckSame(IntervalTextToDateTime('-20 06:03:20'), -20.252314, 1e-6);
   Check(DateTimeToIso8601Text(IntervalTextToDateTime('+0 06:03:20')) = 'T06:03:20');
   tmp := DateTimeToIso8601Text(IntervalTextToDateTime('+1 06:03:20'));
-  Check(tmp = '1899-12-31T06:03:20');
+  CheckEqual(tmp, '1899-12-31T06:03:20');
   tmp := DateTimeToIso8601Text(IntervalTextToDateTime('-2 06:03:20'));
-  Check(tmp = '1899-12-28T06:03:20');
+  CheckEqual(tmp, '1899-12-28T06:03:20');
   CheckSame(TimeLogToDateTime(135131870949), 41578.477512, 1e-5);
   tmp := '1982-10-30T06:03:20';
   Check(Iso8601CheckAndDecode(Pointer(tmp), length(tmp), D));
@@ -6863,23 +6908,31 @@ begin
   check(Iso8601ToDateTime(tmp) = 0);
   check(Iso8601ToTimelog(tmp) = 0);
   tmp := UnixTimePeriodToString(0);
-  check(tmp = 'T00:00:00');
+  CheckEqual(tmp, 'T00:00:00');
   tmp := UnixTimePeriodToString(30);
-  check(tmp = 'T00:00:30');
+  CheckEqual(tmp, 'T00:00:30');
   tmp := UnixTimePeriodToString(SecsPerMin);
-  check(tmp = 'T00:01:00');
+  CheckEqual(tmp, 'T00:01:00');
   tmp := UnixTimePeriodToString(SecsPerMin * MinsPerHour);
-  check(tmp = 'T01:00:00');
+  CheckEqual(tmp, 'T01:00:00');
   tmp := UnixTimePeriodToString(SecsPerDay);
-  check(tmp = '0000-00-01');
+  CheckEqual(tmp, '0000-00-01');
   tmp := UnixTimePeriodToString(SecsPerDay * 15);
-  check(tmp = '0000-00-15');
+  CheckEqual(tmp, '0000-00-15');
+  tmp := UnixTimePeriodToString(SecsPerDay * 31);
+  CheckEqual(tmp, '0000-00-31');
+  tmp := UnixTimePeriodToString(SecsPerDay * (31 + 4));
+  CheckEqual(tmp, '0000-01-04');
+  tmp := UnixTimePeriodToString(SecsPerDay * (31 + 28 + 7));
+  CheckEqual(tmp, '0000-02-07');
   tmp := UnixTimePeriodToString(SecsPerDay * 365);
-  check(tmp = '0000-12-31');
+  CheckEqual(tmp, '0001-00-00');
+  tmp := UnixTimePeriodToString(SecsPerDay * 365 + 1);
+  CheckEqual(tmp, '0001-00-00');
   tmp := UnixTimePeriodToString(SecsPerDay * 366);
-  check(tmp = '0001-00-00');
-  tmp := UnixTimePeriodToString(SecsPerDay * 732);
-  check(tmp = '0002-00-00');
+  CheckEqual(tmp, '0001-00-01');
+  tmp := UnixTimePeriodToString(SecsPerDay * 365 * 2);
+  CheckEqual(tmp, '0002-00-00');
 end;
 
 function LocalTimeToUniversal(LT: TDateTime; TZOffset: Integer): TDateTime;
@@ -8240,14 +8293,6 @@ var
   s, t, d: RawUtf8;
   U: PUtf8Char;
 begin
-  CheckEqual(StatusCodeToText(100)^, 'Continue');
-  CheckEqual(StatusCodeToText(200)^, 'OK');
-  CheckEqual(StatusCodeToText(206)^, 'Partial Content');
-  CheckEqual(StatusCodeToText(300)^, 'Multiple Choices');
-  CheckEqual(StatusCodeToText(503)^, 'Service Unavailable');
-  CheckEqual(StatusCodeToText(513)^, 'Invalid Request');
-  CheckEqual(StatusCodeToText(514)^, 'Invalid Request');
-  CheckEqual(StatusCodeToText(499)^, 'Invalid Request');
   for i := 1 to 100 do
   begin
     s := DateTimeToIso8601(Now / 20 + RandomDouble * 20, true);
@@ -8360,6 +8405,8 @@ begin
     '605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1'));
   Check(not IsHttpUserAgentBot(
     'Mozilla/5.0 (Windows NT 10.0; Trident/7.0; rv:11.0) like Gecko'));
+  Check(not IsHttpUserAgentBot(DefaultUserAgent(self)),
+    'Mozilla/5.0 (Linux x64; mORMot) TCB/2 mormot2tests');
   Check(IsHttpUserAgentBot(
     'Googlebot/2.1 (+http://www.google.com/bot.html)'));
   Check(IsHttpUserAgentBot(
@@ -8617,6 +8664,7 @@ var
   tmp: array[0..512] of AnsiChar;
   msg, n, v: RawUtf8;
   os: TOperatingSystem;
+  osv: TOperatingSystemVersion;
   len: integer;
 begin
   Check(not UserAgentParse('toto (mozilla)', n, v, os));
@@ -8632,6 +8680,32 @@ begin
   Check(n = 'myprogram');
   Check(v = '3.1.2');
   check(os = osWindows);
+  osv.os := osWindows;
+  osv.win := wSeven;
+  osv.winbuild := 0;
+  CheckEqual(ToText(osv), 'Windows 7');
+  osv.win := wTen_64;
+  CheckEqual(ToText(osv), 'Windows 10 64bit');
+  osv.winbuild := 10240;
+  CheckEqual(ToText(osv), 'Windows 10 64bit 1507');
+  osv.winbuild := 10241;
+  CheckEqual(ToText(osv), 'Windows 10 64bit 1507');
+  osv.win := wTen;
+  osv.winbuild := 19045;
+  CheckEqual(ToText(osv), 'Windows 10 22H2');
+  osv.win := wEleven;
+  osv.winbuild := 22000;
+  CheckEqual(ToText(osv), 'Windows 11 21H2');
+  osv.winbuild := 22621;
+  CheckEqual(ToText(osv), 'Windows 11 22H2');
+  osv.win := wEleven_64;
+  osv.winbuild := 26100;
+  CheckEqual(ToText(osv), 'Windows 11 64bit 24H2');
+  osv.winbuild := 26100;
+  CheckEqual(ToTextOS(cardinal(osv)), 'Windows 11 64bit 24H2 26100');
+  osv.win := wServer2022_64;
+  osv.winbuild := 20349;
+  CheckEqual(ToTextOS(cardinal(osv)), 'Windows Server 2022 64bit 21H2 20349');
   FillcharFast(tmp, SizeOf(tmp), 1);
   len := SyslogMessage(sfAuth, ssCrit, 'test', '', '', tmp, SizeOf(tmp), false);
   // Check(len=65); // <-- different for every PC, due to PC name differences
@@ -9059,7 +9133,7 @@ var
 
 var
   v: tvalue;
-  s, k, key, val: RawUtf8;
+  s, k, key, val, u: RawUtf8;
   i, n: integer;
   exists: boolean;
   sdk: TSDKey;
@@ -9141,6 +9215,13 @@ begin
     check(dict.LoadFromJson(s));
     Test;
     s := dict.SaveToBinary;
+    u := '{"a":1,"b":2}';
+    check(dict.LoadFromJson(u));
+    CheckEqual(dict.SaveToJson, u);
+    check(dict.LoadFromJson('{a:1,b:2}'), 'extended syntax');
+    CheckEqual(dict.SaveToJson, u);
+    check(dict.LoadFromJson('{a:1,2:{b:3,c:4}}'));
+    CheckEqual(dict.SaveToJson, '{"a":1,"2":{"b":3,"c":4}}');
   finally
     dict.Free;
   end;

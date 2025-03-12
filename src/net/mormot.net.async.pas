@@ -592,7 +592,7 @@ type
     fLastOperationReleaseMemorySeconds: cardinal;
     fLastOperationIdleSeconds: cardinal;
     fKeepConnectionInstanceMS: cardinal;
-    fLastOperationMS: Int64; // as set by ProcessIdleTix()
+    fLastOperationMS: Int64; // = GetTickCount64 as set by ProcessIdleTix()
     {$ifdef USE_WINIOCP}
     // in IOCP mode, Execute does wieSend (and wieAccept for TAsyncServer)
     fIocp: TWinIocp; // wieAccept/wieSend events in their its own IOCP queue
@@ -605,11 +605,12 @@ type
     fSocketsEpoll: boolean; // = PollSocketClass.FollowEpoll
     {$endif USE_WINIOCP}
     /// implement generational garbage collector of TAsyncConnection instances
-    // - we define two generations: the first has a TTL of KeepConnectionInstanceMS
+    // - we define two generations: GC #1 has a TTL of KeepConnectionInstanceMS
     // (100ms) and are used to avoid GPF or confusion on still active connections;
-    // the second has a TTL of 10 seconds and will be used by ConnectionCreate to
+    // GC #2 has a TTL of 10 seconds and will be used by ConnectionCreate to
     // recycle e.g. THttpAsyncConnection instances between HTTP/1.0 calls
     fGC1, fGC2: TPollAsyncConnections;
+    fGCLast, fGCTix1, fGCTix2: integer;
     fOnIdle: array of TOnPollSocketsIdle;
     fThreadClients: record // used by TAsyncClient
       Count, Timeout: integer;
@@ -782,7 +783,7 @@ type
   // state for server process
   TAsyncServer = class(TAsyncConnections)
   protected
-    fServer: TCrtSocket; // for proper complex binding
+    fServer: TCrtSocket; // for proper complex binding (including TLS)
     fMaxPending: integer;
     fMaxConnections: integer;
     fAccepted: Int64;
@@ -966,7 +967,7 @@ type
   /// handle one HTTP server connection to our non-blocking THttpAsyncServer
   THttpAsyncServerConnection = class(THttpAsyncConnection)
   protected
-    fKeepAliveSec: TAsyncConnectionSec;
+    fKeepAliveMaxSec: TAsyncConnectionSec; // 0 for no keep-alive (force close)
     fHeadersSec: TAsyncConnectionSec;
     fRequestFlags: THttpServerRequestFlags;
     fPipelineState: set of (pEnabled, pWrite);
@@ -1066,11 +1067,12 @@ type
     fInterningTix: cardinal;
     fExecuteEvent: TSynEvent;
     fSockets: THttpAsyncClientConnections; // allocated when needed
-    fHttpDateNowUtc: string[39]; // consume 37 chars, aligned to 40 bytes
+    fHttpDateNowUtc: THttpDateNowUtc;
     function GetHttpQueueLength: cardinal; override;
     procedure SetHttpQueueLength(aValue: cardinal); override;
     function GetConnectionsActive: cardinal; override;
     function GetExecuteState: THttpServerExecuteState; override;
+    function GetBanned: THttpAcceptBan; override;
     procedure IdleEverySecond; virtual;
     procedure AppendHttpDate(var Dest: TRawByteStringBuffer); override;
     // the main thread will Send output packets in the background
@@ -1360,6 +1362,8 @@ type
     function SetupTls(var tls: TNetTlsContext): boolean; virtual;
     procedure AfterServerStarted; virtual;
     function OnExecute(Ctxt: THttpServerRequestAbstract): cardinal;
+    function OnExecuteLocal(Ctxt: THttpServerRequestAbstract;
+      Definition: THttpProxyUrl; const Uri: TUriMatchName): cardinal;
   public
     /// initialize this forward proxy instance
     // - the supplied aSettings should be owned by the caller (e.g from a main
@@ -2494,7 +2498,7 @@ var
   notif: TPollSocketResult;
 begin
   FormatUtf8('R%:%', [fIndex, fOwner.fProcessName], fName);
-  SetCurrentThreadName(fName);
+  SetCurrentThreadName('=%', [fName]);
   fOwner.NotifyThreadStart(self);
   try
     fExecuteState := esRunning;
@@ -2615,6 +2619,9 @@ begin
         fOwner.DoLog(sllWarning, 'Execute raised a % -> terminate % thread %',
           [PClass(E)^, fOwner.fConnectionClass, fName], self);
   end;
+  if (fOwner <> nil) and
+     (fOwner.fLog <> nil) then
+    fOwner.fLog.Add.NotifyThreadEnded;
   fExecuteState := esFinished;
 end;
 
@@ -2639,8 +2646,11 @@ begin
   if aThreadPoolCount <= 0 then
     aThreadPoolCount := 1;
   fLastOperationReleaseMemorySeconds := 60;
-  fLastOperationSec := Qword(mormot.core.os.GetTickCount64) div 1000; // ASAP
+  fLastOperationMS := mormot.core.os.GetTickCount64;
+  fLastOperationSec := Qword(fLastOperationMS) div 1000; // ASAP
   fKeepConnectionInstanceMS := 100;
+  SetLength(fGC1.Items, 512);
+  SetLength(fGC2.Items, 512);
   {$ifndef USE_WINIOCP}
   fThreadPollingWakeupLoad :=
     (cardinal(aThreadPoolCount) div SystemInfo.dwNumberOfProcessors) * 8;
@@ -2739,36 +2749,96 @@ end;
 
 function OneGC(var gen, dst: TPollAsyncConnections; lastms, oldms: cardinal): PtrInt;
 var
-  c: TAsyncConnection;
-  i, d: PtrInt;
+  c: PAsyncConnection;
+  ms, n: cardinal;
+  d: PtrInt;
 begin
   result := 0;
-  if gen.Count = 0 then
+  n := gen.Count;
+  if n = 0 then
     exit;
   d := dst.Count;
+  if oldms < 50 then
+    oldms := 50; // bare minimum for GC#1
   oldms := lastms - oldms;
-  for i := 0 to gen.Count - 1 do
-  begin
-    c := pointer(gen.Items[i]);
-    if c.fLastOperation <= oldms then // AddGC() set c.fLastOperation as ms
+  c := pointer(gen.Items);
+  repeat
+    ms := c^.fLastOperation;
+    if ms <= oldms then // AddGC() set c.fLastOperation as ms
     begin
       // move to next generation list after timeout
       if d = length(dst.Items) then
         SetLength(dst.Items, NextGrow(d));
-      dst.Items[d] := c;
+      dst.Items[d] := c^;
       inc(d);
     end
     else
     begin
-      if c.fLastOperation > lastms then
+      if ms > lastms then
         // need to reset time flag every 49.7 days (32-bit unlikely overflow)
-        c.fLastOperation := lastms; // will wait twice fKeepConnectionInstanceMS
-      gen.Items[result] := c; // keep
+        c^.fLastOperation := lastms; // will wait twice the delay
+      gen.Items[result] := c^; // keep
       inc(result);
     end;
-  end;
+    inc(c);
+    dec(n);
+  until n = 0;
   gen.Count := result; // don't resize gen.Items[] to avoid realloc
   dst.Count := d;
+end;
+
+procedure TAsyncConnections.DoGC;
+var
+  tofree: TPollAsyncConnections;
+  n1, n2, h, tix1, tix2: integer;
+  lastms: cardinal;
+begin
+  // refresh ticks markers
+  tix1 := fLastOperationMS shr 5; // ProcessIdleTix() to call every 32 ms
+  tix2 := tix1 shr 5;             // check GC#2 only every second
+  lastms := fLastOperationMS;     // to force 32-bit unsigned value
+  // retrieve the connection instances to be released
+  if fGC2.Safe.TryLock then
+  try
+    n1 := 0;
+    if fGC1.Count <> 0 then
+      if fGC1.Safe.TryLock then
+        // if we reached here, both GC#1 and GC#2 have been acquired
+        try
+          // keep just-closed-connections in GC#1 list for 100 ms by default
+          n1 := OneGC(fGC1, fGC2, lastms, fKeepConnectionInstanceMS);
+        finally
+          fGC1.Safe.UnLock;
+        end
+      else
+        exit; // won't block and retry if another thread is accessing GC#1
+    fGCTix1 := tix1;
+    if (fGCTix2 = tix2) or
+       (fGC2.Count = 0) then
+      exit;
+    fGCTix2 := tix2;
+    // keep instances 10 seconds in GC#2 until no pending accept() needs them
+    tofree.Count := 0;
+    SetLength(tofree.Items, NextGrow(fGC2.Count shr 1));
+    n2 := OneGC(fGC2, tofree, lastms, 10000);
+  finally
+    fGC2.Safe.UnLock;
+  end
+  else
+    exit; // won't block if another thread is accessing GC#2
+  // notify the result of GC#1 and GC#2 collection
+  h := n1 xor (n2 shl 16); // compute the current state of both GC
+  if (h = fGCLast) and
+     (tofree.Count = 0) then
+    exit; // nothing new to report
+  fGCLast := h;
+  if Assigned(fLog) then
+    fLog.Add.Log(sllTrace, 'DoGC #1=% #2=% free=% client=%',
+      [n1, n2, tofree.Count, fSockets.Count], self);
+//writeln('DoGC n1=', n1, ' n2=',n2, ' tofree=',tofree.Count);
+  // actually release the deprecated connection instances
+  if tofree.Count <> 0 then
+    FreeGC(tofree);
 end;
 
 procedure TAsyncConnections.FreeGC(var conn: TPollAsyncConnections);
@@ -2794,48 +2864,13 @@ begin
       on E: Exception do
       begin
         if Assigned(fLog) then
-          fLog.Add.Log(sllWarning, 'DoGC: %.Free failed as %',
+          fLog.Add.Log(sllWarning, 'FreeGC: %.Free failed as %',
             [pointer(c), PClass(E)^], self);
         dec(i); // just ignore this entry
       end;
     end;
   conn.Count := 0;
   conn.Items := nil;
-end;
-
-procedure TAsyncConnections.DoGC;
-var
-  tofree: TPollAsyncConnections;
-  n1, n2: integer;
-begin
-  // retrieve the connection instances to be released
-  if Terminated or
-     (fGC1.Count + fGC2.Count = 0) then
-    exit;
-  tofree.Count := 0;
-  SetLength(tofree.Items, 32); // good initial provisioning
-  fGC2.Safe.Lock;
-  try
-    fGC1.Safe.Lock;
-    try
-      // keep in first generation GC for 100 ms by default
-      n1 := OneGC(fGC1, fGC2, fLastOperationMS, fKeepConnectionInstanceMS);
-    finally
-      fGC1.Safe.UnLock;
-    end;
-    // wait 10 seconds until no pending event is in queue and free instances
-    n2 := OneGC(fGC2, tofree, fLastOperationMS, 10000);
-  finally
-    fGC2.Safe.UnLock;
-  end;
-  if n1 + n2 + tofree.Count = 0 then
-    exit;
-  if Assigned(fLog) then
-    fLog.Add.Log(sllTrace, 'DoGC #1=% #2=% free=% client=%',
-      [n1, n2, tofree.Count, fSockets.Count], self);
-  // actually release the deprecated connection instances
-  if tofree.Count > 0 then
-    FreeGC(tofree);
 end;
 
 procedure TAsyncConnections.Shutdown;
@@ -3549,35 +3584,48 @@ end;
 
 procedure TAsyncConnections.ProcessIdleTix(Sender: TObject; NowTix: Int64);
 var
+  ms32: integer; // change at most every 32ms
   sec: TAsyncConnectionSec;
   i: PtrInt;
 begin
-  // called from fSockets.fWrite.OnGetOneIdle callback
-  if Terminated then
+  // called from fSockets.fWrite.OnGetOneIdle callback at most every 500ms
+  if Terminated or
+     (fLastOperationMS = NowTix) then
     exit;
   try
+    ms32 := NowTix shr 5;
+    // process pending soWaitWrite
     if (fSockets <> nil) and
        (fSockets.fWaitingWrite.Count <> 0) and
-       (fLastOperationMS shr 5 <> NowTix shr 5) then // at most every 32ms
+       (fLastOperationMS shr 5 <> ms32) then
     begin
-      fSockets.ProcessWaitingWrite; // process pending soWaitWrite
+      fSockets.ProcessWaitingWrite;
       if Terminated then
         exit;
+      NowTix := mormot.core.os.GetTickCount64; // may have changed
     end;
-    fLastOperationMS := NowTix; // internal reusable cache to avoid syscall
-    DoGC;
+    // update internal cache to avoid GetTickCount64 syscall
+    fLastOperationMS := NowTix;
+    // perform connection GC
+    if (fGCTix1 <> ms32) and
+       (fGC1.Count + fGC2.Count <> 0) then
+      DoGC;
+    if Terminated then
+      exit;
+    // notify IdleEverySecond
+    sec := Qword(NowTix) div 1000; // when 32-bit second resolution is fine
+    if sec <> fLastOperationSec then
+    begin
+      fLastOperationSec := sec;
+      IdleEverySecond;
+    end;
+    // notify the SetOnIdle() registered events
     if fOnIdle <> nil then
       for i := 0 to length(fOnIdle) - 1 do
         if Terminated then
           exit
         else
-          fOnIdle[i](Sender, NowTix);
-    sec := Qword(NowTix) div 1000; // 32-bit second resolution is fine
-    if (sec = fLastOperationSec) or
-       Terminated then
-      exit; // not a new second tick yet
-    fLastOperationSec := sec;
-    IdleEverySecond;
+          fOnIdle[i](Sender, NowTix); // any exception is cathed below
   except // any exception from here is fatal for the whole server process
     on E: Exception do
       DoLog(sllWarning, 'ProcessIdleTix catched %', [E], self);
@@ -3586,7 +3634,8 @@ begin
   // e.g. overriden in TWebSocketAsyncConnections to send pending frames
 end;
 
-procedure TAsyncConnections.SetOnIdle(const aOnIdle: TOnPollSocketsIdle; Remove: boolean);
+procedure TAsyncConnections.SetOnIdle(
+  const aOnIdle: TOnPollSocketsIdle; Remove: boolean);
 begin
   if Remove then
     MultiEventRemove(fOnIdle, TMethod(aOnIdle))
@@ -3721,7 +3770,7 @@ destructor TAsyncServer.Destroy;
 var
   endtix: Int64;
 begin
-  endtix := mormot.core.os.GetTickCount64 + 10000;
+  endtix := mormot.core.os.GetTickCount64 + 10000; // never wait forever
   Shutdown;
   //DoLog(sllTrace, 'Destroy before inherited', [], self);
   inherited Destroy;
@@ -3796,7 +3845,7 @@ var
 begin
   // Accept() incoming connections
   // and Send() output packets in the background if fExecuteAcceptOnly=false
-  SetCurrentThreadName('AW:%', [fProcessName]);
+  SetCurrentThreadName('=AW:%', [fProcessName]);
   NotifyThreadStart(self);
   try
     // create and bind fServer to the expected TCP port
@@ -3938,7 +3987,7 @@ begin
         end;
         // if we reached here, we have accepted a connection -> process
         inc(fAccepted);
-        start := 0; // reset sleep pace on error
+        start := 0; // reset sleep pace if no error
         if ConnectionCreate(client, sin, connection) then
         begin
           // no log here, because already done in ConnectionNew and Start()
@@ -3978,6 +4027,8 @@ begin
   end;
   DoLog(sllInfo, 'Execute: done AW %', [fProcessName], self);
   SetExecuteState(esFinished);
+  if fLog <> nil then
+    fLog.Add.NotifyThreadEnded;
 end;
 
 
@@ -4007,7 +4058,7 @@ var
   sub: PWinIocpSubscription;
   {$endif USE_WINIOCP}
 begin
-  SetCurrentThreadName('W:% %', [fProcessName, self]);
+  SetCurrentThreadName('=W:% %', [fProcessName, self]);
   NotifyThreadStart(self);
   try
     if fThreadClients.Count > 0 then
@@ -4035,6 +4086,8 @@ begin
       DoLog(sllWarning, 'Execute raised % -> terminate %',
         [PClass(E)^, fProcessName], self);
   end;
+  if fLog <> nil then
+    fLog.Add.NotifyThreadEnded;
 end;
 
 
@@ -4106,7 +4159,7 @@ begin
     end;
     case fHttp.State of
       hrsGetBodyChunkedHexFirst,
-      hrsGetBodyContentLength,
+      hrsGetBodyContentLengthFirst,
       hrsWaitProcessing:
         if not (nfHeadersParsed in fHttp.HeaderFlags) then
         begin
@@ -4356,9 +4409,9 @@ begin
   fHttp.Compress := fServer.fCompress;
   fHttp.CompressAcceptEncoding := fServer.fCompressAcceptEncoding;
   fHttp.Options := fServer.fDefaultRequestOptions;
-  if fServer.fServerKeepAliveTimeOutSec <> 0 then
-    fKeepAliveSec := fServer.Async.fLastOperationSec +
-                     fServer.fServerKeepAliveTimeOutSec;
+  if fServer.fServerKeepAliveTimeOutSec <> 0 then // 0 = no keep alive
+    fKeepAliveMaxSec := fServer.Async.fLastOperationSec +
+                        fServer.fServerKeepAliveTimeOutSec;
   if hsoEnablePipelining in fServer.Options then
     fPipelineState := [pEnabled];
   HttpInit;
@@ -4372,8 +4425,8 @@ begin
   if fServer <> nil then
   begin
     if fServer.fServerKeepAliveTimeOutSec <> 0 then
-      fKeepAliveSec := fServer.Async.fLastOperationSec +
-                       fServer.fServerKeepAliveTimeOutSec;
+      fKeepAliveMaxSec := fServer.Async.fLastOperationSec +
+                          fServer.fServerKeepAliveTimeOutSec;
     fPipelineState := fPipelineState * [pEnabled];
   end;
 end;
@@ -4389,7 +4442,7 @@ end;
 procedure THttpAsyncServerConnection.BeforeDestroy;
 begin
   if Assigned(fServer) and
-     Assigned(fServer.fOnProgressiveRequestFree) and
+     Assigned(fServer.fProgressiveRequests) and
      (rfProgressiveStatic in fHttp.ResponseFlags) then
     fServer.DoProgressiveRequestFree(fHttp);
   fHttp.ProcessDone; // ContentStream.Free
@@ -4462,21 +4515,27 @@ begin
     // process one request (or several in case of pipelined input/output)
     while fHttp.ProcessRead(st, {returnOnStateChange=}false) do
     begin
-      // detect pipelined GET input
-      if (st.Len <> 0) and // there are still data in the input read buffer
-         (fPipelineState = [pEnabled]) and // no pWrite yet
-         (fKeepAliveSec > 0) and
-         not (hfConnectionClose in fHttp.HeaderFlags) then
-        include(fPipelineState, pWrite); // DoRequest will gather output in fWr
       // handle main steps change
       case fHttp.State of
         hrsGetBodyChunkedHexFirst,
-        hrsGetBodyContentLength:
-          // we just received command + all headers
-          result := DoHeaders;
+        hrsGetBodyContentLengthFirst:
+          // received command + all headers
+          if not (nfHeadersParsed in fHttp.HeaderFlags) then
+            result := DoHeaders;
         hrsWaitProcessing:
-          // calls the (blocking) HTTP request processing callback
-          result := DoRequest;
+          // received command + all headers + body (if any)
+          begin
+            // detect pipelined GET input
+            if st.Len <> 0 then // there are still data in the input read buffer
+              if (fPipelineState = [pEnabled]) and // no pWrite yet
+                 (fKeepAliveMaxSec > 0) and
+                 not (hfConnectionClose in fHttp.HeaderFlags) then
+                // DoRequest should gather output in fWr
+                include(fPipelineState, pWrite);
+                // note: if hsoEnablePipelining is not set, will continue
+            // = DoHeader (if needed) + call fServer.DoRequest() callback
+            result := DoRequest;
+          end
       else
         begin
           fOwner.DoLog(sllWarning, 'OnRead: close connection after % (before=%)',
@@ -4547,7 +4606,7 @@ begin
   if fHttp.State = hrsSendBody then
   begin
     // use the HTTP state machine to fill fWr with outgoing body chunk
-    hrp := fHttp.ProcessBody(fWr, fOwner.fSockets.fSendBufferSize);
+    hrp := fServer.DoProcessBody(fHttp, fWr, fOwner.fSockets.fSendBufferSize);
     if acoVerboseLog in fOwner.fOptions then
       fOwner.DoLog(sllTrace, 'AfterWrite ProcessBody=% ContentLength=% Wr=%',
         [ToText(hrp)^, fHttp.ContentLength, fWr.Len], self);
@@ -4565,7 +4624,7 @@ begin
     end; // hrpAbort, hrpDone will check hrsResponseDone
   end;
   // if we reached here, we are either finished or failed
-  if Assigned(fServer.fOnProgressiveRequestFree) and
+  if Assigned(fServer.fProgressiveRequests) and
      (rfProgressiveStatic in fHttp.ResponseFlags) then
     fServer.DoProgressiveRequestFree(fHttp);
   fHttp.ProcessDone;   // ContentStream.Free
@@ -4737,20 +4796,21 @@ begin
       include(fHttp.ResponseFlags, rfAsynchronous);
       fHttp.State := hrsWaitAsyncProcessing;
       exit;
-    end
+    end;
   end;
   // handle HTTP/1.1 keep alive timeout
-  if (fKeepAliveSec > 0) and
-     not (hfConnectionClose in fHttp.HeaderFlags) and
-     (fServer.Async.fLastOperationSec > fKeepAliveSec) then
-  begin
-    if acoVerboseLog in fOwner.fOptions then
-      fOwner.DoLog(sllTrace, 'DoRequest KeepAlive=% timeout: close connnection',
-        [fKeepAliveSec], self);
-    include(fHttp.HeaderFlags, hfConnectionClose); // before SetupResponse
-  end
+  if not (hfConnectionClose in fHttp.HeaderFlags) then
+    if fKeepAliveMaxSec = 0 then // fServer.ServerKeepAliveTimeOut = 0
+      include(fHttp.HeaderFlags, hfConnectionClose) // disable Keep-Alive
+    else if fServer.Async.fLastOperationSec > fKeepAliveMaxSec then
+    begin
+      if acoVerboseLog in fOwner.fOptions then
+        fOwner.DoLog(sllTrace, 'DoRequest KeepAlive=%ms timeout: close connnection',
+          [fServer.ServerKeepAliveTimeOut], self);
+      include(fHttp.HeaderFlags, hfConnectionClose); // before SetupResponse
+    end;
   // trigger optional hsoBan40xIP temporary IP4 bans on unexpected request
-  else if fServer.fAsync.Banned.ShouldBan(fRequest.RespStatus, fRemoteIP4) then
+  if fServer.fAsync.Banned.ShouldBan(fRequest.RespStatus, fRemoteIP4) then
   begin
     fOwner.DoLog(sllTrace, 'DoRequest=%: BanIP(%) %',
       [fRequest.RespStatus, fRemoteIP, fServer.fAsync.Banned], self);
@@ -4824,9 +4884,9 @@ begin
   ctx.Method := pointer(fHttp.CommandMethod);
   ctx.Host := pointer(fHttp.Host);
   ctx.Url := pointer(fHttp.CommandUri);
-  ctx.User := nil; // from THttpServerSocketGeneric.Authorization()
+  ctx.User := nil;
   if hsrAuthorized in fRequestFlags then
-    ctx.User := pointer(fHttp.BearerToken);
+    ctx.User := pointer(fHttp.BearerToken); // see fServer.Authorization()
   ctx.Referer := pointer(fHttp.Referer);
   ctx.UserAgent := pointer(fHttp.UserAgent);
   ctx.RemoteIP := pointer(fRemoteIP);
@@ -4835,7 +4895,7 @@ begin
   ctx.StatusCode := fRespStatus;
   ctx.Received := fBytesRecv;
   ctx.Sent := fBytesSend;
-  ctx.Tix64 := 0;
+  ctx.Tix64 := fServer.fAsync.fLastOperationMS; // ProcessIdleTix() GetTickCount64
   try
     fServer.fOnAfterResponse(ctx); // e.g. THttpLogger or THttpAnalyzer
   except
@@ -5020,7 +5080,12 @@ end;
 function THttpAsyncServer.GetExecuteState: THttpServerExecuteState;
 begin
   result := fAsync.fExecuteState; // state comes from THttpAsyncConnections
-  fExecuteMessage := fAsync.fExecuteMessage;
+  fExecuteMessage := fAsync.fExecuteMessage; // copy message
+end;
+
+function THttpAsyncServer.GetBanned: THttpAcceptBan;
+begin
+  result := fAsync.fBanned;
 end;
 
 {$ifdef OSWINDOWS}
@@ -5102,7 +5167,7 @@ var
   msidle: integer;
 begin
   // call ProcessIdleTix - and POSIX Send() output packets in the background
-  SetCurrentThreadName('M:%', [fAsync.fProcessName]);
+  SetCurrentThreadName('=M:%', [fAsync.fProcessName]);
   NotifyThreadStart(self);
   WaitStarted(10); // wait for fAsync.Execute to bind and start
   if fAsync <> nil then
@@ -5141,7 +5206,7 @@ begin
             break;
           // periodic trigger of IdleEverySecond and ProcessIdleTixSendFrames
           tix64 := mormot.core.os.GetTickCount64;
-          tix := tix64 shr 16; // check SendFrame idle after 1 minute
+          tix := tix64 shr 16; // check SendFrame idle after 1 minute (64K ms)
           fAsync.ProcessIdleTix(self, tix64);
           if (fCallbackSendDelay <> nil) and
              //TODO: set and check fCallbackOutgoingCount>0 instead?
@@ -5169,7 +5234,11 @@ begin
         fAsync.DoLog(sllWarning, 'Execute raised uncatched % -> terminate %',
           [PClass(E)^, fAsync.fProcessName], self);
     end;
+  if fAsync = nil then
+    exit;
   fAsync.DoLog(sllInfo, 'Execute: done W %', [fAsync.fProcessName], self);
+  if fAsync.fLog <> nil then
+    fAsync.fLog.Add.NotifyThreadEnded;
 end;
 
 
@@ -5224,10 +5293,11 @@ begin
     exit;
   if not fHashCached.FindAndCopy(name, hashes) then
   begin
+    // first time this hash is request: try to load and compute now
     i := length(fn);
     while i > 0 do
       if fn[i] = '.' then
-        break
+        break // remove the .sha256 or .md5 file extension
       else
         dec(i);
     if i = 0 then
@@ -5238,6 +5308,7 @@ begin
       exit; // no such file
     fHashCached.Add(name, hashes);
   end;
+  // return the pre-computed hash of this file
   i := 0;
   for a := low(a) to high(a) do
     if a in fAlgos then
@@ -5426,7 +5497,7 @@ begin
       if one.Disabled or
          (one.Source = '') then
         continue;
-      // validate source as local file folder or remote http server
+      // validate source as local file folder or remote http(s) server
       one.fSourced := sUndefined;
       if IsHttp(one.Source) then
       begin
@@ -5496,17 +5567,91 @@ begin
   end;
 end;
 
+function THttpProxyServer.OnExecuteLocal(Ctxt: THttpServerRequestAbstract;
+  Definition: THttpProxyUrl; const Uri: TUriMatchName): cardinal;
+var
+  fn: TFileName;
+  name: RawUtf8;
+  cached: RawByteString;
+  tix, siz: Int64;
+  ext: PUtf8Char;
+  pck: THttpProxyCacheKind;
+begin
+  // delete any deprecated cached content
+  tix := Int64(fServer.Async.LastOperationSec) * 1000; // = GetTickCount64
+  Definition.fMemCached.DeleteDeprecated(tix);
+  Definition.fHashCached.DeleteDeprecated(tix);
+  // supplied URI should be a safe local file
+  result := HTTP_NOTFOUND;
+  UrlDecodeVar(Uri.Path.Text, Uri.Path.Len, name, {name=}true);
+  NormalizeFileNameU(name);
+  if not SafePathNameU(name) then
+    exit;
+  // try to assign a local file to the output Ctxt
+  fn := FormatString('%%', [Definition.fLocalFolder, name]);
+  result := Ctxt.SetOutFile(fn, Definition.IfModifiedSince, '',
+    Definition.CacheControlMaxAgeSec, @siz); // to be streamed from file
+  // complete the actual URI process
+  case result of
+    HTTP_SUCCESS:
+      // this local file does exist: try if we could use Definition.MemCache
+      if Assigned(Definition.fMemCached) then
+      begin
+        pck := Definition.MemCache.FromUri(Uri);
+        if not (pckIgnore in pck) then
+          if (pckForce in pck) or
+             (siz <= Definition.MemCache.MaxSize) then
+          begin
+            // use a memory cache
+            if not Definition.fMemCached.FindAndCopy(name, cached) then
+            begin
+              cached := StringFromFile(fn);
+              Definition.fMemCached.Add(name, cached);
+            end;
+            Ctxt.ExtractOutContentType; // reverse Ctxt.SetOutFile(fn)
+            Ctxt.OutContent := cached;
+          end;
+      end;
+    HTTP_NOTFOUND:
+      // this URI is no file, but may be a folder
+      if (siz < 0) and // siz=-1 for folder
+         not (psoNoFolderHtmlIndex in fSettings.Server.Options) then
+      begin
+        // return the folder files info as cached HTML
+        if (psoDisableFolderHtmlIndexCache in fSettings.Server.Options) or
+           not Definition.fMemCached.FindAndCopy(name, cached) then
+        begin
+          FolderHtmlIndex(fn, Ctxt.Url,
+            StringReplaceChars(name, PathDelim, '/'), RawUtf8(cached));
+          if Assigned(Definition.fMemCached) and
+             not (psoDisableFolderHtmlIndexCache in fSettings.Server.Options) then
+            Definition.fMemCached.Add(name, cached);
+        end;
+        result := Ctxt.SetOutContent(cached, {304=}true, HTML_CONTENT_TYPE);
+      end
+      else if siz = 0 then
+        // URI may be a  ####.sha256 / ####.md5 hash
+        if Assigned(Definition.fHashCached) then
+        begin
+          ext := ExtractExtP(name, {withoutdot:}true);
+          if ext <> nil then
+            case PCardinal(ext)^ of
+              ord('s') + ord('h') shl 8 + ord('a') shl 16 + ord('2') shl 24:
+                result := Definition.ReturnHash(Ctxt, hfSHA256, name, fn);
+              ord('m') + ord('d') shl 8 + ord('5') shl 16:
+                result := Definition.ReturnHash(Ctxt, hfMd5, name, fn);
+            end;
+        end;
+  end; // may be e.g. HTTP_NOTMODIFIED (304)
+  fLog.Add.Log(sllTrace, 'OnExecute: % % fn=% status=% size=% cached=%',
+    [Ctxt.Method, Ctxt.Url, fn, result, siz, (cached <> '')], self);
+end;
+
 function THttpProxyServer.OnExecute(Ctxt: THttpServerRequestAbstract): cardinal;
 var
   one: THttpProxyUrl;
   uri: TUriMatchName;
-  fn: TFileName;
-  name: RawUtf8;
-  cached: RawByteString;
-  siz, tix: Int64;
-  ext: PUtf8Char;
   met: TUriRouterMethod;
-  pck: THttpProxyCacheKind;
 begin
   result := HTTP_NOTFOUND;
   // retrieve O(1) execution context
@@ -5520,88 +5665,25 @@ begin
     exit;
   // retrieve path and resource/file name from URI
   Ctxt.RouteAt(0, uri.Path);
-  if uri.Path.Len > 512 then
+  if uri.Path.Len > 512 then // obviously invalid
     exit;
   uri.ParsePath; // compute uri.Name for file-level TUriMatch
   // ensure was not marked as rejected
   if (one.RejectCsv <> '') and
      one.fReject.Check(one.RejectCsv, uri, PathCaseInsensitive) then
     exit;
-  // delete any deprecated cached content
-  tix := Int64(fServer.Async.LastOperationSec) * 1000; // = GetTickCount64
-  one.fMemCached.DeleteDeprecated(tix);
-  one.fHashCached.DeleteDeprecated(tix);
   // actual request processing
-  case met of
-    urmGet,
-    urmHead:
-    case one.fSourced of
-      sLocalFolder:
-        begin
-          // get content from a local file
-          UrlDecodeVar(uri.Path.Text, uri.Path.Len, name, {name=}true);
-          NormalizeFileNameU(name);
-          if not SafePathNameU(name) then
-            exit;
-          fn := FormatString('%%', [one.fLocalFolder, name]);
-          result := Ctxt.SetOutFile(fn, one.IfModifiedSince, '',
-            one.CacheControlMaxAgeSec, @siz); // will be streamed from file
-          case result of
-            HTTP_SUCCESS:
-              if Assigned(one.fMemCached) then
-              begin
-                pck := one.MemCache.FromUri(uri);
-                if not (pckIgnore in pck) then
-                  if (pckForce in pck) or
-                     (siz <= one.MemCache.MaxSize) then
-                  begin
-                    // use a memory cache
-                    if not one.fMemCached.FindAndCopy(name, cached) then
-                    begin
-                      cached := StringFromFile(fn);
-                      one.fMemCached.Add(name, cached);
-                    end;
-                    Ctxt.ExtractOutContentType; // reverse Ctxt.SetOutFile(fn)
-                    Ctxt.OutContent := cached;
-                  end;
-              end;
-            HTTP_NOTFOUND:
-              if (siz < 0) and // siz=-1 if the requested resource was a folder
-                 not (psoNoFolderHtmlIndex in fSettings.Server.Options) then
-              begin
-                // return the folder files info as cached HTML
-                if (psoDisableFolderHtmlIndexCache in fSettings.Server.Options) or
-                   not one.fMemCached.FindAndCopy(name, cached) then
-                begin
-                  FolderHtmlIndex(fn, Ctxt.Url,
-                    StringReplaceChars(name, PathDelim, '/'), RawUtf8(cached));
-                  if Assigned(one.fMemCached) and
-                     not (psoDisableFolderHtmlIndexCache in fSettings.Server.Options) then
-                    one.fMemCached.Add(name, cached);
-                end;
-                result := Ctxt.SetOutContent(cached, {304=}true, HTML_CONTENT_TYPE);
-              end
-              else if siz = 0 then
-                if Assigned(one.fHashCached) then
-                begin
-                  ext := ExtractExtP(name, {withoutdot:}true);
-                  if ext <> nil then
-                    case PCardinal(ext)^ of
-                      ord('s') + ord('h') shl 8 + ord('a') shl 16 + ord('2') shl 24:
-                        result := one.ReturnHash(Ctxt, hfSHA256, name, fn);
-                      ord('m') + ord('d') shl 8 + ord('5') shl 16:
-                        result := one.ReturnHash(Ctxt, hfMd5, name, fn);
-                    end;
-                end;
-          end; // may be e.g. HTTP_NOTMODIFIED (304)
-          fLog.Add.Log(sllTrace, 'OnExecute: % % fn=% status=% size=% cached=%',
-            [Ctxt.Method, Ctxt.Url, fn, result, siz, (cached <> '')], self);
-        end;
-      sRemoteUri:
-        begin
-          { TODO: implement progressive proxy cache on a remote server }
-        end;
-    end;
+  case one.fSourced of
+    sLocalFolder:
+      case met of
+        urmGet,
+        urmHead:
+          OnExecuteLocal(Ctxt, one, uri);
+      end;
+    sRemoteUri:
+      begin
+        { TODO: implement progressive proxy cache on a remote server }
+      end;
   end;
 end;
 

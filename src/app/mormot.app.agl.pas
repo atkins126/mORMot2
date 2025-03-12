@@ -621,7 +621,7 @@ begin
   sn := fService.Name;
   se := fService.AbortExitCodes;
   notifytix := false;
-  SetCurrentThreadName('run %', [sn]);
+  SetCurrentThreadName('=run %', [sn]);
   try
     lastunstable := 0;
     repeat
@@ -960,11 +960,11 @@ begin
       if FileIsExecutable(fn) then
         res := RunCommand(Utf8ToString(n), {waitfor=}true)
       else
-      begin
+      begin // append to text log file
         GetMemoryInfo(mem, false);
-        res := ord(AppendToTextFile(FormatUtf8('% %: % [mem=%/%] %',
+        res := ord(AppendToTextFile(FormatUtf8('% %: % [mem=%/%] [cpu=%]',
           [w, Name, msg, KBNoSpace(mem.memfree), KBNoSpace(mem.memtotal),
-           RetrieveLoadAvg]), fn));
+           RetrieveLoadAvg]), fn)); // POSIX loadavg or Windows 'U:xx K:xx' %
       end;
     end;
     fOwner.fSettings.LogClass.Add.Log(sllTrace,
@@ -1597,7 +1597,7 @@ begin
       end;
     aaSleep:
       if ToInteger(Param, ms) then
-        Sleep(ms)
+        sysutils.Sleep(ms) // would retry on ESysEINTR
       else
         exit;
     {$ifdef OSWINDOWS}

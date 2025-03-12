@@ -2179,7 +2179,7 @@ function WordScanIndex(P: PWordArray; Count: PtrInt; Value: word): PtrInt;
         cmp     rdx, rax
         jbe     @no
         ret
-        // 16bit-unaligned loop (seldom called)
+        // 16bit-unaligned loop (hardly called)
 {$ifdef FPC} align 8 {$else} .align 8 {$endif}
 @unal:  lea     rcx, [rcx + rdx * 2]
         neg     rdx
@@ -2245,7 +2245,7 @@ function IntegerScanIndex(P: PCardinalArray; Count: PtrInt; Value: cardinal): Pt
         cmp     rdx, rax
         jbe     @no
         ret
-        // 32bit-unaligned loop (seldom called)
+        // 32bit-unaligned loop (hardly called)
 {$ifdef FPC} align 8 {$else} .align 8 {$endif}
 @unal:  lea     rcx, [rcx + rdx * 4]
         neg     rdx
@@ -2274,7 +2274,7 @@ function MemCmp(P1, P2: PByteArray; L: PtrInt): integer;
 @by16:    // loop comparing 16 bytes
           movups  xmm1, oword ptr [P1 + L]
           movups  xmm2, oword ptr [P2 + L]
-          pcmpeqb xmm1, xmm2             // compare 16 bytes
+          pcmpeqb xmm1, xmm2             // compare 16 bytes (128-bit)
           pmovmskb eax, xmm1             // get byte mask
           xor     eax, r9d               // not ax
           jnz     @diff                  // difference found

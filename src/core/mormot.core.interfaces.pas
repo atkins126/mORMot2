@@ -3416,7 +3416,7 @@ begin
     W.CancelAllAsNew;
   end
   else 
-    // paranoid thread-safety call with its own temp buffer (seldom called)
+    // paranoid thread-safety call with its own temp buffer (hardly called)
     W := TJsonWriter.CreateOwnedStream(8192);
   try
     if ifoJsonAsExtended in fOptions then
@@ -4806,7 +4806,7 @@ begin
         [fInterfaceName, a, self, aName]);
     arg^.ValueDirection :=
       TInterfaceMethodValueDirection(aParams[a * ARGPERARG].VInteger);
-    VarRecToUtf8(aParams[a * ARGPERARG + 1], u);
+    VarRecToUtf8(@aParams[a * ARGPERARG + 1], u);
     if u = '' then
       EInterfaceFactory.RaiseUtf8(
         '%: invalid param name #% for %.AddMethod("%")',
@@ -7686,7 +7686,7 @@ begin
     // hook once - Create may be done twice in GetWeakZero() for SetPrivateSlot
     exit;
   fHookedFreeInstance := P^;
-  PatchCodePtrUInt(P, PtrUInt(@HookedFreeInstance));
+  PatchCodePtrUInt(P, PtrUInt(@HookedFreeInstance), {leaveunprot=}false);
 end;
 
 function GetWeakZero(aClass: TClass; CreateIfNonExisting: boolean): TSetWeakZero;

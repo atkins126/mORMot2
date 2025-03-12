@@ -332,6 +332,8 @@ type
 
   /// a dynamic array of TVarRec, i.e. could match an "array of const" parameter
   TTVarRecDynArray = array of TVarRec;
+  TVarRecArray = array[ 0 .. MaxInt div SizeOf(TVarRec) - 1 ] of TVarRec;
+  PVarRecArray = ^TVarRecArray;
 
   /// a TVarData values array
   // - is not called TVarDataArray to avoid confusion with the corresponding
@@ -365,11 +367,12 @@ type
   TExtendedDynArray = array of Extended;
   TWordDynArray = array of word;
   PWordDynArray = ^TWordDynArray;
-  TByteDynArray = array of byte;
-  PByteDynArray = ^TByteDynArray;
-  {$ifndef ISDELPHI2007ANDUP}
+  {$ifndef FPC_OR_UNICODE}
   TBytes = array of byte;
   {$endif ISDELPHI2007ANDUP}
+  PBytes = ^TBytes;
+  TByteDynArray = array of byte; // can't reuse TBytes (Delphi XE internal error)
+  PByteDynArray = ^TByteDynArray;
   TBytesDynArray = array of TBytes;
   PBytesDynArray = ^TBytesDynArray;
   TObjectDynArray = array of TObject;
@@ -775,13 +778,6 @@ function IsNullGuid({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif} guid: 
 function AddGuid(var guids: TGuidDynArray; const guid: TGuid;
   NoDuplicates: boolean = false): integer;
 
-/// compute a random UUid value from the RandomBytes() generator and RFC 4122
-procedure RandomGuid(out result: TGuid); overload;
-
-/// compute a random UUid value from the RandomBytes() generator and RFC 4122
-function RandomGuid: TGuid; overload;
-  {$ifdef HASINLINE}inline;{$endif}
-
 /// fast O(log(n)) binary search of a binary (e.g. TGuid) value in a sorted array
 function FastFindBinarySorted(P, Value: PByteArray; Size, R: PtrInt): PtrInt;
 
@@ -838,7 +834,7 @@ procedure FastAssignNewNotVoid(var d; s: pointer); overload;
   {$ifndef FPC_CPUX64} {$ifdef HASINLINE}inline;{$endif} {$endif}
 
 /// internal function used by FastSetString/FastSetStringCP
-function FastNewString(len, codepage: PtrInt): PAnsiChar;
+function FastNewString(len: PtrInt; codepage: PtrInt = CP_RAWBYTESTRING): pointer;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// ensure the supplied variable will have a CP_UTF8 code page
@@ -860,6 +856,7 @@ procedure FakeLength(var s: RawUtf8; endChar: PUtf8Char); overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// internal function which could be used instead of SetLength() if RefCnt = 1
+// - FakeLength() don't handle len = 0, whereas FakeSetLength() will
 procedure FakeLength(var s: RawByteString; len: PtrInt); overload;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -931,10 +928,15 @@ procedure Ansi7StringToShortString(const source: RawUtf8; var result: ShortStrin
 procedure AppendShortCardinal(value: cardinal; var dest: ShortString);
 
 /// simple concatenation of a signed 64-bit integer as text into a shorstring
-procedure AppendShortInt64(value: Int64; var dest: ShortString);
+procedure AppendShortInt64(const value: Int64; var dest: ShortString);
 
 /// simple concatenation of an unsigned 64-bit integer as text into a shorstring
-procedure AppendShortQWord(value: QWord; var dest: ShortString);
+procedure AppendShortQWord(const value: QWord; var dest: ShortString);
+
+/// simple concatenation of INTEGER Curr64 (value*10000) into a shorstring
+// - will emit 0, 2 or 4 decimals in the output text (e.g. '1', '1.23', '1.2345')
+procedure AppendShortCurr64(const value: Int64; var dest: ShortString;
+  fixeddecimals: PtrInt = 0);
 
 /// simple concatenation of a character into a @shorstring
 // - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
@@ -1241,7 +1243,7 @@ procedure Int64ToCurrency(const i: Int64; c: PCurrency); overload;
 // - #.##51 will round to #.##+0.01 and #.##50 will be truncated to #.##
 // - implementation will use fast Int64 math to avoid any precision loss due to
 // temporary floating-point conversion
-function SimpleRoundTo2Digits(Value: Currency): Currency;
+function SimpleRoundTo2Digits(const Value: Currency): Currency;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// simple, no banker rounding of a Currency value, stored as Int64, to only 2 digits
@@ -1251,26 +1253,26 @@ function SimpleRoundTo2Digits(Value: Currency): Currency;
 procedure SimpleRoundTo2DigitsCurr64(var Value: Int64);
 
 /// no banker rounding into text, with two digits after the decimal point
-// - #.##51 will round to #.##+0.01 and #.##50 will be truncated to #.##
-// - this function will only allow 2 digits in the returned text
+// - i.e. SimpleRoundTo2DigitsCurr64() as text
 function TwoDigits(const d: double): TShort23;
 
 /// truncate a currency value to only 2 digits
 // - implementation will use fast Int64 math to avoid any precision loss due to
 // temporary floating-point conversion
-function TruncTo2Digits(Value: currency): currency;
+function TruncTo2Digits(const Value: currency): currency;
+  {$ifdef CPU64}inline;{$endif}
 
 /// truncate a currency value, stored as Int64, to only 2 digits
 // - implementation will use fast Int64 math to avoid any precision loss due to
 // temporary floating-point conversion
 procedure TruncTo2DigitsCurr64(var Value: Int64);
-  {$ifdef HASINLINE}inline;{$endif}
+  {$ifdef CPU64}inline;{$endif}
 
 /// truncate a Currency value, stored as Int64, to only 2 digits
 // - implementation will use fast Int64 math to avoid any precision loss due to
 // temporary floating-point conversion
-function TruncTo2Digits64(Value: Int64): Int64;
-  {$ifdef HASINLINE}inline;{$endif}
+function TruncTo2Digits64(const Value: Int64): Int64;
+  {$ifdef CPU64}inline;{$endif}
 
 /// simple wrapper to efficiently compute both division and modulo per 100
 // - compute result.D = Y div 100 and result.M = Y mod 100
@@ -1444,7 +1446,7 @@ function ToInt64(const text: RawUtf8; out value: Int64): boolean;
 function ToDouble(const text: RawUtf8; out value: double): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// internal fast integer val to text conversion
+/// internal fast integer value to text conversion
 // - expect the last available temporary char position in P
 // - return the last written char position (write in reverse order in P^)
 // - typical use:
@@ -1460,7 +1462,7 @@ function ToDouble(const text: RawUtf8; out value: double): boolean;
 // - not to be called directly: use IntToStr() or Int32ToUtf8() instead
 function StrInt32(P: PAnsiChar; val: PtrInt): PAnsiChar;
 
-/// internal fast unsigned integer val to text conversion
+/// internal fast unsigned integer value to text conversion
 // - expect the last available temporary char position in P
 // - return the last written char position (write in reverse order in P^)
 // - convert the input value as PtrUInt, so work with QWord on 64-bit CPUs
@@ -1471,10 +1473,22 @@ function StrUInt32(P: PAnsiChar; val: PtrUInt): PAnsiChar;
 function StrInt64(P: PAnsiChar; const val: Int64): PAnsiChar;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// internal fast unsigned Int64 val to text conversion
+/// internal fast unsigned Int64 value to text conversion
 // - same calling convention as with StrInt32() above
 function StrUInt64(P: PAnsiChar; const val: QWord): PAnsiChar;
   {$ifdef CPU64}inline;{$endif}
+
+/// internal fast INTEGER Curr64 (value*10000) value to text conversion
+// - expect the last available temporary char position in P
+// - return the last written char position (write in reverse order in P^)
+// - will return 0 for Value=0, or a string representation with always 4 decimals
+//   (e.g. 1->'0.0001' 500->'0.0500' 25000->'2.5000' 30000->'3.0000')
+// - is called by Curr64ToPChar() and Curr64ToStr() functions
+function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
+
+/// fast convert an Int64 value into a temporary shortstring on stack
+function ToShort(const val: Int64): TShort23;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// add the 4 digits of integer Y to P^ as '0000'..'9999'
 procedure YearToPChar(Y: PtrUInt; P: PUtf8Char);
@@ -1793,6 +1807,10 @@ function AddInteger(var Values: TIntegerDynArray; var ValuesCount: integer;
 function AddWord(var Values: TWordDynArray; var ValuesCount: integer;
   Value: Word): PtrInt;
 
+/// add a 8-bit integer value at the end of a dynamic array of integers
+function AddByte(var Values: TByteDynArray; var ValuesCount: integer;
+  Value: byte): PtrInt;
+
 /// add a 64-bit integer value at the end of a dynamic array of integers
 function AddInt64(var Values: TInt64DynArray; var ValuesCount: integer;
   Value: Int64): PtrInt; overload;
@@ -1819,17 +1837,21 @@ function AddPtrUInt(var Values: TPtrUIntDynArray;
 /// delete any 32-bit integer in Values[]
 procedure DeleteInteger(var Values: TIntegerDynArray; Index: PtrInt); overload;
 
-/// delete any 32-bit integer in Values[]
+/// delete any 32-bit integer in Values[] and associated ValuesCount
 procedure DeleteInteger(var Values: TIntegerDynArray; var ValuesCount: integer;
   Index: PtrInt); overload;
 
 /// delete any 16-bit integer in Values[]
-procedure DeleteWord(var Values: TWordDynArray; Index: PtrInt);
+procedure DeleteWord(var Values: TWordDynArray; Index: PtrInt); overload;
+
+/// delete any 16-bit integer in Values[] and associated ValuesCount
+procedure DeleteWord(var Values: TWordDynArray; var ValuesCount: integer;
+  Index: PtrInt); overload;
 
 /// delete any 64-bit integer in Values[]
 procedure DeleteInt64(var Values: TInt64DynArray; Index: PtrInt); overload;
 
-/// delete any 64-bit integer in Values[]
+/// delete any 64-bit integer in Values[] and associated ValuesCount
 procedure DeleteInt64(var Values: TInt64DynArray; var ValuesCount: integer;
   Index: PtrInt); overload;
 
@@ -1873,6 +1895,9 @@ function FromI64(const Values: array of Int64): TInt64DynArray;
 function FromU64(const Values: array of QWord): TQWordDynArray;
   {$ifdef FPC}{$ifdef HASINLINE}inline;{$endif}{$endif}
 
+/// internal function called e.g. by DeleteWord/DeleteInteger/DeleteInt64
+procedure UnmanagedDynArrayDelete(var v; Count, Index, ItemSize: PtrUInt);
+
 type
   /// used to store and retrieve Words in a sorted array
   // - ensure Count=0 before use - if not defined as a private member of a class
@@ -1885,7 +1910,7 @@ type
     /// the actual 16-bit word storage
     Values: TWordDynArray;
     /// how many items are currently in Values[]
-    Count: PtrInt;
+    Count: integer;
     /// add a value into the sorted array
     // - return the index of the new inserted value into the Values[] array
     // - return -(foundindex+1) if this value is already in the Values[] array
@@ -1893,6 +1918,9 @@ type
     /// return the index if the supplied value in the Values[] array
     // - return -1 if not found
     function IndexOf(aValue: Word): PtrInt; {$ifdef HASINLINE}inline;{$endif}
+    /// search and delete a supplied value in the Values[] array
+    // - return -1 if not found, or the index of the delete item
+    function Remove(aValue: Word): PtrInt;
     /// save the internal array into a TWordDynArray variable
     procedure SetArray(out aValues: TWordDynArray);
   end;
@@ -1909,7 +1937,7 @@ type
     /// the actual 32-bit integers storage
     Values: TIntegerDynArray;
     /// how many items are currently in Values[]
-    Count: PtrInt;
+    Count: integer;
     /// add a value into the sorted array
     // - return the index of the new inserted value into the Values[] array
     // - return -(foundindex+1) if this value is already in the Values[] array
@@ -1917,6 +1945,9 @@ type
     /// return the index if the supplied value in the Values[] array
     // - return -1 if not found
     function IndexOf(aValue: integer): PtrInt; {$ifdef HASINLINE}inline;{$endif}
+    /// search and delete a supplied value in the Values[] array
+    // - return -1 if not found, or the index of the delete item
+    function Remove(aValue: integer): PtrInt;
     /// save the internal array into a TWordDynArray variable
     procedure SetArray(out aValues: TIntegerDynArray);
   end;
@@ -1973,6 +2004,9 @@ procedure PtrArrayDelete(var aPtrArray; aIndex: PtrInt; aCount: PInteger = nil;
 /// wrapper to find an item to a array of pointer dynamic array storage
 function PtrArrayFind(var aPtrArray; aItem: pointer): integer;
   {$ifdef HASINLINE}inline;{$endif}
+
+ /// wrapper to retrieve the last added pointer in a dynamic array storage
+function PtrArrayPop(var aPtrArray): pointer;
 
 /// wrapper to count all nil items in a pointer dynamic array storage
 function PtrArrayNotNilCount(const aPtrArray): integer;
@@ -2055,6 +2089,10 @@ function ObjArrayFind(const aObjArray; aItem: TObject): PtrInt; overload;
 // - returns -1 if the item is not found in the dynamic array
 function ObjArrayFind(const aObjArray; aCount: integer; aItem: TObject): PtrInt; overload;
   {$ifdef HASINLINE}inline;{$endif}
+
+/// wrapper to retrieve the last added T*ObjArray dynamic array storage
+// - would implement a simple LIFO queue of TObject
+function ObjArrayPop(var aObjArray): TObject; {$ifdef HASINLINE} inline; {$endif}
 
 /// wrapper to count all not nil items in a T*ObjArray dynamic array storage
 // - for proper serialization on Delphi 7-2009, use Rtti.RegisterObjArray()
@@ -2766,6 +2804,8 @@ var
   /// the low-level ARM/AARCH64 CPU features retrieved from system.envp
   // - text from CpuInfoFeatures may not be accurate on oldest kernels
   CpuFeatures: TArmHwCaps;
+  /// the low-level ARM/AARCH64 CPU model text as retrieved by mormot.core.os
+  CpuArmModel: RawUtf8;
 {$endif CPUARM3264}
 
 /// cross-platform wrapper function to check AES HW support on Intel or ARM
@@ -2868,11 +2908,11 @@ function DACntDecFree(var refcnt: TDACnt): boolean;
   {$ifndef CPUINTEL} inline; {$endif}
 
 /// low-level string reference counter process
-procedure StrCntAdd(var refcnt: TStrCnt; increment: TStrCnt);
+procedure StrCntAdd(var refcnt: TStrCnt; increment: TStrCnt = 1);
   {$ifdef HASINLINE} inline; {$endif}
 
 /// low-level dynarray reference counter process
-procedure DACntAdd(var refcnt: TDACnt; increment: TDACnt);
+procedure DACntAdd(var refcnt: TDACnt; increment: TDACnt = 1);
   {$ifdef HASINLINE} inline; {$endif}
 
 /// fast atomic compare-and-swap operation on a pointer-sized integer value
@@ -2964,7 +3004,7 @@ procedure MoveFast(const src; var dst; cnt: PtrInt);
 {$else}
 
 // fallback to RTL versions on non-INTEL or PIC platforms by default
-// and mormot.core.os.posix.inc redirects them to libc memset/memmove
+// - mormot.core.os.posix.inc will redirect them to libc memset/memmove
 var FillcharFast: procedure(var Dest; count: PtrInt; Value: byte) = FillChar;
 var MoveFast: procedure(const Source; var Dest; Count: PtrInt) = Move;
 
@@ -3087,6 +3127,9 @@ procedure TrimSelf(var S: RawUtf8);
 procedure TrimCopy(const S: RawUtf8; start, count: PtrInt;
   var result: RawUtf8);
 
+/// faster dedicated RawUtf8 version of delete(s, 1, 1) to avoid realloc
+procedure TrimFirstChar(var S: RawUtf8);
+
 /// returns the left part of a RawUtf8 string, according to SepStr separator
 // - if SepStr is found, returns Str first chars until (and excluding) SepStr
 // - if SepStr is not found, returns Str
@@ -3181,7 +3224,7 @@ type
     function RawNext: cardinal;
     /// compute the next 32-bit generated value
     // - will automatically reseed after around 2^32 generated values, which is
-    // huge but very conservative since this generator has a period of 2^88
+    // huge but conservative since this generator has a known period of 2^88
     function Next: cardinal; overload;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// compute the next 32-bit generated value, in range [0..max-1]
@@ -3210,60 +3253,6 @@ function Lecuyer: PLecuyer;
 /// internal function used e.g. by TLecuyer.FillShort/FillShort31
 procedure FillAnsiStringFromRandom(dest: PByteArray; size: PtrUInt);
 
-/// fast compute of some 32-bit random value, using the gsl_rng_taus2 generator
-// - this function will use well documented and proven Pierre L'Ecuyer software
-// generator - which happens to be faster (and safer) than RDRAND opcode (which
-// is used for seeding anyway)
-// - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
-// randomness, but is twice slower (even with AES-NI)
-// - thread-safe and non-blocking function: each thread will maintain its own
-// TLecuyer table (note that RTL's system.Random function is not thread-safe)
-function Random32: cardinal; overload;
-
-/// compute of a 32-bit random value <> 0, using the gsl_rng_taus2 generator
-// - thread-safe function: each thread will maintain its own TLecuyer table
-function Random32Not0: cardinal;
-
-/// fast compute of some 31-bit random value, using the gsl_rng_taus2 generator
-// - thread-safe function: each thread will maintain its own TLecuyer table
-function Random31: integer;
-
-/// compute of a 31-bit random value <> 0, using the gsl_rng_taus2 generator
-// - thread-safe function: each thread will maintain its own TLecuyer table
-function Random31Not0: integer;
-
-/// fast compute of a 64-bit random value, using the gsl_rng_taus2 generator
-// - thread-safe function: each thread will maintain its own TLecuyer table
-function Random64: QWord;
-
-/// fast compute of bounded 32-bit random value, using the gsl_rng_taus2 generator
-// - calls internally the overloaded Random32 function, ensuring Random32(max)<max
-// - consider using TAesPrng.Main.Random32(), which offers cryptographic-level
-// randomness, but is twice slower (even with AES-NI)
-// - thread-safe and non-blocking function using a per-thread TLecuyer engine
-function Random32(max: cardinal): cardinal; overload;
-
-/// fast compute of a 64-bit random floating point, using the gsl_rng_taus2 generator
-// - thread-safe and non-blocking function using a per-thread TLecuyer engine
-// - returns a random value in range [0..1)
-function RandomDouble: double;
-
-/// fill a memory buffer with random bytes from the gsl_rng_taus2 generator
-// - will actually XOR the Dest buffer with Lecuyer numbers
-// - consider also the cryptographic-level TAesPrng.Main.FillRandom() method
-// - thread-safe and non-blocking function using a per-thread TLecuyer engine
-procedure RandomBytes(Dest: PByte; Count: integer);
-
-/// fill some string[31] with 7-bit ASCII random text
-// - thread-safe and non-blocking function using a per-thread TLecuyer engine
-procedure RandomShort31(var dest: TShort31);
-
-{$ifndef PUREMORMOT2}
-/// fill some 32-bit memory buffer with values from the gsl_rng_taus2 generator
-// - the destination buffer is expected to be allocated as 32-bit items
-procedure FillRandom(Dest: PCardinal; CardinalCount: integer);
-{$endif PUREMORMOT2}
-
 /// seed the thread-specific gsl_rng_taus2 Random32 generator
 // - by default, gsl_rng_taus2 generator is re-seeded every 2^32 values, which
 // is very conservative against the Pierre L'Ecuyer's algorithm period of 2^88
@@ -3286,6 +3275,13 @@ procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 // TAesPrng.GetEntropy will call it as one of its entropy sources, in addition
 // to system-retrieved randomness from mormot.core.os.pas' XorOSEntropy()
 procedure XorEntropy(var e: THash512Rec);
+
+var
+  /// stub used by XorEntropy() to retrieve 256-bit of randomness
+  // - this default unit with call sysutils.CreateGuid() twice
+  // - mormot.core.os.posix.inc will implement a proper POSIX function here
+  // and try to read 32 bytes from /dev/urandom
+  XorEntropyGetOsRandom256: procedure(var e: THash256Rec);
 
 /// convert the endianness of a given unsigned 16-bit integer into BigEndian
 function bswap16(a: cardinal): cardinal;
@@ -3874,16 +3870,18 @@ type
   PSynVarData = ^TSynVarData;
 
 const
+  /// variant type holding a PtrInt value
+  varPtrInt = {$ifdef CPU32} varInteger {$else} varInt64 {$endif};
   /// unsigned 64bit integer variant type
   // - currently called varUInt64 in Delphi (not defined in older versions),
   // and varQWord in FPC
-  varWord64 = 21;
+  varWord64       = 21;
   /// map the Windows VT_INT extended VARENUM, i.e. a 32-bit signed integer
   // - also detected and handled by VariantToInteger/VariantToInt64
-  varOleInt = 22;
+  varOleInt       = 22;
   /// map the Windows VT_UINT extended VARENUM, i.e. a 32-bit unsigned integer
   // - also detected and handled by VariantToInteger/VariantToInt64
-  varOleUInt = 23;
+  varOleUInt      = 23;
   /// map the Windows VT_LPSTR extended VARENUM, i.e. a PAnsiChar
   // - also detected and handled by VariantToUtf8
   varOlePAnsiChar = 30;
@@ -3892,9 +3890,9 @@ const
   varOlePWideChar = 31;
   /// map the Windows VT_FILETIME extended VARENUM, i.e. a 64-bit TFileTime
   // - also detected and handled by VariantToDateTime
-  varOleFileTime = 64;
+  varOleFileTime  = 64;
   /// map the Windows VT_CLSID extended VARENUM, i.e. a by-reference PGuid
-  varOleClsid = 72;
+  varOleClsid     = 72;
 
   varVariantByRef = varVariant or varByRef;
   varStringByRef  = varString  or varByRef;
@@ -3918,7 +3916,7 @@ const
   {$endif UNICODE}
 
   {$ifdef ISDELPHI}
-  CFirstUserType = $10F;
+  CFirstUserType  = $10F;
   {$endif ISDELPHI}
 
   /// those TVarData.VType values are meant to be direct values
@@ -4225,7 +4223,8 @@ type
   TStreamDynArray = array of TStream;
 
   {$M+}
-  /// TStream with a protected fPosition field
+  /// TStream with an internal Position field
+  // - also override Read/Write to raise EStreamError, for Delphi/FPC consistency
   TStreamWithPosition = class(TStream)
   protected
     fPosition: Int64;
@@ -4235,16 +4234,27 @@ type
   public
     /// change the current Read/Write position, within current GetSize
     function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
-    /// call the 64-bit Seek() overload
+    /// generic override calling the 64-bit Seek() overload
     function Seek(Offset: Longint; Origin: Word): Longint; override;
+    /// default implementation which will raise an exception on call
+    function Read(var Buffer; Count: Longint): Longint; override;
+    /// default implementation which will raise an exception on call
+    function Write(const Buffer; Count: Longint): Longint; override;
   end;
   {$M-}
 
-  /// TStream with two protected fPosition/fSize fields
+  /// TStream with internal Position/Size fields
   TStreamWithPositionAndSize = class(TStreamWithPosition)
   protected
     fSize: Int64;
     function GetSize: Int64; override;
+  end;
+
+  /// TStream with internal Position/Size fields but allowing no Seek() change
+  TStreamWithNoSeek = class(TStreamWithPositionAndSize)
+  public
+    /// allow to retrieve but not change the current Read/Write position
+    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
   end;
 
   /// TStream using a RawByteString as internal storage
@@ -4551,7 +4561,7 @@ end;
 
 function DoubleToCurrency(const d: double): currency;
 begin
-  result := trunc(d * CURR_RES);
+  PInt64(@result)^ := trunc(d * CURR_RES);
 end;
 
 {$endif CPUX86}
@@ -4567,10 +4577,10 @@ begin
   PVarData(@v).VCurrency := c;
 end;
 
-function SimpleRoundTo2Digits(Value: Currency): Currency;
+function SimpleRoundTo2Digits(const Value: Currency): Currency;
 begin
-  SimpleRoundTo2DigitsCurr64(PInt64(@Value)^);
   result := Value;
+  SimpleRoundTo2DigitsCurr64(PInt64(@result)^);
 end;
 
 procedure SimpleRoundTo2DigitsCurr64(var Value: Int64);
@@ -4590,40 +4600,19 @@ end;
 function TwoDigits(const d: double): TShort23;
 var
   v: Int64;
-  m, L: PtrInt;
-  tmp: array[0..23] of AnsiChar;
-  p: PAnsiChar;
 begin
-  v := trunc(d * CURR_RES);
-  m := v mod 100;
-  if m <> 0 then
-    if m > 50 then
-      {%H-}inc(v, 100 - m)
-    else if m < -50 then
-      {%H-}dec(v, 100 + m)
-    else
-      dec(v, m);
-  p := {%H-}StrInt64(@tmp[23], v);
-  L := @tmp[22] - p;
-  m := PWord(@tmp[L - 2])^;
-  if m = ord('0') or ord('0') shl 8 then
-    // '300' -> '3'
-    dec(L, 3)
-  else
-  begin
-    // '301' -> '3.01'
-    PWord(@tmp[L - 1])^ := m;
-    tmp[L - 2] := '.';
-  end;
-  SetString(result, p, L);
+  DoubleToCurrency(d, PCurrency(@v)^); // specific code for x87
+  SimpleRoundTo2DigitsCurr64(v);
+  result[0] := #0;
+  AppendShortCurr64(v, result, {decimals=}2);
 end;
 
-function TruncTo2Digits(Value: Currency): Currency;
+function TruncTo2Digits(const Value: Currency): Currency;
 var
-  v64: Int64 absolute Value; // to avoid any floating-point precision issues
+  r64: Int64 absolute result; // to avoid any floating-point precision issues
 begin
-  dec(v64, v64 mod 100);
   result := Value;
+  dec(r64, r64 mod 100);
 end;
 
 procedure TruncTo2DigitsCurr64(var Value: Int64);
@@ -4631,7 +4620,7 @@ begin
   dec(Value, Value mod 100);
 end;
 
-function TruncTo2Digits64(Value: Int64): Int64;
+function TruncTo2Digits64(const Value: Int64): Int64;
 begin
   result := Value - Value mod 100;
 end;
@@ -4694,18 +4683,6 @@ var
 begin
   d[0] := 0;
   d[1] := 0;
-end;
-
-function RandomGuid: TGuid;
-begin
-  RandomGuid(result);
-end;
-
-procedure RandomGuid(out result: TGuid);
-begin // see https://datatracker.ietf.org/doc/html/rfc4122#section-4.4
-  RandomBytes(@result, SizeOf(TGuid));
-  PCardinal(@result.D3)^ := (PCardinal(@result.D3)^ and $ff3f0fff) + $00804000;
-  // version bits 12-15 = 4 (random) and reserved bits 6-7 = 1
 end;
 
 function FastFindBinarySorted(P, Value: PByteArray; Size, R: PtrInt): PtrInt;
@@ -4802,32 +4779,31 @@ end;
 
 {$endif FPC_CPUX64}
 
-function FastNewString(len, codepage: PtrInt): PAnsiChar;
+function FastNewString(len, codepage: PtrInt): pointer;
 var
   rec: PStrRec;
 begin
   result := nil;
-  if len > 0 then
-  begin
-    {$ifdef FPC}
-    rec := GetMem(len + (_STRRECSIZE + 4));
-    result := PAnsiChar(rec) + _STRRECSIZE;
-    {$else}
-    GetMem(result, len + (_STRRECSIZE + 4));
-    rec := pointer(result);
-    inc(PStrRec(result));
-    {$endif FPC}
-    {$ifdef HASCODEPAGE} // also set elemSize := 1
-    {$ifdef FPC}
-    rec^.codePageElemSize := codepage + (1 shl 16);
-    {$else}
-    PCardinal(@rec^.codePage)^ := codepage + (1 shl 16);
-    {$endif FPC}
-    {$endif HASCODEPAGE}
-    rec^.refCnt := 1;
-    rec^.length := len;
-    PCardinal(PAnsiChar(rec) + len + _STRRECSIZE)^ := 0; // ends with four #0
-  end;
+  if len <= 0 then
+    exit;
+  {$ifdef FPC}
+  rec := GetMem(len + (_STRRECSIZE + 4));
+  result := PAnsiChar(rec) + _STRRECSIZE;
+  {$else}
+  GetMem(result, len + (_STRRECSIZE + 4));
+  rec := result;
+  inc(PStrRec(result));
+  {$endif FPC}
+  {$ifdef HASCODEPAGE} // also set elemSize := 1
+  {$ifdef FPC}
+  rec^.codePageElemSize := codepage + (1 shl 16);
+  {$else}
+  PCardinal(@rec^.codePage)^ := codepage + (1 shl 16);
+  {$endif FPC}
+  {$endif HASCODEPAGE}
+  rec^.refCnt := 1;
+  rec^.length := len;
+  PCardinal(PAnsiChar(rec) + len + _STRRECSIZE)^ := 0; // ends with four #0
 end;
 
 {$ifdef HASCODEPAGE}
@@ -4985,7 +4961,7 @@ procedure FastSetRawByteString(var s: RawByteString; p: pointer; len: PtrInt);
 var
   r: pointer;
 begin
-  r := FastNewString(len, CP_RAWBYTESTRING); // FPC does constant propagation
+  r := FastNewString(len); // FPC does constant propagation
   if (p <> nil) and
      (r <> nil) then
     MoveFast(p^, r^, len);
@@ -4999,7 +4975,7 @@ procedure FastNewRawByteString(var s: RawByteString; len: PtrInt);
 var
   r: pointer;
 begin
-  r := FastNewString(len, CP_RAWBYTESTRING);
+  r := FastNewString(len);
   if pointer(s) = nil then
     pointer(s) := r
   else
@@ -5214,18 +5190,38 @@ begin
   AppendShortTemp(StrUInt32(@tmp[23], value), @tmp[23], @dest);
 end;
 
-procedure AppendShortInt64(value: Int64; var dest: ShortString);
+procedure AppendShortInt64(const value: Int64; var dest: ShortString);
 var
   tmp: array[0..23] of AnsiChar;
 begin
   AppendShortTemp(StrInt64(@tmp[23], value), @tmp[23], @dest);
 end;
 
-procedure AppendShortQWord(value: QWord; var dest: ShortString);
+procedure AppendShortQWord(const value: QWord; var dest: ShortString);
 var
   tmp: array[0..23] of AnsiChar;
 begin
   AppendShortTemp(StrUInt64(@tmp[23], value), @tmp[23], @dest);
+end;
+
+procedure AppendShortCurr64(const value: Int64; var dest: ShortString;
+  fixeddecimals: PtrInt);
+var
+  tmp: array[0..31] of AnsiChar;
+  p: PAnsiChar;
+  l: PtrInt;
+begin
+  p := StrCurr64(@tmp[31], value);
+  l := @tmp[31] - p;
+  if (l > 5) and
+     (p[l - 5] = '.') then
+    if PCardinal(@p[l - 4])^ = $30303030 then
+      dec(l, 5)  // x.0000 -> x
+    else if fixeddecimals <> 0 then
+      dec(l, 4 - fixeddecimals)
+    else if PWord(@p[l - 2])^ = $3030 then
+      dec(l, 2); // x.xx00 -> x.xx
+  AppendShortBuffer(p, l, @dest);
 end;
 
 procedure AppendBufferToUtf8(src: PUtf8Char; srclen: PtrInt; var dest: RawUtf8);
@@ -5522,12 +5518,10 @@ var
   c: PtrInt;
   tab: PAnsichar;
 begin
+  result := '';
   if len <= 0 then
-  begin
-    result := '';
     exit;
-  end;
-  FastSetString(result, (len * 3) - 1);
+  pointer(result) := FastNewString((len * 3) - 1, CP_UTF8);
   tab := @HexCharsLower;
   p := pointer(result);
   if reverse then
@@ -6285,7 +6279,7 @@ var
   {$endif CPUX86NOTPIC}
 begin
   if PCardinalArray(@val)^[1] = 0 then
-    P := StrUInt32(P, PCardinal(@val)^)
+    P := StrUInt32(P, PCardinal(@val)^) // 32-bit value
   else
   begin
     {$ifndef CPUX86NOTPIC}
@@ -6346,6 +6340,51 @@ begin
 end;
 
 {$endif CPU64}
+
+function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
+var
+  c: QWord;
+  d: cardinal;
+begin
+  if Value = 0 then
+  begin
+    result := P - 1;
+    result^ := '0';
+    exit;
+  end;
+  if Value < 0 then
+    c := -Value
+  else
+    c := Value;
+  if c < 10000 then
+  begin
+    result := P - 6; // only decimals -> append '0.xxxx'
+    PCardinal(result)^ := ord('0') + ord('.') shl 8;
+    YearToPChar(c, PUtf8Char(P) - 4);
+  end
+  else
+  begin
+    result := StrUInt64(P - 1, c);
+    d := PCardinal(P - 5)^; // in two explit steps for CPUARM (alf)
+    PCardinal(P - 4)^ := d;
+    P[-5] := '.'; // insert '.' just before last 4 decimals
+  end;
+  if Value < 0 then
+  begin
+    dec(result);
+    result^ := '-';
+  end;
+end;
+
+function ToShort(const val: Int64): TShort23;
+var
+  tmp: array[0..23] of AnsiChar;
+  p: PAnsiChar;
+begin
+  p := {%H-}StrInt64(@tmp[23], val);
+  result[0] := AnsiChar(@tmp[23] - p);
+  MoveFast(p^, result[1], ord(result[0]));
+end;
 
 function GetExtended(P: PUtf8Char): TSynExtended;
 var
@@ -6958,6 +6997,16 @@ begin
   inc(ValuesCount);
 end;
 
+function AddByte(var Values: TByteDynArray; var ValuesCount: integer;
+  Value: byte): PtrInt;
+begin
+  result := ValuesCount;
+  if result = Length(Values) then
+    SetLength(Values, NextGrow(result));
+  Values[result] := Value;
+  inc(ValuesCount);
+end;
+
 function AddInt64(var Values: TInt64DynArray; var ValuesCount: integer; Value: Int64): PtrInt;
 begin
   result := ValuesCount;
@@ -7056,6 +7105,18 @@ begin
   dec(n);
   UnmanagedDynArrayDelete(Values, n, Index, SizeOf(Values[0]));
   SetLength(Values, n);
+end;
+
+procedure DeleteWord(var Values: TWordDynArray; var ValuesCount: integer; Index: PtrInt);
+var
+  n: PtrInt;
+begin
+  n := ValuesCount;
+  if PtrUInt(Index) >= PtrUInt(n) then
+    exit; // wrong Index
+  dec(n);
+  ValuesCount := n;
+  UnmanagedDynArrayDelete(Values, n, Index, SizeOf(Values[0]));
 end;
 
 procedure DeleteInteger(var Values: TIntegerDynArray; Index: PtrInt);
@@ -7862,6 +7923,13 @@ begin
   result := FastFindWordSorted(pointer(Values), Count - 1, aValue);
 end;
 
+function TSortedWordArray.Remove(aValue: Word): PtrInt;
+begin
+  result := IndexOf(aValue);
+  if result >= 0 then
+    DeleteWord(Values, Count, result);
+end;
+
 procedure TSortedWordArray.SetArray(out aValues: TWordDynArray);
 begin
   if Count = 0 then
@@ -7894,6 +7962,13 @@ end;
 function TSortedIntegerArray.IndexOf(aValue: integer): PtrInt;
 begin
   result := FastFindIntegerSorted(pointer(Values), Count - 1, aValue);
+end;
+
+function TSortedIntegerArray.Remove(aValue: integer): PtrInt;
+begin
+  result := IndexOf(aValue);
+  if result >= 0 then
+    DeleteInteger(Values, Count, result);
 end;
 
 procedure TSortedIntegerArray.SetArray(out aValues: TIntegerDynArray);
@@ -8067,6 +8142,23 @@ begin
   result := PtrUIntScanIndex(pointer(a), length(a), PtrUInt(aItem));
 end;
 
+function PtrArrayPop(var aPtrArray): pointer;
+var
+  n: PtrInt;
+  a: PAnsiChar;
+begin
+  result := nil;
+  a := pointer(aPtrArray);
+  if a = nil then
+    exit;
+  n := PDALen(a - _DALEN)^ + (_DAOFF - 1);
+  result := PPointerArray(a)[n];
+  if n = 0 then
+    TPointerDynArray(aPtrArray) := nil
+  else
+    PDALen(a - _DALEN)^ := n - _DAOFF; // no realloc, in-place shrink
+end;
+
 function PtrArrayNotNilCount(const aPtrArray): integer;
 var
   i: PtrInt;
@@ -8131,6 +8223,11 @@ end;
 function ObjArrayFind(const aObjArray; aCount: integer; aItem: TObject): PtrInt;
 begin
   result := PtrUIntScanIndex(pointer(aObjArray), aCount, PtrUInt(aItem));
+end;
+
+function ObjArrayPop(var aObjArray): TObject;
+begin
+  result := PtrArrayPop(aObjArray);
 end;
 
 function ObjArrayNotNilCount(const aObjArray): integer;
@@ -9151,6 +9248,29 @@ begin
   end;
 end;
 
+procedure TrimFirstChar(var S: RawUtf8);
+var
+  len: PtrInt;
+  sr: PStrRec; // local copy to use register
+begin
+  sr := pointer(S);
+  if sr = nil then
+    exit;
+  dec(sr);
+  len := sr^.length - 1;
+  if len = 0 then
+    FastAssignNew(S)
+  else if sr^.refCnt = 1 then
+  begin
+    sr^.length := len; // fast in-place modify
+    inc(sr);
+    MoveFast(PAnsiChar(sr)[1], sr^, len);
+    PAnsiChar(sr)[len] := #0;
+  end
+  else
+    FastSetString(S, @PByteArray(S)[1], len); // need realloc
+end;
+
 procedure TrimSelf(var S: RawUtf8);
 var
   i, len: PtrInt;
@@ -9473,17 +9593,11 @@ begin
   result := @_Lecuyer;
 end;
 
-{$ifdef OSDARWIN} // FPC CreateGuid calls /dev/urandom which is not advised
-function mach_absolute_time: Int64;   cdecl external 'c';
-function mach_continuous_time: Int64; cdecl external 'c';
-
-procedure CreateGuid(var guid: TGuid); // sysutils version is slow
+procedure _XorEntropyGetOsRandom256(var e: THash256Rec);
 begin
-  PInt64Array(@guid)^[0] := mach_absolute_time;  // monotonic time (in ns)
-  PInt64Array(@guid)^[1] := mach_continuous_time;
-  crc128c(@guid, SizeOf(guid), THash128(guid)); // good enough diffusion
+  sysutils.CreateGUID(e.l.guid); // e.g. Windows CoCreateGuid()
+  sysutils.CreateGUID(e.h.guid);
 end;
-{$endif OSDARWIN}
 
 var
   // cascaded 128-bit random to avoid replay attacks - shared by all threads
@@ -9491,29 +9605,20 @@ var
 
 procedure XorEntropy(var e: THash512Rec);
 var
-  lec: PLecuyer;
-  guid: THash128Rec;
+  lec: PHash128Rec;
+  rnd: THash256Rec;
 begin
   // note: we don't use RTL Random() here because it is not thread-safe
-  if _EntropyGlobal.L = 0 then
-    sysutils.CreateGuid(_EntropyGlobal.guid); // slow but rich initial value
+  XorEntropyGetOsRandom256(rnd); // fast get 256-bit of randomness from OS
+  if _EntropyGlobal.c0 = 0 then
+    _EntropyGlobal.guid := rnd.h.guid; // initialize forward security
   e.r[0].L := e.r[0].L xor _EntropyGlobal.L;
   e.r[0].H := e.r[0].H xor _EntropyGlobal.H;
-  lec := @_Lecuyer; // lec^.rs#=0 at thread startup, but won't hurt
-  e.r[1].c0 := e.r[1].c0 xor lec^.RawNext; // perfect forward security
-  e.r[1].c1 := e.r[1].c1 xor lec^.RawNext; // but don't expose rs1,rs2,rs3
-  e.r[1].c2 := e.r[1].c2 xor lec^.RawNext;
-  // any threadvar is thread-specific, so PtrUInt(lec) identifies this thread
-  {$ifdef CPUINTELARM}
-  e.r[1].c3 := e.r[1].c3 xor crc32c(PtrUInt(lec), @CpuFeatures, SizeOf(CpuFeatures));
-  {$else}
-  e.r[1].c3 := e.r[1].c3 xor PtrUInt(lec);
-  {$endif CPUINTELARM}
-  // Windows CoCreateGuid, Linux /proc/sys/kernel/random/uuid, FreeBSD syscall,
-  // then fallback to /dev/urandom or RTL mtwist_u32rand
-  CreateGuid(guid.guid); // not from sysutils: redefined above for OSDARWIN
-  e.r[2].L := e.r[2].L xor guid.L;
-  e.r[2].H := e.r[2].H xor guid.H;
+  lec := @_Lecuyer; // PtrUInt(lec) identifies this thread
+  e.r[1].L := e.r[1].L xor PtrUInt(@e)  xor lec^.L xor rnd.l.L;
+  e.r[1].H := e.r[1].H xor PtrUInt(lec) xor lec^.H xor rnd.l.H;
+  e.r[2].L := e.r[2].L xor rnd.h.L;
+  e.r[2].H := e.r[2].H xor rnd.h.H;
   // no mormot.core.os yet, so we can't use QueryPerformanceMicroSeconds()
   unaligned(PDouble(@e.r[3].Lo)^) := Now * 2123923447; // cross-platform time
   {$ifdef CPUINTEL} // use low-level Intel/AMD opcodes
@@ -9521,10 +9626,6 @@ begin
   RdRand32(@e.r[0].c, length(e.r[0].c));
   e.r[3].Hi := e.r[3].Hi xor Rdtsc; // has slightly changed in-between
   {$else}
-  {$ifdef OSDARWIN} // fallback to known OS API on Mac M1/M2
-  e.r[3].Lo := e.r[3].Lo xor mach_absolute_time; // as defined above
-  e.r[3].Hi := e.r[3].Hi xor mach_continuous_time;
-  {$endif OSDARWIN}
   e.r[3].Hi := e.r[3].Hi xor GetTickCount64; // always defined in FPC RTL
   {$endif CPUINTEL}
   crc128c(@e, SizeOf(e), _EntropyGlobal.b); // simple diffusion to move forward
@@ -9706,58 +9807,6 @@ begin
   _Lecuyer.Seed(entropy, entropylen);
 end;
 
-function Random32: cardinal;
-begin
-  result := _Lecuyer.Next;
-end;
-
-function Random32Not0: cardinal;
-begin
-  with _Lecuyer do
-    repeat
-      result := Next;
-    until result <> 0;
-end;
-
-function Random31: integer;
-begin
-  result := _Lecuyer.Next shr 1;
-end;
-
-function Random31Not0: integer;
-begin
-  with _Lecuyer do
-    repeat
-      result := Next shr 1;
-    until result <> 0;
-end;
-
-function Random32(max: cardinal): cardinal;
-begin
-  result := (QWord(_Lecuyer.Next) * max) shr 32;
-end;
-
-function Random64: QWord;
-begin
-  result := _Lecuyer.NextQWord;
-end;
-
-function RandomDouble: double;
-begin
-  result := _Lecuyer.NextDouble;
-end;
-
-procedure RandomBytes(Dest: PByte; Count: integer);
-begin
-  if Count > 0 then
-    _Lecuyer.Fill(pointer(Dest), Count);
-end;
-
-procedure RandomShort31(var dest: TShort31);
-begin
-  _Lecuyer.FillShort31(dest);
-end;
-
 procedure LecuyerEncrypt(key: Qword; var data: RawByteString);
 var
   gen: TLecuyer;
@@ -9771,14 +9820,6 @@ begin
   gen.Fill(@data[1], length(data));
   FillZero(THash128(gen)); // to avoid forensic leak
 end;
-
-{$ifndef PUREMORMOT2}
-procedure FillRandom(Dest: PCardinal; CardinalCount: integer);
-begin
-  if CardinalCount > 0 then
-    _Lecuyer.Fill(pointer(Dest), CardinalCount shl 2);
-end;
-{$endif PUREMORMOT2}
 
 
 { MultiEvent* functions }
@@ -11359,7 +11400,7 @@ end;
 
 function TSynTempBuffer.InitRandom(RandomLen: integer): pointer;
 begin
-  RandomBytes(Init(RandomLen), RandomLen);
+  _Lecuyer.Fill(Init(RandomLen), RandomLen);
   result := buf;
 end;
 
@@ -11645,11 +11686,9 @@ end;
 {$endif HASINLINE}
 
 function crc64c(buf: PAnsiChar; len: cardinal): Int64;
-var
-  lo: PtrInt;
 begin
-  lo := crc32c(0, buf, len);
-  result := Int64(lo) or (Int64(crc32c(lo, buf, len)) shl 32);
+  PQWordRec(@result)^.L := crc32c(0, buf, len);
+  PQWordRec(@result)^.H := crc32c(PQWordRec(@result)^.L, buf, len);
 end;
 
 function crc32cTwice(seed: QWord; buf: PAnsiChar; len: cardinal): QWord;
@@ -11659,19 +11698,16 @@ begin
 end;
 
 function crc63c(buf: PAnsiChar; len: cardinal): Int64;
-var
-  lo: PtrInt;
 begin
-  lo := crc32c(0, buf, len);
-  result := Int64(lo) or (Int64(crc32c(lo, buf, len) and $7fffffff) shl 32);
+  PQWordRec(@result)^.L := crc32c(0, buf, len);
+  PQWordRec(@result)^.H := crc32c(PQWordRec(@result)^.L, buf, len) and $7fffffff;
 end;
 
 procedure crc128c(buf: PAnsiChar; len: cardinal; out crc: THash128);
 var
   h: THash128Rec absolute crc;
   h1, h2: cardinal;
-begin
-  // see https://goo.gl/Pls5wi
+begin // see https://goo.gl/Pls5wi
   h1 := crc32c(0, buf, len);
   h2 := crc32c(h1, buf, len);
   h.i0 := h1;
@@ -11687,8 +11723,7 @@ procedure crc256c(buf: PAnsiChar; len: cardinal; out crc: THash256);
 var
   h: THash256Rec absolute crc;
   h1, h2: cardinal;
-begin
-  // see https://goo.gl/Pls5wi
+begin // see https://goo.gl/Pls5wi
   h1 := crc32c(0, buf, len);
   h2 := crc32c(h1, buf, len);
   h.i0 := h1;
@@ -12769,6 +12804,11 @@ end;
 
 { ************ Some Convenient TStream descendants }
 
+function {%H-}RaiseStreamError(Caller: TObject; const Context: shortstring): PtrInt;
+begin
+  raise EStreamError.CreateFmt('Unexpected %s.%s', [ClassNameShort(Caller)^, Context]);
+end;
+
 { TStreamWithPosition }
 
 {$ifdef FPC}
@@ -12801,7 +12841,7 @@ begin
     fPosition := result;
   end
   else
-    // optimize on Delphi when retrieving TStream.Position as Seek(0,soCurrent)
+    // optimize for Delphi with no GetPosition method but Seek(0,soCurrent) call
     result := fPosition;
 end;
 
@@ -12810,12 +12850,35 @@ begin
   result := Seek(Offset, TSeekOrigin(Origin)); // call the 64-bit version above
 end;
 
+function TStreamWithPosition.Read(var Buffer; Count: Longint): Longint;
+begin
+  result := RaiseStreamError(self, 'Read');
+end;
+
+function TStreamWithPosition.Write(const Buffer; Count: Longint): Longint;
+begin
+  result := RaiseStreamError(self, 'Write');
+end;
+
 
 { TStreamWithPositionAndSize }
 
 function TStreamWithPositionAndSize.GetSize: Int64;
 begin
   result := fSize;
+end;
+
+
+{ TStreamWithNoSeek }
+
+function TStreamWithNoSeek.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
+var
+  prev: Int64;
+begin
+  prev := fPosition;
+  result := inherited Seek(Offset, Origin);
+  if prev <> fPosition then
+    RaiseStreamError(self, 'Seek');
 end;
 
 
@@ -12919,11 +12982,6 @@ begin
 end;
 
 
-function {%H-}RaiseStreamError(Caller: TObject; const Context: shortstring): PtrInt;
-begin
-  raise EStreamError.CreateFmt('Unexpected %s.%s', [ClassNameShort(Caller)^, Context]);
-end;
-
 procedure crc32tabInit(polynom: cardinal; var tab: TCrc32tab);
 var
   i, n: PtrUInt;
@@ -12966,6 +13024,7 @@ begin
   // setup minimalistic global functions - overriden by other core units
   VariantClearSeveral     := @_VariantClearSeveral;
   SortDynArrayVariantComp := @_SortDynArrayVariantComp;
+  XorEntropyGetOsRandom256 := @_XorEntropyGetOsRandom256;
   // initialize CPU-specific asm
   TestCpuFeatures;
 end;

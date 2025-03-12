@@ -1220,12 +1220,12 @@ function IsBase64(sp: PAnsiChar; len: PtrInt): boolean; overload;
 function BinToBase64Length(len: PtrUInt): PtrUInt;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// retrieve the expected undecoded length of a Base64 encoded buffer
-// - here len is the number of bytes in sp
+/// retrieve the expected decoded length of a Base64 encoded buffer
+// - here len is the number of chars in the input sp buffer
 function Base64ToBinLength(sp: PAnsiChar; len: PtrInt): PtrInt;
 
-/// retrieve the expected undecoded length of a Base64 encoded buffer
-// - here len is the number of bytes in sp
+/// retrieve the expected decoded length of a Base64 encoded buffer
+// - here len is the number of chars in the input sp buffer
 // - will check supplied text is a valid Base64 encoded stream
 function Base64ToBinLengthSafe(sp: PAnsiChar; len: PtrInt): PtrInt;
 
@@ -1266,8 +1266,8 @@ procedure Base64uriEncode(rp, sp: PAnsiChar; len: cardinal);
 function BinToBase64uriLength(len: PtrUInt): PtrUInt;
   {$ifdef HASINLINE}inline;{$endif}
 
-/// retrieve the expected undecoded length of a Base64-URI encoded buffer
-// - here len is the number of bytes in sp
+/// retrieve the expected decoded length of a Base64-URI encoded buffer
+// - here len is the number of chars in the encoded buffer
 // - in comparison to Base64 standard encoding, will trim any right-sided '='
 // unsignificant characters, and replace '+' or '/' by '_' or '-'
 function Base64uriToBinLength(len: PtrInt): PtrInt;
@@ -1573,7 +1573,8 @@ type
 // - parameters must be supplied two by two, as Name,Value pairs, e.g.
 // ! url := UrlEncode(['select','*','where','ID=12','offset',23,'object',aObject]);
 // - parameters names should be plain ASCII-7 RFC compatible identifiers
-// (0..9a..zA..Z_.~), otherwise they are skipped unless ueEncodeNames is set
+// (0..9a..zA..Z_.), otherwise they are skipped unless ueEncodeNames is set - the
+// tilde (~) character is part of RFC 3986 but should be escaped in practice
 // - parameters values can be either textual, integer or extended, or any TObject
 // - TObject serialization into UTF-8 will be processed with ObjectToJson()
 function UrlEncode(const NameValuePairs: array of const;
@@ -1683,8 +1684,7 @@ function UrlDecodeNeedParameters(U, CsvNames: PUtf8Char): boolean;
 // - if a pair is decoded, return a PUtf8Char pointer to the next pair in
 // the input buffer, or points to #0 if all content has been processed
 // - if a pair is not decoded, return nil
-function UrlDecodeNextNameValue(U: PUtf8Char;
-  var Name, Value: RawUtf8): PUtf8Char;
+function UrlDecodeNextNameValue(U: PUtf8Char; var Name, Value: RawUtf8): PUtf8Char;
 
 /// decode a URI-encoded Value from an input buffer
 // - decoded value is set in Value out variable
@@ -1700,12 +1700,13 @@ function UrlDecodeNextName(U: PUtf8Char; out Name: RawUtf8): PUtf8Char;
 
 /// checks if the supplied UTF-8 text don't need URI encoding
 // - returns TRUE if all its chars are non-void plain ASCII-7 RFC compatible
-// identifiers (0..9a..zA..Z-_.~)
+// identifiers (0..9a..zA..Z-_.) - the tilde (~) character is part of RFC 3986
+// but should be escaped in practice
 function IsUrlValid(P: PUtf8Char): boolean;
 
 /// checks if the supplied UTF-8 text values don't need URI encoding
 // - returns TRUE if all its chars of all strings are non-void plain ASCII-7 RFC
-// compatible identifiers (0..9a..zA..Z-_.~)
+// compatible identifiers (0..9a..zA..Z-_.) - excluding tilde (~)
 function AreUrlValid(const Url: array of RawUtf8): boolean;
 
 /// ensure the supplied URI contains a trailing '/' charater
@@ -2357,17 +2358,10 @@ type
   end;
 
   /// a fake TStream, which will just count the number of bytes written
-  TFakeWriterStream = class(TStream)
-  protected
-    fWritten: Int64;
-    {$ifdef FPC}
-    function GetPosition: Int64; override;
-    {$endif FPC}
+  TFakeWriterStream = class(TStreamWithPositionAndSize)
   public
     function Read(var Buffer; Count: Longint): Longint; override;
     function Write(const Buffer; Count: Longint): Longint; override;
-    function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
-    function Seek(Offset: Longint; Origin: Word): Longint; override;
   end;
 
   TNestedStream = record
@@ -2398,8 +2392,6 @@ type
     procedure Flush; virtual;
     /// will read up to Count bytes from the internal nested TStream
     function Read(var Buffer; Count: Longint): Longint; override;
-    /// this TStream is read-only: calling this method will raise an exception
-    function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
   /// TStream with an internal memory buffer
@@ -2426,8 +2418,6 @@ type
     function Seek(const Offset: Int64; Origin: TSeekOrigin): Int64; override;
     /// will read up to Count bytes from the internal buffer or source TStream
     function Read(var Buffer; Count: Longint): Longint; override;
-    /// this TStream is read-only: calling this method will raise an exception
-    function Write(const Buffer; Count: Longint): Longint; override;
   end;
 
 
@@ -5350,20 +5340,18 @@ var
   crc: cardinal;
   tmp: array[0..16383] of AnsiChar;  // big enough to resize result in-place
 begin
+  result := '';
   if (PlainLen = 0) or
      (Plain = nil) then
-  begin
-    result := '';
     exit;
-  end;
   EnsureAlgoHasNoForcedFormat('Compress');
   crc := AlgoHash(0, Plain, PlainLen);
   if (PlainLen < CompressionSizeTrigger) or
      (CheckMagicForCompressed and
       IsContentCompressed(Plain, PlainLen)) then
   begin
-    FastNewRawByteString(result, PlainLen + BufferOffset + 9);
-    R := pointer(result);
+    R := FastNewString(PlainLen + BufferOffset + 9);
+    pointer(result) := R;
     inc(R, BufferOffset);
     PCardinal(R)^ := crc;
     R[4] := COMPRESS_STORED;
@@ -5375,8 +5363,8 @@ begin
     len := CompressDestLen(PlainLen) + BufferOffset;
     if len > SizeOf(tmp) then
     begin
-      FastNewRawByteString(result, len);
-      R := pointer(result);
+      R := FastNewString(len);
+      pointer(result) := R;
     end
     else
       R := @tmp;
@@ -5645,11 +5633,11 @@ begin
       head.UnCompressedSize := count;
     if S = nil then
     begin
-      FastNewRawByteString(tmps, head.UnCompressedSize);
-      S := pointer(tmps); // here S is a temporary buffer
+      S := FastNewString(head.UnCompressedSize);
+      pointer(tmps) := S; // here S is a temporary buffer
     end;
     if {%H-}tmpd = '' then
-      FastNewRawByteString(tmpd, AlgoCompressDestLen(head.UnCompressedSize));
+      pointer(tmpd) := FastNewString(AlgoCompressDestLen(head.UnCompressedSize));
     dec(count, head.UnCompressedSize); // supports premature end of input
     if S = pointer(tmps) then
       head.UnCompressedSize := Source.Read(S^, head.UnCompressedSize);
@@ -5678,7 +5666,7 @@ begin
   trail.Magic := Magic;
   trail.HeaderRelativeOffset := result;        // Int64 into cardinal
   if trail.HeaderRelativeOffset <> result then // max 4GB compressed size
-    RaiseStreamError(self, 'StreamCompress trail overflow');
+    RaiseStreamError(self, 'StreamCompress: trail overflow');
   Dest.WriteBuffer(trail, SizeOf(trail));
 end;
 
@@ -6647,7 +6635,7 @@ begin
   begin
     Base64EncodeLoop(p, sp, PERLINE, @b64enc); // better inlining than AVX2 here
     inc(sp, PERLINE);
-    PWord(p + 64)^ := $0a0d; // CR + LF on all systems for safety
+    PWord(p + 64)^ := CRLFW; // CR + LF on all systems for safety
     inc(p, 66);
     dec(len, PERLINE);
   end;
@@ -6665,7 +6653,7 @@ begin
       Base64EncodeTrailing(p, sp, len); // 1/2 bytes as 4 chars with trailing =
       inc(p, 4);
     end;
-    PWord(p)^ := $0a0d;
+    PWord(p)^ := CRLFW;
     inc(p, 2);
   end;
   if Suffix <> '' then
@@ -7006,7 +6994,7 @@ begin
     result := (len shr 2) * 3;
     case len and 3 of
       1:
-        result := 0;
+        result := 0; // invalid
       2:
         inc(result, 1);
       3:
@@ -7549,7 +7537,7 @@ begin
       // BLOB literals are string literals containing hexadecimal data and
       // preceded by a single "x" or "X" character. For example: X'53514C697465'
       LenHex := (Len - 3) shr 1;
-      pointer(result) := FastNewString(LenHex, CP_RAWBYTESTRING);
+      pointer(result) := FastNewString(LenHex);
       if mormot.core.text.HexToBin(@P[2], pointer(result), LenHex) then
         exit; // valid hexa data
     end
@@ -7578,7 +7566,7 @@ begin
       // BLOB literals are string literals containing hexadecimal data and
       // preceded by a single "x" or "X" character. For example: X'53514C697465'
       LenHex := (Len - 3) shr 1;
-      pointer(result) := FastNewString(LenHex, CP_RAWBYTESTRING);
+      pointer(result) := FastNewString(LenHex);
       if mormot.core.text.HexToBin(@P[2], pointer(result), LenHex) then
         exit; // valid hexa data
     end
@@ -7789,7 +7777,7 @@ function MultiPartFormDataNewBound(var boundaries: TRawUtf8DynArray): RawUtf8;
 var
   random: array[0..2] of cardinal;
 begin
-  RandomBytes(@random, SizeOf(random));
+  SharedRandom.Fill(@random, SizeOf(random));
   result := BinToBase64uri(@random, SizeOf(random));
   AddRawUtf8(boundaries, result);
 end;
@@ -8065,7 +8053,7 @@ begin
     inc(s);
     if tcUriUnreserved in tab[c] then
     begin
-      // was ['_', '-', '.', '~', '0'..'9', 'a'..'z', 'A'..'Z']
+      // was ['_', '-', '.', '0'..'9', 'a'..'z', 'A'..'Z'] - '~' excluded
       d^ := c;
       inc(d);
     end
@@ -8214,7 +8202,7 @@ begin
       for a := 0 to n shr 1 do
       begin
         p := @NameValuePairs[a * 2];
-        VarRecToUtf8(p^, name);
+        VarRecToUtf8(p, name);
         if name = '' then
           continue;
         flags := flags - [valueDirect, valueIsCsv];
@@ -8235,13 +8223,13 @@ begin
            (byte(p^.VType) in vtNotString) then
           include(flags, valuedirect);
         if (ueSkipVoidValue in Options) and
-           VarRecIsVoid(p^) then
+           VarRecIsVoid(p) then
           continue // skip e.g. '' or 0
         else if p^.VType = vtObject then // no VarRecToUtf8(vtObject)=ClassName
           value := ObjectToJson(p^.VObject, [])
         else if not (valueDirect in flags) then
         begin
-          VarRecToUtf8(p^, value);
+          VarRecToUtf8(p, value);
           if (ueSkipVoidString in Options) and
              (value = '') then
             continue; // skip ''
@@ -8274,7 +8262,7 @@ begin
         w.AddString(name);
         w.AddDirect('=');
         if valueDirect in flags then
-          w.Add(p^) // requires TJsonWriter
+          w.AddVarRec(p) // requires TJsonWriter
         else
           _UrlEncodeW(w, pointer(value), length(value), 32); // = UrlEncode(W)
       end;
@@ -8294,7 +8282,7 @@ begin
   tab := @TEXT_CHARS;
   repeat
     if tcUriUnreserved in tab[P^] then
-      inc(P) // was  ['_', '-', '.', '~', '0'..'9', 'a'..'z', 'A'..'Z']
+      inc(P) // was  ['_', '-', '.', '0'..'9', 'a'..'z', 'A'..'Z'] - exclude '~'
     else if P^ = #0 then
       break
     else
@@ -9237,32 +9225,32 @@ var
 begin
   // generated asm is much better with a local proc
   if P < PEnd then
-  repeat
-    PBeg := P;
-    {$ifdef CPUX64}
-    inc(P, BufferLineLength(P, PEnd)); // use branchless SSE2 on x86_64
-    {$else}
-    while (P < PEnd) and
-          (P^ <> #13) and
-          (P^ <> #10) do
-      inc(P);
-    {$endif CPUX64}
-    Map.ProcessOneLine(PBeg, P);
-    if P + 1 < PEnd then
-      if PWord(P)^ = 13 + 10 shl 8 then
-      begin
-        inc(P, 2); // ignore #13#10
-        if P < PEnd then
-          continue;
-      end
-      else
-      begin
-        inc(P);    // ignore #13 or #10
-        if P < PEnd then
-          continue;
-      end;
-    break;
-  until false;
+    repeat
+      PBeg := P;
+      {$ifdef CPUX64}
+      inc(P, BufferLineLength(P, PEnd)); // use branchless SSE2 on x86_64
+      {$else}
+      while (P < PEnd) and
+            (P^ <> #13) and
+            (P^ <> #10) do
+        inc(P);
+      {$endif CPUX64}
+      Map.ProcessOneLine(PBeg, P);
+      if P + 1 < PEnd then
+        if PWord(P)^ = 13 + 10 shl 8 then
+        begin
+          inc(P, 2); // ignore #13#10
+          if P < PEnd then
+            continue;
+        end
+        else
+        begin
+          inc(P);    // ignore #13 or #10
+          if P < PEnd then
+            continue;
+        end;
+      break;
+    until false;
 end;
 
 procedure TMemoryMapText.LoadFromMap(AverageLineLength: integer = 32);
@@ -9275,9 +9263,8 @@ begin
   GetMem(fLines, fLinesMax * SizeOf(pointer));
   P := pointer(fMap.Buffer);
   fMapEnd := P + fMap.Size;
-  if (PWord(P)^ = $BBEF) and
-     (P[2] = #$BF) then
-    inc(P, 3); // ignore UTF-8 BOM
+  if PCardinal(P)^ and $00ffffff = BOM_UTF8 then
+    inc(P, 3); // ignore any UTF-8 BOM
   ParseLines(P, fMapEnd, self);
   if fLinesMax > fCount + 16384 then
     Reallocmem(fLines, fCount * SizeOf(pointer)); // size down only if worth it
@@ -9393,25 +9380,13 @@ begin
 end;
 
 function Plural(const itemname: ShortString; itemcount: cardinal): ShortString;
-var
-  len, L: PtrInt;
 begin
-  len := (AppendUInt32ToBuffer(@result[1], itemcount) - PUtf8Char(@result[1])) + 1;
-  result[len] := ' ';
-  L := ord(itemname[0]);
-  if (L > 0) and
-     (L <= 240) then
-  begin
-    // avoid buffer overflow
-    MoveFast(itemname[1], result[len + 1], L);
-    inc(len, L);
-    if itemcount > 1 then
-    begin
-      inc(len);
-      result[len] := 's';
-    end;
-  end;
-  result[0] := AnsiChar(len);
+  result[0] := #0;
+  AppendShortCardinal(itemcount, result);
+  AppendShortChar(' ', @result);
+  AppendShort(itemname, result);
+  if itemcount > 1 then
+    AppendShortChar('s', @result);
 end;
 
 function EscapeBuffer(s: PAnsiChar; slen: integer;
@@ -9937,7 +9912,7 @@ begin
   else
   begin
     // compute the hash of the existing partial content
-    FastNewRawByteString(buf, 1 shl 20); // 1MB temporary buffer
+    pointer(buf) := FastNewString(1 shl 20); // 1MB temporary buffer
     repeat
       read := fRedirected.Read(pointer(buf)^, length(buf));
       if read <= 0 then
@@ -10104,45 +10079,14 @@ end;
 
 function TFakeWriterStream.Read(var Buffer; Count: Longint): Longint;
 begin
-  // do nothing
-  result := Count;
+  result := Count; // do nothing
 end;
 
 function TFakeWriterStream.Write(const Buffer; Count: Longint): Longint;
 begin
-  // do nothing
-  inc(fWritten, Count);
+  inc(fPosition, Count);
+  inc(fSize, Count);
   result := Count;
-end;
-
-{$ifdef FPC}
-function TFakeWriterStream.GetPosition: Int64;
-begin
-  result := fWritten;
-end;
-{$endif FPC}
-
-function TFakeWriterStream.Seek(Offset: Longint; Origin: Word): Longint;
-begin
-  result := Seek(Offset, TSeekOrigin(Origin));
-end;
-
-function TFakeWriterStream.Seek(const Offset: Int64; Origin: TSeekOrigin): Int64;
-begin
-  case Origin of
-    soBeginning:
-      result := Offset;
-    soEnd:
-      result := fWritten - Offset;
-    else
-      result := fWritten + Offset;
-  end;
-  if result > fWritten then
-    result := fWritten
-  else if result < 0 then
-    result := 0
-  else if result < fWritten then
-    fWritten := result;
 end;
 
 
@@ -10265,17 +10209,12 @@ begin
   fContentRead := pointer(s);
 end;
 
-function TNestedStreamReader.Write(const Buffer; Count: Longint): Longint;
-begin
-  result := RaiseStreamError(self, 'Write');
-end;
-
 
 { TBufferedStreamReader }
 
 constructor TBufferedStreamReader.Create(aSource: TStream; aBufSize: integer);
 begin
-  FastNewRawByteString(fBuffer, aBufSize);
+  pointer(fBuffer) := FastNewString(aBufSize);
   fSource := aSource;
   fSize := fSource.Size; // get it once
   fSource.Seek(0, soBeginning);
@@ -10345,12 +10284,6 @@ begin
   end;
   inc(fPosition, result);
 end;
-
-function TBufferedStreamReader.Write(const Buffer; Count: Longint): Longint;
-begin
-  result := RaiseStreamError(self, 'Write');
-end;
-
 
 
 function HashFile(const FileName: TFileName; Hasher: THasher): cardinal;
@@ -10583,7 +10516,7 @@ begin
   if tweItalic in st then
     Toggle(tweItalic);
   if P <> nil then
-    if PWord(P)^ = $0a0d then
+    if PWord(P)^ = CRLFW then
       inc(P, 2)
     else
       inc(P);
@@ -10683,7 +10616,7 @@ begin
 none:     if lst = twlParagraph then
           begin
             c := PWord(P)^; // detect blank line to separate paragraphs
-            if c = $0a0d then
+            if c = CRLFW then
               inc(P, 2)
             else if c and $ff = $0a then
               inc(P)
@@ -10767,7 +10700,7 @@ begin
         break
       else
       begin
-        if PWord(P)^ = $0a0d then
+        if PWord(P)^ = CRLFW then
           inc(P, 2)
         else
           inc(P);
@@ -11504,8 +11437,12 @@ begin
 end;
 
 procedure TRawByteStringBuffer.AppendCRLF;
+var
+  p: PByteArray; // faster than PWord() on Intel
 begin
-  PWord(@PByteArray(fBuffer)[fLen])^ := $0a0d;
+  p := @PByteArray(fBuffer)[fLen];
+  p[0] := 13;
+  p[1] := 10;
   inc(fLen, 2);
 end;
 

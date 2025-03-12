@@ -3430,7 +3430,7 @@ begin
   {$ifndef SYNDB_SILENCE}
   if high(Args) >= 0 then
   begin
-    fStatement := VarRecAs(Args[0], TSqlDBStatement);
+    fStatement := VarRecAs(@Args[0], TSqlDBStatement);
     if (fStatement <> nil) and
        fStatement.Connection.Properties.LogSqlStatementOnException then
       try
@@ -5451,8 +5451,7 @@ begin
     else
       batchRowCount := RowCount;
   if batchRowCount = 0 then
-    ESqlDBException.RaiseUtf8(
-      '%.MultipleValuesInsert(%) with # params = %>%',
+    ESqlDBException.RaiseUtf8('%.MultipleValuesInsert(%) with # params = %>%',
       [self, TableName, RowCount * maxf, paramCountLimit]);
   dec(maxf);
   prevrowcount := 0;
@@ -5869,8 +5868,7 @@ begin
           BindTextU(Param, tmp, IO);
         end;
     else
-      ESqlDBException.RaiseUtf8(
-        'Invalid %.Bind(%,TSqlDBFieldType(%),%)',
+      ESqlDBException.RaiseUtf8('Invalid %.Bind(%,TSqlDBFieldType(%),%)',
         [self, Param, ord(ParamType), Value]);
     end;
 end;
@@ -5908,12 +5906,7 @@ begin
               BindDateTime(i, Iso8601ToDateTimePUtf8Char(PUtf8Char(VAnsiString) + 3,
                 length(RawUtf8(VAnsiString)) - 3))
             else
-              {$ifdef HASCODEPAGE}
               BindTextU(i, AnyAnsiToUtf8(RawByteString(VAnsiString)), IO);
-              {$else}
-              // expect UTF-8 content only for AnsiString, i.e. RawUtf8 values
-              BindTextU(i, RawUtf8(VAnsiString), IO);
-              {$endif HASCODEPAGE}
           end;
         vtPChar:
           BindTextP(i, PUtf8Char(VPChar), IO);
@@ -5951,12 +5944,11 @@ begin
           BindCurrency(i, VCurrency^, IO);
         vtExtended:
           Bind(i, VExtended^, IO);
-        vtPointer:
+        vtPointer: // see TJsonWriter.AddJsonEscape(TVarRec) or VarRecToVariant()
           if VPointer = nil then
             BindNull(i, IO)
           else
-            ESqlDBException.RaiseUtf8(
-              'Unexpected %.Bind() pointer', [self]);
+            Bind(i, PtrInt(VPointer), IO);
         vtVariant:
           BindVariant(i, VVariant^, VariantIsBlob(VVariant^), IO);
       else
@@ -6029,11 +6021,7 @@ begin
             BindBlob(Param, RawByteString(VAny), IO)
         else
           // direct bind of AnsiString as UTF-8 value
-          {$ifdef HASCODEPAGE}
           BindTextU(Param, AnyAnsiToUtf8(RawByteString(VAny)), IO);
-          {$else} // on older Delphi, we assume AnsiString = RawUtf8
-          BindTextU(Param, RawUtf8(VAny), IO);
-          {$endif HASCODEPAGE}
     else
       if VType = varVariantByRef then
         BindVariant(Param, PVariant(VPointer)^, DataIsBlob, IO)
@@ -6055,8 +6043,7 @@ begin
      (fConnection = nil) or
      (fConnection.fProperties.BatchSendingAbilities *
       [cCreate, cUpdate, cDelete] = []) then
-    ESqlDBException.RaiseUtf8(
-      'Invalid call to %.BindArray(Param=%,Type=%)',
+    ESqlDBException.RaiseUtf8('Invalid call to %.BindArray(Param=%,Type=%)',
       [self, Param, ToText(ParamType)^]);
 end;
 
@@ -6102,8 +6089,7 @@ end;
 
 procedure TSqlDBStatement.CheckColInvalid(Col: integer);
 begin
-  ESqlDBException.RaiseUtf8(
-    'Invalid call to %.Column*(Col=%)', [self, Col]);
+  ESqlDBException.RaiseUtf8('Invalid call to %.Column*(Col=%)', [self, Col]);
 end;
 
 function TSqlDBStatement.GetForceBlobAsNull: boolean;
@@ -6163,8 +6149,7 @@ end;
 
 procedure TSqlDBStatement.ColumnBlobFromStream(Col: integer; Stream: TStream);
 begin
-  ESqlDBException.RaiseUtf8(
-    '%.ColumnBlobFromStream not implemented', [self]);
+  ESqlDBException.RaiseUtf8('%.ColumnBlobFromStream not implemented', [self]);
 end;
 
 function TSqlDBStatement.ColumnVariant(Col: integer; ForceUtf8: boolean): Variant;
@@ -6368,8 +6353,7 @@ begin // default implementation (never called in practice)
           W.WrBase64(pointer(blob), length(blob), {withMagic=}true);
         end;
     else
-      ESqlDBException.RaiseUtf8(
-        '%.ColumnToJson: invalid ColumnType(%)=%',
+      ESqlDBException.RaiseUtf8('%.ColumnToJson: invalid ColumnType(%)=%',
         [self, col, ord(ColumnType(col))]);
     end;
 end;
@@ -6673,8 +6657,7 @@ begin
         ftBlob:
           W.Write(ColumnBlob(f));
       else
-        ESqlDBException.RaiseUtf8(
-          '%.ColumnsToBinary: Invalid ColumnType(%)=%',
+        ESqlDBException.RaiseUtf8('%.ColumnsToBinary: Invalid ColumnType(%)=%',
           [self, ColumnName(f), ord(ft)]);
       end;
     end;
@@ -8056,8 +8039,7 @@ begin
      (fConnection = nil) or
      (fConnection.fProperties.BatchSendingAbilities *
        [cCreate, cUpdate, cDelete] = []) then
-    ESqlDBException.RaiseUtf8(
-      'Invalid call to %.BindArray(Param=%,Type=%)',
+    ESqlDBException.RaiseUtf8('Invalid call to %.BindArray(Param=%,Type=%)',
       [self, Param, ToText(NewType)^]);
   SetLength(result^.VArray, ArrayCount);
   result^.VInt64 := ArrayCount;
@@ -8358,7 +8340,7 @@ begin
           Connection.Properties.SqlDateToIso8601Quoted(aValues[i].VExtended^)
       else
       begin
-        VarRecToUtf8(aValues[i], VArray[fParamsArrayCount]);
+        VarRecToUtf8(@aValues[i], VArray[fParamsArrayCount]);
         case VType of
           ftUtf8:
             if StoreVoidStringAsNull and
