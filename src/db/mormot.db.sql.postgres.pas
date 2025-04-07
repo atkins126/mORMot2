@@ -735,7 +735,7 @@ constructor TSqlDBPostgresConnectionProperties.Create(
 begin
   PostgresLibraryInitialize; // raise an ESqlDBPostgres on loading failure
   if PQ.IsThreadSafe <> 1 then
-    raise ESqlDBPostgres.Create('libpq should be compiled in threadsafe mode');
+    raise ESqlDBPostgres.CreateU('libpq should be compiled in threadsafe mode');
   fDbms := dPostgreSQL;
   FillOidMapping;
   inherited Create(aServerName, aDatabaseName, aUserID, aPassWord);
@@ -1551,7 +1551,7 @@ begin
   end;
   fProcessing := false;
   log := nil;
-  TSynLog.Add.NotifyThreadEnded;
+  SynDBLog.Add.NotifyThreadEnded;
 end;
 
 

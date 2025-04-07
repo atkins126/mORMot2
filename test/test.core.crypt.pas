@@ -417,12 +417,14 @@ procedure TTestCoreCrypto._SHA512;
       '8d788a309d785436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
     {$ifdef USE_OPENSSL}
     if TOpenSslHash.IsAvailable then
+    begin
       CheckEqual(TOpenSslHash.Hash('sha512', ''),
         'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d' +
         '36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e');
       CheckEqual(TOpenSslHash.Hash('sha512', FOX),
         '07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785' +
         '436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
+    end;
     {$endif USE_OPENSSL}
     c := 'a';
     sha.Init;
@@ -1690,13 +1692,16 @@ begin
     '382576a7841021cc28fc4c0948753fb8312090cea942ea4c4e73' +
     '5d10dc724b155f9f6069f289d61daca0cb814502ef04eae1');
   {$ifdef USE_OPENSSL}
-  CheckEqual(BigNumHexFromDecimal('0'), '');
-  CheckEqual(BigNumHexFromDecimal('1'), '01');
-  CheckEqual(BigNumHexFromDecimal('15'), '0f');
-  CheckEqual(BigNumHexFromDecimal('255'), 'ff');
-  CheckEqual(BigNumHexFromDecimal('65534'), 'fffe');
-  CheckEqual(BigNumHexFromDecimal('65535'), 'ffff');
-  CheckEqual(BigNumHexFromDecimal('12345678901234567890'), 'ab54a98ceb1f0ad2');
+  if OpenSslIsAvailable then
+  begin
+    CheckEqual(BigNumHexFromDecimal('0'), '');
+    CheckEqual(BigNumHexFromDecimal('1'), '01');
+    CheckEqual(BigNumHexFromDecimal('15'), '0f');
+    CheckEqual(BigNumHexFromDecimal('255'), 'ff');
+    CheckEqual(BigNumHexFromDecimal('65534'), 'fffe');
+    CheckEqual(BigNumHexFromDecimal('65535'), 'ffff');
+    CheckEqual(BigNumHexFromDecimal('12345678901234567890'), 'ab54a98ceb1f0ad2');
+  end;
   {$endif USE_OPENSSL}
 end;
 
@@ -3615,34 +3620,77 @@ var
   i: PtrInt;
   bak: RawUtf8;
   timer: TPrecisionTimer;
+  r: TJwtContent;
   cook: array of RawUtf8;
   cookid: array of TBinaryCookieGeneratorSessionID;
 begin
+  // validate and benchmark a plain cookie with no record
   SetLength(cook, 16384);
   SetLength(cookid, length(cook));
-  gen.Init;
-  timer.Start;
-  for i := 0 to high(cook) do
-    cookid[i] := gen.Generate(cook[i]);
-  NotifyTestSpeed('generate', length(cook), 0, @timer);
-  for i := 0 to high(cook) - 1 do
-    Check(cookid[i] <> cookid[i + 1]);
-  for i := 0 to high(cook) do
-    Check(cookid[i] <> 0);
-  for i := 0 to high(cook) do
-    CheckEqual(gen.Validate(cook[i]), cookid[i], 'gen1');
-  for i := 0 to high(cook) shr 4 do
-    CheckEqual(gen.Validate(ParseTrailingJwt(
-      '/uri/' + cook[i] + '  ', {nodot=}true)), cookid[i], 'gen2');
-  bak := gen.Save;
-  gen.Init;
-  for i := 0 to high(cook) do
-    CheckEqual(gen.Validate(cook[i]), 0, 'void');
-  Check(gen.Load(bak), 'load');
-  timer.Start;
-  for i := 0 to high(cook) do
-    CheckEqual(gen.Validate(cook[i]), cookid[i], 'loaded');
-  NotifyTestSpeed('validate', length(cook), 0, @timer);
+  gen := TBinaryCookieGenerator.Create;
+  try
+    timer.Start;
+    for i := 0 to high(cook) do
+      cookid[i] := gen.Generate(cook[i]);
+    NotifyTestSpeed('generate', length(cook), 0, @timer);
+    for i := 0 to high(cook) - 1 do
+      Check(cookid[i] <> cookid[i + 1]);
+    for i := 0 to high(cook) do
+      Check(cookid[i] <> 0);
+    for i := 0 to high(cook) do
+      CheckEqual(gen.Validate(cook[i]), cookid[i], 'gen1');
+    for i := 0 to high(cook) shr 4 do
+      CheckEqual(gen.Validate(ParseTrailingJwt(
+        '/uri/' + cook[i] + '  ', {nodot=}true)), cookid[i], 'gen2');
+    bak := gen.Save;
+  finally
+    gen.Free;
+  end;
+  gen := TBinaryCookieGenerator.Create;
+  try
+    for i := 0 to high(cook) do
+      CheckEqual(gen.Validate(cook[i]), 0, 'void');
+    Check(gen.Load(bak), 'load');
+    timer.Start;
+    for i := 0 to high(cook) do
+      CheckEqual(gen.Validate(cook[i]), cookid[i], 'loaded');
+    NotifyTestSpeed('validate', length(cook), 0, @timer);
+  finally
+    gen.Free;
+  end;
+  // validate a cookie with its associated complex binary record
+  SetLength(cook, 1024);
+  gen := TBinaryCookieGenerator.Create;
+  try
+    FillCharFast(r, SizeOf(r), 0);
+    for i := 0 to high(cook) do
+    begin
+      UInt32ToUtf8(i, r.reg[jrcIssuer]);
+      r.data.InitObject([r.reg[jrcIssuer], i]);
+      r.id.Value := i;
+      cookid[i] := gen.Generate(cook[i], 0, @r, TypeInfo(TJwtContent));
+      r.data.Clear; // to be reused in the loop
+    end;
+    for i := 0 to high(cook) - 1 do
+      Check(cookid[i] <> cookid[i + 1]);
+    for i := 0 to high(cook) do
+      Check(cookid[i] <> 0);
+    for i := 0 to high(cook) do
+    begin
+      // no Finalize(r); here to verify that RecordLoadBinary() does it
+      r.id.Value := 0;
+      CheckEqual(gen.Validate(cook[i], @r, TypeInfo(TJwtContent)),
+        cookid[i], 'gen3');
+      CheckEqual(r.id.Value, i);
+      CheckEqual(GetInteger(pointer(r.reg[jrcIssuer])), i);
+      Check(r.data.IsObject, 'obj');
+      CheckEqual(r.data.Count, 1);
+      CheckEqual(r.data.Names[0], r.reg[jrcIssuer]);
+      CheckEqual(VariantToIntegerDef(r.data.Values[0], 0), i);
+    end;
+  finally
+    gen.Free;
+  end;
 end;
 
 procedure TTestCoreCrypto.Pkcs11;

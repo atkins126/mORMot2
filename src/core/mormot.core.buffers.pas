@@ -581,6 +581,7 @@ const
 
 /// fast concatenation of several AnsiStrings
 function RawByteStringArrayConcat(const Values: array of RawByteString): RawByteString;
+  {$ifdef FPC}inline;{$endif}
 
 /// creates a TBytes from a RawByteString memory buffer
 procedure RawByteStringToBytes(const buf: RawByteString; out bytes: TBytes);
@@ -838,7 +839,7 @@ type
   // - big speed up if data is written in small blocks
   // - also handle optimized storage of any integer/Int64/RawUtf8 values
   // - use TFileBufferReader or TFastReader for decoding of the stored binary
-  TBufferWriter = class
+  TBufferWriter = class(TSynPersistent)
   protected
     fPos: PtrInt;
     fBufLen, fBufLen16: PtrInt;
@@ -1756,7 +1757,8 @@ type
     mtPdf,
     mtSQlite3,
     mtXcomp,
-    mtDicom);
+    mtDicom,
+    mtZstd);
   PMimeType = ^TMimeType;
 
 const
@@ -1799,7 +1801,8 @@ const
     'application/pdf',               // mtPdf
     'application/x-sqlite3',         // mtSQlite3
     'application/x-compress',        // mtXcomp
-    'application/dicom');            // mtDicom
+    'application/dicom',             // mtDicom
+    'application/zstd');             // mtZstd RFC 8878
 
 /// retrieve the MIME content type from its file name
 function GetMimeContentTypeFromExt(const FileName: TFileName;
@@ -1814,9 +1817,9 @@ function GetMimeContentTypeFromMemory(Content: pointer; Len: PtrInt): TMimeType;
 /// retrieve the MIME content type from a supplied binary buffer
 // - inspect the first bytes, to guess from standard known headers
 // - return the MIME type, ready to be appended to a 'Content-Type: ' HTTP header
-// - returns DefaultContentType if the binary buffer has an unknown layout
-function GetMimeContentTypeFromBuffer(Content: pointer; Len: PtrInt;
-  const DefaultContentType: RawUtf8; Mime: PMimeType = nil): RawUtf8;
+// - keep the supplied ContentType if the binary buffer has an unknown layout
+function GetMimeContentTypeFromBuffer(const Content: RawByteString;
+  var ContentType: RawUtf8): TMimeType;
 
 /// retrieve the MIME content type from its file name or a supplied binary buffer
 // - will first check for known file extensions, then inspect the binary content
@@ -1824,15 +1827,15 @@ function GetMimeContentTypeFromBuffer(Content: pointer; Len: PtrInt;
 // - default is DefaultContentType or 'application/octet-stream' (BINARY_CONTENT_TYPE)
 // or 'application/fileextension' if FileName was specified
 // - see @http://en.wikipedia.org/wiki/Internet_media_type for most common values
-function GetMimeContentType(Content: pointer; Len: PtrInt; const FileName: TFileName = '';
-  const DefaultContentType: RawUtf8 = BINARY_CONTENT_TYPE; Mime: PMimeType = nil): RawUtf8;
+function GetMimeContentType(const Content: RawByteString; const FileName: TFileName = '';
+  const DefaultContentType: RawUtf8 = BINARY_CONTENT_TYPE): RawUtf8;
 
 /// retrieve the HTTP header for MIME content type from a supplied binary buffer
 // - just append HEADER_CONTENT_TYPE and GetMimeContentType() result
 // - can be used as such:
 // !  Call.OutHead := GetMimeContentTypeHeader(Call.OutBody,aFileName);
 function GetMimeContentTypeHeader(const Content: RawByteString;
-  const FileName: TFileName = ''; Mime: PMimeType = nil): RawUtf8;
+  const FileName: TFileName = ''): RawUtf8;
 
 function ToText(t: TMimeType): PShortString; overload;
 
@@ -4388,7 +4391,7 @@ end;
 
 constructor TBufferWriter.Create(aFile: THandle; BufLen: integer);
 begin
-  Create(THandleStream.Create(aFile), BufLen);
+  Create(TFileStreamEx.CreateFromHandle(aFile, ''), BufLen);
   fInternalStream := true;
 end;
 
@@ -4397,14 +4400,9 @@ constructor TBufferWriter.Create(const aFileName: TFileName;
 var
   s: TStream;
 begin
-  if Append and
-     FileExists(aFileName) then
-  begin
-    s := TFileStreamEx.Create(aFileName, fmOpenWrite);
+  s := TFileStreamEx.CreateWrite(aFileName);
+  if Append then
     s.Seek(0, soEnd);
-  end
-  else
-    s := TFileStreamEx.Create(aFileName, fmCreate);
   Create(s, BufLen);
   fInternalStream := true;
 end;
@@ -5499,8 +5497,7 @@ begin
   len := DecompressHeader(Comp, CompLen, Load);
   if len = 0 then
     exit;
-  FastSetString(RawUtf8(result), len + BufferOffset); // CP_UTF8 for FPC RTL bug
-  dec := pointer(result);
+  dec := FastSetString(RawUtf8(result), len + BufferOffset); // CP_UTF8 for FPC
   if not DecompressBody(Comp, dec + BufferOffset, CompLen, len, Load) then
     result := '';
 end;
@@ -5639,10 +5636,9 @@ begin
     if {%H-}tmpd = '' then
       pointer(tmpd) := FastNewString(AlgoCompressDestLen(head.UnCompressedSize));
     dec(count, head.UnCompressedSize); // supports premature end of input
-    if S = pointer(tmps) then
-      head.UnCompressedSize := Source.Read(S^, head.UnCompressedSize);
-    if head.UnCompressedSize <= 0 then
-      exit; // read error
+    if S = pointer({%H-}tmps) then
+      if not StreamReadAll(Source, S, head.UnCompressedSize) then
+        exit;
     head.UncompressedHash := AlgoHash(ForceHash32, S, head.UnCompressedSize);
     D := pointer(tmpd);
     head.CompressedSize := AlgoCompress(S, head.UnCompressedSize, D);
@@ -5721,7 +5717,7 @@ var
       if sourcesize < tmplen then
         tmplen := sourcesize;
       Source.Position := sourceSize - tmplen;
-      if Source.Read(tmp, tmplen) <> tmplen then
+      if not StreamReadAll(Source, @tmp, tmplen) then
         exit;
       dec(tmplen, SizeOf(TAlgoCompressTrailer));
       t := @tmp[tmplen];
@@ -5773,8 +5769,8 @@ begin
       if Head.CompressedSize > length({%H-}tmps) then
         FastNewRawByteString(tmps, Head.CompressedSize);
       S := pointer(tmps);
-      if Source.Read(S^, Head.CompressedSize) <> Head.CompressedSize then
-        break;
+      if not StreamReadAll(Source, S, Head.CompressedSize) then
+        exit;
     end;
     inc(sourcePosition, Head.CompressedSize);
     // decompress chunk into Dest
@@ -5836,17 +5832,17 @@ function TAlgoCompress.StreamUnCompress(const Source: TFileName;
 var
   S: TStream;
 begin
-  try
-    S := FileStreamSequentialRead(Source);
+  result := nil;
+  S := FileStreamSequentialRead(Source);
+  if S <> nil then
     try
-      result := StreamUnCompress(S, Magic, ForceHash32);
-    finally
-      S.Free;
+      try
+        result := StreamUnCompress(S, Magic, ForceHash32);
+      finally
+        S.Free;
+      end;
+    except // catch any StreamUnCompress issue
     end;
-  except
-    on E: Exception do
-      result := nil;
-  end;
 end;
 
 function TAlgoCompress.StreamComputeLen(P: PAnsiChar; Len: PtrUInt;
@@ -5888,26 +5884,25 @@ var
 begin
   EnsureAlgoHasNoForcedFormat('FileCompres'); // should be overriden
   result := false;
-  if (ChunkBytes > 0) and
-     FileExists(Source) then
-  try
-    S := FileStreamSequentialRead(Source);
+  if ChunkBytes <= 0 then
+    exit;
+  S := FileStreamSequentialRead(Source);
+  if S <> nil then
     try
-      DeleteFile(Dest);
-      D := TFileStreamEx.Create(Dest, fmCreate);
       try
-        StreamCompress(S, D, Magic, ForceHash32, WithTrailer, ChunkBytes);
+        DeleteFile(Dest);
+        D := TFileStreamEx.Create(Dest, fmCreate);
+        try
+          StreamCompress(S, D, Magic, ForceHash32, WithTrailer, ChunkBytes);
+        finally
+          D.Free;
+        end;
+        result := FileSetDateFrom(Dest, S.Handle);
       finally
-        D.Free;
+        S.Free;
       end;
-      result := FileSetDateFrom(Dest, S.Handle);
-    finally
-      S.Free;
+    except  // catch any StreamUnCompress issue
     end;
-  except
-    on Exception do
-      result := false;
-  end;
 end;
 
 function TAlgoCompress.FileUnCompress(const Source, Dest: TFileName;
@@ -5917,9 +5912,9 @@ var
 begin
   EnsureAlgoHasNoForcedFormat('FileUnCompress'); // should be overriden
   result := false;
-  if FileExists(Source) then
+  S := FileStreamSequentialRead(Source);
+  if S <> nil then
   try
-    S := FileStreamSequentialRead(Source);
     try
       DeleteFile(Dest);
       D := TFileStreamEx.Create(Dest, fmCreate);
@@ -5933,9 +5928,7 @@ begin
     finally
       S.Free;
     end;
-  except
-    on Exception do
-      result := false;
+  except  // catch any StreamUnCompress issue
   end;
 end;
 
@@ -6183,21 +6176,8 @@ end;
 
 
 function RawByteStringArrayConcat(const Values: array of RawByteString): RawByteString;
-var
-  i, L: PtrInt;
-  P: PAnsiChar;
 begin
-  L := 0;
-  for i := 0 to high(Values) do
-    inc(L, length(Values[i]));
-  FastNewRawByteString(result{%H-}, L);
-  P := pointer(result);
-  for i := 0 to high(Values) do
-  begin
-    L := length(Values[i]);
-    MoveFast(pointer(Values[i])^, P^, L);
-    inc(P, L);
-  end;
+  Join(Values, RawUtf8(result)); // better explicit CP_UTF8 for FPC bug
 end;
 
 procedure RawByteStringToBytes(const buf: RawByteString; out bytes: TBytes);
@@ -6595,10 +6575,8 @@ var
 begin
   result := '';
   len := length(s);
-  if len = 0 then
-    exit;
-  FastSetString(result, BinToBase64Length(len));
-  Base64Encode(pointer(result), pointer(s), len);
+  if len <> 0 then
+    Base64Encode(FastSetString(result, BinToBase64Length(len)), pointer(s), len);
 end;
 
 function BinToBase64Short(Bin: PAnsiChar; BinBytes: integer): ShortString;
@@ -6624,8 +6602,7 @@ var
 begin
   outlen := BinToBase64Length(len);
   inc(outlen, 2 * (outlen shr 6) + 2); // one CRLF per line
-  FastSetString(result{%H-}, PtrInt(outlen) + length(Prefix) + length(Suffix));
-  p := pointer(result);
+  p := FastSetString(result{%H-}, PtrInt(outlen) + length(Prefix) + length(Suffix));
   if Prefix <> '' then
   begin
     MoveFast(pointer(Prefix)^, p^, PStrLen(PAnsiChar(pointer(Prefix)) - _STRLEN)^);
@@ -6672,16 +6649,14 @@ end;
 function BinToBase64(Bin: PAnsiChar; BinBytes: integer): RawUtf8;
 begin
   result := '';
-  if BinBytes = 0 then
-    exit;
-  FastSetString(result, BinToBase64Length(BinBytes));
-  Base64Encode(pointer(result), Bin, BinBytes);
+  if BinBytes <> 0 then
+    Base64Encode(FastSetString(result, BinToBase64Length(BinBytes)), Bin, BinBytes);
 end;
 
 function BinToBase64(const data, Prefix, Suffix: RawByteString; WithMagic: boolean): RawUtf8;
 var
   lendata, lenprefix, lensuffix, len: integer;
-  res: PByteArray absolute result;
+  res: PByteArray;
 begin
   result := '';
   lendata := length(data);
@@ -6692,7 +6667,7 @@ begin
   len := ((lendata + 2) div 3) * 4 + lenprefix + lensuffix;
   if WithMagic then
     inc(len, 3);
-  FastSetString(result, len);
+  res := FastSetString(result, len);
   if lenprefix > 0 then
     MoveFast(pointer(Prefix)^, res^, lenprefix);
   if WithMagic then
@@ -6721,8 +6696,7 @@ begin
   Result := '';
   if DataLen <= 0 then
     exit;
-  FastSetString(Result, ((DataLen + 2) div 3) * 4 + 3);
-  PInteger(pointer(Result))^ := JSON_BASE64_MAGIC_C;
+  PInteger(FastSetString(Result, ((DataLen + 2) div 3) * 4 + 3))^ := JSON_BASE64_MAGIC_C;
   Base64Encode(PAnsiChar(pointer(Result)) + 3, Data, DataLen);
 end;
 
@@ -6848,11 +6822,8 @@ var
 begin
   result := false;
   resultLen := Base64LengthAdjust(sp, len);
-  if resultLen <> 0 then
-  begin
-    FastNewRawByteString(data, resultLen);
-    result := Base64DecodeMain(sp, pointer(data), len); // may use AVX2
-  end;
+  if resultLen <> 0 then // may use AVX2
+    result := Base64DecodeMain(sp, FastNewRawByteString(data, resultLen), len);
   if not result then
     data := '';
 end;
@@ -6956,19 +6927,15 @@ var
 begin
   result := '';
   len := length(s);
-  if len = 0 then
-    exit;
-  FastSetString(result, BinToBase64uriLength(len));
-  Base64uriEncode(pointer(result), pointer(s), len);
+  if len <> 0 then
+    Base64uriEncode(FastSetString(result, BinToBase64uriLength(len)), pointer(s), len);
 end;
 
 function BinToBase64uri(Bin: PAnsiChar; BinBytes: integer): RawUtf8;
 begin
   result := '';
-  if BinBytes <= 0 then
-    exit;
-  FastSetString(result, BinToBase64uriLength(BinBytes));
-  Base64uriEncode(pointer(result), Bin, BinBytes);
+  if BinBytes > 0 then
+    Base64uriEncode(FastSetString(result, BinToBase64uriLength(BinBytes)), Bin, BinBytes);
 end;
 
 function BinToBase64uriShort(Bin: PAnsiChar; BinBytes: integer): ShortString;
@@ -7025,10 +6992,8 @@ begin
   result := false;
   resultLen := Base64uriToBinLength(len);
   if resultLen <> 0 then
-  begin
-    FastNewRawByteString(bin, resultLen);
-    result := Base64AnyDecode(ConvertBase64UriToBin, sp, pointer(bin), len);
-  end;
+    result := Base64AnyDecode(ConvertBase64UriToBin, sp,
+      FastNewRawByteString(bin, resultLen), len);
   if not result then
     bin := '';
 end;
@@ -7499,8 +7464,8 @@ begin
   if (B32Len > 0) and
      ((B32Len and 7) = 0) then
   begin
-    FastNewRawByteString(result, (B32Len shr 3) * 5);
-    p := Base32Decode(@ConvertBase32ToBin, B32, pointer(result), B32Len);
+    p := Base32Decode(@ConvertBase32ToBin, B32,
+      FastNewRawByteString(result, (B32Len shr 3) * 5), B32Len);
     if p <> nil then
     begin
       FakeLength(result, p - pointer(result));
@@ -7693,8 +7658,8 @@ var
     if (boundary <> '') and
        (boundary[1] = '"') then
       TrimChars(boundary, 1, 1); // "boundary" -> boundary
-    Make(['--', boundary, '--'#13#10], endBoundary);
-    boundary := Make(['--', boundary, #13#10]);
+    Join(['--', boundary, '--'#13#10], endBoundary);
+    boundary := Join(['--', boundary, #13#10]);
     result := true;
   end;
 
@@ -7869,8 +7834,7 @@ begin
   if ForcedContentType <> '' then
     part.ContentType := ForcedContentType
   else
-    part.ContentType := GetMimeContentType(
-      pointer(content), length(content), FileName);
+    part.ContentType := GetMimeContentType(content, FileName);
   part.Encoding := 'base64';
   part.Content := BinToBase64(content);
   SetLength(MultiPart, newlen);
@@ -7891,9 +7855,8 @@ begin
   part.Name := FieldName;
   if ForcedContentType <> '' then
     part.ContentType := ForcedContentType
-  else
-    part.ContentType := GetMimeContentTypeFromBuffer(
-      pointer(FieldValue), length(FieldValue), TEXT_CONTENT_TYPE);
+  else if GetMimeContentTypeFromBuffer(FieldValue, part.ContentType) = mtUnknown then
+    part.ContentType := TEXT_CONTENT_TYPE; // fallback to plain text
   part.Content := FieldValue;
   SetLength(MultiPart, newlen);
   MultiPart[newlen - 1] := part;
@@ -8306,7 +8269,7 @@ function IncludeTrailingUriDelimiter(const URI: RawByteString): RawByteString;
 begin
   if (URI <> '') and
      (Uri[length(URI)] <> '/') then
-    result := URI + '/'
+    Join([URI, '/'], RawUtf8(result))
   else
     result := URI;
 end;
@@ -8394,8 +8357,7 @@ begin
     // decode value content
     if len <> 0 then
     begin
-      FastSetString(Value, len);
-      V := pointer(Value);
+      V := FastSetString(Value, len);
       U := Beg;
       repeat
         if (U^ = '%') and
@@ -8465,8 +8427,7 @@ begin
   if len = 0 then
     exit;
   // decode name content
-  FastSetString(Name, len);
-  V := pointer(Name);
+  V := FastSetString(Name, len);
   U := Beg;
   repeat
     if (U^ = '%') and
@@ -8724,15 +8685,16 @@ end;
 { *********** Basic MIME Content Types Support }
 
 const
-  MIME_MAGIC: array[0..18] of cardinal = (
+  MIME_MAGIC: array[0 .. 19] of cardinal = (
      $04034b50 + 1, $46445025 + 1, $21726152 + 1, $afbc7a37 + 1,
      $694c5153 + 1, $75b22630 + 1, $9ac6cdd7 + 1, $474e5089 + 1,
      $38464947 + 1, $46464f77 + 1, $a3df451a + 1, $002a4949 + 1,
      $2a004d4d + 1, $2b004d4d + 1, $46464952 + 1, $e011cfd0 + 1,
-     $5367674f + 1, $1c000000 + 1, $4d434944 + 1);
+     $5367674f + 1, $1c000000 + 1, $4d434944 + 1, $fd2fb528 + 1);
   MIME_MAGIC_TYPE: array[0..high(MIME_MAGIC)] of TMimeType = (
      mtZip, mtPdf, mtRar, mt7z, mtSQlite3, mtWma, mtWmv, mtPng, mtGif, mtFont,
-     mtWebm, mtTiff, mtTiff, mtTiff, mtWebp{=riff}, mtDoc, mtOgg, mtMp4, mtDicom);
+     mtWebm, mtTiff, mtTiff, mtTiff, mtWebp{=riff}, mtDoc, mtOgg, mtMp4,
+     mtDicom, mtZstd);
 
 function GetMimeContentTypeFromMemory(Content: pointer; Len: PtrInt): TMimeType;
 var
@@ -8743,38 +8705,46 @@ begin
   if (Content <> nil) and
      (Len > 4) then
   begin
-    if PAnsiChar(Content)^ = '<' then
-      case PCardinal(PAnsiChar(Content) + 1)^ or $20202020 of
-        ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24:
-          begin
-            result := mtHtml; // legacy HTML document
-            exit;
-          end;
-        ord('!') + ord('d') shl 8 + ord('o') shl 16 + ord('c') shl 24:
-          begin
-            if (PCardinal(PAnsiChar(Content) + 5)^ or $20202020 =
-               ord('t') + ord('y') shl 8 + ord('p') shl 16 + ord('e') shl 24) and
-               (PAnsiChar(Content)[9] = ' ') then
-              if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 =
-                 ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24) then
-                result := mtHtml // HTML5 markup
-              else
-                result := mtXml; // malformed XML document
-            exit;
-          end;
-        ord('?') + ord('x') shl 8 + ord('m') shl 16 + ord('l') shl 24:
-          begin
-            result := mtXml; // "well formed" XML document
-            exit;
-          end;
-      end;
+    case PAnsiChar(Content)^ of
+      '<':
+        case PCardinal(PAnsiChar(Content) + 1)^ or $20202020 of
+          ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24:
+            begin
+              result := mtHtml; // legacy HTML document
+              exit;
+            end;
+          ord('!') + ord('d') shl 8 + ord('o') shl 16 + ord('c') shl 24:
+            begin
+              if (PCardinal(PAnsiChar(Content) + 5)^ or $20202020 =
+                 ord('t') + ord('y') shl 8 + ord('p') shl 16 + ord('e') shl 24) and
+                 (PAnsiChar(Content)[9] = ' ') then
+                if (PCardinal(PAnsiChar(Content) + 10)^ or $20202020 =
+                   ord('h') + ord('t') shl 8 + ord('m') shl 16 + ord('l') shl 24) then
+                  result := mtHtml // HTML5 markup
+                else
+                  result := mtXml; // malformed XML document
+              exit;
+            end;
+          ord('?') + ord('x') shl 8 + ord('m') shl 16 + ord('l') shl 24:
+            begin
+              result := mtXml; // "well formed" XML document
+              exit;
+            end;
+        end;
+      '{', '[':
+        begin
+          if (Len < 65535) and (StrLen(Content) = Len) then
+            result := mtJson;
+          exit;
+        end;
+    end;
     i := IntegerScanIndex(@MIME_MAGIC, length(MIME_MAGIC), PCardinal(Content)^ + 1);
     // + 1 to avoid finding it in the exe - may use SSE2
     if i >= 0 then
       result := MIME_MAGIC_TYPE[i];
     case result of // identify some partial matches
       mtUnknown:
-        case PCardinal(Content)^ and $00ffffff of
+        case PCardinal(Content)^ and $00ffffff of // identify 3 bytes magic
           $685a42:
             result := mtBz2;  // 42 5A 68
           $088b1f:
@@ -8848,18 +8818,12 @@ begin
   end;
 end;
 
-function GetMimeContentTypeFromBuffer(Content: pointer; Len: PtrInt;
-  const DefaultContentType: RawUtf8; Mime: PMimeType): RawUtf8;
-var
-  m: TMimeType;
+function GetMimeContentTypeFromBuffer(const Content: RawByteString;
+  var ContentType: RawUtf8): TMimeType;
 begin
-  m := GetMimeContentTypeFromMemory(Content, Len);
-  if Mime <> nil then
-    Mime^ := m;
-  if m = mtUnknown then
-    result := DefaultContentType
-  else
-    result := MIME_TYPE[m];
+  result := GetMimeContentTypeFromMemory(pointer(Content), Length(Content));
+  if result <> mtUnknown then
+    ContentType := MIME_TYPE[result];
 end;
 
 const
@@ -8909,41 +8873,34 @@ begin
     FileExt^ := {%H-}ext;
 end;
 
-function GetMimeContentType(Content: pointer; Len: PtrInt; const FileName: TFileName;
-  const DefaultContentType: RawUtf8; Mime: PMimeType): RawUtf8;
+function GetMimeContentType(const Content: RawByteString; const FileName: TFileName;
+  const DefaultContentType: RawUtf8): RawUtf8;
 var
   ext: RawUtf8;
   m: TMimeType;
 begin
-  if FileName <> '' then
+  result := DefaultContentType;
+  if FileName <> '' then // file extension is more precise -> check first
   begin
-    // file extension is more precise -> check first
     m := GetMimeContentTypeFromExt(FileName, @ext);
     if m <> mtUnknown then
     begin
       result := MIME_TYPE[m];
-      if Mime <> nil then
-        Mime^ := m;
       exit;
     end;
-    // fallback to content check
-    if (ext <> '') and
+    if (ext <> '') and // default e.g. 'application/zip' or 'application/pdf'
        (ext[1] in ['a'..'z']) then
-      // e.g. 'application/zip' or 'application/pdf'
-      result := 'application/' + LowerCase(ext)
-    else
-      result := DefaultContentType;
-  end
-  else
-    result := DefaultContentType;
-  result := GetMimeContentTypeFromBuffer(Content, Len, result, Mime);
+      result := 'application/' + LowerCase(ext);
+  end;
+  if Content <> '' then
+    GetMimeContentTypeFromBuffer(Content, result);
 end;
 
 function GetMimeContentTypeHeader(const Content: RawByteString;
-  const FileName: TFileName; Mime: PMimeType): RawUtf8;
+  const FileName: TFileName): RawUtf8;
 begin
-  result := HEADER_CONTENT_TYPE + GetMimeContentType(
-      pointer(Content), length(Content), FileName, BINARY_CONTENT_TYPE, Mime);
+  result := HEADER_CONTENT_TYPE +
+              GetMimeContentType(Content, FileName, BINARY_CONTENT_TYPE);
 end;
 
 function ToText(t: TMimeType): PShortString;
@@ -8952,7 +8909,7 @@ begin
 end;
 
 const
-  MIME_COMPRESSED: array[0..38] of cardinal = ( // may use SSE2
+  MIME_COMPRESSED: array[0..39] of cardinal = ( // may use SSE2
     $04034b50, // 'application/zip' = 50 4B 03 04
     $474e5089, // 'image/png' = 89 50 4E 47 0D 0A 1A 0A
     $e0ffd8ff, $e1ffd8ff, // 'image/jpeg' FF D8 FF E0/E1
@@ -8981,7 +8938,8 @@ const
     $b7010000, $ba010000, // mpeg = 00 00 01 Bx
     $cececece, // jceks = CE CE CE CE
     $dbeeabed, // .rpm package file
-    $e011cfd0); // msi = D0 CF 11 E0 A1 B1 1A E1
+    $e011cfd0, // msi = D0 CF 11 E0 A1 B1 1A E1
+    $fd2fb528); // Zstandard frame
 
 function IsContentCompressed(Content: pointer; Len: PtrInt): boolean;
 begin
@@ -9022,10 +8980,9 @@ const
     'SVG',
     'X-ICO',
     nil);
-  _CONTENT_APP: array[0..4] of PUtf8Char = (
+  _CONTENT_APP: array[0..3] of PUtf8Char = (
     'JSON',
     'JAVASCRIPT',
-    'VND.API+JSON',
     'XML',
     nil);
 
@@ -9034,10 +8991,19 @@ begin
   case IdemPPChar(ContentType, @_CONTENT) of
     0: // text/*
       result := true;
-    1: // image/*
+    1: // image/[svg/x-ico]
       result := IdemPPChar(ContentType + 6, @_CONTENT_IMG) >= 0;
-    2: // application/*
-      result := IdemPPChar(ContentType + 12, @_CONTENT_APP) >= 0;
+    2: // application/[json/javascript/xml]
+      begin
+        result := true;
+        inc(ContentType, 12);
+        if IdemPPChar(ContentType, @_CONTENT_APP) >= 0 then
+          exit;
+        // detect e.g. application/atom+xml or application/vnd.api+json
+        ContentType := PosChar(ContentType, '+');
+        result := (ContentType <> nil) and
+                  (IdemPPChar(ContentType + 1, @_CONTENT_APP) >= 0);
+      end
   else
     result := false;
   end;
@@ -9386,7 +9352,7 @@ begin
   AppendShortChar(' ', @result);
   AppendShort(itemname, result);
   if itemcount > 1 then
-    AppendShortChar('s', @result);
+    AppendShortCharSafe('s', @result);
 end;
 
 function EscapeBuffer(s: PAnsiChar; slen: integer;
@@ -9879,7 +9845,7 @@ begin
   f := FileOpenSequentialRead(FileName);
   if not ValidHandle(f) then
     exit;
-  hasher := Create(TFileStreamFromHandle.Create(f));
+  hasher := Create(TFileStreamEx.CreateFromHandle(f, FileName));
   try
     if Assigned(OnProgress) then
     begin
@@ -10223,7 +10189,7 @@ end;
 constructor TBufferedStreamReader.Create(const aSourceFileName: TFileName;
   aBufSize: integer);
 begin
-  Create(TFileStreamEx.Create(aSourceFileName, fmOpenReadShared));
+  Create(TFileStreamEx.CreateRead(aSourceFileName));
   fOwnStream := fSource;
 end;
 
@@ -11594,7 +11560,7 @@ begin
   for e := succ(low(e)) to high(e) do
   begin
     LowerCaseSelf(EMOJI_TEXT[e]);
-    EMOJI_TAG[e] := ':' + EMOJI_TEXT[e] + ':';
+    Join([':', EMOJI_TEXT[e], ':'], EMOJI_TAG[e]);
     SetLength(EMOJI_UTF8[e], 4); // order matches U+1F600 to U+1F64F codepoints
     Ucs4ToUtf8(ord(e) + $1f5ff, pointer(EMOJI_UTF8[e]));
   end;

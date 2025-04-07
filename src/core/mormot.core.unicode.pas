@@ -260,6 +260,10 @@ function IsValidUtf8WithoutControlChars(source: PUtf8Char): boolean; overload;
 // - supplied input is a RawUtf8 variable
 function IsValidUtf8WithoutControlChars(const source: RawUtf8): boolean; overload;
 
+/// check if any forbidden 7-bit char appears in the supplied text
+// - is a wrapper around strcspn()
+function ContainsChars(const text, forbidden: RawUtf8): boolean;
+
 /// will truncate the supplied UTF-8 value if its length exceeds the specified
 // UTF-16 Unicode characters count
 // - count may not match the UCS-4 CodePoint, in case of UTF-16 surrogates
@@ -1198,31 +1202,33 @@ type
 
 var
   /// lookup table used for fast case conversion to uppercase
-  // - handle 8-bit upper chars as in WinAnsi / code page 1252 (e.g. accents)
+  // - handle 8-bit upper chars as in WinAnsi / code page 1252 (e.g. 'e' with
+  // or without accents will be translated into plain 'E' without accent)
   // - is defined globally, since may be used from an inlined function
   NormToUpper: TNormTable;
   NormToUpperByte: TNormTableByte absolute NormToUpper;
 
   /// lookup table used for fast case conversion to lowercase
-  // - handle 8-bit upper chars as in WinAnsi / code page 1252 (e.g. accents)
+  // - handle 8-bit upper chars as in WinAnsi / code page 1252 (e.g. 'e' with
+  // or without accents will be translated into plain 'e' without accent)
   // - is defined globally, since may be used from an inlined function
   NormToLower: TNormTable;
   NormToLowerByte: TNormTableByte absolute NormToLower;
 
   /// this table will convert 'a'..'z' into 'A'..'Z'
   // - so it will work with UTF-8 without decoding, whereas NormToUpper[] expects
-  // WinAnsi encoding
+  // WinAnsi encoding to handle accents
   NormToUpperAnsi7: TNormTable;
   NormToUpperAnsi7Byte: TNormTableByte absolute NormToUpperAnsi7;
 
   /// this table will convert 'A'..'Z' into 'a'..'z'
   // - so it will work with UTF-8 without decoding, whereas NormToUpper[] expects
-  // WinAnsi encoding
+  // WinAnsi encoding to handle accents
   NormToLowerAnsi7: TNormTable;
   NormToLowerAnsi7Byte: TNormTableByte absolute NormToLowerAnsi7;
 
   /// case sensitive NormToUpper[]/NormToLower[]-like table
-  // - i.e. NormToNorm[c] = c
+  // - i.e. every item is itself, as NormToNorm[c] = c
   NormToNorm: TNormTable;
   NormToNormByte: TNormTableByte absolute NormToNorm;
 
@@ -1382,7 +1388,7 @@ function IdemPCharArrayBy2(p: PUtf8Char; const upArrayBy2Chars: RawUtf8): PtrInt
 // - ignore case - up^ must be already Upper
 // - this version will decode the UTF-8 content before using NormToUpper[], so
 // it will be slower than the IdemPChar() function above, but will handle
-// WinAnsi accentuated characters (e.g. 'e' acute will be matched as 'E')
+// WinAnsi accentuated characters (e.g. 'e' acute will be matched as plain 'E')
 function IdemPCharU(p, up: PUtf8Char): boolean;
 
 /// returns true if the beginning of p^ is same as up^
@@ -1441,7 +1447,7 @@ function StrPosI(uppersubstr, str: PUtf8Char): PUtf8Char;
 /// a non case-sensitive RawUtf8 version of Pos()
 // - substr is expected to be already in upper case
 // - this version will decode the UTF-8 content before using NormToUpper[],
-// so will support only WinAnsi (Code Page 1252) codepoints
+// and will remove WinAnsi (Code Page 1252) accents during its search
 // - see PosI() for a non-accentuated, but faster version
 function PosIU(substr: PUtf8Char; const str: RawUtf8): integer;
 
@@ -1524,7 +1530,8 @@ function Utf8CompareOS(P1, P2: PUtf8Char): PtrInt;
 function Utf8CompareIOS(P1, P2: PUtf8Char): PtrInt;
 
 /// retrieve the next UCS-4 CodePoint stored in U, then update the U pointer
-// - this function will decode the UTF-8 content before using NormToUpper[]
+// - this function will decode the UTF-8 content before using NormToUpper[],
+// and will remove WinAnsi (Code Page 1252) accents during its conversion
 // - will return '?' if the UCS-4 CodePoint is higher than #255: so use this function
 // only if you need to deal with ASCII characters (e.g. it's used for Soundex
 // and for ContainsUtf8 function)
@@ -1611,7 +1618,8 @@ function UpperCopyShort(dest: PAnsiChar; const source: ShortString): PAnsiChar;
 
 /// fast UTF-8 comparison handling WinAnsi CP-1252 case folding
 // - this version expects u1 and u2 to be zero-terminated
-// - decode the UTF-8 content before using NormToUpper[] lookup table
+// - decode the UTF-8 content before using NormToUpper[] lookup table,
+// and will remove WinAnsi (Code Page 1252) accents during its comparison
 // - match the our SYSTEMNOCASE custom (and default) SQLite 3 collation
 // - consider Utf8ICompReference() for Unicode 10.0 support
 function Utf8IComp(u1, u2: PUtf8Char): PtrInt;
@@ -1619,7 +1627,8 @@ function Utf8IComp(u1, u2: PUtf8Char): PtrInt;
 /// fast UTF-8 comparison handling WinAnsi CP-1252 case folding
 // - this version expects u1 and u2 not to be necessary zero-terminated, but
 // uses L1 and L2 as length for u1 and u2 respectively
-// - decode the UTF-8 content before using NormToUpper[] lookup table
+// - decode the UTF-8 content before using NormToUpper[] lookup table,
+// and will remove WinAnsi (Code Page 1252) accents during its comparison
 // - consider Utf8ILCompReference() for Unicode 10.0 support
 function Utf8ILComp(u1, u2: PUtf8Char; L1, L2: cardinal): PtrInt;
 
@@ -1631,7 +1640,7 @@ function Utf8UpperCopy(Dest, Source: PUtf8Char; SourceChars: cardinal): PUtf8Cha
 /// copy UTF-8 buffer into dest^ handling WinAnsi CP-1252 NormToUpper[] folding
 // - returns the final dest pointer
 // - will copy up to 255 AnsiChar (expect the dest buffer to be array[byte] of
-// AnsiChar), with UTF-8 encoding
+// AnsiChar), with UTF-8 encoding and WinAnsi accents removal
 function Utf8UpperCopy255(dest: PAnsiChar; const source: RawUtf8): PUtf8Char;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1665,33 +1674,34 @@ var
 
 /// SameText() overloaded function with proper UTF-8 decoding
 // - fast version using NormToUpper[] array for all WinAnsi characters
-// - this version will decode each UTF-8 glyph before using NormToUpper[]
+// - this version will decode each UTF-8 glyph before using NormToUpper[],
+// so will remove WinAnsi (Code Page 1252) accents during its comparison
 // - current implementation handles UTF-16 surrogates as Utf8IComp()
 function SameTextU(const S1, S2: RawUtf8): boolean;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// fast conversion of the supplied text into 8-bit uppercase
-// - this will not only convert 'a'..'z' into 'A'..'Z', but also WinAnsi
-// accentuated latin characters ('e' acute into 'E' e.g.), using NormToUpper[]
+// - this will not only convert 'a'..'z' into 'A'..'Z', but also remove WinAnsi
+// latin accents ('e' acute into plain 'E' e.g.), using NormToUpper[]
 // - it will therefore decode the supplied UTF-8 content to handle more than
 // 7-bit of ascii characters (so this function is dedicated to WinAnsi code page
 // 1252 characters set)
 function UpperCaseU(const S: RawUtf8): RawUtf8;
 
 /// fast conversion of the supplied text into 8-bit lowercase
-// - this will not only convert 'A'..'Z' into 'a'..'z', but also WinAnsi
-// accentuated latin characters ('E' acute into 'e' e.g.), using NormToLower[]
+// - this will not only convert 'a'..'z' into 'A'..'Z', but also remove WinAnsi
+// latin accents ('e' acute into plain 'e' e.g.), using NormToLower[]
 // - it will therefore decode the supplied UTF-8 content to handle more than
 // 7-bit of ascii characters
 function LowerCaseU(const S: RawUtf8): RawUtf8;
 
 /// fast conversion of the supplied text into 8-bit case sensitivity
-// - convert the text in-place, returns the resulting length
+// - convert the text from P into D, returns the resulting length
 // - it will decode the supplied UTF-8 content to handle more than 7-bit
 // of ascii characters during the conversion (leaving not WinAnsi characters
 // untouched)
 // - will not set the last char to #0 (caller must do that if necessary)
-function ConvertCaseUtf8(P: PUtf8Char; const Table: TNormTableByte): PtrInt;
+function ConvertCaseUtf8(P, D: PUtf8Char; const Table: TNormTableByte): PtrInt;
 
 /// check if the supplied text has some case-insentitive 'a'..'z','A'..'Z' chars
 // - will therefore be correct with true UTF-8 content, but only for 7-bit
@@ -1787,6 +1797,7 @@ function UpperCaseSynUnicode(const S: SynUnicode): SynUnicode;
 function LowerCaseSynUnicode(const S: SynUnicode): SynUnicode;
 
 /// fast WinAnsi comparison using the NormToUpper[] array for all 8-bit values
+// - i.e. will remove WinAnsi (Code Page 1252) accents during its comparison
 function AnsiIComp(Str1, Str2: pointer): PtrInt;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1874,6 +1885,12 @@ function TrimOneChar(const text: RawUtf8; exclude: AnsiChar): RawUtf8;
 /// returns the supplied text content, without any other char than specified
 // - specify a custom char set to be included, e.g. as ['A'..'Z']
 function OnlyChar(const text: RawUtf8; const only: TSynAnsicharSet): RawUtf8;
+
+/// check if any of the supplied chars appears in the text
+function HasAnyChar(const text: RawUtf8; const chars: TSynAnsicharSet): boolean;
+
+/// check if any other than the supplied chars appears in the text
+function HasOnlyChar(const text: RawUtf8; const chars: TSynAnsicharSet): boolean;
 
 /// returns the supplied text content, without any control char
 // - here control chars have an ASCII code in [#0 .. ' '], i.e. text[] <= ' '
@@ -2414,6 +2431,9 @@ procedure QuickSortRawUtf8(var Values: TRawUtf8DynArray; ValuesCount: integer;
 /// sort a RawUtf8 array, low values first
 procedure QuickSortRawUtf8(Values: PRawUtf8Array; L, R: PtrInt;
   caseInsensitive: boolean = false); overload;
+
+/// compute the sum of all length(Values^[...))
+function SumRawUtf8Length(Values: PRawUtf8; n: integer): TStrLen;
 
 /// sort and remove any duplicated RawUtf8 from Values[]
 procedure DeduplicateRawUtf8(var Values: TRawUtf8DynArray);
@@ -3286,6 +3306,14 @@ begin
     end;
   end;
   result := true;
+end;
+
+function ContainsChars(const text, forbidden: RawUtf8): boolean;
+begin
+  result := (text <> '') and
+            (forbidden <> '') and
+            (strcspn(pointer(text), pointer(forbidden)) <>
+               PStrLen(PAnsiChar(pointer(text)) - _STRLEN)^);
 end;
 
 function Utf8ToUnicodeLength(source: PUtf8Char): PtrUInt;
@@ -5451,10 +5479,7 @@ function Utf8DecodeToUnicodeRawByteString(P: PUtf8Char; L: integer): RawByteStri
 begin
   if (P <> nil) and
      (L <> 0) then
-  begin
-    FastNewRawByteString(result, L * 3);
-    FakeSetLength(result, Utf8ToWideChar(pointer(result), P, L));
-  end
+    FakeSetLength(result, Utf8ToWideChar(FastNewRawByteString(result, L * 3), P, L))
   else
     result := '';
 end;
@@ -5519,8 +5544,7 @@ begin
   if (c < 0) or
      (z < c) then
     c := z;
-  FastSetString(result, len shl 1);
-  d := pointer(result);
+  d := FastSetString(result, len shl 1);
   MoveFast(s^, d^, c);
   inc(s, c);
   inc(d, c);
@@ -6721,9 +6745,9 @@ begin
   result := AnsiICompW(PWideChar(A), PWideChar(B));
 end;
 
-function ConvertCaseUtf8(P: PUtf8Char; const Table: TNormTableByte): PtrInt;
+function ConvertCaseUtf8(P, D: PUtf8Char; const Table: TNormTableByte): PtrInt;
 var
-  d, s: PUtf8Char;
+  s: PUtf8Char;
   c: PtrUInt;
   extra, i: PtrInt;
   {$ifdef CPUX86NOTPIC}
@@ -6738,7 +6762,6 @@ begin
   {$ifndef CPUX86NOTPIC}
   utf8 := @UTF8_TABLE;
   {$endif CPUX86NOTPIC}
-  d := P;
   repeat
     c := byte(P[0]);
     inc(P);
@@ -6746,7 +6769,7 @@ begin
       break;
     if c <= 127 then
     begin
-      d[result] := AnsiChar(Table[c]);
+      D[result] := AnsiChar(Table[c]);
       inc(result);
     end
     else
@@ -6770,7 +6793,7 @@ begin
       if (c <= 255) and
          (Table[c] <= 127) then
       begin
-        d[result] := AnsiChar(Table[c]);
+        D[result] := AnsiChar(Table[c]);
         inc(result);
         inc(P, extra);
         continue;
@@ -6778,7 +6801,7 @@ begin
       s := P - 1;
       inc(P, extra);
       inc(extra);
-      MoveByOne(s, d + result, extra);
+      MoveByOne(s, D + result, extra);
       inc(result, extra);
     end;
   until false;
@@ -6789,10 +6812,9 @@ var
   ls, ld: PtrInt;
 begin
   ls := length(S);
-  FastSetString(result, pointer(S), ls);
-  ld := ConvertCaseUtf8(pointer(result), NormToUpperByte);
+  ld := ConvertCaseUtf8(pointer(S), FastSetString(result, ls), NormToUpperByte);
   if ls <> ld then
-    SetLength(result, ld);
+    FakeLength(result, ld);
 end;
 
 function LowerCaseU(const S: RawUtf8): RawUtf8;
@@ -6800,10 +6822,9 @@ var
   ls, ld: PtrInt;
 begin
   ls := length(S);
-  FastSetString(result, pointer(S), ls);
-  ld := ConvertCaseUtf8(pointer(result), NormToLowerByte);
+  ld := ConvertCaseUtf8(pointer(S), FastSetString(result, ls), NormToLowerByte);
   if ls <> ld then
-    SetLength(result, ld);
+    FakeLength(result, ld);
 end;
 
 function Utf8IComp(u1, u2: PUtf8Char): PtrInt;
@@ -8078,8 +8099,7 @@ begin
     if text[i] <= ' ' then
     begin
       n := i - 1;
-      FastSetString(result, len);
-      p := pointer(result);
+      p := FastSetString(result, len);
       if n > 0 then
         MoveFast(pointer(text)^, p^, n);
       for j := i + 1 to len do
@@ -8104,8 +8124,7 @@ begin
     if text[i] in exclude then
     begin
       n := i - 1;
-      FastSetString(result, len - 1);
-      p := pointer(result);
+      p := FastSetString(result, len - 1);
       if n > 0 then
         MoveFast(pointer(text)^, p^, n);
       for j := i + 1 to len do
@@ -8133,8 +8152,7 @@ begin
     result := text; // no exclude char found
     exit;
   end;
-  FastSetString(result, len - 1);
-  p := pointer(result);
+  p := FastSetString(result, len - 1);
   MoveFast(pointer(text)^, p^, first);
   inc(p, first);
   for i := first + 1 to len do
@@ -8157,6 +8175,36 @@ begin // reverse bits in local stack copy before calling TrimChar()
   for i := 0 to (SizeOf(only) shr POINTERSHR) - 1 do
     exclude[i] := not PPtrIntArray(@only)[i];
   result := TrimChar(text, TSynAnsicharSet(exclude));
+end;
+
+function HasAnyChar(const text: RawUtf8; const chars: TSynAnsicharSet): boolean;
+var
+  p: PUtf8Char;
+begin
+  result := true;
+  p := pointer(text);
+  if p <> nil then
+    repeat
+      if p^ in chars then
+        exit;
+      inc(p);
+    until p^ = #0;
+  result := false;
+end;
+
+function HasOnlyChar(const text: RawUtf8; const chars: TSynAnsicharSet): boolean;
+var
+  p: PUtf8Char;
+begin
+  result := false;
+  p := pointer(text);
+  if p <> nil then
+    repeat
+      if not (p^ in chars) then
+        exit;
+      inc(p);
+    until p^ = #0;
+  result := true;
 end;
 
 procedure FillZero(var secret: RawByteString);
@@ -8221,10 +8269,9 @@ begin
       break;
     AddInteger(pos, posCount, found);
   until false;
-  FastSetString(result, Length(S) + (newlen - oldlen) * posCount); // alloc once
+  dst := FastSetString(result, Length(S) + (newlen - oldlen) * posCount);
   last := 1;
   src := pointer(S);
-  dst := pointer(result);
   for i := 0 to posCount - 1 do
   begin
     sharedlen := pos[i] - last;
@@ -8311,31 +8358,30 @@ begin
   result := Source;
 end;
 
-function StringReplaceTabs(const Source, TabText: RawUtf8): RawUtf8;
-
-  procedure Process(s, d, t: PAnsiChar; tlen: PtrInt);
-  begin
-    repeat
-      if s^ = #0 then
-        break
-      else if s^ <> #9 then
+procedure StringReplaceTabsProcess(s, d, t: PAnsiChar; tlen: PtrInt);
+begin
+  repeat
+    if s^ = #0 then
+      break
+    else if s^ <> #9 then
+    begin
+      d^ := s^;
+      inc(d);
+      inc(s);
+    end
+    else
+    begin
+      if tlen > 0 then
       begin
-        d^ := s^;
-        inc(d);
-        inc(s);
-      end
-      else
-      begin
-        if tlen > 0 then
-        begin
-          MoveByOne(t, d, tlen);
-          inc(d, tlen);
-        end;
-        inc(s);
+        MoveByOne(t, d, tlen);
+        inc(d, tlen);
       end;
-    until false;
-  end;
+      inc(s);
+    end;
+  until false;
+end;
 
+function StringReplaceTabs(const Source, TabText: RawUtf8): RawUtf8;
 var
   len, i, n, ttl: PtrInt;
 begin
@@ -8351,8 +8397,8 @@ begin
     result := Source;
     exit;
   end;
-  FastSetString(result, len + n * pred(ttl));
-  Process(pointer(Source), pointer(result), pointer(TabText), ttl);
+  StringReplaceTabsProcess(pointer(Source),
+    FastSetString(result, len + n * pred(ttl)), pointer(TabText), ttl);
 end;
 
 function RawUtf8OfChar(Ch: AnsiChar; Count: integer): RawUtf8;
@@ -8360,10 +8406,7 @@ begin
   if Count <= 0 then
     FastAssignNew(result)
   else
-  begin
-    FastSetString(result, Count);
-    FillCharFast(pointer(result)^, Count, byte(Ch));
-  end;
+    FillCharFast(FastSetString(result, Count)^, Count, byte(Ch));
 end;
 
 function QuotedStr(const S: RawUtf8; Quote: AnsiChar): RawUtf8;
@@ -8406,8 +8449,7 @@ begin
     for i := quote1 to PLen - 1 do
       if P[i] = Quote then
         inc(nquote);
-  FastSetString(result, PLen + nquote + 2);
-  r := pointer(result);
+  r := FastSetString(result, PLen + nquote + 2);
   r^ := Quote;
   inc(r);
   if nquote = 0 then
@@ -8713,7 +8755,7 @@ begin
       while p^ in [#9, ' '] do // trim left
         inc(p);
       len := 0;
-      while p[len] > #13 do      // end of line/value
+      while p[len] > #13 do // end of line/value
         inc(len);
       while p[len - 1] = ' ' do  // trim right
         dec(len);
@@ -9814,6 +9856,17 @@ begin
   qs.Sort(pointer(Values), L, R);
 end;
 
+function SumRawUtf8Length(Values: PRawUtf8; n: integer): TStrLen;
+begin
+  result := 0;
+  if n > 0 then
+    repeat
+      inc(result, length(Values^));
+      inc(Values);
+      dec(n);
+    until n = 0;
+end;
+
 function DeduplicateRawUtf8Sorted(val: PPointerArray; last: PtrInt): PtrInt;
 var
   i: PtrInt;
@@ -10591,8 +10644,7 @@ begin
   if (u4 = nil) or
      (L <= 0) then
     exit;
-  FastSetString(u, L * 6); // prepare for the worse (paranoid)
-  p := pointer(u);
+  p := FastSetString(u, L * 6); // prepare for the worse (paranoid)
   repeat
     inc(p, Ucs4ToUtf8(u4^, p));
     inc(u4);

@@ -785,7 +785,7 @@ begin
         for i := textlen downto 1 do
           if PByteArray(text)[i - 1] in [10, 13] then
           begin
-            fRedirect.Write(pointer(text)^, i); // write up to last LF
+            fRedirect.WriteBuffer(pointer(text)^, i); // write up to last LF
             textstart := i;
             dec(textlen, i);
             break;
@@ -796,7 +796,7 @@ begin
           result := true; // aborted during rotation
       end;
       // text output to log file
-      fRedirect.Write(PByteArray(text)[textstart], textlen);
+      fRedirect.WriteBuffer(PByteArray(text)[textstart], textlen);
       //TODO: optional TSynLog format with timestamps
     except
       on E: Exception do
@@ -1090,7 +1090,7 @@ constructor TSynAngelizeSettings.Create;
 begin
   inherited Create;
   fHttpTimeoutMS := 200;
-  fFolder := IncludeTrailingPathDelimiter(Executable.ProgramFilePath + 'services');
+  fFolder := MakePath([Executable.ProgramFilePath, 'services'], true);
   fExt := '.service';
   fCommandFile := 'cmd';
 end;

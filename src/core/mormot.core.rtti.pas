@@ -589,12 +589,11 @@ type
     function GetEnumNameTrimed(const Value): RawUtf8;
       {$ifdef HASSAFEINLINE}inline;{$endif}
     /// get the enumeration names corresponding to a set value as CSV
-    function GetSetName(const value; trimmed: boolean = false;
-      sep: AnsiChar = ','): RawUtf8;
+    function GetSetName(const value; trimmed: boolean = false; sep: AnsiChar = ','): RawUtf8;
     /// get the enumeration names corresponding to a set value as a RawUtf8 rray
     // - optionally return the corresponding ordinal values in a TIntegerDynArray
     procedure GetSetNameArray(const value; var res: TRawUtf8DynArray;
-      trimmed: boolean = false; resOrd: PIntegerDynArray = nil);
+    trimmed: boolean = false; resOrd: PIntegerDynArray = nil);
     /// get the enumeration names corresponding to a set value as JSON array
     function GetSetNameJsonArray(Value: cardinal; SepChar: AnsiChar = ',';
       FullSetsAsStar: boolean = false): RawUtf8; overload;
@@ -846,6 +845,9 @@ type
     /// for ordinal types, get the storage size and sign
     function RttiOrd: TRttiOrd;
       {$ifdef HASSAFEINLINE}inline;{$endif}
+    /// for ordinal types, get the 64-bit integer value from text
+    // - supports integer numbers but also enums and sets as CSV text
+    function OrdFromText(const Text: RawUtf8; out Value: Int64): boolean;
     /// return TRUE if the property is an unsigned 64-bit field (QWord/UInt64)
     function IsQWord: boolean;
       {$ifdef HASSAFEINLINE}inline;{$endif}
@@ -997,7 +999,8 @@ type
       OnlyImplementedBy: TInterfacedObjectClass;
       out AncestorsImplementedEntry: TPointerDynArray);
     /// for rkInterface: check if this type (or ancestor) implements a TGuid
-    function InterfaceImplements(const AGuid: TGuid): boolean;
+    function InterfaceImplements(
+      {$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}aGuid: TGuid): boolean;
   end;
 
   {$A+}
@@ -1499,7 +1502,6 @@ function ClassFieldNamesAllPropsAsText(
   ClassType: TClass; IncludePropType: boolean = false;
   Types: TRttiKinds = [low(TRttiKind)..high(TRttiKind)]): RawUtf8;
 
-
 type
   /// information about one method, as returned by GetPublishedMethods
   TPublishedMethodInfo = record
@@ -1516,6 +1518,9 @@ type
 // - will work with FPC and Delphi RTTI
 function GetPublishedMethods(Instance: TObject;
   out Methods: TPublishedMethodInfoDynArray; aClass: TClass = nil): integer;
+
+/// retrieve all published method names about any class
+function GetPublishedMethodNames(aClass: TClass): TRawUtf8DynArray;
 
 /// copy class published properties via names using RTTI
 // - copy integer, Int64, enumerates (including boolean), variant, records,
@@ -1597,7 +1602,12 @@ procedure ClearObject(Value: TObject; FreeAndNilNestedObjects: boolean = false);
 procedure FinalizeObject(Value: TObject);
   {$ifdef HASINLINE} inline; {$endif}
 
-/// fill a class instance properties from command line switches
+/// fill a simple value from a command line switch using RTTI
+// - works with strings, numbers, flots and even enum/set text identifiers
+function SetValueFromExecutableCommandLine(var Value; ValueInfo: PRttiInfo;
+  const SwitchName, Description: RawUtf8; CommandLine: TExecutableCommandLine = nil): boolean;
+
+/// fill a class instance properties from command line switches using RTTI
 // - SwitchPrefix + property name will be searched in CommandLine.Names[]
 // - is typically used to fill a settings class instance
 // - won't include any nested class or dynamic array properties
@@ -1682,7 +1692,7 @@ procedure SetEnumFromOrdinal(aTypeInfo: PRttiInfo; out Value; Ordinal: PtrUInt);
 
 /// helper to retrieve the CSV text of all enumerate items defined in a set
 function GetSetName(aTypeInfo: PRttiInfo; const value;
-  trimmed: boolean = false): RawUtf8;
+  trimmed: boolean = false; sep: AnsiChar = ','): RawUtf8;
 
 /// retrieve the text of all enumerate items defined in a set as dynamic array
 // - optionally return the corresponding ordinal values in a TIntegerDynArray
@@ -3763,8 +3773,7 @@ begin
   TrimLeftLowerCaseShort(GetEnumName(Value), result);
 end;
 
-function TRttiEnumType.GetSetName(const value; trimmed: boolean;
-  sep: AnsiChar): RawUtf8;
+function TRttiEnumType.GetSetName(const value; trimmed: boolean; sep: AnsiChar): RawUtf8;
 var
   j: PtrInt;
   PS, v: PShortString;
@@ -3799,8 +3808,8 @@ begin
   tmp.Done(result, CP_UTF8);
 end;
 
-procedure TRttiEnumType.GetSetNameArray(const value; var res: TRawUtf8DynArray;
-  trimmed: boolean; resOrd: PIntegerDynArray);
+procedure TRttiEnumType.GetSetNameArray(const value;
+  var res: TRawUtf8DynArray; trimmed: boolean; resOrd: PIntegerDynArray);
 var
   n, j: PtrInt;
   PS: PShortString;
@@ -3964,6 +3973,26 @@ end;
 function TRttiInfo.RttiOrd: TRttiOrd;
 begin
   result := TRttiOrd(GetTypeData(@self)^.OrdType);
+end;
+
+function TRttiInfo.OrdFromText(const Text: RawUtf8; out Value: Int64): boolean;
+begin // caller should have verified that Kind in rkOrdinalTypes
+  result := false;
+  if ToInt64(Text, Value) or // ordinal field from number
+     (IsBoolean and  // also FPC rkBool
+      GetInt64Bool(pointer(Text), Value)) then // boolean from true/false/yes/no
+  else if Text= '' then
+    exit
+  else if Kind = rkEnumeration then // enumerate field from text
+  begin
+    Value := GetEnumNameValue(@self, Text, {trimlowcase=}true);
+    if Value < 0 then
+      exit; // not a text enum
+  end else if Kind = rkSet then
+    Value := GetSetCsvValue(@self, pointer(Text))
+  else
+    exit;
+  result := true;
 end;
 
 function TRttiInfo.IsCurrency: boolean;
@@ -4358,14 +4387,15 @@ begin
   until false;
 end;
 
-function TRttiInfo.InterfaceImplements(const AGuid: TGuid): boolean;
+function TRttiInfo.InterfaceImplements(
+  {$ifdef FPC_HAS_CONSTREF}constref{$else} const{$endif} aGuid: TGuid): boolean;
 var
   nfo: PRttiInfo;
   typ: PRttiInterfaceTypeData;
 begin
   result := false;
   if (@self = nil) or
-     IsNullGuid(AGuid) or
+     IsNullGuid(aGuid) or
      (Kind <> rkInterface) then
     exit;
   typ := InterfaceType;
@@ -4376,7 +4406,7 @@ begin
       exit;
     typ := nfo^.InterfaceType;
   until (ifHasGuid in typ^.IntfFlags) and
-        IsEqualGuid(AGuid, typ^.IntfGuid^);
+        IsEqualGuid(aGuid, typ^.IntfGuid^);
   result := true; // found
 end;
 
@@ -4508,21 +4538,8 @@ begin
     exit;
   k := TypeInfo^.Kind;
   if k in rkOrdinalTypes then
-    if ToInt64(Value, v) or // ordinal field from number
-       (TypeInfo^.IsBoolean and  // also FPC rkBool
-        GetInt64Bool(pointer(Value), v)) then // boolean from true/false/yes/no
+    if TypeInfo^.OrdFromText(Value, v) then
       SetInt64Value(Instance, v)
-    else if Value = '' then
-      exit
-    else if k = rkEnumeration then // enumerate field from text
-    begin
-      v := GetEnumNameValue(TypeInfo, Value, {trimlowcase=}true);
-      if v < 0 then
-        exit; // not a text enum
-      SetOrdProp(Instance, v);
-    end
-    else if k = rkSet then // set field from CSV text
-      SetOrdProp(Instance, GetSetCsvValue(TypeInfo, pointer(Value)))
     else
       exit
   else if k in rkStringTypes then
@@ -5414,6 +5431,16 @@ begin
   result := false;
 end;
 
+function GetPublishedMethodNames(aClass: TClass): TRawUtf8DynArray;
+var
+  m: PtrInt;
+  methods: TPublishedMethodInfoDynArray;
+begin
+  SetLength(result, GetPublishedMethods(nil, methods, aClass));
+  for m := 0 to length(result) - 1 do
+    result[m] := methods[m].Name;
+end;
+
 function ClassHierarchyWithField(ClassType: TClass): TClassDynArray;
 
   procedure InternalAdd(C: TClass; var list: TClassDynArray);
@@ -5897,6 +5924,34 @@ begin
   result := true;
 end;
 
+function SetValueFromExecutableCommandLine(var Value; ValueInfo: PRttiInfo;
+  const SwitchName, Description: RawUtf8; CommandLine: TExecutableCommandLine): boolean;
+var
+  rc: TRttiCustom;
+  desc, v: RawUtf8;
+begin
+  result := false;
+  if @Value = nil then
+    exit; // avoid GPF
+  rc := Rtti.RegisterType(ValueInfo);
+  if rc = nil then
+    exit;
+  if rc.Kind in [rkEnumeration, rkSet] then // append idents to the description
+  begin
+    rc.Cache.EnumInfo^.GetEnumNameTrimedAll(desc);
+    if rc.Kind = rkEnumeration then
+      desc := Join([Description, ' - values: ' , StringReplaceChars(desc, ',', '|')])
+    else
+      desc := Join([Description, ' - values: set of ', desc]);
+  end
+  else
+    desc := Description;
+  if CommandLine = nil then
+    CommandLine := Executable.Command;
+  result := CommandLine.Get(SwitchName, v, desc) and
+            rc.ValueSetText(@Value, v);
+end;
+
 function SetObjectFromExecutableCommandLine(Value: TObject;
   const SwitchPrefix, DescriptionSuffix: RawUtf8;
   CommandLine: TExecutableCommandLine): boolean;
@@ -6102,13 +6157,14 @@ begin
   aTypeInfo^.EnumBaseType^.SetEnumFromOrdinal(Value, Ordinal);
 end;
 
-function GetSetName(aTypeInfo: PRttiInfo; const value; trimmed: boolean): RawUtf8;
+function GetSetName(aTypeInfo: PRttiInfo; const value;
+  trimmed: boolean; sep: AnsiChar): RawUtf8;
 begin
-  result := aTypeInfo^.SetEnumType^.EnumBaseType.GetSetName(value, trimmed);
+  result := aTypeInfo^.SetEnumType^.EnumBaseType.GetSetName(value, trimmed, sep);
 end;
 
-function GetSetNameArray(aTypeInfo: PRttiInfo; const value;
-  trimmed: boolean; resOrd: PIntegerDynArray): TRawUtf8DynArray;
+function GetSetNameArray(aTypeInfo: PRttiInfo; const value; trimmed: boolean;
+  resOrd: PIntegerDynArray): TRawUtf8DynArray;
 begin
   aTypeInfo^.SetEnumType^.EnumBaseType.GetSetNameArray(value, result, trimmed, resOrd);
 end;
@@ -9128,14 +9184,18 @@ var
   f: double;
 begin
   result := true;
-  if rcfHasRttiOrd in Cache.Flags then
-    if ToInt64(Text, v) then
-      RTTI_TO_ORD[Cache.RttiOrd](Data, v)
+  if Cache.Kind in rkOrdinalTypes then
+    if Cache.Info^.OrdFromText(Text, v) then // integer but also enum/set idents
+      if rcfHasRttiOrd in Cache.Flags then
+        RTTI_TO_ORD[Cache.RttiOrd](Data, v)
+      else if rcfGetInt64Prop in Cache.Flags then
+        PInt64(Data)^ := v
+      else
+        result := false
     else
       result := false
-  else if rcfGetInt64Prop in Cache.Flags then
-    result := ToInt64(Text, PInt64(Data)^)
-  else case Parser of
+  else
+  case Parser of
     ptCurrency:
       PInt64(Data)^ := StrToCurr64(pointer(Text)); // no temp Double conversion
     ptRawUtf8:

@@ -2731,7 +2731,8 @@ begin
         TAesPrng.Fill(TAesBlock(Issuer))
     else
       EccIssuer(IssuerText, Issuer);
-    if not Ecc256r1MakeKey(PublicKey, fPrivateKey) then
+    if not ecc_make_key_pas(PublicKey, fPrivateKey) then
+      // OpenSSL's Ecc256r1MakeKey is faster, but our random source seems safer
       EEccException.RaiseUtf8('%.CreateNew: MakeKey?', [self]);
     if @Ecc256r1Verify = @ecdsa_verify_pas then
     begin
@@ -2772,8 +2773,7 @@ constructor TEccCertificateSecret.CreateFromSecureFile(
   Pbkdf2Round: integer; Aes: TAesAbstractClass);
 begin
   CreateFromSecureFile(
-    IncludeTrailingPathDelimiter(FolderName) + Utf8ToString(Serial),
-    PassWord, Pbkdf2Round, Aes);
+    MakePath([FolderName, Serial]), PassWord, Pbkdf2Round, Aes);
 end;
 
 constructor TEccCertificateSecret.CreateFrom(Cert: TEccCertificate;
@@ -2904,8 +2904,7 @@ begin
     result := false
   else
     result := FileFromString(SaveToSecureBinary(PassWord, AFStripes,
-      Pbkdf2Round, Aes, NoHeader), IncludeTrailingPathDelimiter(DestFolder) +
-      SaveToSecureFileName);
+      Pbkdf2Round, Aes, NoHeader), MakePath([DestFolder, SaveToSecureFileName]));
 end;
 
 function TEccCertificateSecret.SaveToSecureFiles(const PassWord: RawUtf8;
@@ -5237,7 +5236,8 @@ var
 begin
   if privpwd <> '' then
     ECrypt.RaiseUtf8('%.GenerateDer: unsupported privpwd', [self]);
-  if not Ecc256r1MakeKey(rawpub, rawpriv) then
+  if not ecc_make_key_pas(rawpub, rawpriv) then
+    // OpenSSL's Ecc256r1MakeKey is faster, but our random source seems safer
     exit;
   pub := EccToDer(rawpub);
   priv := EccToDer(rawpriv);
@@ -5408,7 +5408,8 @@ begin
   fKeyAlgo := CAA_CKA[Algorithm];
   if Algorithm = caaES256 then
     if IsZero(fEcc) and
-       Ecc256r1MakeKey(eccpub, fEcc) then
+       ecc_make_key_pas(eccpub, fEcc) then
+       // OpenSSL's Ecc256r1MakeKey is faster, but our random source seems safer
       result := Ecc256r1UncompressAsn1(eccpub);
 end;
 

@@ -1859,7 +1859,7 @@ var
         if SearchRecValidFolder(F, ffoIncludeHiddenFiles in Options) and
            ((IgnoreFileName = '') or
             (AnsiCompareFileName(F.Name, IgnoreFileName) <> 0)) then
-          SearchFolder(IncludeTrailingPathDelimiter(folder + F.Name));
+          SearchFolder(MakePath([folder, F.Name], true));
       until FindNext(F) <> 0;
       FindClose(F);
     end;
@@ -3089,10 +3089,10 @@ function SearchSBNDMQ2ComputeMask(const Pattern: RawUtf8;
 var
   i: PtrInt;
   p: PAnsiChar absolute Pattern;
-  m: PSBNDMQ2Mask absolute result;
+  m: PSBNDMQ2Mask;
   c: PCardinal;
 begin
-  FastNewRawByteString(result, SizeOf(m^));
+  m := FastNewRawByteString(result, SizeOf(m^));
   FillCharFast(m^, SizeOf(m^), 0);
   for i := 0 to length(Pattern) - 1 do
   begin
@@ -4530,8 +4530,8 @@ end;
 procedure TSynBloomFilter.Insert(aValue: pointer; aValueLen: integer);
 var
   h: integer;
-  h1, h2: cardinal; // https://goo.gl/Pls5wi
-begin
+  h1, h2: cardinal;
+begin // https://www.eecs.harvard.edu/~michaelm/postscripts/tr-02-05.pdf
   if (self = nil) or
      (aValueLen <= 0) or
      (fBits = 0) then
@@ -4563,7 +4563,7 @@ end;
 function TSynBloomFilter.MayExist(aValue: pointer; aValueLen: integer): boolean;
 var
   h: integer;
-  h1, h2: cardinal; // adding h2 is enough and safe - see https://goo.gl/Pls5wi
+  h1, h2: cardinal; // adding h2 is enough and safe - see pdf above
 begin
   result := false;
   if (self = nil) or
@@ -4938,8 +4938,7 @@ var
 begin
   PEnd := PAnsiChar(P) + Len - 4;
   DestLen := FromVarUInt32(P);
-  FastNewRawByteString(Dest, DestLen);
-  D := pointer(Dest);
+  D := FastNewRawByteString(Dest, DestLen);
   DEnd := D + DestLen;
   crc := 0;
   while PAnsiChar(P) < PEnd do

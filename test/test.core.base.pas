@@ -742,6 +742,19 @@ begin
 end;
 
 procedure TTestCoreBase.FastStringCompare;
+
+  procedure _HasAnyChar(const text, forbidden: RawUtf8; expected: boolean = true);
+  var
+    any: TSynAnsicharSet;
+    i: PtrInt;
+  begin
+    Check(ContainsChars(text, forbidden) = expected);
+    any := [];
+    for i := 1 to length(forbidden) do
+      include(any, forbidden[i]);
+    Check(HasAnyChar(text, any) = expected);
+  end;
+
 begin
   CheckEqual(CompareText('', ''), 0);
   Check(CompareText('abcd', '') > 0);
@@ -789,6 +802,45 @@ begin
   CheckEqual(strspn(PAnsiChar('baabbaabbaabbabcd'), PAnsiChar('ab')), 15);
   CheckEqual(strspn(PAnsiChar('baabbaabbaabbaabcd'), PAnsiChar('ab')), 16);
   CheckEqual(strspn(PAnsiChar('baabbaabbaababaabcd'), PAnsiChar('ab')), 17);
+  _HasAnyChar('', '', false);
+  _HasAnyChar('', 'a', false);
+  _HasAnyChar('', 'aa', false);
+  _HasAnyChar('a', '', false);
+  _HasAnyChar('abcde', '', false);
+  _HasAnyChar('abdef', 'cg', false);
+  _HasAnyChar('a', 'c', false);
+  _HasAnyChar('a', 'cd', false);
+  _HasAnyChar('a', 'cdef', false);
+  _HasAnyChar('a', 'cdefg', false);
+  _HasAnyChar('a', 'cdefga');
+  _HasAnyChar('abcde', 'a');
+  _HasAnyChar('abcde', 'b');
+  _HasAnyChar('abcde', 'c');
+  _HasAnyChar('abcde', 'e');
+  _HasAnyChar('abcde', 'ga');
+  _HasAnyChar('abcde', 'gb');
+  _HasAnyChar('abcde', 'gc');
+  _HasAnyChar('abcde', 'ge');
+  _HasAnyChar('abcde', 'ihga');
+  _HasAnyChar('abcde', 'ihgb');
+  _HasAnyChar('abcde', 'ihgc');
+  _HasAnyChar('abcde', 'ihge');
+  _HasAnyChar('abcde', 'jihga');
+  _HasAnyChar('abcde', 'jihgb');
+  _HasAnyChar('abcde', 'jihgc');
+  _HasAnyChar('abcde', 'jihge');
+  _HasAnyChar('abcde', 'jihgak');
+  _HasAnyChar('abcde', 'jihgbk');
+  _HasAnyChar('abcde', 'jihgck');
+  _HasAnyChar('abcde', 'jihgek');
+  Check(HasOnlyChar('abab', ['a' .. 'c']));
+  Check(HasOnlyChar('abab', ['a' .. 'c']));
+  Check(HasOnlyChar('abbab', ['a' .. 'c']));
+  Check(HasOnlyChar('abab', ['a' .. 'b']));
+  Check(not HasOnlyChar('abaeb', ['a' .. 'c']));
+  Check(not HasOnlyChar('eabab', ['a' .. 'c']));
+  Check(not HasOnlyChar('ababe', ['a' .. 'c']));
+  Check(HasOnlyChar('ababe', ['a' .. 'e']));
 end;
 
 procedure TTestCoreBase.IniFiles;
@@ -3963,8 +4015,10 @@ var
   i32, i32_: TIntegerDynArray;
   i64: TInt64DynArray;
   i, n: PtrInt;
+  c: integer;
   timer: TPrecisionTimer;
 begin
+  CheckEqual(9007199254740991, MAX_SAFE_JS_INTEGER);
   CheckEqual(NextPowerOfTwo(0), 1);
   CheckEqual(NextPowerOfTwo(1), 1);
   CheckEqual(NextPowerOfTwo(2), 2);
@@ -4145,6 +4199,31 @@ begin
   check(i64[1] = 1);
   check(i64[2] = 2);
   check(i64[3] = 3);
+  c := 4;
+  AddSortedInt64(i64, c, 10);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '0,1,2,3,10');
+  AddSortedInt64(i64, c, 20);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '0,1,2,3,10,20');
+  AddSortedInt64(i64, c, 15);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '0,1,2,3,10,15,20');
+  RemoveSortedInt64SmallerThan(i64, c, -100);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '0,1,2,3,10,15,20');
+  RemoveSortedInt64SmallerThan(i64, c, 0);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '0,1,2,3,10,15,20');
+  RemoveSortedInt64SmallerThan(i64, c, 1);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '1,2,3,10,15,20');
+  RemoveSortedInt64SmallerThan(i64, c, 2);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '2,3,10,15,20');
+  RemoveSortedInt64SmallerThan(i64, c, 9);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '10,15,20');
+  RemoveSortedInt64SmallerThan(i64, c, 17);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '20');
+  RemoveSortedInt64SmallerThan(i64, c, 20);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '20');
+  RemoveSortedInt64SmallerThan(i64, c, 170);
+  Check(i64 = nil);
+  CheckEqual(c, 0);
+  CheckEqual(Int64DynArrayToCsv(pointer(i64), c), '');
   for n := 1 to 1000 do
   begin
     SetLength(i64, n);
@@ -4945,16 +5024,15 @@ begin
   NotifyTestSpeed('StrInt64', 100000, 0, @Timer);
 end;
 
-function LowerCaseAscii7(const S: RawByteString): RawByteString;
+function LowerCaseAscii7(const S: RawByteString): RawUtf8;
 var
   Ch: AnsiChar;
   L: Integer;
   Source, Dest: PAnsiChar;
 begin
   L := Length(S);
-  SetLength(result, L);
+  Dest := FastSetString(result, L);
   Source := Pointer(S);
-  Dest := Pointer(result);
   while L <> 0 do
   begin
     Ch := Source^;
@@ -5475,11 +5553,40 @@ begin
   Check(not RawUtf8DynArraySame(arr, arr2), 'RawUtf8DynArraySame4');
   Check(RawUtf8DynArraySame(arr, arr2, true), 'RawUtf8DynArraySame4i');
   arr := CsvToRawUtf8DynArray('two,one,one');
+  CheckEqual(RawUtf8ArrayToCsv(arr), 'two,one,one');
+  CheckEqual(RawUtf8ArrayToCsv(arr, ''), 'twooneone');
+  CheckEqual(RawUtf8ArrayToCsv(arr, '/', {rev=}true), 'one/one/two');
   Check(not RawUtf8DynArrayEquals(arr, arr2), 'RawUtf8DynArrayEquals5');
   Check(RawUtf8DynArrayContains(arr, arr2), 'RawUtf8DynArrayContains5');
   Check(RawUtf8DynArrayContains(arr, arr2, {insens=}true), 'RawUtf8DynArrayContains5i');
   Check(not RawUtf8DynArraySame(arr, arr2), 'RawUtf8DynArraySame5');
   Check(not RawUtf8DynArraySame(arr, arr2, true), 'RawUtf8DynArraySame5i');
+  CheckEqual(Join([]), '');
+  CheckEqual(Join(['one']), 'one');
+  CheckEqual(Join(['one', 'two']), 'onetwo');
+  CheckEqual(Join(['', 'one', 'two']), 'onetwo');
+  CheckEqual(Join(['one', 'two', ' three ']), 'onetwo three ');
+  CheckEqual(Join(['one', 'two', '', 'three']), 'onetwothree');
+  CheckEqual(JoinCsv('', []), '');
+  CheckEqual(JoinCsv('', ['one']), 'one');
+  CheckEqual(JoinCsv('', ['one', 'two']), 'onetwo');
+  CheckEqual(JoinCsv('', ['', 'one', 'two']), 'onetwo');
+  CheckEqual(JoinCsv('', ['one', 'two', ' three ']), 'onetwo three ');
+  CheckEqual(JoinCsv('', ['one', 'two', '', 'three']), 'onetwothree');
+  CheckEqual(JoinCsv(',', []), '');
+  CheckEqual(JoinCsv(',', ['', '']), ',');
+  CheckEqual(JoinCsv(',', ['one']), 'one');
+  CheckEqual(JoinCsv(',', ['one', 'two']), 'one,two');
+  CheckEqual(JoinCsv(',', ['one', 'two', ' three ']), 'one,two, three ');
+  CheckEqual(JoinCsv(',', ['one', 'two', '', 'three']), 'one,two,,three');
+  CheckEqual(JoinCsv('//', ['one'], true), 'one');
+  CheckEqual(JoinCsv('//', ['one', 'two'], true), 'two//one');
+  CheckEqual(JoinCsv('//', ['1', '2', '3'], true), '3//2//1');
+  CheckEqual(JoinCsv(',', ['one', 'two'], {reverse=}true), 'two,one');
+  CheckEqual(JoinCsv(',', ['one', 'two', 'three '], true), 'three ,two,one');
+  CheckEqual(JoinCsv(',', ['one', 'two', ''], true), ',two,one');
+  CheckEqual(JoinCsv(',', ['one'], true), 'one');
+  CheckEqual(JoinCsv(',', ['', ''], true), ',');
   Finalize(arr);
   CsvToRawUtf8DynArray(res, ',', '', arr);
   Check(arr[0] = 'one');
@@ -5877,7 +5984,7 @@ begin
     SetString(Up2, PAnsiChar(pointer(U)), L);
     L := Utf8UpperCopy(pointer(Up), pointer(U), L) - pointer(Up);
     Check(L <= length(U));
-    CheckEqual(ConvertCaseUtf8(Pointer(Up2), NormToUpperByte), L);
+    CheckEqual(ConvertCaseUtf8(pointer(Up2), pointer(Up2), NormToUpperByte), L);
     if Up <> '' then
       Check(EqualBuf(Up, Up2));
     if CurrentAnsiConvert.CodePage = CODEPAGE_US then
@@ -7195,6 +7302,8 @@ var
   end;
 
 begin
+  CheckEqual(ord(arm64DCPODP), 64);
+  CheckEqual(ord(arm32AES), 32);
   CheckEqual(SizeOf(TSmbiosBiosFlags), 8);
   CheckEqual(SizeOf(TSmbiosMemory) - 7 * SizeOf(RawUtf8), 11);
   CheckEqual(SizeOf(TSmbiosMemoryArray) - 2 * SizeOf(pointer), 5);
@@ -7966,7 +8075,7 @@ begin
   Check(IdemPropNameU('', ''));
   for i := 0 to 100 do
     Check(IdemPropNameU(RawUtf8OfChar('a', i), RawUtf8OfChar('A', i)));
-  Check(UpperCaseU('abcd') = 'ABCD');
+  CheckEqual(UpperCaseU('abcd'), 'ABCD');
   Check(IdemPropNameU('abcDe', abcde, 5));
   Check(not IdemPropNameU('abcD', abcde, 5));
   Check(not IdemPropNameU('abcDF', abcde, 5));
@@ -8368,7 +8477,7 @@ var
   fu: TUnixMSTime;
   fn: array[0..10] of TFileName;
   mp, mp2: TMultiPartDynArray;
-  s, mpc, mpct: RawUtf8;
+  s, ct, mpc, mpct: RawUtf8;
   st: THttpMultiPartStream;
   rfc2388: boolean;
 
@@ -8466,19 +8575,23 @@ begin
   Check(not HttpMethodWithNoBody('PUT'));
   Check(not HttpMethodWithNoBody('OPT'));
   // mime content types
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.h264'), 'video/H264');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto', 'def1'), 'def1');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.', 'def2'), 'def2');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.a', 'def3'), 'application/a');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.1', 'def4'), 'def4');
-  CheckEqual(GetMimeContentType(nil, 0, 'toto.ab', 'def5'), 'application/ab');
+  CheckEqual(GetMimeContentType('', 'toto.h264'), 'video/H264');
+  CheckEqual(GetMimeContentType('', 'toto', 'def1'), 'def1');
+  CheckEqual(GetMimeContentType('', 'toto.', 'def2'), 'def2');
+  CheckEqual(GetMimeContentType('', 'toto.a', 'def3'), 'application/a');
+  CheckEqual(GetMimeContentType('', 'toto.1', 'def4'), 'def4');
+  CheckEqual(GetMimeContentType('', 'toto.ab', 'def5'), 'application/ab');
   for i := 0 to high(MIMES) shr 1 do
-    CheckEqual(GetMimeContentType(nil, 0, 'toto.' + MIMES[i * 2]),
+    CheckEqual(GetMimeContentType('', 'toto.' + MIMES[i * 2]),
       ToUtf8(MIMES[i * 2 + 1]));
+  FastSetString(s, 34);
   for i := 0 to high(BIN) do
   begin
-    CheckEqual(GetMimeContentType(@BIN[i], 34, ''), BIN_MIME[i]);
-    CheckEqual(GetMimeContentTypeFromBuffer(@BIN[i], 34, ''), BIN_MIME[i]);
+    PCardinal(s)^ := BIN[i];
+    CheckEqual(GetMimeContentType(s), BIN_MIME[i]);
+    ct := '';
+    Check(GetMimeContentTypeFromBuffer(s, ct) <> mtUnknown);
+    CheckEqual(ct, BIN_MIME[i]);
   end;
   s := '<?xml';
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtXml);
@@ -8494,6 +8607,12 @@ begin
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
   s := '<!DocType HTML<html><body>';
   Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtHtml);
+  s := '{"json":123}';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtJson);
+  s := '["json",123]';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtJson);
+  s := '["json",'#0'123]';
+  Check(GetMimeContentTypeFromMemory(pointer(s), length(s)) = mtUnknown);
   Check(not IsContentTypeCompressible('anything'));
   Check(not IsContentTypeCompressible('toto/plain'));
   Check(IsContentTypeCompressible('text/plain'));
@@ -8505,6 +8624,8 @@ begin
   Check(IsContentTypeCompressible('application/xml'));
   Check(IsContentTypeCompressible('application/javascript'));
   Check(IsContentTypeCompressible('application/VND.API+JSON'));
+  Check(IsContentTypeCompressible('application/atom+xml'));
+  Check(not IsContentTypeCompressible('applications/atom+xml'));
   Check(not IsContentTypeCompressible('application/plain'));
   Check(IsContentTypeCompressible('image/svg'));
   Check(IsContentTypeCompressible('image/X-ico'));
@@ -8803,6 +8924,7 @@ const
 var
   gen: TSynUniqueIdentifierGenerator;
   i1, i2: TSynUniqueIdentifierBits;
+  js: TSynUnique53;
   i3: TSynUniqueIdentifier;
   rounds, i: integer;
   json, obfusc: RawUtf8;
@@ -8814,8 +8936,12 @@ begin
     try
       for i := 1 to 50000 do
       begin
+        i1.Value := 0;
+        i2.Value := 0;
         gen.ComputeNew(i1);
         gen.ComputeNew(i2);
+        check(i1.Value <> 0);
+        check(i2.Value <> 0);
         check(i1.ProcessID = 10);
         check(i2.ProcessID = 10);
         check(i1.CreateTimeUnix > JAN2015_UNIX);
@@ -8852,14 +8978,30 @@ begin
   try
     i3 := 0;
     check(gen.FromObfuscated(obfusc, i3), 'SharedObfuscationKey');
-    check(i1.Value = i3, 'FromObfuscated');
+    checkEqual(i1.Value, i3, 'FromObfuscated');
+    i1.Value := 0;
     timer.Start;
     for i := 1 to 100000 do
     begin
-      gen.ComputeNew(i1);
       gen.ComputeNew(i2);
+      check(i2.Value <> 0);
+      Check(i1.Value <> i2.Value, 'ComputeNew');
+      i1 := i2;
     end;
     NotifyTestSpeed('ComputeNew', gen.ComputedCount, 0, @timer);
+    check(i1.Value <> 0);
+    check(i2.Value <> 0);
+    js := i1.JavaScriptID;
+    check(js < MAX_SAFE_JS_INTEGER);
+    check(i1.Value <> 0);
+    check(i2.Value <> 0);
+    CheckEqual(js, i1.JavaScriptID);
+    CheckEqual(i1.Value, i2.Value);
+    i2.Value := 0;
+    CheckNotEqual(i1.Value, i2.Value);
+    CheckNotEqual(js, i2.JavaScriptID);
+    i2.JavaScriptID := js;
+    CheckEqual(i1.Value, i2.Value);
   finally
     gen.Free;
   end;
