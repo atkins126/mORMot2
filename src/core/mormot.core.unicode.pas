@@ -54,7 +54,7 @@ type
     /// the number of extra bytes in addition to the first UTF-8 byte
     // - since RFC 3629, only values within the 0..3 range should appear, i.e.
     // up to UTF8_MAXUTF16 within the UTF-16 surrogates range
-    Lookup: array[byte] of byte;
+    Lookup: TByteToByte;
     /// retrieve a >127 UCS-4 CodePoint from an UTF-8 sequence
     function GetHighUtf8Ucs4(var U: PUtf8Char): Ucs4CodePoint;
   end;
@@ -1187,12 +1187,12 @@ function StringToWinAnsi(const Text: string): WinAnsiString;
 
 type
   /// lookup table used for fast case conversion
-  TNormTable = packed array[AnsiChar] of AnsiChar;
+  TNormTable = TAnsiCharToAnsiChar;
   /// pointer to a lookup table used for fast case conversion
   PNormTable = ^TNormTable;
 
   /// lookup table used for fast case conversion
-  TNormTableByte = packed array[byte] of byte;
+  TNormTableByte = TByteToByte;
   /// pointer to a lookup table used for fast case conversion
   PNormTableByte = ^TNormTableByte;
 
@@ -1202,28 +1202,28 @@ type
 
 var
   /// lookup table used for fast case conversion to uppercase
-  // - handle 8-bit upper chars as in WinAnsi / code page 1252 (e.g. 'e' with
-  // or without accents will be translated into plain 'E' without accent)
+  // - handle 8-bit upper chars as in WinAnsi / code page 1252 (e.g. 'e' or 'E'
+  // with or without accents will be translated into plain 'E' without accent)
   // - is defined globally, since may be used from an inlined function
   NormToUpper: TNormTable;
   NormToUpperByte: TNormTableByte absolute NormToUpper;
 
   /// lookup table used for fast case conversion to lowercase
-  // - handle 8-bit upper chars as in WinAnsi / code page 1252 (e.g. 'e' with
-  // or without accents will be translated into plain 'e' without accent)
+  // - handle 8-bit upper chars as in WinAnsi / code page 1252 (e.g. 'e' or 'E'
+  // with or without accents will be translated into plain 'e' without accent)
   // - is defined globally, since may be used from an inlined function
   NormToLower: TNormTable;
   NormToLowerByte: TNormTableByte absolute NormToLower;
 
   /// this table will convert 'a'..'z' into 'A'..'Z'
-  // - so it will work with UTF-8 without decoding, whereas NormToUpper[] expects
-  // WinAnsi encoding to handle accents
+  // - so it will work with UTF-8 without decoding, whereas NormToUpper[]
+  // expects WinAnsi encoding to handle accents
   NormToUpperAnsi7: TNormTable;
   NormToUpperAnsi7Byte: TNormTableByte absolute NormToUpperAnsi7;
 
   /// this table will convert 'A'..'Z' into 'a'..'z'
-  // - so it will work with UTF-8 without decoding, whereas NormToUpper[] expects
-  // WinAnsi encoding to handle accents
+  // - so it will work with UTF-8 without decoding, whereas NormToLower[]
+  // expects WinAnsi encoding to handle accents
   NormToLowerAnsi7: TNormTable;
   NormToLowerAnsi7Byte: TNormTableByte absolute NormToLowerAnsi7;
 
@@ -1572,7 +1572,7 @@ function GetLineContains(p, pEnd, up: PUtf8Char): boolean;
 // - used internally for short keys match or case-insensitive hash
 // - returns final dest pointer
 // - will copy up to 255 AnsiChar (expect the dest buffer to be defined e.g. as
-// array[byte] of AnsiChar on the caller stack)
+// TByteToAnsiChar on the caller stack)
 function UpperCopy255(dest: PAnsiChar; const source: RawUtf8): PAnsiChar; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
@@ -1580,7 +1580,7 @@ function UpperCopy255(dest: PAnsiChar; const source: RawUtf8): PAnsiChar; overlo
 // - used internally for short keys match or case-insensitive hash
 // - returns final dest pointer
 // - will copy up to 255 AnsiChar (expect the dest buffer to be defined e.g. as
-// array[byte] of AnsiChar on the caller stack)
+// TByteToAnsiChar on the caller stack)
 function UpperCopy255Buf(dest: PAnsiChar; source: PUtf8Char; sourceLen: PtrInt): PAnsiChar;
 
 /// copy source into dest^ with WinAnsi 8-bit upper case conversion
@@ -1805,8 +1805,8 @@ function AnsiIComp(Str1, Str2: pointer): PtrInt;
 function PosExIPas(Sub, P: PUtf8Char; Offset: PtrUInt; Lookup: PNormTable): PtrInt;
 
 /// a ASCII-7 case-insensitive version of PosEx()
-// - will use the NormToUpperAnsi7 lookup table for character conversion
-function PosExI(const SubStr, S: RawUtf8; Offset: PtrUInt): PtrInt; overload;
+// - use NormToUpperAnsi7 lookup table, i.e. compare 'a'..'z' as 'A'..'Z'
+function PosExI(const SubStr, S: RawUtf8; Offset: PtrUInt = 1): PtrInt; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// a case-insensitive version of PosEx() with a specified lookup table
@@ -5871,13 +5871,15 @@ function IdemPCharAnsi(
   p: PUtf8Char; up: PAnsiChar): boolean; {$ifdef HASINLINE}inline;{$endif}
 begin
   // in this local IdemPChar() version, p and up are expected to be <> nil
-  result := false;
   dec(PtrUInt(p), PtrUInt(up));
   while true do
     if up^ = #0 then
       break
     else if table[up[PtrUInt(p)]] <> up^ then
-      exit
+    begin
+      result := false;
+      exit;
+    end
     else
       inc(up);
   result := true;
@@ -5892,13 +5894,15 @@ function IdemPCharByte(
   p: PUtf8Char; up: PAnsiChar): boolean; {$ifdef HASINLINE}inline;{$endif}
 begin
   // in this local IdemPChar() version, p and up are expected to be <> nil
-  result := false;
   dec(PtrUInt(p), PtrUInt(up));
   while true do
     if up^ = #0 then
       break
     else if table[PtrInt(up[PtrUInt(p)])] <> PByte(up)^ then
-      exit
+    begin
+      result := false;
+      exit;
+    end
     else
       inc(up);
   result := true;
@@ -8454,7 +8458,7 @@ begin
   inc(r);
   if nquote = 0 then
   begin
-    MoveFast(P^, r^, PLen);
+    MoveFast(P^, r^, PLen); // most common case is "some text" with no " within
     r[PLen] := Quote;
   end
   else
@@ -9129,7 +9133,7 @@ procedure CamelCase(P: PAnsiChar; len: PtrInt; var s: RawUtf8; const isWord: TSy
 var
   i: PtrInt;
   d: PAnsiChar;
-  tmp: array[byte] of AnsiChar;
+  tmp: TByteToAnsiChar;
 begin
   if len > SizeOf(tmp) then
     len := SizeOf(tmp);
@@ -9198,7 +9202,7 @@ var
 
 procedure SnakeCase(P: PAnsiChar; len: PtrInt; var s: RawUtf8);
 var
-  tmp: array[byte] of AnsiChar;
+  tmp: TByteToAnsiChar;
   d: PAnsiChar;
   flags, last: TSnakeCase;
 begin
@@ -9247,7 +9251,7 @@ end;
 
 function IsReservedKeyWord(const aName: RawUtf8): boolean;
 var
-  up: array[byte] of AnsiChar;
+  up: TByteToAnsiChar;
 begin
   UpperCopy255Buf(@up, pointer(aName), length(aName))^ := #0;
   result := FastFindPUtf8CharSorted(
@@ -9267,7 +9271,7 @@ end;
 
 procedure GetCaptionFromPCharLen(P: PUtf8Char; out result: string);
 var
-  tmp: array[byte] of AnsiChar;
+  tmp: TByteToAnsiChar;
 begin
   if P = nil then
     exit;
@@ -9679,7 +9683,7 @@ end;
 function FastFindUpperPUtf8CharSorted(P: PPUtf8CharArray; R: PtrInt;
   Value: PUtf8Char; ValueLen: PtrInt): PtrInt;
 var
-  tmp: array[byte] of AnsiChar;
+  tmp: TByteToAnsiChar;
 begin
   UpperCopy255Buf(@tmp, Value, ValueLen)^ := #0;
   result := FastFindPUtf8CharSorted(P, R, @tmp);
@@ -10043,13 +10047,12 @@ begin
   begin
     fSafe.WriteLock;
     try
-      if fFiles = nil then
+      if fFiles = nil then // use efficient getdents64() syscall
       begin
         if aReadMs <> nil then
           QueryPerformanceMicroSeconds(start);
-        fFiles := PosixFileNames(fFolder, fSubFolders); // fast syscall
+        fFiles := PosixFileNames(fFolder, fSubFolders, nil, nil, {excldir=}true);
         QuickSortRawUtf8(fFiles, length(fFiles), nil, @StrIComp);
-        // e.g. 4392 filenames from /home/ab/dev/lib/ in 7.20ms
         if aReadMs <> nil then
         begin
           QueryPerformanceMicroSeconds(stop);

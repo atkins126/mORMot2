@@ -392,6 +392,9 @@ const
   /// the maximum known RID value of S-1-5-21-xx-xx-xx-RID patterns
   WKR_RID_MAX = 584;
 
+function ToText(w: TWellKnownSid): PShortString; overload;
+function ToText(w: TWellKnownRid): PShortString; overload;
+
 
 { ****************** Security Descriptor Self-Relative Binary Structures }
 
@@ -1016,10 +1019,10 @@ type
         Int: TRawAceOperandInt);
       sctOctetString: (
         OctetBytes: cardinal;
-        Octet: array[byte] of byte);
+        Octet: TByteToByte);
       sctComposite: (
         CompositeBytes: cardinal;
-        Composite: array[byte] of byte);
+        Composite: TByteToByte);
       sctSid: (
         SidBytes: cardinal;
         Sid: TSid);
@@ -1030,7 +1033,7 @@ type
       sctResourceAttribute,
       sctDeviceAttribute: (
         UnicodeBytes: cardinal;
-        Unicode: array[byte] of WideChar);
+        Unicode: TByteToWideChar);
   end;
   PRawAceOperand = ^TRawAceOperand;
 
@@ -1307,6 +1310,8 @@ const
     'Private-Information',                     // kaPrivateInformation
     'ms-DS-Allowed-To-Act-On-Behalf-Of-Other-Identity',  // kaMsDsAllowedToActOnBehalfOfOtherIdentity
     'RAS-Information');                        // kaRasInformation
+
+function ToText(a: TAdsKnownAttribute): PShortString; overload;
 
 /// search a known AD schema attribute from its ObjectID
 // - is implemented via O(log(n)) binary search within ordered ATTR_UUID[]
@@ -2629,6 +2634,16 @@ begin
   KnownRidSid(wkr, dom, PSid(result)^);
 end;
 
+function ToText(w: TWellKnownSid): PShortString;
+begin
+  result := GetEnumNameRtti(TypeInfo(TWellKnownSid), ord(w));
+end;
+
+function ToText(w: TWellKnownRid): PShortString;
+begin
+  result := GetEnumNameRtti(TypeInfo(TWellKnownRid), ord(w));
+end;
+
 
 { ****************** Security Descriptor Self-Relative Binary Structures }
 
@@ -2750,6 +2765,11 @@ end;
 
 
 { ****************** Active Directory Definitions }
+
+function ToText(a: TAdsKnownAttribute): PShortString;
+begin
+  result := GetEnumNameRtti(TypeInfo(TAdsKnownAttribute), ord(a));
+end;
 
 function UuidToKnownAttribute(const u: TGuid): TAdsKnownAttribute;
 begin
@@ -3172,7 +3192,7 @@ begin
     AppendShortTwoChars(@SAR_SDDL[TSecAccessRight(i)][1], @s)
   else if mask - samWithSddl <> [] then
   begin
-    AppendShortTwoChars('0x', @s);        // we don't have all tokens it needs
+    AppendShortTwoChars('0x', @s);        // we don't have all needed tokens
     AppendShortIntHex(cardinal(mask), s); // store as @x##### hexadecimal
   end
   else
@@ -4772,9 +4792,9 @@ begin
   if SCOPE_P[scope] in Flags then
     AppendShortChar('P', @tmp);
   if SCOPE_AR[scope] in Flags then
-    AppendShortTwoChars('AR', @tmp);
+    AppendShortTwoChars(ord('A') + ord('R') shl 8, @tmp);
   if SCOPE_AI[scope] in Flags then
-    AppendShortTwoChars('AI', @tmp);
+    AppendShortTwoChars(ord('A') + ord('I') shl 8, @tmp);
   acl := @Dacl;
   if scope = sasSacl then
     acl := @Sacl;
@@ -4858,12 +4878,12 @@ begin
   tmp[0] := #0;
   if Owner <> '' then
   begin
-    tmp := 'O:';
+    AppendShortTwoChars(ord('O') + ord(':') shl 8, @tmp);
     SddlAppendSid(tmp, pointer(Owner), dom);
   end;
   if Group <> '' then
   begin
-    AppendShortTwoChars('G:', @tmp);
+    AppendShortTwoChars(ord('G') + ord(':') shl 8, @tmp);
     SddlAppendSid(tmp, pointer(Group), dom);
   end;
   sddl.AddShort(tmp);
@@ -5237,7 +5257,7 @@ end;
 function LookupSid(sid: PSid; out name, domain: RawUtf8;
   const server: RawUtf8): TSidType;
 var
-  n, d: array[byte] of WideChar;
+  n, d: TByteToWideChar;
   s: TSynTempBuffer;
   nl, dl, use: cardinal;
 begin

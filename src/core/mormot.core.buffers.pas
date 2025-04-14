@@ -8010,7 +8010,7 @@ begin
   result := PtrUInt(d);
   if d = nil then
     exit;
-  hex := @TwoDigitsHexWB;
+  hex := @TwoDigitsHex;
   repeat
     c := s^;
     inc(s);
@@ -8636,7 +8636,7 @@ end;
 
 function UrlDecodeNeedParameters(U, CsvNames: PUtf8Char): boolean;
 var
-  tmp: array[byte] of AnsiChar;
+  tmp: TByteToAnsiChar;
   L: integer;
   Beg: PUtf8Char;
 // UrlDecodeNeedParameters('price=20.45&where=LastName%3D','price,where') will
@@ -9364,7 +9364,7 @@ begin
   if (slen > 0) and
      (dmax > 7) then
   begin
-    tab := @TwoDigitsHexWBLower;
+    tab := @TwoDigitsHexLower;
     repeat
       c := s^;
       inc(s);
@@ -9650,13 +9650,15 @@ begin
   persec := '';
   if PerSecond <> 0 then
     FormatShort16(' %/s', [KBNoSpace(PerSecond)], persec);
-  KB(CurrentSize, curr, {nospace=}true);
+  curr[0] := #0;
+  AppendKB(CurrentSize, curr, {withspace=}false);
   if ExpectedSize = 0 then
     // size may not be known (e.g. server-side chunking)
     FormatUtf8('% % read% ...', [ctx, curr, persec], result)
   else
   begin
-    KB(ExpectedSize, expect, {nospace=}true);
+    expect[0] := #0;
+    AppendKB(ExpectedSize, expect, {withspace=}false);
     if CurrentSize < ExpectedSize then
     begin
       // we can state the current progression ratio

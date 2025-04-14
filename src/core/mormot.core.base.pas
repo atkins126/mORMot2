@@ -484,6 +484,17 @@ type
   PObjectArray = ^TObjectArray;
   TPtrIntArray = array[ 0 .. MaxInt div SizeOf(PtrInt) - 1 ] of PtrInt;
   PPtrIntArray = ^TPtrIntArray;
+  TByteToByte = array[byte] of byte;
+  TByteToAnsiChar = array[byte] of AnsiChar;
+  TByteToWideChar = array[byte] of WideChar;
+  /// type of mormot.core.unicode TNormTable lookup table
+  TAnsiCharToAnsiChar = array[AnsiChar] of AnsiChar;
+  /// type of a lookup table used for fast two-digit chars conversion
+  TAnsiCharToWord = array[AnsiChar] of word;
+  PAnsiCharToWord = ^TAnsiCharToWord;
+  /// type of a lookup table used for fast two-digit chars conversion
+  TByteToWord = array[byte] of word;
+  PByteToWord = ^TByteToWord;
   PInt64Rec = ^Int64Rec;
   PLongRec = ^LongRec;
   PPShortString = ^PShortString;
@@ -946,6 +957,9 @@ procedure AppendShortQWord(const value: QWord; var dest: ShortString);
 procedure AppendShortCurr64(const value: Int64; var dest: ShortString;
   fixeddecimals: PtrInt = 0);
 
+/// simple concatenation of no banker rounding floating point value as TwoDigits()
+procedure AppendShortTwoDigits(const Value: double; var Dest: shortstring);
+
 /// simple concatenation of a character into a @shorstring, checking its length
 // - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
 procedure AppendShortCharSafe(chr: AnsiChar; dest: PAnsiChar; const max: AnsiChar = #255);
@@ -958,7 +972,12 @@ procedure AppendShortChar(chr: AnsiChar; dest: PAnsiChar);
 
 /// simple concatenation of two characters into a @shorstring
 // - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
-procedure AppendShortTwoChars(twochars, dest: PAnsiChar);
+procedure AppendShortTwoChars(twochars, dest: PAnsiChar); overload;
+  {$ifdef HASINLINE} inline; {$endif}
+
+/// simple concatenation of two characters (as 16-bit integer) into a @shorstring
+// - dest is @shortstring and not shortstring to circumvent a Delphi inlining bug
+procedure AppendShortTwoChars(twochars: cardinal; dest: PAnsiChar); overload;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// simple concatenation of a #0 ending text into a @shorstring
@@ -1081,7 +1100,7 @@ function DateTimeToIsoString(dt: TDateTime): string;
 /// parse a '0x#####' buffer context into a 32-bit binary
 // - jump trailing '0x', then ends at first non hexadecimal character
 // - internal function to avoid linking mormot.core.buffers.pas
-function ParseHex0x(p: PAnsiChar): cardinal;
+function ParseHex0x(p: PAnsiChar; no0x: boolean = false): cardinal;
 
 /// parse an hexadecimal buffer into its raw binary
 // - parse up to n chars from p^, ending in case of not hexadecimal char
@@ -1268,6 +1287,7 @@ procedure SimpleRoundTo2DigitsCurr64(var Value: Int64);
 /// no banker rounding into text, with two digits after the decimal point
 // - i.e. SimpleRoundTo2DigitsCurr64() as text
 function TwoDigits(const d: double): TShort23;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// truncate a currency value to only 2 digits
 // - implementation will use fast Int64 math to avoid any precision loss due to
@@ -2336,25 +2356,25 @@ type
   /// map a 128-bit hash as an array of lower bit size values
   // - consumes 16 bytes of memory
   THash128Rec = packed record
-  case integer of
-  0: (
-      Lo, Hi: Int64);
-  1: (
-      L, H: QWord);
-  2: (
-      i0, i1, i2, i3: integer);
-  3: (
-      c0, c1, c2 ,c3: cardinal);
-  4: (
-      c: TBlock128);
-  5: (
-      b: THash128);
-  6: (
-      w: array[0..7] of word);
-  7: (
-      l64, h64: Int64Rec);
-  8: (
-      guid: TGuid);
+    case integer of
+      0: (
+          Lo, Hi: Int64);
+      1: (
+          L, H: QWord);
+      2: (
+          i0, i1, i2, i3: integer);
+      3: (
+          c0, c1, c2 ,c3: cardinal);
+      4: (
+          c: TBlock128);
+      5: (
+          b: THash128);
+      6: (
+          w: array[0..7] of word);
+      7: (
+          l64, h64: Int64Rec);
+      8: (
+          guid: TGuid);
   end;
   /// pointer to 128-bit hash map variable record
   PHash128Rec = ^THash128Rec;
@@ -2372,27 +2392,27 @@ type
   /// map a 256-bit hash as an array of lower bit size values
   // - consumes 32 bytes of memory
   THash256Rec = packed record
-  case integer of
-  0: (
-      Lo, Hi: THash128);
-  1: (
-      d0, d1, d2, d3: Int64);
-  2: (
-      i0, i1, i2, i3, i4, i5, i6, i7: integer);
-  3: (
-      c0, c1: TBlock128);
-  4: (
-      b: THash256);
-  5: (
-      q: array[0..3] of QWord);
-  6: (
-      c: array[0..7] of cardinal);
-  7: (
-      w: array[0..15] of word);
-  8: (
-     l, h: THash128Rec);
-  9: (
-     sha1: THash160);
+    case integer of
+      0: (
+          Lo, Hi: THash128);
+      1: (
+          d0, d1, d2, d3: Int64);
+      2: (
+          i0, i1, i2, i3, i4, i5, i6, i7: integer);
+      3: (
+          c0, c1: TBlock128);
+      4: (
+          b: THash256);
+      5: (
+          q: array[0..3] of QWord);
+      6: (
+          c: array[0..7] of cardinal);
+      7: (
+          w: array[0..15] of word);
+      8: (
+         l, h: THash128Rec);
+      9: (
+         sha1: THash160);
   end;
   /// pointer to 256-bit hash map variable record
   PHash256Rec = ^THash256Rec;
@@ -2415,36 +2435,36 @@ type
   /// map a 512-bit hash as an array of lower bit size values
   // - consumes 64 bytes of memory
   THash512Rec = packed record
-  case integer of
-  0: (
-      Lo, Hi: THash256);
-  1: (
-      h0, h1, h2, h3: THash128);
-  2: (
-      d0, d1, d2, d3, d4, d5, d6, d7: Int64);
-  3: (
-      i0, i1, i2, i3, i4, i5, i6, i7,
-      i8, i9, i10, i11, i12, i13, i14, i15: integer);
-  4: (
-      c0, c1, c2, c3: TBlock128);
-  5: (
-      b: THash512);
-  6: (
-      b160: THash160);
-  7: (
-      b384: THash384);
-  8: (
-      w: array[0..31] of word);
-  9: (
-      c: array[0..15] of cardinal);
-  10: (
-       i: array[0..7] of Int64);
-  11: (
-       q: array[0..7] of QWord);
-  12: (
-       r: array[0..3] of THash128Rec);
-  13: (
-       l, h: THash256Rec);
+    case integer of
+      0: (
+          Lo, Hi: THash256);
+      1: (
+          h0, h1, h2, h3: THash128);
+      2: (
+          d0, d1, d2, d3, d4, d5, d6, d7: Int64);
+      3: (
+          i0, i1, i2, i3, i4, i5, i6, i7,
+          i8, i9, i10, i11, i12, i13, i14, i15: integer);
+      4: (
+          c0, c1, c2, c3: TBlock128);
+      5: (
+          b: THash512);
+      6: (
+          b160: THash160);
+      7: (
+          b384: THash384);
+      8: (
+          w: array[0..31] of word);
+      9: (
+          c: array[0..15] of cardinal);
+      10: (
+           i: array[0..7] of Int64);
+      11: (
+           q: array[0..7] of QWord);
+      12: (
+           r: array[0..3] of THash128Rec);
+      13: (
+           l, h: THash256Rec);
   end;
   /// pointer to 512-bit hash map variable record
   PHash512Rec = ^THash512Rec;
@@ -3005,7 +3025,12 @@ type
 
 var
   /// internal flags used by FillCharFast - easier from asm that CpuFeatures
+  // - published here mainly for testing/regression purposes
   X64CpuFeatures: TX64CpuFeatures;
+
+const
+  // identify Intel/AMD AVX2+BMI support at Haswell level
+  CPUAVX2HASWELL = [cfAVX2, cfSSE42, cfBMI1, cfBMI2, cfCLMUL];
 
 {$ifdef ASMX64AVXNOCONST}
 /// simdjson asm as used by mormot.core.unicode on Haswell for FPC IsValidUtf8()
@@ -3023,18 +3048,26 @@ procedure Base64DecodeAvx2(var b64: PAnsiChar; var b64len: PtrInt; var b: PAnsiC
 // - note: Delphi RTL is far from efficient: on i386 the FPU is slower/unsafe,
 // and on x86_64, ERMS is wrongly used even for small blocks
 // - on ARM/AARCH64 POSIX, mormot.core.os would redirect to optimized libc
+{$ifdef FPC_PICX64}
+var FillcharFast: procedure(var dst; cnt: PtrInt; value: byte) = FillChar;
+{$else}
 procedure FillcharFast(var dst; cnt: PtrInt; value: byte);
+{$endif FPC_PICX64}
 
 /// our fast version of move() on Intel/AMD
 // - on Delphi Intel i386/x86_64, will use fast SSE2 instructions (if available)
 // - FPC i386 has fastmove.inc which is faster than our SSE2/ERMS version
-// - FPC x86_64 RTL is slower than our SSE2/AVX asm
+// - FPC x86_64 RTL is slower than our SSE2/AVX asm but supports PIC (.so)
 // - on non-Intel CPUs, it will fallback to the default RTL Move()
 // - on ARM/AARCH64 POSIX, mormot.core.os would redirect to optimized libc
 {$ifdef FPC_X86}
 var MoveFast: procedure(const Source; var Dest; Count: PtrInt) = Move;
 {$else}
-procedure MoveFast(const src; var dst; cnt: PtrInt);
+{$ifdef FPC_PICX64}
+var MoveFast: procedure(const Source; var Dest; Count: PtrInt) = Move;
+{$else}
+procedure MoveFast(const src; var dst; cnt: PtrInt); { use our AVX-ready asm }
+{$endif FPC_PICX64}
 {$endif FPC_X86}
 
 {$else}
@@ -4662,13 +4695,9 @@ begin
 end;
 
 function TwoDigits(const d: double): TShort23;
-var
-  v: Int64;
 begin
-  DoubleToCurrency(d, PCurrency(@v)^); // specific code for x87
-  SimpleRoundTo2DigitsCurr64(v);
   result[0] := #0;
-  AppendShortCurr64(v, result, {decimals=}2);
+  AppendShortTwoDigits(d, result);
 end;
 
 function TruncTo2Digits(const Value: Currency): Currency;
@@ -5192,6 +5221,12 @@ begin
   inc(dest[0], 2);
 end;
 
+procedure AppendShortTwoChars(twochars: cardinal; dest: PAnsiChar);
+begin
+  PWord(dest + ord(dest[0]) + 1)^ := twochars;
+  inc(dest[0], 2);
+end;
+
 procedure AppendShortBuffer(buf: PAnsiChar; len: PtrInt; dest: PAnsiChar);
 begin
   if len + ord(dest[0]) > 255 then
@@ -5312,11 +5347,29 @@ begin
      (p[l - 5] = '.') then
     if PCardinal(@p[l - 4])^ = $30303030 then
       dec(l, 5)  // x.0000 -> x
-    else if fixeddecimals <> 0 then
-      dec(l, 4 - fixeddecimals)
-    else if PWord(@p[l - 2])^ = $3030 then
-      dec(l, 2); // x.xx00 -> x.xx
+    else
+      case fixeddecimals of
+        0:
+          if PWord(@p[l - 2])^ = $3030 then
+            dec(l, 2); // x.xx00 -> x.xx
+        1:
+          if p[l - 4] = '0' then
+            dec(l, 5) // x.0 -> x (not truly fixed to 1 decimal)
+          else
+            dec(l, 3);
+      else
+        dec(l, 4 - fixeddecimals); // keep x.00 x.000
+      end;
   AppendShortBuffer(p, l, @dest);
+end;
+
+procedure AppendShortTwoDigits(const Value: double; var Dest: shortstring);
+var
+  v: Int64;
+begin
+  DoubleToCurrency(Value, PCurrency(@v)^); // specific code for x87
+  SimpleRoundTo2DigitsCurr64(v);
+  AppendShortCurr64(v, Dest, {decimals=}2);
 end;
 
 procedure AppendBufferToUtf8(src: PUtf8Char; srclen: PtrInt; var dest: RawUtf8);
@@ -5559,31 +5612,35 @@ begin
   end;
 end;
 
-function ParseHex0x(p: PAnsiChar): cardinal;
+function ParseHex0x(p: PAnsiChar; no0x: boolean): cardinal;
 var
   v0, v1: integer;
 begin
   result := 0;
   if p = nil then
     exit;
-  while p^ <> 'x' do
-    if p^ = #0 then
-      exit
-    else
-      inc(p);
-  repeat
+  if not no0x then
+  begin
+    while p^ <> 'x' do
+      if p^ = #0 then
+        exit
+      else
+        inc(p);
     inc(p); // points to trailing 'x' at start
+  end;
+  repeat
     v0 := Hex2Dec(p^);
     if v0 < 0 then
-      break; // not in '0'..'9','a'..'f'
+      break; // not in '0'..'9','a'..'f' -> trim right
     inc(p);
     v1 := Hex2Dec(p^);
     if v1 < 0 then
     begin
-      result := (result shl 4) or cardinal(v0); // only one char left
+      result := (result shl 4) or cardinal(v0); // only one char left = 4-bit
       break;
     end;
-    result := (result shl 8) or (cardinal(v0) shl 4) or cardinal(v1);
+    result := (result shl 8) or (cardinal(v0) shl 4) or cardinal(v1); // 8-bit
+    inc(p);
   until false;
 end;
 
@@ -6435,41 +6492,6 @@ begin
 end;
 
 {$endif CPU64}
-
-function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
-var
-  c: QWord;
-  d: cardinal;
-begin
-  if Value = 0 then
-  begin
-    result := P - 1;
-    result^ := '0';
-    exit;
-  end;
-  if Value < 0 then
-    c := -Value
-  else
-    c := Value;
-  if c < 10000 then
-  begin
-    result := P - 6; // only decimals -> append '0.xxxx'
-    PCardinal(result)^ := ord('0') + ord('.') shl 8;
-    YearToPChar(c, PUtf8Char(P) - 4);
-  end
-  else
-  begin
-    result := StrUInt64(P - 1, c);
-    d := PCardinal(P - 5)^; // in two explit steps for CPUARM (alf)
-    PCardinal(P - 4)^ := d;
-    P[-5] := '.'; // insert '.' just before last 4 decimals
-  end;
-  if Value < 0 then
-  begin
-    dec(result);
-    result^ := '-';
-  end;
-end;
 
 function ToShort(const val: Int64): TShort23;
 var
@@ -10156,12 +10178,12 @@ begin
   {$ifdef DISABLE_SSE42}
   // force fallback on Darwin x64 (as reported by alf) - clang asm bug?
   CpuFeatures := CpuFeatures -
-    [cfSSE3, cfSSE42, cfPOPCNT, cfAESNI, cfCLMUL, cfAVX, cfAVX2, cfFMA];
+    [cfSSE3, cfSSE42, cfPOPCNT, cfAESNI, cfCLMUL, cfAVX, cfAVX2, cfAVX10, cfFMA];
   {$else}
   if not (cfOSXS in CpuFeatures) or
      not IsXmmYmmOSEnabled then
     // AVX is available on the CPU, but not supported at OS context switch
-    CpuFeatures := CpuFeatures - [cfAVX, cfAVX2, cfFMA];
+    CpuFeatures := CpuFeatures - [cfAVX, cfAVX2, cfAVX10, cfFMA];
   {$endif DISABLE_SSE42}
   if cfRAND in CpuFeatures then
     try
@@ -12104,6 +12126,41 @@ begin
 end;
 
 {$endif ASMX86}
+
+function StrCurr64(P: PAnsiChar; const Value: Int64): PAnsiChar;
+var
+  c: QWord;
+  d: cardinal;
+begin
+  if Value = 0 then
+  begin
+    result := P - 1;
+    result^ := '0';
+    exit;
+  end;
+  if Value < 0 then
+    c := -Value
+  else
+    c := Value;
+  if c < 10000 then
+  begin
+    result := P - 6; // only decimals -> append '0.xxxx'
+    PCardinal(result)^ := ord('0') + ord('.') shl 8;
+    YearToPChar(c, PUtf8Char(P) - 4);
+  end
+  else
+  begin
+    result := StrUInt64(P - 1, c);
+    d := PCardinal(P - 5)^; // in two explit steps for CPUARM (alf)
+    PCardinal(P - 4)^ := d;
+    P[-5] := '.'; // insert '.' just before last 4 decimals
+  end;
+  if Value < 0 then
+  begin
+    dec(result);
+    result^ := '-';
+  end;
+end;
 
 function CompareBuf(const P1: RawByteString; P2: pointer; P2Len: PtrInt): integer;
 begin
