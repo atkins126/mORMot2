@@ -41,10 +41,12 @@ uses
   sysutils,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.rtti,
   mormot.core.unicode,
   mormot.core.text,
   mormot.core.buffers,
+  mormot.core.datetime,
   mormot.lib.openssl11,
   mormot.crypt.core,
   mormot.crypt.ecc256r1,
@@ -108,7 +110,7 @@ type
     procedure Init(aOwner: TAesAbstract; aCipherName: PUtf8Char);
     procedure Done;
     procedure Clone(another: PAesOsl);
-    procedure SetEvp(DoEncrypt: boolean; const method: shortstring);
+    procedure SetEvp(DoEncrypt: boolean; const method: ShortString);
     procedure UpdEvp(DoEncrypt: boolean; BufIn, BufOut: pointer; Count: cardinal);
   end;
 
@@ -334,7 +336,7 @@ type
 /// retrieve a low-level PEVP_MD digest from its algorithm name
 // - raise an EOpenSslHash if this algorithm is not found
 function OpenSslGetMdByName(const Algorithm: RawUtf8;
-  const Caller: shortstring): PEVP_MD; overload;
+  const Caller: ShortString): PEVP_MD; overload;
 
 /// retrieve a low-level PEVP_MD digest from mORMot THashAlgo enum
 // - returns nil if not found, e.g. if OpenSsl is not available
@@ -501,8 +503,8 @@ type
     fPrivKey, fPubKey: PEVP_PKEY;
     fAsymAlgo: TCryptAsymAlgo;
     function ComputeSignature(const headpayload: RawUtf8): RawUtf8; override;
-    procedure CheckSignature(const headpayload: RawUtf8; const signature: RawByteString;
-      var jwt: TJwtContent); override;
+    function CheckSignature(headpayload: PValuePUtf8Char;
+      const signature: RawByteString): TJwtResult; override;
   public
     /// initialize the JWT processing instance using any supported OpenSSL algorithm
     constructor Create(const aJwtAlgorithm, aHashAlgorithm: RawUtf8;
@@ -774,7 +776,7 @@ begin // another^.Owned is set by the caller
     end;
 end;
 
-procedure TAesOsl.SetEvp(DoEncrypt: boolean; const method: shortstring);
+procedure TAesOsl.SetEvp(DoEncrypt: boolean; const method: ShortString);
 var
   c: PEVP_CIPHER_CTX;
 begin
@@ -1204,7 +1206,7 @@ end;
 
 
 function OpenSslGetMdByName(const Algorithm: RawUtf8;
-  const Caller: shortstring): PEVP_MD;
+  const Caller: ShortString): PEVP_MD;
 begin
   EOpenSslHash.CheckAvailable(nil, Caller);
   if Algorithm = 'null' then
@@ -1235,7 +1237,11 @@ const
     'sha512-256', // hfSHA512_256
     'sha3-256',   // hfSHA3_256
     'sha3-512',   // hfSHA3_512
-    'sha224');    // hfSHA224
+    'sha224',     // hfSHA224
+    'sha3-224',   // hfSHA3_224
+    'sha3-384',   // hfSHA3_384
+    'shake128',   // hfShake128
+    'shake256');  // hfShake256
 
   CAA_MD: array[TCryptAsymAlgo] of RawUtf8 = (
     'SHA256', // caaES256
@@ -1730,19 +1736,19 @@ begin
   result := GetSignatureSecurityRaw(fAsymAlgo, sig); // into base-64 encoded raw
 end;
 
-procedure TJwtOpenSsl.CheckSignature(const headpayload: RawUtf8;
-  const signature: RawByteString; var jwt: TJwtContent);
+function TJwtOpenSsl.CheckSignature(headpayload: PValuePUtf8Char;
+  const signature: RawByteString): TJwtResult;
 var
   der: RawByteString;
 begin
   if fPubKey = nil then
     fPubKey := LoadPublicKey(fPublicKey, fPublicKeyPassword);
   der := SetSignatureSecurityRaw(fAsymAlgo, signature);
-  if fPubKey^.Verify(fAlgoMd, pointer(der), pointer(headpayload),
-      length(der), length(headpayload)) then
-    jwt.result := jwtValid
+  if fPubKey^.Verify(fAlgoMd, pointer(der), headpayload^.Text,
+      length(der), headpayload^.Len) then
+    result := jwtValid
   else
-    jwt.result := jwtInvalidSignature;
+    result := jwtInvalidSignature;
 end;
 
 
@@ -2305,7 +2311,7 @@ function TCryptCertAlgoOpenSsl.CreateSelfSignedCsr(const Subjects: RawUtf8;
   const PrivateKeyPassword: SpiUtf8; var PrivateKeyPem: RawUtf8;
   Usages: TCryptCertUsages; Fields: PCryptCertFields): RawUtf8;
 
-  procedure RaiseError(const msg: shortstring);
+  procedure RaiseError(const msg: ShortString);
   begin
     ECryptCert.RaiseUtf8('%.CreateSelfSignedCsr %: % error', [self, JwtName, msg]);
   end;
@@ -2973,7 +2979,7 @@ begin
     for i := 0 to length(x) - 1 do
     begin
       AddString(x[i].ToPem);
-      AddShorter(CRLF);
+      AddDirectNewLine; // = #13#10 on Windows, #10 on POSIX
     end;
     fStore.UnLock;
     // followed by X.509 CRLs
@@ -2981,7 +2987,7 @@ begin
     for i := 0 to length(c) - 1 do
     begin
       AddString(c[i].ToPem); // raise EOpenSsl (not signed)
-      AddShorter(CRLF);
+      AddDirectNewLine;
     end;
     fStore.UnLock;
     SetText(RawUtf8(result));

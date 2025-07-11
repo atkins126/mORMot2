@@ -26,6 +26,7 @@ uses
   sysutils,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.rtti,
   mormot.core.unicode,
   mormot.core.text,
@@ -256,7 +257,7 @@ type
     // - self will remain untouched unless noclone is set
     function ToText(noclone: boolean = false): RawUtf8;
     /// could be used for low-level console debugging of a raw value
-    procedure Debug(const name: shortstring; full: boolean = false);
+    procedure Debug(const name: ShortString; full: boolean = false);
   end;
 
   /// define Normal, P and Q pre-computed modulos
@@ -362,6 +363,7 @@ var
   /// runtime-computed 4KB table of all known 2, 3, 5, 7, ... 17989 prime numbers
   // - as used by TBigInt.MatchKnownPrime
   // - published in interface section for TTestCoreCrypto._RSA validation
+  // - computed when needed at runtime from 1KB of nibble-encoded deltas
   BIGINT_PRIMES: array[0 .. 2063] of word;
 
 /// compute the base-10 decimal text from a Big Integer binary buffer
@@ -1035,7 +1037,7 @@ begin
   // see https://www.di-mgt.com.au/euclidean.html#code-binarygcd
   if IsZero or
      b^.IsZero then
-    raise ERsaException.Create('Unexpected TBigInt.GreatestCommonDivisor(0)');
+    ERsaException.RaiseU('Unexpected TBigInt.GreatestCommonDivisor(0)');
   ta := Clone;
   tb := b.Clone;
   z := Min(ta.FindMinBit, tb.FindMinBit);
@@ -1295,7 +1297,7 @@ var
 begin
   // see https://www.di-mgt.com.au/euclidean.html#code-modinv
   if m.Compare(1) <= 0 then
-    raise ERsaException.Create('Unexpected TBigInt.ModInverse(0,1)');
+    ERsaException.RaiseU('Unexpected TBigInt.ModInverse(0,1)');
   u1 := Owner.AllocateFrom(1);
   u3 := Clone;
   v1 := Owner.AllocateFrom(0);
@@ -1538,7 +1540,7 @@ var
 begin
   // ensure it is worth searching (paranoid)
   if Size <= 2 then
-    raise ERsaException.Create('TBigInt.FillPrime: unsupported size');
+    ERsaException.RaiseU('TBigInt.FillPrime: unsupported size');
   // never wait forever - 1 min seems enough even on slow Arm (tested on RaspPi)
   if EndTix <= 0 then
     EndTix := GetTickCount64 + MilliSecsPerMin; // time on Intel is around 1 sec
@@ -1569,7 +1571,7 @@ begin
       // - with our TAesPrng, it never occurred after 1,000,000,000 trials
       dec(min);
       if min = 0 then // paranoid
-        raise ERsaException.Create('TBigInt.FillPrime: weak CSPRNG');
+        ERsaException.RaiseU('TBigInt.FillPrime: weak CSPRNG');
       continue;
     end;
     // should be a big enough odd number
@@ -1579,7 +1581,7 @@ begin
     if (Value[Size - 1] or (RSA_RADIX shr 1) <> 0) and // absolute big enough
        (last32^ >= FIPS_MIN) then
       break;
-    raise ERsaException.Create('TBigInt.FillPrime FIPS_MIN'); // paranoid
+    ERsaException.RaiseU('TBigInt.FillPrime FIPS_MIN'); // paranoid
   until false;
   // brute force search for the next prime starting at this point
   result := true; 
@@ -1606,7 +1608,7 @@ begin
   result := false; // timed out
 end;
 
-procedure TBigInt.Debug(const name: shortstring; full: boolean);
+procedure TBigInt.Debug(const name: ShortString; full: boolean);
 var
   tmp: RawUtf8;
 begin
@@ -2253,7 +2255,7 @@ var
 begin
   if (Modulus <> '') or
      (Exponent <> '') then
-    raise ERsaException.Create('TRsaPublicKey.FromDer over an existing key');
+    ERsaException.RaiseU('TRsaPublicKey.FromDer over an existing key');
   // first try PKCS#1 format
   result := DerToRsa(der, ASN1_BITSTR, nil, [
               @Modulus,
@@ -2303,7 +2305,7 @@ var
 begin
   if (Modulus <> '') or
      (PublicExponent <> '') then
-    raise ERsaException.Create('TRsaPrivateKey.FromDer over an existing key');
+    ERsaException.RaiseU('TRsaPrivateKey.FromDer over an existing key');
   // first try the openssl PKCS#8 layout
   result := DerToRsa(der, ASN1_OCTSTR, @Version, [
               @Modulus,
@@ -3427,7 +3429,7 @@ begin
     case fKeyAlgo of
       ckaRsa,
       ckaRsaPss:
-        result := fRsa.Seal(Cipher, Message);
+        result := fRsa.Seal(Message, Cipher);
     end;
 end;
 
@@ -3519,7 +3521,7 @@ begin
       ckaRsa,
       ckaRsaPss:
         if fRsa <> nil then
-          result := fRsa.Open(Cipher, Message);
+          result := fRsa.Open(Message, Cipher);
     end;
 end;
 

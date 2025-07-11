@@ -448,13 +448,13 @@ type
   /// kind of exceptions raised by this unit
   E7Zip = class(ESynException)
   protected
-    class procedure RaiseAfterCheck(Caller: TObject; const Context: shortstring;
+    class procedure RaiseAfterCheck(Caller: TObject; const Context: ShortString;
       Res: HResult);
   public
-    class procedure Check(Caller: TObject; const Context: shortstring;
+    class procedure Check(Caller: TObject; const Context: ShortString;
       Res: HResult);
       {$ifdef HASINLINE} inline; {$endif}
-    class procedure CheckOk(Caller: TObject; const Context: shortstring;
+    class procedure CheckOk(Caller: TObject; const Context: ShortString;
       Res: HResult);
       {$ifdef HASINLINE} inline; {$endif}
   end;
@@ -861,20 +861,20 @@ end;
 { E7Zip }
 
 class procedure E7Zip.RaiseAfterCheck(Caller: TObject;
-  const Context: shortstring; Res: HResult);
+  const Context: ShortString; Res: HResult);
 begin
   raise CreateFmt('%s.%s error %x (%s)',
-    [ClassNameShort(Caller)^, Context, Res, string(WinErrorText(Res, nil))])
+    [ClassNameShort(Caller)^, Context, Res, string(WinErrorText(Res))])
 end;
 
-class procedure E7Zip.Check(Caller: TObject; const Context: shortstring;
+class procedure E7Zip.Check(Caller: TObject; const Context: ShortString;
   Res: HResult);
 begin
   if Res and $80000000 <> 0 then
     RaiseAfterCheck(Caller, Context, Res);
 end;
 
-class procedure E7Zip.CheckOk(Caller: TObject; const Context: shortstring;
+class procedure E7Zip.CheckOk(Caller: TObject; const Context: ShortString;
   Res: HResult);
 begin
   if Res <> S_OK then
@@ -2120,7 +2120,7 @@ begin
     eamExtract:
       if fStream <> nil then
         outStream := T7zStream.Create(fStream, false, index)
-      else if assigned(fExtractCallback) then
+      else if Assigned(fExtractCallback) then
       begin
         result := fExtractCallback(self, index, outStream);
         exit;

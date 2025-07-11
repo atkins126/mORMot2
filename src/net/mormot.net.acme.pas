@@ -430,13 +430,13 @@ begin
     fLog.Add.Log(sllTrace, '% = % %',
        [fUri, fStatus, KBNoSpace(length(fBody))], self);
   // the server includes a Replay-Nonce header field in every response
-  fNonce := FindNameValue(pointer(fHeaders), 'REPLAY-NONCE: ');
+  FindNameValue(fHeaders, 'REPLAY-NONCE: ', fNonce);
   // validate the response
   if not (fStatus in [HTTP_SUCCESS, HTTP_CREATED, HTTP_NOCONTENT]) then
   begin
     err := JsonDecode(pointer(fBody), 'detail', nil, {handlejsonobjarr=} false);
     if err = '' then
-      StatusCodeToReason(fStatus, err);
+      err := StatusCodeToText(fStatus)^;
     EJwsHttp.RaiseUtf8('Error % [%] while querying %', [fStatus, err, fUri]);
   end;
   result := fBody;
@@ -472,7 +472,7 @@ begin
   begin
     // no key identifier, need to provide JSON Web Key
     if not fCert.HasPrivateSecret then
-      raise EJwsHttp.Create('No private key');
+      EJwsHttp.RaiseUtf8('%.Post: No private key', [self]);
     // compute JWK JSON object - e.g. '{"e":..,"kty":"RSA","n":..}' for RSA
     jwk := fCert.JwkCompute;
     // the thumbprint of a JWK is computed with no whitespace or line breaks
@@ -492,7 +492,7 @@ begin
   Request(aUrl, 'POST', '', data, 'application/jose+json');
   result := GetNonceAndBody;
   if fKid = '' then
-    fKid := FindNameValue(pointer(fHeaders), 'LOCATION: ');
+    FindNameValue(fHeaders, 'LOCATION: ', fKid);
 end;
 
 function TJwsHttpClient.Post(const aUrl: RawUtf8;
@@ -560,12 +560,13 @@ begin
   fDirectoryUrl := aDirectoryUrl;
   fContact := aContact;
   if aSubjects = '' then
-    raise EAcmeClient.Create('Create with aSubjects=nil');
+    EAcmeClient.RaiseUtf8('%.Create with aSubjects=nil', [self]);
   fSubjects := aSubjects;
   fSubject := CsvToRawUtf8DynArray(fSubjects);
   for i := 0 to high(fSubject) do
     if fSubject[i] = '' then // not allowed by FindPropName()
-      raise EAcmeClient.Create('Create with a void entry in aSubjects CSV');
+      EAcmeClient.RaiseUtf8('%.Create with a void entry in aSubjects=%',
+        [self, aSubjects]);
   fHttpClient := TJwsHttpClient.Create(fLog, aCert);
 end;
 
@@ -870,7 +871,7 @@ var
   cert, pk: RawUtf8;
   log: ISynLog;
 begin
-  log := fLog.Enter(self, 'RegisterAndWait');
+  fLog.EnterLocal(log, self, 'RegisterAndWait');
   fOnChallenges := OnChallenge;
   StartDomainRegistration;
   endtix := GetTickCount64 + WaitForSec * 1000;
@@ -1059,7 +1060,7 @@ var
   fn: TFileName;
   log: ISynLog;
 begin
-  log := fLog.Enter(self, 'LoadFromKeyStoreFolder');
+  fLog.EnterLocal(log, self, 'LoadFromKeyStoreFolder');
   SetCallbackForLoadFromKeyStoreFolder({enabled=}false);
   fSafe.Lock;
   try
@@ -1079,7 +1080,7 @@ begin
                RenameFile(fn, fn + '.invalid'); // don't try it again
                if Assigned(log) then
                  log.Log(sllWarning, 'LoadFromKeyStoreFolder: renamed as ' +
-                   '%.invalid after %', [fn, E.ClassType], self);
+                   '%.invalid after %', [fn, PClass(E)^], self);
              end;
            end;
       until FindNext(f) <> 0;
@@ -1108,7 +1109,7 @@ var
   log: ISynLog;
 begin
   // this method is run from a transient TLoggedWorkThread
-  log := fLog.Enter(self, 'CheckCertificates');
+  fLog.EnterLocal(log, self, 'CheckCertificates');
   if (self = nil) or
      (fClient = nil) or
      (fRenewBeforeEndDays <= 0) then
@@ -1317,7 +1318,7 @@ begin
       include(opt, hsoEnableLogging);
   end;
   // start a basic HTTP server on port 80
-  log := aLog.Enter('Create: start THttpServer on %', [p], self);
+  aLog.EnterLocal(log, 'Create: start THttpServer on %', [p], self);
   fHttpServer := THttpServer.Create(p, nil, nil, 'Acme Server',
     aHttpServerThreadCount, 30000, opt, aLog);
   // retrieve some parameters from the main HTTPS server

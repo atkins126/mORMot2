@@ -25,6 +25,7 @@ uses
   sysutils,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.crypt.core,
   mormot.crypt.secure,
   mormot.crypt.ecc256r1,
@@ -192,7 +193,7 @@ type
     fCaa: TCryptAsymAlgo;
     fSlot: TPkcs11Slot;
     fToken: TPkcs11Token;
-    procedure RaiseError(const Msg: shortstring); overload; override;
+    procedure RaiseError(const Msg: ShortString); overload; override;
     // if true then caller should make try ... finally fEngine.Close
     function OpenPrivateKey: CK_OBJECT_HANDLE;
   public
@@ -442,7 +443,7 @@ var
   seq: TAsnObject;
   log: ISynLog; // seldom called, and better be traced (and profiled)
 begin
-  log := fCert.Log.Enter('SignDigest % %', [ToText(DigAlgo)^, fCert], self);
+  fCert.Log.EnterLocal(log, 'SignDigest % %', [ToText(DigAlgo)^, fCert], self);
   result := '';
   hf := CAA_HF[DigAlgo];
   if HASH_SIZE[hf] <> DigLen then
@@ -757,7 +758,7 @@ end;
 
 { TCryptCertPkcs11 }
 
-procedure TCryptCertPkcs11.RaiseError(const Msg: shortstring);
+procedure TCryptCertPkcs11.RaiseError(const Msg: ShortString);
 begin
   ECryptCertPkcs11.RaiseUtf8('% (slot=#%, CKA_ID=%) %',
     [self, fSlotID, fStorageID, Msg]);

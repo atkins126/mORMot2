@@ -328,7 +328,7 @@ begin
       dec(ValueCount)
     until ValueCount = 0;
   //if PAnsiChar(p) - pointer(Bin) <> length(Bin) then
-  //  raise ESqlDBPostgres.CreateU('ToIntArrayOid');
+  //  ESqlDBPostgres.RaiseU('ToIntArrayOid');
   result := true;
 end;
 
@@ -336,7 +336,7 @@ end;
 { ************ PostgreSQL Client Library Loading }
 
 const
-  PQ_ENTRIES: array[0..36] of PAnsiChar = (
+  PQ_ENTRIES: array[0..36] of PAnsiChar = ( // will be prefixed by 'PQ' chars
     'libVersion',
     'isthreadsafe',
     'setdbLogin',
@@ -441,7 +441,7 @@ begin
   FormatUtf8('% % failed: % [%]', [self, ctxt, errCode, errMsg], msg);
   if res <> nil then
     Clear(res);
-  raise ESqlDBPostgres.CreateU(msg); // will properly call SetDbError()
+  ESqlDBPostgres.RaiseU(msg); // will properly call SetDbError()
 end;
 
 procedure TSqlDBPostgresLib.Check(conn: PPGconn; const ctxt: ShortString;

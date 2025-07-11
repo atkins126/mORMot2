@@ -220,20 +220,38 @@ procedure Utf8ToShortString(var dest: ShortString; source: PUtf8Char);
 function Utf8ToUnicodeLength(source: PUtf8Char): PtrUInt;
 
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding
-// - will also refuse #0 characters within the buffer
 // - on Haswell AVX2 Intel/AMD CPUs, will use very efficient ASM
+// - warning: AVX2 version won't refuse #0 characters within the buffer
 // - follows RFC 3629 requirements, i.e. up to 4-bytes UTF-8 sequences, to
 // stay within U+0000..U+10FFFF UTF-16 accessible range with surrogates
 var
   IsValidUtf8Buffer: function(source: PUtf8Char; sourcelen: PtrInt): boolean;
 
-function IsValidUtf8Pas(source: PUtf8Char; len: PtrInt): boolean; // test only
+/// returns TRUE if the supplied buffer has valid UTF-8 encoding
+// - could be called directly on small input, if #0 characters should be refused
+function IsValidUtf8Pas(source: PUtf8Char; len: PtrInt): boolean;
+
+/// returns TRUE if the supplied RawUtf8 has valid UTF-8 encoding
+// - could be called directly on small input, if #0 characters should be refused
+function IsValidUtf8Small(const source: RawByteString): boolean;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding
-// - will also refuse #0 characters within the buffer
 // - on Haswell AVX2 Intel/AMD CPUs, will use very efficient ASM, reaching e.g.
 // 21 GB/s parsing speed on a Core i5-13500
-function IsValidUtf8(const source: RawUtf8): boolean; overload;
+// - warning: AVX2 version won't refuse #0 characters within the buffer - use
+// IsValidUtf8NotVoid() if you are not sure that your input is pure text
+function IsValidUtf8(const source: RawByteString): boolean; overload;
+  {$ifdef HASINLINE}inline;{$endif}
+
+/// returns TRUE if the supplied buffer has valid UTF-8 encoding and no #0 within
+// - will also refuse #0 characters within the buffer even on AVX2
+function IsValidUtf8NotVoid(source: PUtf8Char; len: PtrInt): boolean; overload;
+  {$ifdef HASINLINE}{$ifndef ASMX64AVXNOCONST}inline;{$endif}{$endif}
+
+/// returns TRUE if the supplied buffer has valid UTF-8 encoding and no #0 within
+// - will also refuse #0 characters within the buffer even on AVX2
+function IsValidUtf8NotVoid(const source: RawByteString): boolean; overload;
   {$ifdef HASINLINE}inline;{$endif}
 
 /// returns TRUE if the supplied buffer has valid UTF-8 encoding
@@ -283,14 +301,14 @@ function Utf8TruncateToLength(var text: RawUtf8; maxBytes: PtrUInt): boolean;
 // UTF-8 sequence, i.e. will trim the whole trailing UTF-8 sequence
 // - returns maxBytes if text was not truncated, or the number of fitting bytes
 function Utf8TruncatedLength(const text: RawUtf8; maxBytes: PtrUInt): PtrInt; overload;
+  {$ifdef HASINLINE}inline;{$endif}
 
 /// compute the truncated length of the supplied UTF-8 value if it exceeds the
 // specified bytes count
 // - this function will ensure that the returned content will contain only valid
 // UTF-8 sequence, i.e. will trim the whole trailing UTF-8 sequence
 // - returns maxBytes if text was not truncated, or the number of fitting bytes
-function Utf8TruncatedLength(text: PAnsiChar;
-  textlen, maxBytes: PtrUInt): PtrInt; overload;
+function Utf8TruncatedLength(text: PAnsiChar; textlen, maxBytes: PtrUInt): PtrInt; overload;
 
 /// calculate the UTF-16 Unicode characters count of the UTF-8 encoded first line
 // - count may not match the UCS-4 CodePoint, in case of UTF-16 surrogates
@@ -531,7 +549,7 @@ type
     // - use this array like AnsiToWide: array[byte] of word
     property AnsiToWide: TWordDynArray
       read fAnsiToWide;
-    /// direct access to the Unicode-To-Ansi lookup table
+    /// direct access to the UTF-16 to Ansi lookup table
     // - use this array like WideToAnsi: array[word] of byte
     // - any unhandled WideChar will return ord('?')
     property WideToAnsi: TByteDynArray
@@ -1400,14 +1418,14 @@ function IdemPCharW(p: PWideChar; up: PUtf8Char): boolean;
 // - returns true if the item matched
 // - ignore case - upTextStart must be already in upper case
 // - chars are compared as 7-bit Ansi only (no accentuated chars, nor UTF-8)
-// - see StartWithExact() from mormot.core.text for a case-sensitive version
+// - see StartWithExact() from this unit for a case-sensitive version
 function StartWith(const text, upTextStart: RawUtf8): boolean;
 
 /// check case-insensitive matching ending of text in upTextEnd
 // - returns true if the item matched
 // - ignore case - upTextEnd must be already in upper case
 // - chars are compared as 7-bit Ansi only (no accentuated chars, nor UTF-8)
-// - see EndWithExact() from mormot.core.text for a case-sensitive version
+// - see EndWithExact() from this unit for a case-sensitive version
 function EndWith(const text, upTextEnd: RawUtf8): boolean;
 
 /// returns the index of a case-insensitive matching ending of p^ in upArray[]
@@ -1834,13 +1852,13 @@ type
 
 /// check case-sensitive matching starting of text in start
 // - returns true if the item matched
-// - see StartWith() from mormot.core.unicode for a case-insensitive version
+// - see StartWith() from this unit for a case-insensitive version
 function StartWithExact(const text, textStart: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
 /// check case-sensitive matching ending of text in ending
 // - returns true if the item matched
-// - see EndWith() from mormot.core.unicode for a case-insensitive version
+// - see EndWith() from this unit for a case-insensitive version
 function EndWithExact(const text, textEnd: RawUtf8): boolean;
   {$ifdef HASINLINE} inline; {$endif}
 
@@ -1939,13 +1957,6 @@ function SplitRights(const Str, SepChar: RawUtf8): RawUtf8;
 /// check all character within text are spaces or control chars
 // - i.e. a faster alternative to  if TrimU(text)='' then
 function IsVoid(const text: RawUtf8): boolean;
-
-/// fill all bytes of this memory buffer with zeros, i.e. 'toto' -> #0#0#0#0
-// - will write the memory buffer directly, if this string instance is not shared
-// (i.e. has refcount = 1), to avoid zeroing still-used values
-// - may be used to cleanup stack-allocated content
-// ! ... finally FillZero(secret); end;
-procedure FillZero(var secret: RawByteString); overload;
 
 /// fill all bytes of this UTF-8 string with zeros, i.e. 'toto' -> #0#0#0#0
 // - will write the memory buffer directly, if this string instance is not shared
@@ -2095,7 +2106,7 @@ function FindNameValue(const NameValuePairs: RawUtf8; UpperName: PAnsiChar;
 // - as called when inlining FindNameValue()
 // - won't make any memory allocation, so could be fine for a quick lookup
 function FindNameValuePointer(NameValuePairs: PUtf8Char; UpperName: PAnsiChar;
-  out FoundLen: PtrInt; UpperNameSeparator: AnsiChar): PUtf8Char;
+  out FoundLen: PtrInt; UpperNameSeparator: AnsiChar = #0): PUtf8Char;
 
 /// compute the line length from source array of chars
 // - if PEnd = nil, end counting at either #0, #13 or #10
@@ -2231,7 +2242,7 @@ procedure SnakeCase(P: PAnsiChar; len: PtrInt; var s: RawUtf8); overload;
 function SnakeCase(const text: RawUtf8): RawUtf8; overload;
 
 const
-  // published for unit testing (e.g. if properly sorted)
+  // published for unit testing in TNetworkProtocols.OpenAPI (e.g. if sorted)
   RESERVED_KEYWORDS: array[0..91] of RawUtf8 = (
     'ABSOLUTE', 'ABSTRACT', 'ALIAS', 'AND', 'ARRAY', 'AS', 'ASM', 'ASSEMBLER',
     'BEGIN', 'CASE', 'CLASS', 'CONST', 'CONSTREF', 'CONSTRUCTOR', 'DESTRUCTOR',
@@ -2768,7 +2779,7 @@ begin
             end;
           UTF16_HISURROGATE_MIN .. UTF16_HISURROGATE_MAX:
             if (PtrInt(PtrUInt(Source)) >= SourceLen) or
-               ((cardinal(Source^) < UTF16_LOSURROGATE_MIN) or
+               ((cardinal(Source^) < UTF16_LOSURROGATE_MIN) or // 2nd surrogate
                 (cardinal(Source^) > UTF16_LOSURROGATE_MAX)) then
             begin
 unmatch:      if (PtrInt(PtrUInt(@Dest[3])) > DestLen) or
@@ -2837,14 +2848,11 @@ procedure RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
   var result: TSynTempBuffer; Flags: TCharConversionFlags);
 begin
   if (WideChar = nil) or
-     (WideCharCount = 0) then
+     (WideCharCount <= 0) then
     result.Init(0)
   else
-  begin
-    result.Init(WideCharCount * 3);
-    result.Len := RawUnicodeToUtf8(
-      result.buf, result.len, WideChar, WideCharCount, Flags);
-  end;
+    result.Len := RawUnicodeToUtf8(result.Init(WideCharCount * 3),
+      (WideCharCount * 3) + 16, WideChar, WideCharCount, Flags);
 end;
 
 procedure RawUnicodeToUtf8(WideChar: PWideChar; WideCharCount: integer;
@@ -2878,6 +2886,13 @@ begin
   if Utf8Length <= 0 then
     result := '';
 end;
+
+{$ifndef FPC_OR_UNICODE} // Delphi 7/2007 RTL don't handle surrogates
+procedure _DoWin32PWideCharToUtf8(P: PWideChar; Len: PtrInt; var res: RawUtf8);
+begin
+  RawUnicodeToUtf8(P, Len, res);
+end;
+{$endif FPC_OR_UNICODE}
 
 procedure Utf8ToShortString(var dest: ShortString; source: PUtf8Char);
 var
@@ -3188,7 +3203,7 @@ begin
     end
     else if PtrUInt(source) >= PtrUInt(len) + 4 then
       break;
-    c := utf8[source^]; // number of expected extra bytes
+    c := utf8[source^]; // number of expected extra bytes (1..6)
     inc(source);
     if c = UTF8_ASCII then
       continue // last 1..3 chars
@@ -3216,10 +3231,40 @@ begin
   result := IsValidUtf8Buffer(source, StrLen(source));
 end;
 
-function IsValidUtf8(const source: RawUtf8): boolean;
+function IsValidUtf8Small(const source: RawByteString): boolean;
 begin
-  result := IsValidUtf8Buffer(pointer(source), length(source));
+  result := (source = '') or
+    IsValidUtf8Pas(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
 end;
+
+function IsValidUtf8(const source: RawByteString): boolean;
+begin
+  result := (source = '') or
+    IsValidUtf8Buffer(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
+end;
+
+function IsValidUtf8NotVoid(const source: RawByteString): boolean;
+begin
+  result := (source = '') or
+    IsValidUtf8NotVoid(pointer(source), PStrLen(PAnsiChar(pointer(source)) - _STRLEN)^);
+end;
+
+{$ifdef ASMX64AVXNOCONST}
+function IsValidUtf8NotVoid(source: PUtf8Char; len: PtrInt): boolean;
+begin
+  if (len >= 128) and // main AVX2 loop iterates on 64 bytes
+     (cpuHaswell in X64CpuFeatures) then
+    result := (ByteScanIndex(pointer(source), len, 0) < 0) and // detect #0
+              IsValidUtf8Avx2(source, len)
+  else
+    result := IsValidUtf8Pas(source, len);
+end;
+{$else}
+function IsValidUtf8NotVoid(source: PUtf8Char; len: PtrInt): boolean;
+begin
+  result := IsValidUtf8Pas(source, len);
+end;
+{$endif ASMX64AVXNOCONST}
 
 procedure DetectRawUtf8(var source: RawByteString);
 begin
@@ -3421,33 +3466,27 @@ end;
 
 function Utf8TruncatedLength(const text: RawUtf8; maxBytes: PtrUInt): PtrInt;
 begin
-  result := Length(text);
-  if PtrUInt(result) < maxBytes then
-    exit;
-  result := maxBytes;
-  if (result = 0) or
-     (ord(text[result]) <= $7f) then
-    exit; 
-  while (result > 0) and
-        (ord(text[result]) and $c0 = $80) do
-    dec(result);
-  if (result > 0) and
-     (ord(text[result]) > $7f) then
-    dec(result);
+  result := length(text);
+  if PtrUInt(result) > maxBytes then
+    result := Utf8TruncatedLength(pointer(text), result, maxBytes);
 end;
 
 function Utf8TruncatedLength(text: PAnsiChar; textlen, maxBytes: PtrUInt): PtrInt;
 begin
   result := textlen;
-  if textlen < maxBytes then
+  if textlen <= maxBytes then
     exit;
+  dec(text);
   result := maxBytes;
+  if (result = 0) or
+     (text[result] <= #$7f) then // next byte is a new UTF-8 codepoint
+    exit;
   while (result > 0) and
         (ord(text[result]) and $c0 = $80) do
-    dec(result);
+    dec(result); // go just after the extra bytes
   if (result > 0) and
-     (ord(text[result]) > $7f) then
-    dec(result);
+     (text[result] > #$7f) then
+    dec(result); // go the end of previous UTF-8 codepoint
 end;
 
 function Utf8FirstLineToUtf16Length(source: PUtf8Char): PtrInt;
@@ -3899,7 +3938,12 @@ end;
 
 function TSynAnsiConvert.Utf8ToAnsi(const u: RawUtf8): RawByteString;
 begin
-  Utf8BufferToAnsi(pointer(u), length(u), result);
+  if (u = '') or
+     {$ifdef HASCODEPAGE} (GetCodePage(u) = fCodePage) {$else}
+     IsAnsiCompatible(PAnsiChar(pointer(u)), Length(u)) {$endif HASCODEPAGE} then
+    result := u
+  else
+    Utf8BufferToAnsi(pointer(u), length(u), result);
 end;
 
 function TSynAnsiConvert.Utf8ToAnsiBuffer2K(const S: RawUtf8;
@@ -7762,7 +7806,8 @@ end;
 
 function PosExI(const SubStr, S: RawUtf8; Offset: PtrUInt; Lookup: PNormTable): PtrInt;
 begin
-  if Lookup = nil then
+  if (Lookup = nil) or
+     (Lookup = @NormToNorm) then
     {$ifdef CPUX86}
     result := PosEx(SubStr, S, Offset)
     {$else}
@@ -7974,26 +8019,21 @@ end;
 
 function SplitRights(const Str, SepChar: RawUtf8): RawUtf8;
 var
-  i, j, sep: PtrInt;
-  c: AnsiChar;
+  i: PtrInt;
 begin
-  sep := length(SepChar);
-  if sep > 0 then
-    if sep = 1 then
-      result := SplitRight(Str, SepChar[1])
-    else
+  if SepChar <> '' then
+    if length(SepChar) = 1 then
     begin
+      result := SplitRight(Str, SepChar[1]);
+      exit;
+    end
+    else
       for i := length(Str) downto 1 do
-      begin
-        c := Str[i];
-        for j := 1 to sep do
-          if c = SepChar[j] then
-          begin
-            FastSetString(result, @PByteArray(Str)[i], length(Str) - i);
-            exit;
-          end;
-      end;
-    end;
+        if PosExChar(Str[i], SepChar) <> 0 then
+        begin
+          FastSetString(result, @PByteArray(Str)[i], length(Str) - i);
+          exit;
+        end;
   result := Str;
 end;
 
@@ -8209,16 +8249,6 @@ begin
       inc(p);
     until p^ = #0;
   result := true;
-end;
-
-procedure FillZero(var secret: RawByteString);
-begin
-  if secret = '' then
-    exit;
-  with PStrRec(pointer(PtrInt(secret) - _STRRECSIZE))^ do
-    if refCnt = 1 then // avoid GPF if const
-      FillCharFast(pointer(secret)^, length, 0);
-  FastAssignNew(secret); // dec refCnt
 end;
 
 procedure FillZero(var secret: RawUtf8);
@@ -11189,6 +11219,9 @@ begin
   Utf8AnsiConvert      := TSynAnsiUtf8.Create(CP_UTF8);
   RawByteStringConvert := TSynAnsiFixedWidth.Create(CP_RAWBYTESTRING);
   CurrentAnsiConvert   := TSynAnsiConvert.Engine(Unicode_CodePage);
+  {$ifndef FPC_OR_UNICODE}
+  DoWin32PWideCharToUtf8 := _DoWin32PWideCharToUtf8; // Delphi 7/2007 weak RTL
+  {$endif FPC_OR_UNICODE}
   // setup optimized ASM functions
   IsValidUtf8Buffer := @IsValidUtf8Pas;
   {$ifdef ASMX64AVXNOCONST}

@@ -11,6 +11,7 @@ uses
   sysutils,
   mormot.core.base,
   mormot.core.os,
+  mormot.core.os.security,
   mormot.core.text,
   mormot.core.buffers,
   mormot.core.unicode,
@@ -51,6 +52,7 @@ type
     hasinternet: boolean;
     // for _THttpPeerCache
     peercacheopt: THttpRequestExtendedOptions;
+    peercachedirect: THttpPeerCache;
     // for _TUriTree
     reqone, reqtwo: RawUtf8;
     request: integer;
@@ -62,13 +64,14 @@ type
     tunneloptions: TTunnelOptions;
     tunnelexecutedone: boolean;
     tunnelexecuteremote, tunnelexecutelocal: TNetPort;
-    function OnPeerCacheDirect(var aUri: TUri; var aHeader: RawUtf8;
-      var aOptions: THttpRequestExtendedOptions): integer;
     procedure TunnelExecute(Sender: TObject);
     procedure TunnelExecuted(Sender: TObject);
     procedure TunnelTest(const clientcert, servercert: ICryptCert);
     procedure RunLdapClient(Sender: TObject);
     procedure RunPeerCacheDirect(Sender: TObject);
+    function OnPeerCacheDirect(var aUri: TUri; var aHeader: RawUtf8;
+      var aOptions: THttpRequestExtendedOptions): integer;
+    function OnPeerCacheRequest(Ctxt: THttpServerRequestAbstract): cardinal;
     // several methods used by _TUriTree
     function DoRequest_(Ctxt: THttpServerRequestAbstract): cardinal;
     function DoRequest0(Ctxt: THttpServerRequestAbstract): cardinal;
@@ -211,87 +214,103 @@ const
   MYENUM2TXT: array[TMyEnum] of RawUtf8 = ('', 'one', 'and 2');
 
 const
-  // some reference from https://github.com/OAI/OpenAPI-Specification
-  OpenApiRef: array[0..1] of RawUtf8 = (
-    'v2.0/json/petstore-simple.json',
-    'v3.0/petstore.json');
+  // some reference OpenAPI/Swagger definitions
+  OpenApiRef: array[0 .. 3] of RawUtf8 = (
+    'https://petstore.swagger.io/v2/swagger.json',
+    'https://petstore3.swagger.io/api/v3/openapi.json',
+    'https://qdrant.github.io/qdrant/redoc/v1.8.x/openapi.json',
+    'https://platform-api-staging.vas.com/api/v1/swagger.json');
+  OpenApiName: array[0 .. high(OpenApiRef)] of RawUtf8 = (
+    'Pets2',
+    'Pets3',
+    'Qdrant',
+    'VAS');
 
 procedure TNetworkProtocols.OpenAPI;
 var
   i: PtrInt;
   fn: TFileName;
-  u, ud, uc, url: RawUtf8;
-  pets: TRawUtf8DynArray;
+  key, prev, url, dto, client: RawUtf8;
+  api: TRawUtf8DynArray;
   oa: TOpenApiParser;
+  timer: TPrecisionTimer;
 begin
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'and 2'), 2);
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'one'), 1);
   CheckEqual(FindCustomEnum(MYENUM2TXT, ''), 0);
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'and'), 0);
   CheckEqual(FindCustomEnum(MYENUM2TXT, 'and 3'), 0);
-  for i := 1 to high(RESERVED_KEYWORDS) do
-    CheckUtf8(StrComp(pointer(RESERVED_KEYWORDS[i - 1]),
-      pointer(RESERVED_KEYWORDS[i])) < 0, RESERVED_KEYWORDS[i]);
   for i := 0 to high(RESERVED_KEYWORDS) do
   begin
-    u := RESERVED_KEYWORDS[i];
-    Check(IsReservedKeyWord(u));
-    inc(u[1], 32); // lowercase
-    Check(IsReservedKeyWord(u));
-    LowerCaseSelf(u);
-    Check(IsReservedKeyWord(u));
-    u := u + 's';
-    Check(not IsReservedKeyWord(u));
+    key := RESERVED_KEYWORDS[i];
+    CheckUtf8(StrComp(pointer(prev), pointer(key)) < 0, key);
+    prev := key;
+    Check(IsReservedKeyWord(key));
+    inc(key[1], 32);    // lowercase first char
+    Check(IsReservedKeyWord(key));
+    LowerCaseSelf(key); // lowercase all chars
+    Check(IsReservedKeyWord(key));
+    key := key + 's';
+    Check(not IsReservedKeyWord(key));
     Check(not IsReservedKeyWord(UInt32ToUtf8(i)));
   end;
-  SetLength(pets, length(OpenApiRef));
+  SetLength(api, length(OpenApiRef));
   for i := 0 to high(OpenApiRef) do
-  begin
-    fn := FormatString('%petstore%.json', [WorkDir, i + 1]);
-    pets[i] := StringFromFile(fn);
-    if pets[i] = '' then
+    if OpenApiRef[i] <> '' then
     begin
+      fn := FormatString('%OpenApi%.json', [WorkDir, OpenApiName[i]]);
+      api[i] := StringFromFile(fn);
+      if api[i] <> '' then
+        continue; // already downloaded and formatted
       url := OpenApiRef[i];
-      if not IdemPChar(pointer(url), 'HTTP') then
-        url := 'https://raw.githubusercontent.com/OAI/' +
-                 'OpenAPI-Specification/main/examples/' + url;
-       JsonBufferReformat(pointer(
-        HttpGet(url, nil, false, nil, 0, {forcesock:}false, {igncerterr:}true)),
-        pets[i]);
-      if pets[i] <> '' then
-        FileFromString(pets[i], fn);
+      JsonBufferReformat(pointer(DownloadFile(url)), api[i]);
+      if api[i] <> '' then
+        FileFromString(api[i], fn); // it is a valid JSON file
     end;
-  end;
-  for i := 0 to high(pets) do
-    if pets[i] <> '' then
+  for i := 0 to high(api) do
+    if api[i] <> '' then
     begin
-      oa := TOpenApiParser.Create(FormatUtf8('Pets%', [i + 1]));
+      timer.Start;
+      oa := TOpenApiParser.Create(OpenApiName[i]);
       try
-        oa.ParseJson(pets[i]);
-        ud := oa.GenerateDtoUnit;
-        Check(ud <> '', 'DTO');
-        uc := oa.GenerateClientUnit;
-        Check(uc <> '', 'CLIENT');
-        //ConsoleWrite(ud);
-        //ConsoleWrite(uc);
+        //oa.Options := oa.Options + [opoGenerateStringType];
+        //oa.Options := oa.Options + OPENAPI_CONCISE;
+        //oa.Options := oa.Options + [opoNoEnum];
+        //oa.Options := oa.Options + [opoGenerateOldDelphiCompatible];
+        //oa.Options := oa.Options + [opoClientOnlySummary];
+        //oa.Options := oa.Options + [opoDtoNoDescription, opoClientNoDescription];
+        oa.ParseJson(api[i]);
+        // ensure there was something properly parsed
+        Check(oa.Version <> oavUnknown, 'version');
+        Check(oa.Title <> '', 'title');
+        Check(oa.Operations <> nil, 'operations');
+        // generate the dto/client units
+        dto := oa.GenerateDtoUnit;
+        client := oa.GenerateClientUnit;
+        Check((opoGenerateSingleApiUnit in oa.Options) or (dto <> ''), 'dto');
+        Check(client <> '', 'client');
+        {$ifdef OSLINUX}
+        //oa.ExportToDirectory('/home/ab/dev/lib2/test/');
+        {$endif OSLINUX}
+        //ConsoleWrite(dto);
+        //ConsoleWrite(client);
       finally
         oa.Free;
       end;
+      NotifyTestSpeed('%', [OpenApiName[i]], 0, length(dto) + length(client), @timer);
     end;
 end;
 
 procedure RtspRegressionTests(proxy: TRtspOverHttpServer; test: TSynTestCase;
   clientcount, steps: integer);
-type
-  TReq = record
+var
+  streamer: TCrtSocket;
+  req: array of record
     get: THttpSocket;
     post: TCrtSocket;
     stream: TCrtSocket;
     session: RawUtf8;
   end;
-var
-  streamer: TCrtSocket;
-  req: array of TReq;
 
   procedure Shutdown;
   var
@@ -299,7 +318,7 @@ var
     log: ISynLog;
     timer, one: TPrecisionTimer;
   begin
-    log := proxy.LogClass.Enter(proxy, 'Shutdown');
+    proxy.LogClass.EnterLocal(log, proxy, 'Shutdown');
     // first half deletes POST first, second half deletes GET first
     timer.Start;
     rmax := clientcount - 1;
@@ -349,17 +368,19 @@ var
 
 var
   rmax, r, i: PtrInt;
+  res: TNetResult;
+  raw: integer;
   text: RawUtf8;
   log: ISynLog;
 begin
   // here we follow the steps and content stated by https://goo.gl/CX6VA3
-  log := proxy.LogClass.Enter(proxy, 'Tests');
+  proxy.LogClass.EnterLocal(log, proxy, 'Tests');
   if (proxy = nil) or
      (proxy.RtspServer <> '127.0.0.1') then
     test.Check(false, 'expect a running proxy on 127.0.0.1')
   else
   try
-    if SystemInfo.dwNumberOfProcessors = 1 then
+    if SystemInfo.dwNumberOfProcessors < 8 then
       Sleep(50); // seems mandatory from LUTI regression tests
     rmax := clientcount - 1;
     streamer := TCrtSocket.Bind(proxy.RtspPort);
@@ -390,6 +411,8 @@ begin
         end;
       if log <> nil then
         log.Log(sllCustom1, 'RegressionTests % POST', [clientcount], proxy);
+      if SystemInfo.dwNumberOfProcessors < 8 then
+        Sleep(50); // seems mandatory from LUTI regression tests
       for r := 0 to rmax do
         with req[r] do
         begin
@@ -431,13 +454,17 @@ begin
               'NTAwMDAwDQpBY2NlcHQtTGFuZ3VhZ2U6IGVuLVVTDQpVc2VyLUFnZW50OiBRVFMg'#13#10 +
               'KHF0dmVyPTQuMTtjcHU9UFBDO29zPU1hYyA4LjYpDQoNCg=='); 
           for r := 0 to rmax do
-            test.check(req[r].stream.SockReceiveString =
+          begin
+            text := req[r].stream.SockReceiveString(@res, @raw);
+            test.CheckUtf8(text =
               'DESCRIBE rtsp://tuckru.apple.com/sw.mov RTSP/1.0'#13#10 +
               'CSeq: 1'#13#10 +
               'Accept: application/sdp'#13#10 +
               'Bandwidth: 1500000'#13#10 +
               'Accept-Language: en-US'#13#10 +
-              'User-Agent: QTS (qtver=4.1;cpu=PPC;os=Mac 8.6)'#13#10#13#10);
+              'User-Agent: QTS (qtver=4.1;cpu=PPC;os=Mac 8.6)'#13#10#13#10,
+              'describe res=% raw=%', [ToText(res)^, raw]);
+          end;
         end;
         // stream output should be redirected to the GET request
         for r := 0 to rmax do
@@ -448,17 +475,18 @@ begin
         for r := 0 to rmax do
           with req[r] do
           begin
-            text := get.SockReceiveString;
+            text := get.SockReceiveString(@res, @raw);
             //if log <> nil then
             //  log.Log(sllCustom1, 'RegressionTests % #%/% received %',
             //    [clientcount, r, rmax, text], proxy);
-            test.CheckEqual(text, session);
+            test.CheckUtf8(text = session, 'session res=% raw=%', [ToText(res)^, raw]);
           end;
       end;
       if log <> nil then
         log.Log(sllCustom1, 'RegressionTests % SHUTDOWN', [clientcount], proxy);
     finally
       Shutdown;
+      //sleep(1000); // ensure all client sockets are detected as closed
     end;
   except
     on E: Exception do
@@ -792,6 +820,14 @@ begin
   end;
 end;
 
+procedure CheckSynopseReverse(test: TNetworkProtocols; const ip: RawUtf8);
+begin
+  if ip = 'blog.synopse.info' then // occurs on some weird DNS servers
+    test.Check(true)
+  else
+    test.CheckEqual(ip, '62-210-254-173.rev.poneytelecom.eu');
+end;
+
 procedure TNetworkProtocols.RunLdapClient(Sender: TObject);
 var
   rev: RawUtf8;
@@ -842,7 +878,7 @@ begin
         break; // success
       Sleep(100); // wait a little and retry up to 2 seconds
     until GetTickCount64 > endtix;
-    CheckEqual(rev, '62-210-254-173.rev.poneytelecom.eu')
+    CheckSynopseReverse(self, rev);
   end;
 end;
 
@@ -879,7 +915,11 @@ begin
   if not Executable.Command.Get('ntp', ntp) then
     ntp := NTP_DEFAULT_SERVER;
   withntp := not Executable.Command.Option('nontp');
-  hasinternet := DnsLookups('yahoo.com', '', 500) <> nil; // avoid abusive wait
+  if Executable.Command.Has('dns') and
+     Executable.Command.Has(['t', 'test']) then
+    hasinternet := false // once is enough (e.g. from LUTI)
+  else
+    hasinternet := DnsLookups('yahoo.com', '', 500) <> nil; // avoid abusive wait
   if hasinternet then
   begin
     utc1 := GetSntpTime(ntp);
@@ -916,6 +956,12 @@ begin
   Check(NetIsIP4('1.2.3.4', @c));
   CheckEqual(c, $04030201);
   // validate DNS client with some known values
+  CheckEqual(ord(drrOPT), 41);
+  CheckEqual(ord(drrHTTPS), 65);
+  CheckEqual(ord(drrSPF), 99);
+  CheckEqual(ord(drrEUI64), 109);
+  CheckEqual(ord(drrTKEY), 249);
+  CheckEqual(ord(drrAMTRELAY), 260);
   CheckEqual(DnsLookup(''), '');
   CheckEqual(DnsLookup('localhost'), '127.0.0.1');
   CheckEqual(DnsLookup('LocalHost'), '127.0.0.1');
@@ -943,10 +989,10 @@ begin
     CheckEqual(ip, rev, 'dns2');
     inc(fAssertions);
     rev := DnsReverseLookup(ip);
-    if rev <> '' then
-      CheckEqual(rev, '62-210-254-173.rev.poneytelecom.eu')
+    if rev = '' then
+      synopsednsip := ip // we will retry in the background thread
     else
-      synopsednsip := ip; // we will retry in the background thread
+      CheckSynopseReverse(self, rev);
     // async validate actual LDAP client on public ldap.forumsys.com server
     Run(RunLdapClient, self, 'ldap', true, false);
   end;
@@ -1224,7 +1270,7 @@ begin
   rl := TLdapResultList.Create;
   try
     u := rl.Dump({noTime=}true);
-    CheckEqual(u, 'results: 0'#13#10);
+    CheckEqual(u, 'results: 0' + CRLF);
     rl2 := CopyObject(rl);
     Check(rl2 <> nil);
     Check(rl2.ClassType = TLdapResultList);
@@ -1257,22 +1303,36 @@ begin
     CheckHash(rl.GetJson([roObjectNameWithoutDCAtRoot, roNoObjectName]), $F41233F2);
     CheckHash(rl.GetJson([roWithCanonicalName]), $C4BA2ED3);
     CheckHash(rl.GetJson([roNoObjectName, roWithCanonicalName]), $0BCFC3BC);
-    CheckHash(rl.Dump({noTime=}true), $DF59A0A9, 'hashDump');
+    c := {$ifdef OSWINDOWS}$8D553E5D{$else}$D74DDA27{$endif};
+    CheckHash(rl.Dump({noTime=}true), c, 'hashDump');
     CheckHash(rl.ExportToLdifContent, $4A97B4B2, 'hashLdif');
     CopyObject(rl, rl2);
-    CheckHash(rl2.Dump({noTime=}true), $DF59A0A9, 'hashDump2');
+    CheckHash(rl2.Dump({noTime=}true), c, 'hashDump2');
     CheckHash(rl2.ExportToLdifContent, $4A97B4B2, 'hashLdif2');
+    CheckHash(rl2.ExportToLdifContent({human=}true), $E6C54523, 'hashLdif3');
     r.Attributes.Delete(atCommonName);
     CheckEqual(r.Attributes.Count, 2);
     v := rl.GetJson([roNoObjectName]);
     CheckEqual(v, '{"bar":{"foo":{"objectClass":"person","sn":"Doe"}}}');
     r.ObjectName := 'cn=foo, ou=bar, dc=toto, dc=it';
-    //writeln(rl.GetJson([roNoDCAtRoot, roNoObjectName]));
     CheckHash(rl.GetJson([]), $DF03674D);
     CheckHash(rl.GetJson([roRawValues]), $DF03674D);
     CheckHash(rl.GetJson([roNoDCAtRoot]), $DB4EF1DC);
     CheckEqual(rl.GetJson([roNoObjectName, roNoDCAtRoot]), v);
-    CheckHash(rl.ExportToLdifContent, $31A4283C, 'hashLdif');
+    CheckHash(rl.ExportToLdifContent, $31A4283C, 'hashLdif4');
+    o := RandomWinAnsi(200 + Random32(300));   // force not UTF-8
+    Check(not IsValidUtf8(o), 'utf8');
+    r.Attributes.Add('jpegphoto', o);
+    o := RandomUri(50 + Random32(200)); // force pure US-ASCII
+    r.Attributes.Add('longname', o); //.KnownType := atAlias;
+    u := rl.ExportToLdifContent({human=}false, {maxline=}80);
+    CheckEqual(rl.ExportToLdifContent({human=}true, {maxline=}80), u);
+    v := rl.ExportToLdifContent({human=}false, {maxline=}0);
+    CheckNotEqual(v, u);
+    u := StringReplaceAll(u, #10' ', ''); // mimics maxline=0
+    CheckEqual(v, u);
+    CheckEqual(rl.ExportToLdifContent({human=}true,  {maxline=}0), u);
+//sleep(1010); consolewrite(rl.ExportToLdifContent(true));
   finally
     rl.Free;
     rl2.Free;
@@ -1554,10 +1614,13 @@ end;
 
 procedure TNetworkProtocols.IPAddresses;
 var
-  i: PtrInt;
-  s: shortstring;
+  i, n: PtrInt;
+  s: ShortString;
   txt: RawUtf8;
   ip: THash128Rec;
+  sub: TIp4SubNets;
+  bin: RawByteString;
+  timer: TPrecisionTimer;
 begin
   FillZero(ip.b);
   Check(IsZero(ip.b));
@@ -1627,35 +1690,196 @@ begin
   CheckEqual(IP4Prefix('255.254.1.0'), 0, 'invalid netmask 4');
   CheckEqual(IP4Prefix('255.255.255.256'), 0, 'invalid netmask 5');
   CheckEqual(IP4Subnet('192.168.1.135', '255.255.255.0'), '192.168.1.0/24');
-  Check(IP4Match('192.168.1.1', '192.168.1.0/24'), 'match1');
+  Check(IP4Match('192.168.1.1',   '192.168.1.0/24'), 'match1');
   Check(IP4Match('192.168.1.135', '192.168.1.0/24'), 'match2');
   Check(IP4Match('192.168.1.250', '192.168.1.0/24'), 'match3');
   Check(not IP4Match('192.168.2.135', '192.168.1.0/24'), 'match4');
   Check(not IP4Match('191.168.1.250', '192.168.1.0/24'), 'match5');
-  Check(not IP4Match('192.168.1', '192.168.1.0/24'), 'match6');
-  Check(not IP4Match('192.168.1.135', '192.168.1/24'), 'match7');
+  Check(not IP4Match('192.168.1',     '192.168.1.0/24'), 'match6');
+  Check(not IP4Match('192.168.1.135', '192.168.1/24'),   'match7');
   Check(not IP4Match('192.168.1.135', '192.168.1.0/65'), 'match8');
-  Check(not IP4Match('193.168.1.1', '192.168.1.0/24'), 'match9');
+  Check(not IP4Match('193.168.1.1',   '192.168.1.0/24'), 'match9');
+  Check(IP4Match('192.168.1.250', '192.168.1.250'),     'match10');
+  Check(not IP4Match('192.168.1.251', '192.168.1.250'), 'match11');
+  sub := TIp4SubNets.Create;
+  try
+    CheckEqual(sub.AfterAdd, 0);
+    bin := sub.SaveToBinary;
+    if CheckEqual(length(bin), 4) then
+      CheckEqual(PInteger(bin)^, 0);
+    Check(not sub.Match('190.16.1.1'));
+    Check(not sub.Match('190.16.1.135'));
+    Check(not sub.Match('190.16.1.250'));
+    Check(not sub.Match('190.16.2.135'));
+    Check(sub.Add('190.16.1.0/24'));
+    Check(sub.Match('190.16.1.1'));
+    Check(sub.Match('190.16.1.135'));
+    Check(sub.Match('190.16.1.250'));
+    Check(not sub.Match('193.168.1.1'));
+    Check(not sub.Match('190.16.2.135'));
+    Check(not sub.Match('191.168.1.250'));
+    CheckEqual(sub.AfterAdd, 1);
+    bin := sub.SaveToBinary;
+    sub.Clear;
+    CheckEqual(sub.AfterAdd, 0);
+    Check(not sub.Match('190.16.1.1'));
+    Check(not sub.Match('190.16.1.135'));
+    Check(not sub.Match('190.16.1.250'));
+    Check(sub.LoadFromBinary(bin), 'load1');
+    CheckEqual(sub.AfterAdd, 1);
+    Check(sub.Match('190.16.1.1'));
+    Check(sub.Match('190.16.1.135'));
+    Check(sub.Match('190.16.1.250'));
+    Check(not sub.Match('193.168.1.1'));
+    sub.Clear;
+    Check(sub.Add('190.16.40.0/21'));
+    Check(sub.Match('190.16.43.1'));
+    Check(sub.Match('190.16.44.1'));
+    Check(sub.Match('190.16.45.1'));
+    Check(not sub.Match('190.16.55.1'));
+    Check(sub.Add('190.16.1.0/24'));
+    Check(sub.Match('190.16.1.1'));
+    Check(sub.Match('190.16.1.135'));
+    Check(sub.Match('190.16.1.250'));
+    Check(sub.Match('190.16.43.1'));
+    Check(sub.Match('190.16.44.1'));
+    Check(sub.Match('190.16.45.1'));
+    Check(not sub.Match('190.16.55.1'));
+    CheckEqual(sub.AfterAdd, 2);
+    bin := sub.SaveToBinary;
+    sub.Clear;
+    Check(not sub.Match('190.16.43.1'));
+    Check(sub.LoadFromBinary(bin), 'load2');
+    CheckEqual(sub.AfterAdd, 2);
+    Check(sub.Match('190.16.1.1'));
+    Check(sub.Match('190.16.1.135'));
+    Check(sub.Match('190.16.1.250'));
+    Check(sub.Match('190.16.43.1'));
+    Check(sub.Match('190.16.44.1'));
+    Check(sub.Match('190.16.45.1'));
+    Check(sub.SaveToBinary = bin, 'save');
+    sub.Clear;
+    CheckEqual(sub.AddFromText('# test'#10'190.16.40.0/21 # comment'#10 +
+      '190.16.1.0/24'), 2);
+    Check(sub.SaveToBinary = bin, 'loadtext');
+    CheckEqual(sub.AfterAdd, 2);
+    sub.Clear;
+    Check(sub.Add('1.2.3.4'));
+    Check(sub.Match('1.2.3.4'));
+    Check(not sub.Match('1.2.3.5'));
+    bin := sub.SaveToBinary;
+    sub.Clear;
+    CheckEqual(sub.AddFromText('1.2.3.4 ; comment'#10), 1);
+    CheckEqual(sub.AfterAdd, 1);
+    Check(sub.SaveToBinary = bin, 'loadtext');
+    Check(sub.Match('1.2.3.4'));
+    Check(not sub.Match('1.2.3.5'));
+    txt := DownloadFile('https://raw.githubusercontent.com/firehol/blocklist-ipsets/' +
+      'refs/heads/master/firehol_level1.netset', 'firehol.netset');
+    if txt <> '' then
+    begin
+      sub.Clear;
+      timer.Start;
+      n := sub.AddFromText(txt);
+      NotifyTestSpeed('parse TIp4SubNets', n, length(txt), @timer);
+      Check(n > 4000);
+      CheckEqual(sub.AfterAdd, n);
+      CheckEqual(length(sub.SubNet), 18);
+      Check(not sub.Match('1.2.3.4'));
+      Check(not sub.Match('1.2.3.5'));
+      Check(not sub.Match('192.168.1.1'), '192'); // only IsPublicIP() was added
+      Check(not sub.Match('10.18.1.1'), '10');
+      Check(not sub.Match('62.210.254.173'), 'synopse.info');
+      // 223.254.0.0/16 as https://check.spamhaus.org/results/?query=SBL212803
+      Check(sub.Match('223.254.0.1') ,'a0');
+      Check(sub.Match('223.254.1.1'), 'b0');
+      Check(sub.Match('223.254.200.129'), 'c0');
+      CheckEqual(sub.AddFromText(txt), 0, 'twice');
+      // e.g. 18 masks, 4471 subnets, 612.950.208 unique IPs: around 16M/s
+      timer.Start;
+      for i := 1 to 20000 do
+        Check(not sub.Match($01010101), '1.1.1.1');
+      NotifyTestSpeed('blacklist TIp4SubNets', 20000, 0, @timer);
+      bin := sub.SaveToBinary;
+      Check(length(bin) < length(txt), 'bin<txt'); // 18020 < 71138
+      FileFromString(bin, WorkDir + 'firehol-bin.netset');
+      // TSynAlgo.Compress: bin=18020 AlgoSynLZ=16598 AlgoDeflate=11923
+      Check(IP4SubNetMatch(bin, '223.254.0.1') ,'a1');
+      Check(IP4SubNetMatch(bin, '223.254.1.1'), 'b1');
+      Check(IP4SubNetMatch(bin, '223.254.200.129'), 'c1');
+      // IP4SubNetMatch() is actually not faster than sub.Match()
+      timer.Start;
+      for i := 1 to 20000 do
+        Check(not IP4SubNetMatch(pointer(bin), $01010101), 'IP4SubNetMatch');
+      NotifyTestSpeed('blacklist direct', 20000, 0, @timer);
+      txt := DownloadFile('https://www.spamhaus.org/drop/drop.txt',
+        'spamhaus.netset');
+      if txt <> '' then
+      begin
+        Check(sub.AddFromText(txt) < 1000, 'spamhaus within firehol');
+        sub.Clear;
+        Check(not sub.Match('10.18.1.1'), '10');
+        Check(sub.AddFromText(txt) > 1000, 'spamhaus=1525');
+        Check(sub.Match('223.254.0.1') ,'a2'); // 223.254.0.0/16
+        Check(sub.Match('223.254.1.1'), 'b2');
+        Check(sub.Match('223.254.200.129'), 'c2');
+        CheckEqual(sub.AddFromText(txt), 0, 'twice');
+      end;
+      sub.Clear;
+      Check(sub.LoadFromBinary(bin), 'loadbin');
+      Check(sub.SaveToBinary = bin, 'savebin');
+      Check(sub.Match('223.254.0.1') ,'a3'); // 223.254.0.0/16
+      Check(sub.Match('223.254.1.1'), 'b3');
+      Check(sub.Match('223.254.200.129'), 'c3');
+    end;
+  finally
+    sub.Free;
+  end;
 end;
+
+const
+  HTTP_TIMEOUT = 30000;
 
 type
   THttpPeerCacheHook = class(THttpPeerCache); // to test protected methods
   THttpPeerCryptHook = class(THttpPeerCrypt);
 
-const
-  HTTP_LINK: array[0 .. 1] of RawUtf8 = ( // some constant images on our website
-    'http://bouchez.info/_wp_generated/wpacaa94d5.gif', // plain HTTP is easier
-    'http://bouchez.info/_wp_generated/wp5e714672.jpg');
-  HTTP_HASH: array[0 .. high(HTTP_LINK)] of RawUtf8 = (
-    'af33fb8c84461b3e0893b88ef6a2fdecc79fe7de4170f13566edaf4d190d8a9d',
-    '4d950e49fe18379a2b81fc531794ecedfa0f10fa21a2fc5fe2ba2e33ac660c99');
-  HTTP_TIMEOUT = 30000;
+function TNetworkProtocols.OnPeerCacheDirect(var aUri: TUri;
+  var aHeader: RawUtf8; var aOptions: THttpRequestExtendedOptions): integer;
+begin
+  // ext parameters only for the first resource
+  CheckUtf8((aUri.Address = '0') = aOptions.TLS.IgnoreCertificateErrors, aUri.Address);
+  if aOptions.TLS.IgnoreCertificateErrors then
+    CheckEqual(aOptions.TLS.PrivatePassword, 'password')
+  else
+    CheckEqual(aOptions.TLS.PrivatePassword, '');
+  // it is time to setup our custom parameters, needed e.g. with https
+  aOptions.TLS.IgnoreCertificateErrors := true;
+  // continue
+  result := HTTP_SUCCESS;
+end;
+
+function FakeGif(const Url: RawUtf8): RawByteString;
+begin // not a true GIF, but enough for GetMimeContentType()
+  result := Join(['GIF89a', Url]);
+end;
+
+function TNetworkProtocols.OnPeerCacheRequest(Ctxt: THttpServerRequestAbstract): cardinal;
+begin
+  // a local web server is safer than an Internet resource
+  result := HTTP_SUCCESS;
+  Ctxt.OutContent := FakeGif(Ctxt.Url);
+  Ctxt.OutContentType := 'image/gif';
+  Check(Assigned(peercachedirect));
+  CheckEqual(peercachedirect.HttpServer.CurrentProcess, 1, 'hpcState');
+  Check(gasProcessing in peercachedirect.State, 'hpcStateRequest');
+end;
 
 procedure TNetworkProtocols.RunPeerCacheDirect(Sender: TObject);
 var
   hpc: THttpPeerCacheHook absolute Sender;
   msg2: THttpPeerCacheMessage;
-  dUri, dBearer, dTok, dAddr, ctyp, params: RawUtf8;
+  dUri, dBearer, dTok, dAddr, ctyp, params, url, gif, hash: RawUtf8;
   cache: TFileName;
   i: PtrInt;
   status, len: integer;
@@ -1664,38 +1888,67 @@ var
   decoded: TUri;
   tls: TNetTlsContext;
   popt: PHttpRequestExtendedOptions;
+  localserver: THttpServer;
+
+  procedure WaitNotProcessing(const Context: string);
+  var
+    endtix: Int64;
+  begin
+    if not (gasProcessing in hpc.State) then
+    begin
+      Check(true, Context); // most common case
+      exit;
+    end;
+    endtix := GetTickCount64 + 500; // never wait forever
+    repeat
+      SleepHiRes(10); // let the HTTP thread finalize its course
+    until (not (gasProcessing in hpc.State)) or
+          (GetTickCount64 > endtix);
+    CheckUtf8(not (gasProcessing in hpc.State),
+      '%=%', [Context, ToText(hpc.State)]);
+  end;
+
 begin
   hcs := nil;
+  localserver := THttpServer.Create('8889', nil, nil, 'local', 2);
   try
+    peercachedirect := hpc;
+    Check(hpc.State = [], 'hpcState1');
+    localserver.OnRequest := OnPeerCacheRequest; // return the URL
     hpc.OnDirectOptions := OnPeerCacheDirect;
     try
       // validate all resources
       popt := @peercacheopt;
-      for i := 0 to high(HTTP_LINK) do
+      for i := 0 to 2 do
       begin
         // test according to local cache status
-        cache := MakeString([hpc.TempFilesPath, '02', HTTP_HASH[i], '.cache']);
+        url := '/' + SmallUInt32Utf8[i];
+        gif := FakeGif(url);
+        CheckEqual(GetMimeContentType(gif), 'image/gif');
+        hash := Sha256(gif);
+        cache := MakeString([hpc.TempFilesPath, '02', hash, '.cache']);
         DeleteFile(cache);
         // compute the direct proxy URI and bearer
-        Check(hpc.Settings.HttpDirectUri('secret', HTTP_LINK[i], HTTP_HASH[i],
-          dUri, dBearer, false, false, popt));
+        Check(hpc.Settings.HttpDirectUri('secret', 'http://127.0.0.1:8889' + url,
+          hash, dUri, dBearer, false, false, popt));
         popt := nil; // ext parameters only for the first
-        Check(PosEx(':8008', dUri) <> 0);
-        Check(dBearer <> '');
+        Check(PosEx(':8008', dUri) <> 0, ':8008');
+        Check(dBearer <> '', 'dBearer');
         Check(IdemPChar(pointer(dBearer), HEADER_BEARER_UPPER));
-        Check(decoded.From(dUri));
+        Check(decoded.From(dUri), 'decoded');
         // decode dBearer
         dTok := '';
-        Check(FindNameValue(PAnsiChar(pointer(dBearer)), HEADER_BEARER_UPPER, dTok));
+        Check(FindNameValue(PAnsiChar(pointer(dBearer)),
+                HEADER_BEARER_UPPER, dTok), 'dTok');
         params := '';
         FillCharFast(msg2, SizeOf(msg2), 0);
         res := hpc.BearerDecode(dTok, pcfBearerDirect, msg2, @params);
         if i = 0 then
-          Check(params <> '')
+          Check(params <> '', 'params')
         else
           CheckEqual(params, '');
         Check(res = mdOk, 'directDecode');
-        Check(msg2.Kind = pcfBearerDirect);
+        Check(msg2.Kind = pcfBearerDirect, 'directKind');
         // first GET request to download from reference website
         if hcs = nil then
         begin
@@ -1707,24 +1960,27 @@ begin
         end;
         status := hcs.Get(decoded.Address, HTTP_TIMEOUT, dBearer);
         CheckEqual(status, HTTP_SUCCESS);
-        CheckEqual(Sha256(hcs.Content), HTTP_HASH[i]);
-        CheckEqual(HashFileSha256(cache), HTTP_HASH[i]);
+        CheckEqual(Sha256(hcs.Content), hash);
+        CheckEqual(HashFileSha256(cache), hash);
         ctyp := hcs.ContentType;
-        CheckUtf8(IdemPChar(pointer(ctyp), 'IMAGE/'), ctyp);
+        CheckEqual(ctyp, 'image/gif');
         len := hcs.ContentLength;
         CheckUtf8(PosEx('Repr-Digest: sha-256=:', hcs.Headers) <> 0, hcs.Headers);
+        WaitNotProcessing('hpcState2');
         // GET twice to retrieve from cache
         status := hcs.Get(decoded.Address, HTTP_TIMEOUT, dBearer);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, ctyp);
-        CheckEqual(Sha256(hcs.Content), HTTP_HASH[i]);
+        CheckEqual(Sha256(hcs.Content), hash);
+        WaitNotProcessing('hpcState3');
         // HEAD should work with cache
         status := hcs.Head(decoded.Address, HTTP_TIMEOUT, dBearer);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, ctyp);
         CheckUtf8(PosEx('Repr-Digest: sha-256=:', hcs.Headers) <> 0, hcs.Headers);
+        WaitNotProcessing('hpcState4');
         // prepare local requests on cache in pcfBearer mode (like a peer)
         hpc.MessageInit(pcfBearer, 0, msg2);
         CheckEqual(msg2.IP4, hpc.IP4);
@@ -1735,31 +1991,37 @@ begin
         status := hcs.Get('dummy', HTTP_TIMEOUT, dTok);
         CheckEqual(status, HTTP_NOTFOUND, 'no hash');
         msg2.Hash.Algo := hfSHA256;
-        Check(Sha256StringToDigest(HTTP_HASH[i], msg2.Hash.Bin.Lo), 'sha');
+        Check(Sha256StringToDigest(hash, msg2.Hash.Bin.Lo), 'sha');
         hpc.MessageEncodeBearer(msg2, dTok);
         status := hcs.Get('dummy', HTTP_TIMEOUT, dTok);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
-        CheckEqual(hcs.ContentType, ctyp, 'ctyp from content');
-        CheckEqual(Sha256(hcs.Content), HTTP_HASH[i]);
+        CheckEqual(hcs.ContentType, ctyp, 'ctyp from cached content');
+        CheckEqual(Sha256(hcs.Content), hash);
+        WaitNotProcessing('hpcState5');
         // HEAD on cache in pcfBearer mode
         status := hcs.Head('dummies', HTTP_TIMEOUT, dtok);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, '');
-        // HEAD should work without cache and call directly ictuswin.com
+        WaitNotProcessing('hpcState6');
+        // HEAD should work without cache and call directly the http server
         Check(DeleteFile(cache));
         status := hcs.Head(decoded.Address, HTTP_TIMEOUT, dBearer);
         CheckEqual(status, HTTP_SUCCESS);
         CheckEqual(hcs.ContentLength, len);
         CheckEqual(hcs.ContentType, ctyp);
+        WaitNotProcessing('hpcState7');
       end;
     finally
       hcs.Free;
     end;
   finally
+    WaitNotProcessing('hpcStateFinal');
+    peercachedirect := nil;
     hpc.Settings.Free;
     hpc.Free;
+    localserver.Free;
   end;
 end;
 
@@ -1782,8 +2044,8 @@ begin
   CheckEqual(Base64uriToBinLength(PEER_CACHE_BEARERLEN), PEER_CACHE_MESSAGELEN);
   // validate THttpRequestExtendedOptions serialization
   peercacheopt.Init;
-  Check(not peercacheopt.TLS.IgnoreCertificateErrors);
-  Check(VarIsEmptyOrNull(peercacheopt.ToDocVariant));
+  Check(not peercacheopt.TLS.IgnoreCertificateErrors, 'tice1');
+  Check(VarIsEmptyOrNull(peercacheopt.ToDocVariant), 'tdv1');
   CheckEqual(peercacheopt.ToUrlEncode('/root'), '/root');
   peercacheopt.TLS.IgnoreCertificateErrors := true;
   CheckEqual(VariantSaveJson(peercacheopt.ToDocVariant), '{"ti":true}');
@@ -1792,11 +2054,11 @@ begin
   CheckEqual(VariantSaveJson(peercacheopt.ToDocVariant), '{"ti":true,"as":3}');
   CheckEqual(peercacheopt.ToUrlEncode('/root'), '/root?ti=1&as=3');
   peercacheopt.Init;
-  Check(not peercacheopt.TLS.IgnoreCertificateErrors);
-  Check(VarIsEmptyOrNull(peercacheopt.ToDocVariant));
+  Check(not peercacheopt.TLS.IgnoreCertificateErrors, '2');
+  Check(VarIsEmptyOrNull(peercacheopt.ToDocVariant), 'tdv2');
   CheckEqual(VariantSaveJson(peercacheopt.ToDocVariant), 'null');
   Check(peercacheopt.InitFromUrl('ti=1&as=3'));
-  Check(peercacheopt.TLS.IgnoreCertificateErrors);
+  Check(peercacheopt.TLS.IgnoreCertificateErrors, 'tice3');
   CheckEqual(VariantSaveJson(peercacheopt.ToDocVariant), '{"ti":true,"as":3}');
   Check(peercacheopt.InitFromUrl('ti=1'));
   CheckEqual(VariantSaveJson(peercacheopt.ToDocVariant), '{"ti":true}');
@@ -1853,7 +2115,7 @@ begin
             res := hpc2.MessageDecode(@tmp, SizeOf(tmp), msg2);
             Check(res = mdOk, 'hpc2');
             CheckEqual(msg2.Size, i);
-            Check(CompareMem(@msg, @msg2, SizeOf(msg)));
+            Check(CompareMem(@msg, @msg2, SizeOf(msg)), 'hpc2mem');
           end;
           NotifyTestSpeed('messages', n * 2, n * 2 * SizeOf(msg), @timer);
           m := RawUtf8(ToText(msg));
@@ -1876,10 +2138,13 @@ begin
           Check(res = mdOk, 'hpc');
           Check(CompareMem(@msg, @msg2, SizeOf(msg)));
           // validate the UDP client/server stack is running
-          Check(hpc.Ping = nil);
+          if hpc.Ping <> nil then // multiple VMs may ping - twice may fail
+            Check(not fOwner.MultiThread, 'ping<>nil') // LUTI = not multithread
+          else
+            Check(true, 'ping=nil');
           // validate THttpPeerCrypt.HttpDirectUri request encoding/decoding
           Check(THttpPeerCrypt.HttpDirectUri('secret',
-            'https://synopse.info/forum', ToText(msg.Hash), dUri, dBearer));
+            'https://synopse.info/forum', ToText(msg.Hash), dUri, dBearer), 'direct');
           CheckEqual(dUri, '/https/synopse.info/forum');
           Check(THttpPeerCrypt.HttpDirectUriReconstruct(pointer(dUri), decoded), 'reconst');
           CheckEqual(decoded.URI, 'https://synopse.info/forum');
@@ -1946,28 +2211,15 @@ begin
   end;
 end;
 
-function TNetworkProtocols.OnPeerCacheDirect(var aUri: TUri;
-  var aHeader: RawUtf8; var aOptions: THttpRequestExtendedOptions): integer;
-begin
-  // ext parameters only for the first resource
-  CheckUtf8((aUri.Address = '_wp_generated/wpacaa94d5.gif') =
-            aOptions.TLS.IgnoreCertificateErrors, aUri.Address);
-  if aOptions.TLS.IgnoreCertificateErrors then
-    CheckEqual(aOptions.TLS.PrivatePassword, 'password')
-  else
-    CheckEqual(aOptions.TLS.PrivatePassword, '');
-  // it is time to setup our custom parameters, needed e.g. with https
-  aOptions.TLS.IgnoreCertificateErrors := true;
-  // continue
-  result := HTTP_SUCCESS;
-end;
-
 procedure TNetworkProtocols.HTTP;
 var
   met: TUriMethod;
   s: RawUtf8;
   hc: THttpCookies;
   U: TUri;
+  h: PUtf8Char;
+  l: PtrInt;
+  dig: THashDigest;
 
   procedure Check4;
   begin
@@ -2079,6 +2331,38 @@ begin
     'cookone: value'#13#10#13#10);
   CheckEqual(length(hc.Cookies), 4, 'malformatted CRLF');
   Check4;
+  h := HttpRequestLength(
+    'Content-Length: 100'#13#10'content-range: bytes 100-199/3083'#13#10, l);
+  check(h <> nil);
+  checkEqual(l, 4);
+  Check(IdemPropName('3083', h, 4));
+  h := HttpRequestLength('Content-Length: 100'#13#10, l);
+  check(h <> nil);
+  checkEqual(l, 3);
+  Check(IdemPropName('100', h, 3));
+  h := HttpRequestLength('Content-Range: 100-199/2000'#13#10, l);
+  check(h <> nil);
+  checkEqual(l, 4);
+  Check(IdemPropName('2000', h, 4));
+  h := HttpRequestLength('Content-Range: 100-199'#13#10, l);
+  check(h = nil);
+  check(U.From('https://ictuswin.com/toto/titi'));
+  h := HttpRequestLength('Content-Lengths: 100'#13#10, l);
+  check(h = nil);
+  FillCharFast(dig, SizeOf(dig), 0);
+  CheckEqual(ord(dig.Algo), 0);
+  l := HttpRequestHash(hfSHA256, U, 'etag: "1234"'#13#10, dig);
+  CheckEqual(l, SizeOf(THash256));
+  Check(dig.Algo = hfSHA256);
+  CheckEqual(Sha256DigestToString(dig.Bin.Lo),
+    'cc991f15d823e419ef45f8b94e6759c4f992056c1c1a64cc79338c49f9720273');
+  FillCharFast(dig, SizeOf(dig), 0);
+  l := HttpRequestHash(hfSHA256, U,
+    'Content-Length: 100'#13#10'Last-Modified: 2025', dig);
+  CheckEqual(l, SizeOf(THash256));
+  Check(dig.Algo = hfSHA256);
+  CheckEqual(Sha256DigestToString(dig.Bin.Lo),
+    '9b23e3b9894578f2709eca35aa9afad277ab5aa4afe9344192f59535719ac734');
 end;
 
 procedure TNetworkProtocols._THttpProxyCache;
@@ -2148,35 +2432,48 @@ var
   timer: TPrecisionTimer;
   orig, rd: RawByteString;
 begin
+  {$ifdef OSDARWINARM}
+  if true then // mac M1 libcurl seems not tftp compatible
+  {$else}
   if not CurlIsAvailable then
+  {$endif OSDARWINARM}
   begin
     AddConsole('libcurl is not available on this system -> skip test');
     exit;
   end;
+  // create a temporary file to server
   orig := RandomAnsi7(256 shl 10 + Random32(100)); // 256.1KB of random data
-  tmp := TemporaryFileName;
+  tmp := TemporaryFileName; // e.g. '/tmp/mormot2tests_28F3D8C5.tmp'
   if not CheckFailed(FileFromString(orig, tmp), 'tmp file') then
   try
+    // start the TFTP server
     srv := TTftpServerThread.Create(ExtractFilePath(tmp),
       [ttoRrq , {ttoLowLevelLog,} ttoCaseInsensitiveFileName, ttoAllowSubFolders],
       TSynLogTestLog, '127.0.0.1', '6969', '');
     try
+      // request the temporary file using the libcurl client
       timer.Start;
-      StringToUtf8(ExtractFileName(tmp), uri); // .tmp file
+      StringToUtf8(ExtractFileName(tmp), uri); // 'mormot2tests_28F3D8C5.tmp'
       res := CurlPerform('tftp://127.0.0.1:6969/' + uri, rd);
-      Check(res = crOK, 'tftp exact case');
-      CheckEqual(rd, orig, 'tftp1');
-      UpperCaseSelf(uri);  // .TMP file to validate case-insensitive URI
+      CheckUtf8(res = crOK, 'tftp exact case %', [ToText(res)^]);
+      if res <> crOk then
+        exit;
+      CheckEqual(length(rd), length(orig), 'tftp1a');
+      CheckEqual(rd, orig, 'tftp1b');
+      // validate case-insensitive URI as e.g. 'MORMOT2TESTS_28F3D8C5.TMP'
+      UpperCaseSelf(uri);
       rd := ''; // paranoid
       res := CurlPerform('tftp://127.0.0.1:6969/' + uri, rd, 1000, nil,
         {tftpblocksize=}1468);
       Check(res = crOK, 'tftp uppercase and custom blocksize');
-      CheckEqual(rd, orig, 'tftp2');
+      if res = crOk then
+        CheckEqual(rd, orig, 'tftp2');
       NotifyTestSpeed('TFTP request', 2, length(rd) * 2, @timer);
     finally
       srv.Free;
     end;
   finally
+    // remove the temporary file to serve
     Check(DeleteFile(tmp), 'delete tmp');
   end;
 end;

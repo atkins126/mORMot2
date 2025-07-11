@@ -264,7 +264,7 @@ type
     // - will use shared AcquireJsonWriter instance if available
     procedure GetJsonValue(Value: TOrm; withID: boolean; Occasion: TOrmOccasion;
       var Json: RawUtf8); overload;
-      {$ifdef FPC} inline; {$endif} // avoid URW1111 on Delphi 2010
+      {$ifdef FPC_OR_DELPHIXE} inline; {$endif} // avoid URW1111 on Delphi 2010
     /// access to a thread-safe internal cached TJsonWriter instance
     function AcquireJsonWriter(var tmp: TTextWriterStackBuffer): TJsonWriter;
       {$ifdef HASINLINE} inline; {$endif}
@@ -492,7 +492,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     procedure InternalLog(const Text: RawUtf8; Level: TSynLogLevel); overload;
       {$ifdef HASINLINE}inline;{$endif}
-    procedure InternalLog(const Format: RawUtf8; const Args: array of const;
+    procedure InternalLog(Format: PUtf8Char; const Args: array of const;
       Level: TSynLogLevel = sllTrace); overload;
     function GetServerTimestamp: TTimeLog;
       {$ifdef HASINLINE}inline;{$endif}
@@ -1074,7 +1074,7 @@ var
   T: TOrmTable;
   V: Int64;
   P: PUtf8Char;
-  field: shortstring;
+  field: ShortString;
 begin
   Data := nil;
   // handle naive expressions like SELECT ID from Table where ID=10
@@ -2555,7 +2555,7 @@ begin
   result := true; // always worth caching by default
 end;
 
-procedure TRestOrm.InternalLog(const Format: RawUtf8; const Args: array of const;
+procedure TRestOrm.InternalLog(Format: PUtf8Char; const Args: array of const;
   Level: TSynLogLevel);
 begin
   fRest.InternalLog(Format, Args, Level);
@@ -2785,7 +2785,7 @@ begin
       if FieldIndex(fn) >= 0 then // ensure unique name
         for i := 2 to 100 do
         begin
-          fn := n + SmallUInt32Utf8[i];
+          mormot.core.base.Join([n, SmallUInt32Utf8[i]], fn);
           if FieldIndex(fn) < 0 then
             break;
         end;

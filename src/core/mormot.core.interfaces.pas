@@ -955,6 +955,8 @@ type
     fResolversToBeReleased: TInterfaceResolverObjArray;
     fDependencies: TInterfacedObjectObjArray;
     function TryResolve(aInterface: PRttiInfo; out Obj): boolean; override;
+    // internal function matching Implements() for ickFromInjectedResolver
+    function TryResolveImplements(aInterface: PRttiInfo; out Obj): boolean;
   public
     /// define a global class type for interface resolution
     // - most of the time, you will need a local DI/IoC resolution list; but
@@ -998,6 +1000,8 @@ type
     procedure InjectInstance(const aDependencies: array of TInterfacedObject);
       overload; virtual;
     /// check if a given interface can be resolved, from its RTTI
+    // - will only check internal InjectResolver() list, not InjectInstance()
+    // nor RegisterGlobal() resolution
     function Implements(aInterface: PRttiInfo): boolean; override;
     /// delete a previously registered resolver
     // - aResolver can be re-registered afterwards
@@ -2560,8 +2564,8 @@ const
   /// marker used internally to pass ServiceMethod^.ArgsInputIsOctetStream
   // - used by both TRestServerRoutingRest.ExecuteSoaByInterface and
   // TInterfaceMethodExecute.ExecuteJson, followed by a RawByteString pointer
-  // - is a UTF-8 marker, ending with a #0 so to be identified within JSON
-  JSON_BIN_MAGIC_C = $00b2bfef;
+  // - is U+FFF2 UTF-8 marker, ending with a #0 so to be identified within JSON
+  JSON_BIN_MAGIC_C = $b2bfef;
 
   /// the TInterfaceMethodOptions which are related to custom thread execution
   INTERFACEMETHOD_THREADOPTIONS = [
@@ -2582,7 +2586,7 @@ const
     [optExecInMainThread, optFreeInMainThread]);
 
 /// return the interface execution options set as text
-function ToText(opt: TInterfaceMethodOptions): shortstring; overload;
+function ToText(opt: TInterfaceMethodOptions): ShortString; overload;
 
 
 { ************ SetWeak and SetWeakZero Weak Interface Reference }
@@ -2665,7 +2669,7 @@ begin
   WR.AddString(GetSetNameJsonArray(TypeInfo(TInterfaceMethodValueAsm), ValueKindAsm));
   WR.AddDirect('}', ',');
 {$else}
-  WR.AddShorter('"},');
+  WR.AddDirect('"', '}', ',');
 {$endif SOA_DEBUG}
 end;
 
@@ -4277,7 +4281,7 @@ begin
         for a := 0 to High(Args) do
           Args[a].SerializeToContract(WR);
         WR.CancelLastComma;
-        WR.AddShorter(']},');
+        WR.AddDirect(']', '}', ',');
       end;
     WR.CancelLastComma(']');
     WR.SetText(fContract);
@@ -4934,7 +4938,7 @@ var
 begin
   fact := TInterfaceFactory.Get(aGuid);
   if fact = nil then
-    GuidToShort(aGuid, PGuidShortString(@result)^)
+    GuidToShort(aGuid, PShortGuid(@result)^)
   else
     result := fact.fInterfaceRtti.Info^.RawName;
 end;
@@ -5325,6 +5329,22 @@ begin
     if GlobalInterfaceResolver.TryResolve(aInterface, Obj) then
       exit;
   end;
+  result := false;
+end;
+
+function TInterfaceResolverInjected.TryResolveImplements(aInterface: PRttiInfo;
+  out Obj): boolean;
+var
+  i: PtrInt;
+begin
+  // only check local resolvers, as Implements() does
+  result := true;
+  if (self <> nil) and
+     (aInterface <> nil) and
+     (fResolvers <> nil) then
+    for i := 0 to length(fResolvers) - 1 do
+      if fResolvers[i].TryResolve(aInterface, Obj) then
+        exit;
   result := false;
 end;
 
@@ -5963,7 +5983,7 @@ begin
     ioGreaterThanOrEqualTo:
       ok := aComputed >= aCount;
   else
-    raise EInterfaceStub.CreateUtf8(
+    raise EInterfaceStub.CreateUtf8( // no RaiseUtf8() for Delphi
       '%.IntCheckCount(): Unexpected % operator', [self, Ord(aOperator)]);
   end;
   InternalCheck(ok, true, 'ExpectsCount(''%'',%,%) failed: count=%',
@@ -6624,7 +6644,7 @@ begin
   result := @PerThreadRunningContext;
 end;
 
-function ToText(opt: TInterfaceMethodOptions): shortstring;
+function ToText(opt: TInterfaceMethodOptions): ShortString;
 begin
   GetSetNameShort(TypeInfo(TInterfaceMethodOptions), opt, result);
 end;
@@ -7247,7 +7267,7 @@ begin
         if Assigned(BackgroundExecutionThread) then
           BackgroundExecuteCallMethod(@call, BackgroundExecutionThread)
         else
-          raise EInterfaceFactory.Create('optExecInPerInterfaceThread' +
+          EInterfaceFactory.RaiseU('optExecInPerInterfaceThread' +
             ' with BackgroundExecutionThread=nil')
       else
         CallMethod(call); // actual asm stub
@@ -7756,7 +7776,7 @@ var
   rc: TRttiCustom;
 begin
   {$ifdef NOPATCHVMT}
-  raise EInterfaceFactory.Create('Unsupported SetWeakZero() on this context');
+  EInterfaceFactory.RaiseU('Unsupported SetWeakZero() on this context');
   {$endif NOPATCHVMT}
   rc := Rtti.RegisterClass(aClass);
   result := rc.GetPrivateSlot(TSetWeakZero);

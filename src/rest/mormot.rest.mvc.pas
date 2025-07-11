@@ -451,6 +451,7 @@ type
     procedure AddErrorContext(var context: variant; error: integer);
     procedure CommandError(const ErrorName: RawUtf8; const ErrorValue: variant;
       ErrorCode: integer); virtual;
+    function StatusCodeToErrorText(Code: integer): RawUtf8; virtual;
   public
     /// initialize a rendering process for a given MVC Application/ViewModel
     constructor Create(aApplication: TMvcApplication); reintroduce;
@@ -1469,11 +1470,13 @@ begin
     recsize := 0
   else
   begin
-    // binary decoding of a rkRecord
+    // binary decoding of a record/object
     recsize := PRecordDataTypeInfo^.RecordSize;
-    if recsize > SizeOf(rec) then
-      EMvcException.RaiseUtf8('%.CheckAndRetrieveInfo: recsize=% overflow',
-        [self, recsize]);
+    if (recsize = 0) or // = 0 if not rkRecordTypes
+       (recsize > SizeOf(rec)) then
+      EMvcException.RaiseUtf8('%.CheckAndRetrieveInfo: incorrect % % (size=%)',
+        [self, PRecordDataTypeInfo^.RawName, ToText(PRecordDataTypeInfo^.Kind)^,
+         recsize]);
     FillCharFast(rec, recsize, 0);
   end;
   try
@@ -1536,7 +1539,8 @@ begin
     exit; // no cookie -> no session
   result := fContext.Validate(
     cookie, PRecordData, PRecordTypeInfo, PExpires, nil, Invalidate);
-  if result <= 0 then
+  if (result <= 0) and
+     not Invalidate then
     // delete any invalid/expired cookie on server side
     Finalize;
 end;
@@ -1650,13 +1654,18 @@ begin
   Renders(renderContext, ErrorCode, true);
 end;
 
+function TMvcRendererAbstract.StatusCodeToErrorText(Code: integer): RawUtf8;
+begin
+  result := mormot.core.text.StatusCodeToErrorMsg(Code); // default English
+end;
+
 procedure TMvcRendererAbstract.AddErrorContext(
   var context: variant; error: integer);
 var
   details: RawUtf8;
 begin
   _ObjAddProps([
-    'msg',       StatusCodeToErrorMsg(error),
+    'msg',       StatusCodeToErrorText(error),
     'errorCode', error,
     'ip',        fRemoteIP,
     'useragent', fRemoteUserAgent], context, {dontadddef=}true);

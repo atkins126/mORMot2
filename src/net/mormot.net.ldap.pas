@@ -8,9 +8,9 @@ unit mormot.net.ldap;
 
    Simple LDAP Protocol Client
     - CLDAP Client Functions
-    - LDIF Data Interchange Format
     - LDAP Protocol Definitions
     - LDAP Attributes Definitions
+    - LDIF Data Interchange Format
     - LDAP Response Storage
     - Main TLdapClient Class
     - Dedicated TLdapCheckMember Class
@@ -206,19 +206,6 @@ function DnsLdapControlersSorted(UdpFirstDelayMS, MinimalUdpCount: integer;
   DomainName: PRawUtf8 = nil): TRawUtf8DynArray;
 
 
-{ **************** LDIF Data Interchange Format }
-
-/// check if the supplied buffer requires base-64 encoding as RFC 2849 value
-// - i.e. if p[0..l-1] contains SAFE-STRING = [SAFE-INIT-CHAR *SAFE-CHAR]
-// - note that https://www.rfc-editor.org/errata/eid3646 states it applied to
-// also to dn/rdn values
-function IsLdifSafe(p: PUtf8Char; l: PtrInt): boolean;
-
-/// append the supplied buffer value as specified by RFC 2849
-procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: PtrInt;
-  forcebase64: boolean = false);
-
-
 { **************** LDAP Protocol Definitions }
 
 /// convert a Distinguished Name to a Canonical Name
@@ -336,6 +323,7 @@ const
 type
   /// high level LDAP result codes
   // - as returned e.g. by TLdapClient.ResultError property
+  // - leUnknown is a client-side error - check TLdapClient.ResultString text
   // - use RawLdapError() and RawLdapErrorString() to decode a LDAP result code
   // or LDAP_RES_CODE[] and LDAP_ERROR_TEXT[] to their integer/text value
   TLdapError = (
@@ -700,7 +688,8 @@ type
     atOperatingSystemVersion,
     atServicePrincipalName,
     atUnicodePwd,
-    atAccountNameHistory);
+    atAccountNameHistory,
+    atTokenGroups);                // virtual/constructed attribute for self
 
   /// set of common Attribute Types
   TLdapAttributeTypes = set of TLdapAttributeType;
@@ -782,7 +771,8 @@ const
     'Operating-System-Version',    // atOperatingSystemVersion
     'Service-Principal-Name',      // atServicePrincipalName
     'Unicode-Pwd',                 // atUnicodePwd
-    'Account-Name-History');       // atAccountNameHistory
+    'Account-Name-History',        // atAccountNameHistory
+    'Token-Groups');               // atTokenGroups
 
   /// how all TLdapAttributeType are actually stored in the LDAP raw value
   AttrTypeStorage: array[TLdapAttributeType] of TLdapAttributeTypeStorage = (
@@ -840,7 +830,8 @@ const
     atsRawUtf8,                     // atOperatingSystemVersion
     atsRawUtf8,                     // atServicePrincipalName
     atsUnicodePwd,                  // atUnicodePwd
-    atsRawUtf8);                    // atAccountNameHistory
+    atsRawUtf8,                     // atAccountNameHistory
+    atsSid);                        // atTokenGroups
 
   /// the LDAP raw values stored as UTF-8, which do not require any conversion
   ATS_READABLE = [atsRawUtf8 .. atsIntegerAccountType];
@@ -881,8 +872,9 @@ procedure AttributeNameNormalize(var AttrName: RawUtf8);
 // - as used by TLdapAttribute.GetReadable/GetAllReadable
 // - will detect SID, GUID, FileTime and text date/time known fields
 // - if s is not truly UTF-8 encoded, will return its hexadecimal representation
-procedure AttributeValueMakeReadable(var s: RawUtf8;
-  ats: TLdapAttributeTypeStorage; dom: PSid = nil; uuid: TAppendShortUuid = nil);
+// - returns TRUE if s was converted into hexadecimal
+function AttributeValueMakeReadable(var s: RawUtf8; ats: TLdapAttributeTypeStorage;
+  dom: PSid = nil; uuid: TAppendShortUuid = nil): boolean;
 
 /// convert a set of common Attribute Types into their array text representation
 // - by design, atUndefined would be excluded from the list
@@ -1054,6 +1046,7 @@ type
       options: TLdapResultOptions; dom: PSid; uuid: TAppendShortUuid);
     procedure SetVariantArray(var v: TDocVariantData;
       options: TLdapResultOptions; dom: PSid; uuid: TAppendShortUuid);
+    procedure SetKnownType(AttrType: TLdapAttributeType);
   public
     /// initialize the attribute(s) storage
     constructor Create(const AttrName: RawUtf8; AttrType: TLdapAttributeType); overload;
@@ -1098,8 +1091,11 @@ type
       options: TLdapResultOptions; dom: PSid; uuid: TAppendShortUuid);
     /// search for a given value within this list
     function FindIndex(const aValue: RawByteString): PtrInt;
-    /// add all attributes to a "dn: ###" entry of a ldif-content buffer
-    procedure ExportToLdif(w: TTextWriter);
+    /// add all attributes as LDIF "dn: ###" entry, as specified by RFC 2849
+    // - aHumanFriendly = TRUE will also append '# dn: <utf-8 content>' e.g. if
+    // base-64 encoded was involved for human-friendly export
+    procedure ExportToLdif(w: TTextWriter; aHumanFriendly: boolean;
+      aMaxLineLen: PtrInt);
     /// save all attributes into a Modifier() / TLdapClient.Modify() ASN1_SEQ
     function ExportToAsnSeq: TAsnObject;
     /// how many values have been added to this attribute
@@ -1112,7 +1108,7 @@ type
       read fAttributeName;
     /// the common LDAP Attribute Type corresponding to this AttributeName
     property KnownType: TLdapAttributeType
-      read fKnownType;
+      read fKnownType write SetKnownType;
     /// the common LDAP Attribute Type Storage corresponding to this AttributeName
     property KnownTypeStorage: TLdapAttributeTypeStorage
       read fKnownTypeStorage;
@@ -1225,7 +1221,7 @@ type
       read Get write SetAttr; default;
     /// access to the internal list of TLdapAttribute objects
     // - note that length(Items) may be <> Count for this class, so you should
-    // NEVER use an enumerate "for a in list.Items do" loop
+    // NEVER use an enumerate "for a in list.Items do" loop, but rely on Count
     property Items: TLdapAttributeDynArray
       read fItems;
     /// number of TLdapAttribute objects in this list
@@ -1372,6 +1368,75 @@ function Modifier(Op: TLdapModifyOp;
 
 
 
+{ **************** LDIF Data Interchange Format }
+
+/// check if the supplied buffer requires base-64 encoding as RFC 2849 value
+// - i.e. if p[0..l-1] contains SAFE-STRING = [SAFE-INIT-CHAR *SAFE-CHAR]
+// - note that https://www.rfc-editor.org/errata/eid3646 states it applied to
+// also to dn/rdn values
+function IsLdifSafe(p: PUtf8Char; l: PtrInt): boolean;
+
+const
+  /// some default maximum line for our LDIF output
+  MAX_LDIF_LINE = 80;
+
+/// raw append of the supplied buffer value as specified by RFC 2849
+// - humanfriendly=true will add '# attname: <utf-8 content>' comment line
+// e.g. if base-64 encoding was involved, for human-friendly file export
+// - as used e.g. by TLdapAttribute.ExportToLdif and TLdapResult.ExportToLdif
+procedure AddLdif(w: TTextWriter; const v: RawByteString;
+  forcebase64, humanfriendly: boolean; att: pointer{TLdapAttribute};
+  maxlen: PtrInt);
+
+type
+  /// store a set of name/value attributes, for a given LDIF change type
+  TLdifChange = class(TLdapAttributeList)
+  protected
+    fChangeType: TLdapModifyOp;
+    procedure AssignTo(Dest: TClonable); override;
+  public
+    /// how the associated attributes should be applied
+    // - by default, if not specified in the LDIF file, plain lmoAdd is assumed
+    property ChangeType: TLdapModifyOp
+      read fChangeType;
+  end;
+  /// dynamic array of LDIF changes, as stored in TLdifEntry
+  TLdifChangeDynArray = array of TLdifChange;
+
+  /// store a LDIF entry, associated with a given dn
+  // - will reflect the exact content of a LDIF file section
+  TLdifEntry = class(TClonable)
+  protected
+    fDn: RawUtf8;
+    fItems: TLdifChangeDynArray;
+    procedure AssignTo(Dest: TClonable); override;
+  public
+    /// finalize the list
+    destructor Destroy; override;
+    /// access to the internal list of TLdifChange objects
+    property Items: TLdifChangeDynArray
+      read fItems;
+    property Dn: RawUtf8
+      read fDn write fDn;
+  end;
+  /// dynamic array of LDIF entries, as stored in TLdifFile
+  TLdifEntryDynArray = array of TLdifEntry;
+
+  /// store all decoded LDIF content in memory
+  // - will reflect the exact content of a LDIF file
+  TLdifFile = class(TClonable)
+  protected
+    fItems: TLdifEntryDynArray;
+    procedure AssignTo(Dest: TClonable); override;
+  public
+    /// finalize the list
+    destructor Destroy; override;
+    /// access to the internal list of TLdifChange objects
+    property Items: TLdifEntryDynArray
+      read fItems;
+  end;
+
+
 { **************** LDAP Response Storage }
 
 type
@@ -1422,7 +1487,10 @@ type
     // - return true on success
     function CopyObjectGuid(out objectGuid: TGuid): boolean;
     /// add a "dn: ###" entry to a ldif-content buffer
-    procedure ExportToLdif(w: TTextWriter);
+    // - aHumanFriendly=true will add '# attname: <utf-8 content>' comment line
+    // e.g. if base-64 encoding was involved, for human-friendly file export
+    procedure ExportToLdif(w: TTextWriter; aHumanFriendly: boolean;
+      aMaxLineLen: PtrInt);
   end;
   /// just a dynamic array of TLdapResult instances
   TLdapResultObjArray = array of TLdapResult;
@@ -1489,8 +1557,11 @@ type
     function GetJson(Options: TLdapResultOptions = [];
       const ObjectAttributeField: RawUtf8 = '*';
       Format: TTextWriterJsonFormat = jsonCompact): RawUtf8;
-    /// export all results in the RFC 2234 ldif-content output
-    function ExportToLdifContent: RawUtf8;
+    /// export all results as LDIF text, as specified by RFC 2849
+    // - aHumanFriendly=true will add '# attname: <utf-8 content>' comment line
+    // e.g. if base-64 encoding was involved, for human-friendly file export
+    function ExportToLdifContent(aHumanFriendly: boolean = false;
+      aMaxLineLen: PtrInt = MAX_LDIF_LINE): RawUtf8;
     /// dump the result of a LDAP search into human readable form
     // - used for debugging
     function Dump(NoTime: boolean = false): RawUtf8;
@@ -1660,7 +1731,7 @@ type
     /// finalize this instance
     destructor Destroy; override;
     /// run Connect and Bind of a temporary TLdapClient over TargetHost/TargetPort
-    // - don't validate the password, just TargetHost/TargetPort
+    // - don't validate the password nor Kerberos auth, just TargetHost/TargetPort
     function CheckTargetHost: TLdapClientTransmission;
     /// try to setup the LDAP server information from the system
     // - use a temporary TLdapClient.Connect then optionally call BindSaslKerberos
@@ -1728,6 +1799,8 @@ type
     /// the user password for non-anonymous Bind/BindSaslKerberos
     // - if you can, use instead password-less Kerberos authentication, or
     // at least ensure the connection is secured via TLS
+    // - as an alternative, on POSIX you can specify a keytab associated with
+    // UserName as 'FILE:/full/path/to/my.keytab' into this property
     property Password: SpiUtf8
       read fPassword write fPassword;
     /// Kerberos Canonical Domain Name
@@ -1825,10 +1898,11 @@ type
     procedure SearchMissingAttributes; overload;
     procedure RetrieveRootDseInfo;
     procedure RetrieveDefaultDNInfo;
-    procedure Reset;
-    procedure SetResultString(const msg: RawUtf8);
+    procedure Reset(reconnect: boolean);
+    procedure SetUnknownError(const msg: RawUtf8); overload;
+    procedure SetUnknownError(const fmt: RawUtf8; const args: array of const); overload;
     function DoBind(Mode: TLdapClientBound): boolean;
-    function Reconnect(const context: shortstring): boolean;
+    function Reconnect(const context: ShortString): boolean;
   public
     /// initialize this LDAP client instance
     constructor Create; overload; override;
@@ -1840,7 +1914,8 @@ type
 
     { connection methods }
 
-    /// try to connect to LDAP server
+    /// try to connect to LDAP server at socket level
+    // - without any authentication: consider using Bind/BindSaslKerberos instead
     // - if no TargetHost/TargetPort/FullTls has been set, will try the OS
     // DnsLdapControlers() hosts (from mormot.net.dns) following DiscoverMode
     // - do nothing if was already connected
@@ -1937,7 +2012,7 @@ type
       {$ifdef HASINLINE}inline;{$endif}
     /// test whether the client is connected to the server and try re-connect
     // - follows Settings.AutoReconnect property and OnDisconnect event
-    function EnsureConnected(const context: shortstring): boolean;
+    function EnsureConnected(const context: ShortString): boolean;
     /// test whether the client is connected with TLS or Kerberos Signing-Sealing
     // - it is unsafe to send e.g. a plain Password without lctEncrypted
     function Transmission: TLdapClientTransmission;
@@ -2048,7 +2123,7 @@ type
     function SearchAllDocRaw(out Dest: TDocVariantData;
       const BaseDN, Filter: RawUtf8; const Attributes: array of RawUtf8;
       Options: TLdapResultOptions; const ObjectAttributeField: RawUtf8 = '*';
-      MaxCount: integer = 0): boolean; 
+      MaxCount: integer = 0; PerPage: integer = 1000): boolean;
     /// retrieve all entries that match a given set of criteria
     // - may return false and ResultError = leSizeLimitExceeded if too many
     // items were found: in this case, the first page is available in SearchResult
@@ -2347,7 +2422,7 @@ type
     property ResultCode: integer
       read fResultCode;
     /// contains the high-level result enumerate of the last LDAP operation
-    // - see also ResultCode raw integer and ResultString text
+    // - see also ResultString text, especially for leUnknown
     property ResultError: TLdapError
       read fResultError;
     /// human readable description of the last LDAP operation
@@ -2656,13 +2731,13 @@ begin
       res := DnsServices(n, NameServer);
       if res <> nil then
       begin
-        result := res[0]; // found a matching site
+        result := res[Random32(length(res))]; // return a matching site
         exit;
       end;
     end;
   end;
-  if LdapServers <> nil then
-    result := LdapServers[0] // if no site is defined, use first server
+  if LdapServers <> nil then // if no site is defined, use one of the servers
+    result := LdapServers[Random32(length(LdapServers))]
   else
     result := '';
 end;
@@ -2870,49 +2945,6 @@ begin
   result := DnsLdapControlers(NameServer, UsePosixEnv, DomainName);
   if UdpFirstDelayMS > 0 then
     CldapSortHosts(result, UdpFirstDelayMS, MinimalUdpCount);
-end;
-
-
-{ **************** LDIF Data Interchange Format }
-
-// we follow https://www.rfc-editor.org/rfc/rfc2849 specs
-
-function IsLdifSafe(p: PUtf8Char; l: PtrInt): boolean; // RFC 2849
-begin
-  if (p <> nil) and
-     (l > 0) then
-  begin
-    result := false;
-    if p^ in [#0, #10, #13, ' ', ':', '<', #128 .. #255] then
-      exit; // SAFE-INIT-CHAR: <= 127, not NUL, LF, CR, SPACE, COLON, LESS-THAN
-    dec(l);
-    if p[l] = ' ' then
-      exit; // "should not end with a space" RFC 2849 point 8)
-    if l <> 0 then
-      repeat
-        inc(p);
-        if p^ in [#0, #10, #13, #128 .. #255] then
-          exit; // SAFE-CHAR: <= 127 not NUL, LF, CR
-        dec(l);
-      until l = 0;
-  end;
-  result := true;
-end;
-
-procedure AddLdif(w: TTextWriter; p: PUtf8Char; l: PtrInt; forcebase64: boolean);
-begin
-  if forcebase64 or
-     not IsLdifSafe(p, l) then
-  begin
-    // UTF-8 or binary content is just stored as name:: <base64>
-    w.AddDirect(':', ' ');
-    w.WrBase64(pointer(p), l, {withmagic=}false); // line feeds are optionals
-  end
-  else
-  begin
-    w.AddDirect(' ');
-    w.AddNoJsonEscape(p, l);
-  end;
 end;
 
 
@@ -3368,7 +3400,7 @@ begin
   result := (Text <> '') and
             (PosExChar('*', Text) = 0) and
             (PosExChar('\', Text) = 0) and
-            IsValidUtf8(Text);
+            IsValidUtf8Small(Text); // AVX2 not worth it
 end;
 
 function LdapEscape(const Text: RawUtf8; KeepWildChar: boolean): RawUtf8;
@@ -3397,7 +3429,7 @@ function LdapIsValidDistinguishedName(const Text: RawUtf8): boolean;
 begin
   result := (Text <> '') and
             (PosExChar('*', Text) = 0) and // but allows \ within DN
-            IsValidUtf8(Text);
+            IsValidUtf8Small(Text); // AVX2 not worth it
 end;
 
 function LdapValidDistinguishedName(const Text: RawUtf8): RawUtf8;
@@ -3504,7 +3536,8 @@ const
     'operatingSystemVersion',      // atOperatingSystemVersion
     'servicePrincipalName',        // atServicePrincipalName
     'unicodePwd',                  // atUnicodePwd
-    'accountNameHistory');         // atAccountNameHistory
+    'accountNameHistory',          // atAccountNameHistory
+    'tokenGroups');                // atTokenGroups
 
   // reference names to fill the global AttrTypeNameAlt[]
   _AttrTypeNameAlt: array[0 .. high(AttrTypeNameAlt)] of RawUtf8 = (
@@ -3601,8 +3634,8 @@ begin
     AttrName := RawUtf8(existing); // replace with existing interned name
 end;
 
-procedure AttributeValueMakeReadable(var s: RawUtf8;
-  ats: TLdapAttributeTypeStorage; dom: PSid; uuid: TAppendShortUuid);
+function AttributeValueMakeReadable(var s: RawUtf8; ats: TLdapAttributeTypeStorage;
+  dom: PSid; uuid: TAppendShortUuid): boolean;
 var
   ft: QWord;
   guid: TGuid;
@@ -3610,6 +3643,7 @@ var
   ts: TTimeLogBits absolute guid;
 begin
   // handle the storage kind of our recognized attribute types
+  result := false;
   case ats of
     atsRawUtf8, // most used - LDAP v3 requires UTF-8 encoding
     atsInteger,
@@ -3662,14 +3696,18 @@ begin
     atsUnicodePwd:
       begin
         s := 'xxxxxxxx'; // anti-forensic measure
+        result := true;
         exit;
       end;
   end;
   // atsAny or not expected format: check valid UTF-8, or fallback to hexa
-  if IsValidUtf8(s) then
+  if IsValidUtf8Small(s) then // AVX2 not worth it
     EnsureRawUtf8(s)
   else
+  begin
     BinToHexLowerSelf(RawByteString(s));
+    result := true;
+  end;
 end;
 
 function ToText(Attributes: TLdapAttributeTypes): TRawUtf8DynArray;
@@ -4045,8 +4083,7 @@ constructor TLdapAttribute.Create(
 begin
   inherited Create;
   fAttributeName := AttrName;
-  fKnownType := AttrType;
-  fKnownTypeStorage := AttrTypeStorage[AttrType];
+  SetKnownType(AttrType);
   SetLength(fList, 1); // optimized for a single value (most used case)
 end;
 
@@ -4054,6 +4091,12 @@ destructor TLdapAttribute.Destroy;
 begin
   Clear;
   inherited Destroy;
+end;
+
+procedure TLdapAttribute.SetKnownType(AttrType: TLdapAttributeType);
+begin
+  fKnownType := AttrType;
+  fKnownTypeStorage := AttrTypeStorage[AttrType];
 end;
 
 procedure TLdapAttribute.Clear;
@@ -4369,7 +4412,8 @@ begin
     result := -1;
 end;
 
-procedure TLdapAttribute.ExportToLdif(w: TTextWriter);
+procedure TLdapAttribute.ExportToLdif(w: TTextWriter;
+  aHumanFriendly: boolean; aMaxLineLen: PtrInt);
 var
   i: PtrInt;
 begin
@@ -4377,8 +4421,8 @@ begin
   begin
     w.AddString(fAttributeName); // is either OID or plain alphanum
     w.AddDirect(':');
-    AddLdif(w, pointer(fList[i]), length(fList[i]),
-      {forcebase64:} fKnownTypeStorage in ATS_BINARY);
+    AddLdif(w, fList[i], {forcebase64:} fKnownTypeStorage in ATS_BINARY,
+      aHumanFriendly, self, aMaxLineLen);
     w.AddDirect(#10);
   end;
 end;
@@ -4674,6 +4718,156 @@ begin
 end;
 
 
+{ **************** LDIF Data Interchange Format }
+
+// we follow https://www.rfc-editor.org/rfc/rfc2849 specs
+
+function IsLdifSafe(p: PUtf8Char; l: PtrInt): boolean; // RFC 2849
+begin
+  if (p <> nil) and
+     (l > 0) then
+  begin
+    result := false;
+    if p^ in [#0, #10, #13, ' ', ':', '<', #128 .. #255] then
+      exit; // SAFE-INIT-CHAR: <= 127, not NUL, LF, CR, SPACE, COLON, LESS-THAN
+    dec(l);
+    if p[l] = ' ' then
+      exit; // "should not end with a space" RFC 2849 point 8)
+    if l <> 0 then
+      repeat
+        inc(p);
+        if p^ in [#0, #10, #13, #128 .. #255] then
+          exit; // SAFE-CHAR: <= 127 not NUL, LF, CR
+        dec(l);
+      until l = 0;
+  end;
+  result := true;
+end;
+
+procedure AddWrapLine(w: TTextWriter; p: PUtf8Char; len, pos, maxlen: PtrInt);
+var
+  perline: PtrInt;
+begin // here maxlen > 0
+  perline := MinPtrInt(len, maxlen - pos);
+  repeat
+    w.AddNoJsonEscape(p, perline);
+    dec(len, perline);
+    if len = 0 then
+      exit;
+    w.AddDirect(#10, ' ');
+    inc(p, perline);
+    perline := MinPtrInt(len, maxlen);
+  until false;
+end;
+
+procedure AddLdif(w: TTextWriter; const v: RawByteString;
+  forcebase64, humanfriendly: boolean; att: pointer; maxlen: PtrInt);
+var
+  a: TLdapAttribute absolute att;
+  truncated: boolean;
+  tmp: RawUtf8;
+begin
+  dec(maxlen);
+  if forcebase64 or
+     not IsLdifSafe(pointer(v), length(v)) then
+  begin
+    // UTF-8 or binary content are stored as 'attributename:: <base64>'
+    w.AddDirect(':', ' ');
+    if (att = nil) or
+       (maxlen <= 0) then
+      w.WrBase64(pointer(v), length(v), {withmagic=}false) // line feeds optional
+    else
+    begin
+      tmp := BinToBase64(v);
+      AddWrapLine(w, pointer(tmp), length(tmp), length(a.AttributeName) + 2, maxlen);
+    end;
+    if forcebase64 or
+       (not humanfriendly) or
+       (a = nil) or
+       (a.fKnownTypeStorage in [atsAny, atsInteger]) then
+      exit;
+    humanfriendly := false; // skip AttributeValueMakeReadable() below
+  end
+  else
+  begin
+    // simple 'attributename: <us-ascii>' form
+    w.AddDirect(' ');
+    if (att = nil) or
+       (maxlen <= 0) then
+      w.AddString(v)
+    else
+      AddWrapLine(w, pointer(v), length(v), length(a.AttributeName) + 1, maxlen);
+    if (not humanfriendly) or
+       (a = nil) or
+       (a.fKnownTypeStorage = atsRawUtf8) then
+      exit;
+  end;
+  // optionally append the human-friendly value as comment
+  tmp := v;
+  if humanfriendly then
+    if AttributeValueMakeReadable(tmp, a.fKnownTypeStorage) or
+       (pointer(tmp) = pointer(v)) then
+      exit; // don't put hexadecimal or identical content in comment
+  w.AddDirect(#10, '#', ' ');
+  w.AddString(a.AttributeName); // is either OID or plain alphanum
+  w.AddDirect(':', ' ', '<');
+  truncated := (maxlen > 0) and
+               (length(tmp) + length(a.AttributeName) > maxlen - 6);
+  if truncated then
+    FakeLength(tmp, Utf8TruncatedLength(tmp, maxlen - 9));
+  w.AddString(tmp);             // human-readable text as comment
+  if truncated then
+    w.AddDirect('.', '.', '.', '>')
+  else
+    w.AddDirect('>');
+end;
+
+
+{ TLdifChange }
+
+procedure TLdifChange.AssignTo(Dest: TClonable);
+var
+  d: TLdifChange absolute Dest;
+begin
+  inherited AssignTo(Dest); // copy all TLdapAttribute
+  d.fChangeType := fChangeType;
+end;
+
+
+{ TLdifEntry }
+
+procedure TLdifEntry.AssignTo(Dest: TClonable);
+var
+  d: TLdifEntry absolute Dest;
+begin
+  d.fDn := fDn;
+  TLdifChange.CloneObjArray(fItems, d.fItems);
+end;
+
+destructor TLdifEntry.Destroy;
+begin
+  ObjArrayClear(fItems);
+  inherited Destroy;
+end;
+
+
+{ TLdifFile }
+
+procedure TLdifFile.AssignTo(Dest: TClonable);
+var
+  d: TLdifFile absolute Dest;
+begin
+  TLdifEntry.CloneObjArray(fItems, d.fItems);
+end;
+
+destructor TLdifFile.Destroy;
+begin
+  ObjArrayClear(fItems);
+  inherited Destroy;
+end;
+
+
+
 { **************** LDAP Response Storage }
 
 { TLdapResult }
@@ -4802,17 +4996,18 @@ begin
   end;
 end;
 
-procedure TLdapResult.ExportToLdif(w: TTextWriter);
+procedure TLdapResult.ExportToLdif(w: TTextWriter; aHumanFriendly: boolean;
+  aMaxLineLen: PtrInt);
 var
   i: PtrInt;
 begin
   w.AddDirect('#', ' ');
   w.AddString(DNToCN(fObjectName, {NoRaise=}true));
-  w.AddShorter(#10'dn:');
-  AddLdif(w, pointer(fObjectName), length(fObjectName));
+  w.AddDirect(#10, 'd', 'n', ':');
+  AddLdif(w, fObjectName, false, false, nil, 0);
   w.AddDirect(#10);
   for i := 0 to fAttributes.Count - 1 do
-    fAttributes.Items[i].ExportToLdif(w);
+    fAttributes.Items[i].ExportToLdif(w, aHumanFriendly, aMaxLineLen);
   w.AddDirect(#10);
 end;
 
@@ -4974,7 +5169,8 @@ begin
   result := FindOrAdd(ObjectName).FindOrAdd(AttributeName);
 end;
 
-function TLdapResultList.ExportToLdifContent: RawUtf8;
+function TLdapResultList.ExportToLdifContent(aHumanFriendly: boolean;
+  aMaxLineLen: PtrInt): RawUtf8;
 var
   tmp: TTextWriterStackBuffer;
   w: TTextWriter;
@@ -4984,7 +5180,7 @@ begin
   try
     W.AddShort('version: 1'#10);
     for i := 0 to Count - 1 do
-      Items[i].ExportToLdif(w);
+      Items[i].ExportToLdif(w, aHumanFriendly, aMaxLineLen);
     W.Add('# total number of entries: %'#10, [Count]);
     w.SetText(result);
   finally
@@ -5006,34 +5202,34 @@ begin
     w.Add(count);
     if not NoTime then
     begin
-      w.AddShorter(' in ');
+      w.AddDirect(' ', 'i', 'n', ' ');
       w.AddShort(MicroSecToString(fMicroSec));
       w.AddShorter(' sent=');
       w.AddShort(KBNoSpace(fOut));
       w.AddShorter(' recv=');
       w.AddShort(KBNoSpace(fIn));
     end;
-    w.AddCR;
+    w.AddDirectNewLine; // = #13#10 on Windows, #10 on POSIX
     for i := 0 to Count - 1 do
     begin
       res := Items[i];
-      w.Add('%: %'#10, [i, DNToCN(res.ObjectName, {NoRaise=}true)]);
-      w.Add('  objectName : %'#10, [res.ObjectName]);
+      w.Add('%: %' + CRLF, [i, DNToCN(res.ObjectName, {NoRaise=}true)]);
+      w.Add('  objectName : %' + CRLF, [res.ObjectName]);
       for j := 0 to res.Attributes.Count - 1 do
       begin
         attr := res.Attributes.Items[j];
         w.Add('  % : ', [attr.AttributeName]);
         if attr.Count <> 1 then
-          w.AddCR;
+          w.AddDirectNewLine;
         for k := 0 to attr.Count - 1 do
         begin
           if attr.Count <> 1 then
             w.AddShorter('    - ');
           w.AddString(attr.GetReadable(k));
-          w.AddCR;
+          w.AddDirectNewLine;
         end;
       end;
-      w.AddCR;
+      w.AddDirectNewLine;
     end;
     w.SetText(result);
   finally
@@ -5191,10 +5387,7 @@ begin
         if test.Bind then // connect and anonymous binding
         begin
           fTls := test.Sock.TLS.Enabled; // may have changed during Connect
-          if fTls then
-            result := lctEncrypted
-          else
-            result := lctPlain;
+          result := test.Transmission; // lctEncrypted or lctPlain
         end;
       finally
         test.Free;
@@ -5449,11 +5642,18 @@ end;
 
 // **** TLdapClient connection methods
 
-procedure TLdapClient.SetResultString(const msg: RawUtf8);
+procedure TLdapClient.SetUnknownError(const msg: RawUtf8);
 begin
+  fResultError := leUnknown;
+  fResultCode := -1;
   fResultString := msg;
   if Assigned(fLog) then
-    fLog.Add.Log(sllDebug, msg, self);
+    fLog.Add.Log(sllTrace, msg, self);
+end;
+
+procedure TLdapClient.SetUnknownError(const fmt: RawUtf8; const args: array of const);
+begin
+  SetUnknownError(FormatUtf8(fmt, args));
 end;
 
 function TLdapClient.Connect(DiscoverMode: TLdapClientConnect;
@@ -5468,13 +5668,13 @@ begin
   if result then
     exit; // socket was already connected
   if fLog.HasLevel([sllEnter]) then
-    log := fLog.Enter(self, 'Connect');
+    fLog.EnterLocal(log, self, 'Connect');
   fResultError := leUnknown;
   fResultString := '';
   if fSettings.TargetHost = '' then
     if lccNoDiscovery in DiscoverMode then
     begin
-      SetResultString('Connect: no TargetHost supplied');
+      SetUnknownError('Connect: no TargetHost supplied');
       exit;
     end
     else
@@ -5498,7 +5698,7 @@ begin
       end;
       if dc = nil then
       begin
-        SetResultString('Connect: no LDAP server found on this network');
+        SetUnknownError('Connect: no LDAP server found on this network');
         exit;
       end;
       if Assigned(log) then
@@ -5546,17 +5746,17 @@ begin
         fSettings.Tls := fSock.TLS.Enabled;
         if Assigned(log) then
           log.Log(sllTrace, 'Connected to %', [fSettings.TargetUri], self);
-        exit;
+        exit; // success
       end;
     except
       on E: Exception do
       begin
         FreeAndNil(fSock); // abort and try next dc[]
-        FormatUtf8('Connect %: %', [E, E.Message], fResultString);
+        SetUnknownError('Connect %: %', [E, E.Message]);
       end;
     end;
   if fResultString = '' then
-    SetResultString('Connect: failed');
+    SetUnknownError('Connect: failed');
 end;
 
 function TLdapClient.GetTlsContext: PNetTlsContext;
@@ -5830,8 +6030,11 @@ begin
             ELdap.RaiseUtf8('%.SendPacket: AutoReconnect failed as %',
               [self, fResultString]);
         if fSock.SockConnected then
+        begin
+          packet := BuildPacket(Asn1Data); // rebuild with new fSeq + encryption
           if fSock.TrySndLow(pointer(packet), length(packet), @res, @raw) then
             exit; // success after re-connection
+        end;
       end;
   end;
   // a non-recoverable socket error occured at sending the request
@@ -5950,11 +6153,10 @@ end;
 function TLdapClient.DecodeResponse(
   var Pos: integer; const Asn1Response: TAsnObject): TAsnObject;
 var
-  x, asntype, seqend: integer;
+  x, asntype, seqend, winerr: integer;
   s, t: TAsnObject;
   errmsg: RawUtf8;
   hex: PAnsiChar;
-  wintxt: PShortString;
 begin
   result := '';
   fResultCode := -1;
@@ -5962,10 +6164,18 @@ begin
   fResultString := '';
   fResponseCode := LDAP_ASN1_ERROR;
   fResponseDN := '';
-  if (AsnNext(Pos, Asn1Response) <> ASN1_SEQ) or
-     (AsnNextInteger(Pos, Asn1Response, asntype) <> fSeq) or
-     (asntype <> ASN1_INT) then
+  if AsnNext(Pos, Asn1Response) <> ASN1_SEQ then
+  begin
+    SetUnknownError('Malformated response: missing ASN.1 SEQ');
     exit;
+  end;
+  seqend := AsnNextInteger(Pos, Asn1Response, asntype);
+  if (seqend <> fSeq) or
+     (asntype <> ASN1_INT) then
+   begin
+     SetUnknownError('Unexpected SEQ=% expected=%', [seqend, fSeq]);
+     exit;
+   end;
   fResponseCode := AsnNext(Pos, Asn1Response, nil, @seqend);
   if fResponseCode in LDAP_ASN1_RESPONSES then
   begin
@@ -5982,9 +6192,9 @@ begin
         hex := pointer(StrPosI(', DATA ', pointer(fResultString)));
         if hex <> nil then
         begin
-         wintxt := WinErrorConstant(ParseHex0x(hex + 7, {no0x=}true));
-         if wintxt^[0] <> #0 then
-            Append(errmsg, [' ERROR_', wintxt^]);
+          winerr := ParseHex0x(hex + 7, {no0x=}true);
+          if winerr <> 0 then
+            Append(errmsg, [' ', WinErrorShort(winerr)]);
         end;
       end;
       if fResultString = '' then
@@ -5992,7 +6202,7 @@ begin
       else
         fResultString := FormatUtf8('% [%]', [errmsg, fResultString]);
       if Assigned(fLog) then
-        fLog.Add.Log(sllDebug, 'DecodeResponse: %', [fResultString], self);
+        fLog.Add.Log(sllTrace, 'DecodeResponse: %', [fResultString], self);
     end;
     if fResultCode = LDAP_RES_REFERRAL then
       if AsnNext(Pos, Asn1Response, @s) = ASN1_CTC3 then
@@ -6021,7 +6231,7 @@ var
   x: integer;
 begin
   fReferals.Clear;
-  SendPacket(Asn1Data);
+  SendPacket(Asn1Data); // raise exception on failure
   resp := ReceiveResponse;
   x := 1;
   result := DecodeResponse(x, resp);
@@ -6044,7 +6254,7 @@ begin
      not fSettings.Tls and
      not fSettings.AllowUnsafePasswordBind then
     ELdap.RaiseUtf8('%.Bind with a password requires a TLS connection', [self]);
-  log := fLog.Enter('Bind as %', [fSettings.UserName], self);
+  fLog.EnterLocal(log, 'Bind as %', [fSettings.UserName], self);
   try
     SendAndReceive(Asn(LDAP_ASN1_BIND_REQUEST, [
                      Asn(fVersion),
@@ -6086,7 +6296,7 @@ begin
   if fBound or
      not Connect then
     exit;
-  log := fLog.Enter('BindSalsDigest(%) as %',
+  fLog.EnterLocal(log, 'BindSalsDigest(%) as %',
     [DIGEST_NAME[Algo], fSettings.UserName], self);
   if DIGEST_ALGONAME[Algo] = '' then
     ELdap.RaiseUtf8('Unsupported %.BindSaslDigest(%) algorithm',
@@ -6179,14 +6389,14 @@ begin
   // initiate GSSAPI bind request
   if not InitializeDomainAuth then
   begin
-    SetResultString('Kerberos: Error initializing the library');
+    SetUnknownError('Kerberos: Error initializing the library');
     exit;
   end;
   if (fSettings.KerberosSpn = '') and
      (fSettings.KerberosDN <> '') then
     fSettings.KerberosSpn := 'LDAP/' + fSettings.TargetHost + {noport}
                              '@' + UpperCase(fSettings.KerberosDN);
-  log := fLog.Enter('BindSaslKerberos(%) on %',
+  fLog.EnterLocal(log, 'BindSaslKerberos(%) on %',
     [fSettings.UserName, fSettings.KerberosSpn], self);
   needencrypt := false;
   try
@@ -6230,8 +6440,7 @@ begin
         except
           on E: Exception do
           begin
-            FormatUtf8('Kerberos %: %', [E, E.Message], fResultString);
-            // keep ResultCode = LDAP_RES_SASL_BIND_IN_PROGRESS (14)
+            SetUnknownError('Kerberos %: %', [E, E.Message]);
             exit; // catch SSPI/GSSAPI errors and return false
           end;
         end;
@@ -6244,14 +6453,14 @@ begin
           if fResultCode <> LDAP_RES_SASL_BIND_IN_PROGRESS then
           begin
             if fResultCode = LDAP_RES_SUCCESS then // paranoid
-              SetResultString('Kerberos: aborted SASL handshake');
+              SetUnknownError('Kerberos: aborted SASL handshake');
             exit;
           end;
           ParseInput;
           datain := SecDecrypt(fSecContext, datain);
           if length(datain) <> 4 then
           begin
-            fResultString := 'Kerberos: Unexpected SecLayer response';
+            SetUnknownError('Kerberos: Unexpected SecLayer response');
             exit; // expected format is #0=SecLayer #1#2#3=MaxMsgSizeInNetOrder
           end;
           seclayers := TKerbSecLayer(datain[1]);
@@ -6261,8 +6470,7 @@ begin
             if secmaxsize <> 0 then
             begin
               // invalid answer (as stated by RFC 4752)
-              FormatUtf8('Kerberos: Unexpected secmaxsize=%',
-                [secmaxsize], fResultString);
+              SetUnknownError('Kerberos: Unexpected secmaxsize=%', [secmaxsize]);
               exit;
             end
             else
@@ -6274,8 +6482,8 @@ begin
           else if seclayers * KLS_EXPECTED = [] then
           begin
             // we only support signing+sealing
-            FormatUtf8('Kerberos: Unsupported [%] method(s)',
-              [GetSetName(TypeInfo(TKerbSecLayer), seclayers)], fResultString);
+            SetUnknownError('Kerberos: Unsupported [%] method(s)',
+              [GetSetName(TypeInfo(TKerbSecLayer), seclayers)]);
             exit;
           end
           else
@@ -6324,8 +6532,8 @@ begin
   finally
     if Assigned(log) then
       log.Log(LOG_DEBUGERROR[not result],
-        'BindSaslKerberos=% % % signseal=% as %', [BOOL_STR[result],
-        fResultCode, ToText(Transmission)^, needencrypt, fBoundUser], self);
+        'BindSaslKerberos=% % % signseal=% as %', [BOOL_STR[result], fResultCode,
+        ToText(Transmission)^, BOOL_STR[needencrypt], fBoundUser], self);
   end;
 end;
 
@@ -6334,7 +6542,7 @@ begin
   result := fSock.SockConnected;
 end;
 
-function TLdapClient.EnsureConnected(const context: shortstring): boolean;
+function TLdapClient.EnsureConnected(const context: ShortString): boolean;
 begin
   result := (self <> nil) and
             (fSock.SockConnected or
@@ -6362,26 +6570,32 @@ begin
   fLog.Add.Log(sllTrace, 'Close', self);
   if fSock.SockConnected then
     try
-      SendPacket(AsnTyped('', LDAP_ASN1_UNBIND_REQUEST));
+      SendPacket(AsnTyped('', LDAP_ASN1_UNBIND_REQUEST)); // may raise exception
     except
       result := false;
     end;
   FreeAndNil(fSock);
-  Reset;
+  Reset({reconnect=}false);
   fFlags := [];
 end;
 
-procedure TLdapClient.Reset;
+procedure TLdapClient.Reset(reconnect: boolean);
 begin
   fLog.Add.Log(sllTrace, 'Reset', self);
   if fSecContextEncrypt in fFlags then
     FreeSecContext(fSecContext);
-  fFlags := fFlags * [fRetrieveRootDseInfo, fRetrievedDefaultDNInfo];
+  fSeq := 0;
   fBound := false; // fBoundAs should be kept as it is
   fBoundUser := '';
-  fRootDN := '';
-  fDefaultDN := '';
-  fConfigDN := '';
+  if reconnect then
+    fFlags := fFlags * [fRetrieveRootDseInfo, fRetrievedDefaultDNInfo]
+  else
+  begin
+    fFlags := []; // from Close: full reset
+    fRootDN := '';
+    fDefaultDN := '';
+    fConfigDN := '';
+  end;
 end;
 
 function TLdapClient.DoBind(Mode: TLdapClientBound): boolean;
@@ -6398,7 +6612,7 @@ begin
   end;
 end;
 
-function TLdapClient.Reconnect(const context: shortstring): boolean;
+function TLdapClient.Reconnect(const context: ShortString): boolean;
 var
   log: ISynLog;
   step: PUtf8Char;
@@ -6408,26 +6622,23 @@ begin
      (fBoundAs = lcbNone) or
      (fSock = nil) then
     exit; // no server to reconnect
-  log := fLog.Enter('Reconnect from %', [context], self);
+  fLog.EnterLocal(log, 'Reconnect from %', [context], self);
   // reset the client state and close any current socket
-  Reset;
+  Reset({reconnect=}true);
   fSock.Close;
   // re-create the client socket with previous valid TCP parameters
   if Assigned(log) then
     log.Log(sllTrace, 'Reconnect: OpenBind(%)', [fSettings.TargetUri], self);
   step := 'OpenBind';
   try
-    fSock.OpenBind(fSettings.TargetHost, fSettings.TargetPort, fSettings.Tls);
+    fSock.OpenBind(fSettings.TargetHost, fSettings.TargetPort,
+                   {bind=}false, fSettings.Tls);
     // re-bound with the previous mean of authentication
     step := 'DoBind';
     result := DoBind(fBoundAs);
   except
     on E: Exception do
-    begin
-      FormatUtf8('% raised %', [step, E], fResultString);
-      if Assigned(log) then
-        log.Log(sllError, 'Reconnect: %', [fResultString], self);
-    end;
+      SetUnknownError('Reconnect: % raised %', [step, E]);
   end;
 end;
 
@@ -6460,7 +6671,7 @@ begin
             RespValue^ := v;
       end;
   finally
-    fLog.Add.Log(LOG_DEBUGERROR[not result], 'Extended(%)=% % % %',
+    fLog.Add.Log(LOG_TRACEERROR[not result], 'Extended(%)=% % % %',
       [Oid, BOOL_STR[result], fResultCode, fResultString, v], self);
   end;
 end;
@@ -6538,7 +6749,7 @@ begin
     // actually send the request
     bytesIn := fSock.BytesIn;
     bytesOut := fSock.BytesOut;
-    SendPacket(s);
+    SendPacket(s); // raise exception on failure
     // receive and parse the response
     x := 1;
     repeat
@@ -6622,7 +6833,7 @@ begin
   finally
     if Assigned(fLog) then
       if result then
-        fLog.Add.Log(sllDebug, 'Search dn="%" filter="%" %',
+        fLog.Add.Log(sllTrace, 'Search dn="%" filter="%" %',
           [BaseDN, Filter, fSearchResult], self)
       else
         fLog.Add.Log(sllError, 'Search dn="%" filter="%" failed as %',
@@ -6752,6 +6963,8 @@ begin
     fSearchResult.fMicroSec := fSearchRange.fMicroSec;
     fSearchResult.fIn := fSearchRange.fIn;
     fSearchResult.fOut := fSearchRange.fOut;
+    if Assigned(fLog) then
+      fLog.Add.Log(sllTrace, 'SearchMissingAttributes: %', [fSearchResult], self);
   end;
 end;
 
@@ -6827,23 +7040,30 @@ end;
 function TLdapClient.SearchAllDocRaw(out Dest: TDocVariantData;
   const BaseDN, Filter: RawUtf8; const Attributes: array of RawUtf8;
   Options: TLdapResultOptions; const ObjectAttributeField: RawUtf8;
-  MaxCount: integer): boolean;
+  MaxCount, PerPage: integer): boolean;
 var
-  n: integer;
+  n, recv: integer;
   dom: PSid;
+  ilog: ISynLog;
 begin
   // setup context and resultset
+  if Assigned(fLog) then
+    fLog.EnterLocal(ilog, 'SearchAllDocRaw max=% perpage=%',
+      [MaxCount, PerPage], self);
   dom := nil;
   if not (roNoSddlDomainRid in Options) then
     dom := pointer(DomainSid); // RID resolution from cached Domain SID
   Dest.Init(mFast, dvObject);
   n := 0;
+  recv := 0;
   // check for "paging attributes" auto-range results
   if (roAutoRange in Options) and
      (ObjectAttributeField <> '') and
      not (roTypesOnly in Options) then
     SearchRangeBegin;
-  SearchBegin(1000); // force pagination for the loop below
+  if PerPage <= 100 then
+    PerPage := 100;
+  SearchBegin(PerPage); // force pagination for the loop below
   try
     // retrieve all result pages
     repeat
@@ -6851,6 +7071,7 @@ begin
         break;
       fSearchResult.AppendTo(Dest, Options, ObjectAttributeField, dom);
       inc(n, fSearchResult.Count);
+      inc(recv, fSearchResult.Recv);
     until (SearchCookie = '') or
           ((MaxCount > 0) and
            (n > MaxCount));
@@ -6861,6 +7082,9 @@ begin
     if fSearchRange <> nil then
       SearchRangeEnd(Dest, Options, ObjectAttributeField); // as TDocVariant
   end;
+  if Assigned(ilog) then
+    ilog.Log(sllDebug, 'SearchAllDocRaw=% count=% recv=%',
+      [BOOL_STR[result], n, KBNoSpace(recv)], self);
   // eventually sort by field names (if specified)
   if roSortByName in Options then
     Dest.SortByName(nil, {reverse=}false, {nested=}true);
@@ -6943,7 +7167,7 @@ begin
                  ]));
   result := fResultCode = LDAP_RES_COMPARE_TRUE;
   if Assigned(fLog) then
-    fLog.Add.Log(LOG_DEBUGERROR[not (fResultCode in LDAP_RES_NOERROR)],
+    fLog.Add.Log(LOG_TRACEERROR[not (fResultCode in LDAP_RES_NOERROR)],
       'Compare("%",%,%)=% % %', [Obj, AttrName, AttrValue,
       BOOL_STR[result], fResultCode, fResultString], self);
 end;
@@ -6990,8 +7214,11 @@ begin
                  ]));
   result := fResultCode = LDAP_RES_SUCCESS;
   if Assigned(fLog) then
-    fLog.Add.Log(LOG_DEBUGERROR[not result], 'Modify(%)=% % %',
-      [Obj, BOOL_STR[result], fResultCode, fResultString], self);
+    if result then
+      fLog.Add.Log(sllDebug, 'Modify(%) n=%', [Obj, length(Modifications)], self)
+    else
+      fLog.Add.Log(sllError, 'Modify(%)=% % %',
+        [Obj, BOOL_STR[result], fResultCode, fResultString], self);
 end;
 
 function TLdapClient.Modify(const Obj: RawUtf8; Op: TLdapModifyOp;
@@ -7062,7 +7289,7 @@ begin
     // Obj had children and DeleteChildren is True
     try
       SearchScope := lssSingleLevel;
-      Search([], Obj);
+      Search([], {filter=}'', {dn=}Obj);
       children := fSearchResult.ObjectNames;
       for i := 0 to high(children) do
         if not Delete(children[i], {DeleteChildren=}true) then
@@ -7493,7 +7720,7 @@ end;
 
 { TLdapCheckMember }
 
-// checking group membership on a LDAP server is really a complex task
+// proper group membership on a LDAP server is really a complex task
 // - so a dedicated TLdapCheckMember class is worth the effort :)
 // - we follow the pattern as implemented in the best reference code we found:
 // https://www.gabescode.com/active-directory/2018/09/13/one-user-is-member-of-a-group.html
@@ -7797,27 +8024,42 @@ var
   datain, dataout: RawByteString;
 begin
   result := false;
+  if StartWithExact(aPassword, 'FILE:') then
+    exit; // don't cheat with this server credentials :)
   InvalidateSecContext(client);
-  InvalidateSecContext(server);
   try
     try
-      while ClientSspiAuthWithPassword(
-              client, datain, aUser, aPassword, fKerberosSpn, dataout) and
-            ServerSspiAuth(server, dataout, datain) do ;
-      if aFullUserName <> nil then
-        ServerSspiAuthUser(server, aFullUserName^);
-      {$ifdef OSWINDOWS}
-      // on Windows, ensure this user is part of AllowGroupBySid()
-      if (fGroupSid = nil) or
-         ServerSspiAuthGroup(server, fGroupSid) then
-      {$endif OSWINDOWS}
-        result := true;
-    except
-      result := false;
+      if (aFullUserName = nil)
+         {$ifdef OSWINDOWS} and (fGroupSid = nil) {$endif} then
+        // simple aUser/aPassword credential check needs no server side
+        // - see as reference mag_auth_basic() in NGINX's mod_auth_gssapi.c
+        result := ClientSspiAuthWithPassword(client, 'onlypass',
+                    aUser, aPassword, fKerberosSpn, dataout)
+      else
+      begin
+        // more user information currently need a ServerSspiAuth() context
+        InvalidateSecContext(server);
+        try
+          while ClientSspiAuthWithPassword(client, datain,
+                  aUser, aPassword, fKerberosSpn, dataout) and
+                ServerSspiAuth(server, dataout, datain) do ;
+          if aFullUserName <> nil then
+            ServerSspiAuthUser(server, aFullUserName^);
+          {$ifdef OSWINDOWS}
+          // on Windows, ensure this user is part of AllowGroupBySid()
+          if (fGroupSid = nil) or
+             ServerSspiAuthGroup(server, fGroupSid) then
+          {$endif OSWINDOWS}
+            result := true;
+        finally
+          FreeSecContext(server);
+        end;
+      end;
+    finally
+      FreeSecContext(client);
     end;
-  finally
-    FreeSecContext(server);
-    FreeSecContext(client);
+  except
+    result := false;
   end;
 end;
 

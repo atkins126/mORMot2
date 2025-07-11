@@ -175,6 +175,8 @@ type
       Token: SpiUtf8;
     end;
     /// how many times THttpClientSocket/TWinHttp should redirect 30x responses
+    // - TCurlHttp would only check for RedirectMax > 0 with no exact count
+    // - TWinINet won't support this parameter
     RedirectMax: integer;
     /// allow to customize the User-Agent header
     // - for TWinHttp, should be set at constructor level
@@ -257,7 +259,7 @@ const
 type
   /// maintain one partial download for THttpPartials
   THttpPartial = record
-    /// genuine positive identifier, 0 if empty/recyclable
+    /// genuine 31-bit positive identifier, 0 if empty/recyclable
     ID: THttpPartialID;
     /// the expected full size of this download
     FullSize: Int64;
@@ -274,7 +276,7 @@ type
   // - used e.g. during progressive download in THttpPeerCache
   THttpPartials = class
   protected
-    /// 32-bit monotonic counter sequence to populate THttpPartial.ID
+    /// 31-bit monotonic counter sequence to populate THttpPartial.ID
     fLastID: cardinal;
     /// how many fDownload[] are actually non void (ID <> 0)
     fUsed: cardinal;
@@ -471,6 +473,13 @@ type
       sockettimeout: cardinal = 10000; redirectmax: integer = 0): TFileName;
   end;
 
+  /// the flags as returned by IWGetAlternate.State
+  // - gasProcessing will be set e.g. if THttpServer.CurrentProcess > 0
+  // - gasPartials will be set e.g. if THttpPartials.IsVoid = false
+  TWGetAlternateState = set of (
+    gasProcessing,
+    gasPartials);
+
   /// interface called by THttpClientSocket.WGet() for alternate download
   // - THttpPeerCache implements e.g. a local peer-to-peer download cache
   // - as set to THttpClientSocketWGet.Alternate optional parameter
@@ -517,6 +526,8 @@ type
     /// check if the network interface defined in Settings did actually change
     // - you may want to recreate the alternate downloading instance
     function NetworkInterfaceChanged: boolean;
+    /// returns the current state of this instance
+    function State: TWGetAlternateState;
   end;
 
   /// internal low-level execution context for THttpClientSocket.Request
@@ -564,7 +575,8 @@ type
   // - on any error (timeout, connection closed) will retry once to get the value
   // - note that this client is not thread-safe: either use a critical section
   // (as we do in TRestClientUri), or create one instance per thread
-  // - don't forget to use Free procedure when you are finished
+  // - don't forget to use the Free method when you are finished, or consider
+  // using IJsonClient/TJsonClient for a higher level REST client
   THttpClientSocket = class(THttpSocket)
   protected
     fExtendedOptions: THttpRequestExtendedOptions;
@@ -572,6 +584,8 @@ type
     fAccept: RawUtf8;
     fProcessName: RawUtf8;
     fRedirected: RawUtf8;
+    fProxyAuthHeader: RawUtf8;
+    fRequestContext: RawUtf8;
     fRangeStart, fRangeEnd: Int64;
     fAuthDigestAlgo: TDigestAlgo;
     fOnAuthorize, fOnProxyAuthorize: TOnHttpClientSocketAuthorize;
@@ -609,6 +623,11 @@ type
     // - as used e.g. by TSimpleHttpClient
     constructor OpenOptions(const aUri: TUri;
       var aOptions: THttpRequestExtendedOptions; const aOnLog: TSynLogProc = nil);
+    /// after Create(), open or bind to a given server port
+    // - overriden to support HTTP proxy without CONNECT
+    procedure OpenBind(const aServer, aPort: RawUtf8; doBind: boolean;
+      aTLS: boolean = false; aLayer: TNetLayer = nlTcp;
+      aSock: TNetSocket = TNetSocket(-1); aReusePort: boolean = false); override;
     /// compare TUri and its options with the actual connection
     // - returns true if no new instance - i.e. Free + OpenOptions() - is needed
     // - only supports HTTP/HTTPS, not any custom RegisterNetClientProtocol()
@@ -789,6 +808,11 @@ type
     /// contain the body type retrieved from the server
     property ContentType: RawUtf8
       read Http.ContentType;
+    /// human-readable text information filled during the last HTTP request
+    // - typically one or several lines of 'DoRetry ...' context and/or
+    // some redirection / exception information
+    property RequestContext: RawUtf8
+      read fRequestContext;
   end;
 
   /// class-reference type (metaclass) of a HTTP client socket access
@@ -836,6 +860,7 @@ function WGet(const url: RawUtf8; const destfile: TFileName;
 
 function ToText(wgs: TWGetStep): PShortString; overload;
 function ToText(wgs: TWGetSteps; trimmed: boolean = true): RawUtf8; overload;
+function ToText(st: TWGetAlternateState; trimmed: boolean = true): RawUtf8; overload;
 
 var
   /// global overriden value for the GetSystemProxyUri() function
@@ -845,6 +870,9 @@ var
 
   /// force GetProxyForUri(fromSystem=true) in GetSystemProxyUri() function
   DefaultHttpClientSocketProxyAuto: boolean;
+
+  /// disable proxy for any IPv4 '1.2.3.4' address in GetSystemProxyUri() function
+  DefaultHttpClientSocketProxyNotForIp4: boolean;
 
 
 /// ask the Operating System to return the Tunnel/Proxy settings for a given URI
@@ -1079,7 +1107,7 @@ type
       write fExtendedOptions.UserAgent;
     /// how many 3xx status code redirections are allowed
     // - default is 0 - i.e. no redirection
-    // - implemented for TWinHttp only
+    // - recognized by TWinHttp and TCurlHttp, but not by TWinINet
     property RedirectMax: integer
       read fExtendedOptions.RedirectMax write fExtendedOptions.RedirectMax;
     /// internal structure used to store extended options
@@ -1238,6 +1266,7 @@ type
   TWinINet = class(TWinHttpApi)
   protected
     // those internal methods will raise an EWinINet exception on error
+    procedure RaiseFromLastError(const ctxt: ShortString);
     procedure InternalConnect(ConnectionTimeOut, SendTimeout,
       ReceiveTimeout: cardinal); override;
     procedure InternalCreateRequest(const aMethod, aUrl: RawUtf8); override;
@@ -1259,9 +1288,6 @@ type
   EWinINet = class(EHttpSocket)
   protected
     fLastError: integer;
-  public
-    /// create and raise a WinINet exception, with the error message as text
-    class procedure RaiseFromLastError;
   published
     /// the associated WSAGetLastError value
     property LastError: integer
@@ -1291,7 +1317,7 @@ type
   protected
     // you can override this method e.g. to disable/enable some protocols
     function InternalGetProtocols: cardinal; virtual;
-    // those internal methods will raise an EOSError exception on error
+    // those internal methods will raise an EWinHttp exception on error
     procedure InternalConnect(ConnectionTimeOut, SendTimeout,
       ReceiveTimeout: cardinal); override;
     procedure InternalCreateRequest(const aMethod, aUrl: RawUtf8); override;
@@ -1304,17 +1330,14 @@ type
     function InternalQueryDataAvailable: cardinal; override;
     function InternalReadData(var Data: RawByteString;
       Read: PtrInt; Size: cardinal): cardinal; override;
+    procedure RaiseFromLastError(const ctxt: ShortString);
   public
     /// relase the connection
     destructor Destroy; override;
   end;
 
   /// WinHttp exception type
-  EWinHttp = class(ESynException)
-  public
-    /// create and raise a EWinHttp exception, with the error message as text
-    class procedure RaiseFromLastError;
-  end;
+  EWinHttp = class(ESynException);
 
 var
   /// global flag to enable HTTP proxy detection at OS level for TWinHttp
@@ -1590,7 +1613,7 @@ type
 
   /// event signature for error callbacks during IJsonClient.Request()
   TOnJsonClientError = procedure(const Sender: IJsonClient;
-    const Response: TJsonResponse; const ErrorMsg: shortstring) of object;
+    const Response: TJsonResponse; const ErrorMsg: ShortString) of object;
 
   /// event signature for a callback run before each IJsonClient.Request()
   TOnJsonClientBefore = procedure(const Sender: IJsonClient;
@@ -1897,6 +1920,11 @@ function HttpGet(const aUri: RawUtf8; const inHeaders: RawUtf8;
   outStatus: PInteger = nil; timeout: integer = 0; forceSocket: boolean = false;
   ignoreTlsCertError: boolean = false): RawByteString; overload;
 
+/// retrieve the content of a web page, with ignoreTlsCertError=true for https
+// - typically used to retrieve reference material online for testing
+// - can optionally use a local file as convenient offline cache
+function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName = '';
+  outStatus: PInteger = nil): RawByteString;
 
 
 { ************** Send Email using the SMTP Protocol }
@@ -2208,7 +2236,7 @@ end;
 
 procedure THttpPartials.DoLog(const Fmt: RawUtf8; const Args: array of const);
 var
-  txt: shortstring;
+  txt: ShortString;
 begin
   if not Assigned(OnLog) then
     exit;
@@ -2579,6 +2607,11 @@ begin
   result := GetSetName(TypeInfo(TWGetSteps), wgs, trimmed);
 end;
 
+function ToText(st: TWGetAlternateState; trimmed: boolean): RawUtf8;
+begin
+  result := GetSetName(TypeInfo(TWGetAlternateState), st, trimmed);
+end;
+
 var
   _PROXYSETFROMENV: boolean; // retrieve environment variables only once
   _PROXYSAFE: TLightLock;
@@ -2612,7 +2645,14 @@ end;
 
 function GetSystemProxyUri(const uri, proxy: RawUtf8; var temp: TUri): PUri;
 begin
-  if IsNone(proxy) then
+  if IsNone(proxy) or
+     (not temp.From(uri)) or
+     (temp.Address = '') or
+     IsLocalHost(pointer(temp.Address)) or // no proxy for "127.x.x.x"
+     (DefaultHttpClientSocketProxyNotForIp4 and
+      NetIsIP4(pointer(temp.Address))) or // plain "1.2.3.4" IP has no proxy
+     ((temp.Scheme <> '') and
+      not IdemPChar(pointer(temp.Scheme), 'HTTP')) then
     result := nil
   else if (proxy <> '') and
           temp.From(proxy) then
@@ -2719,13 +2759,50 @@ begin
   aOptions.TLS := TLS; // copy back Peer information after connection
 end;
 
+procedure THttpClientSocket.OpenBind(const aServer, aPort: RawUtf8; doBind,
+  aTLS: boolean; aLayer: TNetLayer; aSock: TNetSocket; aReusePort: boolean);
+var
+  bak: TUri;
+begin
+  if doBind then
+    EHttpSocket.RaiseUtf8('%.OpenBind with doBind=true', [self]);
+  fProxyAuthHeader := '';
+  if (not aTLS) and // proxy to https:// destination requires CONNECT
+     (Tunnel.Server <> '') and
+     (Tunnel.Server <> aServer) then
+  begin
+    // plain http:// proxy is implemented in RequestSendHeader not via CONNECT
+    bak := Tunnel;
+    try
+      Tunnel.Clear; // no CONNECT
+      inherited OpenBind(bak.Server, bak.Port, false, bak.Https, bak.Layer);
+      fProxyUrl := bak.URI;
+      if bak.User <> '' then
+        Join(['Proxy-Authorization: Basic ', bak.UserPasswordBase64], fProxyAuthHeader);
+      fSocketLayer := aLayer;
+      include(fFlags, fProxyHttp);
+      if Assigned(OnLog) then
+        OnLog(sllTrace, 'Open(%:%) via proxy %', [aServer, aPort, fProxyUrl], self);
+    finally
+      // always restore server and tunnel params for proper retry
+      fServer := aServer;
+      fPort := aPort; // good enough to keep '' for default port 80
+      exclude(fFlags, fServerTlsEnabled); // any TLS was about the proxy
+      Tunnel := bak;
+    end;
+  end
+  else
+    // regular socket creation if no proxy or toward https://
+    inherited OpenBind(aServer, aPort, {doBind=}false, aTLS, aLayer);
+end;
+
 function THttpClientSocket.SameOpenOptions(const aUri: TUri;
   const aOptions: THttpRequestExtendedOptions): boolean;
 var
   tun: TUri;
 begin
   result := IdemPChar(pointer(aUri.Scheme), 'HTTP') and
-            aUri.Same(Server, Port, TLS.Enabled) and
+            aUri.Same(Server, Port, ServerTls) and
             SameNetTlsContext(TLS, aOptions.TLS) and
             fExtendedOptions.SameAuth(@aOptions.Auth);
   if result then
@@ -2749,35 +2826,40 @@ procedure THttpClientSocket.RequestInternal(var ctxt: THttpClientRequest);
   procedure DoRetry(const Fmt: RawUtf8; const Args: array of const;
     FatalErrorCode: integer = HTTP_CLIENTERROR);
   var
-    msg: RawUtf8;
+    msg: ShortString;
   begin
-    FormatUtf8(Fmt, Args, msg);
+    FormatShort(Fmt, Args, msg);
+    AppendLine(fRequestContext, ['DoRetry ',  msg]);
     //writeln('DoRetry ',byte(ctxt.Retry), ' ', FatalErrorCode, ' / ', msg);
     if Assigned(OnLog) then
        OnLog(sllTrace, 'DoRetry % socket=% fatal=% retry=%',
          [msg, fSock.Socket, FatalErrorCode, BOOL_STR[rMain in ctxt.Retry]], self);
-    if fAborted then
+    if Aborted then
       ctxt.Status := HTTP_CLIENTERROR
     else if rMain in ctxt.Retry then
       // we should retry once -> return error only if failed twice
       ctxt.Status := FatalErrorCode
     else
       try
-        // recreate the connection and try again
+        // recreate the connection and try again - like TCrtSocket.ReOpen()
         Close;
-        OpenBind(fServer, fPort, {bind=}false, TLS.Enabled);
+        OpenBind(fServer, fPort, {bind=}false, ServerTls);
         HttpStateReset;
         include(ctxt.Retry, rMain);
         RequestInternal(ctxt); // retry once
       except
-        on Exception do
+        on E: Exception do
+        begin
+          AppendLine(fRequestContext, [E, ':', E.Message]);
           ctxt.Status := FatalErrorCode;
+        end;
       end;
   end;
 
 var
   cmd: PUtf8Char;
   pending: TCrtSocketPending;
+  res: TNetResult;
   bodystream: TStream;
   loerr, buflen: integer;
   dat: RawByteString;
@@ -2790,7 +2872,7 @@ begin
       fServer, fPort, ctxt.Url, ToText(Http.HeaderFlags), byte(ctxt.Retry)], self);
   end;
   Http.Content := '';
-  if fAborted then
+  if Aborted then
     ctxt.Status := HTTP_CLIENTERROR
   else if (hfConnectionClose in Http.HeaderFlags) or
           not SockIsDefined then
@@ -2829,8 +2911,10 @@ begin
       begin
         // InStream may be a THttpMultiPartStream -> Seek(0) calls Flush
         ctxt.InStream.Seek(0, soBeginning);
-        if SockSendStream(ctxt.InStream, 1 shl 20,
-             {noraise=}false, {checkrecv=}true) = nrRetry then
+        res := SockSendStream(ctxt.InStream, 1 shl 20,
+             {noraise=}false, {checkrecv=}true);
+        AppendLine(fRequestContext, [ctxt.InStream, ' = ', ToText(res)^]);
+        if res = nrRetry then
         begin
           // the server interrupted the upload by sending something (e.g. 413)
           if Assigned(OnLog) then
@@ -2852,6 +2936,7 @@ begin
             // timeout may happen not because the server took its time, but
             // because the network is down: sadly, the socket is still reported
             // as OK by the OS (on both Windows and POSIX)
+            AppendLine(fRequestContext, ['NoData ms=', Timeout]);
             // -> no need to retry
             ctxt.Status := HTTP_TIMEOUT;
             // -> close the socket, since this HTTP request is clearly aborted
@@ -2881,7 +2966,10 @@ begin
         ctxt.Status := GetCardinal(cmd + 9);
         if (ctxt.Status < 200) or
            (ctxt.Status > 599) then // the HTTP standard requires three digits
+        begin
+          AppendLine(fRequestContext, ['Invalid ', Http.CommandResp]);
           exit; // abort but returns the received number (may be 0)
+        end;
       end
       else
       begin
@@ -2919,6 +3007,8 @@ begin
           end
           else
             bodystream := nil; // don't append any HTML server error message
+        if bodystream <> nil then
+          AppendLine(fRequestContext, [ctxt.Status, ' over ', bodystream]);
         // retrieve whole response body
         GetBody(bodystream);
       end;
@@ -2933,8 +3023,11 @@ begin
           DoRetry('% raised after % [%]',
             [E, ToText(ENetSock(E).LastError)^, E.Message])
         else
+        begin
           // propagate custom exceptions to the caller (e.g. from progression)
+          AppendLine(fRequestContext, [E, ':', E.Message]);
           raise;
+        end;
     end;
   finally
     if Assigned(OnLog) then
@@ -2961,13 +3054,16 @@ begin
     SockSendLine([method, ' ', url, ' HTTP/1.1']);
   {$ifdef OSPOSIX}
   if SocketLayer = nlUnix then
-    SockSend('Host: unix')
+    SockSend('Host: unix') // not part of the HTTP standard anyway
   else
   {$endif OSPOSIX}
-  if Port = DEFAULT_PORT[TLS.Enabled] then
-    SockSendLine(['Host: ', Server])
+  if (fPort = '') or // = '' for fProxyHttp on port 80
+     (fPort = DEFAULT_PORT[ServerTls]) then
+    SockSendLine(['Host: ', fServer])
   else
-    SockSendLine(['Host: ', Server, ':', Port]);
+    SockSendLine(['Host: ', fServer, ':', fPort]);
+  if fProxyAuthHeader <> '' then
+    SockSend(fProxyAuthHeader);
   if (fRangeStart > 0) or
      (fRangeEnd > 0) then
     if fRangeEnd > fRangeStart then
@@ -3006,6 +3102,7 @@ var
   newuri: TUri;
 begin
   // prepare the execution
+  fRequestContext := '';
   ctxt.Url := url;
   if (url = '') or
      (url[1] <> '/') then
@@ -3045,7 +3142,7 @@ begin
         ctxt.Status := fOnProtocolRequest(Http);
         if StatusCodeIsSuccess(ctxt.Status) then
           ctxt.Status := Http.ContentToOutput(ctxt.Status, ctxt.OutStream);
-        if assigned(OnLog) then
+        if Assigned(OnLog) then
           OnLog(sllTrace, 'Request(%)=% via %.OnRequest',
             [fOpenUriFull, ctxt.Status,
              TObject(TMethod(fOnProtocolRequest).Data)], self);
@@ -3053,16 +3150,17 @@ begin
     end
     else
     repeat
-      // sub-method to handle the actual request, with proper retrial
+      // sub-method to handle the actual request, with proper retry
       RequestInternal(ctxt);
-      if fAborted then
+      if Aborted then
         break;
       // handle optional (proxy) authentication callbacks
       if (ctxt.Status = HTTP_UNAUTHORIZED) and
           Assigned(fOnAuthorize) then
       begin
-        if assigned(OnLog) then
+        if Assigned(OnLog) then
           OnLog(sllTrace, 'Request(% %)=%', [ctxt.Method, url, ctxt.Status], self);
+        AppendLine(fRequestContext, [ctxt.Status]);
         if rAuth in ctxt.Retry then
           break; // avoid infinite recursion
         include(ctxt.Retry, rAuth);
@@ -3072,8 +3170,9 @@ begin
       else if (ctxt.Status = HTTP_PROXYAUTHREQUIRED) and
           Assigned(fOnProxyAuthorize) then
       begin
-        if assigned(OnLog) then
+        if Assigned(OnLog) then
           OnLog(sllTrace, 'Request(% %)=%', [ctxt.Method, url, ctxt.Status], self);
+        AppendLine(fRequestContext, [ctxt.Status]);
         if rAuthProxy in ctxt.Retry then
           break;
         include(ctxt.Retry, rAuthProxy);
@@ -3091,6 +3190,7 @@ begin
       else
         ctxt.Retry := [];
       ctxt.Url := Http.HeaderGetValue('LOCATION');
+      AppendLine(fRequestContext, [ctxt.Status, ' into ', ctxt.Url]);
       case ctxt.Status of
         // https://developer.mozilla.org/en-US/docs/Web/HTTP/Redirections
         HTTP_MOVEDPERMANENTLY,
@@ -3106,7 +3206,7 @@ begin
         OutStream.Size := ctxt.OutStreamInitialPos;     // truncate
         OutStream.Position := ctxt.OutStreamInitialPos; // reset position
       end;
-      if assigned(OnLog) then
+      if Assigned(OnLog) then
         OnLog(sllTrace, 'Request % % redirected to %', [ctxt.Method, url, ctxt.Url], self);
       if Assigned(fOnRedirect) then
         if not fOnRedirect(self, ctxt) then
@@ -3118,13 +3218,18 @@ begin
         if (hfConnectionClose in Http.HeaderFlags) or
            (newuri.Server <> Server) or
            (newuri.Port <> Port) or
-           (newuri.Https <> TLS.Enabled) then
+           (newuri.Https <> ServerTls) then
         begin
           Close; // relocated to another server -> reset the TCP connection
           try
+            AppendLine(fRequestContext, ['ReOpen ', newuri.URI]);
             OpenBind(newuri.Server, newuri.Port, {bind=}false, newuri.Https);
           except
-            ctxt.Status := HTTP_CLIENTERROR; // more explicit than 404 or 501
+            on E: Exception do
+            begin
+              AppendLine(fRequestContext, [E, ': ', E.Message]);
+              ctxt.Status := HTTP_CLIENTERROR; // more explicit than 404 or 501
+            end;
           end;
           HttpStateReset;
           ctxt.Url := newuri.Address;
@@ -3133,7 +3238,7 @@ begin
       else
         fRedirected := ctxt.Url;
       inc(ctxt.Redirected);
-    until fAborted;
+    until Aborted;
     if Assigned(fOnAfterRequest) then
       fOnAfterRequest(self, ctxt);
   end;
@@ -3573,7 +3678,7 @@ begin
   if (Sender = nil) or
      not IdemPChar(pointer(Authenticate), pointer(SECPKGNAMEHTTP_UPPER)) then
     exit;
-  unauthstatus := Context.status; // either 401 or 407
+  unauthstatus := Context.status; // either 401 (http auth) or 407 (proxy auth)
   bak := Context.header;
   InvalidateSecContext(sc);
   try
@@ -3687,7 +3792,7 @@ begin
   Http := OpenHttp(server, port, aTLS, aLayer, '', aTimeout, @tls);
   if Http <> nil then
   try
-    Http.RedirectMax := 5;
+    Http.RedirectMax := 5; // fair enough
     status := Http.Get(url, 0, inHeaders);
     if outStatus <> nil then
       outStatus^ := status;
@@ -4003,19 +4108,19 @@ begin
       InternalAddHeader(fCompressList.AcceptEncoding);
     upload:= IsPost(method) or IsPut(method);
     // send request to remote server
-    if assigned(fOnUpload) and
+    if Assigned(fOnUpload) and
        upload then
       fOnUpload(self, false)
-    else if assigned(fOnDownload) and
+    else if Assigned(fOnDownload) and
             not upload then
       fOnDownload(self, false);
     InternalSendRequest(method, data);
     // retrieve status and headers
     result := InternalRetrieveAnswer(OutHeader, contentEnc, acceptEnc, OutData);
-    if assigned(fOnUpload) and
+    if Assigned(fOnUpload) and
        upload then
       fOnUpload(self, true)
-    else if assigned(fOnDownload) and
+    else if Assigned(fOnDownload) and
             not upload then
       fOnDownload(self, true);
     // handle incoming answer compression
@@ -4086,7 +4191,7 @@ begin
     {$endif USELIBCURL}
     {$endif USEWININET}
     if _MainHttpClass = nil then
-      raise EHttpSocket.Create('MainHttpClass: No THttpRequest class known!');
+      EHttpSocket.RaiseU('MainHttpClass: No THttpRequest class known!');
   end;
   result := _MainHttpClass;
 end;
@@ -4247,26 +4352,27 @@ begin
       WinHttpForceProxyDetection := false; // flag was the culprit
   end;
   if fSession = nil then
-    EWinHttp.RaiseFromLastError;
+    RaiseFromLastError('Open');
   // cf. http://msdn.microsoft.com/en-us/library/windows/desktop/aa384116
   if not WinHttpApi.SetTimeouts(fSession, HTTP_DEFAULT_RESOLVETIMEOUT,
      ConnectionTimeOut, SendTimeout, ReceiveTimeout) then
-    EWinHttp.RaiseFromLastError;
-  if fHttps then
+    RaiseFromLastError('SetTimeouts');
+  if fHttps or
+     (fExtendedOptions.RedirectMax > 0) then // may redirect from http to https
   begin
     protocols := InternalGetProtocols;
     if not WinHttpApi.SetOption(fSession, WINHTTP_OPTION_SECURE_PROTOCOLS,
         @protocols, SizeOf(protocols)) then
-      EWinHttp.RaiseFromLastError;
+      RaiseFromLastError('SetOption(tls)');
     Callback := WinHttpApi.SetStatusCallback(fSession,
       WinHttpSecurityErrorCallback, WINHTTP_CALLBACK_FLAG_SECURE_FAILURE, nil);
     if CallbackRes = WINHTTP_INVALID_STATUS_CALLBACK then
-      EWinHttp.RaiseFromLastError;
+      RaiseFromLastError('SetStatusCallback');
   end;
   fConnection := WinHttpApi.Connect(
     fSession, pointer(Utf8ToSynUnicode(fServer)), fPort, 0);
   if fConnection = nil then
-    EWinHttp.RaiseFromLastError;
+    RaiseFromLastError('Connect');
 end;
 
 procedure TWinHttp.InternalCreateRequest(const aMethod, aUrl: RawUtf8);
@@ -4284,13 +4390,13 @@ begin
   fRequest := WinHttpApi.OpenRequest(fConnection, pointer(Utf8ToSynUnicode(aMethod)),
     pointer(Utf8ToSynUnicode(aUrl)), nil, nil, ACCEPT_TYPES[fNoAllAccept], Flags);
   if fRequest = nil then
-    EWinHttp.RaiseFromLastError;
+    RaiseFromLastError('OpenRequest');
   if fKeepAlive = 0 then
   begin
     Flags := WINHTTP_DISABLE_KEEP_ALIVE;
     if not WinHttpApi.SetOption(
        fRequest, WINHTTP_OPTION_DISABLE_FEATURE, @Flags, SizeOf(Flags)) then
-      EWinHttp.RaiseFromLastError;
+      RaiseFromLastError('SetOption(keepalive)');
   end;
 end;
 
@@ -4308,7 +4414,7 @@ begin
   if (hdr <> '') and
      not WinHttpApi.AddRequestHeaders(FRequest,
      pointer(Utf8ToSynUnicode(hdr)), length(hdr), WINHTTP_ADDREQ_FLAG_COALESCE) then
-    EWinHttp.RaiseFromLastError;
+    RaiseFromLastError('AddRequestHeaders');
 end;
 
 procedure TWinHttp.InternalSendRequest(const aMethod: RawUtf8;
@@ -4337,10 +4443,11 @@ procedure TWinHttp.InternalSendRequest(const aMethod: RawUtf8;
             Bytes := Max;
           if not WinHttpApi.WriteData(fRequest, @PByteArray(aData)[Current],
              Bytes, BytesWritten) then
-            EWinHttp.RaiseFromLastError;
+            RaiseFromLastError('WriteData');
           inc(Current, BytesWritten);
           if not fOnUpload(Self, Current, L) then
-            EWinHttp.RaiseUtf8('%: OnUpload canceled %', [self, aMethod]);
+            EWinHttp.RaiseUtf8('%: OnUpload cancel % on %:%',
+              [self, aMethod, fServer, fPort]);
         end;
       end;
     end
@@ -4367,25 +4474,26 @@ begin
         wraNegotiate,
         wraNegotiateChannelBinding:
           winAuth := WINHTTP_AUTH_SCHEME_NEGOTIATE;
-      else
-        raise EWinHttp.CreateUtf8(
-          '%: unsupported AuthScheme=%', [self, ToText(AuthScheme)^]);
+      else // no RaiseUtf8 to avoid "winAuth not initialized" error on Delphi
+        raise EWinHttp.CreateUtf8('%: unsupported AuthScheme=% on % %:%',
+          [self, ToText(AuthScheme)^, aMethod, fServer, fPort]);
       end;
       Utf8ToSynUnicode(AuthUserName, usr);
       Utf8ToSynUnicode(AuthPassword, pwd);
       try
         if not WinHttpApi.SetCredentials(fRequest, WINHTTP_AUTH_TARGET_SERVER,
            winAuth, pointer(usr), pointer(pwd), nil) then
-          EWinHttp.RaiseFromLastError;
+          RaiseFromLastError('SetCredentials');
       finally
         FillZero(pwd);
       end;
     end;
-  if fHttps and
-     IgnoreTlsCertificateErrors then
-    if not WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
-       @SECURITY_FLAG_IGNORE_CERTIFICATES, SizeOf(cardinal)) then
-      EWinHttp.RaiseFromLastError;
+  if IgnoreTlsCertificateErrors then
+    if fHttps or
+       (fExtendedOptions.RedirectMax > 0) then // may redirect from http to https
+      if not WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
+         @SECURITY_FLAG_IGNORE_CERTIFICATES, SizeOf(cardinal)) then
+        RaiseFromLastError('SetOption(ignorecert)');
   if fExtendedOptions.RedirectMax > 0 then
     if WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_REDIRECT_POLICY,
          @REDIRECT_POLICY_ALWAYS, SizeOf(cardinal)) then
@@ -4395,18 +4503,19 @@ begin
   if _SendRequest(L) and
      WinHttpApi.ReceiveResponse(fRequest, nil) then
     exit; // success
-  if fHttps and
+  if (fHttps or
+      (fExtendedOptions.RedirectMax > 0)) and
      (GetLastError = ERROR_WINHTTP_CLIENT_AUTH_CERT_NEEDED) and
      IgnoreTlsCertificateErrors and
      WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_SECURITY_FLAGS,
        @SECURITY_FLAG_IGNORE_CERTIFICATES, SizeOf(cardinal)) and
      WinHttpApi.SetOption(fRequest, WINHTTP_OPTION_CLIENT_CERT_CONTEXT,
        pointer(WINHTTP_NO_CLIENT_CERT_CONTEXT), 0) and
-     _SendRequest(L) and
+     _SendRequest(L) and // retry
      WinHttpApi.ReceiveResponse(fRequest, nil) then
     exit; // success with no certificate validation
   // if we reached here, an error occurred
-  EWinHttp.RaiseFromLastError;
+  RaiseFromLastError('SendRequest');
 end;
 
 function TWinHttp.InternalGetInfo(Info: cardinal): RawUtf8;
@@ -4450,14 +4559,14 @@ begin
     if GetLastError = ERROR_WINHTTP_OPERATION_CANCELLED then
       result := 0 // connection may be closed by the server e.g. on 30x redirect
     else
-      EWinHttp.RaiseFromLastError;
+      RaiseFromLastError('QueryDataAvailable');
 end;
 
 function TWinHttp.InternalReadData(var Data: RawByteString;
   Read: PtrInt; Size: cardinal): cardinal;
 begin
   if not WinHttpApi.ReadData(fRequest, @PByteArray(Data)[Read], Size, result) then
-    EWinHttp.RaiseFromLastError;
+    RaiseFromLastError('ReadData');
 end;
 
 destructor TWinHttp.Destroy;
@@ -4469,31 +4578,30 @@ begin
   inherited Destroy;
 end;
 
-
-{ EWinHttp }
-
-class procedure EWinHttp.RaiseFromLastError;
+procedure TWinHttp.RaiseFromLastError(const ctxt: ShortString);
+var
+  err: integer;
 begin
-  RaiseLastModuleError(winhttpdll, EWinHttp);
+  err := GetLastError;
+  EWinHttp.RaiseUtf8('%: % error [%] (%) on %:%',
+    [self, ctxt, WinErrorText(err, winhttpdll), err, fServer, fPort]);
 end;
 
 
-{ EWinINet }
+{ TWinINet }
 
-class procedure EWinINet.RaiseFromLastError;
+procedure TWinINet.RaiseFromLastError(const ctxt: ShortString);
 var
   err: integer;
   E: EWinINet;
 begin
   // see http://msdn.microsoft.com/en-us/library/windows/desktop/aa383884
   err := GetLastError;
-  E := CreateUtf8('% (%)', [SysErrorMessageWinInet(err), err]);
+  E := EWinINet.CreateUtf8('%: % error [%] (%) on %:%',
+    [self, ctxt, SysErrorMessageWinInet(err), err, fServer, fPort]);
   E.fLastError := err;
   raise E;
 end;
-
-
-{ TWinINet }
 
 procedure TWinINet.InternalConnect(
   ConnectionTimeOut, SendTimeout, ReceiveTimeout: cardinal);
@@ -4509,7 +4617,7 @@ begin
   fSession := InternetOpenA(pointer(fExtendedOptions.UserAgent), OpenType,
     pointer(fProxyName), pointer(fProxyByPass), 0);
   if fSession = nil then
-    EWinINet.RaiseFromLastError;
+    RaiseFromLastError('Open');
   InternetSetOption(fConnection, INTERNET_OPTION_CONNECT_TIMEOUT,
     @ConnectionTimeOut, SizeOf(ConnectionTimeOut));
   InternetSetOption(fConnection, INTERNET_OPTION_SEND_TIMEOUT,
@@ -4519,7 +4627,7 @@ begin
   fConnection := InternetConnectA(fSession, pointer(fServer), fPort,
     nil, nil, INTERNET_SERVICE_HTTP, 0, 0);
   if fConnection = nil then
-    EWinINet.RaiseFromLastError;
+    RaiseFromLastError('Connect');
 end;
 
 procedure TWinINet.InternalCreateRequest(const aMethod, aUrl: RawUtf8);
@@ -4540,7 +4648,7 @@ begin
   FRequest := HttpOpenRequestA(FConnection, pointer(aMethod), pointer(aUrl),
     nil, nil, ACCEPT_TYPES[fNoAllAccept], Flags, 0);
   if FRequest = nil then
-    EWinINet.RaiseFromLastError;
+    RaiseFromLastError('OpenRequest');
 end;
 
 procedure TWinINet.InternalCloseRequest;
@@ -4557,7 +4665,7 @@ begin
   if (hdr <> '') and
      not HttpAddRequestHeadersA(fRequest, pointer(hdr), length(hdr),
        HTTP_ADDREQ_FLAG_COALESCE) then
-    EWinINet.RaiseFromLastError;
+    RaiseFromLastError('AddHeader');
 end;
 
 procedure TWinINet.InternalSendRequest(const aMethod: RawUtf8; const aData:
@@ -4574,7 +4682,7 @@ begin
     buff.dwStructSize := SizeOf(buff);
     buff.dwBufferTotal := Length(aData);
     if not HttpSendRequestExA(fRequest, @buff, nil, 0, 0) then
-      EWinINet.RaiseFromLastError;
+      RaiseFromLastError('SendRequest');
     datapos := 0;
     while datapos < datalen do
     begin
@@ -4586,18 +4694,18 @@ begin
         Bytes := max;
       if not InternetWriteFile(fRequest,
          @PByteArray(aData)[datapos], Bytes, BytesWritten) then
-        EWinINet.RaiseFromLastError;
+        RaiseFromLastError('WriteFile');
       inc(datapos, BytesWritten);
       if not fOnUpload(Self, datapos, datalen) then
         raise EWinINet.CreateFmt('OnUpload Canceled %s', [aMethod]);
     end;
     if not HttpEndRequest(fRequest, nil, 0, 0) then
-      EWinINet.RaiseFromLastError;
+      RaiseFromLastError('EndRequest');
   end
   else
     // blocking send with no callback
     if not HttpSendRequestA(fRequest, nil, 0, pointer(aData), length(aData)) then
-      EWinINet.RaiseFromLastError;
+      RaiseFromLastError('SendRequest');
 end;
 
 function TWinINet.InternalGetInfo(Info: cardinal): RawUtf8;
@@ -4638,14 +4746,14 @@ end;
 function TWinINet.InternalQueryDataAvailable: cardinal;
 begin
   if not InternetQueryDataAvailable(fRequest, result, 0, 0) then
-    EWinINet.RaiseFromLastError;
+    RaiseFromLastError('QueryDataAvailable');
 end;
 
 function TWinINet.InternalReadData(var Data: RawByteString;
   Read: PtrInt; Size: cardinal): cardinal;
 begin
   if not InternetReadFile(fRequest, @PByteArray(Data)[Read], Size, result) then
-    EWinINet.RaiseFromLastError;
+    RaiseFromLastError('ReadData');
 end;
 
 destructor TWinINet.Destroy;
@@ -4726,7 +4834,8 @@ const
   CERT_PEM: RawUtf8 = 'PEM';
 begin
   fIn.URL := fRootURL + aUrl;
-  curl.easy_setopt(fHandle, coFollowLocation, 1); // url redirection (as TWinHttp)
+  if fExtendedOptions.RedirectMax > 0 then // url redirection (as TWinHttp)
+    curl.easy_setopt(fHandle, coFollowLocation, 1);
   //curl.easy_setopt(fHandle,coTCPNoDelay,0); // disable Nagle
   if fLayer = nlUnix then
     curl.easy_setopt(fHandle, coUnixSocketPath, pointer(fServer));
@@ -4734,7 +4843,9 @@ begin
   if (fProxyName <> '') and
      not IsNone(fProxyName) then
     curl.easy_setopt(fHandle, coProxy, pointer(fProxyName));
-  if fHttps then
+  if fHttps or
+     (fExtendedOptions.RedirectMax > 0) then // may redirect from http to https
+    // see https://curl.haxx.se/libcurl/c/simplessl.html
     if IgnoreTlsCertificateErrors then
     begin
       curl.easy_setopt(fHandle, coSSLVerifyPeer, 0);
@@ -4742,23 +4853,19 @@ begin
       //curl.easy_setopt(fHandle,coProxySSLVerifyPeer,0);
       //curl.easy_setopt(fHandle,coProxySSLVerifyHost,0);
     end
-    else
+    else if fTls.CertFile <> '' then
     begin
-      // see https://curl.haxx.se/libcurl/c/simplessl.html
-      if fTls.CertFile <> '' then
-      begin
-        curl.easy_setopt(fHandle, coSSLCertType, pointer(CERT_PEM));
-        curl.easy_setopt(fHandle, coSSLCert, pointer(fTls.CertFile));
-        if fTls.PassPhrase <> '' then
-          curl.easy_setopt(fHandle, coSSLCertPasswd, pointer(fTls.PassPhrase));
-        curl.easy_setopt(fHandle, coSSLKeyType, nil);
-        curl.easy_setopt(fHandle, coSSLKey, pointer(fTls.KeyName));
-        curl.easy_setopt(fHandle, coCAInfo, pointer(fTls.CACertFile));
-        curl.easy_setopt(fHandle, coSSLVerifyPeer, 1);
-      end
-      else if fTls.CACertFile <> '' then
-        curl.easy_setopt(fHandle, coCAInfo, pointer(fTls.CACertFile));
-    end;
+      curl.easy_setopt(fHandle, coSSLCertType, pointer(CERT_PEM));
+      curl.easy_setopt(fHandle, coSSLCert, pointer(fTls.CertFile));
+      if fTls.PassPhrase <> '' then
+        curl.easy_setopt(fHandle, coSSLCertPasswd, pointer(fTls.PassPhrase));
+      curl.easy_setopt(fHandle, coSSLKeyType, nil);
+      curl.easy_setopt(fHandle, coSSLKey, pointer(fTls.KeyName));
+      curl.easy_setopt(fHandle, coCAInfo, pointer(fTls.CACertFile));
+      curl.easy_setopt(fHandle, coSSLVerifyPeer, 1);
+    end
+    else if fTls.CACertFile <> '' then
+      curl.easy_setopt(fHandle, coCAInfo, pointer(fTls.CACertFile));
   curl.easy_setopt(fHandle, coUserAgent, pointer(fExtendedOptions.UserAgent));
   curl.easy_setopt(fHandle, coWriteFunction, @CurlWriteRawByteString);
   curl.easy_setopt(fHandle, coHeaderFunction, @CurlWriteRawByteString);
@@ -5243,7 +5350,7 @@ begin
 end;
 
 const
-  FMT_REQ: array[{full=}boolean] of RawUtf8 = (
+  FMT_REQ: array[{full=}boolean] of PUtf8Char = (
     'Request % %', 'Request % % %');
 
 procedure TJsonClientAbstract.RttiRequest(const Method, Action, Headers: RawUtf8;
@@ -5329,9 +5436,9 @@ var
   a: PtrInt;
   name, value: RawUtf8;
   p: PVarRec;
-  tmp: TSynTempBuffer;
+  tmp: TSynTempAdder;
 begin
-  {%H-}tmp.InitOnStack;
+  {%H-}tmp.Init;
   p := @NameValuePairs[0];
   for a := 0 to high(NameValuePairs) shr 1 do
   begin
@@ -5349,8 +5456,8 @@ begin
     tmp.AddDirect(#13, #10); // use CR+LF in HTTP headers
     inc(p);
   end;
-  if tmp.added <> 0 then
-    tmp.Done(OutHeaders, CP_UTF8);
+  if tmp.Size <> 0 then
+    tmp.Done(OutHeaders);
 end;
 
 function HeadersEncode(const NameValuePairs: array of const): RawUtf8;
@@ -5404,7 +5511,7 @@ begin
   fBaseUri := IncludeTrailingUriDelimiter(aBaseUri);
   fKeepAlive := aKeepAlive;
   fHttp := TSimpleHttpClient.Create;
-  fDefaultHeaders := 'Accept: ' + JSON_CONTENT_TYPE;
+  fDefaultHeaders := ('Accept: ' + JSON_CONTENT_TYPE);
   fOptions := [jcoParseTolerant, jcoHttpErrorRaise];
   fUrlEncoder := [ueEncodeNames, ueSkipVoidString];
 end;
@@ -5636,6 +5743,30 @@ begin
   {$endif LINUX_RAWDEBUGVOIDHTTPGET}
 end;
 
+function HttpGetWeak(const aUri: RawUtf8; const aLocalFile: TFileName;
+  outStatus: PInteger): RawByteString;
+var
+  status: integer;
+begin
+  if aLocalFile <> '' then // try from local cache
+  begin
+    result := StringFromFile(aLocalFile); // useful e.g. during regression tests
+    if result <> '' then
+    begin
+      if outStatus <> nil then
+        outStatus^ := HTTP_SUCCESS; // emulates proper download
+      exit;
+    end;
+  end;
+  result := HttpGet(aUri, {inhead=}'', {outhead=}nil, {notsock=}false,
+    @status, {timeout=}0, {forcesocket=}false, {ignorecerterror=}true);
+  if outStatus <> nil then
+    outStatus^ := status;
+  if (status = HTTP_SUCCESS) and
+     (aLocalFile <> '') and
+     (result <> '') then
+    FileFromString(result, aLocalFile);
+end;
 
 
 { ************** Send Email using the SMTP Protocol }
@@ -5794,6 +5925,7 @@ type
     // INewSocketAddressCache methods
     function Search(const Host: RawUtf8; out NetAddr: TNetAddr): boolean;
     procedure Add(const Host: RawUtf8; const NetAddr: TNetAddr);
+    procedure Force(const Host, IP: RawUtf8);
     procedure Flush(const Host: RawUtf8);
     procedure SetTimeOut(aSeconds: integer);
   end;
@@ -5822,6 +5954,17 @@ procedure TNewSocketAddressCache.Add(const Host: RawUtf8;
 begin
   fData.DeleteDeprecated;   // flush cache only when we may need some new space
   fData.Add(Host, NetAddr); // do nothing if already added in another thread
+end;
+
+procedure TNewSocketAddressCache.Force(const Host, IP: RawUtf8);
+var
+  addr: TNetAddr;
+begin
+  if not NetIsIP4(pointer(IP)) or
+     not addr.SetFromIP4(IP, true) then
+    exit;
+  fData.DeleteDeprecated;   // flush cache only when we may need some new space
+  fData.AddOrUpdate(Host, addr); // force change
 end;
 
 procedure TNewSocketAddressCache.Flush(const Host: RawUtf8);

@@ -204,7 +204,7 @@ asm
         push    ebp
         add     esp, - 20
         mov     [esp], ecx
-        movzx   ecx, byte ptr [eax].taescontext.rounds
+        movzx   ecx, byte ptr [eax].TAesContext.Rounds
         lea     esi, [4 * ecx]
         lea     ecx, [ecx - 1]
         lea     eax, [eax + 4 * esi] // eax=@ctx.rk[ctx.rounds]=pk
@@ -3162,7 +3162,7 @@ asm
         jmp     _AesNiHashXmm0 // returns in both xmm0 and eax
 end;
 
-// 128-bit aeshash as implemented in Go runtime, using aesni/sse4.1 opcodes
+// 128-bit aeshash as implemented in GoLang runtime, using aesni/sse4.1 opcodes
 procedure _AesNiHashXmm0;
   {$ifdef FPC} nostackframe; assembler; {$endif}
 asm

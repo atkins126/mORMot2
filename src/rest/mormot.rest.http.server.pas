@@ -609,7 +609,7 @@ begin
      (aServer = nil) or
      (aServer.Model = nil) then
     exit;
-  log := fLog.Enter(self, 'AddServer');
+  fLog.EnterLocal(log, self, 'AddServer');
   fSafe.WriteLock; // protect fRestServers[]
   try
     n := length(fRestServers);
@@ -668,7 +668,7 @@ begin
      (aServer = nil) or
      (aServer.Model = nil) then
     exit;
-  log := fLog.Enter(self, 'RemoveServer');
+  fLog.EnterLocal(log, self, 'RemoveServer');
   fSafe.WriteLock; // protect fRestServers[]
   try
     n := high(fRestServers);
@@ -680,7 +680,7 @@ begin
           if THttpApiServer(fHttpServer).RemoveUrl(aServer.Model.Root,
              fPublicPort, fRestServers[i].Security in SEC_TLS,
              fDomainName) <> NO_ERROR then
-            log.Log(sllLastError, '%.RemoveUrl(%)',
+            fLog.Add.Log(sllLastError, '%.RemoveUrl(%)',
               [self, aServer.Model.Root], self);
         {$endif USEHTTPSYS}
         for j := i to n - 1 do
@@ -758,7 +758,7 @@ begin
     fLog := TSynLog
   else
     fLog := aServers[0].LogClass;
-  log := fLog.Enter('Create % (%) on port %',
+  fLog.EnterLocal(log, 'Create % (%) on port %',
     [ToText(aUse)^, ToText(aSecurity)^, aPort], self);
   fOptions := aOptions;
   inherited Create; // may have been overriden
@@ -834,8 +834,7 @@ begin
   if aUse in HTTP_API_MODES then
     if PosEx('Wine', OSVersionInfoEx) > 0 then
     begin
-      if Assigned(log) then
-        log.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
+      fLog.Add.Log(sllWarning, '%: httpapi probably not well supported on % -> ' +
           'fallback to useHttpAsync', [ToText(aUse)^, OSVersionInfoEx], self);
       aUse := useHttpAsync; // the closest server we have using sockets
     end
@@ -853,8 +852,7 @@ begin
     except
       on E: Exception do
       begin
-        if Assigned(log) then
-          log.Log(sllError, '% for % % at%  -> fallback to socket-based server',
+        fLog.Add.Log(sllError, '% for % % at%  -> fallback to socket-based server',
             [E, ToText(aUse)^, fHttpServer, fRestServerNames], self);
         FreeAndNilSafe(fHttpServer); // if http.sys initialization failed
         if fUse in [useHttpApiOnly, useHttpApiRegisteringURIOnly] then
@@ -922,12 +920,11 @@ end;
 
 destructor TRestHttpServer.Destroy;
 var
-  log: ISynLog;
+  {%H-}log: ISynLog;
 begin
-  log := fLog.Enter(self, 'Destroy');
-  if log <> nil then
-    log.Log(sllHttp, '% finalized for %',
-      [fHttpServer, Plural('server', length(fRestServers))], self);
+  fLog.EnterLocal(log, self, 'Destroy').
+       Log(sllHttp, '% finalized for %',
+         [fHttpServer, Plural('server', length(fRestServers))], self);
   Shutdown(true); // but don't call fRestServers[i].Server.Shutdown
   FreeAndNilSafe(fHttpServer);
   inherited Destroy;
@@ -939,25 +936,24 @@ var
   i: PtrInt;
   {%H-}log: ISynLog;
 begin
-  if (self <> nil) and
-     not fShutdownInProgress then
-  begin
-    log := fLog.Enter('Shutdown(%)', [BOOL_STR[noRestServerShutdown]], self);
-    fShutdownInProgress := true;
-    fHttpServer.Shutdown;
-    fSafe.WriteLock; // protect fRestServers[]
-    try
-      for i := 0 to high(fRestServers) do
-      begin
-        if not noRestServerShutdown then
-          fRestServers[i].Server.Shutdown;
-        if TMethod(fRestServers[i].Server.OnNotifyCallback).Data = self then
-          // avoid unexpected GPF, and proper TRestServer reuse
-          fRestServers[i].Server.OnNotifyCallback := nil;
-      end;
-    finally
-      fSafe.WriteUnLock;
+  if (self = nil) or
+     fShutdownInProgress then
+    exit;
+  fLog.EnterLocal(log, 'Shutdown(%)', [BOOL_STR[noRestServerShutdown]], self);
+  fShutdownInProgress := true;
+  fHttpServer.Shutdown;
+  fSafe.WriteLock; // protect fRestServers[]
+  try
+    for i := 0 to high(fRestServers) do
+    begin
+      if not noRestServerShutdown then
+        fRestServers[i].Server.Shutdown;
+      if TMethod(fRestServers[i].Server.OnNotifyCallback).Data = self then
+        // avoid unexpected GPF, and proper TRestServer reuse
+        fRestServers[i].Server.OnNotifyCallback := nil;
     end;
+  finally
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -1063,8 +1059,8 @@ begin
     aDomainName, aRegisterUri);
   if err = NO_ERROR then
     exit;
-  FormatUtf8('http.sys URI registration error #% for http%://%:%/%',
-    [err, TLS_TEXT[https], aDomainName, fPublicPort, aRoot], result);
+  result := FormatUtf8('http.sys URI registration error % for http%://%:%/%',
+    [WinErrorShort(err), TLS_TEXT[https], aDomainName, fPublicPort, aRoot]);
   if err = ERROR_ACCESS_DENIED then
     if aRegisterUri then
       result := result +
@@ -1072,9 +1068,10 @@ begin
     else
       result := result +
         ' (you need to register the URI - try to use useHttpApiRegisteringURI)';
-  fLog.Add.Log(sllLastError, result, self);
   if aRaiseExceptionOnError then
-    ERestHttpServer.RaiseUtf8('%: %', [self, result]);
+    ERestHttpServer.RaiseUtf8('%: %', [self, result])
+  else
+    fLog.Add.Log(sllError, result, self);
 end;
 {$else}
 begin
@@ -1146,7 +1143,7 @@ begin
   if (Ctxt.Method = '') or
      ((rsoOnlyJsonRequests in fOptions) and
       not IsGet(Ctxt.Method) and
-      not IdemPChar(pointer(Ctxt.InContentType), JSON_CONTENT_TYPE_UPPER)) then
+      not IsContentTypeJsonU(Ctxt.InContentType)) then
   begin
     // wrong Input parameters or not JSON request: 400 BAD REQUEST
     result := HTTP_BADREQUEST;
@@ -1164,9 +1161,8 @@ begin
   end;
   if (Ctxt.InContent <> '') and
      (rsoOnlyValidUtf8 in fOptions) and
-     (IdemPChar(pointer(Ctxt.InContentType), JSON_CONTENT_TYPE_UPPER) or
-      IdemPChar(pointer(Ctxt.InContentType), 'TEXT/')) and
-     not IsValidUtf8(Ctxt.InContent) then // may use AVX2
+     IsContentUtf8(Ctxt.InContent, Ctxt.InContentType) and
+     not IsValidUtf8NotVoid(Ctxt.InContent) then // may use AVX2
   begin
     // rsoOnlyValidUtf8 rejection
     result := HTTP_NOTACCEPTABLE;
