@@ -80,11 +80,11 @@ type
     fCount, fFirst, fLast: integer;
     fWaitPopFlags: set of (wpfDestroying);
     fWaitPopCounter: integer;
-    function GetCount: integer;
     procedure InternalPop(aValue: pointer);
     procedure InternalGrow;
     function InternalDestroying(incPopCounter: integer): boolean;
-    function InternalWaitDone(starttix, endtix: Int64; const idle: TThreadMethod): boolean;
+    function InternalWaitDone(starttix, endtix: Int64; const OnIdle: TThreadMethod): boolean;
+    function ReadOnlyLockedCount: integer;
     /// low-level TObjectStore methods implementing the persistence
     procedure LoadFromReader; override;
     procedure SaveToWriter(aWriter: TBufferWriter); override;
@@ -153,7 +153,7 @@ type
     /// returns how many items are currently stored in this queue
     // - this method is not thread-safe, so the returned value should be
     // either indicative, or you should use explicit Safe lock/unlock
-    // - if you want to check that the queue is not void, call Pending
+    // - if you want to check that the queue is not void, just call Pending
     function Count: integer;
     /// returns how much slots is currently reserved in memory
     // - the queue has an optimized auto-sizing algorithm, you can use this
@@ -237,22 +237,22 @@ type
   /// ref-counted interface for thread-safe access to a TDocVariant document
   // - is implemented e.g. by TLockedDocVariant, for IoC/DI resolution
   // - fast and safe storage of any JSON-like object, as property/value pairs,
-  // or a JSON-like array, as values
+  // or a JSON-like array - with thread-safe concurrent read access
   ILockedDocVariant = interface
     ['{CADC2C20-3F5D-4539-9D23-275E833A86F3}']
     function GetValue(const Name: RawUtf8): Variant;
     procedure SetValue(const Name: RawUtf8; const Value: Variant);
     /// check and return a given property by name
     // - returns TRUE and fill Value with the value associated with the supplied
-    // Name, using an internal lock for thread-safety
+    // Name, using an internal R/W lock for thread-safety
     // - returns FALSE if the Name was not found, releasing the internal lock:
     // use ExistsOrLock() if you want to add the missing value
     function Exists(const Name: RawUtf8; out Value: Variant): boolean;
     /// check and return a given property by name
     // - returns TRUE and fill Value with the value associated with the supplied
-    // Name, using an internal lock for thread-safety
+    // Name, using an internal R/W lock for thread-safety
     // - returns FALSE and set the internal lock if Name does not exist:
-    // caller should then release the lock via ReplaceAndUnlock()
+    // caller should then release the lock via ReplaceAndUnlock() or UnLock
     function ExistsOrLock(const Name: RawUtf8; out Value: Variant): boolean;
     /// set a value by property name, and set a local copy
     // - could be used as such, for implementing a thread-safe cache:
@@ -264,10 +264,10 @@ type
       out LocalValue: Variant);
     /// add an existing property value to the given TDocVariant document object
     // - returns TRUE and add the Name/Value pair to Obj if Name is existing,
-    // using an internal lock for thread-safety
+    // using an internal R/W lock for thread-safety
     // - returns FALSE if Name is not existing in the stored document, and
     // lock the internal storage: caller should eventually release the lock
-    // via AddNewPropAndUnlock()
+    // via AddNewPropAndUnlock() or UnLock
     // - could be used as such, for implementing a thread-safe cache:
     // ! if not cache.AddExistingPropOrLock('Articles',Scope) then
     // !   cache.AddNewPropAndUnlock('Articles',GetArticlesFromDB,Scope);
@@ -280,16 +280,20 @@ type
     // returning false, i.e. be executed on a locked instance
     procedure AddNewPropAndUnlock(const Name: RawUtf8; const Value: variant;
       var Obj: variant);
+    /// release the R/W lock after ExistsOrLock() or AddExistingPropOrLock()
+    // - if you don't have any data to add with ReplaceAndUnlock() or
+    // AddNewPropAndUnlock()
+    procedure UnLock;
     /// add an existing property value to the given TDocVariant document object
     // - returns TRUE and add the Name/Value pair to Obj if Name is existing
     // - returns FALSE if Name is not existing in the stored document
-    // - this method would use a lock during the Name lookup, but would always
+    // - this method would use a R/W lock during the Name lookup, but would always
     // release the lock, even if returning FALSE (see AddExistingPropOrLock)
     function AddExistingProp(const Name: RawUtf8; var Obj: variant): boolean;
     /// add a property value to the given TDocVariant document object
     // - this method would not expect the resource to be locked when called,
     // as with AddNewPropAndUnlock
-    // - will use the internal lock for thread-safety
+    // - will use the internal R/W lock for thread-safety
     // - if the Name is already existing, would update/change the existing value
     // - could be used as such, for implementing a thread-safe cache:
     // ! if not cache.AddExistingProp('Articles',Scope) then
@@ -298,7 +302,7 @@ type
     procedure AddNewProp(const Name: RawUtf8; const Value: variant;
       var Obj: variant);
     /// append a value to the internal TDocVariant document array
-    // - you should not use this method in conjunction with other document-based
+    // - you should not use this method in conjunction with other object-based
     // alternatives, like Exists/AddExistingPropOrLock or AddExistingProp
     procedure AddItem(const Value: variant);
     /// makes a thread-safe copy of the internal TDocVariant document object or array
@@ -307,8 +311,11 @@ type
     procedure Clear;
     /// save the stored values as UTF-8 encoded JSON Object
     function ToJson(HumanReadable: boolean = false): RawUtf8;
-    /// low-level access to the associated thread-safe mutex
-    function Lock: TAutoLocker;
+    /// low-level access to the internal TDocVariant instance and all its features
+    // - warning: the returned result is not thread-safe so you should use Safe^
+    function Data: PDocVariantData;
+    /// low-level access to the associated thread-safe R/W lock
+    function Safe: PRWLock;
     /// the document fields would be safely accessed via this property
     // - this is the main entry point of this storage
     // - will raise an EDocVariant exception if Name does not exist at reading
@@ -322,10 +329,11 @@ type
   // could define one published property of a mormot.core.interfaces.pas
   // TInjectableObject as ILockedDocVariant so that this class may be
   // automatically injected
+  // - thread-safety is using a TRWLock for safe and fast concurrent reading
   TLockedDocVariant = class(TInterfacedPersistent, ILockedDocVariant)
   protected
+    fSafe: TRWLock;
     fValue: TDocVariantData;
-    fLock: TAutoLocker;
     function GetValue(const Name: RawUtf8): Variant;
     procedure SetValue(const Name: RawUtf8; const Value: Variant);
   public
@@ -338,42 +346,30 @@ type
     constructor Create(options: TDocVariantModel); reintroduce; overload;
     /// initialize the thread-safe document storage with the corresponding options
     constructor Create(options: TDocVariantOptions); reintroduce; overload;
-    /// finalize the storage
-    destructor Destroy; override;
     /// check and return a given property by name
     function Exists(const Name: RawUtf8;
       out Value: Variant): boolean;
-    /// check and return a given property by name
-    // - returns TRUE and return the value of the existing Name
-    // - if not found, returns FALSE and expects Lock.Leave or ReplaceAndUnlock()
-    // to be eventually called
+    /// check and return a given property by name before ReplaceAndUnlock
     function ExistsOrLock(const Name: RawUtf8;
       out Value: Variant): boolean;
-    /// set a value by property name, and set a local copy
+    /// set a value by property name, and set a local copy after ExistsOrLock
     procedure ReplaceAndUnlock(const Name: RawUtf8; const Value: Variant;
       out LocalValue: Variant);
     /// add an existing property value to the given TDocVariant document object
-    // - returns TRUE and add the Name/Value pair to Obj if Name is existing
-    // - returns FALSE if Name is not existing in the stored document, and
-    // expects Lock.Leave or AddNewPropAndUnlock() to be eventually caled
+    // or prepare for AddNewPropAndUnlock
     function AddExistingPropOrLock(const Name: RawUtf8;
       var Obj: variant): boolean;
     /// add a property value to the given TDocVariant document object and
-    // to the internal stored document
+    // to the internal stored document after AddExistingPropOrLock
     procedure AddNewPropAndUnlock(const Name: RawUtf8; const Value: variant;
       var Obj: variant);
+    /// release the R/W lock after ExistsOrLock() or AddExistingPropOrLock()
+    procedure UnLock;
     /// add an existing property value to the given TDocVariant document object
-    // - returns TRUE and add the Name/Value pair to Obj if Name is existing
-    // - returns FALSE if Name is not existing in the stored document
-    // - this method would use a lock during the Name lookup, but would always
-    // release the lock, even if returning FALSE (see AddExistingPropOrLock)
+    // without maintaining the lock if not existing
     function AddExistingProp(const Name: RawUtf8;
       var Obj: variant): boolean;
     /// add a property value to the given TDocVariant document object
-    // - this method would not expect the resource to be locked when called,
-    // as with AddNewPropAndUnlock
-    // - will use the internal lock for thread-safety
-    // - if the Name is already existing, would update/change the existing value
     procedure AddNewProp(const Name: RawUtf8; const Value: variant;
       var Obj: variant);
     /// append a value to the internal TDocVariant document array
@@ -385,8 +381,10 @@ type
     /// save the stored value as UTF-8 encoded JSON Object
     // - implemented as just a wrapper around VariantSaveJson()
     function ToJson(HumanReadable: boolean = false): RawUtf8;
-    /// low-level access to the associated thread-safe mutex
-    function Lock: TAutoLocker;
+    /// low-level access to the internal TDocVariant instance and all its features
+    function Data: PDocVariantData;
+    /// low-level access to the associated thread-safe Read/Write lock
+    function Safe: PRWLock;
     /// the document fields would be safely accessed via this property
     // - will raise an EDocVariant exception if Name does not exist
     // - result variant is returned as a copy, not as varByRef, since a copy
@@ -949,8 +947,9 @@ type
   /// allow parallel execution of an index-based process in a thread pool
   // - will create its own thread pool, then execute any method by spliting the
   // work over each thread, so Method execution time is expected to be fair
-  TSynParallelProcess = class(TSynLocked)
+  TSynParallelProcess = class(TSynPersistent)
   protected
+    fSafe: TOSLightLock; // only used to serialize ParallelRunAndWait()
     fThreadName: RawUtf8;
     fPool: array of TSynParallelProcessThread;
     fThreadPoolCount: integer;
@@ -1109,8 +1108,9 @@ type
   // - a dedicated thread will be initialized and launched for the process, so
   // OnExecute() should better take some time to be worth the thread creation
   // - see TLoggedWorker for a global mechanism to handle a pool of this class
-  // - note: set FreeOnTerminate := true, so never call Free/Destroy to finalize,
-  // but call Terminate with proper cross-dereference in any owner thread
+  // - note: set FreeOnTerminate := true (unless ManualWaitForAndFree is true),
+  // so never call Free/Destroy to finalize, but call Terminate with proper
+  // cross-dereference in any owner thread
   TLoggedWorkThread = class(TLoggedThread)
   protected
     fOwner: TLoggedWorker;
@@ -1121,43 +1121,50 @@ type
     /// this constructor will directly start the thread in background
     // - with the context supplied to OnExecute() as a regular Sender: TObject
     // - OnExecuted() will eventually be run with Sender as TLoggedWorkThread
-    constructor Create(Owner: TLoggedWorker; const ProcessName: RawUtf8;
+    constructor CreateOwned(Owner: TLoggedWorker; const ProcessName: RawUtf8;
       Sender: TObject; const OnExecute: TNotifyEvent;
       const OnExecuted: TNotifyEvent = nil; Suspended: boolean = false);
-        reintroduce; overload;
+        overload;
     /// this constructor will directly start the thread in background
     // - with the context supplied to OnExecute() as a TDocVariantData object
     // initialized from name/value pairs from this constructor
     // - OnExecuted() will eventually be run with Sender as TLoggedWorkThread
-    constructor Create(Owner: TLoggedWorker; const ProcessName: RawUtf8;
+    // - named CreateOwnedAs() to circumvent Delphi "array of const" bug
+    constructor CreateOwnedAs(Owner: TLoggedWorker; const ProcessName: RawUtf8;
       const NameValuePairs: array of const; const OnExecute: TOnLoggedWorkProcessData;
       const OnExecuted: TNotifyEvent = nil; Suspended: boolean = false);
-        reintroduce; overload;
     /// this constructor will directly start the thread in background
     // - with the context as its internal TLoggedWork data structure
-    constructor Create(Owner: TLoggedWorker; const Work: TLoggedWork;
+    constructor CreateOwned(Owner: TLoggedWorker; const Work: TLoggedWork;
       const OnExecuted: TNotifyEvent = nil; Suspended: boolean = false);
+        overload;
+    /// this constructor will directly start the thread in background
+    // - with the context supplied to OnExecute() as a regular Sender: TObject
+    constructor Create(Logger: TSynLogClass; const ProcessName: RawUtf8;
+      Sender: TObject; const OnExecute: TNotifyEvent;
+      Suspended: boolean = false; ManualWaitForAndFree: boolean = false);
         reintroduce; overload;
     /// this constructor will directly start the thread in background
     // - with the context supplied to OnExecute() as a regular Sender: TObject
     // - OnExecuted() will eventually be run with Sender as TLoggedWorkThread
     constructor Create(Logger: TSynLogClass; const ProcessName: RawUtf8;
-      Sender: TObject; const OnExecute: TNotifyEvent;
-      const OnExecuted: TNotifyEvent = nil; Suspended: boolean = false);
+      Sender: TObject; const OnExecute, OnExecuted: TNotifyEvent;
+      Suspended: boolean = false; ManualWaitForAndFree: boolean = false);
         reintroduce; overload;
     /// this constructor will directly start the thread in background
     // - with the context as its internal TLoggedWork data structure
     constructor Create(Logger: TSynLogClass; const Work: TLoggedWork;
-      const OnExecuted: TNotifyEvent = nil; Suspended: boolean = false);
+      const OnExecuted: TNotifyEvent = nil; Suspended: boolean = false;
+      ManualWaitForAndFree: boolean = false);
         reintroduce; overload;
     /// this constructor will directly start the thread in background
     // - with the context supplied to OnExecute() as a TDocVariantData object
     // initialized from name/value pairs from this constructor
     // - OnExecuted() will eventually be run with Sender as TLoggedWorkThread
-    constructor Create(Logger: TSynLogClass; const ProcessName: RawUtf8;
+    // - named CreateAs() to circumvent Delphi "array of const" bug
+    constructor CreateAs(Logger: TSynLogClass; const ProcessName: RawUtf8;
       const NameValuePairs: array of const; const OnExecute: TOnLoggedWorkProcessData;
       const OnExecuted: TNotifyEvent = nil; Suspended: boolean = false);
-        reintroduce; overload;
   end;
 
   /// execute tasks in a pool of runtime-adjusted TLoggedWorkThread
@@ -1374,7 +1381,9 @@ const
   // allow up to 256 * 2MB = 512MB of RAM for the TSynThreadPoolWorkThread stack
   THREADPOOL_MAXTHREADS = 256;
 
-
+/// adjust the number of threads to the actual system it runs on
+// - e.g. Windows ARM PRISM has troubles with multiple threads, so we limit to 4
+procedure ThreadCountAdjust(var aThreadPoolCount: integer);
 
 
 
@@ -1411,7 +1420,7 @@ begin
   end;
 end;
 
-function TSynQueue.GetCount: integer;
+function TSynQueue.ReadOnlyLockedCount: integer;
 var
   f, l: integer;
 begin
@@ -1427,13 +1436,16 @@ end;
 
 function TSynQueue.Count: integer;
 begin
-  if self = nil then
-    result := 0
-  else
-    repeat
-      result := GetCount;
-      ReadBarrier;
-    until GetCount = result; // RCU algorithm to avoid aberations
+  result := 0;
+  if (self = nil) or
+     (fFirst < 0) then
+    exit;
+  fSafe.ReadOnlyLock;
+  try
+    result := ReadOnlyLockedCount;
+  finally
+    fSafe.ReadOnlyUnLock;
+  end;
 end;
 
 function TSynQueue.Capacity: integer;
@@ -1593,17 +1605,17 @@ begin
 end;
 
 function TSynQueue.InternalWaitDone(starttix, endtix: Int64;
-  const idle: TThreadMethod): boolean;
+  const OnIdle: TThreadMethod): boolean;
 begin
-  if Assigned(idle) then
+  if Assigned(OnIdle) then
   begin
     SleepHiRes(1); // SleepStep() may wait up to 250 ms which is not responsive
-    idle; // e.g. Application.ProcessMessages
+    OnIdle; // e.g. Application.ProcessMessages
   end
   else
     SleepStep(starttix);
   result := (wpfDestroying in fWaitPopFlags) or // no need to lock/unlock
-            (GetTickCount64 > endtix);
+            (mormot.core.os.GetTickCount64 > endtix);
 end;
 
 function TSynQueue.WaitPop(aTimeoutMS: integer; const aWhenIdle: TThreadMethod;
@@ -1614,7 +1626,7 @@ begin
   result := false;
   if not InternalDestroying(+1) then
   try
-    starttix := GetTickCount64;
+    starttix := mormot.core.os.GetTickCount64;
     endtix := starttix + aTimeoutMS;
     repeat
       if Assigned(aCompared) and
@@ -1637,7 +1649,7 @@ begin
   result := nil;
   if not InternalDestroying(+1) then
   try
-    starttix := GetTickCount64;
+    starttix := mormot.core.os.GetTickCount64;
     endtix := starttix + aTimeoutMS;
     repeat
       if fFirst >= 0 then
@@ -1648,7 +1660,7 @@ begin
             result := fValues.ItemPtr(fFirst);
         finally
           if result = nil then
-            fSafe.ReadWriteUnLock; // caller should always Unlock once done
+            fSafe.ReadWriteUnLock;
         end;
       end;
     until (result <> nil) or
@@ -1670,12 +1682,12 @@ begin
   finally
     fSafe.WriteUnLock;
   end;
-  starttix := GetTickCount64;
+  starttix := mormot.core.os.GetTickCount64;
   endtix := starttix + aTimeoutMS;
   repeat
     SleepStep(starttix); // ensure WaitPos() is actually finished
   until (fWaitPopCounter = 0) or
-        (GetTickCount64 > endtix);
+        (mormot.core.os.GetTickCount64 > endtix);
 end;
 
 procedure TSynQueue.Save(out aDynArrayValues; aDynArray: PDynArray);
@@ -1686,7 +1698,7 @@ begin
   DA.Init(fValues.Info.Info, aDynArrayValues, @n);
   fSafe.ReadOnlyLock;
   try
-    DA.Capacity := Count; // pre-allocate whole array, and set its length
+    DA.Capacity := ReadOnlyLockedCount; // pre-allocate whole array
     if fFirst >= 0 then
       if fFirst <= fLast then
         DA.AddArray(fValueVar, fFirst, fLast - fFirst + 1)
@@ -1767,7 +1779,7 @@ begin
   fSafe.ReadOnlyLock;
   try
     inherited SaveToWriter(aWriter);
-    n := Count;
+    n := ReadOnlyLockedCount;
     aWriter.WriteVarUInt32(n);
     if n = 0 then
       exit;
@@ -1800,7 +1812,7 @@ end;
 
 function TPendingTaskList.GetTimestamp: Int64;
 begin
-  result := GetTickCount64;
+  result := mormot.core.os.GetTickCount64;
 end;
 
 procedure TPendingTaskList.AddTask(aMilliSecondsDelayFromNow: integer;
@@ -1896,24 +1908,17 @@ end;
 
 constructor TLockedDocVariant.Create;
 begin
-  Create(JSON_FAST);
+  fValue.InitFast;
 end;
 
 constructor TLockedDocVariant.Create(options: TDocVariantModel);
 begin
-  Create(JSON_[options]);
+  fValue.Init(options);
 end;
 
 constructor TLockedDocVariant.Create(options: TDocVariantOptions);
 begin
-  fLock := TAutoLocker.Create;
   fValue.Init(options);
-end;
-
-destructor TLockedDocVariant.Destroy;
-begin
-  inherited;
-  fLock.Free;
 end;
 
 function TLockedDocVariant.Exists(const Name: RawUtf8;
@@ -1921,7 +1926,7 @@ function TLockedDocVariant.Exists(const Name: RawUtf8;
 var
   i: PtrInt;
 begin
-  fLock.Enter;
+  fSafe.ReadOnlyLock;
   try
     i := fValue.GetValueIndex(Name);
     if i < 0 then
@@ -1932,7 +1937,7 @@ begin
       result := true;
     end;
   finally
-    fLock.Leave;
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
@@ -1942,7 +1947,7 @@ var
   i: PtrInt;
 begin
   result := true;
-  fLock.Enter;
+  fSafe.ReadWriteLock; // upgradable
   try
     i := fValue.GetValueIndex(Name);
     if i < 0 then
@@ -1951,19 +1956,22 @@ begin
       Value := fValue.Values[i];
   finally
     if result then
-      fLock.Leave;
+      fSafe.ReadWriteUnLock
+    else
+      fSafe.WriteLock; // upgrade for ReplaceAndUnlock()
   end;
 end;
 
 procedure TLockedDocVariant.ReplaceAndUnlock(
   const Name: RawUtf8; const Value: Variant; out LocalValue: Variant);
 begin
-  // caller made fLock.Enter
+  // caller made fSafe.WriteLock
   try
-    SetValue(Name, Value);
+    fValue.AddOrUpdateValue(Name, Value); // = locked SetValue()
     LocalValue := Value;
   finally
-    fLock.Leave;
+    fSafe.WriteUnlock;
+    fSafe.ReadWriteUnLock; // need both
   end;
 end;
 
@@ -1973,29 +1981,40 @@ var
   i: PtrInt;
 begin
   result := true;
-  fLock.Enter;
+  fSafe.ReadWriteLock; // upgradable
   try
     i := fValue.GetValueIndex(Name);
     if i < 0 then
-      result := false
+      result := false // Name is not yet existing
     else
       _ObjAddProps([Name, fValue.Values[i]], Obj);
   finally
     if result then
-      fLock.Leave;
+      fSafe.ReadWriteUnLock
+    else
+      fSafe.WriteLock; // upgrade for AddNewPropAndUnlock()
   end;
 end;
 
 procedure TLockedDocVariant.AddNewPropAndUnlock(const Name: RawUtf8;
   const Value: variant; var Obj: variant);
 begin
-  // caller made fLock.Enter
+  // caller made fSafe.WriteLock
   try
-    SetValue(Name, Value);
+    fValue.AddOrUpdateValue(Name, Value); // = locked SetValue()
     _ObjAddProps([Name, Value], Obj);
   finally
-    fLock.Leave;
+    fSafe.WriteUnlock;
+    fSafe.ReadWriteUnLock; // need both
   end;
+end;
+
+procedure TLockedDocVariant.UnLock;
+begin
+  if not fSafe.IsLocked then
+    ESynThread.RaiseU('Unexpected TLockedDocVariant.UnLock');
+  fSafe.WriteUnlock;
+  fSafe.ReadWriteUnLock; // need both
 end;
 
 function TLockedDocVariant.AddExistingProp(const Name: RawUtf8;
@@ -2004,7 +2023,7 @@ var
   i: PtrInt;
 begin
   result := true;
-  fLock.Enter;
+  fSafe.ReadOnlyLock;
   try
     i := fValue.GetValueIndex(Name);
     if i < 0 then
@@ -2012,72 +2031,77 @@ begin
     else
       _ObjAddProps([Name, fValue.Values[i]], Obj);
   finally
-    fLock.Leave;
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
 procedure TLockedDocVariant.AddNewProp(const Name: RawUtf8;
   const Value: variant; var Obj: variant);
 begin
-  fLock.Enter;
+  fSafe.WriteLock;
   try
-    SetValue(Name, Value);
+    fValue.AddOrUpdateValue(Name, Value); // = locked SetValue()
     _ObjAddProps([Name, Value], Obj);
   finally
-    fLock.Leave;
+    fSafe.WriteUnlock;
   end;
 end;
 
 function TLockedDocVariant.GetValue(const Name: RawUtf8): Variant;
 begin
-  fLock.Enter;
+  fSafe.ReadOnlyLock;
   try
     fValue.RetrieveValueOrRaiseException(pointer(Name), length(Name),
       fValue.IsCaseSensitive, result{%H-}, false);
   finally
-    fLock.Leave;
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
 procedure TLockedDocVariant.SetValue(const Name: RawUtf8;
   const Value: Variant);
 begin
-  fLock.Enter;
+  fSafe.WriteLock;
   try
     fValue.AddOrUpdateValue(Name, Value);
   finally
-    fLock.Leave;
+    fSafe.WriteUnLock;
   end;
 end;
 
 procedure TLockedDocVariant.AddItem(const Value: variant);
 begin
-  fLock.Enter;
+  fSafe.WriteLock;
   try
     fValue.AddItem(Value);
   finally
-    fLock.Leave;
+    fSafe.WriteUnLock;
   end;
+end;
+
+function TLockedDocVariant.Data: PDocVariantData;
+begin
+  result := @fValue;
 end;
 
 function TLockedDocVariant.Copy: variant;
 begin
   VarClear(result{%H-});
-  fLock.Enter;
+  fSafe.ReadOnlyLock;
   try
     TDocVariantData(result).InitCopy(variant(fValue), JSON_FAST);
   finally
-    fLock.Leave;
+    fSafe.ReadOnlyUnLock;
   end;
 end;
 
 procedure TLockedDocVariant.Clear;
 begin
-  fLock.Enter;
+  fSafe.WriteLock;
   try
     fValue.Reset;
   finally
-    fLock.Leave;
+    fSafe.WriteUnLock;
   end;
 end;
 
@@ -2085,11 +2109,11 @@ function TLockedDocVariant.ToJson(HumanReadable: boolean): RawUtf8;
 var
   tmp: RawUtf8;
 begin
-  fLock.Enter;
+  fSafe.ReadOnlyLock;
   try
     DocVariantType.ToJson(@fValue, tmp);
   finally
-    fLock.Leave;
+    fSafe.ReadOnlyUnLock;
   end;
   if HumanReadable then
     JsonBufferReformat(pointer(tmp), result)
@@ -2097,9 +2121,9 @@ begin
     result := tmp;
 end;
 
-function TLockedDocVariant.Lock: TAutoLocker;
+function TLockedDocVariant.Safe: PRWLock;
 begin
-  result := fLock;
+  result := @fSafe;
 end;
 
 
@@ -2167,11 +2191,11 @@ var
 begin
   if fExecute = exRun then
   begin
-    endtix := GetTickCount64 + maxMS;
+    endtix := mormot.core.os.GetTickCount64 + maxMS;
     repeat
       SleepHiRes(1); // wait for Execute to finish
     until (fExecute <> exRun) or
-          (GetTickCount64 >= endtix);
+          (mormot.core.os.GetTickCount64 >= endtix);
   end;
 end;
 
@@ -2292,9 +2316,11 @@ begin
                 fOnAfterProcess(self);
             end;
           except
-            E := AcquireExceptionObject;
+            E := AcquireExceptionObject; // won't be released
             if E.InheritsFrom(Exception) then
-              fBackgroundException := Exception(E);
+              fBackgroundException := Exception(E)
+            else
+              ReleaseExceptionObject; // avoid leak (inlikely)
           end;
         finally
           SetPendingProcess(flagFinished);
@@ -2310,23 +2336,20 @@ begin
   if result <> flagIdle then
     exit; // no need to lock if obviously busy or finished
   fPendingProcessLock.Lock;
-  try
-    result := fPendingProcessFlag;
-    if result = flagIdle then
-    begin
-      // we just acquired the thread! congrats!
-      fPendingProcessFlag := flagStarted; // atomic set "started" flag
-      fCallerThreadID := ThreadID;
-    end;
-  finally
-    fPendingProcessLock.UnLock;
+  result := fPendingProcessFlag;
+  if result = flagIdle then
+  begin
+    // we just acquired the thread! congrats!
+    fPendingProcessFlag := flagStarted; // atomic set "started" flag
+    fCallerThreadID := ThreadID;
   end;
+  fPendingProcessLock.UnLock;
 end;
 
 function TSynBackgroundThreadMethodAbstract.OnIdleProcessNotify(
   var start: Int64): Int64;
 begin
-  result := GetTickCount64;
+  result := mormot.core.os.GetTickCount64;
   if start = 0 then
     result := start;
   dec(result, start);
@@ -2422,7 +2445,7 @@ function TSynBackgroundThreadMethodAbstract.GetOnIdleBackgroundThreadActive: boo
 begin
   result := (self <> nil) and
             Assigned(fOnIdle) and
-            (GetPendingProcess <> flagIdle);
+            (fPendingProcessFlag <> flagIdle);
 end;
 
 
@@ -2580,7 +2603,7 @@ begin
   if (fTask = nil) or
      Terminated then
     exit;
-  tix := GetTickCount64;
+  tix := mormot.core.os.GetTickCount64;
   n := 0;
   LockedInc32(@fProcessingCounter);
   try
@@ -2667,7 +2690,7 @@ begin
   end;
   task.OnProcess := aOnProcess;
   task.Secs := aOnProcessSecs;
-  task.NextTix := GetTickCount64 + (aOnProcessSecs * 1000 - TIXPRECISION);
+  task.NextTix := mormot.core.os.GetTickCount64 + (aOnProcessSecs * 1000 - TIXPRECISION);
   task.MsgSafe.Init; // required since task is on stack
   fTasks.Safe.WriteLock;
   try
@@ -3047,7 +3070,7 @@ constructor TSynParallelProcess.Create(ThreadPoolCount: integer;
 var
   i: PtrInt;
 begin
-  inherited Create; // initialize fSafe
+  fSafe.Init;
   if ThreadPoolCount < 0 then
     ESynThread.RaiseUtf8('%.Create(%,%)',
       [Self, ThreadPoolCount, ThreadName]);
@@ -3065,7 +3088,8 @@ end;
 destructor TSynParallelProcess.Destroy;
 begin
   ObjArrayClear(fPool);
-  inherited;
+  inherited Destroy;
+  fSafe.Done;
 end;
 
 procedure TSynParallelProcess.ParallelRunAndWait(const Method: TOnSynParallelProcess;
@@ -3092,6 +3116,7 @@ begin
     inc(t); // include current thread
   if use > t then
     use := t;
+  fSafe.Lock; // paranoid: serialize ParallelRunAndWait() calls
   try
     // start secondary threads
     perthread := cardinal(MethodCount) div cardinal(use);
@@ -3141,6 +3166,7 @@ begin
         error := FormatUtf8('% % on thread % [%]',
           [{%H-}error, E, fPool[t].fThreadName, E.Message]);
     end;
+    fSafe.UnLock;
     if error <> '' then
       ESynThread.RaiseUtf8('%.ParallelRunAndWait: %', [self, error]);
   end;
@@ -3163,27 +3189,34 @@ end;
 function TSynThread.SleepOrTerminated(MS: cardinal): boolean;
 var
   endtix: Int64;
+  step, remaining: integer;
 begin
   result := true; // notify Terminated
   if Terminated then
     exit;
   if MS < 32 then
   begin
-    // smaller than GetTickCount64 resolution (under Windows)
+    // smaller than OS timer resolution (at least under Windows)
     SleepHiRes(MS);
     if Terminated then
       exit;
   end
   else
   begin
-    endtix := GetTickCount64 + MS;
+    step := 0;
+    endtix := mormot.core.os.GetTickCount64 + MS;
     repeat
-      SleepHiRes(10);
+      if step < 200 then
+        inc(step, 10); // steps = 10..200 = up to total 2100 ms
+      SleepHiRes(step);
       if Terminated then
         exit;
-    until GetTickCount64 > endtix;
+      remaining := endtix - mormot.core.os.GetTickCount64;
+      if remaining < step then
+        step := remaining;
+    until remaining <= 0;
   end;
-  result := false; // abnormal delay expiration
+  result := false; // MS timeout
 end;
 
 procedure TSynThread.DoTerminate;
@@ -3306,7 +3339,7 @@ begin
     NotifyThreadStart(self);
     if fLogClass <> nil then
     begin
-      fLogClass.EnterLocal(ilog, 'Execute % %', [fProcessName, fLogClass], self);
+      fLogClass.EnterLocal(ilog, 'Execute %', [fProcessName], self);
       if Assigned(ilog) then
         fLog := ilog.Instance;
     end;
@@ -3404,23 +3437,31 @@ begin
 end;
 
 constructor TLoggedWorkThread.Create(Logger: TSynLogClass; const Work: TLoggedWork;
-  const OnExecuted: TNotifyEvent; Suspended: boolean);
+  const OnExecuted: TNotifyEvent; Suspended, ManualWaitForAndFree: boolean);
 begin
   fWork := Work;
   fOnDone := OnExecuted;
-  FreeOnTerminate := true;
+  FreeOnTerminate := not ManualWaitForAndFree;
   inherited Create(Suspended, nil, nil, Logger, Work.Name);
 end;
 
 constructor TLoggedWorkThread.Create(Logger: TSynLogClass;
   const ProcessName: RawUtf8; Sender: TObject;
-  const OnExecute, OnExecuted: TNotifyEvent; Suspended: boolean);
+  const OnExecute: TNotifyEvent; Suspended, ManualWaitForAndFree: boolean);
 begin
   SetWork(fWork, OnExecute, Sender, ProcessName);
-  Create(Logger, fWork, OnExecuted, Suspended);
+  Create(Logger, fWork, fOnDone, Suspended, ManualWaitForAndFree);
 end;
 
 constructor TLoggedWorkThread.Create(Logger: TSynLogClass;
+  const ProcessName: RawUtf8; Sender: TObject;
+  const OnExecute, OnExecuted: TNotifyEvent; Suspended, ManualWaitForAndFree: boolean);
+begin
+  SetWork(fWork, OnExecute, Sender, ProcessName);
+  Create(Logger, fWork, OnExecuted, Suspended, ManualWaitForAndFree);
+end;
+
+constructor TLoggedWorkThread.CreateAs(Logger: TSynLogClass;
   const ProcessName: RawUtf8; const NameValuePairs: array of const;
   const OnExecute: TOnLoggedWorkProcessData; const OnExecuted: TNotifyEvent;
   Suspended: boolean);
@@ -3429,14 +3470,14 @@ begin
   Create(Logger, fWork, OnExecuted, Suspended);
 end;
 
-constructor TLoggedWorkThread.Create(Owner: TLoggedWorker; const Work: TLoggedWork;
+constructor TLoggedWorkThread.CreateOwned(Owner: TLoggedWorker; const Work: TLoggedWork;
   const OnExecuted: TNotifyEvent; Suspended: boolean);
 begin
   fOwner := Owner;
   Create(Owner.fSynLog, Work, OnExecuted, Suspended);
 end;
 
-constructor TLoggedWorkThread.Create(Owner: TLoggedWorker;
+constructor TLoggedWorkThread.CreateOwned(Owner: TLoggedWorker;
   const ProcessName: RawUtf8; Sender: TObject;
   const OnExecute, OnExecuted: TNotifyEvent; Suspended: boolean);
 begin
@@ -3444,13 +3485,13 @@ begin
   Create(Owner.fSynLog, ProcessName, Sender, OnExecute, OnExecuted, Suspended);
 end;
 
-constructor TLoggedWorkThread.Create(Owner: TLoggedWorker;
+constructor TLoggedWorkThread.CreateOwnedAs(Owner: TLoggedWorker;
   const ProcessName: RawUtf8; const NameValuePairs: array of const;
   const OnExecute: TOnLoggedWorkProcessData; const OnExecuted: TNotifyEvent;
   Suspended: boolean);
 begin
   fOwner := Owner;
-  Create(Owner.fSynLog, ProcessName, NameValuePairs, OnExecute, OnExecuted, Suspended);
+  CreateAs(Owner.fSynLog, ProcessName, NameValuePairs, OnExecute, OnExecuted, Suspended);
 end;
 
 
@@ -3493,7 +3534,7 @@ begin
     begin
       // enough CPU cores to run a new thread now
       inc(fRunning);
-      TLoggedWorkThread.Create(self, Work, RunDone);
+      TLoggedWorkThread.CreateOwned(self, Work, RunDone);
       exit;
     end
     else if ForcedThread then
@@ -3575,23 +3616,23 @@ end;
 
 function TLoggedWorker.RunWait(TimeoutSec: integer; CallSynchronize: boolean): boolean;
 var
-  endtix: Int64;
+  endtix: cardinal;
 begin
   result := (self = nil) or
             (fRunning = 0);
   if result then
     exit;
-  endtix := TimeoutSec shl 10;
+  endtix := TimeoutSec;
   if endtix <> 0 then
-    inc(endtix, GetTickCount64()); // never wait forever
+    inc(endtix, GetTickSec); // never wait forever
   CallSynchronize := CallSynchronize and
                      (GetCurrentThreadID = MainThreadID);
   while fRunning <> 0 do
     if (endtix <> 0) and
-       (GetTickCount64 > endtix) then
+       (GetTickSec > endtix) then
       exit // result = false on timeout
     else if CallSynchronize then
-      CheckSynchronize{$ifndef DELPHI6OROLDER}(1){$endif}
+      CheckSynchronize(1)
     else
       SleepHiRes(10);
   result := true; // success
@@ -3647,7 +3688,7 @@ end;
 destructor TSynThreadPool.Destroy;
 var
   i: PtrInt;
-  endtix: Int64;
+  endtix: cardinal;
 begin
   fTerminated := true; // fWorkThread[].Execute will check this flag
   try
@@ -3665,9 +3706,9 @@ begin
       TaskAbort(fPendingContext[i]);
     {$endif USE_WINIOCP}
     // wait for threads to finish, with 30 seconds TimeOut
-    endtix := GetTickCount64 + 30000;
+    endtix := GetTickSec + 30;
     while (fRunningThreads > 0) and
-          (GetTickCount64 < endtix) do
+          (GetTickSec < endtix) do
       SleepHiRes(5);
     for i := 0 to fWorkThreadCount - 1 do
       fWorkThread[i].Free;
@@ -3748,7 +3789,7 @@ begin
   if (fContentionAbortDelay > 0) and
      aWaitOnContention then
   begin
-    tix := GetTickCount64;
+    tix := mormot.core.os.GetTickCount64;
     starttix := tix;
     endtix := tix + fContentionAbortDelay; // default 5 sec
     repeat
@@ -3757,7 +3798,7 @@ begin
         SleepHiRes(1)
       else
         SleepHiRes(10);
-      tix := GetTickCount64;
+      tix := mormot.core.os.GetTickCount64;
       if fTerminated then
         exit;
       if Enqueue then
@@ -3949,6 +3990,15 @@ begin
     SetCurrentThreadName('%%-%', [fOwner.fPoolName, fThreadNumber, fOwner.fName]);
 end;
 
+
+procedure ThreadCountAdjust(var aThreadPoolCount: integer);
+begin
+  {$ifdef OSWINDOWS}
+  if IsWow64Emulation then
+    if aThreadPoolCount > 4 then
+      aThreadPoolCount := 4; // Windows PRISM does not like too much threads
+  {$endif OSWINDOWS}
+end;
 
 end.
 

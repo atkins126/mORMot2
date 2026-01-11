@@ -100,10 +100,9 @@ type
   TServiceFactoryServerInstance = record
     /// the internal Instance ID, as remotely sent in "id":1
     InstanceID: TID;
-    /// GetTickCount64() shr 10 timestamp corresponding to the last access of
-    // this instance
-    LastAccess: cardinal;
-    /// the associated client session
+    /// Ctxt.TickCount64 shr 10 set during the last access of this instance
+    LastAccessTix10: cardinal;
+    /// the associated client session ID
     Session: cardinal;
     /// the implementation instance itself
     Instance: TInterfacedObject;
@@ -147,7 +146,7 @@ type
     fInstanceCurrentID: TID;
     fInstanceCounter: cardinal;
     fInstanceTimeOut: cardinal;
-    fInstanceDeprecatedTix32, fInstanceGCDeprecatedTix32: cardinal;
+    fInstanceDeprecatedTix10, fInstanceGCDeprecatedTix10: cardinal;
     fInstanceGC: TSynObjectListLocked; // release refcnt>1 in separated lock
     fStats: TSynMonitorInputOutputObjArray;
     fImplementationClass: TInterfacedClass;
@@ -172,7 +171,7 @@ type
     function GetInstanceGCCount: integer;
     procedure InstanceFree(Obj: TInterfacedObject);
     procedure InstanceFreeOrGC(Obj: TInterfacedObject);
-    function DoInstanceGC(Force: boolean): PtrInt;
+    function DoInstanceGC(Tix10: cardinal; Final: boolean = false): PtrInt;
     function DoInstanceGCSession(aSessionID: cardinal): integer;
     /// called by ExecuteMethod to append input/output params to Sender.TempTextWriter
     procedure OnLogRestExecuteMethod(Sender: TInterfaceMethodExecuteRaw;
@@ -183,6 +182,10 @@ type
     // - will handle TInterfacedPersistent and TInjectableObject
     // as expected, if necessary
     function CreateInstance(AndIncreaseRefCount: boolean): TInterfacedObject;
+    /// low-level method called from client CacheFlush/_ping_ URI
+    function RenewSession(tix10, id: cardinal): integer;
+    /// low-level method called when session is finished
+    function CloseSession(aSessionID: cardinal): integer;
   public
     /// initialize the service provider on the server side
     // - expect an direct server-side implementation class, which may inherit
@@ -270,11 +273,6 @@ type
     function SetServiceLog(const aMethod: array of RawUtf8;
       const aLogRest: IRestOrm;
       aLogClass: TOrmServiceLogClass = nil): TServiceFactoryServerAbstract; override;
-    /// low-level method called from client CacheFlush/_ping_ URI
-    function RenewSession(Ctxt: TRestServerUriContext): integer;
-    /// make some garbage collection when session is finished
-    // - return the number of instances released during this process
-    function OnCloseSession(aSessionID: cardinal): integer;
 
     /// the associated TRestServer instance
     property RestServer: TRestServer
@@ -360,10 +358,6 @@ type
     fFakeCallbacks: TSynObjectListLocked; // TInterfacedObjectFakeServer instances
     fOnCallbackReleasedOnClientSide: TOnCallbackReleased;
     fOnCallbackReleasedOnServerSide: TOnCallbackReleased;
-    fCallbacks: array of record
-      Service: TInterfaceFactory;
-      Arg: PInterfaceMethodArgument;
-    end;
     fRecordVersionCallback: array of IServiceRecordVersionCallbackDynArray;
     fCallbackNamesSorted: TRawUtf8DynArray;
     fPublishSignature: boolean;
@@ -402,17 +396,23 @@ type
       const aContractExpected: RawUtf8): TServiceFactoryServer;
     /// initialize and register a server-side interface callback instance
     procedure GetFakeCallback(Ctxt: TRestServerUriContext;
-      ParamInterfaceInfo: PRttiInfo; FakeID: PtrInt; out Obj);
-    /// low-level function called from TRestServer.CacheFlush URI method
-    procedure ReleaseFakeCallback(Ctxt: TRestServerUriContext);
+      ParamInterfaceRtti: TRttiCustom; FakeID: PtrInt; out Obj);
+    /// low-level method called from client root/cacheflush/_ping_ URI
+    // - returns the number of renewed instances
+    function ClientSessionRenew(Ctxt: TRestServerUriContext): integer;
+    /// low-level method called from client root/cacheflush/_callback_ URI
+    procedure ClientFakeCallbackRelease(Ctxt: TRestServerUriContext);
+    /// low-level method called from client root/cacheflush/_replaceconn_ URI
+    // - returns the number of SOA callbacks changed
+    // - would also modify any active connection
+    function ClientReplaceConnectionID(old, new: TRestConnectionID): integer;
     /// purge a fake callback from the internal list
-    // - called e.g. by ReleaseFakeCallback() or
+    // - called e.g. by ClientFakeCallbackRelease() or
     // RemoveFakeCallbackOnConnectionClose()
     procedure RemoveFakeCallback(FakeObj: TObject; {TInterfacedObjectFakeServer}
       Ctxt: TRestServerUriContext);
     /// purge all fake callbacks on a given connection
-    procedure RemoveFakeCallbackOnConnectionClose(aConnectionID: TRestConnectionID;
-      aConnectionOpaque: PRestServerConnectionOpaque);
+    procedure RemoveFakeCallbackOnConnectionClose(aConnectionID: TRestConnectionID);
     /// class method able to check if a given server-side callback event fake
     // instance has been released on the client side
     // - may be used to automatically purge a list of subscribed callbacks,
@@ -427,10 +427,6 @@ type
       Opaque: pointer);
     /// class method able to associate an Opaque pointer to a fake callback
     class function CallbackGetOpaque(const callback: IInterface): pointer;
-    /// replace the connection ID of callbacks after a reconnection
-    // - returns the number of callbacks changed
-    function FakeCallbackReplaceConnectionID(
-      aConnectionIDOld, aConnectionIDNew: TRestConnectionID): integer;
     /// register a callback interface which will be called each time a write
     // operation is performed on a given TOrm with a TRecordVersion field
     // - called e.g. by TRestServer.RecordVersionSynchronizeSubscribeMaster
@@ -675,6 +671,7 @@ begin
       end;
   end;
   SetLength(fStats, fInterface.MethodsCount);
+  fMethods := [mGET, mPOST]; // use SetMethods() to customize
   // prepare some reusable execution context (avoid most memory allocations)
   TInterfaceMethodExecuteCached.Prepare(fInterface, fExecuteCached);
 end;
@@ -743,22 +740,22 @@ end;
 
 destructor TServiceFactoryServer.Destroy;
 var
-  endtix: Int64;
+  endtix: cardinal;
   i: PtrInt;
 begin
   // clean up any pending implementation instances
-  endtix := GetTickCount64 + 5000; // paranoid wait for refcnt=1 from services
+  endtix := GetTickSec + 5; // paranoid wait for refcnt=1 from services
   repeat
-    DoInstanceGC({force=}false);
+    DoInstanceGC(0);
     if fInstanceGC.Count = 0 then
       break;
     SleepHiRes(1);
-    if GetTickCount64 > endtix then
+    if GetTickSec > endtix then
     begin
       fRestServer.InternalLog('%.Destroy: I% InstanceGC.Count=% timeout  - ' +
         'you should fix your implementation to release its dependencies',
         [ClassType, InterfaceUri, fInstanceGC.Count], sllWarning);
-      DoInstanceGC({force=}true); // may GPF but at least won't leak memory
+      DoInstanceGC(0, {final=}true); // may GPF but at least won't leak memory
       break;
     end;
   until false;
@@ -773,29 +770,33 @@ begin
   // finalize service execution context
   FreeAndNil(fBackgroundThread);
   ObjArrayClear(fStats, true);
-  ObjArrayClear(fExecuteCached);
+  ObjArrayClear(fExecuteCached); // before inherited Destroy
   inherited Destroy;
   fExecuteLock.Done;
 end;
 
-function TServiceFactoryServer.DoInstanceGC(Force: boolean): PtrInt;
+function TServiceFactoryServer.DoInstanceGC(Tix10: cardinal; Final: boolean): PtrInt;
 var
   obj: TInterfacedObject;
   pending: TPointerDynArray;
   pendingcount: integer; // PtrArrayAdd() expects integer, not PtrInt
   i: PtrInt;
 begin
-  // delete when RefCount = 1 (for optFreeInMainThread/PerInterfaceThread)
   result := 0;
   if fInstanceGC.Count = 0 then
     exit;
-  pendingcount := 0;
+  // delete when RefCount = 1 (for optFreeInMainThread/PerInterfaceThread)
   fInstanceGC.Safe.WriteLock;
   try
+    if (Tix10 <> 0) and // 0 from Destroy
+       (fInstanceGCDeprecatedTix10 = Tix10) then
+      exit;
+    fInstanceGCDeprecatedTix10 := Tix10;
+    pendingcount := 0;
     for i := fInstanceGC.Count - 1 downto 0 do // downto for proper Delete(i)
     begin
       obj := fInstanceGC.List[i];
-      if Force or
+      if Final or
          (obj.RefCount = 1) then
       begin
         PtrArrayAdd(pending, obj, pendingcount); // free outside GC lock
@@ -805,10 +806,10 @@ begin
   finally
     fInstanceGC.Safe.WriteUnLock;
   end;
-  result := pendingcount;
-  if result = 0 then
+  if pendingcount = 0 then
     exit;
   // the instances are actually released outside of fInstanceGC.Safe lock
+  result := pendingcount;
   for i := 0 to result - 1 do
     InstanceFree(pending[i]); // may run in a background thread - intercept except
   fRestServer.InternalLog('%.DoInstanceGC=% for I% %',
@@ -903,8 +904,7 @@ begin
   finally
     fInstances.Safe.WriteUnLock;
   end;
-  if result <> 0 then
-    DoInstanceGC({force=}false); // release now outside of the lock
+  // eventually released on next fInstanceGCDeprecatedTix32 round
 end;
 
 function TServiceFactoryServer.Get(out Obj): boolean;
@@ -955,54 +955,49 @@ begin
     result := fContract; // just return the current value
 end;
 
-function TServiceFactoryServer.RenewSession(Ctxt: TRestServerUriContext): integer;
+function TServiceFactoryServer.RenewSession(tix10, id: cardinal): integer;
 var
-  tix, sess: cardinal;
-  i: integer;
+  n: integer;
   P: PServiceFactoryServerInstance;
 begin
   result := 0;
-  if (self = nil) or
-     (Ctxt = nil) or
-     (fInstances.Count = 0) or
-     (Ctxt.Session <= CONST_AUTHENTICATION_NOT_USED) or
-     not (fInstanceCreation in [sicClientDriven, sicPerSession]) then
-    exit;
-  tix := Ctxt.TickCount64 shr 10;
   fInstances.Safe.ReadLock;
   try
     P := pointer(fInstance);
-    sess := Ctxt.Session;
-    for i := 1 to fInstances.Count do
-    begin
-      if P^.Session = sess then
+    if P = nil then
+      exit;
+    n := fInstances.Count;
+    repeat
+      if P^.Session = id then
       begin
-        P^.LastAccess := tix;
+        P^.LastAccessTix10 := tix10;
         inc(result);
       end;
       inc(P);
-    end;
+      dec(n);
+    until n = 0;
   finally
     fInstances.Safe.ReadUnLock;
   end;
 end;
 
-function TServiceFactoryServer.OnCloseSession(aSessionID: cardinal): integer;
+function TServiceFactoryServer.CloseSession(aSessionID: cardinal): integer;
 var
   inst: TServiceFactoryServerInstance;
 begin
   result := 0;
-  if fInstances.Count > 0 then
-    case InstanceCreation of
-      sicPerSession:
-        begin
-          inst.InstanceID := aSessionID;
-          RetrieveInstance(nil, inst, ord(imFree), aSessionID); // O(log(n))
-        end;
-      sicClientDriven:
-        // release ASAP if was not notified by client
-        result := DoInstanceGCSession(aSessionID);
-    end;
+  case InstanceCreation of
+    sicPerSession:
+      begin
+        // trigger "_free_" pseudo-method call on this session instance
+        inst.InstanceID := aSessionID; // O(log(n)) search
+        if RetrieveInstance(nil, inst, ord(imFree), aSessionID) >= 0 then
+          inc(result);
+      end;
+    sicClientDriven:
+      // should be eventually released if not properly notified by the client
+      result := DoInstanceGCSession(aSessionID);
+  end;
 end;
 
 function TServiceFactoryServer.RunOnAllInstances(
@@ -1060,7 +1055,7 @@ function TServiceFactoryServer.RetrieveInstance(Ctxt: TRestServerUriContext;
         fRestServer.InternalLog('%.RetrieveInstance: I% instance added in ' +
           'background', [ClassType, fInterfaceUri], sllWarning);
         InstanceFree(Inst.Instance); // revert CreateInstance() above
-        P^.LastAccess := Inst.LastAccess;
+        P^.LastAccessTix10 := Inst.LastAccessTix10;
         Inst.Instance := P^.Instance;
       end;
     finally
@@ -1076,20 +1071,20 @@ function TServiceFactoryServer.RetrieveInstance(Ctxt: TRestServerUriContext;
   procedure DeleteDeprecated;
   var
     i: PtrInt;
-    tix: cardinal;
+    tix10: cardinal;
     P: PServiceFactoryServerInstance;
   begin
     fInstances.Safe.WriteLock;
     try
-      if fInstanceDeprecatedTix32 = Inst.LastAccess then
+      if fInstanceDeprecatedTix10 = Inst.LastAccessTix10 then
         exit;
-      fInstanceDeprecatedTix32 := Inst.LastAccess;
-      tix := Inst.LastAccess - fInstanceTimeout;
-      if integer(tix) > 0 then // tix<0 when booted sooner than the timeout
+      fInstanceDeprecatedTix10 := Inst.LastAccessTix10;
+      tix10 := Inst.LastAccessTix10 - fInstanceTimeout;
+      if integer(tix10) > 0 then // tix<0 when booted sooner than the timeout
         for i := fInstances.Count - 1 downto 0 do // downto for proper Delete(i)
         begin
           P := @fInstance[i]; // fInstance[i] due to Delete(i) below
-          if tix <= P^.LastAccess then
+          if P^.LastAccessTix10 >= tix10 then
             continue;
           if sllInfo in fRestServer.LogLevel then
             fRestServer.LogFamily.Add.Log(sllInfo, 'RetrieveInstance: ' +
@@ -1109,18 +1104,15 @@ var
   P: PServiceFactoryServerInstance;
 begin
   result := -1;
-  Inst.LastAccess := Ctxt.TickCount64 shr 10; // 1 second resolution
+  Inst.LastAccessTix10 := Ctxt.TickCount64 shr 10; // 1 second resolution
   // every second, check and release any deprecated instance(s)
   if (fInstanceTimeout <> 0) and
      (fInstances.Count > 0) and
-     (fInstanceDeprecatedTix32 <> Inst.LastAccess) then
+     (fInstanceDeprecatedTix10 <> Inst.LastAccessTix10) then
     DeleteDeprecated;
   if (fInstanceGC.Count > 0) and
-     (Inst.LastAccess <> fInstanceGCDeprecatedTix32) then
-  begin
-    fInstanceGCDeprecatedTix32 := Inst.LastAccess;
-    DoInstanceGC({force=}false); // try every second if refcount=1 now
-  end;
+     (Inst.LastAccessTix10 <> fInstanceGCDeprecatedTix10) then
+    DoInstanceGC(Inst.LastAccessTix10); // try every second if refcount=1 now
   // imFree has a specific behavior
   if aMethodIndex = ord(imFree) then
   begin
@@ -1164,7 +1156,7 @@ begin
       if fInstances.DynArray.FastLocateSorted(Inst.InstanceID, ndx) then
       begin
         P := @fInstance[ndx];
-        P^.LastAccess := Inst.LastAccess;
+        P^.LastAccessTix10 := Inst.LastAccessTix10;
         Inst.Instance := P^.Instance;
         result := aMethodIndex; // notify caller
         exit;
@@ -1222,6 +1214,7 @@ procedure TServiceFactoryServer.OnLogRestExecuteMethod(
 var
   W: TJsonWriter;
   a: PtrInt;
+  arg: PInterfaceMethodArgument;
   len: integer;
 begin
   // append the input/output/error parameters as batch JSON
@@ -1236,23 +1229,28 @@ begin
           W.AddShort('",Input:{'); // as TOrmPropInfoRttiVariant.GetJsonValues
           if not (optNoLogInput in Sender.Options) then
           begin
-            for a := ArgsInFirst to ArgsInLast do
-              with Args[a] do
-                if (ValueDirection <> imdOut) and
-                   ((ValueType <> imvInterface) or
-                    (vIsInterfaceJson in ValueKindAsm)) and
-                   not ArgRtti.ValueIsVoid(Sender.Values[a]) then
+            a := ArgsInFirst;
+            arg := @Args[a];
+            while a <= ArgsInLast do
+            begin
+              if arg^.IsInput and
+                 ((arg^.ValueType <> imvInterface) or
+                  (vIsInterfaceJson in arg^.ValueKindAsm)) and
+                 not arg^.ArgRtti.ValueIsVoid(Sender.Values[a]) then
+              begin
+                W.AddShort(arg^.ParamName^); // in JSON_FAST_EXTENDED format
+                W.AddDirect(':');
+                if rcfSpi in arg^.ArgRtti.Flags then
+                  W.AddShorter('"****",')
+                else
                 begin
-                  W.AddShort(ParamName^); // in JSON_FAST_EXTENDED format
-                  W.AddDirect(':');
-                  if rcfSpi in ArgRtti.Flags then
-                    W.AddShorter('"****",')
-                  else
-                  begin
-                    AddJson(W, Sender.Values[a], SERVICELOG_WRITEOPTIONS);
-                    W.AddComma;
-                  end;
+                  arg^.AddJson(W, Sender.Values[a], SERVICELOG_WRITEOPTIONS);
+                  W.AddComma;
                 end;
+              end;
+              inc(arg);
+              inc(a);
+            end;
             W.CancelLastComma;
           end;
         end;
@@ -1272,36 +1270,41 @@ begin
                   W.AddShorter(',status:');
                   W.AddU(Status);
                 end;
-                if not fExcludeServiceLogCustomAnswer and
+                if not (optExcludeServiceLogCustomAnswer in fOptions) and
                    (len > 0) and
                    (len <= 1024) then
                 begin
-                  // write up to 1KB of result binary as (Base64) text
+                  // write up to 1KB of result (binary as Base64)
                   W.AddShort(',result:"');
-                  if IsValidUtf8NotVoid(pointer(content), len) then
-                    W.AddJsonEscape(pointer(content), len)
+                  if IsValidUtf8Buffer(pointer(Content), len) then
+                    W.AddJsonEscape(pointer(Content))
                   else
-                    W.WrBase64(pointer(content), len, false);
+                    W.WrBase64(pointer(Content), len, false);
                   W.AddDirect('"');
                 end;
               end
             else
             begin
-              for a := ArgsOutFirst to ArgsOutLast do
-                with Args[a] do
-                  if (ValueDirection <> imdConst) and
-                     not ArgRtti.ValueIsVoid(Sender.Values[a]) then
+              a := ArgsOutFirst;
+              arg := @Args[a];
+              while a <= ArgsOutLast do
+              begin
+                if arg^.IsOutput and
+                   not arg^.ArgRtti.ValueIsVoid(Sender.Values[a]) then
+                begin
+                  W.AddShort(arg^.ParamName^);
+                  W.AddDirect(':');
+                  if rcfSpi in arg^.ArgRtti.Flags then
+                    W.AddShorter('"****",')
+                  else
                   begin
-                    W.AddShort(ParamName^);
-                    W.AddDirect(':');
-                    if rcfSpi in ArgRtti.Flags then
-                      W.AddShorter('"****",')
-                    else
-                    begin
-                      AddJson(W, Sender.Values[a], SERVICELOG_WRITEOPTIONS);
-                      W.AddComma;
-                    end;
+                    arg^.AddJson(W, Sender.Values[a], SERVICELOG_WRITEOPTIONS);
+                    W.AddComma;
                   end;
+                end;
+                inc(arg);
+                inc(a);
+              end;
               W.CancelLastComma;
             end;
         end;
@@ -1362,15 +1365,37 @@ end;
 procedure TServiceFactoryServer.ExecuteMethod(Ctxt: TRestServerUriContext);
 var
   Inst: TServiceFactoryServerInstance;
-  WR: TJsonWriter;
   entry: PInterfaceEntry;
   instancePtr: pointer; // weak IInvokable reference
   execres: boolean;
   opt: TInterfaceMethodOptions;
+  wropt: TTextWriterOptions;
   exec: TInterfaceMethodExecuteCached;
   timeEnd: Int64;
   m: PtrInt;
   err: ShortString;
+
+  procedure HandleCleanup; // sub-function for FPC Win64-aarch64 compilation
+  begin
+    try
+      Ctxt.ThreadServer^.Factory := nil;
+      if InstanceCreation = sicSingle then
+        // always release single shot instance immediately (no GC)
+        InstanceFree(Inst.Instance);
+    finally
+      if exec <> nil then
+      begin
+        if Ctxt.ServiceExecution^.LogRest <> nil then
+        begin
+          QueryPerformanceMicroSeconds(timeEnd);
+          dec(timeEnd, Ctxt.MicroSecondsStart);
+          FinalizeLogRest(Ctxt, exec, timeEnd);
+        end;
+        fExecuteCached[m].Release(exec);
+      end;
+    end;
+  end;
+
 begin
   // 1. initialize Inst.Instance and Inst.InstanceID
   Inst.InstanceID := 0;
@@ -1445,8 +1470,8 @@ begin
   end;
   err := '';
   exec := nil;
-  WR := nil;
   try
+    // resolve the raw TObject execution method for this interface
     if fImplementationClassKind = ickFake then
       if Inst.Instance <> fSharedInstance then
         exit
@@ -1464,25 +1489,26 @@ begin
       end;
       instancePtr := PAnsiChar(Inst.Instance) + entry^.IOffset;
     end;
+    Ctxt.ThreadServer^.Factory := self;
+    // prepare the execution options
     opt := Ctxt.ServiceExecution^.Options;
     if optExecInPerInterfaceThread in opt then
       if fBackgroundThread = nil then
         fBackgroundThread := fRestServer.Run.NewBackgroundThreadMethod(
           '% %', [self, fInterface.InterfaceName]);
-    fExecuteCached[m].Acquire(opt, exec, WR);
-    Ctxt.ThreadServer^.Factory := self;
+    wropt := [];
     if not (optForceStandardJson in opt) and
        ((Ctxt.Call.InHead = '') or
         (Ctxt.ClientKind = ckFramework)) then
-      // return extended/optimized pseudo-JSON, as recognized by mORMot
-      WR.CustomOptions := WR.CustomOptions + [twoForceJsonExtended]
+      include(wropt, twoForceJsonExtended) // extended/optimized pseudo-JSON
     else
-      // return standard JSON, as expected e.g. by a regular AJAX client
-      WR.CustomOptions := WR.CustomOptions + [twoForceJsonStandard];
+      include(wropt, twoForceJsonStandard); // standard/AJAX JSON
     if optDontStoreVoidJson in opt then
-      WR.CustomOptions := WR.CustomOptions + [twoIgnoreDefaultInRecord];
+      include(wropt, twoIgnoreDefaultInRecord);
+    // retrieve a local TInterfaceMethodExecute instance for the processing
+    exec := fExecuteCached[m].Acquire(opt, wropt);
     // root/calculator {"method":"add","params":[1,2]} -> {"result":[3],"id":0}
-    Ctxt.ServiceResultStart(WR);
+    Ctxt.ServiceResultStart(exec.WR);
     if optExecLockedPerInterface in opt then
       fExecuteLock.Lock
     else if optExecGlobalLocked in opt then
@@ -1505,12 +1531,12 @@ begin
       else
         // regular execution
         execres := exec.ExecuteJson([instancePtr], Ctxt.ServiceParameters,
-          WR, @err, Ctxt.ForceServiceResultAsJsonObject);
+          exec.WR, @err, Ctxt.ForceServiceResultAsJsonObject);
       if not execres then
       begin
         // wrong request returns HTTP error 406
         if err[0] <> #0 then
-          Ctxt.Error('%', [err], HTTP_NOTACCEPTABLE)
+          Ctxt.Error('%', [err], HTTP_NOTACCEPTABLE) // 406
         else
           ExecuteError(self, Ctxt, 'execution failed (probably due to bad ' +
             'input parameters: e.g. did you initialize your input record(s)?)',
@@ -1528,30 +1554,14 @@ begin
     if Ctxt.Call.OutHead = '' then
     begin
       // <>'' for TServiceCustomAnswer, where body has already been written
-      Ctxt.ServiceResultEnd(WR, Inst.InstanceID);
+      Ctxt.ServiceResultEnd(exec.WR, Inst.InstanceID);
       Ctxt.Call.OutHead := JSON_CONTENT_TYPE_HEADER_VAR;
       if exec.ServiceCustomAnswerStatus = 0 then // if none has been set
         Ctxt.Call.OutStatus := HTTP_SUCCESS;
     end;
-    WR.SetText(Ctxt.Call.OutBody);
+    exec.WR.SetText(Ctxt.Call.OutBody);
   finally
-    try
-      Ctxt.ThreadServer^.Factory := nil;
-      if InstanceCreation = sicSingle then
-        // always release single shot instance immediately (no GC)
-        InstanceFree(Inst.Instance);
-    finally
-      if exec <> nil then
-      begin
-        if Ctxt.ServiceExecution^.LogRest <> nil then
-        begin
-          QueryPerformanceMicroSeconds(timeEnd);
-          dec(timeEnd, Ctxt.MicroSecondsStart);
-          FinalizeLogRest(Ctxt, exec, timeEnd);
-        end;
-        fExecuteCached[m].Release(exec);
-      end;
-    end;
+    HandleCleanup;
   end;
 end;
 
@@ -1733,7 +1743,7 @@ begin
     call.Init;
     ctxt := TRestServerUriContext.Create;
     try
-      ctxt.Prepare(fRestServer, call);
+      ctxt.Prepare(fRestServer, call, mPOST);
       for i := fFakeCallbacks.Count - 1 downto 0 do // backward for safety
       begin
         fake := fFakeCallbacks.List[i];
@@ -1808,6 +1818,7 @@ begin
     F := TServiceFactoryServer.Create(fRestServer, aInterfaces[j],
       aInstanceCreation, aImplementationClass, aContractExpected,
       fSessionTimeout, aSharedImplementation);
+    F.fInterfaceMethodIndex := length(fInterfaceMethod);
     if result = nil then
     begin
       result := F; // returns the first registered interface
@@ -1822,12 +1833,48 @@ end;
 
 function TServiceContainerServer.OnCloseSession(aSessionID: cardinal): integer;
 var
-  i: PtrInt;
+  n: cardinal;
+  f: ^TServiceContainerInterface;
+  s: TServiceFactoryServer;
 begin
   result := 0;
-  for i := 0 to high(fInterface) do
-    inc(result, TServiceFactoryServer(fInterface[i].Service).
-      OnCloseSession(aSessionID));
+  f := pointer(fInterface);
+  if (f = nil) or
+     (aSessionID <= CONST_AUTHENTICATION_NOT_USED) then
+    exit;
+  n := PDALen(PAnsiChar(f) - _DALEN)^ + _DAOFF;
+  repeat
+    s := pointer(f^.Service);
+    if (s.fInstanceCreation in [sicClientDriven, sicPerSession]) and
+       (s.fInstances.Count > 0) then
+      inc(result, s.CloseSession(aSessionID));
+    inc(f);
+    dec(n);
+  until n = 0;
+end;
+
+function TServiceContainerServer.ClientSessionRenew(Ctxt: TRestServerUriContext): integer;
+var
+  n, tix10: cardinal;
+  f: ^TServiceContainerInterface;
+  s: TServiceFactoryServer;
+begin
+  result := 0;
+  f := pointer(fInterface);
+  if (f = nil) or
+     (Ctxt = nil) or
+     (Ctxt.Session <= CONST_AUTHENTICATION_NOT_USED) then
+    exit;
+  tix10 := Ctxt.TickCount64 shr 10;
+  n := PDALen(PAnsiChar(f) - _DALEN)^ + _DAOFF;
+  repeat
+    s := pointer(f^.Service);
+    if (s.fInstanceCreation in [sicClientDriven, sicPerSession]) and
+       (s.fInstances.Count > 0) then
+      inc(result, s.RenewSession(tix10, Ctxt.Session));
+    inc(f);
+    dec(n);
+  until n = 0;
 end;
 
 procedure TServiceContainerServer.ClearServiceList;
@@ -1929,21 +1976,6 @@ begin
   fRestServer.ResetRoutes; // (dis)active root/interface/_signature_ URI
 end;
 
-function FakeCallbackFind(list: PPointer; n: integer; id: TInterfacedObjectFakeID;
-  conn: TRestConnectionID): TInterfacedObjectFakeServer;
-begin
-  if n <> 0 then
-    repeat
-      result := list^;
-      inc(list);
-      if (result.fFakeID = id) and
-         (result.fLowLevelConnectionID = conn) then
-        exit;
-      dec(n);
-    until n = 0;
-  result := nil;
-end;
-
 procedure TServiceContainerServer.RemoveFakeCallback(FakeObj: TObject;
   Ctxt: TRestServerUriContext);
 var
@@ -1989,7 +2021,7 @@ begin
 end;
 
 procedure TServiceContainerServer.RemoveFakeCallbackOnConnectionClose(
-  aConnectionID: TRestConnectionID; aConnectionOpaque: PRestServerConnectionOpaque);
+  aConnectionID: TRestConnectionID);
 var
   call: TRestUriParams;
   ctxt: TRestServerUriContext;
@@ -2003,7 +2035,7 @@ begin
   call.Init;
   ctxt := TRestServerUriContext.Create;
   try
-    ctxt.Prepare(fRestServer, call);
+    ctxt.Prepare(fRestServer, call, mPOST);
     fFakeCallbacks.Safe.WriteLock; // may include a nested WriteLock (reentrant)
     try
       for i := fFakeCallbacks.Count - 1 downto 0 do // backward for safety
@@ -2021,7 +2053,22 @@ begin
   end;
 end;
 
-procedure TServiceContainerServer.ReleaseFakeCallback(
+function FakeCallbackFind(list: PPointer; n: integer; id: TInterfacedObjectFakeID;
+  conn: TRestConnectionID): TInterfacedObjectFakeServer;
+begin
+  if n <> 0 then
+    repeat
+      result := list^;
+      inc(list);
+      if (result.fFakeID = id) and
+         (result.fLowLevelConnectionID = conn) then
+        exit;
+      dec(n);
+    until n = 0;
+  result := nil;
+end;
+
+procedure TServiceContainerServer.ClientFakeCallbackRelease(
   Ctxt: TRestServerUriContext);
 var
   connectionID: TRestConnectionID;
@@ -2048,7 +2095,7 @@ begin
     exit;
   if not params[0].Name.Idem('ISynLogCallback') then // avoid stack overflow
     if sllDebug in fRestServer.LogLevel then
-      fRestServer.InternalLog('%.ReleaseFakeCallback(%,"%") remote call',
+      fRestServer.InternalLog('%.ClientFakeCallbackRelease(%,"%") remote call',
         [ClassType, fakeID, params[0].Name.Text], sllDebug);
   fFakeCallbacks.Safe.WriteLock; // may include a nested WriteLock (reentrant)
   try
@@ -2091,12 +2138,15 @@ begin
 end;
 
 procedure TServiceContainerServer.GetFakeCallback(Ctxt: TRestServerUriContext;
-  ParamInterfaceInfo: PRttiInfo; FakeID: PtrInt; out Obj);
+  ParamInterfaceRtti: TRttiCustom; FakeID: PtrInt; out Obj);
 var
   factory: TInterfaceFactory;
   instance: TInterfacedObjectFakeServer;
 begin
-  factory := TInterfaceFactory.Get(ParamInterfaceInfo);
+  factory := ParamInterfaceRtti.Cache.InterfaceFactory;
+  if factory = nil then // should already be set
+    EInterfaceFactory.RaiseUtf8('Unexpected %.GetFakeCallback(%)',
+      [self, ParamInterfaceRtti.Name]);
   instance := TInterfacedObjectFakeServer.Create(Ctxt, factory, FakeID);
   pointer(Obj) := instance.fFakeInterface;
   FakeCallbackAdd(instance);
@@ -2176,19 +2226,19 @@ begin
     until n = 0;
 end;
 
-function TServiceContainerServer.FakeCallbackReplaceConnectionID(
-  aConnectionIDOld, aConnectionIDNew: TRestConnectionID): integer;
+function TServiceContainerServer.ClientReplaceConnectionID(
+  old, new: TRestConnectionID): integer;
 begin
   result := 0;
   if (fFakeCallbacks = nil) or
-     (aConnectionIDOld <= 0) or
-     (aConnectionIDNew <= 0) or
-     (aConnectionIDOld = aConnectionIDNew) then
+     (old <= 0) or
+     (new <= 0) or
+     (old = new) then
     exit;
   fFakeCallbacks.Safe.ReadOnlyLock;
   try
     result := FakeCallbackReplaceID(pointer(fFakeCallbacks.List),
-      fFakeCallbacks.Count, aConnectionIDOld, aConnectionIDNew);
+      fFakeCallbacks.Count, old, new);
   finally
     fFakeCallbacks.Safe.ReadOnlyUnLock;
   end;
@@ -2470,17 +2520,17 @@ end;
 
 destructor TServiceRecordVersionCallback.Destroy;
 var
-  timeOut: Int64;
+  timeOut: cardinal;
 begin
   try
     if fBatch <> nil then
     begin
-      timeOut := GetTickCount64 + 2000;
+      timeOut := GetTickSec + 3;
       repeat
-        SleepHiRes(1); // allow 2 seconds to process all pending frames
+        SleepHiRes(10); // allow 2-3 seconds to process all pending frames
         if fBatch = nil then
           exit;
-      until GetTickCount64 > timeOut;
+      until GetTickSec > timeOut;
       fSlave.InternalLog('%.Destroy on %: active BATCH', [self, fTable], sllError);
       fSlave.Orm.BatchSend(fBatch);
       fBatch.Free;

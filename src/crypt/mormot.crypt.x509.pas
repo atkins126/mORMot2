@@ -1492,7 +1492,7 @@ end;
 
 procedure TXName.ComputeText;
 var
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   a: TXAttr;
   first: boolean;
   p: PUtf8Char;
@@ -1696,11 +1696,11 @@ end;
 
 function HumanRandomID: RawUtf8;
 var
-  rnd: THash256;
+  rnd: THash256Rec;
 begin
-  SharedRandom.Fill(@rnd, SizeOf(rnd)); // Lecuyer is enough for public random
-  rnd[0] := rnd[0] and $7f;     // ensure > 0
-  ToHumanHex(result, @rnd, 20); // 20 bytes = 160-bit as a common size
+  Random128(@rnd.l, @rnd.h);     // unpredictable
+  rnd.b[0] := rnd.b[0] and $7f;  // ensure > 0
+  ToHumanHex(result, @rnd, SizeOf(rnd.sha1)); // 20 bytes is the usual size
 end;
 
 function CsvToDns(p: PUtf8Char): RawByteString;
@@ -3162,7 +3162,7 @@ begin
       if CsvContains(p^.Signed.Extension[xceIssuerAlternativeName],
            DnsName, ',', {casesensitive=}false) and
          p^.IsValidDate(TimeUtc) then
-        ObjArrayAdd(result, p^);
+        PtrArrayAdd(result, p^);
       inc(p);
     end;
   finally
@@ -4201,7 +4201,7 @@ end;
 
 function TCryptStoreX509.Save: RawByteString;
 var
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   w: TTextWriter;
 begin
   w := TTextWriter.CreateOwnedStream(tmp);

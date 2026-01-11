@@ -32,6 +32,7 @@ uses
   mormot.core.rtti,
   mormot.core.json,
   mormot.core.buffers,
+  mormot.core.interfaces,
   mormot.crypt.core,
   mormot.crypt.ecc,
   mormot.crypt.secure, // IProtocol definition
@@ -449,7 +450,7 @@ begin
   temp.opcode := aFrame.opcode;
   temp.content := aFrame.content;
   len := length(aFrame.payload);
-  tix := GetTickCount64 shr MilliSecsPerSecShl;
+  tix := GetTickSec;
   fWebSocketConnections.Safe.ReadOnlyLock;
   try
     ws := pointer(fWebSocketConnections.List);

@@ -530,7 +530,7 @@ type
     // ACE body
     Mask: TSecAccessMask;
     case integer of
-      0: (CommonSid: cardinal);
+      0: (CommonSid:   cardinal);
       1: (ObjectFlags: cardinal;
           ObjectStart: cardinal);
   end;
@@ -1264,7 +1264,7 @@ const
     '{3f78c3e5-f79a-46bd-a0b8-9d18116ddc79}',  // kaMsDsAllowedToActOnBehalfOfOtherIdentity
     '{037088f8-0ae1-11d2-b422-00a0c968f939}'); // kaRasInformation
 
-  /// the official ldapDisplayName of our known Active Directory schema attributes
+  /// the official "Ldap-Display-Name" of our known Active Directory schema attributes
   ATTR_TXT: array[TAdsKnownAttribute] of RawUtf8 = (
     '',                                        // kaNull
     'User-Account-Restrictions',               // kaUserAccountRestrictions
@@ -1317,12 +1317,12 @@ function ToText(a: TAdsKnownAttribute): PShortString; overload;
 // - returns kaNull if the supplied TGuid was not found
 function UuidToKnownAttribute(const u: TGuid): TAdsKnownAttribute;
 
-/// recognize the ldapDisplayName of our TAdsKnownAttribute selection
+/// recognize the "Ldap-Display-Name" of our TAdsKnownAttribute selection
 // - use FindNonVoidRawUtf8I(ATTR_TXT[]) O(n) case-insensitive brute force search
-// - returns kaNull if the supplied text does not match any known ldapDisplayName
+// - returns kaNull if the supplied text does not match any known Ldap-Display-Name
 function TextToKnownAttribute(p: PUtf8Char; len: TStrLen): TAdsKnownAttribute;
 
-/// append an ObjectID as TAdsKnownAttribute's ldapDisplayName, or as UUID hexa
+/// append an ObjectID as TAdsKnownAttribute's Ldap-Display-Name, or as UUID hexa
 // - if u is a TAdsKnownAttribute, append its ATTR_TXT[] text
 // - otherwise, append regular '3f2504e0-4f89-11d3-9a0c-0305e82c3301' text
 // - can be used as TAppendShortUuid optional parameter for SDDL generation
@@ -1337,7 +1337,7 @@ procedure AppendShortKnownUuid(const u: TGuid; var s: ShortString);
 procedure ObjectUuidToText({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
   guid: TGuid; uuid: TAppendShortUuid; var Text: RawUtf8);
 
-/// parse an ObjectID, recognizing TAdsKnownAttribute's ldapDisplayName or UUID hexa
+/// parse an ObjectID, recognizing TAdsKnownAttribute's Ldap-Display-Name or UUID hexa
 // - can be used as TShortToUuid optional parameter for SDDL parsing
 // - you can also define your own TShortToUuidfunction
 // - use O(n) case-insensitive brute force search over ATTR_TXT[] values
@@ -1418,10 +1418,10 @@ function SddlToKnownSid(const sddl: RawUtf8; out wks: TWellKnownSid): boolean;
 function SddlToKnownRid(const sddl: RawUtf8; out wkr: TWellKnownRid): boolean;
 
 const
-  { SDDL standard identifiers using string[3] for efficient 32-bit alignment }
+  { SDDL standard identifiers using TShort3 for efficient 32-bit alignment }
 
   /// define how ACE kinds in TSecAce.AceType are stored as SDDL
-  SAT_SDDL: array[TSecAceType] of string[3] = (
+  SAT_SDDL: array[TSecAceType] of TShort3 = (
     '',    // satUnknown
     'A',   // satAccessAllowed
     'D',   // satAccessDenied
@@ -1447,7 +1447,7 @@ const
     'FL'); // satAccessFilter
 
   /// define how ACE flags in TSecAce.Flags are stored as SDDL
-  SAF_SDDL: array[TSecAceFlag] of string[3] = (
+  SAF_SDDL: array[TSecAceFlag] of TShort3 = (
     'OI',  // safObjectInherit
     'CI',  // safContainerInherit
     'NP',  // safNoPropagateInherit
@@ -1458,7 +1458,7 @@ const
     'FA'); // safFailedAccess
 
   /// define how ACE access rights bits in TSecAce.Mask are stored as SDDL
-  SAM_SDDL: array[TSecAccess] of string[3] = (
+  SAM_SDDL: array[TSecAccess] of TShort3 = (
     'CC',  // samCreateChild
     'DC',  // samDeleteChild
     'LC',  // samListChildren
@@ -1493,7 +1493,7 @@ const
     'GR'); // samGenericRead
 
   /// define how full 32-bit ACE access rights in TSecAce.Mask are stored as SDDL
-  SAR_SDDL: array[TSecAccessRight] of string[3] = (
+  SAR_SDDL: array[TSecAccessRight] of TShort3 = (
     'FA',  //  sarFileAll
     'FR',  //  sarFileRead
     'FW',  //  sarFileWrite
@@ -1807,7 +1807,7 @@ type
     /// decode a Security Descriptor from its SDDL textual representation
     // - could also recognize SDDL RID placeholders, with the specified
     // RidDomain in its 'S-1-5-21-xxxxxx-xxxxxxx-xxxxxx' text form
-    // - recognize ldapDisplayName of TAdsKnownAttribute if uuid=@ShortToKnownUuid
+    // - recognize Ldap-Display-Name of TAdsKnownAttribute if uuid=@ShortToKnownUuid
     function FromText(const SddlText: RawUtf8;
       const RidDomain: RawUtf8 = ''; uuid: TShortToUuid = nil): TAceTextParse; overload;
     /// decode a Security Descriptor from its SDDL textual representation
@@ -1835,7 +1835,7 @@ type
       saf: TSecAceFlags = []): PSecAce; overload;
     /// add one new ACE to the DACL (or SACL) from SDDL text
     // - dom <> nil would enable SDDL RID placeholders recognition
-    // - recognize ldapDisplayName of TAdsKnownAttribute if uuid=@ShortToKnownUuid
+    // - recognize Ldap-Display-Name of TAdsKnownAttribute if uuid=@ShortToKnownUuid
     // - add to Dacl[] unless scope is sasSacl so it is added to Sacl[]
     // - return nil on sddl input text parsing error, or the newly added entry
     function Add(const sddl: RawUtf8; dom: PSid = nil; uuid: TShortToUuid = nil;
@@ -2228,13 +2228,15 @@ function FillSystemRandom(Buffer: PByteArray; Len: integer;
 // - the application can specify a secret salt text, which should reflect the
 // current execution context, to ensure nobody could decrypt the data without
 // knowing this application-specific AppSecret value
-// - will use CryptProtectData DPAPI function call under Windows
-// - see https://msdn.microsoft.com/en-us/library/ms995355
+// - will use CryptProtectData DPAPI function call under Windows, as defined
+// by https://msdn.microsoft.com/en-us/library/ms995355
 // - this function is Windows-only, could be slow, and you don't know which
 // algorithm is really used on your system, so using our mormot.crypt.core.pas
 // CryptDataForCurrentUser() is probably a safer (and cross-platform) alternative
 // - also note that DPAPI has been closely reverse engineered - see e.g.
-// https://www.passcape.com/index.php?section=docsys&cmd=details&id=28
+// https://www.passcape.com/index.php?section=docsys&cmd=details&id=28 -
+// and that it seems unreliable under PRISM WinArm emulation so it will return
+// SymmetricEncrypt(Data) weak encryption/obfuscation on this platform
 function CryptDataForCurrentUserDPAPI(const Data, AppSecret: RawByteString;
   Encrypt: boolean): RawByteString;
 
@@ -2250,7 +2252,7 @@ type
   HCERTSTORE = pointer;
 
   CRYPTOAPI_BLOB = record
-    cbData: DWORD;
+    cbData: DWord;
     pbData: PByteArray;
   end;
   CRYPT_INTEGER_BLOB = CRYPTOAPI_BLOB;
@@ -2258,9 +2260,9 @@ type
   CRYPT_OBJID_BLOB   = CRYPTOAPI_BLOB;
 
   CRYPT_BIT_BLOB = record
-    cbData: DWORD;
+    cbData: DWord;
     pbData: PByteArray;
-    cUnusedBits: DWORD;
+    cUnusedBits: DWord;
   end;
 
   CRYPT_ALGORITHM_IDENTIFIER = record
@@ -2283,7 +2285,7 @@ type
   PCERT_EXTENSIONS = ^CERT_EXTENSIONS;
 
   CERT_INFO = record
-    dwVersion: DWORD;
+    dwVersion: DWord;
     SerialNumber: CRYPT_INTEGER_BLOB;
     SignatureAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
     Issuer: CERT_NAME_BLOB;
@@ -2293,15 +2295,15 @@ type
     SubjectPublicKeyInfo: CERT_PUBLIC_KEY_INFO;
     IssuerUniqueId: CRYPT_BIT_BLOB;
     SubjectUniqueId: CRYPT_BIT_BLOB;
-    cExtension: DWORD;
+    cExtension: DWord;
     rgExtension: PCERT_EXTENSIONS;
   end;
   PCERT_INFO = ^CERT_INFO;
 
   CERT_CONTEXT = record
-    dwCertEncodingType: DWORD;
+    dwCertEncodingType: DWord;
     pbCertEncoded: PByte;
-    cbCertEncoded: DWORD;
+    cbCertEncoded: DWord;
     pCertInfo: PCERT_INFO;
     hCertStore: HCERTSTORE;
   end;
@@ -2309,34 +2311,34 @@ type
   PPCCERT_CONTEXT = ^PCCERT_CONTEXT;
 
   CRYPT_KEY_PROV_PARAM = record
-    dwParam: DWORD;
+    dwParam: DWord;
     pbData: PByte;
-    cbData: DWORD;
-    dwFlags: DWORD;
+    cbData: DWord;
+    dwFlags: DWord;
   end;
   PCRYPT_KEY_PROV_PARAM = ^CRYPT_KEY_PROV_PARAM;
 
   CRYPT_KEY_PROV_INFO = record
     pwszContainerName: PWideChar;
     pwszProvName: PWideChar;
-    dwProvType: DWORD;
-    dwFlags: DWORD;
-    cProvParam: DWORD;
+    dwProvType: DWord;
+    dwFlags: DWord;
+    cProvParam: DWord;
     rgProvParam: PCRYPT_KEY_PROV_PARAM;
-    dwKeySpec: DWORD;
+    dwKeySpec: DWord;
   end;
   PCRYPT_KEY_PROV_INFO = ^CRYPT_KEY_PROV_INFO;
 
   CRYPT_OID_INFO = record
-    cbSize: DWORD;
+    cbSize: DWord;
     pszOID: PAnsiChar;
     pwszName: PWideChar;
-    dwGroupId: DWORD;
+    dwGroupId: DWord;
     Union: record
       case integer of
-        0: (dwValue: DWORD);
-        1: (Algid: DWORD);
-        2: (dwLength: DWORD);
+        0: (dwValue:  DWord);
+        1: (Algid:    DWord);
+        2: (dwLength: DWord);
     end;
     ExtraInfo: CRYPTOAPI_BLOB;
   end;
@@ -2347,31 +2349,31 @@ type
   PCRYPT_ATTRIBUTE = pointer;
 
   CRYPT_SIGN_MESSAGE_PARA = record
-    cbSize: DWORD;
-    dwMsgEncodingType: DWORD;
+    cbSize: DWord;
+    dwMsgEncodingType: DWord;
     pSigningCert: PCCERT_CONTEXT;
     HashAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
     pvHashAuxInfo: pointer;
-    cMsgCert: DWORD;
+    cMsgCert: DWord;
     rgpMsgCert: PPCCERT_CONTEXT;
-    cMsgCrl: DWORD;
+    cMsgCrl: DWord;
     rgpMsgCrl: PPCCRL_CONTEXT;
-    cAuthAttr: DWORD;
+    cAuthAttr: DWord;
     rgAuthAttr: PCRYPT_ATTRIBUTE;
-    cUnauthAttr: DWORD;
+    cUnauthAttr: DWord;
     rgUnauthAttr: PCRYPT_ATTRIBUTE;
-    dwFlags: DWORD;
-    dwInnerContentType: DWORD;
+    dwFlags: DWord;
+    dwInnerContentType: DWord;
     HashEncryptionAlgorithm: CRYPT_ALGORITHM_IDENTIFIER;
     pvHashEncryptionAuxInfo: pointer;
   end;
 
   PFN_CRYPT_GET_SIGNER_CERTIFICATE = function(pvGetArg: pointer;
-    dwCertEncodingType: DWORD; pSignerId: PCERT_INFO;
+    dwCertEncodingType: DWord; pSignerId: PCERT_INFO;
     hMsgCertStore: HCERTSTORE): PCCERT_CONTEXT; stdcall;
   CRYPT_VERIFY_MESSAGE_PARA = record
-    cbSize: DWORD;
-    dwMsgAndCertEncodingType: DWORD;
+    cbSize: DWord;
+    dwMsgAndCertEncodingType: DWord;
     hCryptProv: HCRYPTPROV;
     pfnGetSignerCertificate: PFN_CRYPT_GET_SIGNER_CERTIFICATE;
     pvGetArg: pointer;
@@ -2405,34 +2407,34 @@ type
     /// acquire a handle to a particular key container within a
     // particular cryptographic service provider (CSP)
     AcquireContextA: function(var phProv: HCRYPTPROV; pszContainer: PAnsiChar;
-      pszProvider: PAnsiChar; dwProvType: DWORD; dwFlags: DWORD): BOOL; stdcall;
+      pszProvider: PAnsiChar; dwProvType: DWord; dwFlags: DWord): BOOL; stdcall;
     /// releases the handle of a cryptographic service provider (CSP) and a
     // key container
     ReleaseContext: function(hProv: HCRYPTPROV; dwFlags: PtrUInt): BOOL; stdcall;
     /// transfers a cryptographic key from a key BLOB into a cryptographic
     // service provider (CSP)
-    ImportKey: function(hProv: HCRYPTPROV; pbData: pointer; dwDataLen: DWORD;
-      hPubKey: HCRYPTKEY; dwFlags: DWORD; var phKey: HCRYPTKEY): BOOL; stdcall;
+    ImportKey: function(hProv: HCRYPTPROV; pbData: pointer; dwDataLen: DWord;
+      hPubKey: HCRYPTKEY; dwFlags: DWord; var phKey: HCRYPTKEY): BOOL; stdcall;
     /// customizes various aspects of a session key's operations
-    SetKeyParam: function(hKey: HCRYPTKEY; dwParam: DWORD; pbData: pointer;
-      dwFlags: DWORD): BOOL; stdcall;
+    SetKeyParam: function(hKey: HCRYPTKEY; dwParam: DWord; pbData: pointer;
+      dwFlags: DWord): BOOL; stdcall;
     /// releases the handle referenced by the hKey parameter
     DestroyKey: function(hKey: HCRYPTKEY): BOOL; stdcall;
     /// encrypt the data designated by the key held by the CSP module
     // referenced by the hKey parameter
     Encrypt: function(hKey: HCRYPTKEY; hHash: HCRYPTHASH; Final: BOOL;
-      dwFlags: DWORD; pbData: pointer; var pdwDataLen: DWORD; dwBufLen: DWORD): BOOL; stdcall;
+      dwFlags: DWord; pbData: pointer; var pdwDataLen: DWord; dwBufLen: DWord): BOOL; stdcall;
     /// decrypts data previously encrypted by using the CryptEncrypt function
     Decrypt: function(hKey: HCRYPTKEY; hHash: HCRYPTHASH; Final: BOOL;
-      dwFlags: DWORD; pbData: pointer; var pdwDataLen: DWORD): BOOL; stdcall;
+      dwFlags: DWord; pbData: pointer; var pdwDataLen: DWord): BOOL; stdcall;
     /// fills a buffer with cryptographically random bytes
     // - since Windows Vista with Service Pack 1 (SP1), an AES counter-mode
     // based PRNG specified in NIST Special Publication 800-90 is used
-    GenRandom: function(hProv: HCRYPTPROV; dwLen: DWORD; pbBuffer: pointer): BOOL; stdcall;
+    GenRandom: function(hProv: HCRYPTPROV; dwLen: DWord; pbBuffer: pointer): BOOL; stdcall;
     /// converts a security descriptor to a string format
     ConvertSecurityDescriptorToStringSecurityDescriptorA: function(
-      SecurityDescriptor: PSECURITY_DESCRIPTOR; RequestedStringSDRevision: DWORD;
-      SecurityInformation: DWORD; var StringSecurityDescriptor: PAnsiChar;
+      SecurityDescriptor: PSECURITY_DESCRIPTOR; RequestedStringSDRevision: DWord;
+      SecurityInformation: DWord; var StringSecurityDescriptor: PAnsiChar;
       StringSecurityDescriptorLen: LPDWORD): BOOL; stdcall;
 
     /// try to load the CryptoApi on this system
@@ -2444,24 +2446,25 @@ type
   end;
 
 const
-  PROV_RSA_FULL        = 1;
-  PROV_RSA_AES         = 24;
-  CRYPT_NEWKEYSET      = 8;
-  CRYPT_VERIFYCONTEXT  = DWORD($F0000000);
-  PLAINTEXTKEYBLOB     = 8;
-  CUR_BLOB_VERSION     = 2;
-  KP_IV                = 1;
-  KP_MODE              = 4;
-  CALG_AES_128         = $660E;
-  CALG_AES_192         = $660F;
-  CALG_AES_256         = $6610;
-  CRYPT_MODE_CBC       = 1;
-  CRYPT_MODE_ECB       = 2;
-  CRYPT_MODE_OFB       = 3;
-  CRYPT_MODE_CFB       = 4;
-  CRYPT_MODE_CTS       = 5;
-  HCRYPTPROV_NOTTESTED = HCRYPTPROV(-1);
-  NTE_BAD_KEYSET       = HRESULT($80090016);
+  PROV_RSA_FULL                   = 1;
+  PROV_RSA_AES                    = 24;
+  CRYPT_NEWKEYSET                 = 8;
+  CRYPT_VERIFYCONTEXT             = DWord($F0000000);
+  PLAINTEXTKEYBLOB                = 8;
+  CUR_BLOB_VERSION                = 2;
+  KP_IV                           = 1;
+  KP_MODE                         = 4;
+  CALG_AES_128                    = $660E;
+  CALG_AES_192                    = $660F;
+  CALG_AES_256                    = $6610;
+  CRYPT_MODE_CBC                  = 1;
+  CRYPT_MODE_ECB                  = 2;
+  CRYPT_MODE_OFB                  = 3;
+  CRYPT_MODE_CFB                  = 4;
+  CRYPT_MODE_CTS                  = 5;
+  HCRYPTPROV_NOTTESTED            = HCRYPTPROV(-1);
+  NTE_BAD_KEYSET                  = HRESULT($80090016);
+  BCRYPT_USE_SYSTEM_PREFERRED_RNG = $00000002;
 
 var
   /// direct access to the Windows CryptoApi - with late binding
@@ -2658,7 +2661,7 @@ type
     DynamicDaylightTimeDisabled: boolean;
   end;
 
-function GetTimeZoneInformation(var info: TTimeZoneInformation): DWORD;
+function GetTimeZoneInformation(var info: TTimeZoneInformation): DWord;
   stdcall; external kernel32;
 
 /// allow to change the current system time zone on Windows
@@ -3100,7 +3103,7 @@ begin
     {$ifdef CPUX64}
     if MemCmp(pointer(OldSid[i]), @Sid, SidLen) = 0 then // use SSE2 asm
     {$else}
-    if CompareMem(pointer(OldSid[i]), @Sid, SidLen) then
+    if mormot.core.base.CompareMem(pointer(OldSid[i]), @Sid, SidLen) then
     {$endif CPUX64}
     begin
       MoveFast(pointer(NewSid[i])^, Sid, SidLen); // in-place overwrite
@@ -3546,7 +3549,7 @@ begin
   if a = kaNull then
     AppendShortUuid(u, s) // append as regular UUID hexadecimal text
   else
-    AppendShortAnsi7String(ATTR_TXT[a], s); // append the ldapDisplayName
+    AppendShortAnsi7String(ATTR_TXT[a], s); // append the Ldap-Display-Name
 end;
 
 procedure ObjectUuidToText({$ifdef FPC_HAS_CONSTREF}constref{$else}const{$endif}
@@ -3855,7 +3858,7 @@ begin
   p := s;
 end;
 
-function SddlNextTwo(var p: PUtf8Char; out u: ShortString): boolean;
+function SddlNextTwo(var p: PUtf8Char; u: PAnsiChar): boolean;
 var
   s: PUtf8Char;
 begin
@@ -3902,7 +3905,7 @@ var
   a: TSecAccess;
   m: integer absolute mask;
   one: integer;
-  u: string[2];
+  u: TShort3;
 begin
   result := false;
   m := 0;
@@ -3917,7 +3920,7 @@ begin
         break // we got the mask as a 32-bit hexadecimal value
       else
         exit;
-    if not SddlNextTwo(p, u) then
+    if not SddlNextTwo(p, @u) then
       exit;
     one := 0;
     for r := low(r) to high(r) do
@@ -3954,8 +3957,8 @@ begin
     AppendShortTwoChars(@SAR_SDDL[TSecAccessRight(i)][1], @s)
   else if mask - samWithSddl <> [] then
   begin
-    AppendShortTwoChars('0x', @s);        // we don't have all needed tokens
-    AppendShortIntHex(cardinal(mask), s); // store as @x##### hexadecimal
+    AppendShortTwoChars(ord('0') + ord('x') shl 8, @s);  // missing token
+    AppendShortIntHex(cardinal(mask), s); // stored as @x##### hexadecimal
   end
   else
     for a := low(a) to high(a) do
@@ -4107,7 +4110,7 @@ begin
     sctInt64:
       if v^.Int.Base <> scbDecimal then // scbOctal does fallback to hexa
       begin
-        AppendShortTwoChars('0x', @s);
+        AppendShortTwoChars(ord('0') + ord('x') shl 8, @s);
         AppendShortIntHex(v^.Int.Value, s);
       end
       else if v^.Int.Sign = scsNegative then
@@ -4510,7 +4513,7 @@ begin
     AppendShort(SAT_SDDL[AceType], s)
   else
   begin
-    AppendShortTwoChars('0x', @s);
+    AppendShortTwoChars(ord('0') + ord('x') shl 8, @s);
     AppendShortIntHex(RawType, s); // fallback to lower hex - paranoid
   end;
   AppendShortCharSafe(';', @s);
@@ -4583,7 +4586,7 @@ begin
   result := atpInvalidFlags;
   while p^ <> ';' do
   begin
-    if not SddlNextTwo(p, u) then
+    if not SddlNextTwo(p, @u) then
       exit;
     for f := low(f) to high(f) do
       if SAF_SDDL[f] = u then
@@ -4852,7 +4855,7 @@ begin
   StorageSize := length(Input);
   Count := 0;
   if (Storage = nil) or
-     (StorageSize and 3 <> 0) or // should be DWORD-aligned
+     (StorageSize and 3 <> 0) or // should be DWord-aligned
      (StorageSize >= MAX_TREE_BYTES) or
      (PCardinal(Storage)^ <> ACE_CONDITION_SIGNATURE) then
     exit;
@@ -5488,11 +5491,12 @@ begin
     inc(p, length(Group));
   end;
   if p - pointer(result) <> length(result) then
-    raise EOSSecurity.Create('TSecurityDescriptor.ToBinary'); // paranoid
+    raise EOSSecurity.Create('TSecurityDescriptor.ToBinary') // paranoid
+    {$ifdef FPC} at get_caller_addr(get_frame), get_caller_frame(get_frame) {$endif}
 end;
 
 const
-  SCOPE_SDDL: array[TSecAceScope] of string[3] = (
+  SCOPE_SDDL: array[TSecAceScope] of TShort3 = (
     'D:', 'S:');
   SCOPE_P: array[TSecAceScope] of TSecControl = (
     scDaclProtected, scSaclProtected);
@@ -6662,7 +6666,7 @@ function AsnNext(var Pos: integer; const Buffer: TAsnObject;
   Value: PRawByteString; CtrEndPos: PInteger): integer;
 var
   asnsize: integer;
-  tmp: array[0..23] of AnsiChar;
+  tmp: TTemp24;
   p: PAnsiChar;
 begin
   if Value <> nil then
@@ -6725,27 +6729,6 @@ end;
 { ****************** Windows API Specific Security Types and Functions }
 
 {$ifdef OSWINDOWS}
-
-function FillSystemRandom(Buffer: PByteArray; Len: integer;
-  AllowBlocking: boolean): boolean;
-var
-  prov: HCRYPTPROV;
-begin
-  result := false;
-  if Len <= 0 then
-    exit;
-  // warning: on some Windows versions, this could take up to 30 ms!
-  if CryptoApi.Available then
-    if CryptoApi.AcquireContextA(prov, nil, nil,
-      PROV_RSA_FULL, CRYPT_VERIFYCONTEXT) then
-    begin
-      result := CryptoApi.GenRandom(prov, Len, Buffer);
-      CryptoApi.ReleaseContext(prov, 0);
-    end;
-  if not result then
-    // OS API call failed -> fallback to our Lecuyer's gsl_rng_taus2 generator
-    SharedRandom.Fill(pointer(Buffer), Len);
-end;
 
 { TWinCryptoApi }
 
@@ -6811,6 +6794,38 @@ begin
   result := true;
 end;
 
+var
+  BCryptApi: THandle;
+  BCryptGenRandom: function(hAlgorithm, pBuffer: pointer;
+    cbBuffer, dwFlags: ULONG): cardinal; stdcall;
+  CryptProv: HCRYPTPROV; // use GenRandom() as XP fallback
+
+function FillSystemRandom(Buffer: PByteArray; Len: integer;
+  AllowBlocking: boolean): boolean;
+begin
+  result := false;
+  if Len <= 0 then
+    exit;
+  if (OSVersion >= wVista) and
+     DelayedProc(BCryptGenRandom, BCryptApi, 'bcrypt.dll', 'BCryptGenRandom') then
+    // use the new Vista+ API
+    result := BCryptGenRandom(nil, Buffer, Len, BCRYPT_USE_SYSTEM_PREFERRED_RNG) = NOERROR;
+  if not result then
+  begin
+    if (CryptProv = nil) and
+       CryptoApi.Available then
+      CryptoApi.AcquireContextA(CryptProv, nil, nil,
+        PROV_RSA_FULL, CRYPT_VERIFYCONTEXT); // initialize once for XP fallback
+    if CryptProv <> nil then
+      result := CryptoApi.GenRandom(CryptProv, Len, Buffer);
+  end;
+  if not result then
+    // OS API call failed -> fallback to our TLecuyer gsl_rng_taus2 generator
+    SharedRandom.Fill(pointer(Buffer), Len)
+  else if Len >= SizeOf(SystemEntropy.LiveFeed) then
+    crcblock(@SystemEntropy.LiveFeed, pointer(Buffer)); // shuffle live state
+end;
+
 type
   {$ifdef FPC}
   {$packrecords C} // mandatory under Win64
@@ -6845,6 +6860,12 @@ var
   e: PDATA_BLOB;
   ok: boolean;
 begin
+  if IsWow64Emulation then // PRISM seems inconsistent about these API calls
+  begin
+    result := Data;
+    SymmetricEncrypt(crc32cHash(AppSecret), result); // weak but consistent
+    exit; // only used internally by read_h as mean of obfuscation
+  end;
   src.pbData := pointer(Data);
   src.cbData := length(Data);
   if AppSecret <> '' then
@@ -6924,7 +6945,7 @@ const
     // note: string[32] to ensure there is a #0 terminator for all items
     'SeCreateTokenPrivilege',          // wspCreateToken
     'SeAssignPrimaryTokenPrivilege',   // wspAssignPrimaryToken
-    'SeLockMemoryPrivilege',           // wspLockMemory
+    'SeLockMemoryPrivilege',           // wspLockMemory - e.g. MEM_LARGE_PAGES
     'SeIncreaseQuotaPrivilege',        // wspIncreaseQuota
     'SeUnsolicitedInputPrivilege',     // wspUnsolicitedInput
     'SeMachineAccountPrivilege',       // wspMachineAccount
@@ -7206,7 +7227,7 @@ type
   PMS_PEB = ^MS_PEB;
   MS_PEB = packed record
     Reserved1: array[0..1] of byte;
-    BeingDebugged: BYTE;
+    BeingDebugged: byte;
     Reserved2: array[0..0] of byte;
     {$ifdef CPUX64}
     _align1: array[0..3] of byte;
@@ -7700,6 +7721,13 @@ begin
   if not result then
     SetLastError(bak); // so that WinLastError / RaiseLastError would work
 end;
+
+
+initialization
+
+finalization
+  if CryptProv <> nil then // used as fallback on XP
+    CryptoApi.ReleaseContext(CryptProv, 0);
 
 {$endif OSWINDOWS}
 

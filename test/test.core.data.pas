@@ -114,6 +114,8 @@ uses
   mormot.rest.client,
   mormot.rest.server,
   mormot.net.client,
+  mormot.net.server,
+  mormot.net.async,
   mormot.net.ldap,
   test.core.base;
 
@@ -126,6 +128,7 @@ type
   // defined and implemented in the mormot.core.*.pas units
   TTestCoreProcess = class(TSynTestCase)
   protected
+    procedure Setup; override;
     procedure MustacheTranslate(var English: string);
     procedure MustacheHelper(const Value: variant; out Result: variant);
   published
@@ -352,6 +355,8 @@ const
   __TTestCustomJsonGitHub =
       'name RawUtf8 id cardinal description RawUtf8 ' +
      'fork boolean owner{login RawUtf8 id currency}';
+  __TTestCustomJsonMixed =
+     'status: RawUtf8; results: variant; price: double;';
   __TTestCustomJson2Title =
       'TITYPE,TIID,TICID,TIDSC30,TIORDER,TIDEL RawUtf8';
   __TTestCustomJson2 =
@@ -421,6 +426,18 @@ end;
 
 { TTestCoreProcess }
 
+procedure TTestCoreProcess.Setup;
+var
+  refzip: RawByteString;
+begin
+  // one url to rule them all: avoid github https calls for Mustache + JSON
+  if FileExists(WorkDir + discogsFileName) then
+    exit;
+  refzip := DownloadFile('https://synopse.info/files/process-ref.zip');
+  if not CheckFailed(refzip <> '', 'process-ref') then
+    Check(UnZipMemAll(refzip, WorkDir), 'process-unzip');
+end;
+
 procedure TTestCoreProcess.Variants;
 var
   v: Variant;
@@ -460,130 +477,130 @@ begin
   Check(boolean(v));
   Check(VariantTypeName(v)^ = 'Boolean');
   GetVariantFromJsonField('0', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(v)^ = 'Integer');
   Check(v = 0);
   GetVariantFromJsonField('123', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(v = 123);
   GetVariantFromJsonField('0123', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(VariantTypeName(v)^ = 'String');
   GetVariantFromJsonField('-', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '-');
   GetVariantFromJsonField('-e', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '-e');
   GetVariantFromJsonField('-0', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(@vd)^ = 'Integer');
   Check(v = 0);
   GetVariantFromJsonField('-123', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(v = -123);
   GetVariantFromJsonField('-0123', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(VariantTypeName(v)^ = 'String');
   GetVariantFromJsonField('123456789', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(v)^ = 'Integer');
   Check(v = 123456789);
   GetVariantFromJsonField('9876543210', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(VariantTypeName(v)^ = 'Int64');
   Check(v = 9876543210);
   GetVariantFromJsonField('12345678901', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(v = 12345678901);
   GetVariantFromJsonField('12345678901234567', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   GetVariantFromJsonField('123456789012345678', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(v = 123456789012345678);
   GetVariantFromJsonField('1234567890123456789', False, v, nil);
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(v = 1234567890123456789);
   GetVariantFromJsonField('12345678901234567890', False, v, nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   Check(VariantTypeName(v)^ = 'Double');
   CheckSame(vd.VDouble, 12345678901234567890.0, 0);
   GetVariantFromJsonField('12345678901234567890', False, v, nil, false);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   GetVariantFromJsonField('0.123', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(VariantTypeName(v)^ = 'Currency');
   Check(v = 0.123);
   GetVariantFromJsonField('-0.123', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -0.123);
   GetVariantFromJsonField('-123.1', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -123.1);
   GetVariantFromJsonField('-123.12', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -123.12);
   GetVariantFromJsonField('-123.123', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -123.123);
   GetVariantFromJsonField('123.1234', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = 123.1234);
   GetVariantFromJsonField('-123.1234', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(v = -123.1234);
   GetVariantFromJsonField('0123.1234', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   GetVariantFromJsonField('-0123.1234', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   GetVariantFromJsonField('-123.1234', False, v, nil);
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   GetVariantFromJsonField('123.12345', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   GetVariantFromJsonField('123.12345', False, v, nil, {double=}true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, 123.12345);
   GetVariantFromJsonField('-123.12345', False, v, nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, -123.12345);
   GetVariantFromJsonField('-1.123e12', False, v, nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, -1.123e12);
   GetVariantFromJsonField('-123.123e-2', False, v, nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   Check(VariantTypeName(v)^ = 'Double');
   CheckSame(v, -123.123e-2);
   GetVariantFromJsonField('-123.123ee2', False, v, nil, true);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(VariantTypeName(v)^ = 'String');
   Check(v = '-123.123ee2');
   GetVariantFromJsonField('1e', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '1e');
   GetVariantFromJsonField('1e0', False, v, nil);
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(v)^ = 'Integer');
   Check(v = 1);
   GetVariantFromJsonField('1-123.12', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '1-123.12');
   GetVariantFromJsonField('123.', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.');
   GetVariantFromJsonField('123.abc', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.abc');
   GetVariantFromJsonField('123.1abc', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.1abc');
   GetVariantFromJsonField('123.12a', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.12a');
   GetVariantFromJsonField('123.123a', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.123a');
   GetVariantFromJsonField('123.1234a', False, v, nil);
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(v = '123.1234a');
   Check(VariantToDateTime('2016', dt));
   CheckSame(dt, 42370);
@@ -608,12 +625,12 @@ begin
   {$endif FPC}
   info.Json := nil;
   JsonToAnyVariant(v, info, nil, false);
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   Check(VariantTypeName(v)^ = 'Empty');
   v := VariantLoadJson('');
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   v := VariantLoadJson('null');
-  Check(vd.VType = varNull);
+  CheckEqual(vd.VType, varNull);
   Check(VariantTypeName(v)^ = 'Null');
   v := VariantLoadJson('false');
   Check(not boolean(v));
@@ -622,36 +639,36 @@ begin
   Check(VariantTypeName(v)^ = 'Boolean');
   Check(boolean(v));
   v := VariantLoadJson('invalid');
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   Check(VariantTypeName(v)^ = 'Empty');
   Check(VariantLoadJson(v, 'true'));
   Check(boolean(v));
   Check(not VariantLoadJson(v, 'invalid'));
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   Check(VariantTypeName(v)^ = 'Empty');
   v := VariantLoadJson('0');
-  Check(vd.VType = varInteger);
+  CheckEqual(vd.VType, varInteger);
   Check(VariantTypeName(v)^ = 'Integer');
   v := VariantLoadJson('123456789012345678');
-  Check(vd.VType = varInt64);
+  CheckEqual(vd.VType, varInt64);
   Check(VariantTypeName(v)^ = 'Int64');
   Check(v = 123456789012345678);
   v := VariantLoadJson('123.1234');
-  Check(vd.VType = varCurrency);
+  CheckEqual(vd.VType, varCurrency);
   Check(VariantTypeName(v)^ = 'Currency');
   CheckSame(v, 123.1234);
   v := VariantLoadJson('1E300', nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   Check(VariantTypeName(v)^ = 'Double');
   CheckSame(v, 1e300);
   v := VariantLoadJson('-1E300', nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, -1e300);
   v := VariantLoadJson('-1E-300', nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, -1e-300);
   v := VariantLoadJson('1E-300', nil, true);
-  Check(vd.VType = varDouble);
+  CheckEqual(vd.VType, varDouble);
   CheckSame(v, 1e-300);
   v := VariantLoadJson('[]', @JSON_[mFast]);
   Check(VariantTypeName(v)^ = 'DocVariant');
@@ -672,10 +689,10 @@ begin
   Check(v._count = 2);
   Check(VariantTypeName(v)^ = 'DocVariant');
   v := VariantLoadJson('{"invalid":', @JSON_[mFast]);
-  Check(vd.VType = varEmpty);
+  CheckEqual(vd.VType, varEmpty);
   Check(VariantTypeName(v)^ = 'Empty');
   v := VariantLoadJson(' "toto\r\ntoto"');
-  Check(vd.VType = varString);
+  CheckEqual(vd.VType, varString);
   Check(VariantTypeName(v)^ = 'String');
   Check(v = 'toto'#$D#$A'toto');
 end;
@@ -965,6 +982,7 @@ begin
     JSONPARSER_TOLERANTOPTIONS, []);
   for spec := 0 to High(MUSTACHE_SPECS) do
   begin
+    // may have been downloaded+unzipped from process-ref.zip in Setup
     mustacheJson := DownloadFile(
       'https://raw.githubusercontent.com/mustache/spec/' +
       'master/specs/' + StringToAnsi7(MUSTACHE_SPECS[spec]) + '.json',
@@ -1027,7 +1045,7 @@ begin
       Minor := GetNextItemCardinal(P);
       Release := GetNextItemCardinal(P);
       Build := GetNextItemCardinal(P);
-      Context.{$ifdef USERECORDWITHMETHODS}Get.{$endif}Json := P;
+      Context.Json := P;
       Main := Context.ParseString;
       Detailed := Context.ParseString;
       Context.ParseEndOfObject;
@@ -1280,8 +1298,13 @@ type
       id: currency;
     end;
   end;
-
   TTestCustomJsonGitHubs = array of TTestCustomJsonGitHub;
+
+  TTestCustomJsonMixed = packed record
+    status: RawUtf8;
+    results: variant;
+    price: double;
+  end;
 
   TTestCustomJson2Title = packed record
     TITYPE, TIID, TICID, TIDSC30, TIORDER, TIDEL: RawUtf8;
@@ -1425,6 +1448,7 @@ type
     property Enum: TSimpleEnum
       read fEnum write SetEnum;
   end;
+  TSimpleExampleObjArray = array of TSimpleExample;
 
 procedure TSimpleExample.SetEnumSet(const Value: TEnumSet);
 begin
@@ -1440,6 +1464,47 @@ procedure TSimpleExample.SetEnum(const Value: TSimpleEnum);
 begin
   fEnum := Value;
 end;
+
+type
+  TPropTest = class(TSynJsonFileSettings)
+  private
+    fProp1: RawUtf8;
+    fProp2: RawUtf8;
+    fSimple: TSimpleExampleObjArray;
+    procedure Setprop1(AValue: RawUtf8);
+    procedure Setprop2(AValue: RawUtf8);
+  published
+    property prop1: RawUtf8
+      read fProp1 write Setprop1;
+    property prop2: RawUtf8
+      read fProp2 write Setprop2;
+    property simple: TSimpleExampleObjArray
+      read fSimple;
+  end;
+
+procedure TPropTest.Setprop1(AValue: rawUtf8);
+begin
+  if fprop1 = AValue then 
+    exit;
+  fprop1 := AValue;
+end;
+
+procedure TPropTest.Setprop2(AValue: rawUtf8);
+begin
+  if fprop2 = AValue then 
+    exit;
+  fprop2 := AValue;
+end;
+
+type
+  TMySettings = class(THttpProxyServerSettings)
+  protected
+    fLines: TRawUtf8DynArray;
+  published
+    // validate custom text lines (e.g. 'name=value') in its own section
+    property Lines: TRawUtf8DynArray
+      read fLines;
+  end;
 
 const
   SIMPLEENUM2TXT: array[TSimpleEnum] of RawUtf8 = (
@@ -1460,9 +1525,6 @@ var
   JA, JA2: TTestCustomJsonArray;
   JAS: TTestCustomJsonArraySimple;
   JAV: TTestCustomJsonArrayVariant;
-  GDtoObject, G2, G3: TDtoObject;
-  GNest: TDtoObject3;
-  owv: TObjectWithVariant;
   Trans: TTestCustomJson2;
   Disco, Disco2: TTestCustomDiscogs;
   Cache: TEntry;
@@ -1475,6 +1537,7 @@ var
   Coll, C2: TCollTst;
   MyItem: TCollTest;
   Comp: TComplexNumber;
+  t: TPropTest;
   DA: TDynArray;
   F: TFV;
   TLNow: TTimeLog;
@@ -1832,9 +1895,14 @@ var
     ab0, ab1: TSubAB;
     cd0, cd1, cd2: TSubCD;
     agg, agg2: TAggregate;
-    X: RawUtf8;
+    X, U, J: RawUtf8;
     AA, AB: TRawUtf8DynArrayDynArray;
     i, a, v: PtrInt;
+    mix1: TTestCustomJsonMixed;
+    ps: TMySettings;
+    GDtoObject, G2, G3: TDtoObject;
+    GNest: TDtoObject3;
+    owv: TObjectWithVariant;
     {$ifdef HASEXTRECORDRTTI}
     nav, nav2: TConsultaNav;
     nrtti, nrtti2: TNewRtti;
@@ -2013,6 +2081,14 @@ var
     CheckEqual(agg.abArr[1].a, '3');
     CheckEqual(agg.abArr[1].b, 7);
     Finalize(agg);
+    U := 'c;b;a'#13#10'5;1;"2;3"'#13#10'6;7;3'#13#10;
+    Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs), nil, ';'));
+    CheckEqual(length(agg.abArr), 2);
+    CheckEqual(agg.abArr[0].a, '2;3');
+    CheckEqual(agg.abArr[0].b, 1);
+    CheckEqual(agg.abArr[1].a, '3');
+    CheckEqual(agg.abArr[1].b, 7);
+    Finalize(agg);
     CheckEqual(length(agg.abArr), 0);
     U := 'b'#13#10'1'#13#10'2'#13#10#13#10;
     Check(DynArrayLoadCsv(agg.abArr, U, TypeInfo(TSubABs)));
@@ -2148,10 +2224,10 @@ var
     Check(IniToObject('[main]'#10'somefield=toto', G2));
     CheckEqual(G2.SomeField, 'toto');
     CheckEqual(G2.NestedObject.FieldInteger, 0);
-    Check(IniToObject('[main]'#10'somefield=titi'#10'[nestedobject]'#10'fieldinteger=7', G2));
+    Check(IniToObject('[main]'#10'somefield = titi '#10'[nestedobject]'#10' fieldinteger = 7', G2));
     CheckEqual(G2.SomeField, 'titi');
     CheckEqual(G2.NestedObject.FieldInteger, 7);
-    Check(IniToObject('[main]'#10'[nestedobject]'#10'fieldstring=c:\abc', G2));
+    Check(IniToObject('[main]'#13#10'[nestedobject]'#13#10'fieldstring=c:\abc'#13, G2));
     CheckEqual(G2.SomeField, 'titi');
     CheckEqual(G2.NestedObject.FieldInteger, 7);
     CheckEqual(G2.NestedObject.FieldString, 'c:\abc');
@@ -2211,8 +2287,157 @@ var
     Check(IsObjectDefaultOrVoid(GDtoObject));
     Check(IsObjectDefaultOrVoid(G2));
     Check(ObjectEquals(G2, GDtoObject));
+    U := ObjectToIni(G2);
+    CheckHash(U, $79F2E094);
+    U := '[Main]'#10'[NestedObject]'#10'FIeldVariant : [ 1, 2, 3 ]';
+    Check(IniToObject(U, G2));
+    CheckEqual(VariantSaveJson(G2.NestedObject.FieldVariant), '[1,2,3]');
+    U := '[Main]'#10'[NestedObject]'#10'FIeldVariant : [ 1,2, '#10'3]'#10'[dummy]'#10;
+    Check(not IniToObject(U, G2));
+    CheckEqual(VariantSaveJson(G2.NestedObject.FieldVariant), 'null');
+    Check(IniToObject(U, G2, 'Main', nil, 0, [ifClassSection, ifMultiLineJsonArray]));
+    CheckEqual(VariantSaveJson(G2.NestedObject.FieldVariant), '[1,2,3]');
     G2.Free;
     GDtoObject.Free;
+    t := TPropTest.Create;
+    try
+      CheckEqual(t.prop1, '');
+      CheckEqual(t.prop2, '');
+      Check(t.simple = nil);
+      u := '[global]'#13#10'prop1=test'#13#10#13#10 +
+           '[other]'#13#10'prop2=other'#13#10;
+      Check(t.LoadFromJson(u, 'Global'));
+      CheckEqual(t.prop1, 'test');
+      CheckEqual(t.prop2, '');
+      Check(t.simple = nil);
+      ClearObject(t);
+      CheckEqual(t.prop1, '');
+      CheckEqual(t.prop2, '');
+      Check(t.simple = nil);
+      Append(u, '[simple 1]'#13#10'FullName = fn1'#13#10 +
+                '[simples]'#13#10'FullName=fn'#13#10 + // ignored
+                '[simple.two]'#13#10'FullName = fn 2'#13#10);
+      Check(t.LoadFromJson(u, 'Global'));
+      CheckEqual(t.prop1, 'test');
+      CheckEqual(t.prop2, '');
+      if CheckEqual(length(t.simple), 2, 't.simple') then
+      begin
+        Check(t.simple[0].FullName = 'fn1');
+        Check(t.simple[1].FullName = 'fn 2');
+      end;
+    finally
+      t.Free;
+    end;
+    u := '[MemCache]'#13#10 +
+         'MaxSizeKB = 2'#13#10 +
+         'TimeoutSec = 300'#13#10 +
+         #13#10 +
+         '[DiskCache]'#13#10 +
+         'Path = /home/proxycache'#13#10 +
+         #13#10 +
+         '[Url-Debian]'#13#10 +
+         'Methods = get,head'#13#10 +
+         'Source = http://ftp.debian.org'#13#10 +
+         'HttpHeadCacheSec = 60'#13#10 +
+         'HttpKeepAlive = 30'#13#10 +
+         'HttpDirectGetKB = 16'#13#10 +
+         'MemCache.ForceCsv = csv'#13#10 +
+         #13#10 +
+         '[Url-Ubuntu]'#13#10 +
+         'Methods = get, post, "head" '#13#10 +
+         'Source = http://ftp.ubuntu.org'#13#10 +
+         'HttpHeadCacheSec = 160'#13#10 +
+         'HttpKeepAlive = 130'#13#10 +
+         'HttpDirectGetKB = 161'#13#10 +
+         #13#10 +
+         '[UrlIgnored]'#13#10 +
+         'Methods = post'#13#10 +
+         'Source = http://neverused.org'#13#10 +
+         #13#10 +
+         '[Lines]'#13#10 +
+         ''#13#10 +
+         'one=1'#13#10 +
+         ''#13#10 +
+         'two=2'#13#10 +
+         #13#10 +
+         '[Server]'#13#10 +
+         'Port = 809'#13#10 +
+         'ThreadCount = 7'#13#10;
+    for i := 1 to 6 do
+    begin
+      ps := TMySettings.Create;
+      try
+        CheckEqual(ps.Server.Port, '8098');
+        Check(ps.Server.Log.DestMainFile = 'access.log');
+        Check(ps.Server.Log.DestErrorFile = 'error.log');
+        CheckEqual(ps.Server.Log.DefaultRotateFiles, 9);
+        CheckEqual(ps.MemCache.MaxSizeKB, 4);
+        Check(ps.DiskCache.Path = Executable.ProgramFilePath + 'proxycache');
+        CheckEqual(length(ps.Url), 0);
+        CheckEqual(length(ps.Lines), 0);
+        case i of
+          1:
+            j := u +
+              #13#10 +
+              '[Server.Log]'#13#10 +
+              'DestMainFile = access1.log'#13#10 +
+              'DestErrorFile = error1.log'#13#10 +
+              'DefaultRotate = After10MB'#13#10 +
+              'DefaultRotateFiles = 5'#13#10 +
+              #13#10;
+          2:
+            j := u +
+              'Log.DestMainFile = access1.log'#13#10 +
+              'Log.DestErrorFile = error1.log'#13#10 +
+              'Log.DefaultRotate = After10MB'#13#10 +
+              'Log.DefaultRotateFiles = 5';
+        //else writeln(i,'='#10,j);
+        end;
+        if i >= 5 then
+          Check(IniToObject(j, ps, 'Main')) // we need [Main] for URL=[...]
+        else
+          Check(IniToObject(j, ps, ''));
+        CheckEqual(ps.Server.Port, '809');
+        CheckEqual(ps.Server.ThreadCount, 7);
+        Check(ps.Server.Log.DestMainFile = 'access1.log');
+        Check(ps.Server.Log.DestErrorFile = 'error1.log');
+        CheckEqual(ps.Server.Log.DefaultRotateFiles, 5);
+        CheckEqual(ps.MemCache.MaxSizeKB, 2);
+        Check(ps.DiskCache.Path = '/home/proxycache');
+        CheckEqual(length(ps.Lines), 2);
+        CheckEqual(RawUtf8ArrayToCsv(ps.Lines), 'one=1,two=2');
+        if CheckEqual(length(ps.Url), 2) then
+        begin
+          Check(ps.Url[0].Methods = [urmGet, urmHead]);
+          CheckEqual(ps.Url[0].Source, 'http://ftp.debian.org');
+          CheckEqual(ps.Url[0].HttpHeadCacheSec, 60);
+          CheckEqual(ps.Url[0].HttpKeepAlive, 30);
+          CheckEqual(ps.Url[0].HttpDirectGetKB, 16);
+          CheckEqual(ps.Url[0].MemCache.ForceCsv, 'csv');
+          Check(ps.Url[1].Methods = [urmGet, urmHead, urmPost]);
+          CheckEqual(ps.Url[1].Source, 'http://ftp.ubuntu.org');
+          CheckEqual(ps.Url[1].HttpHeadCacheSec, 160);
+          CheckEqual(ps.Url[1].HttpKeepAlive, 130);
+          CheckEqual(ps.Url[1].HttpDirectGetKB, 161);
+          CheckEqual(ps.Url[1].MemCache.ForceCsv, '');
+        end;
+        case i of // validate all possible combination of INI generation
+          2:
+            j := ObjectToIni(ps, '');
+          3:
+            j := ObjectToIni(ps, '', [], 0,
+              [ifClassValue, ifArraySection, ifMultiLineSections]);
+          4:
+            j := ObjectToIni(ps, 'Main', [], 0,
+              [ifClassSection, ifMultiLineSections]);
+          5:
+            j := ObjectToIni(ps, 'Main', [], 0,
+              [ifClassValue, ifMultiLineSections]);
+        end;
+      finally
+        ps.Free;
+      end;
+    end;
 
     owv := TObjectWithVariant.Create;
     J := ObjectToJson(owv);
@@ -2266,6 +2491,34 @@ var
     Check(Cache.Timestamp512 = 2300);
     Check(Cache.Json = 'test3');
     Check(Cache.Tag = 12);
+
+    mix1.price := 10;
+    CheckEqual(mix1.status, '');
+    Check(VarIsEmpty(mix1.results));
+    CheckEqual(RecordSaveJson(mix1, TypeInfo(TTestCustomJsonMixed)),
+      '{"status":"","results":null,"price":10}');
+    Check(RecordLoadJson(mix1, '{status:"toto",results:1}',
+      TypeInfo(TTestCustomJsonMixed)));
+    CheckEqual(mix1.status, 'toto');
+    Check(mix1.results = 1);
+    CheckSame(mix1.price, 10);
+    Finalize(mix1);
+    CheckEqual(mix1.status, '');
+    Check(VarIsEmpty(mix1.results));
+    CheckEqual(RecordSaveJson(mix1, TypeInfo(TTestCustomJsonMixed)),
+      '{"status":"","results":null,"price":10}');
+    Check(RecordLoadJson(mix1, '{status:"toto",results:{a:10,b:[{c:"cee"}]}}',
+      TypeInfo(TTestCustomJsonMixed)));
+    CheckEqual(mix1.status, 'toto');
+    CheckSame(mix1.price, 10);
+    CheckEqual(RecordSaveJson(mix1, TypeInfo(TTestCustomJsonMixed)),
+      '{"status":"toto","results":{"a":10,"b":[{"c":"cee"}]},"price":10}');
+    Check(RecordLoadJson(mix1, '{status:"titi",price:3,results:[1]}',
+      TypeInfo(TTestCustomJsonMixed)));
+    CheckEqual(mix1.status, 'titi');
+    CheckSame(mix1.price, 3);
+    CheckEqual(RecordSaveJson(mix1, TypeInfo(TTestCustomJsonMixed)),
+      '{"status":"titi","results":[1],"price":3}');
 
     {$ifdef HASEXTRECORDRTTI}
     FillCharFast(nav, SizeOf(nav), 0);
@@ -2583,6 +2836,7 @@ begin
     a := Random32(maxInt);
     r := RandomDouble;
     U := RandomUtf8(i);
+    Check(length(U) >= i);
     J := JsonEncode(['a', a, 'r', r, 'u', U]);
     check(IsValidJson(J));
     P := nil;
@@ -3215,16 +3469,16 @@ begin
   TestJSONSerialization;
   {$endif HASEXTRECORDRTTI}
   // test TJsonRecordTextDefinition JSON serialization
-  Rtti.RegisterFromText(TypeInfo(TSubAB), __TSubAB);
-  Rtti.RegisterFromText(TypeInfo(TSubCD), __TSubCD);
-  Rtti.RegisterFromText(TypeInfo(TAggregate), __TAggregate);
-  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonRecord), __TTestCustomJsonRecord);
-  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArray), __TTestCustomJsonArray);
-  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArraySimple),
-    __TTestCustomJsonArraySimple);
-  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayVariant),
-    __TTestCustomJsonArrayVariant);
-  Rtti.RegisterFromText(TypeInfo(TEntry), __TEntry);
+  Rtti.RegisterFromText([
+    TypeInfo(TSubAB),                      __TSubAB,
+    TypeInfo(TSubCD),                      __TSubCD,
+    TypeInfo(TAggregate),                  __TAggregate,
+    TypeInfo(TTestCustomJsonRecord),       __TTestCustomJsonRecord,
+    TypeInfo(TTestCustomJsonMixed),        __TTestCustomJsonMixed,
+    TypeInfo(TTestCustomJsonArray),        __TTestCustomJsonArray,
+    TypeInfo(TTestCustomJsonArraySimple),  __TTestCustomJsonArraySimple,
+    TypeInfo(TTestCustomJsonArrayVariant), __TTestCustomJsonArrayVariant,
+    TypeInfo(TEntry),                      __TEntry]);
   TestJSONSerialization;
   TestJSONSerialization; // test twice for safety
   Rtti.RegisterFromText(TypeInfo(TEntry), '');
@@ -3232,6 +3486,7 @@ begin
   Rtti.RegisterFromText(TypeInfo(TSubCD), '');
   Rtti.RegisterFromText(TypeInfo(TAggregate), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonRecord), '');
+  Rtti.RegisterFromText(TypeInfo(TTestCustomJsonMixed), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArray), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayVariant), '');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArraySimple), '');
@@ -3240,6 +3495,7 @@ begin
   // test JSON serialization defined by Enhanced RTTI
   TestJSONSerialization;
   {$endif HASEXTRECORDRTTI}
+
   // tests parsing options
   Parser := Rtti.RegisterFromText(
     TypeInfo(TTestCustomJsonRecord), __TTestCustomJsonRecord);
@@ -3295,11 +3551,13 @@ begin
   Check(JA.D = '1234');
   Rtti.RegisterFromText(TypeInfo(TTestCustomJsonArrayWithoutF), '');
 
+  // may have been downloaded+unzipped from process-ref.zip in Setup
   discogsJson := DownloadFile(
     'https://api.discogs.com/artists/45/releases?page=1&per_page=100',
     discogsFileName);
   Check(IsValidJson(discogsJson), 'discogsJson');
 
+  // may have been downloaded+unzipped from process-ref.zip in Setup
   zendframeworkJson := DownloadFile(
     'https://api.github.com/users/zendframework/repos',
     zendframeworkFileName);
@@ -3581,7 +3839,7 @@ begin
   NotifyTestSpeed('IsValidUtf8(RawUtf8)', 0, len, @timer, ONLYLOG);
   timer.Start;
   for i := 1 to ITER do
-    Check(IsValidUtf8(PUtf8Char(pointer(people))));
+    Check(IsValidUtf8Ptr(pointer(people)));
   NotifyTestSpeed('IsValidUtf8(PUtf8Char)', 0, len, @timer, ONLYLOG);
   {$ifdef ASMX64AVXNOCONST}
   if cpuHaswell in X64CpuFeatures then
@@ -3984,8 +4242,75 @@ begin
   {$endif JSONBENCHMARK_FPJSON}
 end;
 
+const
+  HTML_UNESCAPE: array[1 .. 104] of string[6] = (
+    'amp', 'lt', 'gt', 'quot', 'rsquo', {6=}'ndash', {7=}'trade', {8=}'hellip',
+    'nbsp', 'iexcl', 'cent', 'pound', 'curren', 'yen', 'brvbar', 'sect', 'uml',
+    'copy', 'ordf', 'laquo', 'not', 'shy', 'reg', 'macr', 'deg', 'plusmn',
+    'sup2', 'sup3', 'acute', 'micro', 'para', 'middot', 'cedil', 'sup1', 'ordm',
+    'raquo', 'frac14', 'frac12', 'frac34', 'iquest', 'Agrave', 'Aacute', 'Acirc',
+    'Atilde', 'Auml', 'Aring', 'AElig', 'Ccedil', 'Egrave', 'Eacute', 'Ecirc',
+    'Euml', 'Igrave', 'Iacute', 'Icirc', 'Iuml', 'ETH', 'Ntilde', 'Ograve',
+    'Oacute', 'Ocirc', 'Otilde', 'Ouml', 'times', 'Oslash', 'Ugrave', 'Uacute',
+    'Ucirc', 'Uuml', 'Yacute', 'THORN', 'szlig', 'agrave', 'aacute', 'acirc',
+    'atilde', 'auml', 'aring', 'aelig', 'ccedil', 'egrave', 'eacute', 'ecirc',
+    'euml', 'igrave', 'iacute', 'icirc', 'iuml', 'eth', 'ntilde', 'ograve',
+    'oacute', 'ocirc', 'otilde', 'ouml', 'divide', 'oslash', 'ugrave',
+    'uacute', 'ucirc', 'uuml', 'yacute', 'thorn', 'yuml');
+  HTML_UNESCAPED: array[1 .. 6] of RawUtf8 = (
+    '&', '<', '>', '"', '''', '-');
+
 procedure TTestCoreProcess.WikiMarkdownToHtml;
+var
+  i: PtrInt;
+  c: cardinal;
+  s, exp: RawUtf8;
 begin
+  // html escape and parsing
+  CheckEqual(HtmlUnescape(''), '');
+  CheckEqual(HtmlUnescape('test'), 'test');
+  CheckEqual(HtmlUnescape('test&'), 'test&');
+  CheckEqual(HtmlUnescape('&test'), '&test');
+  CheckEqual(HtmlUnescape('te&st'), 'te&st');
+  for i := 1 to high(HTML_UNESCAPE) do
+  begin
+    if i <= 6 then
+      exp := HTML_UNESCAPED[i]
+    else if i = 8 then
+      exp := '...'
+    else
+    begin
+      if i = 7 then
+        c := 153
+      else if i = 9 then
+        c := 32
+      else
+        c := i + ($00a0 - 9);
+      RawUcs4ToUtf8(@c, 1, exp);
+    end;
+    Make(['&', HTML_UNESCAPE[i], ';'], s);
+    CheckEqual(HtmlUnescape(s), exp);
+    CheckEqual(HtmlUnescape(Join(['abc', s])),       Join(['abc', exp]));
+    CheckEqual(HtmlUnescape(Join([s, 'abc'])),       Join([exp, 'abc']));
+    CheckEqual(HtmlUnescape(Join(['a&bc', s])),      Join(['a&bc', exp]));
+    CheckEqual(HtmlUnescape(Join(['ab&amp;c', s])),  Join(['ab&c', exp]));
+    CheckEqual(HtmlUnescape(Join(['ab&none;c', s])), Join(['ab&none;c', exp]));
+    CheckEqual(HtmlToText(s), exp);
+  end;
+  CheckEqual(HtmlToText('abc'), 'abc');
+  CheckEqual(HtmlToText('abc'#13#10'def'), 'abc'#13#10'def');
+  CheckEqual(HtmlToText('abc<p>def'), 'abc'#13#10'def');
+  CheckEqual(HtmlToText('abc<P>def'), 'abc'#13#10'def');
+  CheckEqual(HtmlToText('abc<P>def<br>gh'), 'abc'#13#10'def'#13#10'gh');
+  CheckEqual(HtmlToText('abc<h1>def</h1>title'), 'abc'#13#10'def'#13#10'title');
+  CheckEqual(HtmlToText('abc<H3>def</h4>title'), 'abc'#13#10'def'#13#10'title');
+  CheckEqual(HtmlToText('abc<H3>d&amp;f</h4>title'), 'abc'#13#10'd&f'#13#10'title');
+  CheckEqual(HtmlToText('&amp;bc<H3>d&amp;f</h4>titl&amp;'), '&bc'#13#10'd&f'#13#10'titl&');
+  s := '<div><h1>Welcome</h1><p>This is a <strong>sample</strong> paragraph.</p><ul>' +
+    '<li>Item 1</li><li>Item 2</li></ul><p>Another paragraph<br>with a line break.</p></div>';
+  s := HtmlToText(s);
+  CheckEqual(s, 'Welcome'#13#10'This is a sample paragraph.'#13#10'Item 1'#13#10 +
+    'Item 2'#13#10'Another paragraph'#13#10'with a line break.'#13#10);
   // wiki
   CheckEqual(HtmlEscapeWiki('test'), '<p>test</p>');
   CheckEqual(HtmlEscapeWiki('te<b>st'), '<p>te&lt;b&gt;st</p>');
@@ -4651,6 +4976,22 @@ begin
   d.Merge(d2);
   CheckEqual(d.Json, '{"name":"Mustermann","address":{"city":"Musterstadt",' +
     '"street":"Lindenallee","postal_code":"12345"},"surname":"Max"}');
+  l := DocList([1, 2, 3, DocDict(['a', '1', 'b', 2]), '5']);
+  Check(l <> nil);
+  CheckEqual(l.Len, 5);
+  CheckEqual(l.Json, '[1,2,3,{"a":"1","b":2},"5"]');
+  l := DocList([1, _ObjFast(['a', '1', 'b', 2]), '3']);
+  Check(l <> nil);
+  CheckEqual(l.Len, 3);
+  CheckEqual(l.Json, '[1,{"a":"1","b":2},"3"]');
+  l := DocList([1, 2, 3, '{', 'a', '1', 'b', 2, '}', '5']);
+  Check(l <> nil);
+  CheckEqual(l.Len, 5);
+  CheckEqual(l.Json, '[1,2,3,{"a":"1","b":2},"5"]');
+  l := DocList([1, 2, '{', 'a', '[', ']', '}', '5']);
+  Check(l <> nil);
+  CheckEqual(l.Len, 4);
+  CheckEqual(l.Json, '[1,2,{"a":[]},"5"]');
   // validate IDocList/IDocDict as published properties
   any := TDocAnyTest.Create;
   try
@@ -5086,6 +5427,17 @@ var
   end;
 
 begin
+  CheckEqual(SizeOf(TDecimal128), 16);
+  CheckEqual(ord(betEof), $00);
+  CheckEqual(ord(betInt64), $12);
+  CheckEqual(ord(betDecimal128), $13);
+  CheckEqual(ord(bbtGeneric), $00);
+  CheckEqual(ord(bbtMD5), $05);
+  CheckEqual(ord(bbtEncryptedBsonValue), $06);
+  CheckEqual(ord(bbtCompressedBsonColumn), $07);
+  CheckEqual(ord(bbtUser), $80);
+  CheckEqual(SizeOf(TBsonObjectID), 12);
+  CheckEqual(SizeOf(TBsonVariantData), SizeOf(variant));
   Check(@PBsonVariantData(nil)^.VBlob = @PVarData(nil)^.VAny);
   Check(@PBsonVariantData(nil)^.VText = @PVarData(nil)^.VAny);
   // see http://docs.mongodb.org/manual/reference/object-id
@@ -5094,7 +5446,8 @@ begin
   u := oid.ToText;
   CheckEqual(u, BSONID);
   o := ObjectID('507f191e810c19729de860ea');
-  Check(TVarData(o).VType = BsonVariantType.VarType);
+  CheckEqual(TVarData(o).VType, BsonVariantVType);
+  CheckEqual(BsonVariantVType, BsonVariantType.VarType);
   u := ToUtf8(string(o));
   Check(u = BSONID, 'variant bsonid to string');
   d2 := Iso8601ToDateTime('2012-10-17T20:46:22');
@@ -5231,7 +5584,8 @@ begin
   CheckElemIsBsonArray;
   Check(not BsonParseNextElement(b, name, value));
   o := BsonDocumentToDoc(bsonDat);
-  Check(TVarData(o).VType = DocVariantType.VarType);
+  CheckEqual(TVarData(o).VType, DocVariantVType);
+  CheckEqual(DocVariantVType, DocVariantType.VarType);
   Check(DocVariantType.IsOfType(o));
   Check(o.Name(0) = 'BSON');
   Check(o._(0)._Kind = ord(dvArray));
@@ -5634,6 +5988,9 @@ var
     n: integer;
   begin
     vd.InitArray([1, 2, 3, 4]);
+    Check(vd.IsArray);
+    Check(not vd.IsObject);
+    CheckEqual(vd.Count, 4);
     for f in vd do
     begin
       Check(f.Name = nil);
@@ -5646,7 +6003,28 @@ var
       Check(f.Name = pointer(1)); // should not iterate
     for v in vd.Items do
       Check(v = nil); // should not iterate
-    vd.InitJson('[{a:1,b:1}, 1, "no object", {a:2,b:2}]');
+    Check(vd.InitJson('{a:[{a:1,b:1}, 1, "no object", {a:2,b:2}]}'));
+    Check(not vd.IsArray);
+    Check(vd.IsObject);
+    CheckEqual(vd.Count, 1);
+    for f in vd do
+      CheckEqual(f.Name^, 'a');
+    for v in vd.Items('a') do
+      Check(not VarIsEmptyOrNull(v^));
+    n := 0;
+    for d in vd.Objects('a') do
+    begin
+      Check(not VarDataIsEmptyOrNull(d));
+      Check(DocVariantType.IsOfType(variant(d^)));
+      Check(d^.Exists('a'), 'a');
+      Check(d^.Exists('b'), 'a');
+      inc(n);
+      CheckEqual(d^.I['a'], n);
+      CheckEqual(d^.I['b'], n);
+    end;
+    CheckEqual(n, 2);
+    vd.Clear;
+    Check(vd.InitJson('[{a:1,b:1}, 1, "no object", {a:2,b:2}]'));
     v2.InitFast;
     for f in vd do
     begin
@@ -5750,6 +6128,26 @@ var
   lRefreshed: boolean;
   uu: TRawUtf8DynArray;
 begin
+  Check(GetBoolean('true'));
+  Check(GetBoolean('TRue'));
+  Check(GetBoolean('yes'));
+  Check(GetBoolean('YeS'));
+  Check(not GetBoolean(nil));
+  Check(not GetBoolean('false'));
+  Check(GetBooleanW('true'));
+  Check(GetBooleanW('TRue'));
+  Check(not GetBooleanW('yes'));
+  Check(not GetBooleanW('tru'));
+  Check(not GetBooleanW('trues'));
+  Check(not GetBooleanW(nil));
+  Check(not GetBooleanW('false'));
+  Check(GetTrue('true') = 1);
+  Check(GetTrue('TRue') = 1);
+  Check(GetTrue('yes') = 1);
+  Check(GetTrue('Yes') = 1);
+  Check(GetTrue('tru') = 0);
+  Check(GetTrue('trues') = 1);
+  Check(GetTrue('false') = 0);
   Check(pointer(uu) = nil);
   a.InitArrayFrom(uu, JSON_FAST); // ensure no GPF
   CheckEqual(a.Count, 0);
@@ -5758,7 +6156,27 @@ begin
   CheckEqual(a.Count, 4);
   CheckEqual(a.ToJson, '["0","1","2","3"]');
   for i := 0 to a.Count - 1 do
+  begin
     CheckEqual(GetInteger(pointer(a.GetItemAsText(i))), i);
+    CheckEqual(a.GetValueIndex(SmallUInt32Utf8[i]), i, 'text indexes');
+  end;
+  for i := 1 to a.Count do
+    CheckEqual(a.GetValueIndex(ToUtf8(-i)), a.Count - i, 'negative indexes');
+  a.Clear;
+  a.InitObject(['a', 1, 'obj', '{', 'o', 2, '}']);
+  CheckEqual(a.ToJson, '{"a":1,"obj":{"o":2}}');
+  a.Clear;
+  a.InitObject(['a', 1, 'obj', '{', 'b', 2, 'c', 'cest', '}', 'd', 0]);
+  CheckEqual(a.ToJson, '{"a":1,"obj":{"b":2,"c":"cest"},"d":0}');
+  a.Clear;
+  a.InitObject(['a', 1, 'obj', '{', 'arr', '[', 0, 1, 2, ']', '}']);
+  CheckEqual(a.ToJson, '{"a":1,"obj":{"arr":[0,1,2]}}');
+  a.Clear;
+  a.InitArray(['a', '{', 'arr', '[', 0, 1, 2, ']', '}', 2]);
+  CheckEqual(a.ToJson, '["a",{"arr":[0,1,2]},2]');
+  a.Clear;
+  a.InitArray(['a', '{', 'arr', '[', 0, 1, ']', '}']);
+  CheckEqual(a.ToJson, '["a",{"arr":[0,1]}]');
   a.Clear;
   a.Init;
   a.AddObject(['source', 'source0', // not same order as in for loop below
@@ -5893,6 +6311,9 @@ begin
     Check(Doc.Value[0] = 'one');
     Check(Doc.Value[1] = 2);
     Check(Doc.Value[2] = 3.0);
+    Check(Doc.Value[-3] = 'one', 'negative indexes');
+    Check(Doc.Value[-2] = 2);
+    Check(Doc.Value[-1] = 3.0);
     for i := 0 to Doc.Count - 1 do
       Check(VariantCompare(Doc.Values[i], Doc.Value[i]) = 0);
   end;
@@ -6086,11 +6507,15 @@ begin
   vd := _JsonFastFloat('{"price": 0.156}').price; // 0.156 is a varCurrency here
   CheckSame(vd, 0.156);
   V1 := _Arr([]);
-  vs := 1.5;
+  vs := 1;
   _Safe(V1)^.AddItem(vs);
-  CheckEqual(VariantSaveJson(V1), '[1.5]', 'VariantSaveJson');
+  CheckEqual(VariantSaveJson(V1), '[1]', 'VariantSaveJson');
   vd := 1.7;
   _Safe(V1)^.AddItem(vd);
+  CheckEqual(VariantSaveJson(V1), '[1,1.7]');
+  _Safe(V1)^.SetValueByPath('0', 2);
+  CheckEqual(VariantSaveJson(V1), '[2,1.7]');
+  _Safe(V1)^.SetValueByPath('-2', 1.5);
   CheckEqual(VariantSaveJson(V1), '[1.5,1.7]');
   V2 := _obj(['id', 0]);
   CheckEqual(VariantSaveJson(V2), '{"id":0}');
@@ -6194,7 +6619,7 @@ begin
   CheckEqual(s, '/root?ab=1&ab2=10&d=3');
   Doc.Clear;
   CheckEqual(Doc.Count, 0);
-  p := PosChar(pointer(s), '?');
+  p := PosCharU(s, '?');
   if not CheckFailed(p <> nil) then
     Doc.InitFromUrl(p + 1, JSON_FAST);
   CheckEqual(Doc.Count, 3);
@@ -6396,6 +6821,13 @@ type
     property Value: RawUtf8
       read fValue;
   end;
+  TInheritedClass = class(TLocalClass)
+  protected
+    fAnother: integer;
+  published
+    property Another: integer
+      read fAnother;
+  end;
 
 const
   ENUMPETSTORE1_TXT: array[TEnumPetStore1] of RawUtf8 = (
@@ -6437,6 +6869,8 @@ var
   tmp, u, json: RawUtf8;
   auto: TPersistentAutoCreateFieldsTest;
   local: TLocalClass;
+  inh: TInheritedClass;
+  i64: Int64;
   int: IUnknown;
   s: TSynLogLevels;
   ps: TEnumPetStore1;
@@ -6470,14 +6904,21 @@ begin
   CheckEqual(SizeOf(TRttiVarData), SizeOf(TVarData));
   CheckEqual(SizeOf(TSynVarData), SizeOf(TVarData));
   Check(@PRttiVarData(nil)^.PropValue = @PVarData(nil)^.VAny);
-  // CSV to set
+  // CSV (or JSON array) to set
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), ''), 0, 'TSetMyEnum0');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'none'), 0, 'TSetMyEnum?');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'enFirst'), 1, 'TSetMyEnum1');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'entwo'), 2, 'TSetMyEnum2');
   checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'two,first'), 3, 'TSetMyEnum3');
-  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '*'), 31, 'TSetMyEnum*');
-  // JSON to set
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '"two","first"'), 3, 'TSetMyEnum4');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '["two","first"]'), 3, 'TSetMyEnum5');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '[ "FIRST" ]'), 1, 'TSetMyEnum6');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), 'two,"first"'), 3, 'TSetMyEnum7');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '"two" , first'), 3, 'TSetMyEnum8');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '*'), 31, 'TSetMyEnum*1');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), '["*"]'), 31, 'TSetMyEnum*2');
+  checkEqual(GetSetCsvValue(TypeInfo(TSetMyEnum), ' ONE , *'), 31, 'TSetMyEnum*3');
+  // JSON array to set
   ep := [enTwo];
   CheckEqual(byte(ep), 2);
   tmp := '["enTwo"]';
@@ -6559,6 +7000,7 @@ begin
       Check(GetEnumNameTrimedValue(tmp) = i);
       Check(GetEnumNameTrimedValue(pointer(tmp)) = i);
       Check(GetEnumNameValue(tmp) = i);
+      Check(GetEnumNameValue(QuotedStrJson(tmp)) = i);
       Check(GetEnumNameValue(pointer(tmp)) = i);
       Check(GetEnumNameValue(
         mormot.core.rtti.GetEnumName(TypeInfo(TSynLogLevel), i)^) = i);
@@ -6682,12 +7124,47 @@ begin
   finally
     auto.Free;
   end;
+  CheckEqual(ClassFieldCountWithParents(TPersistent), 0);
+  CheckEqual(ClassFieldCountWithParents(TSynPersistent), 0);
+  CheckEqual(ClassFieldCountWithParents(TInterfacedPersistent), 0);
+  CheckEqual(ClassFieldCountWithParents(TLocalClass), 1);
+  CheckEqual(ClassFieldCountWithParents(TInheritedClass), 2);
+  Check(ClassFieldPropWithParents(TLocalClass, 'value')^.Name^ = 'Value');
+  Check(ClassFieldPropWithParents(TLocalClass, 'Value', true)^.Name^ = 'Value');
+  Check(ClassFieldPropWithParents(TLocalClass, 'value', true) = nil);
+  Check(ClassFieldPropWithParents(TInheritedClass, 'VALUE')^.Name^ = 'Value');
+  Check(ClassFieldPropWithParents(TInheritedClass, 'Value', true)^.Name^ = 'Value');
+  Check(ClassFieldPropWithParents(TInheritedClass, 'VALUE', true) = nil);
+  Check(ClassFieldPropWithParentsU(TLocalClass, 'value')^.Name^ = 'Value');
+  Check(ClassFieldPropWithParentsU(TLocalClass, 'Value', true)^.Name^ = 'Value');
+  Check(ClassFieldPropWithParentsU(TLocalClass, 'value', true) = nil);
+  Check(ClassFieldPropWithParentsU(TInheritedClass, 'VALUE')^.Name^ = 'Value');
+  Check(ClassFieldPropWithParentsU(TInheritedClass, 'Value', true)^.Name^ = 'Value');
+  Check(ClassFieldPropWithParentsU(TInheritedClass, 'VALUE', true) = nil);
   Check(ClassInheritsFromName(TLocalClass, 'TLocalClass'));
   Check(ClassInheritsFromName(TLocalClass, 'TInterfacedPersistent'));
   Check(ClassInheritsFromName(TLocalClass, 'TInterfacedObject'));
   Check(ClassInheritsFromName(TLocalClass, 'TObject'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TInheritedClass'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TLocalClass'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TObject'));
+  Check(ClassInheritsFromName(TLocalClass, 'TLOCALCLASS'));
+  Check(ClassInheritsFromName(TLocalClass, 'TINTERFACEDPERSISTENT'));
+  Check(ClassInheritsFromName(TLocalClass, 'TINTERFACEDOBJECT'));
+  Check(ClassInheritsFromName(TLocalClass, 'TOBJECT'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TINHERitedClass'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TLOCALClass'));
+  Check(ClassInheritsFromName(TInheritedClass, 'TOBJECt'));
   Check(not ClassInheritsFromName(TLocalClass, 'TSynPersistent'));
   Check(not ClassInheritsFromName(TLocalClass, 'TPersistent'));
+  Check(not ClassInheritsFromName(TLocalClass, 'TInheritedClass'));
+  CheckEqual(ClassFieldNamesAllPropsAsText(TPersistent), '');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TLocalClass), 'Value');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TInheritedClass), 'Another,Value');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TPersistent, true), '');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TLocalClass, true), 'Value: RawUtf8');
+  CheckEqual(ClassFieldNamesAllPropsAsText(TInheritedClass, true),
+    'Another: Integer; Value: RawUtf8');
   local := TLocalClass.Create;
   int := local; // will do local.Free
   local.fValue := 'test';
@@ -6717,6 +7194,25 @@ begin
   JsonForDebug(@int, u, json);
   CheckEqual(json, tmp, 'as IUnknown');
   {$endif FPC}
+  Check(not ClassFieldInt64(local, 'another', i64));
+  Check(not ClassFieldText(local, 'another', u));
+  CheckNotEqual(u, 'test');
+  Check(ClassFieldText(local, 'value', u));
+  CheckEqual(u, 'test');
+  inh := TInheritedClass.Create;
+  i64 := 1;
+  Check(ClassFieldInt64(inh, 'another', i64));
+  CheckEqual(i64, 0);
+  int := inh;
+  inh.fAnother := 10;
+  Check(ClassFieldInt64(inh, 'another', i64));
+  CheckEqual(i64, 10);
+  CheckEqual(u, 'test');
+  Check(ClassFieldText(inh, 'value', u));
+  CheckEqual(u, '');
+  inh.fValue := 'toto';
+  Check(ClassFieldText(inh, 'value', u));
+  CheckEqual(u, 'toto');
   cc := TComplexClass.Create;
   try
     CheckEqual(RawUtf8ArrayToCsv(cc.arr), '');
@@ -6734,7 +7230,7 @@ end;
 
 type
   TOne = record
-    head: TLockedListOne;
+    head: TLockedListOne; // first field - as required by TLockedList
     data1, data2: integer;
   end;
   POne = ^TOne;
@@ -6836,12 +7332,17 @@ const
 
   procedure DoOne(const value, expected: RawUtf8);
   var
-    res: RawUtf8;
+    p: PUtf8Char;
   begin
     w.CancelAll;
     w.AddUrlNameNormalize(pointer(value), length(value));
-    w.SetText(res);
-    CheckEqual(res, expected);
+    CheckEqual(w.TextLength, length(expected), 'before');
+    p := w.GetTextAsBuffer; // validate this method insteas of SetText()
+    Check(p <> nil);
+    Check(p[length(expected)] = #0, 'end with #0');
+    if expected <> '' then
+      Check(CompareMem(p, pointer(expected), length(expected)));
+    CheckEqual(w.TextLength, length(expected), 'after');
   end;
 
   procedure Test(decoded, encoded: RawUtf8);
@@ -6891,7 +7392,7 @@ begin
   end;
   str := Utf8ToString(UrlEncode(StringToUtf8('https://test3.diavgeia.gov.gr/doc/')));
   check(str = 'https%3A%2F%2Ftest3.diavgeia.gov.gr%2Fdoc%2F');
-  Check(UrlDecode('where=name%20like%20:(%27Arnaud%%27):') =
+  CheckEqual(UrlDecode('where=name%20like%20:(%27Arnaud%%27):'),
     'where=name like :(''Arnaud%''):', 'URI from browser');
   P := UrlDecodeNextNameValue('where=name+like+%3A%28%27Arnaud%25%27%29%3A', name, value);
   Check(P <> nil);
@@ -6923,9 +7424,12 @@ begin
   begin
     j := i * 5; // circumvent weird FPC code generation bug in -O2 mode
     s := RandomUtf8(j);
+    Check(length(s) >= j);
     CheckEqual(UrlDecode(UrlEncode(s)), s, s);
   end;
   utf := BinToBase64Uri(@Guid, SizeOf(Guid));
+  Check(utf = '00amyWGct0y_ze4lIsj2Mw');
+  utf := BinToBase64Uri(PHash128(@Guid)^);
   Check(utf = '00amyWGct0y_ze4lIsj2Mw');
   FillCharFast(Guid2, SizeOf(Guid2), 0);
   Check(Base64uriToBin(utf, @Guid2, SizeOf(Guid2)));
@@ -6993,6 +7497,7 @@ begin
     CheckEqual(UrlDecodeName(t), s);
     CheckEqual(t, s, 'plainname');
     s := RandomUtf8(i);
+    Check(length(s) >= i);
     Check(not NeedsHtmlEscape(pointer(s), hfNone));
     t := UrlEncode(s);
     Check(t <> '');
@@ -7636,11 +8141,6 @@ begin
   end;
 end;
 
-const
-  // a void .zip file is just a void last header (22 bytes)
-  MINIM_ZIP: TLastHeader = (
-    signature: $06054b50{%H-});
-
 procedure TTestCoreCompression.ZipFormat;
 var
   FN, FN2: TFileName;
@@ -7737,9 +8237,12 @@ var
   i, m: integer;
   mem: QWord;
   json, deleted: TStringDynArray;
+  minim: TLastHeader; // a void .zip file is just a void last header (22 bytes)
 begin
   FN := WorkDir + 'void.zip';
-  Check(FileFromBuffer(@MINIM_ZIP, SizeOf(MINIM_ZIP), fn));
+  FillCharFast(minim, SizeOf(minim), 0);
+  minim.signature := $06054b50; // = PK#5#6 .zip file header - all other = 0
+  Check(FileFromBuffer(@minim, SizeOf(minim), fn));
   try
     with TZipRead.Create(FN) do
       try
@@ -7753,7 +8256,7 @@ begin
   end;
   Check(DeleteFile(FN));
   TZipWrite.Create(FN).Free;
-  CheckEqual(FileSize(FN), SizeOf(MINIM_ZIP), 'TZipWrite void .zip');
+  CheckEqual(FileSize(FN), SizeOf(minim), 'TZipWrite void .zip');
   Check(DeleteFile(FN));
   // onprog := TStreamRedirect.ProgressInfoToConsole;
   onprog := TSynLog.ProgressInfo;
@@ -8165,6 +8668,14 @@ end;
 
 {$endif OSWINDOWS}
 
+
+initialization
+  {$ifndef HASDYNARRAYTYPE}
+  Rtti.RegisterObjArray(TypeInfo(TSimpleExampleObjArray), TSimpleExample);
+  {$endif HASDYNARRAYTYPE}
+
+
+finalization
 
 end.
 

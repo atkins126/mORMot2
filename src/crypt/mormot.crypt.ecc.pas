@@ -423,7 +423,7 @@ type
     // - if Authority is nil, will generate a self-signed certificate
     // - the supplied Issuer name would be stored using AsciiToBaudot(),
     // truncated to the Issuer buffer size, i.e. 16 bytes - if Issuer is '',
-    // TAesPrng.Fill() will be used
+    // Random128() will be used
     // - you may specify some validity time range, if needed
     // - default ParanoidVerify=true will validate the certificate digital
     // signature via a call Ecc256r1Verify() to ensure its usefulness
@@ -862,7 +862,6 @@ type
     fMaxVersion: byte;
     fIsValidCached: boolean;
     fIsValidCacheCount: integer;
-    fIsValidCacheSalt: RawByteString; // avoid flooding on forged input
     fIsValidCache: THash128DynArray;  // low TEccCertificateContent.ComputeHash
     function GetCount: integer;
       {$ifdef HASINLINE} inline; {$endif}
@@ -1233,6 +1232,9 @@ function PemDerRawToEcc(const pem: RawUtf8; out priv: TEccPrivateKey): boolean; 
 /// parse ECC public key in raw, PEM or DER format into its binary raw buffer
 function PemDerRawToEcc(const pem: RawUtf8; out pub: TEccPublicKey): boolean; overload;
 
+/// parse ECC public from "x","y" fields of a "kty":"EC", "crv":"P-256" JWK
+function JwkToEcc(const Json: RawUtf8; out PublicKey: TEccPublicKey): boolean;
+
 /// cipher a raw ECC secp256r1 private key buffer into some binary
 // - encryption uses safe PBKDF2 HMAC-SHA256 AES-CTR-128 and AF-32 algorithms
 // - as used by pemSynopseEccEncryptedPrivateKey format and EccPrivateKeyDecrypt()
@@ -1486,7 +1488,7 @@ type
   // - the frame will always have the same fixed size of 290 bytes (i.e. 388
   // base64-encoded chars, which could be transmitted in a HTTP header),
   // for both mutual or unilateral authentication
-  // - ephemeral keys may be included for perfect forward security
+  // - ephemeral keys may be included to ensure forward secrecy
   TEcdheFrameClient = packed record
     /// expected algorithm used
     Algo: TEcdheAlgo;
@@ -1509,7 +1511,7 @@ type
   // - the frame will always have the same fixed size of 306 bytes (i.e. 408
   // base64-encoded chars, which could be transmitted in a HTTP header),
   // for both mutual or unilateral authentication
-  // - ephemeral keys may be included for perfect forward security
+  // - ephemeral keys may be included to ensure forward secrecy
   TEcdheFrameServer = packed record
     /// algorithm used by the server
     Algo: TEcdheAlgo;
@@ -1542,7 +1544,7 @@ type
   // classes will implement a secure client/server transmission, with a one-way
   // handshake and asymmetric encryption via public/private key pairs
   // - will validate ECDSA signatures using certificates of the associated PKI
-  // - will create an ephemeral ECC key pair for perfect forward security
+  // - will create an ephemeral ECC key pair to ensure forward secrecy
   // - will use ECDH to compute a shared ephemeral session on both sides,
   // for AES-128 or AES-256 encryption, and HMAC with anti-replay - default
   // algorithm will use fast and safe AES-CTR 128-bit encryption, with efficient
@@ -2310,6 +2312,27 @@ begin
   result := true;
 end;
 
+function JwkToEcc(const Json: RawUtf8; out PublicKey: TEccPublicKey): boolean;
+var
+  jwk: TDocVariantData;
+  x, y: RawUtf8;
+  xy, key: THash512Rec;
+begin
+  result := false;
+  if not jwk.InitJson(Json, JSON_FAST) or
+     (jwk.CompareText('kty', 'EC') <> 0) or
+     (jwk.CompareText('crv', 'P-256') <> 0) or
+     not jwk.GetAsRawUtf8('x', x) or
+     not jwk.GetAsRawUtf8('y', y) or
+     not Base64uriToBin(x, @xy.Lo, SizeOf(xy.Lo)) or
+     not Base64uriToBin(y, @xy.Hi, SizeOf(xy.Hi)) then
+    exit;
+  _bswap256(@key.Lo, @xy.Lo);
+  _bswap256(@key.Hi, @xy.Hi);
+  Ecc256r1Compress(TEccPublicKeyUncompressed(key), PublicKey);
+  result := true;
+end;
+
 
 { TEccCertificate }
 
@@ -2819,13 +2842,13 @@ begin
         ValidityStart := EccDate(StartDate);
       ValidityEnd := ValidityStart + ExpirationDays;
     end;
-    TAesPrng.Fill(TAesBlock(Serial));
+    Random128(@Serial);
     fContent.SetUsage(word(Usage), MaxVers);
     if IssuerText = '' then
       if Subjects <> '' then
         fContent.SetSubject(Subjects, MaxVers)
       else
-        TAesPrng.Fill(TAesBlock(Issuer))
+        Random128(@Issuer)
     else
       EccIssuer(IssuerText, Issuer);
     if not ecc_make_key_pas(PublicKey, fPrivateKey) then
@@ -2948,7 +2971,7 @@ begin
     plain := SaveToBinary;
     if plain <> '' then
       try
-        salt := TAesPrng.Fill(PRIVKEY_SALTSIZE);
+        RandomByteString(PRIVKEY_SALTSIZE, salt); // public: TLecuyer is enough
         Pbkdf2HmacSha256(PassWord, salt, Pbkdf2Round, aeskey);
         a := Aes.Create(aeskey);
         try
@@ -3708,7 +3731,6 @@ end;
 constructor TEccCertificateChain.Create;
 begin
   CreateVersion(2);
-  fIsValidCacheSalt := ToUtf8(RandomGuid); // avoid flooding on forged input
 end;
 
 constructor TEccCertificateChain.CreateFromJson(
@@ -3749,7 +3771,6 @@ function TEccCertificateChain.IsValidRaw(const content: TEccCertificateContent;
 var
   authoritypublickey: TEccPublicKey;
   hash: THash256Rec;
-  cached: THash128;
 begin
   // check certificate coherency and date before checking the cache
   result := ecvCorrupted;
@@ -3771,11 +3792,9 @@ begin
   if fIsValidCached then
   begin
     // try to recognize a previous valid certificate in the hash cache
-    cached := hash.Lo; // apply fIsValidCacheSalt and maybe AesNiHash128
-    DefaultHasher128(@cached, pointer(fIsValidCacheSalt), length(fIsValidCacheSalt));
     fSafe.ReadLock;
     try
-      if Hash128Index(pointer(fIsValidCache), fIsValidCacheCount, @cached) >= 0 then
+      if Hash128Index(pointer(fIsValidCache), fIsValidCacheCount, @hash) >= 0 then
         exit; // 128-bit lower part of sha-256 is very unlikely to collide
     finally
       fSafe.ReadUnlock;
@@ -3803,7 +3822,7 @@ begin
       try
         if fIsValidCacheCount > 1024 then
           fIsValidCacheCount := 0; // time to flush the cache once reached 16KB
-        AddHash128(fIsValidCache, cached, fIsValidCacheCount);
+        AddHash128(fIsValidCache, hash.Lo, fIsValidCacheCount);
       finally
         fSafe.WriteUnlock;
       end;
@@ -4033,7 +4052,7 @@ begin
   fSafe.WriteLock;
   try
     if GetBySerial(cert.Signed.Serial) = nil then
-      result := ObjArrayAdd(fItems, cert);
+      result := PtrArrayAdd(fItems, cert);
   finally
     fSafe.WriteUnLock;
   end;
@@ -4500,7 +4519,7 @@ begin
   try
     for i := 0 to high(fItems) do
       if not (IsValid(fItems[i]) in ECC_VALIDSIGN) then
-        ObjArrayAdd(result, fItems[i]);
+        PtrArrayAdd(result, fItems[i]);
   finally
     fSafe.ReadUnLock;
   end;
@@ -4527,7 +4546,7 @@ begin
     try
       if auth.FromFile(files[i]) then
       begin
-        ObjArrayAdd(fItems, auth);
+        PtrArrayAdd(fItems, auth);
         auth := nil;
       end
       else
@@ -4660,27 +4679,23 @@ end;
 procedure HmacCrc256c(key, msg: pointer; keylen, msglen: integer;
   out result: THash256);
 var
-  i: PtrInt;
   h1, h2: cardinal;
-  k0, k0xorIpad, step7data: THash512Rec;
+  k0, step7data: THash512Rec;
 begin
   FillCharFast(k0, SizeOf(k0), 0);
   if keylen > SizeOf(k0) then
     crc256c(key, keylen, k0.Lo)
   else
     MoveFast(key^, k0, keylen);
-  for i := 0 to 15 do
-    k0xorIpad.c[i] := k0.c[i] xor $36363636;
-  for i := 0 to 15 do
-    step7data.c[i] := k0.c[i] xor $5c5c5c5c;
-  h1 := crc32c(crc32c(0, @k0xorIpad, SizeOf(k0xorIpad)), msg, msglen);
-  h2 := crc32c(crc32c(h1, @k0xorIpad, SizeOf(k0xorIpad)), msg, msglen);
+  Xor32By128(@step7data, @k0, 15, $5c5c5c5c);
+  Xor32By128(@k0, @k0, 15, $36363636);
+  h1 := crc32c(crc32c(0,  @k0, SizeOf(k0)), msg, msglen);
+  h2 := crc32c(crc32c(h1, @k0, SizeOf(k0)), msg, msglen);
   crc256cmix(h1, h2, @result);
-  h1 := crc32c(crc32c(0, @step7data, SizeOf(step7data)), @result, SizeOf(result));
+  h1 := crc32c(crc32c(0,  @step7data, SizeOf(step7data)), @result, SizeOf(result));
   h2 := crc32c(crc32c(h1, @step7data, SizeOf(step7data)), @result, SizeOf(result));
   crc256cmix(h1, h2, @result);
   FillCharFast(k0, SizeOf(k0), 0);
-  FillCharFast(k0xorIpad, SizeOf(k0), 0);
   FillCharFast(step7data, SizeOf(k0), 0);
 end;
 
@@ -4705,21 +4720,17 @@ end;
 
 procedure THmacCrc32c.Init(key: pointer; keylen: integer);
 var
-  i: PtrInt;
-  k0, k0xorIpad: THash512Rec;
+  k0: THash512Rec;
 begin
   FillCharFast(k0, SizeOf(k0), 0);
   if keylen > SizeOf(k0) then
     crc256c(key, keylen, k0.Lo)
   else
     MoveFast(key^, k0, keylen);
-  for i := 0 to 15 do
-    k0xorIpad.c[i] := k0.c[i] xor $36363636;
-  for i := 0 to 15 do
-    step7data.c[i] := k0.c[i] xor $5c5c5c5c;
-  seed := crc32c(0, @k0xorIpad, SizeOf(k0xorIpad));
+  Xor32By128(@step7data, @k0, 15, $5c5c5c5c);
+  Xor32By128(@k0, @k0, 15, $36363636);
+  seed := crc32c(0, @k0, SizeOf(k0));
   FillCharFast(k0, SizeOf(k0), 0);
-  FillCharFast(k0xorIpad, SizeOf(k0xorIpad), 0);
 end;
 
 procedure THmacCrc32c.Update(msg: pointer; msglen: integer);
@@ -5260,7 +5271,7 @@ begin
   FillCharFast(aClient, SizeOf(aClient), 0);
   aClient.algo := fAlgo;
   // client-side randomness for ephemeral keys and signatures
-  SharedRandom.Fill(@fRndA, SizeOf(fRndA)); // enough for public randomness
+  Random128(@fRndA); // unpredictable
   aClient.RndA := fRndA;
   // generate the client ephemeral key
   if fAlgo.auth <> authClient then
@@ -5382,7 +5393,7 @@ begin
   FillCharFast(aServer, SizeOf(aServer), 0);
   aServer.algo := fAlgo;
   aServer.RndA := fRndA;
-  SharedRandom.Fill(@fRndB, SizeOf(fRndB)); // enough for public randomness
+  Random128(@fRndB); // unpredictable
   aServer.RndB := fRndB;
   if fAlgo.auth <> authServer then
     if not Ecc256r1MakeKey(aServer.QF, dF) then
@@ -5538,16 +5549,19 @@ begin
   case Algorithm of
     // we only support secp256r1/prime256v1 kind of elliptic curve by now
     ckaEcc256:
-      // try raw uncompressed format, as stored in a X509 certificate
-      if Ecc256r1CompressAsn1(PublicKeySaved, fEccPub) or
-         // try regular ASN1_SEQ format in PEM or DER
-         PemDerRawToEcc(PublicKeySaved, fEccPub) then
       begin
-        fEcc := TEcc256r1Verify.Create(fEccPub); // OpenSSL or our pascal code
-        fKeyAlgo := Algorithm;
-        fSubjectPublicKey := PublicKeySaved;
-        result := true;
-      end;
+        // try raw uncompressed format, as stored in a X509 certificate
+        if Ecc256r1CompressAsn1(PublicKeySaved, fEccPub) then
+          fSubjectPublicKey := PublicKeySaved
+        else if // try regular ASN1_SEQ format in PEM or DER
+                not PemDerRawToEcc(PublicKeySaved, fEccPub) and
+                // try "kty":"EC", "crv":"P-256" kind of JWK
+                not JwkToEcc(PublicKeySaved, fEccPub) then
+            exit;
+      fEcc := TEcc256r1Verify.Create(fEccPub); // OpenSSL or our pascal code
+      fKeyAlgo := Algorithm;
+      result := true;
+    end;
   else
     ECrypt.RaiseUtf8('%.Create: unsupported %', [self, ToText(fKeyAlgo)^]);
   end;
@@ -5582,13 +5596,16 @@ begin
   if self <> nil then
     case fKeyAlgo of
       ckaEcc256:
-        // for ECC, returns the x,y uncompressed coordinates from stored ASN.1
-        if Ecc256r1ExtractAsn1(fSubjectPublicKey, k) then
         begin
+          // try to extract the x,y already uncompressed coordinates from ASN.1
+          if (fSubjectPublicKey = '') or
+             not Ecc256r1ExtractAsn1(fSubjectPublicKey, k) then
+            // need to uncompress into x,y coordinates for JWK
+            Ecc256r1Uncompress(fEccPub, k);
           pointer(x) := FastNewString(ECC_BYTES);;
           pointer(y) := FastNewString(ECC_BYTES);;
-          bswap256(@PHash512Rec(@k)^.Lo, pointer(x));
-          bswap256(@PHash512Rec(@k)^.Hi, pointer(y));
+          _bswap256(pointer(x), @PHash512Rec(@k)^.Lo);
+          _bswap256(pointer(y), @PHash512Rec(@k)^.Hi);
           result := true;
         end;
     end;

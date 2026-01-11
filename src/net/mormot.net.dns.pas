@@ -38,7 +38,8 @@ type
   // name server, or drrCNAME for the alias canonical name
   // - this enumerate has no RTTI because it is mapped to the integer values
   TDnsResourceRecord = (
-    drrA = 1,
+    drrEmpty,
+    drrA,
     drrNS,
     drrMD,
     drrMF,
@@ -295,9 +296,9 @@ function DnsQuery(const QName: RawUtf8; out Res: TDnsResult;
   TimeOutMS: integer = DNSQUERY_TIMEOUT; QClass: cardinal = QC_INET): boolean;
 
 /// retrieve the IPv4 address of a DNS host name - using DnsQuery(drrA)
-// - e.g. DnsLookup('synopse.info') currently returns '62.210.254.173'
+// - e.g. DnsLookup('synopse.info') currently returns '82.67.73.95'
 // - for aliases, the CNAME is ignored and only the first A is returned, e.g.
-// DnsLookup('blog.synopse.info') would simply return '62.210.254.173'
+// DnsLookup('blog.synopse.info') would simply return '82.67.73.95'
 // - will also recognize obvious values like 'localhost' or an IPv4 address
 // - this unit will register this function to mormot.net.sock's NewSocketIP4Lookup
 // - default NameServers = '' will call GetDnsAddresses - but NameServers could
@@ -308,7 +309,7 @@ function DnsLookup(const HostName: RawUtf8; const NameServers: RawUtf8 = '';
   TimeoutMS: integer = DNSQUERY_TIMEOUT): RawUtf8;
 
 /// retrieve the IPv4 address(es) of a DNS host name - using DnsQuery(drrA)
-// - e.g. DnsLookups('synopse.info') currently returns ['62.210.254.173'] but
+// - e.g. DnsLookups('synopse.info') currently returns ['82.67.73.95'] but
 // DnsLookups('yahoo.com') returns an array of several IPv4 addresses
 // - will also recognize obvious values like 'localhost' or an IPv4 address
 // - default NameServers = '' will call GetDnsAddresses - but NameServers could
@@ -343,13 +344,13 @@ function DnsServices(const HostName: RawUtf8; const NameServers: RawUtf8 = '';
 function DnsLdapServices(const DomainName: RawUtf8;
   const NameServers: RawUtf8 = ''): TRawUtf8DynArray;
 
-/// retrieve the LDAP controlers from the current system AD domain name
+/// retrieve the LDAP controllers from the current system AD domain name
 // - returns e.g. ['dc-one.mycorp.com:389', 'dc-two.mycorp.com:389']
-// - optionally return the associated AD controler host name, e.g. 'ad.mycorp.com'
+// - optionally return the associated AD controller host name, e.g. 'ad.mycorp.com'
 // - default NameServers = '' will call GetDnsAddresses - but NameServers could
 // be IPv4 address(es) CSV, maybe prefixed as 'tcp@1.2.3.4' to force TCP
 // - see also CldapMyController() from mormot.net.ldap for a safer client approach
-function DnsLdapControlers(const NameServers: RawUtf8 = '';
+function DnsLdapControllers(const NameServers: RawUtf8 = '';
   UsePosixEnv: boolean = false; DomainName: PRawUtf8 = nil): TRawUtf8DynArray;
 
 
@@ -555,7 +556,7 @@ end;
 function DnsBuildQuestion(const QName: RawUtf8; RR: TDnsResourceRecord;
   QClass: cardinal): RawByteString;
 var
-  tmp: TTextWriterStackBuffer;
+  tmp: TTextWriterStackBuffer; // 8KB work buffer on stack
   w: TBufferWriter;
   h: TDnsHeader;
   n: PUtf8Char;
@@ -605,7 +606,7 @@ var
   start, stop: Int64;
   tix16: cardinal;
   lenw: word;
-  tmp: TSynTempBuffer;
+  tmp: TBuffer4K;
   hdr: PDnsHeader;
 begin
   result := false;
@@ -806,7 +807,7 @@ begin
   if PropNameEquals(HostName, 'localhost') or
      (HostName = c6Localhost) then
     Ip := IP4local
-  else if NetIsIP4(pointer(HostName)) then
+  else if NetIsIP4(pointer(HostName)) then // '1.2.3.4'
     Ip := HostName
   else
     result := false; // and Ip has been set to ''
@@ -817,7 +818,7 @@ var
   res: TDnsResult;
   i: PtrInt;
 begin
-  if not DnsLookupKnown(HostName, result) then
+  if not DnsLookupKnown(HostName, result) then // e.g. 'localhost' or '1.2.3.4'
     if DnsQuery(HostName, res, drrA, NameServers, TimeoutMS) then
       for i := 0 to high(res.Answer) do
         if res.Answer[i].QType = drrA then
@@ -834,7 +835,7 @@ var
   i: PtrInt;
 begin
   result := nil;
-  if DnsLookupKnown(HostName, known) then
+  if DnsLookupKnown(HostName, known) then // e.g. 'localhost' or '1.2.3.4'
     AddRawUtf8(result, known)
   else if DnsQuery(HostName, res, drrA, NameServers, TimeoutMS) then
     for i := 0 to high(res.Answer) do
@@ -878,7 +879,7 @@ begin
   result := DnsServices('_ldap._tcp.' + DomainName, NameServers);
 end;
 
-function DnsLdapControlers(const NameServers: RawUtf8; UsePosixEnv: boolean;
+function DnsLdapControllers(const NameServers: RawUtf8; UsePosixEnv: boolean;
   DomainName: PRawUtf8): TRawUtf8DynArray;
 var
   ad: TRawUtf8DynArray;

@@ -339,7 +339,7 @@ procedure TRestServerDB.InternalInfo(Ctxt: TRestServerUriContext;
   var Info: TDocVariantData);
 begin
   inherited InternalInfo(Ctxt, Info);
-  Info.AddValue(
+  Info.AddValueText(
     'db', FormatUtf8('% %', [ExtractFileName(DB.FileName), KB(DB.FileSize)]));
 end;
 
@@ -420,6 +420,18 @@ end;
 destructor TRestClientDB.Destroy;
 var
   m: TOrmModel;
+
+  procedure HandleCleanup; // sub-function for FPC Win64-aarch64 compilation
+  begin
+    try
+      FreeAndNilSafe(fOwnedServer);
+      fServer := nil;
+    finally
+      m.Free; // may do nothing if m = nil (fServer=nil)
+      fOwnedDB.Free;
+    end;
+  end;
+
 begin
   try
     inherited Destroy; // UnLock records + SessionClose
@@ -434,13 +446,7 @@ begin
          (m.Owner <> nil) then
         // free associated model only if it's owned by nobody
         m := nil;
-      try
-        FreeAndNilSafe(fOwnedServer);
-        fServer := nil;
-      finally
-        m.Free;
-        fOwnedDB.Free;
-      end;
+      HandleCleanup;
     end;
   end;
 end;

@@ -717,6 +717,47 @@ end;
 
 {$endif ASMX64}
 
+procedure XorMemory(Dest, Source: PByteArray; Size: PtrInt);
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+        // rcx/rdi=Dest rdx/rsi=Source r8/rdx=cnt
+        test    Size, Size
+        jz      @z
+        sub     Source, Dest
+        mov     r9, Size
+        shr     Size, 4
+        jnz     @by16
+@0:     test    r9b, 8
+        jz      @8
+        mov     rax, qword ptr [Source + Dest]
+        xor     qword ptr [Dest], rax
+        lea     Dest, [Dest + 8]
+@8:     test    r9b, 4
+        jz      @4
+        mov     eax, dword ptr [Source + Dest]
+        xor     dword ptr [Dest], eax
+        lea     Dest, [Dest + 4]
+@4:     test    r9b, 2
+        jz      @2
+        mov     ax, word ptr [Source + Dest]
+        xor     word ptr [Dest], ax
+        lea     Dest, [Dest + 2]
+@2:     test    r9b, 1
+        jz      @z
+        mov     al, byte ptr [Source + Dest]
+        xor     byte ptr [Dest], al
+@z:     ret
+{$ifdef FPC} align 16 {$else} .align 16 {$endif}
+@by16:  movups  xmm0, oword ptr [Source + Dest]
+        movups  xmm1, oword ptr [Dest]
+        pxor    xmm0, xmm1  // xor xmm,[mem] requires alignment
+        movups  oword ptr [Dest], xmm0
+        lea     Dest, [Dest + 16]
+        sub     Size, 1
+        jnz     @by16
+        test    r9b, 15    // most common case is for a few TBlock128 = 16-bytes
+        jnz     @0
+end;
+
 {$ifdef FPC} // FPC-specific functions with raw RTL access
 
 procedure fpc_freemem; external name 'FPC_FREEMEM'; // access to RTL from asm
@@ -1912,6 +1953,16 @@ function bswap32(a: cardinal): cardinal;
         bswap   eax
 end;
 
+procedure bswap32array(a: PCardinalArray; n: PtrInt);
+{$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
+@1:     mov     eax, dword ptr [a]
+        bswap   eax
+        mov     dword ptr [a], eax
+        add     a, 4
+        sub     n, 1
+        jnz     @1
+end;
+
 function bswap64(const a: QWord): QWord;
 {$ifdef FPC}nostackframe; assembler; asm {$else} asm .noframe {$endif FPC}
         mov     rax, a
@@ -2063,7 +2114,7 @@ function BufferLineLength(Text, TextEnd: PUtf8Char): PtrInt;
         pop     rdi
         pop     rsi
         {$endif WIN64ABI}
-        ret
+        ret                        // branchless for small lines
 @main:  add     rdi, 16
         sub     rdi, rsi
         jae     @fail

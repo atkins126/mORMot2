@@ -49,7 +49,7 @@ type
     {$ifdef OSWINDOWS}
     fServiceDependencies: RawUtf8;
     {$endif OSWINDOWS}
-    fLog: TSynLogLevels;
+    fLog: TSynLogLevels; // 32-bit
     fLogRotateFileCount: integer;
     fLogPath: TFileName;
     fLogClass: TSynLogClass;
@@ -162,6 +162,7 @@ type
     fConsoleMode: boolean;
     fWorkFolderName: TFileName;
     fSettings: TSynDaemonAbstractSettings;
+    fAfterCreateLog: TSynLogClass;
     procedure BeforeCreate(const aWorkFolder: TFileName); virtual;
     /// by default, calls fSettings.SetLog() if not running from tests
     // - could be overriden to change this default behavior
@@ -343,11 +344,18 @@ begin
 end;
 
 procedure TSynDaemon.AfterCreate;
+var
+  logger: TSynLogClass;
 begin
   if RunFromSynTests then
     fSettings.fLogClass := TSynLog // share the same TSynLog for all daemons
   else
-    fSettings.SetLog(TSynLog); // real world logging
+  begin
+    logger := fAfterCreateLog; // may be pre-set in inherited Create()
+    if logger = nil then
+      logger := TSynLog;
+    fSettings.SetLog(logger); // real world logging
+  end;
 end;
 
 destructor TSynDaemon.Destroy;
@@ -482,7 +490,7 @@ var
     else
     begin
       error := GetLastError;
-      FormatUtf8('Error % [%] occurred with', [error, GetErrorText(error)], msg);
+      FormatUtf8('Error % [%] occurred with', [error, GetErrorShort(error)], msg);
       cc := ccLightRed;
       ExitCode := 1; // notify error to caller batch
     end;

@@ -401,13 +401,13 @@ var
 
   procedure WaitUntilNotified;
   var
-    timeout: Int64;
+    timeout: cardinal;
   begin
-    timeout := GetTickCount64 + 5000;
+    timeout := GetTickSec + 5; // never wait forever
     while (subscribed.value <> 6) and
-          (GetTickCount64 < timeout) do
+          (GetTickSec < timeout) do
       sleep(1);
-    check(subscribed.value = 6);
+    CheckEqual(subscribed.value, 6, 'timeout');
   end;
 
 begin
@@ -541,6 +541,7 @@ begin
     '127.0.0.1', fPublicRelayPort, '/invalid', ''), '', 'wrong URI');
   stats := OpenHttpGet('127.0.0.1', fPublicRelayPort, '/stats', '');
   check(PosEx('version', stats) > 0, 'stats');
+  Check(not (rsoPerConnectionNonce in fServer.Options), 'default check connection');
 end;
 
 procedure TTestBidirectionalRemoteConnection.RelaySoaCallbackViaJsonWebsockets;

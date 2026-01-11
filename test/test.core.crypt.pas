@@ -19,14 +19,17 @@ uses
   mormot.core.datetime,
   mormot.core.log,
   mormot.crypt.core,
+  mormot.crypt.other,
   mormot.crypt.openssl,
   mormot.crypt.secure,
+  mormot.crypt.ecc256r1,
   mormot.core.perf,
   mormot.core.test,
   mormot.core.variants,
+  mormot.core.threads, // for TLoggedWorker inlining
   mormot.lib.pkcs11,
   mormot.lib.openssl11,
-  mormot.net.sock, // for NetBinToBase64()
+  mormot.net.sock,     // for NetBinToBase64()
   mormot.crypt.jwt,
   mormot.crypt.ecc,
   mormot.crypt.rsa,
@@ -39,20 +42,24 @@ type
     fDigestAlgo: TDigestAlgo;
     fCatalogAllGenerate: boolean;
     procedure CryptData(dpapi: integer; const name: string);
-    procedure Prng(meta: TAesPrngClass; const name: RawUtf8);
+    procedure Prng(meta: TAesPrngClass; const name, big: RawUtf8);
     function DigestUser(const User, Realm: RawUtf8;
       out HA0: THash512Rec): TAuthServerResult;
     procedure CatalogRunAsym(Context: TObject);
     procedure CatalogRunCert(Context: TObject);
     procedure CatalogRunStore(Context: TObject);
     procedure RsaSlow(Context: TObject);
+    procedure CrcSlow(Context: TObject); // 32-bit, 64-bit and 128-bit hash
     procedure Rfc(a: TSignAlgo; const P, S: RawUtf8; c, l: integer;
       const exp, msg: RawUtf8);
     procedure Kdf(a: TSignAlgo; const key, exp, msg: RawUtf8;
       const lab: RawUtf8 = 'kerberos'; const ctx: RawUtf8 = '');
+    procedure TestSCript(api: TSCriptRaw; const name: RawUtf8);
+    procedure OpenSslTest(Algo: THashAlgo; const msg, exp: RawUtf8); overload;
+    procedure OpenSslTest(Algo: THashAlgo; const msg, key, exp: RawUtf8); overload;
   published
-    /// MD5 (and MD4) hashing functions
-    procedure _MD5;
+    /// 32-bit to 128-bit hashing functions: crc32c, AesNiHash, MD5, MD4...
+    procedure Hashes;
     /// SHA-1 hashing functions
     procedure _SHA1;
     /// SHA-256 hashing functions
@@ -67,8 +74,6 @@ type
     procedure _AES_GCM;
     /// RC4 encryption function
     procedure _RC4;
-    /// 32-bit, 64-bit and 128-bit hashing functions including AesNiHash variants
-    procedure Hashes;
     /// pure pascal RSA tests
     procedure _RSA;
     /// X509 Certificates
@@ -157,6 +162,64 @@ begin
   CheckEqualHex(res, exp, msg);
 end;
 
+procedure TTestCoreCrypto.TestSCript(api: TSCriptRaw; const name: RawUtf8);
+
+  procedure One(const Expected, Password, Salt: RawByteString; N, R, P: PtrUInt);
+  var
+    h: RawByteString;
+  begin
+    h := api(Password, Salt, N, R, P, length(Expected) div 2);
+    Check(h <> '');
+    CheckEqual(BinToHexLower(h), Expected, name);
+  end;
+
+var
+  timer: TPrecisionTimer;
+begin
+  if not Assigned(api) then
+    exit;
+  timer.Start;
+  CheckEqual(api('', '', 3, 1, 1, 16), '', 'N=3');
+  One('48b0d2a8a3272611984c50ebd630af52',
+      'p', 's', 2, 1, 1);
+  One('8756bc2e73774a06194e4042746fe3d1',
+      'p', 'p', 2, 1, 1);
+  One('482c858e229055e62f41e0ec819a5ee18bdb87251a534f75acd95ac5e50aa15f',
+      'password', 'salt', 2, 10, 10);
+  One('88bd5edb52d1dd00188772ad36171290224e74829525b18d7323a57f91963c37',
+      'password', 'salt', 16, 100, 100);
+  One('77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442f' +
+      'cd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906',
+      '', '', 16, 1, 1);
+  One('fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622' +
+      'eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640',
+      'password', 'NaCl', 1024, 8, 16);
+  One('7023bdcb3afd7348461c06cd81fd38ebfda8fbba904f8e3ea9b543f6545da1f2d' +
+      '5432955613f0fcf62d49705242a9af9e61e85dc0d651e40dfcf017b45575887',
+      'pleaseletmein', 'SodiumChloride', 16384, 8, 1);
+  One('c3f182ee2dec846e70a6942fb529985a3a09765ef04c612923b17f18555a37076' +
+      'deb2b9830d69de5492651e4506ae5776d96d40f67aaee37e1777b8ad5c3111432' +
+      'bb3b6f7e1264401879e641ae', 'this is a long '#0' password',
+      'and this is a long '#0' salt', 16384, 8, 1);
+  NotifyTestSpeed('%', [name], 0, 0, @timer, fOwner.MultiThread);
+end;
+
+procedure TTestCoreCrypto.OpenSslTest(Algo: THashAlgo; const msg, exp: RawUtf8);
+begin
+  {$ifdef USE_OPENSSL}
+  if TOpenSslHash.IsAvailable then
+    CheckEqual(TOpenSslHash.Hash(Algo, msg), LowerCase(exp));
+  {$endif USE_OPENSSL}
+end;
+
+procedure TTestCoreCrypto.OpenSslTest(Algo: THashAlgo; const msg, key, exp: RawUtf8);
+begin
+  {$ifdef USE_OPENSSL}
+  if TOpenSslHmac.IsAvailable then
+    CheckEqual(TOpenSslHmac.Hmac(Algo, msg, key), LowerCase(exp));
+  {$endif USE_OPENSSL}
+end;
+
 procedure TTestCoreCrypto._SHA1;
 
   procedure DoTest;
@@ -213,6 +276,12 @@ begin
     4096, 25, '3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038', 'bigger');
   Rfc(saSha1, 'pass'#0'word', 'sa'#0'lt', 4096, 16,
       '56fa6aa75548099dcc37d7f03425e0c3', 'truncated');
+  // do nothing if OpenSSL is not available
+  OpenSslTest(hfSHA1, 'Wikipedia, l''encyclopedie libre et gratuite',
+    'c18cc65028bbdc147288a2d136313287782b9c73');
+  OpenSslTest(hfSHA1, '', '', 'fbdb1d1b18aa6c08324b7d64b71fb76370690e1d');
+  OpenSslTest(hfSHA1, 'The quick brown fox jumps over the lazy dog', 'key',
+    'de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9');
 end;
 
 procedure TTestCoreCrypto._SHA256;
@@ -232,13 +301,7 @@ procedure TTestCoreCrypto._SHA256;
       SHA.Update(@s[i], 1);
     SHA.Final(Digest);
     Check(IsEqual(Digest, TDig));
-    {$ifdef USE_OPENSSL}
-    if TOpenSslHash.IsAvailable then
-    begin
-      CheckEqual(TOpenSslHash.Hash('sha256', s), Sha256DigestToString(TDig));
-      CheckEqual(TOpenSslHash.Hash('', s), Sha256DigestToString(TDig));
-    end;
-    {$endif USE_OPENSSL}
+    OpenSslTest(hfSHA256, s, Sha256DigestToString(TDig));
   end;
 
   procedure DoTest;
@@ -261,6 +324,7 @@ procedure TTestCoreCrypto._SHA256;
     Digest: THash512Rec;
     Digests: THash256DynArray;
     sign: TSynSigner;
+    s: RawUtf8;
     c: AnsiChar;
     i: PtrInt;
     sha: TSha256;
@@ -269,11 +333,6 @@ procedure TTestCoreCrypto._SHA256;
     SingleTest('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq', D2);
     {%H-}Sha256Weak('lagrangehommage', Digest.Lo); // test with len=256>64
     Check(IsEqual(Digest.Lo, D3));
-    {$ifdef USE_OPENSSL}
-    if TOpenSslHmac.IsAvailable then
-      CheckEqual(TOpenSslHmac.Hmac('', 'what do ya want for nothing?', 'Jefe'),
-        '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843');
-    {$endif USE_OPENSSL}
     Pbkdf2HmacSha256('password', 'salt', 1, Digest.Lo);
     check(Sha256DigestToString(Digest.Lo) =
       '120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b');
@@ -288,6 +347,10 @@ procedure TTestCoreCrypto._SHA256;
     FillZero(Digest.b);
     sign.Pbkdf2(saSha256, 'password', 'salt', 4096, @Digest);
     check(Sha256DigestToString(Digest.Lo) = DIG4096);
+    s := BinToHexLower(sign.Pbkdf2(saSha256, 'password', 'salt', 1, 20));
+    CheckEqual(s, '120fb6cffcf8b32c43e7225256c4f837a86548c9');
+    s := BinToHexLower(Pbkdf2HmacSha256('password', 'salt', 1, 20));
+    CheckEqual(s, '120fb6cffcf8b32c43e7225256c4f837a86548c9');
     c := 'a';
     sha.Init;
     for i := 1 to 1000000 do // one million 'a' chars, read one-by-one
@@ -297,12 +360,15 @@ procedure TTestCoreCrypto._SHA256;
       'cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0');
     CheckEqual(Sha224(''),
       'd14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f');
-    CheckEqual(Sha256(''),
-      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
-    CheckEqual(Sha224('The quick brown fox jumps over the lazy dog'),
-      '730e109bd7a8a32b1cb9d9a09aa2325d2430587ddbc0c38bad911525');
-    CheckEqual(Sha224('The quick brown fox jumps over the lazy dog.'),
-      '619cba8e8e05826e9b8c519c0a5c68f4fb653e8a3d8aa04bb2c8cd4c');
+    s := Sha256('');
+    CheckEqual(s, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    OpenSslTest(hfSha256, '', s);
+    s := Sha224('The quick brown fox jumps over the lazy dog');
+    CheckEqual(s, '730e109bd7a8a32b1cb9d9a09aa2325d2430587ddbc0c38bad911525');
+    OpenSslTest(hfSha224, 'The quick brown fox jumps over the lazy dog', s);
+    s := Sha224('The quick brown fox jumps over the lazy dog.');
+    CheckEqual(s, '619cba8e8e05826e9b8c519c0a5c68f4fb653e8a3d8aa04bb2c8cd4c');
+    OpenSslTest(hfSha224, 'The quick brown fox jumps over the lazy dog.', s);
   end;
 
 begin
@@ -383,6 +449,7 @@ begin
   rc4.Encrypt(OutDat, dat, SizeOf(InDat));
   Check(CompareMem(@dat, @InDat, SizeOf(OutDat)));
   key := RandomWinAnsi(100);
+  Check(length(key) = 100);
   for ks := 1 to 10 do
   begin
     ref.InitSha3(pointer(key)^, ks * 10);
@@ -414,12 +481,8 @@ procedure TTestCoreCrypto._SHA512;
       sign.Init(saSha512, password);
       sign.Update(secret);
       Check(sign.final = expected);
-      {$ifdef USE_OPENSSL}
-      if TOpenSslHmac.IsAvailable and
-         (password <> '') then
-        CheckEqual(TOpenSslHmac.Hmac(
-          'sha512', secret, pointer(password), length(password)), expected);
-      {$endif USE_OPENSSL}
+      if password <> '' then
+        OpenSslTest(hfSHA512, secret, password, expected);
     end
     else
     begin
@@ -473,17 +536,11 @@ procedure TTestCoreCrypto._SHA512;
     sha.Final(dig.b);
     Check(Sha512DigestToString(dig.b) = '07e547d9586f6a73f73fbac0435ed76951218fb7d0c' +
       '8d788a309d785436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
-    {$ifdef USE_OPENSSL}
-    if TOpenSslHash.IsAvailable then
-    begin
-      CheckEqual(TOpenSslHash.Hash('sha512', ''),
-        'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d' +
-        '36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e');
-      CheckEqual(TOpenSslHash.Hash('sha512', FOX),
-        '07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785' +
-        '436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
-    end;
-    {$endif USE_OPENSSL}
+    OpenSslTest(hfSHA512, '', 'cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d' +
+      '36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e');
+    OpenSslTest(hfSHA512, FOX,
+      '07e547d9586f6a73f73fbac0435ed76951218fb7d0c8d788a309d785' +
+      '436bbb642e93a252a954f23912547d1e8a3b5ed6e1bfd7097821233fa0538f3db854fee6');
     c := 'a';
     sha.Init;
     for i := 1 to 1000 do
@@ -594,7 +651,7 @@ procedure TTestCoreCrypto._SHA3;
             '801a8290e8d97fe14cdfd3cfdbcd0fe766d3e6e4636bd0a17d710a61678db363';
   var
     instance: TSha3;
-    secret, data, encrypted: RawByteString;
+    secret, data, encrypted, h: RawByteString;
     dig: THash256;
     h512: THash512Rec;
     s, i: PtrInt;
@@ -669,6 +726,7 @@ procedure TTestCoreCrypto._SHA3;
       for i := 1 to 1000 do
       begin
         data := RandomWinAnsi(i);
+        Check(length(data) = i);
         {$ifdef FPC}
         SetCodePage(data, CP_RAWBYTESTRING, {convert=}false);
         {$endif FPC}
@@ -692,10 +750,14 @@ procedure TTestCoreCrypto._SHA3;
     sign.Pbkdf2('{algo:"sha-3/512",secret:"pass",salt:"salt",rounds:100}', h512);
     check(Sha512DigestToString(h512.b) <> DK);
     // taken from https://en.wikipedia.org/wiki/SHA-3
-    CheckEqual(Sha3(SHAKE_128, 'The quick brown fox jumps over the lazy dog'),
-      'F4202E3C5852F9182A0430FD8144F0A74B95E7417ECAE17DB0F8CFEED0E3E66E');
-    CheckEqual(Sha3(SHAKE_128, 'The quick brown fox jumps over the lazy dof'),
-      '853F4538BE0DB9621A6CEA659A06C1107B1F83F02B13D18297BD39D7411CF10C');
+    h := 'F4202E3C5852F9182A0430FD8144F0A74B95E7417ECAE17DB0F8CFEED0E3E66E';
+    CheckEqual(Sha3(SHAKE_128, 'The quick brown fox jumps over the lazy dog'), h);
+    SetLength(h, length(h) div 2);
+    OpenSslTest(hfShake128, 'The quick brown fox jumps over the lazy dog', h);
+    h := '853F4538BE0DB9621A6CEA659A06C1107B1F83F02B13D18297BD39D7411CF10C';
+    CheckEqual(Sha3(SHAKE_128, 'The quick brown fox jumps over the lazy dof'), h);
+    SetLength(h, length(h) div 2);
+    OpenSslTest(hfShake128, 'The quick brown fox jumps over the lazy dof', h);
   end;
 
 begin
@@ -716,14 +778,15 @@ var
   i: integer;
   big: RawByteString;
 begin
+  SetLength(big, 100000);
   // validate TAesPrgn (+ TAesPrngOsl) generators
   check(TAesPrng.IsAvailable);
   check(TSystemPrng.IsAvailable);
-  Prng(TAesPrng, 'mORMot');
+  Prng(TAesPrng, 'mORMot', big);
   {$ifdef USE_OPENSSL}
-  Prng(TAesPrngOsl, 'OpenSSL');
+  Prng(TAesPrngOsl, 'OpenSSL', big);
   {$endif USE_OPENSSL}
-  // same benchmarks as in Prng()
+  // include Lecuyer for comparison, with same benchmarks as in Prng()
   timer.Start;
   CheckEqual(Random32(0), 0);
   CheckEqual(Random32(1), 0);
@@ -732,22 +795,22 @@ begin
   for i := 0 to 50000 do
     Check(Random32(maxInt - i) < cardinal(maxInt - i));
   NotifyTestSpeed('Lecuyer Random32', [], 100003, 100003 * 4, @timer);
-  SetLength(big, 100000);
   timer.Start;
-  RandomBytes(pointer(big), length(big));
-  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big), @timer);
+  for i := 1 to 100 do
+    RandomBytes(pointer(big), length(big));
+  NotifyTestSpeed('       Lecuyer RandomBytes', [], 1, length(big) * 10, @timer);
 end;
 
-procedure TTestCoreCrypto.Prng(meta: TAesPrngClass; const name: RawUtf8);
+procedure TTestCoreCrypto.Prng(meta: TAesPrngClass; const name, big: RawUtf8);
 var
   p: TAesPrngAbstract;
   b1, b2: TAesBlock;
   a1, a2: TAesPrngAbstract;
-  s1, s2, split, big: RawByteString;
+  s1, s2, split: RawByteString;
   c: cardinal;
   d: double;
   e: TSynExtended;
-  i, stripes: PtrInt;
+  i, j, stripes: PtrInt;
   clo, chi, dlo, dhi, elo, ehi: integer;
   timer: TPrecisionTimer;
 begin
@@ -800,17 +863,23 @@ begin
       // compress the output to validate (somehow) its randomness
       check(length(AlgoSynLZ.Compress(s1)) > i, 'random1 should not compress');
       check(length(AlgoSynLZ.Compress(s2)) > i, 'random2 should not compress');
+      // validate other string generation methods
       s1 := a1.FillRandomHex(i);
       CheckEqual(length(s1), i * 2);
       check(mormot.core.text.HexToBin(pointer(s1), nil, i));
+      s1 := a1.RandomPassword(i);
+      CheckEqual(length(s1), i);
+      for j := 1 to i do
+        check(s1[j] in [#33 .. #126]);
       // verify Random32 / RandomDouble / RandomDouble distribution
       c := a1.Random32;
-      check(c <> a2.Random32, 'Random32 collision');
       if c < cardinal(maxint) then
         inc(clo)
       else
         inc(chi);
-      check(a1.Random64 <> a2.Random64);
+      check(c <> a2.Random32, 'Random32 collision');
+      check(c <> a1.Random32, 'Random32 twice collision');
+      check(a1.Random64 <> a2.Random64, 'Random64 collision');
       check(a1.Random32(i) < cardinal(i));
       d := a1.RandomDouble;
       check((d >= 0) and (d < 1));
@@ -870,10 +939,10 @@ begin
   for i := 0 to 50000 do
     Check(p.Random32(maxInt - i) < cardinal(maxInt - i));
   NotifyTestSpeed('% Random32', [name], 100003, 100003 * 4, @timer);
-  SetLength(big, 100000);
   timer.Start;
-  p.FillRandom(pointer(big), length(big));
-  NotifyTestSpeed('       % FillRandom', [name], 1, length(big), @timer);
+  for i := 1 to 100 do
+    p.FillRandom(pointer(big), length(big));
+  NotifyTestSpeed('       % FillRandom', [name], 1, length(big) * 100, @timer);
 end;
 
 function CryptDataSecretWrapper(const Data, AppSecret: RawByteString;
@@ -894,7 +963,13 @@ begin
   case dpapi of
     {$ifdef OSWINDOWS}
     0:
-      func := CryptDataForCurrentUserDPAPI;
+      begin
+        if IsWow64Emulation then // PRISM seems inconsistent about this API
+          exit;
+        func := CryptDataForCurrentUserDPAPI;
+        if OSVersion < wVista then
+          max := 100; // slow API on Windows XP
+      end;
     {$endif OSWINDOWS}
     1:
       func := CryptDataForCurrentUser;
@@ -907,9 +982,9 @@ begin
     exit;
   end;
   enc := func('warmup', 'appsec', true);
-  Check(enc <> '');
+  Check(enc <> '', 'warmup');
   test := func(enc, 'appsec', false);
-  Check(test <> '');
+  Check(test <> '', 'appsec');
   CheckEqual(test, 'warmup');
   size := 0;
   tim.Start;
@@ -919,11 +994,10 @@ begin
     CheckEqual(length(plain), i);
     UInt32ToUtf8(i, appsec);
     enc := func(plain, appsec, true);
-    if not ((plain = '') or
-            (enc <> '')) then
-      enc := func(plain, appsec, true);
     check((plain = '') or
-          (enc <> ''));
+          (enc <> ''), 'not void');
+    check((plain = '') or
+          (enc <> plain), 'enc<>plain');
     check(length(enc) >= length(plain));
     test := func(enc, appsec, false);
     CheckEqual(length(test), i);
@@ -990,6 +1064,40 @@ const
     'XitCD/FEdhbjFbWKibrku9c/P7HNz7oqMx2QkhGa+asefQNnwFv+Nqac9rTCP7ld'#13#10 +
     'ewIDAQAB'#13#10 +
     '-----END PUBLIC KEY-----'#13#10;
+  _rsajwk = // _rsapub converted as JWK
+    '{'#10 +
+    '  "alg": "RS256",'#10 +
+    '  "e": "AQAB",'#10 +
+    '  "ext": true,'#10 +
+    '  "kid": "ccc3cb966a0e09297918052b374e",'#10 +
+    '  "kty": "RSA",'#10 +
+    '  "n": "tQ4_dhzEXlDpj71dwF3Tt1Sx_COvd6Y8R4kxgcLblmdt3BCmGAYgNS2yf0O' +
+       'RcGKse-wYLG-BV8rIT2zRPbrIXfEJmnjlnsQ635n9bMpfhFIyr9pE4w5y5ZUAzJS' +
+       'twYmudykFAfA7_1BWqD-uE3z5PqfnmZHEbYNHeBGt0vIRSfQQXXxj-wnpaQ-_GTY' +
+       'Qr5OHynyJS8esD9dpKfsExc7rBx4VH1tCx1SH9yVAMHts0674HjnnyFyveoXOajN' +
+       '1gxn4_iN1lfWZzzoWqyVvKWZ5XitCD_FEdhbjFbWKibrku9c_P7HNz7oqMx2QkhG' +
+       'a-asefQNnwFv-Nqac9rTCP7ldew",'#10 +
+    '  "use": "sig"'#10 +
+    '}'#10;
+
+  _eccpub =
+    '-----BEGIN PUBLIC KEY-----'#10 +
+    'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoIQ8m1iBHYoxrdLT1A6MH9naG+hk'#10 +
+    '/ccw/Ij0p9Mk7JmNdzCUeEjzlU5/E683I9PZaz2/5RFj1HfKPTgDkxQFkA=='#10 +
+    '-----END PUBLIC KEY-----'#10;
+  _eccjwk = // _eccpub converted as JWK
+    '{'#10 +
+    '  "alg": "ES256",'#10 +
+    '  "crv": "P-256",'#10 +
+    '  "ext": true,'#10 +
+    '  "key_ops": ['#10 +
+    '    "verify"'#10 +
+    '  ],'#10 +
+    '  "kid": "VoycxROU3bdddiAPt2RaIuyjtcjcINVUeNp+FO9L+MA=",'#10 +
+    '  "kty": "EC",'#10 +
+    '  "x": "oIQ8m1iBHYoxrdLT1A6MH9naG-hk_ccw_Ij0p9Mk7Jk",'#10 +
+    '  "y": "jXcwlHhI85VOfxOvNyPT2Ws9v-URY9R3yj04A5MUBZA"'#10 +
+    '}'#10;
 
 procedure TTestCoreCrypto._JWT;
 
@@ -1045,14 +1153,14 @@ procedure TTestCoreCrypto._JWT;
     checkEqual(one.CacheTimeoutSeconds, 0);
     one.Options := one.Options + [joHeaderParse];
     one.Verify(t, jwt);
-    CheckUtf8(jwt.result = jwtValid, 'verify1=%', [ToText(jwt.result)^]);
+    CheckUtf8(jwt.result = jwtValid, 'verify1=% %', [ToText(jwt.result)^, one]);
     checkEqual(jwt.reg[jrcIssuer], 'joe');
     one.Options := one.Options - [joHeaderParse];
     one.CacheTimeoutSeconds := 60;
     checkEqual(one.CacheTimeoutSeconds, 60);
     one.Verify(t, jwt);
     checkEqual(exp, GetCardinal(pointer(jwt.reg[jrcExpirationTime])));
-    CheckUtf8(jwt.result = jwtValid, 'verify2=%', [ToText(jwt.result)^]);
+    CheckUtf8(jwt.result = jwtValid, 'verify2=% %', [ToText(jwt.result)^, one]);
     check(jwt.reg[jrcExpirationTime] <> '');
     checkEqual(jwt.reg[jrcIssuer], 'joe');
     check(jwt.data.B['http://example.com/is_root']);
@@ -1186,10 +1294,7 @@ begin
   finally
     j.Free;
   end;
-  j := TJwtCrypt.Create(caaES256, '-----BEGIN PUBLIC KEY-----'#13#10 +
-    'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoIQ8m1iBHYoxrdLT1A6MH9naG+hk'#13#10 +
-    '/ccw/Ij0p9Mk7JmNdzCUeEjzlU5/E683I9PZaz2/5RFj1HfKPTgDkxQFkA=='#13#10 +
-    '-----END PUBLIC KEY-----'#13#10, [jrcAudience], ['aud'], 60);
+  j := TJwtCrypt.Create(caaES256, _eccpub, [jrcAudience], ['aud'], 60);
   try
     CheckEqual(j.Algorithm, 'ES256');
   finally
@@ -1275,24 +1380,31 @@ type
     bSHA1, bHMACSHA1, bSHA256, bHMACSHA256,
     bSHA384, bHMACSHA384, bSHA512, bSHA512_256, bHMACSHA512,
     bSHA3_256, bSHA3_512,
+    {$ifdef USE_OPENSSL}
+    bSHA1O, bHMACSHA1O, bSHA256O, bHMACSHA256O,
+    bSHA384O, bHMACSHA384O, bSHA512O, bSHA512_256O, bHMACSHA512O,
+    bSHA3_256O, bSHA3_512O,
+    {$endif USE_OPENSSL}
     // encryption
     bRC4,
-    bAES128CFB, bAES128OFB, bAES128C64, bAES128CTR,
+    bAES128CBC, bAES128CFB, bAES128OFB, bAES128C64, bAES128CTR,
     bAES128CFC, bAES128OFC, bAES128CTC, bAES128GCM,
-    bAES256CFB, bAES256OFB, bAES256C64, bAES256CTR,
+    bAES256CBC, bAES256CFB, bAES256OFB, bAES256C64, bAES256CTR,
     bAES256CFC, bAES256OFC, bAES256CTC, bAES256GCM,
-  {$ifdef USE_OPENSSL}
-    bAES128CFBO, bAES128OFBO, bAES128CTRO, bAES128GCMO,
-    bAES256CFBO, bAES256OFBO, bAES256CTRO, bAES256GCMO,
-  {$endif USE_OPENSSL}
-    bSHAKE128, bSHAKE256);
+    {$ifdef USE_OPENSSL}
+    bAES128CBCO, bAES128CFBO, bAES128OFBO, bAES128CTRO, bAES128GCMO,
+    bAES256CBCO, bAES256CFBO, bAES256OFBO, bAES256CTRO, bAES256GCMO,
+    {$endif USE_OPENSSL}
+    bSHAKE128, bSHAKE256, bBlowFish);
 
 procedure TTestCoreCrypto.Benchmark;
 const
+  bAESFIRST = bAES128CBC;
   bAESLAST = {$ifdef USE_OPENSSL} bAES256GCMO {$else} bAES256GCM {$endif};
-
-  bAESOPENSSL = [ {$ifdef USE_OPENSSL} bAES128CFBO .. bAES256GCMO {$endif} ];
-
+  bOPENSSL = [ {$ifdef USE_OPENSSL}
+               bSHA1O .. bSHA3_512O, bAES128CBCO .. bAES256GCMO
+               {$endif USE_OPENSSL} ];
+  COUNT = 500;
   SIZ: array[0..4] of integer = (
     8,
     50,
@@ -1300,26 +1412,28 @@ const
     1000,
     10000);
 
-  COUNT = 500;
-
-  AESCLASS: array[bAES128CFB.. bAESLAST] of TAesAbstractClass = (
-    TAesCfb, TAesOfb, TAesC64, TAesCtr, TAesCfc, TAesOfc, TAesCtc, TAesGcm,
-    TAesCfb, TAesOfb, TAesC64, TAesCtr, TAesCfc, TAesOfc, TAesCtc, TAesGcm
+  AESCLASS: array[bAESFIRST.. bAESLAST] of TAesAbstractClass = (
+    TAesCbc, TAesCfb, TAesOfb, TAesC64, TAesCtr, TAesCfc, TAesOfc, TAesCtc, TAesGcm,
+    TAesCbc, TAesCfb, TAesOfb, TAesC64, TAesCtr, TAesCfc, TAesOfc, TAesCtc, TAesGcm
   {$ifdef USE_OPENSSL} ,
-    TAesCfbOsl, TAesOfbOsl, TAesCtrOsl, TAesGcmOsl,
-    TAesCfbOsl, TAesOfbOsl, TAesCtrOsl, TAesGcmOsl
+    TAesCbcOsl, TAesCfbOsl, TAesOfbOsl, TAesCtrOsl, TAesGcmOsl,
+    TAesCbcOsl, TAesCfbOsl, TAesOfbOsl, TAesCtrOsl, TAesGcmOsl
   {$endif USE_OPENSSL});
 
-  AESBITS: array[bAES128CFB..bAESLAST] of integer = (
-    128, 128, 128, 128, 128, 128, 128, 128,
-    256, 256, 256, 256, 256, 256, 256, 256
+  AESBITS: array[bAESFIRST..bAESLAST] of integer = (
+    128, 128, 128, 128, 128, 128, 128, 128, 128,
+    256, 256, 256, 256, 256, 256, 256, 256, 256
   {$ifdef USE_OPENSSL} ,
-    128, 128, 128, 128, 256, 256, 256, 256
+    128, 128, 128, 128, 128, 256, 256, 256, 256, 256);
+
+  OPENSSL_HASH: array[bSHA1O .. bSHA3_512O] of THashAlgo = (
+    hfSHA1, hfSHA1, hfSHA256, hfSHA256, hfSHA384, hfSHA384, hfSHA512, hfSHA384,
+    hfSHA512, hfSHA3_256, hfSHA3_512
   {$endif USE_OPENSSL});
 var
   b: TBenchmark;
   s, i, size, n: integer;
-  data, encrypted: RawByteString;
+  data, encrypted, s1, s2: RawByteString;
   dig: THash512Rec;
   MD: TMd5;
   SHA1: TSha1;
@@ -1328,38 +1442,45 @@ var
   SHA512: TSha512;
   SHA512_256: TSha512_256;
   SHA3, SHAKE128, SHAKE256: TSha3;
+  bf: TBlowFishCtr;
   RC4: TRC4;
   timer: TPrecisionTimer;
   time: array[TBenchmark] of Int64;
-  AES: array[bAES128CFB..bAESLAST] of TAesAbstract;
+  AES: array[bAESFIRST..bAESLAST] of TAesAbstract;
   TXT: array[TBenchmark] of RawUtf8;
 begin
-  GetEnumTrimmedNames(TypeInfo(TBenchmark), @TXT);
-  for b := low(b) to high(b) do
-    TXT[b] := LowerCase(TXT[b]);
+  GetEnumTrimmedNames(TypeInfo(TBenchmark), @TXT, false, {lower=}true);
   for b := low(AES) to high(AES) do
     if AESCLASS[b].IsAvailable then
     begin
       AES[b] := AESCLASS[b].Create(dig{%H-}, AESBITS[b]);
       ShortStringToAnsi7String(AES[b].AlgoName, TXT[b]);
-      {$ifdef USE_OPENSSL}
-      if b in bAESOPENSSL then
-        TXT[b] := 'openssl ' + TXT[b]
-      else
-      {$endif USE_OPENSSL}
-        TXT[b] := 'mormot ' + TXT[b]
     end
     else
       AES[b] := nil;
+  {$ifdef USE_OPENSSL}
+  if OpenSslIsAvailable then 
+    for b := low(b) to high(b) do
+      if b in bOPENSSL then
+      begin
+        if b < low(AES) then
+          SetLength(TXT[b], length(TXT[b]) - 1);
+        TXT[b] := 'openssl ' + TXT[b];
+      end
+      else
+        TXT[b] := 'mormot ' + TXT[b];
+  {$endif USE_OPENSSL}
   SHAKE128.InitCypher('secret', SHAKE_128);
   SHAKE256.InitCypher('secret', SHAKE_256);
+  bf := TBlowFishCtr.Create('secret');
   RC4.InitSha3(dig, SizeOf(dig));
   FillCharFast(time, SizeOf(time), 0);
   size := 0;
   n := 0;
-  for s := 0 to high(SIZ) do
+  for s := 0 to high(SIZ) do // up to 10KB of CP1252 text
   begin
     data := RandomWinAnsi(SIZ[s]);
+    CheckEqual(length(data), SIZ[s]);
     SetLength(encrypted, SIZ[s]);
     for b := low(b) to high(b) do
     if (b < low(AES)) or
@@ -1368,6 +1489,9 @@ begin
     begin
       if (b = bAesniHash) and
          not Assigned(AesNiHash32) then
+        continue;
+      if (b in bOPENSSL) and
+         not OpenSslIsAvailable then
         continue;
       timer.Start;
       for i := 1 to COUNT do
@@ -1388,7 +1512,7 @@ begin
           bCRC32:
             dig.d0 := crc32(0, pointer(data), SIZ[s]);
           bMD4:
-            MD.Full(pointer(data), SIZ[s], dig.h0, {forcemd4=}true);
+            MD4Buf(pointer(data)^, SIZ[s], dig.h0);
           bMD5:
             MD.Full(pointer(data), SIZ[s], dig.h0);
           bSHA1:
@@ -1416,17 +1540,34 @@ begin
           bRC4:
             RC4.EncryptBuffer(pointer(data), pointer(encrypted), SIZ[s]);
           {$ifdef USE_OPENSSL}
+          bSHA1O,
+          bSHA256O,
+          bSHA384O,
+          bSHA512O,
+          bSHA512_256O,
+          bHMACSHA512O,
+          bSHA3_256O,
+          bSHA3_512O:
+            TOpenSslHash.Hash(OPENSSL_HASH[b], data);
+          bHMACSHA1O,
+          bHMACSHA256O,
+          bHMACSHA384O:
+            TOpenSslHmac.Hmac(OPENSSL_HASH[b], data, 'secret');
+          bAES128CBCO,
           bAES128CFBO,
           bAES128OFBO,
           bAES128CTRO,
+          bAES256CBCO,
           bAES256CFBO,
           bAES256OFBO,
           bAES256CTRO,
           {$endif USE_OPENSSL}
+          bAES128CBC,
           bAES128CFB,
           bAES128OFB,
           bAES128C64,
           bAES128CTR,
+          bAES256CBC,
           bAES256CFB,
           bAES256OFB,
           bAES256C64,
@@ -1449,19 +1590,32 @@ begin
             SHAKE128.Cypher(pointer(data), pointer(encrypted), SIZ[s]);
           bSHAKE256:
             SHAKE256.Cypher(pointer(data), pointer(encrypted), SIZ[s]);
+          bBlowFish:
+            bf.EncryptBuffer(pointer(data), pointer(encrypted), SIZ[s]);
         else
           ESynCrypto.RaiseUtf8('Unexpected %', [TXT[b]]);
         end;
         Check((b >= bRC4) or
+              (b in bOPENSSL) or
               (dig.d0 <> 0) or
               (dig.d1 <> 0));
       end;
       inc(time[b], NotifyTestSpeed('% %', [TXT[b], SIZ[s]], COUNT, SIZ[s] *
-        COUNT, @timer, {onlylog=}true));
+        COUNT, @timer, {onlylog=}true{(b in bOPENSSL) or (PosEx('gcm', TXT[b]) = 0)}));
       //if b in [bSHA3_512,high(b)] then AddConsole('');
     end;
     inc(size, SIZ[s] * COUNT);
     inc(n, COUNT);
+    // we may add some small additionnal tests here (outside timers)
+    CheckEqual(StrLen(pointer(data)), SIZ[s], 'datastrlen');
+    bf.IV := 0;
+    s1 := bf.Encrypt(data, {ivatbeg=}true);
+    CheckEqual(length(s1), SIZ[s] + 8);
+    CheckEqual(bf.IV, 0);
+    s2 := bf.Decrypt(s1, {ivatbeg=}true);
+    CheckEqual(length(s2), SIZ[s]);
+    CheckEqual(s2, data);
+    CheckEqual(bf.IV, 0);
   end;
   for b := low(b) to high(b) do
     if time[b] <> 0 then
@@ -1470,239 +1624,223 @@ begin
         KB((Int64(size) * 1000000) div time[b])]));
   for b := low(AES) to high(AES) do
     AES[b].Free;
+  bf.Free;
 end;
+
+{
+Some results for our 32-bit hashes (typical TSynDictionary use):
+
+On x86_64, for each value of L (0..256):
+4317d0 ../src/core/mormot.core.base.asmx64.inc crc32cfast (389)
+  0=0B/s 4=436.5MB/s 8=555.2MB/s 12=499.5MB/s 16=827.8MB/s 20=675.3MB/s
+  24=1GB/s 28=812.8MB/s 32=1.1GB/s 36=0.9GB/s 40=1.1GB/s 44=1GB/s 48=1.2GB/s
+  52=1.1GB/s 56=1GB/s 60=0.9GB/s 64=1.3GB/s 68=1GB/s 72=1.3GB/s 76=1.2GB/s
+  80=1.2GB/s 84=1.2GB/s 88=1.3GB/s 92=1.2GB/s 96=1.2GB/s 100=1.2GB/s
+  104=1.2GB/s 108=1.2GB/s 112=1.3GB/s 116=1.2GB/s 120=1.2GB/s 124=1.2GB/s
+  128=1.1GB/s 132=1.2GB/s 136=1.3GB/s 140=1.2GB/s 144=1.2GB/s 148=1.2GB/s
+  152=1.3GB/s 156=1.3GB/s 160=1.3GB/s 164=1.2GB/s 168=1.3GB/s 172=1.2GB/s
+  176=1.3GB/s 180=1.3GB/s 184=1.3GB/s 188=1.3GB/s 192=1.3GB/s 196=1.3GB/s
+  200=1.3GB/s 204=1.3GB/s 208=1.2GB/s 212=1.3GB/s 216=1.3GB/s 220=1.3GB/s
+  224=1.3GB/s 228=1.2GB/s 232=1.3GB/s 236=1.2GB/s 240=1.3GB/s 244=1.3GB/s
+  248=1.3GB/s 252=1.3GB/s 256=1.3GB/s
+4d5610 ../src/core/mormot.crypt.core.asmx64.inc crc32c_sse42_aesni (5279)
+  0=0B/s 4=381.9MB/s 8=763.4MB/s 12=1.1GB/s 16=1.4GB/s 20=1.7GB/s
+  24=2GB/s 28=2.2GB/s 32=2.5GB/s 36=2.7GB/s 40=3GB/s 44=3.2GB/s 48=3.4GB/s
+  52=3.6GB/s 56=3.7GB/s 60=3.9GB/s 64=4.2GB/s 68=3.1GB/s 72=3.3GB/s 76=3.7GB/s
+  80=4.8GB/s 84=4.1GB/s 88=4.7GB/s 92=5GB/s 96=5.2GB/s 100=5.3GB/s
+  104=5.6GB/s 108=5.5GB/s 112=5.8GB/s 116=5.4GB/s 120=6GB/s 124=5.7GB/s
+  128=5.8GB/s 132=5.7GB/s 136=6.2GB/s 140=6.2GB/s 144=6.5GB/s 148=5.9GB/s
+  152=6.6GB/s 156=6.2GB/s 160=6.7GB/s 164=6.6GB/s 168=6.5GB/s 172=6.7GB/s
+  176=6.9GB/s 180=6.7GB/s 184=6.1GB/s 188=6.3GB/s 192=7.1GB/s 196=6.9GB/s
+  200=9GB/s 204=8.3GB/s 208=8.8GB/s 212=8.6GB/s 216=7GB/s 220=8.4GB/s
+  224=9.7GB/s 228=9.4GB/s 232=9.5GB/s 236=9.4GB/s 240=10.2GB/s 244=7.8GB/s
+  248=5.8GB/s 252=1.9GB/s 256=10.1GB/s
+431ce0 ../src/core/mormot.core.base.asmx64.inc xxhash32 (860)
+  0=0B/s 4=235MB/s 8=436.2MB/s 12=624.4MB/s 16=842.1MB/s 20=0.9GB/s
+  24=1GB/s 28=1.1GB/s 32=1.5GB/s 36=1.6GB/s 40=1.6GB/s 44=1.7GB/s 48=2.1GB/s
+  52=2.1GB/s 56=2GB/s 60=1.9GB/s 64=2.7GB/s 68=2.6GB/s 72=2.3GB/s 76=2.3GB/s
+  80=2.9GB/s 84=2.9GB/s 88=2.8GB/s 92=2.8GB/s 96=2.8GB/s 100=3.1GB/s
+  104=3.1GB/s 108=3GB/s 112=2.6GB/s 116=2.9GB/s 120=3.1GB/s 124=2.7GB/s
+  128=3.1GB/s 132=3GB/s 136=2.9GB/s 140=2.5GB/s 144=3GB/s 148=3GB/s
+  152=3.1GB/s 156=3.2GB/s 160=3.2GB/s 164=2.4GB/s 168=3.3GB/s 172=3.2GB/s
+  176=3.4GB/s 180=3.3GB/s 184=3.1GB/s 188=3.3GB/s 192=3.4GB/s 196=2.8GB/s
+  200=3.4GB/s 204=3.3GB/s 208=3.5GB/s 212=3.1GB/s 216=3.4GB/s 220=3.4GB/s
+  224=3.4GB/s 228=3.4GB/s 232=3.5GB/s 236=3.5GB/s 240=3.6GB/s 244=3GB/s
+  248=3.6GB/s 252=3.6GB/s 256=3.7GB/s
+4d4fe0 ../src/core/mormot.crypt.core.asmx64.inc _aesnihash32 (4930)
+  0=0B/s 4=235MB/s 8=488.5MB/s 12=723MB/s 16=0.9GB/s 20=1.1GB/s
+  24=1.3GB/s 28=1.6GB/s 32=1.8GB/ s 36=2GB/s 40=2.2GB/s 44=2.4GB/s 48=2.7GB/s
+  52=2.9GB/s 56=3.1GB/s 60=3.4GB/s 64=3.7GB/s 68=3.3GB/s 72=3.5GB/s 76=4GB/s
+  80=4.2GB/s 84=4.2GB/s 88=4.7GB/s 92=4.9GB/s 96=5.3GB/s 100=5.5GB/s
+  104=5.7GB/s 108=5.7GB/s 112=6GB/s 116=6.4GB/s 120=6.2GB/s 124=6.4GB/s
+  128=7GB/s 132=5.5GB/s 136=5.9GB/s 140=6.1GB/s 144=6.2GB/s 148=6.2GB/s
+  152=6.5GB/s 156=6.7GB/s 160=6.6GB/s 164=7GB/s 168=5.2GB/s 172=6.6GB/s
+  176=7.6GB/s 180=7.7GB/s 184=7.8GB/s 188=8GB/s 192=8GB/s 196=8.2GB/s
+  200=8.5GB/s 204=8.7GB/s 208=8.6GB/s 212=7.2GB/s 216=9.4GB/s 220=9.3GB/s
+  224=9.5GB/s 228=9.7GB/s 232=9.7GB/s 236=6.8GB/s 240=10.2GB/s 244=8.3GB/s
+  248=10.5GB/s 252=10.6GB/s 256=10.2GB/s
+
+On i386 (Linux/FPC):
+080792b0 ../src/core/mormot.core.base.asmx86.inc crc32cfast (252)
+  4=381.9MB/s 8=488.5MB/s 12=528.4MB/s 16=921.5MB/s 20=726.7MB/s 24=1.1GB/s
+  28=906.4MB/s 32=1.3GB/s 36=1GB/s 40=1.4GB/s 44=1.1GB/s 48=1.5GB/s
+  52=1.2GB/s 56=1.5GB/s 60=1.3GB/s 64=1.6GB/s 68=1.3GB/s 72=1.6GB/s
+  76=1.4GB/s 80=1.4GB/s 84=1.3GB/s 88=1.6GB/s 92=1.4GB/s 96=1.6GB/s
+  100=1.5GB/s 104=1.7GB/s 108=1.5GB/s 112=1.6GB/s 116=1.4GB/s 120=1.6GB/s
+  124=1.5GB/s 128=1.5GB/s 132=1.5GB/s 136=1.6GB/s 140=1.5GB/s 144=1.6GB/s
+  148=1.6GB/s 152=1.6GB/s 156=1.6GB/s 160=1.6GB/s 164=1.6GB/s 168=1.6GB/s
+  172=1.4GB/s 176=1.6GB/s 180=1.5GB/s 184=1.6GB/s 188=1.6GB/s 192=1.6GB/s
+  196=1.5GB/s 200=1.6GB/s 204=1.5GB/s 208=1.6GB/s 212=1.5GB/s 216=1.6GB/s
+  220=1.5GB/s 224=1.6GB/s 228=1.5GB/s 232=1.6GB/s 236=1.5GB/s 240=1.6GB/s
+  244=1.5GB/s 248=1.6GB/s 252=1.5GB/s 256=1.6GB/s
+08079d80 ../src/core/mormot.core.base.asmx86.inc crc32csse42 (1445)
+  4=436.5MB/s 8=642.8MB/s 12=0.9GB/s 16=1.2GB/s 20=1.3GB/s 24=1.6GB/s
+  28=1.9GB/s 32=2GB/s 36=2.3GB/s 40=2.3GB/s 44=2.5GB/s 48=2.5GB/s
+  52=2.8GB/s 56=2.7GB/s 60=3GB/s 64=2.9GB/s 68=3.2GB/s 72=3.1GB/s
+  76=3GB/s 80=3.2GB/s 84=3.4GB/s 88=3GB/s 92=3.4GB/s 96=3.4GB/s
+  100=3.6GB/s 104=3.4GB/s 108=3.4GB/s 112=3.5GB/s 116=3.6GB/s 120=3.6GB/s
+  124=3.7GB/s 128=3.6GB/s 132=3.7GB/s 136=3.7GB/s 140=3.8GB/s 144=3.8GB/s
+  148=3.8GB/s 152=3.7GB/s 156=3.9GB/s 160=3.8GB/s 164=3.8GB/s 168=3.9GB/s
+  172=4GB/s 176=3.8GB/s 180=3.9GB/s 184=3.8GB/s 188=3.9GB/s 192=3.8GB/s
+  196=3.9GB/s 200=3.8GB/s 204=3.9GB/s 208=3.8GB/s 212=3.8GB/s 216=3.7GB/s
+  220=3.9GB/s 224=3.8GB/s 228=1.9GB/s 232=3.8GB/s 236=3.9GB/s 240=3.8GB/s
+  244=3.8GB/s 248=3.9GB/s 252=3.7GB/s 256=3.7GB/s
+08079830 ../src/core/mormot.core.base.asmx86.inc xxhash32 (806)
+  4=235MB/s 8=436.2MB/s 12=610.6MB/s 16=842.1MB/s 20=0.9GB/s 24=1GB/s
+  28=1.1GB/s 32=1.5GB/s 36=1.6GB/s 40=1.6GB/s 44=1.7GB/s 48=2.2GB/s
+  52=2.1GB/s 56=2GB/s 60=1.6GB/s 64=2.6GB/s 68=2.5GB/s 72=2.4GB/s
+  76=2.5GB/s 80=2.9GB/s 84=2.9GB/s 88=2.2GB/s 92=2.1GB/s 96=3.2GB/s
+  100=2.9GB/s 104=2.7GB/s 108=2.9GB/s 112=3.2GB/s 116=3.2GB/s 120=2.9GB/s
+  124=3GB/s 128=2.9GB/s 132=3.2GB/s 136=3GB/s 140=3.1GB/s 144=3.5GB/s
+  148=3.3GB/s 152=3.2GB/s 156=3GB/s 160=3.4GB/s 164=3.5GB/s 168=3.3GB/s
+  172=3.3GB/s 176=2.4GB/s 180=2.9GB/s 184=3.2GB/s 188=3.4GB/s 192=3.6GB/s
+  196=3.5GB/s 200=3.4GB/s 204=3.5GB/s 208=3.6GB/s 212=3.6GB/s 216=3.4GB/s
+  220=3.5GB/s 224=3.6GB/s 228=3.5GB/s 232=3.5GB/s 236=3.6GB/s 240=3.6GB/s
+  244=3.4GB/s 248=3.1GB/s 252=3.6GB/s 256=3.7GB/s
+0810edd0 ../src/core/mormot.crypt.core.asmx86.inc _aesnihash32 (2638)
+  4=235MB/s 8=508.9MB/s 12=785MB/s 16=1GB/s 20=1.2GB/s 24=1.4GB/s
+  28=1.7GB/s 32=1.9GB/s 36=2GB/s 40=2.3GB/s 44=2.4GB/s 48=2.8GB/s
+  52=3.1GB/s 56=3.3GB/s 60=3.6GB/s 64=3.8GB/s 68=3.3GB/s 72=3.5GB/s
+  76=3.7GB/s 80=3.9GB/s 84=4.1GB/s 88=4.3GB/s 92=4.6GB/s 96=4.3GB/s
+  100=5.1GB/s 104=5.3GB/s 108=5.4GB/s 112=5.7GB/s 116=5.8GB/s 120=6.1GB/s
+  124=6.3GB/s 128=5.6GB/s 132=4.7GB/s 136=5.8GB/s 140=6.1GB/s 144=6.3GB/s
+  148=6.1GB/s 152=6.5GB/s 156=7GB/s 160=7.2GB/s 164=7.2GB/s 168=7.6GB/s
+  172=7.6GB/s 176=7.6GB/s 180=7.6GB/s 184=8.3GB/s 188=8.6GB/s 192=8.8GB/s
+  196=7.7GB/s 200=7.9GB/s 204=7.5GB/s 208=8.3GB/s 212=8.4GB/s 216=8.7GB/s
+  220=7.4GB/s 224=8GB/s 228=9.4GB/s 232=9.5GB/s 236=9.7GB/s 240=9.8GB/s
+  244=10.1GB/s 248=8.2GB/s 252=10.3GB/s 256=10.5GB/s
+
+-> aesnihash32 is faster or as fast as very optimized Intel's crc32c+SSE4.2
+   on x86_64, blow away everything on i386, and with much better output quality
+   - see smhasher report about crc32c: insecure, 100% bias, collisions, distrib,
+   BIC, and xxHash32: LongNeighbors, 4bit collisions, MomentChi2 220 - whereas
+   https://github.com/tkaitchuck/aHash (same algorithm) passes all tests
+}
+
+procedure TTestCoreCrypto.CrcSlow(Context: TObject);
 
 const
   HASHESMAX = 512;
-
-function Hash32Test(buf: PAnsiChar; hash: THasher; var expected: cardinal): boolean;
-var
-  L, modif: PtrInt;
-  c, c2 {, s}: cardinal;
-begin
-  result := false;
-  if expected = 0 then
-    expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
-  else if hash(0, buf, HASHESMAX) <> expected then
-  begin
-    //writeln('alignement problem');
-    exit;
-  end;
-  for L := 0 to HASHESMAX do
-  begin
-    c := hash(0, buf, L);
-    //s := 0;
-    for modif := 0 to L - 1 do
-    begin
-      inc(buf[modif]);
-      c2 := hash(0, buf, L);
-      if c2 = c then
-      begin
-        //writeln('L=',L,' modif=',modif);
-        exit; // should detect one modified bit at any position
-      end;
-      dec(buf[modif]);
-      //inc(s, L);
-    end;
-    if hash(0, buf, L) <> c then
-      exit; // should return the same value for the same data
-    //inc(s, L);
-    // timer.Stop; write(L, '=', GetExecutableLocation(@hash), ' ',
-    // KBNoSpace(timer.PerSec(s)), '/s ');
-  end; // at the end: s = 45133056 (45MB) for HASHESMAX=512
-  {
-  Some results for our 32-bit hashes (typical TSynDictionary use):
-
-  On x86_64, for each value of L (0..256):
-  4317d0 ../src/core/mormot.core.base.asmx64.inc crc32cfast (389)
-    0=0B/s 4=436.5MB/s 8=555.2MB/s 12=499.5MB/s 16=827.8MB/s 20=675.3MB/s
-    24=1GB/s 28=812.8MB/s 32=1.1GB/s 36=0.9GB/s 40=1.1GB/s 44=1GB/s 48=1.2GB/s
-    52=1.1GB/s 56=1GB/s 60=0.9GB/s 64=1.3GB/s 68=1GB/s 72=1.3GB/s 76=1.2GB/s
-    80=1.2GB/s 84=1.2GB/s 88=1.3GB/s 92=1.2GB/s 96=1.2GB/s 100=1.2GB/s
-    104=1.2GB/s 108=1.2GB/s 112=1.3GB/s 116=1.2GB/s 120=1.2GB/s 124=1.2GB/s
-    128=1.1GB/s 132=1.2GB/s 136=1.3GB/s 140=1.2GB/s 144=1.2GB/s 148=1.2GB/s
-    152=1.3GB/s 156=1.3GB/s 160=1.3GB/s 164=1.2GB/s 168=1.3GB/s 172=1.2GB/s
-    176=1.3GB/s 180=1.3GB/s 184=1.3GB/s 188=1.3GB/s 192=1.3GB/s 196=1.3GB/s
-    200=1.3GB/s 204=1.3GB/s 208=1.2GB/s 212=1.3GB/s 216=1.3GB/s 220=1.3GB/s
-    224=1.3GB/s 228=1.2GB/s 232=1.3GB/s 236=1.2GB/s 240=1.3GB/s 244=1.3GB/s
-    248=1.3GB/s 252=1.3GB/s 256=1.3GB/s
-  4d5610 ../src/core/mormot.crypt.core.asmx64.inc crc32c_sse42_aesni (5279)
-    0=0B/s 4=381.9MB/s 8=763.4MB/s 12=1.1GB/s 16=1.4GB/s 20=1.7GB/s
-    24=2GB/s 28=2.2GB/s 32=2.5GB/s 36=2.7GB/s 40=3GB/s 44=3.2GB/s 48=3.4GB/s
-    52=3.6GB/s 56=3.7GB/s 60=3.9GB/s 64=4.2GB/s 68=3.1GB/s 72=3.3GB/s 76=3.7GB/s
-    80=4.8GB/s 84=4.1GB/s 88=4.7GB/s 92=5GB/s 96=5.2GB/s 100=5.3GB/s
-    104=5.6GB/s 108=5.5GB/s 112=5.8GB/s 116=5.4GB/s 120=6GB/s 124=5.7GB/s
-    128=5.8GB/s 132=5.7GB/s 136=6.2GB/s 140=6.2GB/s 144=6.5GB/s 148=5.9GB/s
-    152=6.6GB/s 156=6.2GB/s 160=6.7GB/s 164=6.6GB/s 168=6.5GB/s 172=6.7GB/s
-    176=6.9GB/s 180=6.7GB/s 184=6.1GB/s 188=6.3GB/s 192=7.1GB/s 196=6.9GB/s
-    200=9GB/s 204=8.3GB/s 208=8.8GB/s 212=8.6GB/s 216=7GB/s 220=8.4GB/s
-    224=9.7GB/s 228=9.4GB/s 232=9.5GB/s 236=9.4GB/s 240=10.2GB/s 244=7.8GB/s
-    248=5.8GB/s 252=1.9GB/s 256=10.1GB/s
-  431ce0 ../src/core/mormot.core.base.asmx64.inc xxhash32 (860)
-    0=0B/s 4=235MB/s 8=436.2MB/s 12=624.4MB/s 16=842.1MB/s 20=0.9GB/s
-    24=1GB/s 28=1.1GB/s 32=1.5GB/s 36=1.6GB/s 40=1.6GB/s 44=1.7GB/s 48=2.1GB/s
-    52=2.1GB/s 56=2GB/s 60=1.9GB/s 64=2.7GB/s 68=2.6GB/s 72=2.3GB/s 76=2.3GB/s
-    80=2.9GB/s 84=2.9GB/s 88=2.8GB/s 92=2.8GB/s 96=2.8GB/s 100=3.1GB/s
-    104=3.1GB/s 108=3GB/s 112=2.6GB/s 116=2.9GB/s 120=3.1GB/s 124=2.7GB/s
-    128=3.1GB/s 132=3GB/s 136=2.9GB/s 140=2.5GB/s 144=3GB/s 148=3GB/s
-    152=3.1GB/s 156=3.2GB/s 160=3.2GB/s 164=2.4GB/s 168=3.3GB/s 172=3.2GB/s
-    176=3.4GB/s 180=3.3GB/s 184=3.1GB/s 188=3.3GB/s 192=3.4GB/s 196=2.8GB/s
-    200=3.4GB/s 204=3.3GB/s 208=3.5GB/s 212=3.1GB/s 216=3.4GB/s 220=3.4GB/s
-    224=3.4GB/s 228=3.4GB/s 232=3.5GB/s 236=3.5GB/s 240=3.6GB/s 244=3GB/s
-    248=3.6GB/s 252=3.6GB/s 256=3.7GB/s
-  4d4fe0 ../src/core/mormot.crypt.core.asmx64.inc _aesnihash32 (4930)
-    0=0B/s 4=235MB/s 8=488.5MB/s 12=723MB/s 16=0.9GB/s 20=1.1GB/s
-    24=1.3GB/s 28=1.6GB/s 32=1.8GB/ s 36=2GB/s 40=2.2GB/s 44=2.4GB/s 48=2.7GB/s
-    52=2.9GB/s 56=3.1GB/s 60=3.4GB/s 64=3.7GB/s 68=3.3GB/s 72=3.5GB/s 76=4GB/s
-    80=4.2GB/s 84=4.2GB/s 88=4.7GB/s 92=4.9GB/s 96=5.3GB/s 100=5.5GB/s
-    104=5.7GB/s 108=5.7GB/s 112=6GB/s 116=6.4GB/s 120=6.2GB/s 124=6.4GB/s
-    128=7GB/s 132=5.5GB/s 136=5.9GB/s 140=6.1GB/s 144=6.2GB/s 148=6.2GB/s
-    152=6.5GB/s 156=6.7GB/s 160=6.6GB/s 164=7GB/s 168=5.2GB/s 172=6.6GB/s
-    176=7.6GB/s 180=7.7GB/s 184=7.8GB/s 188=8GB/s 192=8GB/s 196=8.2GB/s
-    200=8.5GB/s 204=8.7GB/s 208=8.6GB/s 212=7.2GB/s 216=9.4GB/s 220=9.3GB/s
-    224=9.5GB/s 228=9.7GB/s 232=9.7GB/s 236=6.8GB/s 240=10.2GB/s 244=8.3GB/s
-    248=10.5GB/s 252=10.6GB/s 256=10.2GB/s
-
-  On i386 (Linux/FPC):
-  080792b0 ../src/core/mormot.core.base.asmx86.inc crc32cfast (252)
-    4=381.9MB/s 8=488.5MB/s 12=528.4MB/s 16=921.5MB/s 20=726.7MB/s 24=1.1GB/s
-    28=906.4MB/s 32=1.3GB/s 36=1GB/s 40=1.4GB/s 44=1.1GB/s 48=1.5GB/s
-    52=1.2GB/s 56=1.5GB/s 60=1.3GB/s 64=1.6GB/s 68=1.3GB/s 72=1.6GB/s
-    76=1.4GB/s 80=1.4GB/s 84=1.3GB/s 88=1.6GB/s 92=1.4GB/s 96=1.6GB/s
-    100=1.5GB/s 104=1.7GB/s 108=1.5GB/s 112=1.6GB/s 116=1.4GB/s 120=1.6GB/s
-    124=1.5GB/s 128=1.5GB/s 132=1.5GB/s 136=1.6GB/s 140=1.5GB/s 144=1.6GB/s
-    148=1.6GB/s 152=1.6GB/s 156=1.6GB/s 160=1.6GB/s 164=1.6GB/s 168=1.6GB/s
-    172=1.4GB/s 176=1.6GB/s 180=1.5GB/s 184=1.6GB/s 188=1.6GB/s 192=1.6GB/s
-    196=1.5GB/s 200=1.6GB/s 204=1.5GB/s 208=1.6GB/s 212=1.5GB/s 216=1.6GB/s
-    220=1.5GB/s 224=1.6GB/s 228=1.5GB/s 232=1.6GB/s 236=1.5GB/s 240=1.6GB/s
-    244=1.5GB/s 248=1.6GB/s 252=1.5GB/s 256=1.6GB/s
-  08079d80 ../src/core/mormot.core.base.asmx86.inc crc32csse42 (1445)
-    4=436.5MB/s 8=642.8MB/s 12=0.9GB/s 16=1.2GB/s 20=1.3GB/s 24=1.6GB/s
-    28=1.9GB/s 32=2GB/s 36=2.3GB/s 40=2.3GB/s 44=2.5GB/s 48=2.5GB/s
-    52=2.8GB/s 56=2.7GB/s 60=3GB/s 64=2.9GB/s 68=3.2GB/s 72=3.1GB/s
-    76=3GB/s 80=3.2GB/s 84=3.4GB/s 88=3GB/s 92=3.4GB/s 96=3.4GB/s
-    100=3.6GB/s 104=3.4GB/s 108=3.4GB/s 112=3.5GB/s 116=3.6GB/s 120=3.6GB/s
-    124=3.7GB/s 128=3.6GB/s 132=3.7GB/s 136=3.7GB/s 140=3.8GB/s 144=3.8GB/s
-    148=3.8GB/s 152=3.7GB/s 156=3.9GB/s 160=3.8GB/s 164=3.8GB/s 168=3.9GB/s
-    172=4GB/s 176=3.8GB/s 180=3.9GB/s 184=3.8GB/s 188=3.9GB/s 192=3.8GB/s
-    196=3.9GB/s 200=3.8GB/s 204=3.9GB/s 208=3.8GB/s 212=3.8GB/s 216=3.7GB/s
-    220=3.9GB/s 224=3.8GB/s 228=1.9GB/s 232=3.8GB/s 236=3.9GB/s 240=3.8GB/s
-    244=3.8GB/s 248=3.9GB/s 252=3.7GB/s 256=3.7GB/s
-  08079830 ../src/core/mormot.core.base.asmx86.inc xxhash32 (806)
-    4=235MB/s 8=436.2MB/s 12=610.6MB/s 16=842.1MB/s 20=0.9GB/s 24=1GB/s
-    28=1.1GB/s 32=1.5GB/s 36=1.6GB/s 40=1.6GB/s 44=1.7GB/s 48=2.2GB/s
-    52=2.1GB/s 56=2GB/s 60=1.6GB/s 64=2.6GB/s 68=2.5GB/s 72=2.4GB/s
-    76=2.5GB/s 80=2.9GB/s 84=2.9GB/s 88=2.2GB/s 92=2.1GB/s 96=3.2GB/s
-    100=2.9GB/s 104=2.7GB/s 108=2.9GB/s 112=3.2GB/s 116=3.2GB/s 120=2.9GB/s
-    124=3GB/s 128=2.9GB/s 132=3.2GB/s 136=3GB/s 140=3.1GB/s 144=3.5GB/s
-    148=3.3GB/s 152=3.2GB/s 156=3GB/s 160=3.4GB/s 164=3.5GB/s 168=3.3GB/s
-    172=3.3GB/s 176=2.4GB/s 180=2.9GB/s 184=3.2GB/s 188=3.4GB/s 192=3.6GB/s
-    196=3.5GB/s 200=3.4GB/s 204=3.5GB/s 208=3.6GB/s 212=3.6GB/s 216=3.4GB/s
-    220=3.5GB/s 224=3.6GB/s 228=3.5GB/s 232=3.5GB/s 236=3.6GB/s 240=3.6GB/s
-    244=3.4GB/s 248=3.1GB/s 252=3.6GB/s 256=3.7GB/s
-  0810edd0 ../src/core/mormot.crypt.core.asmx86.inc _aesnihash32 (2638)
-    4=235MB/s 8=508.9MB/s 12=785MB/s 16=1GB/s 20=1.2GB/s 24=1.4GB/s
-    28=1.7GB/s 32=1.9GB/s 36=2GB/s 40=2.3GB/s 44=2.4GB/s 48=2.8GB/s
-    52=3.1GB/s 56=3.3GB/s 60=3.6GB/s 64=3.8GB/s 68=3.3GB/s 72=3.5GB/s
-    76=3.7GB/s 80=3.9GB/s 84=4.1GB/s 88=4.3GB/s 92=4.6GB/s 96=4.3GB/s
-    100=5.1GB/s 104=5.3GB/s 108=5.4GB/s 112=5.7GB/s 116=5.8GB/s 120=6.1GB/s
-    124=6.3GB/s 128=5.6GB/s 132=4.7GB/s 136=5.8GB/s 140=6.1GB/s 144=6.3GB/s
-    148=6.1GB/s 152=6.5GB/s 156=7GB/s 160=7.2GB/s 164=7.2GB/s 168=7.6GB/s
-    172=7.6GB/s 176=7.6GB/s 180=7.6GB/s 184=8.3GB/s 188=8.6GB/s 192=8.8GB/s
-    196=7.7GB/s 200=7.9GB/s 204=7.5GB/s 208=8.3GB/s 212=8.4GB/s 216=8.7GB/s
-    220=7.4GB/s 224=8GB/s 228=9.4GB/s 232=9.5GB/s 236=9.7GB/s 240=9.8GB/s
-    244=10.1GB/s 248=8.2GB/s 252=10.3GB/s 256=10.5GB/s
-
-  -> aesnihash32 is faster or as fast as very optimized Intel's crc32c+SSE4.2
-     on x86_64, blow away everything on i386, and with much better output quality
-     - see smhasher report about crc32c: insecure, 100% bias, collisions, distrib,
-     BIC, and xxHash32: LongNeighbors, 4bit collisions, MomentChi2 220 - whereas
-     https://github.com/tkaitchuck/aHash (same algorithm) passes all tests
-  }
-  result := true;
-end;
-
-function Hash64Test(buf: PAnsiChar; hash: THasher64; var expected: QWord): boolean;
-var
-  L, modif: PtrInt;
-  c, c2: QWord;
-begin
-  result := false;
-  if expected = 0 then
-    expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
-  else if hash(0, buf, HASHESMAX) <> expected then
-  begin
-    //writeln('alignement problem');
-    exit;
-  end;
-  for L := 0 to HASHESMAX do
-  begin
-    c := hash(0, buf, L);
-    for modif := 0 to L - 1 do
-    begin
-      inc(buf[modif]);
-      c2 := hash(0, buf, L);
-      dec(buf[modif]);
-      if c2 = c then
-      begin
-        //writeln('L=',L,' modif=',modif);
-        exit; // should detect one modified bit at any position
-      end;
-    end;
-    if hash(0, buf, L) <> c then
-      exit; // should return the same value for the same data
-  end;
-  result := true;
-end;
-
-function Hash128Test(buf: PAnsiChar; hash: THasher128; out msg: string): boolean;
-var
-  L, modif: PtrInt;
-  c, c2: THash128;
-begin
-  result := false;
-  for L := 0 to HASHESMAX do
-  begin
-    FillZero(c);
-    hash(@c, buf, L);
-    for modif := 0 to L - 1 do
-    begin
-      FillZero(c2);
-      inc(buf[modif]);
-      hash(@c2, buf, L);
-      dec(buf[modif]);
-      if IsEqual(c, c2) then
-      begin
-        FormatString('L=% modif=%', [L, modif], msg);
-        exit; // should detect one modified bit at any position
-      end;
-    end;
-    FillZero(c2);
-    hash(@c2, buf, L);
-    if not IsEqual(c, c2) then
-    begin
-      msg := 'after reset';
-      exit; // should return the same value for the same data
-    end;
-  end;
-  result := true;
-end;
-
-procedure TTestCoreCrypto.Hashes;
-const
   HASHALIGN = 4; // you may try with paranoid 32 here
+
+  procedure Hash32Test(buf: PAnsiChar; hash: THasher; var expected: cardinal);
+  var
+    L, modif: PtrInt;
+    c, c2: cardinal;
+  begin
+    if expected = 0 then
+      expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
+    else
+      CheckEqual(hash(0, buf, HASHESMAX), expected, 'alignement problem');
+    for L := 0 to HASHESMAX do
+    begin
+      c := hash(0, buf, L);
+      for modif := 0 to L - 1 do
+      begin
+        inc(buf[modif]); // should detect one modified bit at any position
+        c2 := hash(0, buf, L);
+        dec(buf[modif]); // reset
+        CheckUtf8(c <> c2, 'L=% modif=%', [L, modif]);
+      end;
+      CheckEqual(hash(0, buf, L), c, 'after reset');
+    end;
+  end;
+
+  procedure Hash64Test(buf: PAnsiChar; hash: THasher64; var expected: QWord);
+  var
+    L, modif: PtrInt;
+    c, c2: QWord;
+  begin
+    if expected = 0 then
+      expected := hash(0, buf, HASHESMAX) // use first call as aligned reference
+    else
+      CheckEqual(Int64(hash(0, buf, HASHESMAX)), Int64(expected), 'hash64');
+    for L := 0 to HASHESMAX do
+    begin
+      c := hash(0, buf, L);
+      for modif := 0 to L - 1 do
+      begin
+        inc(buf[modif]); // should detect one modified bit at any position
+        c2 := hash(0, buf, L);
+        dec(buf[modif]);
+        CheckUtf8(c <> c2, 'L=% modif=%', [L, modif]);
+      end;
+      CheckEqual(Int64(hash(0, buf, L)), Int64(c), 'after reset');
+    end;
+  end;
+
+  procedure Hash128Test(buf: PAnsiChar; hash: THasher128);
+  var
+    L, modif: PtrInt;
+    c, c2: THash128Rec;
+  begin
+    for L := 0 to HASHESMAX do
+    begin
+      FillZero(c.b);
+      hash(@c, buf, L);
+      if L > 16 then
+      begin
+        Check(c.c0 <> c.c1, 'c0c1'); // no 32-bit overlap is expected
+        Check(c.c0 <> c.c2, 'c0c2');
+        Check(c.c0 <> c.c3, 'c0c3');
+        Check(c.c1 <> c.c2, 'c1c2');
+        Check(c.c1 <> c.c3, 'c1c3');
+        Check(c.c2 <> c.c3, 'c2c3');
+      end;
+      for modif := 0 to L - 1 do
+      begin
+        FillZero(c2.b);
+        inc(buf[modif]); // should detect one modified bit at any position
+        hash(@c2, buf, L);
+        dec(buf[modif]);
+        CheckUtf8(not IsEqual(c.b, c2.b), 'L=% modif=%', [L, modif]);
+      end;
+      FillZero(c2.b);
+      hash(@c2, buf, L); // should return the same value for the same data
+      CheckUtf8(IsEqual(c.b, c2.b), 'after reset');
+    end;
+  end;
+
 var
   buf: RawByteString;
-  u: RawUtf8;
+  u, pw, nfo, nfo2, exp, db, proof, mech: RawUtf8;
+  iv: Int64;
   P: PAnsiChar;
-  msg: string;
   unalign: PtrInt;
-  exp321, exp322, exp323, exp324, exp325: cardinal;
+  n, rnd: integer;
+  i64: Int64;
+  logN, blocksize, parallel, r,
+  exp321, exp322, exp323, exp324, exp325, exp326: cardinal;
   exp641, exp642: QWord;
-  hasher: TSynHasher;
   h, h2: THashAlgo;
   s, s2: TSignAlgo;
+  mcf, mcf2: TModularCryptFormat;
+  sc: TScramClient;
+  clientsig: THash256;
+  hasher: TSynHasher;
+  timer: TPrecisionTimer;
 begin
+  // validate THashAlgo and TSignAlgo recognition
   for h := low(h) to high(h) do
   begin
     u := ToUtf8(h);
@@ -1755,32 +1893,355 @@ begin
   Check(s2 = saSha3S256);
   Check(not TextToSignAlgo('SHA5122', s));
   Check(not TextToSignAlgo('SHA512256', s));
-  Check(Adler32SelfTest);
+  // validate our 32-bit, 64-bit and 128-bit hash functions
   SetLength(buf, HASHESMAX + HASHALIGN);
   exp321 := 0;
   exp322 := 0;
   exp323 := 0;
   exp324 := 0;
   exp325 := 0;
+  exp326 := 0;
   exp641 := 0;
   exp642 := 0;
-  for unalign := 0 to HASHALIGN - 1 do
+  for unalign := 0 to HASHALIGN - 1 do // ensure alignment doesn't change result
   begin
     P := pointer(buf);
     inc(P, unalign);
     FillIncreasing(pointer(P), $12345670, HASHESMAX shr 2);
-    Check(Hash32Test(P, @crc32cfast,    exp321));
-    Check(Hash32Test(P, @crc32c,        exp322));
-    Check(Hash32Test(P, @xxHash32,      exp323));
+    Hash32Test(P, @crc32cfast,    exp321);
+    Hash32Test(P, @crc32c,        exp322);
+    Hash32Test(P, @xxHash32,      exp323);
     if Assigned(AesNiHash32) then
-      Check(Hash32Test(P, @AesNiHash32, exp324));
-    Check(Hash32Test(P, @crc32fast,     exp325));
-    Check(Hash64Test(P, @crc32cTwice,   exp641));
+      Hash32Test(P, @AesNiHash32, exp324);
+    Hash32Test(P, @crc32fast,     exp325);
+    Hash32Test(P, @adler32,       exp326);
+    Hash64Test(P, @crc32cTwice,   exp641);
     if Assigned(AesNiHash64) then
-      Check(Hash64Test(P, @AesNiHash64, exp642));
-    Check(Hash128Test(P, @crc32c128, msg), msg{%H-});
+      Hash64Test(P, @AesNiHash64, exp642);
+    Hash128Test(P, @crc32c128);
     if Assigned(AesNiHash128) then
-      Check(Hash128Test(P, @AesNiHash128, msg), msg);
+      Hash128Test(P, @AesNiHash128);
+  end;
+  CheckEqual(exp321, 4022360595);
+  CheckEqual(exp321, exp322);
+  CheckEqual(exp323, 1465265692);
+  CheckEqual(exp325, 3408302637);
+  CheckEqual(exp326, 4027950528);
+  CheckEqual(adler32fast(0, P, HASHESMAX), exp326);
+  CheckEqual(Int64(exp641), -1170836861443089901);
+  // verify "Modular Crypt" hashing functions
+  u := '$5$rounds=12345$q3hvJE5mn5jKRsW.$BbbYTFiaImz9rTy03GGi.Jf9YY5bmxN0LU3p3uI1iUB';
+  Check(ModularCryptIdentify(u) = mcfSha256Crypt);
+  Check(ModularCryptVerify('password', u) = mcfSha256Crypt);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  Check(ModularCryptVerify('password', u) = mcfSha256Crypt);
+  delete(u, 5, 1);
+  Check(ModularCryptIdentify(u) = mcfInvalid);
+  Check(ModularCryptVerify('password', u) = mcfInvalid);
+  delete(u, 2, 1);
+  Check(ModularCryptIdentify(u) = mcfInvalid);
+  u := '$1$3azHgidD$SrJPt7B.9rekpmwJwtON31';
+  Check(ModularCryptIdentify(u) = mcfMd5Crypt);
+  Check(ModularCryptVerify('password', u) = mcfMd5Crypt);
+  Check(ModularCryptVerify('secret', u) = mcfInvalid);
+  Check(ModularCryptVerify('the minimum number is still observed',
+    '$5$rounds=10$roundstoolow$yfvwcWrQ8l/K0DAWyuPMDNHpIVlTQebY9l/gL972bIC') =
+     mcfSha256Crypt);
+  u := '$6$rounds=1400$anotherlongsalts$POfYwTEok97VWcjxIiSOjiykti.o/pQs.wP' +
+       'vMxQ6Fm7I6IoYN3CmLs66x9t0oSwbtEW7o7UmJEiDwGqd8p4ur1';
+  Check(ModularCryptVerify('a very much longer text to encrypt.  ' +
+    'This one even stretches over morethan one line.', u) = mcfSha512Crypt);
+  Check(ModularCryptVerify('a very much longer text to encrypt.  ' +
+    'This one even stretches over more than one line.', u) = mcfInvalid);
+  Check(ModularCryptIdentify(u) = mcfSha512Crypt);
+  delete(u, 5, 1);
+  Check(ModularCryptIdentify(u) = mcfInvalid);
+  // official test vectors from test_handlers_pbkdf2.py
+  u := '$pbkdf2$1212$OB.dtnSEXZK8U5cgxU/GYQ$y5LKPOplRmok7CZp/aqVDVg8zGI';
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha1);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha1);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  u := '$pbkdf2-sha256$1212$4vjV83LKPjQzk31VI4E0Vw$hsYF68OiOUPdDZ1Fg.fJPeq1h/gXXY7acBp9/6c.tmQ';
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha256);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha256);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  u := '$pbkdf2-sha256$6400$.6UI/S.nXIk8jcbdHx3Fhg$98jZicV16ODfEsEZeYPGHU3kbrUrvUEXOPimVSQDD44';
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha256);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha256);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  u := '$pbkdf2-sha512$1212$RHY0Fr3IDMSVO/RSZyb5ow$eNLfBK.eVozomMr.1gYa1' +
+       '7k9B7KIK25NOEshvhrSX.esqY3s.FvWZViXz4KoLlQI.BzY/YTNJOiKc5gBYFYGww';
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha512);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha512);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  u := '$pbkdf2-sha3$1000$G85lPNdJLXoDVzhbCmsBCA$T6UjUUihUTmnYpwiRbhH8yi' +
+       'BjOLTRzARcwK5gr7OEX.fRj9HD/ME7NivCFzgQ5W7BbBaAyoHKeirdX7cDPF59A';
+  u := ModularCryptHash(mcfPbkdf2Sha3, 'password', 1000); // our own format
+  Check(ModularCryptIdentify(u) = mcfPbkdf2Sha3);
+  Check(ModularCryptVerify('password', u) = mcfPbkdf2Sha3);
+  Check(ModularCryptVerify('p4ssword', u) = mcfInvalid);
+  // BCrypt reference material
+  for n := -100 to 100 do
+  begin
+    i64 := n;
+    iv := BSwap64(i64);
+    BlowFishCtrInc(@iv);
+    CheckEqual(iv, BSwap64(i64 + 1), 'bfctr0');
+    inc(i64, Int64(1) shl 32);
+    iv := BSwap64(i64);
+    BlowFishCtrInc(@iv);
+    CheckEqual(iv, BSwap64(i64 + 1), 'bfctr1');
+  end;
+  i64 := cardinal(-1);
+  iv := BSwap64(i64);
+  BlowFishCtrInc(@iv);
+  CheckEqual(iv, BSwap64(i64 + 1), 'bfctr2');
+  Check(ModularCryptVerify('',
+    '$2b$06$DCq7YPn5Rq63x1Lad4cll.TV4S6ytwfsfvkgY8jIucDrjc8deX1s.') = mcfBCrypt);
+  Check(ModularCryptVerify('a',
+    '$2a$06$m0CrhHm10qJ3lXRY.5zDGO3rS2KdeeWLuGmsfGlMfOxih58VYVfxe') = mcfBCrypt);
+  Check(ModularCryptVerify('a',
+    '$2y$06$m0CrhHm10qJ3lXRY.5zDGO3rS2KdeeWLuGmsfGlMfOxih58VYVfxe') = mcfBCrypt);
+  Check(ModularCryptVerify('<.S.2K(Zq''',
+    '$2b$04$VYAclAMpaXY/oqAo9yUpkuWmoYywaPzyhu56HxXpVltnBIfmO9tgu') = mcfBCrypt);
+  Check(ModularCryptVerify('5.rApO%5jA',
+    '$2a$05$kVNDrnYKvbNr5AIcxNzeIuRcyIF5cZk6UrwHGxENbxP5dVv.WQM/G') = mcfBCrypt);
+  Check(ModularCryptVerify('oW++kSrQW^',
+    '$2b$06$QLKkRMH9Am6irtPeSKN5sObJGr3j47cO6Pdf5JZ0AsJXuze0IbsNm') = mcfBCrypt);
+  Check(ModularCryptVerify('ggJ\KbTnDG',
+    '$2b$07$4H896R09bzjhapgCPS/LYuMzAQluVgR5iu/ALF8L8Aln6lzzYXwbq') = mcfBCrypt);
+  Check(ModularCryptVerify('49b0:;VkH/',
+    '$2b$08$hfvO2retKrSrx5f2RXikWeFWdtSesPlbj08t/uXxCeZoHRWDz/xFe') = mcfBCrypt);
+  Check(ModularCryptVerify('>9N^5jc##''',
+    '$2b$09$XZLvl7rMB3EvM0c1.JHivuIDPJWeNJPTVrpjZIEVRYYB/mF6cYgJK') = mcfBCrypt);
+  Check(ModularCryptVerify('\$ch)s4WXp',
+    '$2b$10$aIjpMOLK5qiS9zjhcHR5TOU7v2NFDmcsBmSFDt5EHOgp/jeTF3O/q') = mcfBCrypt);
+  Check(ModularCryptVerify('RYoj\_>2P7',
+    '$2b$12$esIAHiQAJNNBrsr5V13l7.RFWWJI2BZFtQlkFyiWXjou05GyuREZa') = mcfBCrypt);
+  Check(ModularCryptVerify('password',
+    '$2b$12$GhvMmNVjRW29ulnudl.LbuAnUtN/LRfe1JsBm1Xu6LE3059z5Tr8m') = mcfBCrypt);
+  Check(ModularCryptVerify('a',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.l4WvgHIVg17ZawDIrDM2IjlE64GDNQS') = mcfBCrypt);
+  Check(ModularCryptVerify('aa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.AyUxBk.ThHlsLvRTH7IqcG7yVHJ3SXq') = mcfBCrypt);
+  Check(ModularCryptVerify('aaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.BxOVac5xPB6XFdRc/ZrzM9FgZkqmvbW') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.Qbr209bpCtfl5hN7UQlG/L4xiD3AKau') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.oWszihPjDZI0ypReKsaDOW1jBl7oOii') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ./k.Xxn9YiqtV/sxh3EHbnOHd0Qsq27K') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.PYJqRFQbgRbIjMd5VNKmdKS4sBVOyDe') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ..VMYfzaw1wP/SGxowpLeGf13fxCCt.q') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.5B0p054nO5WgAD1n04XslDY/bqY9RJi') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.INBTgqm7sdlBJDg.J5mLMSRK25ri04y') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.s3y7CdFD0OR5p6rsZw/eZ.Dla40KLfm') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.Jx742Djra6Q7PqJWnTAS.85c28g.Siq') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.oKMXW3EZcPHcUV0ib5vDBnh9HojXnLu') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.w6nIjWpDPNSH5pZUvLjC1q25ONEQpeS') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.k1b2/r9A/hxdwKEKurg6OCn4MwMdiGq') = mcfBCrypt);
+  Check(ModularCryptVerify('aaaaaaaaaaaaaaaa',
+    '$2b$04$5DCebwootqWMCp59ISrMJ.3prCNHVX1Ws.7Hm2bJxFUnQOX9f7DFa') = mcfBCrypt);
+  u := RawUtf8OfChar('a', 260);
+  exp := '$2b$04$QqpSfI8JYX8HSxNwW5yx8Ohp12sNboonE6e5jfnGZ0fD4ZZwQkOOK';
+  Check(ModularCryptVerify(u, exp) = mcfBCrypt);
+  Check(ModularCryptVerify(u, exp, [mcfMd5Crypt, mcfBCrypt]) = mcfBCrypt);
+  Check(ModularCryptVerify(u, exp, [mcfMd5Crypt, mcfSha512Crypt]) = mcfUnknown);
+  Check(ModularCryptVerify(u, exp, [], {maxrounds=}3) = mcfInvalid);
+  u[200] := 'b'; // BCrypt truncates the password at 72 bytes long
+  Check(ModularCryptVerify(u, exp) = mcfBCrypt, 'truncate72');
+  u[10] := 'b';
+  Check(ModularCryptVerify(u, exp) = mcfInvalid, 'passwd');
+  exp := '$bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$Kq4Noyk3094Y2QlB8NdRT8SvGiI4ft2';
+  Check(ModularCryptVerify('password', exp) = mcfBCryptSha256);
+  Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
+  // cross-platform validate SCRAM-MCF with fixed reference content
+  pw := ScramPersistedKey(exp, 'user');
+  CheckEqual(pw, '#bcrypt-sha256$v=2,t=2b,r=12$n79VH.0Q2TMWmt3Oqt9uku$knkUgRsX' +
+    'J0GLVysC4CKT18496Xv5ivqxyMUq5kba3VL0bucxogXVaUUnyhgVK9GmWCkrjL-KbDWrFUDfvLOv0Q');
+  FillZero(clientsig);
+  Check(IsZero(clientsig));
+  proof := ScramClientProof(exp, 'user', clientsig, ['root', 'user', 'cn', 'sn']);
+  Check(not IsZero(clientsig));
+  CheckEqual(proof, 'HtI7ThnH1VYYSDcrorMdg8nSGwVQm_uOMnim3a31WD8');
+  proof := ScramServerProof(pw, proof, ['root', 'user', 'cn', 'sn']);
+  CheckEqual(proof, 'fj_E-R1orj7jvv84CGF-ejICOpauk2ZAqtr8nDUn-Ec');
+  Check(ScramClientServerAuth(exp, 'user', proof, clientsig), 'ScramClientServerAuthRef');
+  Check(IsZero(clientsig));
+  // pure pascal and OpenSSL SCrypt implementation
+  {$ifdef USE_OPENSSL}
+  if OpenSslIsAvailable then
+    if OpenSslVersion >= OPENSSL3_VERNUM then
+      TestSCript(@OpenSslSCrypt, 'OpenSslSCrypt');
+  {$endif USE_OPENSSL}
+  TestSCript(@RawSCrypt, 'RawSCrypt');
+  r := SCryptRounds; // default values
+  SCryptRoundsDecode(r, logN, blocksize, parallel);
+  Check(r = $8000e001);
+  CheckEqual(logN, 16);
+  CheckEqual(blocksize, 8);
+  CheckEqual(parallel, 2);
+  exp := '$scrypt$ln=4,r=8,p=1$QNx4N454ppMeKmDjxyrhsh7Q/PYBQw$zeGG+tsAueRzkvXfE1/F58KOKFEFfI0KpBYwE/3ZUWg';
+  Check(ModularCryptVerify('password', exp) = mcfSCrypt);
+  Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
+  exp := '$scrypt$ln=8,r=8,p=1$WKs1xljLudd6z9kbY0wpJQ$yCR4iDZYDKv+iEJj6yHY0lv/epnfB6f/w1EbXrsJOuQ';
+  Check(ModularCryptVerify('password', exp) = mcfSCrypt);
+  Check(ModularCryptVerify('pAssword', exp) = mcfInvalid);
+  // validate "Modular Crypt" formats
+  for mcf := mcfMd5Crypt to high(mcf) do
+  begin
+    for n := 1 to 10 do
+    begin
+      RandomByteString(n * 7, pw); // should reach at least 64 bytes = 512-bit
+      case mcf of
+        mcfMd5Crypt:
+          rnd := 1000; // fixed number
+        mcfBCrypt, mcfBCryptSha256:
+          rnd := 4 + n shr 2; // cost = 4..5 is enough here
+        mcfSCrypt:
+          begin
+            rnd := SCryptRounds(4 + (n shr 2), 8, n);
+            SCryptRoundsDecode(rnd, logN, blocksize, parallel);
+            CheckEqual(logN, 4 + (n shr 2));
+            CheckEqual(blocksize, 8);
+            CheckEqual(parallel, n);
+          end;
+      else
+        rnd := 1000 + n;
+      end;
+      u := ModularCryptHash(mcf, pw, rnd, {saltsize=}n);
+      Check(u <> '');
+      case mcf of
+        mcfSha256Crypt .. mcfSha512Crypt:
+          CheckEqual(PosEx(Make(['$rounds=', rnd, '$']), u), 3);
+        mcfBCrypt:
+          CheckEqual(PosEx(Make(['$', UInt2DigitsToShort(rnd), '$']), u), 4);
+      end;
+      nfo := '';
+      Check(ModularCryptIdentify(u, @nfo) = mcf);
+      Check(ModularCryptVerify(pw, u) = mcf);
+      Check(nfo <> '');
+      Check(StartWithExact(u, nfo));
+      Check(ModularCryptIdentify(nfo) = mcf);
+      CheckEqual(u, ModularCryptHash(nfo, pw), 'simulate client side re-hash');
+      if u <> '' then // avoid GPF
+      begin
+        // validate SCRAM-like mutual authentication using MCF hashes
+        Check(u[1] = '$');
+        db := ScramPersistedKey(u, 'user');
+        Check(db <> '', 'ScramPersistedKey');
+        Check(db[1] = '#');
+        Check(ModularCryptIdentify(db, @nfo2) = mcf);
+        Check(nfo2[1] = '#');
+        nfo2[1] := '$';
+        CheckEqual(nfo, nfo2);
+        Check(u[1] = '$');
+        Check(IsZero(clientsig));
+        proof := ScramClientProof(u, 'user', clientsig, ['root', 'user', 'cn', 'sn']);
+        Check(not IsZero(clientsig));
+        Check(proof <> '', 'ScramClientProof');
+        Check(ScramServerProof(db, proof, ['root', 'user', 'cn', 'so']) = '');
+        proof := ScramServerProof(db, proof, ['root', 'user', 'cn', 'sn']);
+        Check(proof <> '', 'ScramServerProof');
+        Check(ScramClientServerAuth(u, 'user', proof, clientsig), 'ScramClientServerAuth');
+        Check(IsZero(clientsig));
+        Check(not ScramClientServerAuth(u, 'user', proof, clientsig), 'clientsig=0');
+        Check(IsZero(clientsig));
+        dec(PByteArray(u)[length(u) - 5]);
+        Check(ModularCryptVerify(pw, u) = mcfInvalid);
+      end;
+      u := ModularCryptFakeInfo(pw, mcf);
+      nfo := '';
+      mcf2 := ModularCryptIdentify(u, @nfo);
+      if mcf = mcfMd5Crypt then
+        CheckUtf8(mcf2 in mcfValid, u) // random format
+      else
+        Check(mcf2 = mcf);
+      CheckEqual(nfo, u);
+      CheckEqual(ModularCryptFakeInfo(pw, mcf), u, 'consistent fake');
+    end;
+  end;
+  for mcf := mcfMd5Crypt to high(mcf) do
+  begin
+    timer.Start; // output password hash with default values
+    u := ModularCryptHash(mcf, 'password');
+    if not fOwner.MultiThread then
+      NotifyProgress([TrimLeftLowerCaseShort(ToText(mcf)), '=', timer.Stop]);
+    Check(ModularCryptIdentify(u, @nfo) = mcf);
+    Check(nfo <> '');
+    Check(StartWithExact(u, nfo));
+    Check(ModularCryptIdentify(nfo) = mcf);
+    //ConsoleWrite([CRLF,'ModularCryptHash(''',nfo,''',''password'')=''',u,''');']);
+  end;
+  // regular SCRAM client validation against RFC reference vectors
+  sc := TScramClient.Create(saSha1);
+  try
+    // from RFC 5802 section 5
+    CheckEqual(sc.LastError, '');
+    u := sc.ComputeFirstMessage('user', mech, 'fyko+d2lbbFgONRv9qkxdawL');
+    CheckEqual(u, 'n,,n=user,r=fyko+d2lbbFgONRv9qkxdawL');
+    CheckEqual(mech, 'SCRAM-SHA-1');
+    CheckEqual(sc.LastError, '');
+    proof := sc.ComputeFinalMessage('r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,' +
+      's=QSXCR+Q6sek8bf92,i=4096', 'pencil');
+    CheckEqual(proof, 'c=biws,r=fyko+d2lbbFgONRv9qkxdawL3rfcNHYJY1ZVvWVs7j,' +
+      'p=v0X8v3Bz2T0CJGbJQyF0X+HI4Ts=');
+    CheckEqual(sc.LastError, '');
+    Check(sc.CheckFinalResponse('v=rmF9pqV8S7suAoZWja4dJRkFsKQ='));
+    Check(not sc.CheckFinalResponse('v=rmF9pqV8S7suAoZWja4dJRkFskQ='));
+    Check(sc.CheckFinalResponse('v=rmF9pqV8S7suAoZWja4dJRkFsKQ='));
+  finally
+    sc.Free;
+  end;
+  sc := TScramClient.Create(saSha256);
+  try
+    // from RFC 7677 section 3
+    CheckEqual(sc.LastError, '');
+    u := sc.ComputeFirstMessage('user', mech, 'rOprNGfwEbeRWgbNEkqO');
+    CheckEqual(u, 'n,,n=user,r=rOprNGfwEbeRWgbNEkqO');
+    CheckEqual(mech, 'SCRAM-SHA-256');
+    CheckEqual(sc.LastError, '');
+    proof := sc.ComputeFinalMessage(
+      'r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,' +
+      's=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096', 'pencil');
+    CheckEqual(proof, 'c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,' +
+      'p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=');
+    CheckEqual(sc.LastError, '');
+    Check(sc.CheckFinalResponse('v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4='));
+    Check(not sc.CheckFinalResponse('v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G3='));
+    Check(sc.CheckFinalResponse('v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4='));
+  finally
+    sc.Free;
+  end;
+  sc := TScramClient.Create(saSha256, {mcfsupport=}true);
+  try
+    // from draft-bouchez-kitten-scram-mcf-01 proposal
+    CheckEqual(sc.LastError, '');
+    u := sc.ComputeFirstMessage('user', mech, 'rOprNGfwEbeRWgbNEkqO');
+    CheckEqual(u, 'n,,n=user,r=rOprNGfwEbeRWgbNEkqO,f=y');
+    CheckEqual(mech, 'SCRAM-SHA-256');
+    CheckEqual(sc.LastError, '');
+    // '$scrypt$ln=4,r=8,p=1$QNx4N454ppMeKmDjxyrhsh7Q/PYBQw$IjXuXIAkQMquDcMPr1JniPO6vG5uSxxFHf8jAIpAbDk'
+    nfo := BinToBase64('$scrypt$ln=4,r=8,p=1$QNx4N454ppMeKmDjxyrhsh7Q/PYBQw$');
+    proof := sc.ComputeFinalMessage(
+      'r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,' +
+      'f=' + nfo, 'pencil');
+    CheckEqual(proof, 'c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,' +
+      'p=LyMcKMrzBJUoDhfO7e8aD0BYBLqe3wBrCoJMTIEhJEg=');
+    CheckEqual(sc.LastError, '');
+    Check(sc.CheckFinalResponse('v=2c7tBGYYY8tx/oLZNhZVJnjQKWeku17ZDaV0Jh3Hvmo='));
+  finally
+    sc.Free;
   end;
   // reference vectors from https://en.wikipedia.org/wiki/Mask_generation_function
   buf := 'foo';
@@ -1981,6 +2442,14 @@ begin
   CheckEqual(Base32ToBin('MZXW6YTBOI======'), 'foobar');
   CheckEqual(Base32ToBin('MZXW6YTB1'), '');
   CheckEqual(Base32ToBin('MZXW6YTB========'), '');
+  CheckEqual(Base32ToBin('my======'), 'f');
+  CheckEqual(Base32ToBin('mzxq===='), 'fo');
+  CheckEqual(Base32ToBin('mzxw6==='), 'foo');
+  CheckEqual(Base32ToBin('mzxw6yq='), 'foob');
+  CheckEqual(Base32ToBin('mzxw6ytb'), 'fooba');
+  CheckEqual(Base32ToBin('mzxw6ytboi======'), 'foobar');
+  CheckEqual(Base32ToBin('mzxw6ytb1'), '');
+  CheckEqual(Base32ToBin('mzxw6ytb========'), '');
   tmp := '';
   for i := 1 to 1982 do
   begin
@@ -2033,7 +2502,8 @@ begin
   Check(Zeroed(UnZeroed('~'#0#0'~~')) = '~'#0#0'~~', 'unz4');
   enc.Init;
   dec.Init;
-  tmp := RandomWinAnsi(1 shl 20);
+  tmp := RandomWinAnsi(1 shl 20); // 1MB of 8-bit random
+  CheckEqual(length(tmp), 1 shl 20);
   b32 := BinToBase32(tmp);
   tmp2 := Base32ToBin(b32);
   CheckEqual(length(tmp2), length(tmp));
@@ -2098,7 +2568,7 @@ const
     'PYynVHoDmi6SK5qdbNUp5JNCbgI49PtmxVueuHSTBkI6JbFu9smQCMkp8sQEFBAs8F46W4qqNgMiE9QhJUtoAg',
     'PYynVHoDmi6SK5qdbNUp5NDiW4s3_P_KGDXarkzNgBrxUjjzTUzVJ29q9Uq75xI3eTczo57cI5ibqZ-BvbYRLw',
     'rUvWiPrboNKztxCcC6Cq5GWAlbLOk_UO-GddAmNnHCIpbBSz-q6xqXP0aw0REnW9usdCu2DZZ28B2GbaOfydrg'));
-  TEST_AES_TAG: array[0..2] of RawUtf8 = (
+  TEST_AES_GCM: array[0..2] of RawUtf8 = (
     '7C1DA6408329D2D2E393609DB188129E',  // 128-bit
     'EFF784967837F6BB0007276CA9C9F936',  // 192-bit
     '5F3411F163FF157C4A802DB5FF835823'); // 256-bit
@@ -2198,6 +2668,7 @@ var
   s, b, p: TAesBlock;
   iv: THash128Rec;
   i, j, k, ks, m, len: integer;
+  c: cardinal;
   tag1, tag2: TAesBlock;
   mac: TAesMac256;
   mac1, mac2: THash256;
@@ -2208,6 +2679,7 @@ var
   ValuesCrypted, ValuesOrig: array[0..6] of RawByteString;
   Tags: array[0..2, 7..9] of THash256DynArray; // Tags[k,m]
   h32: array[0..2, 0..9] of TCardinalDynArray;
+  tab: PCardinalArray;
   {$ifdef CPUINTEL}
   backup: TIntelCpuFeatures;
   {$endif CPUINTEL}
@@ -2215,7 +2687,6 @@ begin
   {$ifdef CPUINTEL}
   backup := CpuFeatures;
   {$endif CPUINTEL}
-  Check(AesTablesTest, 'Internal Tables');
   CheckEqual(SizeOf(TMd5Buf), SizeOf(TMd5Digest));
   CheckEqual(1 shl AesBlockShift, SizeOf(TAesBlock));
   CheckEqual(SizeOf(TAes), AES_CONTEXT_SIZE);
@@ -2236,6 +2707,7 @@ begin
   SetLength(crypted, MAX + 256);
   st := '1234essai';
   orig := RandomWinAnsi(8000);
+  CheckEqual(length(orig), 8000);
   PInteger(UniqueRawUtf8(RawUtf8(st)))^ := Random32;
   for noaesni := false to true do
   begin
@@ -2307,6 +2779,20 @@ begin
       '603DEB1015CA71BE2B73AEF0857D77811F352C073B6108D72D9810A30914DFF4',
       '601EC313775789A5B7A7F504BBF3D228F443E3CA4D62B59ACA84E990CACAF5C5' +
       '2B0930DAA23DE94CE87017BA2D84988DDFC9C58DB67AADA613C2DD08457941A6');
+    // check AES internal tables access
+    Check(AesTablesTest, 'Internal Tables');
+    tab := AesTables;
+    CheckEqual(tab[0],  $50a7f451);
+    CheckEqual(tab[99],  0);
+    CheckEqual(tab[255],  $4257b8d0);
+    CheckEqual(tab[$300 + 0],  $5150a7f4);  // @tab[$300] = @TD3
+    CheckEqual(tab[$300 + 255],  $d04257b8);
+    CheckEqual(tab[$400 + 0],  $a56363c6);  // @tab[$400] = @TE0
+    CheckEqual(tab[$400 + 255],  $3a16162c);
+    CheckEqual(tab[$500 + 0],  $6363c6a5);  // @tab[$500] = @TE1
+    CheckEqual(tab[$500 + 255],  $16162c3a);
+    CheckEqual(tab[$700 + 0],  $c6a56363);  // @tab[$700] = @TE3
+    CheckEqual(tab[$700 + 255],  $2c3a1616);
     // check both mORMot and OpenSSL against our reference vectors
     {%H-}Timer[noaesni].Init;
     for k := 0 to 2 do
@@ -2345,8 +2831,8 @@ begin
             RandomBytes(@tag1, SizeOf(tag1));
             Check(TAesGcmAbstract(one).AesGcmFinal(tag1));
             //writeln(one.classname, ks, ' ', AesBlockToShortString(tag1));
-            CheckEqual(AesBlockToString(tag1), TEST_AES_TAG[k],
-              FormatUtf8('TEST_AES_TAG % %', [ks, one.AlgoName]));
+            CheckEqual(AesBlockToString(tag1), TEST_AES_GCM[k],
+              FormatUtf8('TEST_AES_GCM % %', [ks, one.AlgoName]));
           end;
           one.IV := iv.b;
           if aead then
@@ -2458,11 +2944,11 @@ begin
           try
             gcm := one.InheritsFrom(TAesGcmAbstract);
             aead := one.InheritsFrom(TAesAbstractAead);
+            Check(k in [0..2]);
             if m <= 9 then
               SetLength(h32[k, m], 257);
             if aead then
             begin
-              Check(k in [0..2]);
               Check(m in [7..9]);
               SetLength(Tags[k, m], 257);
             end;
@@ -2472,7 +2958,7 @@ begin
               if i < 64 then
                 len := i
               else if i < 128 then
-                len := i * 15
+                len := (i * 5) shr 2
               else
                 len := i * 31; // encrypt buffers from 0 to 7936 bytes
               s2 := copy(orig, 1, len);
@@ -2483,9 +2969,13 @@ begin
               s3 := one.EncryptPkcs7(s2);
               if m <= 9 then
                 if noaesni then
-                  CheckEqual(h32[k, m, i], cardinal(DefaultHasher(0, pointer(s3), length(s3))))
+                begin
+                  c := DefaultHasher(0, pointer(s3), length(s3));
+                  CheckUtf8(h32[k, m, i] = c, '%=% len=%',
+                    [h32[k, m, i], c, length(s3)]);
+                end
                 else
-                  h32[k, m, i] := cardinal(DefaultHasher(0, pointer(s3), length(s3)));
+                  h32[k, m, i] := DefaultHasher(0, pointer(s3), length(s3));
               if aead then
                 if not noaesni then
                   Check(one.MacEncryptGetTag(Tags[k, m, i]))
@@ -2534,7 +3024,7 @@ begin
         [Timer[false].Stop, Timer[true].Stop]);
       Include(CpuFeatures, cfAESNI); // revert Exclude() below from previous loop
     end;
-    if A.UsesAesni then
+    if HasHWAes then
       Exclude(CpuFeatures, cfAESNI);
     {$endif CPUINTEL}
   end;
@@ -2572,7 +3062,8 @@ begin
       cts.iv := iv.b;
       s2 := cts.DecryptCts(crypted);
       CheckEqual(s2, orig);
-      CheckEqual(cts.DecryptCts(cts.EncryptCts(orig, true), true), orig);
+      s3 := cts.EncryptCts(orig, true);
+      CheckEqual(cts.DecryptCts(s3, true), orig);
     end;
   finally
     cts.Free;
@@ -2837,14 +3328,97 @@ begin
 end;
 {$endif PUREMORMOT2}
 
-procedure TTestCoreCrypto._MD5;
+const
+  // AesNiHash128() responses with fixed byte-increasing AesNiHashAntiFuzzTable
+  // - to validate one identical algorithm on both i386 and x64 platforms
+  AESNIHASH_REF128: PAnsiChar =     '00000000000000000000000000000000' +
+    'ebcaa5d9d3111481ca62776f7cc716d5078f6490103c58d95b5e16001d40cf6b' +
+    '9b0e47ebccb12f80270b0d17caafa8e1e64ef4b87ee4dd8743650db1ac9d59b0' +
+    '345407a79f54f73c6a8120cd19ec289750bc08c882e7f30a72295534c6d5ad1c' +
+    '2a4d337351355ef19da8ac689bc9abf5f4eea591f6845c428e70a22f16704d7c' +
+    '7b6d2e6ba7fc17afe99577fdd4396a5400f82e31242f8f4837b128170def4d81' +
+    '5ce88e10dd957cd5256cf17305668d7187e3a5f8364c2f11bf22cfab5c97e57c' +
+    '9d62a4ea395e1a66c6da14059a5b046594887b40c2fd6beb93cb2c0ea3a6d826' +
+    'e448eb7ff07caa6e91d9a2a8cdbf8ffb17e3839f9fd9b5db11fcc27ec73d90b6' +
+    'ea5aa1a2c33f8507d4a4548ee3e951619e19c45be7fc245f2062b8a67200e933' +
+    'e2bc6aee7eb66c9c626a5e24c294d64f9577d432b98b33e09b31b129956c9453' +
+    '982c1746186eeeb2e725be97e486dc3343ab8f9474c99e6e38bd2d13a580f299' +
+    'bba44ec2bfd7c869f719965d6b2232f0b7716a42122245c86fde9b2fcf8687cd' +
+    'a9a2236e62424e427b7262ebc57694e5e3cf2be5086c55492ae1df51e642b16b' +
+    'fa28fa2aa2b2b6470d03d915a77173d0222a5fdb927c149a2ed29ec6f39611b1' +
+    'dfc2957b933caeac4206e5cd6b54505cf734b02d838621386f011a488a0aaa21' +
+    'ca21a1cc16a0de4c7c1706a3d63a54196685816076f0bf423f62cc39c6e65cbe' +
+    'eb71ecb63a7b6bff1f2501040a9cdd4d29d986eec0ba0eeb3cc81f107493fa26' +
+    '8d16ede5b6c2311331043f392d75775205ea71c47441f88fb921091f36429447' +
+    '5440c3a28156fcf83362c7de4563b9e5c74f2ae31c0892ba2416d9433fbec5e8' +
+    'aa066e0839a2ff380eef8a50fdb8abf1a8e264d80d52547c19e8fc8c4cb0b6a9' +
+    '228873ffd35acbd862051ba5972d1ea5c77da42d0932de9862d213d9c2a8e1be' +
+    'ada5d458399c4aaa1047ae56ed803da266fc0be094eb5e1091e2f23842380209' +
+    '75d184ec6b0f6cad9474dc5b335f7894aff4754b5ea5502a27ca73ff14328196' +
+    '5539828fe6b11948b5be01053fbe212da322fa592d28db34898f824faddb1ebb' +
+    '0f2071856be7a84df01aa15cc78b0e77959885fad4117d0d2f428db9a04557a3' +
+    '097c7ffed3b8ad6e1a341610a40e852f70b117853a6de37263f5e726d67c3466';
+  // AesNiHash32() responses with fixed byte-increasing AesNiHashAntiFuzzTable
+  // - to validate one identical algorithm on both i386 and x64 platforms
+  AESNIHASH_REF32: array[0 .. 52] of cardinal = (
+    $00000000, $7ebbb034, $031c3f98, $84720a5e, $a838babc, $fbb8855b,
+    $1c301a13, $611fff36, $9826aa67, $6e1939cf, $1a54fda0, $9dbffd04,
+    $86308d64, $3593ea6e, $59276b61, $4341c163, $b88e7728, $11eca1e0,
+    $1e1c27e1, $de24287e, $1af49bbc, $c0d1bf44, $e2606908, $bc8bc0f3,
+    $932baa5c, $1211661d, $43fbca34, $67e4e4a0, $bb68c8c0, $1c17c3b0,
+    $7dce27fa, $95a911c6, $04a499b3, $cda40a55, $d062c08f, $7f3a8f3f,
+    $d4b99c7b, $1f110334, $ba207aaa, $f395c480, $19dbc289, $e50746b3,
+    $bbc251fc, $ee5b2935, $70d8e8cf, $02a7706c, $f0ad90cf, $020670e0,
+    $1322057e, $d9b7a878, $671232c8, $bbc2d9f4, $85676d1f);
+
+procedure TTestCoreCrypto.Hashes;
 var
-  i, n: integer;
+  i, n: PtrInt;
+  exp: cardinal;
   md: TMd5;
   dig, dig2: TMd5Digest;
-  tmp: TByteDynArray;
+  bytes: TByteToByte;
   ismd4: boolean;
+  ref: PAnsiChar;
+  ref32: PCardinal;
+  h128, ref128: THash128;
+  bak: THash512;
 begin
+  for i := 0 to high(bytes) do
+    bytes[i] := i;
+  // validate AesNiHash128() against reference vectors
+  // - should be done FIRST with no process in the background
+  if Assigned(AesNiHash128) and
+     not CheckFailed(not fBackgroundRun.Waiting, 'no background run') then
+  begin
+    Move512(@bak, AesNiHashAntiFuzzTable);
+    Move512(AesNiHashAntiFuzzTable, @bytes); // replace to get AESNIHASH_REF
+    ref := AESNIHASH_REF128;
+    ref32 := @AESNIHASH_REF32;
+    n := 0;
+    repeat
+      exp := AesNiHash32(n, @bytes, n);
+      CheckUtf8((n = 0) = (exp = 0), 'aesni32n1(%)', [n]);
+      CheckUtf8(exp = ref32^, 'aesni32ref(%)', [n]);
+      FillZero(h128);
+      AesNiHash128(@h128, @bytes, n);
+      Check(mormot.core.text.HexToBin(ref, @ref128, SizeOf(ref128)));
+      inc(ref, SizeOf(ref128) * 2);
+      CheckUtf8(IsEqual(h128, ref128), 'aesni128ref(%)', [n]);
+      exp := PCardinal(@ref128)^;
+      CheckUtf8(AesNiHash32(0, @bytes, n) = exp, 'aesni32trunc(%)', [n]);
+      CheckUtf8(AesNiHash32(n, @bytes, n) = ref32^, 'aesni32n2(%)', [n]);
+      inc(ref32);
+      if n < 20 then
+        inc(n) // specific verification of pshufb process for 1..16 bytes
+      else
+        inc(n, 7);
+    until n > 250;
+    CheckEqual(n, 251);
+    Move512(AesNiHashAntiFuzzTable, @bak); // preserve existing hash tables
+  end;
+  // validate 32-bit, 64-bit and 128-bit crc functions in the background
+  Run(CrcSlow, nil, 'crc', {threaded=}true, {notify=}false);
   // MD5 validation
   CheckEqual(htdigest('agent007', 'download area', 'secret'),
     'agent007:download area:8364d0044ef57b3defcfa141e8f77b65', 'htdigest');
@@ -2865,18 +3439,22 @@ begin
     '3b69f5d2a3bb3719dc69891e9f95e809fd7e8b23ba6318edc45e51fe39708bf9427e9c3e8b9')),
     '4d7e6a1defa93d2dde05b45d864c429b', 'colllisionB');
   // MD Context Hashing validation
-  SetLength(tmp, 256);
   for ismd4 := false to true do
     for n := 256 - 80 to 256 do
     begin
+      // char-by-char update validation
       if ismd4 then
-        md.InitMD4
+        Md4Init(md)
       else
         md.Init;
-      for i := 1 to n do
-        md.Update(tmp[0], 1);
+      for i := 0 to n - 1 do
+        md.Update(bytes[i], 1);
       md.Final(dig);
-      md.Full(pointer(tmp), n, dig2, ismd4);
+      // full buffer single call validation
+      if ismd4 then
+        Md4Buf(bytes, n, dig2)
+      else
+        md.Full(@bytes, n, dig2);
       check(IsEqual(dig, dig2), 'MDrefA');
       check(CompareMem(@dig, @dig2, SizeOf(dig)), 'MDrefB');
     end;
@@ -3301,7 +3879,7 @@ begin
     Check(pub <> '');
     Check(priv <> '');
     asy.GeneratePem(pub2, priv2, '');
-    NotifyTestSpeed('%.Generate', [asy], 2, 0, @timer, {onlylog=}true);
+    NotifyTestSpeed('%.Generate %', [asy, asy.AlgoName], 2, 0, @timer, {onlylog=}true);
     Check(pub2 <> '');
     Check(priv2 <> '');
     Check(pub <> pub2);
@@ -3321,14 +3899,17 @@ var
   crt: TCryptCertAlgo absolute Context;
   timer: TPrecisionTimer;
   caa: TCryptAsymAlgo;
+  cka: TCryptKeyAlgo;
   c1, c2, c3, c4: ICryptCert;
-  s, r, csr: RawByteString;
-  jwt, iss, sub, s2, s3, n, priv: RawUtf8;
+  pub: ICryptPublicKey;
+  s, r, csr, x, y, x2, y2: RawByteString;
+  jwt, iss, sub, s2, s3, n, priv, jwk: RawUtf8;
   fmt: TCryptCertFormat;
   cv: TCryptCertValidity;
   u: TCryptCertUsage;
   fields: TCryptCertFields;
   cpe: TCryptCertPerUsage;
+  eccpub: TEccPublicKey;
 begin
   timer.Start;
   check(PosEx(UpperCase(CAA_JWT[crt.AsymAlgo]), UpperCase(crt.AlgoName)) > 0);
@@ -3386,6 +3967,34 @@ begin
   check(c1.GetNotBefore <= NowUtc + CERT_DEPRECATION_THRESHOLD, 'nbef');
   check(c1.GetNotAfter > NowUtc - CERT_DEPRECATION_THRESHOLD, 'naft');
   check(c1.SetPrivateKey(c1.GetPrivateKey), 'in-place pk replace');
+  jwk := c1.JwkCompute;
+  if jwk <> '' then
+  begin
+    cka := CAA_CKA[caa];
+    //writeln(CRLF, cka, ' from ', c1.Instance.ClassName, ' as ', crt.AlgoName, '  ', jwk);
+    if cka = ckaEcc256 then
+    begin
+      CheckEqual(jwk, c1.JwkCompute);
+      Check(JwkToEcc(jwk, eccpub));
+      pub := TCryptPublicKeyEcc.Create;
+      x := c1.GetPublicKey;
+      Check(pub.Load(cka, x));
+      Check(pub.GetParams(x, y));
+      CheckEqual(SaveAsJwk(caa, x, y), jwk);
+    end;
+    pub := CryptPublicKey[cka].Create;
+    Check(pub.Load(cka, c1.GetPublicKey), 'jwkpub');
+    Check(pub.KeyAlgo = cka, 'jwkalgo1');
+    Check(pub.GetParams(x, y));
+    CheckEqual(SaveAsJwk(caa, x, y), jwk);
+    pub := CryptPublicKey[cka].Create;
+    Check(pub.Load(cka, jwk), 'jwkload');
+    Check(pub.KeyAlgo = cka, 'jwkalgo2');
+    Check(pub.GetParams(x2, y2));
+    CheckEqual(SaveAsJwk(caa, x2, y2), jwk);
+    CheckEqual(x, x2);
+    CheckEqual(y, y2);
+  end;
   for fmt := ccfBinary to ccfPem do
   begin
     c2 := crt.New;
@@ -3717,7 +4326,7 @@ begin
   // sign
   s := c3.Sign(pointer(r), length(r));
   Check(s <> '', 'sign');
-  cv := st1.Verify(s, pointer(r), length(r));
+  cv := st1.Verify(s, r);
   if cv <> cvNotSupported then
     // TCryptStoreOpenSsl.Verify has no way to know which cert signed it
     CheckUtf8(cv = cvValidSigned, 's1=%', [ToText(cv)^]);
@@ -3730,16 +4339,16 @@ begin
   Check(st2.IsValid(c3) = cvValidSigned, '2c3');
   if cv <> cvNotSupported then
   begin
-    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2a');
+    Check(st2.Verify(s, r) = cvValidSigned, 's2a');
     dec(r[1]);
-    Check(st2.Verify(s, pointer(r), length(r)) = cvInvalidSignature, 's2b');
+    Check(st2.Verify(s, r) = cvInvalidSignature, 's2b');
     inc(r[1]);
-    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2c');
+    Check(st2.Verify(s, r) = cvValidSigned, 's2c');
     // validate CRL on buffers (not OpenSSL)
     Check(st2.Revoke(c3, crrWithdrawn));
-    Check(st2.Verify(s, pointer(r), length(r)) = cvRevoked, 's2d');
+    Check(st2.Verify(s, r) = cvRevoked, 's2d');
     Check(st2.Revoke(c3, crrNotRevoked));
-    Check(st2.Verify(s, pointer(r), length(r)) = cvValidSigned, 's2e');
+    Check(st2.Verify(s, r) = cvValidSigned, 's2e');
   end;
   // validate CRL on certificates
   Check(st2.Revoke(c3, crrWithdrawn), 'rev');
@@ -3754,7 +4363,7 @@ begin
     Check(st3.IsValid(c2) = cvUnknownAuthority, '3c2');
     Check(st3.IsValid(c3) = cvUnknownAuthority, '3c3');
     if cv <> cvNotSupported then
-      Check(st3.Verify(s, pointer(r), length(r)) = cvUnknownAuthority, 's3');
+      Check(st3.Verify(s, r) = cvUnknownAuthority, 's3');
   end;
   st3 := st2;
   NotifyTestSpeed('%', [str.AlgoName], 1, 0, @timer, {onlylog=}true);
@@ -3764,11 +4373,12 @@ procedure TTestCoreCrypto.Catalog;
 var
   m: TAesMode;
   k, k2: integer;
-  a, i: PtrInt;
+  a, i, rounds, bytes: PtrInt;
   c32, cprev: cardinal;
   d, dprev: double;
   n, h, nprev, aead: RawUtf8;
   r, s: RawByteString;
+  timer: TPrecisionTimer;
   aes: TAesAbstract;
   key: THash256;
   rnd: TCryptRandom;
@@ -3780,6 +4390,28 @@ var
   crt: TCryptCertAlgo;
   str: TCryptStoreAlgo;
   alg: TCryptAlgos;
+
+ procedure DoEcc(ecc: TCryptPublicKeyClass);
+ var
+   pub: ICryptPublicKey;
+   x1, x2, y1, y2: RawByteString;
+ begin
+   pub := ecc.Create;
+   check(pub.Load(ckaEcc256, _eccpub));
+   check(pub.GetParams(x1, y1));
+   //writeln(BinToHEx(x1)); writeln(bintohex(y1));
+   CheckEqual(BinToBase64Uri(x1), 'oIQ8m1iBHYoxrdLT1A6MH9naG-hk_ccw_Ij0p9Mk7Jk');
+   CheckEqual(BinToBase64Uri(y1), 'jXcwlHhI85VOfxOvNyPT2Ws9v-URY9R3yj04A5MUBZA');
+   pub := ecc.Create;
+   check(pub.Load(ckaEcc256, _eccjwk));
+   check(pub.GetParams(x2, y2));
+   //writeln(BinToHEx(x2)); writeln(bintohex(y2));
+   CheckEqual(BinToBase64Uri(x2), 'oIQ8m1iBHYoxrdLT1A6MH9naG-hk_ccw_Ij0p9Mk7Jk');
+   CheckEqual(BinToBase64Uri(y2), 'jXcwlHhI85VOfxOvNyPT2Ws9v-URY9R3yj04A5MUBZA');
+   check(x1 = x2);
+   check(y1 = y2);
+ end;
+
 begin
   // validate AesAlgoNameEncode / TAesMode
   FillZero(key);
@@ -3803,15 +4435,21 @@ begin
       CheckUtf8(AesAlgoNameDecode(n, k2) = nil, n);
     end;
   // validate Rnd() High-Level Algorithms Factory
+  TAesPrng.Main.Random32; // warmup and entropy gathering outside timer
   alg := TCryptRandom.Instances;
   for a := 0 to high(alg) do
   begin
     rnd := alg[a] as TCryptRandom;
     NotifyProgress([rnd.AlgoName]);
     Check(mormot.crypt.secure.Rnd(rnd.AlgoName) = rnd);
+    timer.Start;
     cprev := 0;
     dprev := 0;
-    for i := 1 to 10 do // some system random generators may be slow/blocking
+    bytes := 0;
+    rounds := 100;
+    if PosEx('blocking', rnd.AlgoName) > 0 then
+      rounds := 10; // some system random generators may be slow/blocking
+    for i := 1 to rounds do
     begin
       c32 := rnd.Get32;
       CheckUtf8(c32 <> cprev, rnd.AlgoName);
@@ -3823,7 +4461,9 @@ begin
       dprev := d;
       n := rnd.Get(i); // up to 10 bytes is fine on slow/blocking OS random API
       CheckEqual(length(n), i);
+      inc(bytes, 12 + i);
     end;
+    NotifyTestSpeed('%', [rnd.AlgoName], 0, bytes, @timer, {onlylog=}true);
   end;
   // validate Hash() High-Level Algorithms Factory
   alg := TCryptHasher.Instances;
@@ -3888,6 +4528,11 @@ begin
     end;
   end;
   // validate Asym() High-Level Algorithms Factory
+  {$ifdef USE_OPENSSL}
+  if TOpenSslHash.IsAvailable then
+    DoEcc(TCryptPublicKeyOpenSsl);
+  {$endif USE_OPENSSL}
+  DoEcc(TCryptPublicKeyEcc);
   alg := TCryptAsym.Instances;
   //fCatalogAllGenerate := SystemInfo.dwNumberOfProcessors > 8; // not worth it
   for a := 0 to high(alg) do
@@ -4066,7 +4711,7 @@ begin
   timer.Start;
   c := TRsa.GenerateNew; // with RSA_DEFAULT_GENERATION_* values
   try
-    NotifyTestSpeed('RS256 generate', -1, 0, @timer, {onlylog=}true);
+    NotifyTestSpeed('RS256 generate', -1, 0, @timer, fOwner.MultiThread);
     if CheckFailed(c <> nil, 'TimeOut') then
       exit;
     CheckEqual(c.ModulusBits, RSA_DEFAULT_GENERATION_BITS);
@@ -4209,7 +4854,7 @@ var
   rnd: HalfUInt; // truncated to 16-bit or 32-bit value
   a, b, s, d, e, m, v: PBigInt;
   cu, pem, txt: RawUtf8;
-  bin, hash, signed, encrypted: RawByteString;
+  bin, pub, hash, signed, encrypted: RawByteString;
   pub1, pub2: TRsaPublicKey;
   pri1, pri2: TRsaPrivateKey;
   timer: TPrecisionTimer;
@@ -4610,6 +5255,7 @@ begin
   finally
     c.Free;
   end;
+  pub := PemToDer(_rsapub);
   c := TRsa.Create;
   try
     Check(c.LoadFromPublicKeyPem(_rsapub));
@@ -4618,13 +5264,25 @@ begin
     CheckEqual(c.E.ToText, '65537');
     CheckEqual(BigIntToText(c.E.Save), '65537');
     CheckEqual(c.M.ToText, txt);
-    Check(c.SavePublicKeyDer = PemToDer(_rsapub));
+    Check(c.SavePublicKeyDer = pub);
     Check(c.SavePrivateKeyDer = '');
     timer.Start;
     for i := 1 to 100 do
       Check(c.Verify(pointer(hash), hfSHA256, bin), 'verifloop');
     NotifyTestSpeed('RS256 verify', 100, 0, @timer);
     CheckEqualHex(hash, _hash);
+  finally
+    c.Free;
+  end;
+  c := TRsa.Create;
+  try
+    Check(c.LoadFromPublicKeyJwk(_rsajwk));
+    Check(c.HasPublicKey);
+    Check(not c.HasPrivateKey);
+    CheckEqual(c.E.ToText, '65537');
+    CheckEqual(c.M.ToText, txt);
+    Check(c.SavePublicKeyDer = pub);
+    Check(c.SavePrivateKeyDer = '');
   finally
     c.Free;
   end;

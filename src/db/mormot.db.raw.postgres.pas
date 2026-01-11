@@ -186,7 +186,7 @@ type
     SetNoticeProcessor: function(conn: PPGconn; proc: PQnoticeProcessor;
       arg: pointer): PQnoticeProcessor; cdecl;
     Clear: procedure(res: PPGresult); cdecl;
-    Freemem: procedure(ptr: pointer); cdecl;
+    FreeMem: procedure(ptr: pointer); cdecl;
     Exec: function(conn: PPGconn; query: PUtf8Char): PPGresult; cdecl;
     Prepare: function(conn: PPGconn; stmtName, query: PUtf8Char; nParams: integer;
       paramTypes: PCardinal): PPGresult; cdecl;
@@ -363,7 +363,7 @@ const
     'getvalue',
     'getlength',
     'getisnull',
-    // optional API entries for pipelining mode
+    // optional API entries for pipelining mode = PQ_ENTRIES_FIRST_OPTIONAL
     'enterPipelineMode',
     'exitPipelineMode',
     'pipelineSync',
@@ -376,6 +376,7 @@ const
     'getResult',
     'socket'
     );
+  PQ_ENTRIES_FIRST_OPTIONAL = 26;
 
 
 { TSqlDBPostgresLib }
@@ -408,7 +409,7 @@ begin
     raiseonfailure := ESqlDBPostgres;
     for i := 0 to High(PQ_ENTRIES) do
     begin
-      if StrComp(PQ_ENTRIES[i], PAnsiChar('enterPipelineMode')) = 0 then
+      if i = PQ_ENTRIES_FIRST_OPTIONAL then
         raiseonfailure := nil; // allow old libpq with no pipelining API
       Resolve('PQ', PQ_ENTRIES[i], @P[I], raiseonfailure);
     end;

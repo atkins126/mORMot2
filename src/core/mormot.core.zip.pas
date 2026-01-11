@@ -376,7 +376,7 @@ type
   // - those 22 bytes end the file and are used to find the TFileHeader entries
   // - in practice, this is the minimal size of a valid but void .zip file
   TLastHeader = record
-    /// $06054b50 PK#5#6 = LASTHEADER_SIGNATURE_INC -
+    /// $06054b50 PK#5#6 = LASTHEADER_SIGNATURE_INC
     signature: cardinal;
     /// 0
     thisDisk: word;
@@ -522,8 +522,8 @@ type
     fCentralDirectoryOffset, fCentralDirectoryTotalFiles: Int64;
     fCentralDirectory: PFileHeader;
     fResource: TExecutableResource;
-    procedure LocateCentralDirectory(BufZip: PByteArray;
-      var Size: PtrInt; Offset: Int64);
+    procedure LocateCentralDirectory(BufZip: PByteArray; Size: PtrInt;
+      Offset: Int64);
     function UnZipStream(aIndex: integer; const aInfo: TFileInfoFull;
       aDest: TStream): boolean;
   public
@@ -551,8 +551,8 @@ type
     /// get the index of a file inside the .zip archive
     function NameToIndex(const aName: TFileName): integer;
     /// uncompress a file stored inside the .zip archive into memory
-    // - will refuse to uncompress more than aMaxSize - i.e. 128 MB of content
-    function UnZip(aIndex: integer; aMaxSize: Int64 = 128 shl 20): RawByteString; overload;
+    // - will refuse to uncompress more than aMaxSize - i.e. 256 MB of content
+    function UnZip(aIndex: integer; aMaxSize: Int64 = 256 shl 20): RawByteString; overload;
     /// uncompress a file stored inside the .zip archive into a stream
     function UnZip(aIndex: integer; aDest: TStream): boolean; overload;
     /// uncompress a file stored inside the .zip archive into a destination directory
@@ -768,6 +768,12 @@ type
   TZipWriteAbstract = TZipWrite;
   TZipWriteToStream = TZipWrite;
 {$endif PUREMORMOT2}
+
+/// wrap TZipRead.Create + UnZipAll + Free over a memory buffer containing a .zip
+function UnZipMemAll(const ZipMem: RawByteString; const DestFolder: TFileName): boolean;
+
+/// wrap TZipRead.Create + UnZipAll + Free over a .zip file
+function UnZipAll(const ZipFile: TFileName; const DestFolder: TFileName): boolean;
 
 var
   /// the default compression level to be applied to EventArchiveZip()
@@ -2213,6 +2219,9 @@ begin
   // caller now makes TZipWriteCompressor.Write then TZipWriteCompressor.Free
 end;
 
+// note: TDirectoryBrowser is not easy to use here due to IncludeVoidFolders
+// and the nested zip names generation
+
 function TZipWrite.AddFolder(const FolderName: TFileName;
   const Mask: TFileName; Recursive: boolean; CompressLevel: integer;
   const OnAdd: TOnZipWriteAdd; IncludeVoidFolders: boolean;
@@ -2462,16 +2471,17 @@ begin
   end;
 end;
 
-function LocateLastHeader(BufZip: PByteArray; var Size: PtrInt;
+function LocateEndCentralDirectory(BufZip: PByteArray; Size: PtrInt;
   Offset: Int64; out head64: PLastHeader64): PLastHeader;
 var
-  i: PtrInt;
   loc64: PLocator64;
+  min: PtrUInt;
 begin
-  // resources size may be rounded up -> search in trailing 128 bytes
-  for i := 0 to 127 do
+  // search for the PK#5#6 marker in trailing 64KB (comment size)
+  result := @BufZip[Size - SizeOf(TLastHeader)];
+  min := PtrUInt(@BufZip[MaxPtrInt(0, Size - 65536)]);
+  while PtrUInt(result) >= min do
   begin
-    result := @BufZip[Size - SizeOf(TLastHeader)];
     if result^.signature + 1 = LASTHEADER_SIGNATURE_INC then
     begin
       if (result^.thisFiles    = ZIP32_MAXFILE) or
@@ -2496,9 +2506,7 @@ begin
         head64 := nil;
       exit;
     end;
-    dec(Size);
-    if Size < SizeOf(TLastHeader) then
-      break;
+    dec(PByte(result)); // search backward
   end;
   result := nil;
 end;
@@ -2518,8 +2526,8 @@ begin
   until P^ = #0;
 end;
 
-procedure TZipRead.LocateCentralDirectory(BufZip: PByteArray;
-  var Size: PtrInt; Offset: Int64);
+procedure TZipRead.LocateCentralDirectory(BufZip: PByteArray; Size: PtrInt;
+  Offset: Int64);
 var
   lh32: PLastHeader;
   lh64: PLastHeader64;
@@ -2528,7 +2536,7 @@ begin
      (Size < SizeOf(TLastHeader)) then
     lh32 := nil
   else
-    lh32 := LocateLastHeader(BufZip, Size, Offset, lh64);
+    lh32 := LocateEndCentralDirectory(BufZip, Size, Offset, lh64);
   if lh32 = nil then
     ESynZip.RaiseUtf8(
       '%.Create(%): zip trailer signature not found', [self, fFileName]);
@@ -2592,7 +2600,7 @@ begin
     SetString(tmp, e^.storedName, h^.fileInfo.nameLen); // better for FPC
     if IsAscii7(pointer(tmp), fZipNamePathDelimReversed, fZipNamePathDelim) then
       // plain ASCII file name needs no conversion
-      e^.zipName := Ansi7ToString(tmp)
+      Ansi7ToString(tmp, string(e^.zipName))
     else
     begin
       extraname := h^.LocateExtra(UNICODEPATH_EXTRA_ID);
@@ -2986,8 +2994,9 @@ begin
   result := '';
   if not RetrieveFileInfo(aIndex, info) or
      (info.f64.zfullSize = 0) or
-     (info.f64.zzipSize > aMaxSize) or
-     (info.f64.zfullSize > aMaxSize) then
+     ((aMaxSize > 0) and
+      ((info.f64.zzipSize > aMaxSize) or
+       (info.f64.zfullSize > aMaxSize))) then
     exit;
   // call libdeflate_crc32 / libdeflate_deflate_decompress if available
   FastSetString(RawUtf8(result), info.f64.zfullSize); // assume CP_UTF8 for FPC
@@ -3142,7 +3151,7 @@ begin
         begin
           pointer(tmp) := FastNewString(len);
           if UnCompressMem(data, pointer(tmp), zzipsize, len) <> len then
-             exit;
+            exit;
           crc := mormot.lib.z.crc32(0, pointer(tmp), len);
           aDest.WriteBuffer(pointer(tmp)^, len);
         end
@@ -3188,26 +3197,26 @@ begin
     if not SafeFileName(LocalZipName) then
       ESynZip.RaiseUtf8('%.UnZip(%): unsafe file name ''%''',
         [self, fFileName, LocalZipName]);
-    Dest := EnsureDirectoryExists(DestDir);
+    Dest := EnsureDirectoryExistsNoExpand(DestDir);
     if Dest = '' then
       exit;
     LocalPath := ExtractFilePath(LocalZipName);
     if LocalPath <> '' then
     begin
       LocalZipName := ExtractFileName(LocalZipName);
-      Dest := EnsureDirectoryExists([Dest, LocalPath]);
-    end;
+      Dest := EnsureDirectoryExistsNoExpand(MakePath([Dest, LocalPath]));
+    end; // expliclit MakePath() for Delphi 7
     if not FileIsWritable(Dest) then
       exit; // impossible to write in this folder
     Dest := Dest + LocalZipName;
   end;
   if IsFolder(Entry[aIndex].zipName) then
-    result := EnsureDirectoryExists(Dest) <> ''
+    result := EnsureDirectoryExistsNoExpand(Dest) <> ''
   else
   begin
     FS := TFileStreamEx.Create(Dest, fmCreate);
     try
-      result := UnZipStream(aIndex, info, FS);
+      result := UnZipStream(aIndex, info, FS); // use libdeflate if possible
     finally
       FS.Free;
     end;
@@ -3217,7 +3226,7 @@ end;
 
 function TZipRead.UnZipAll(DestDir: TFileName): integer;
 begin
-  DestDir := EnsureDirectoryExists(DestDir, ESynZip);
+  DestDir := EnsureDirectoryExists(DestDir, ESynZip, {noexpand=}true);
   for result := 0 to Count - 1 do
     if not UnZip(result, DestDir) then
       exit;
@@ -3264,6 +3273,42 @@ begin
     result := UnZip(aIndex);
 end;
 
+
+function UnZipMemAll(const ZipMem: RawByteString; const DestFolder: TFileName): boolean;
+var
+  z: TZipRead;
+begin
+  result := false;
+  if ZipMem <> '' then
+  try
+    z := TZipRead.Create(pointer(ZipMem), length(ZipMem));
+    try
+      result := z.UnZipAll(Destfolder) < 0; // -1 = success
+    finally
+      z.Free;
+    end;
+  except
+    result := false; // indicates error
+  end;
+end;
+
+function UnZipAll(const ZipFile: TFileName; const DestFolder: TFileName): boolean;
+var
+  z: TZipRead;
+begin
+  result := false;
+  if ZipFile <> '' then
+  try
+    z := TZipRead.Create(ZipFile);
+    try
+      result := z.UnZipAll(Destfolder) < 0; // -1 = success
+    finally
+      z.Free;
+    end;
+  except
+    result := false; // indicates error
+  end;
+end;
 
 var
   EventArchiveZipSafe: TLightLock; // paranoid but better safe than sorry

@@ -266,7 +266,7 @@ type
       out Jwt: TJwtContent): boolean; overload;
     /// internal method to parse a token according to this JWT expectations
     // - without any cache, digital signature nor time consistency check
-    // - as called internally by Verify(), which is the prefered method to call
+    // - as called internally by Verify(), which is the preferred method to call
     // - see also the associated ParseJwt() function
     procedure Parse(const Token: RawUtf8; var Jwt: TJwtContent;
       headpayload: PValuePUtf8Char = nil; signature: PRawByteString = nil;
@@ -961,19 +961,19 @@ begin
     if Issuer = '' then
       RaiseMissing(jrcIssuer)
     else
-      payload.AddValueFromText(JWT_CLAIMS_TEXT[jrcIssuer], Issuer, true);
+      payload.AddValueText(JWT_CLAIMS_TEXT[jrcIssuer], Issuer, true);
   if jrcSubject in fClaims then
     if Subject = '' then
       RaiseMissing(jrcSubject)
     else
-      payload.AddValueFromText(JWT_CLAIMS_TEXT[jrcSubject], Subject, true);
+      payload.AddValueText(JWT_CLAIMS_TEXT[jrcSubject], Subject, true);
   if jrcAudience in fClaims then
     if Audience = '' then
       RaiseMissing(jrcAudience)
     else if Audience[1] = '[' then
       payload.AddOrUpdateValue(JWT_CLAIMS_TEXT[jrcAudience], _JsonFast(Audience))
     else
-      payload.AddValueFromText(JWT_CLAIMS_TEXT[jrcAudience], Audience, true);
+      payload.AddValueText(JWT_CLAIMS_TEXT[jrcAudience], Audience, true);
   if jrcNotBefore in fClaims then
     if NotBefore <= 0 then
       payload.AddOrUpdateValue(JWT_CLAIMS_TEXT[jrcNotBefore], UnixTimeUtc)
@@ -1155,7 +1155,7 @@ begin
     // fast direct compare of fHeaderB64 (including "alg")
     headerlen := length(fHeaderB64);
     if (toklen <= headerlen) or
-       not CompareMem(pointer(fHeaderB64), tok, headerlen) then
+       not mormot.core.base.CompareMem(pointer(fHeaderB64), tok, headerlen) then
       exit;
   end;
   // 2. extract the payload and signature
@@ -1183,7 +1183,9 @@ begin
   P := GotoNextNotSpace(temp.buf);
   if P^ <> '{' then
     exit;
-  P := GotoNextNotSpace(P + 1);
+  repeat
+    inc(P)
+  until not (P^ in [#1..' ']);
   info.Json := P;
   if P^ <> '}' then
   repeat
@@ -1265,7 +1267,7 @@ begin
         TSynVarData(Jwt.data).VType := JSON_VTYPE[dvObject, mFastFloat]
       else
         TSynVarData(Jwt.data).VType := JSON_VTYPE[dvObject, mFast];
-    Jwt.data.AddValue(N, Nlen, info);
+    Jwt.data.AddValueJson(N, Nlen, info);
   until info.EndOfObject = '}';
   Jwt.result := jwtMissingClaim;
   if requiredclaims - Jwt.claims <> [] then
@@ -1296,7 +1298,7 @@ var
   temp: TSynTempBuffer;
 begin
   result := '';
-  P := PosChar(pointer(Token), '.');
+  P := PosCharU(Token, '.');
   if (P = nil) or
      (PosChar(P + 1, '.') = nil) then
     exit;
@@ -1333,7 +1335,7 @@ begin
   if Token = '' then
     exit;
   result := jwtInvalidAlgorithm;
-  P := PosChar(pointer(Token), '.');
+  P := PosCharU(Token, '.');
   if P = nil then
     exit;
   if self <> TJwtAbstract then
@@ -1678,14 +1680,15 @@ begin
   try
     if aKey <> '' then
       // try as private key, then as public key
-      if fRsa.LoadFromPrivateKeyPem(aKey) then // handle PEM or DER
+      if fRsa.LoadFromPrivateKeyPem(aKey) then  // handle PEM or DER
       begin
         if (fRsa.ModulusBits < 2048) or
            not fRsa.CheckPrivateKey then
         ERsaException.RaiseUtf8('%.Create: invalid %-bit private key',
           [self, fRsa.ModulusBits]);
       end
-      else if fRsa.LoadFromPublicKeyPem(aKey) then // PEM or DER
+      else if fRsa.LoadFromPublicKeyPem(aKey) or   // PEM or DER
+              fRsa.LoadFromPublicKeyJwk(aKey) then // JWT JSON
         if fRsa.ModulusBits < 2048 then
           ERsaException.RaiseUtf8(
             '%.Create: invalid %-bit public key', [self, fRsa.ModulusBits]);

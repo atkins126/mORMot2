@@ -198,6 +198,7 @@ begin
   for i := 0 to ECC_COUNT - 1 do
   begin
     p := RandomUtf8(i);
+    Check(length(p) >= i);
     e := EciesSeal('aes-128-ctr', pub[i], p);
     check((i = 0) or (e <> ''));
     checkEqual(EciesOpen('aes-128-ctr', priv[i], e), p, 'EciesOpen');
@@ -741,6 +742,7 @@ begin
 //writeln(priv);
 //writeln(pub);
   msg := RandomUtf8(100);
+  Check(length(msg) >= 100);
   if IdemPChar(pointer(c.Name), 'RSA') then
     c.Count := c.Count * 10;
   timer.Start;
@@ -765,10 +767,10 @@ procedure TTestCoreEcc._OpenSSL;
 begin
   if not OpenSslIsAvailable then
     exit;
-  StartOpenSssl(EVP_PKEY_RSA, 2048, 3, '', 'RSA 2048');
-  StartOpenSssl(EVP_PKEY_RSA_PSS, 2048, 3, '', 'RSA-PSS 2048');
-  StartOpenSssl(EVP_PKEY_EC, NID_X9_62_prime256v1, 100, '', 'prime256v1');
-  StartOpenSssl(EVP_PKEY_ED25519, 0, 100, 'null', 'ed25519');
+  StartOpenSssl(EVP_PKEY_RSA,     2048,                   3, '', 'RSA 2048');
+  StartOpenSssl(EVP_PKEY_RSA_PSS, 2048,                   3, '', 'RSA-PSS 2048');
+  StartOpenSssl(EVP_PKEY_EC,      NID_X9_62_prime256v1, 100, '', 'prime256v1');
+  StartOpenSssl(EVP_PKEY_ED25519, 0,                    100, 'null', 'ed25519');
   RunWait;
 end;
 

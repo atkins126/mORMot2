@@ -74,7 +74,8 @@ uses
        defined(ZLIBSTATIC)}
   mormot.lib.static, // some definitions to properly link libdeflate
   {$ifend}
-  mormot.core.base;
+  mormot.core.base,
+  mormot.core.os;
 
 
 { ****************** Low-Level ZLib Streaming Access }
@@ -249,7 +250,7 @@ const
   // default 15-bit / 32KB size for the LZ77 window
   MAX_WBITS = 15;
   // the LZ77 window parameter value
-  Z_MAX_BITS: array[{ZlibFormat:}boolean] of integer = (
+  Z_MAX_BITS: array[{ZlibFormat:}boolean] of ShortInt = (
     -MAX_WBITS,   // raw output with no header or trailing checksum
      MAX_WBITS);  // include zlib-specific header
 
@@ -640,7 +641,7 @@ end;
 function zcalloc(AppData: pointer; Items, Size: cardinal): pointer; cdecl;
 begin
   // direct use of the (FastMM4) delphi heap for all zip memory allocation
-  Getmem(result, Items * Size);
+  GetMem(result, Items * Size);
 end;
 
 procedure zcfree(AppData, Block: pointer); cdecl;
@@ -759,7 +760,7 @@ end;
 
 function zlibAllocMem(AppData: pointer; Items, Size: cardinal): pointer; cdecl;
 begin
-  Getmem(result, Items * Size);
+  GetMem(result, Items * Size);
 end;
 
 procedure zlibFreeMem(AppData, Block: pointer); cdecl;
@@ -1016,7 +1017,7 @@ end;
 function CompressMem(src, dst: pointer; srcLen, dstLen: PtrInt;
   CompressionLevel: integer; ZlibFormat: boolean): PtrInt;
 var
-  comp: PLibDeflateCompressor;
+  comp: PLibDeflateCompressor; // note: instances should not be cached/reused
 begin
   comp := libdeflate_alloc_compressor(CompressionLevel);
   if comp = nil then
@@ -1034,10 +1035,10 @@ end;
 function UncompressMem(src, dst: pointer; srcLen, dstLen: PtrInt;
   ZlibFormat: boolean): PtrInt;
 var
-  dec: PLibDeflateDecompressor;
+  dec: PLibDeflateDecompressor; // note: instances should not be cached/reused
   res: TLibDeflateResult;
 begin
-  dec := libdeflate_alloc_decompressor;
+  dec := libdeflate_alloc_decompressor; // alloc when needed
   if dec = nil then
     raise EZLib.Create('UncompressMem: libdeflate_alloc_decompressor failed');
   if ZlibFormat then
@@ -1046,7 +1047,8 @@ begin
     res := libdeflate_deflate_decompress(dec, src, srcLen, dst, dstLen, @result);
   libdeflate_free_decompressor(dec);
   if res <> LIBDEFLATE_SUCCESS  then
-    raise EZLib.CreateFmt('UncompressMem: libdeflate = %d', [ord(res)]);
+    raise EZLib.CreateFmt('UncompressMem: libdeflate=%s',
+      [GetEnumNameRtti(TypeInfo(TLibDeflateResult), ord(res))^]);
 end;
 
 {$else}
